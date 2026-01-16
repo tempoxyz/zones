@@ -335,7 +335,7 @@ interface IZoneFactory {
 
 ```solidity
 interface IZonePortal {
-    event DepositEnqueued(
+    event Deposit(
         uint64 indexed zoneId,
         bytes32 indexed newCurrentDepositsHash,
         address indexed sender,
@@ -526,7 +526,7 @@ function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal 
         memo: bytes32(0),
         ...
     })));
-    emit DepositEnqueued(...);
+    emit Deposit(...);
 }
 ```
 
