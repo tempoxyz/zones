@@ -87,7 +87,6 @@ interface IVerifier {
         // Deposit chain
         bytes32 oldProcessedDepositsHash,  // where zone last stopped (from portal state)
         bytes32 newProcessedDepositsHash,  // where zone now stops (from batch)
-        bytes32 currentDepositsHash,       // portal's current head
 
         // Zone state transition
         bytes32 prevStateRoot,
@@ -106,9 +105,7 @@ The verifier validates that the state transition from `prevStateRoot` to `newSta
 
 Deposits use a Merkle chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
 
-The proof must verify:
-- The zone correctly processed deposits from `oldProcessedDepositsHash` to `newProcessedDepositsHash`
-- `newProcessedDepositsHash` is an ancestor of `currentDepositsHash` (a valid point in the chain)
+The proof must verify that the zone correctly processed deposits from `oldProcessedDepositsHash` to `newProcessedDepositsHash`. The sequencer checkpoints `depositsHash` when generating the proof, and that checkpoint becomes `newProcessedDepositsHash`.
 
 After the batch is accepted, the portal updates `processedDepositsHash = newProcessedDepositsHash`.
 
@@ -167,7 +164,6 @@ interface IVerifier {
         // Deposit chain
         bytes32 oldProcessedDepositsHash,  // where zone last stopped (from portal state)
         bytes32 newProcessedDepositsHash,  // where zone now stops (from batch)
-        bytes32 currentDepositsHash,       // portal's current head
 
         // Zone state transition
         bytes32 prevStateRoot,
