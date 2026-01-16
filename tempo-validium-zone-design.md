@@ -427,8 +427,9 @@ Contracts that want to receive transfer exits with a callback must implement thi
 ```solidity
 interface IExitReceiver {
     /// @notice Called by the portal when a transfer exit targets this contract.
-    /// @dev Tokens are transferred to this contract AFTER the callback returns successfully.
-    ///      During the callback, tokens are still held in escrow by the portal.
+    /// @dev Tokens are transferred to this contract BEFORE the callback.
+    ///      If the callback reverts or returns the wrong selector, the portal
+    ///      reverts the transfer (via a self-call) and bounces back the funds.
     /// @param sender The address that initiated the exit on the zone.
     /// @param amount The amount of gas tokens that will be transferred if accepted.
     /// @param data User-provided data from the exit intent.
@@ -509,38 +510,44 @@ This separation allows the sequencer to process withdrawals immediately without 
 When the sequencer processes a withdrawal via `processWithdrawal`:
 
 1. If `gasLimit == 0`: transfer tokens directly to `to`.
-2. If `gasLimit > 0`: call `IExitReceiver.onExitReceived` on the recipient first (tokens remain in escrow during the call).
-   - If the call succeeds and returns the correct selector: transfer tokens to `to`.
-   - If the call fails or returns the wrong selector: bounce back the funds to the zone.
+2. If `gasLimit > 0`: make an external self-call that transfers tokens to `to` first, then calls `IExitReceiver.onExitReceived`.
+   - If the call returns the correct selector: keep the transfer.
+   - If the call reverts or returns the wrong selector: the self-call reverts, and the outer call bounces back the funds to the zone.
 
 ```solidity
-function _executeWithdrawal(Withdrawal calldata w) internal {
+function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external {
+    // Verify head + update queue (omitted)
     if (w.gasLimit == 0) {
         // Simple transfer, no callback
         ITIP20(token).transfer(w.to, w.amount);
-    } else {
-        // Callback requested: call receiver first, transfer only on success
-        try IExitReceiver(w.to).onExitReceived{gas: w.gasLimit}(
-            w.sender,
-            w.amount,
-            w.data
-        ) returns (bytes4 selector) {
-            if (selector == IExitReceiver.onExitReceived.selector) {
-                // Accepted: transfer tokens to receiver
-                ITIP20(token).transfer(w.to, w.amount);
-            } else {
-                // Rejected: bounce back to zone
-                _enqueueBounceBack(w.amount, w.fallbackRecipient);
-            }
-        } catch {
-            // Call failed: bounce back to zone
-            _enqueueBounceBack(w.amount, w.fallbackRecipient);
-        }
+        return;
+    }
+
+    try this._executeWithdrawal(w) {
+        // Success: transfer + callback already executed
+    } catch {
+        // Callback failed or rejected: bounce back to zone
+        _enqueueBounceBack(w.amount, w.fallbackRecipient);
+    }
+}
+
+function _executeWithdrawal(Withdrawal calldata w) external {
+    require(msg.sender == address(this), 'self only');
+    // Transfer before callback so receiver can use funds (e.g. DEX swap)
+    ITIP20(token).transfer(w.to, w.amount);
+
+    bytes4 selector = IExitReceiver(w.to).onExitReceived{gas: w.gasLimit}(
+        w.sender,
+        w.amount,
+        w.data
+    );
+    if (selector != IExitReceiver.onExitReceived.selector) {
+        revert();
     }
 }
 ```
 
-This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits). The portal does not need to know about these use cases—they are handled by receiver contracts.
+The self-call makes the transfer and callback atomic while still letting the portal catch failures and enqueue bounce-backs. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits). The portal does not need to know about these use cases—they are handled by receiver contracts.
 
 ## Withdrawal failure and bounce-back
 
