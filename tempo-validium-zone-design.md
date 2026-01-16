@@ -72,10 +72,12 @@ The sequencer posts batches to Tempo via a single `submitBatch` call that atomic
 
 Each batch submission includes:
 
-- `prevStateRoot`, `newStateRoot`
-- `depositIndex` (number of Tempo-side deposits consumed)
+- `newStateRoot` (the resulting state after execution)
+- `newDepositIndex` (how many deposits have been consumed total)
 - `exits` (full list of exit intents to process)
 - `proof` (validity proof or TEE attestation)
+
+The portal tracks `prevStateRoot` and `prevDepositIndex` from previous batches.
 
 The portal calls the verifier to validate the batch:
 
@@ -84,14 +86,18 @@ interface IVerifier {
     function verify(
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
-        uint64 depositIndex,
+        bytes32 depositsHash,
         bytes32 exitsHash,
         bytes calldata proof
     ) external view returns (bool);
 }
 ```
 
-The verifier validates that the state transition from `prevStateRoot` to `newStateRoot` is correct, that the deposits up to `depositIndex` were processed, and that the `exitsHash` matches the exits committed in the proof. The portal computes `exitsHash = keccak256(abi.encode(exits))` from the provided exits array. Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
+The verifier validates that the state transition from `prevStateRoot` to `newStateRoot` is correct given the inputs. The portal computes:
+- `depositsHash = keccak256(abi.encode(deposits[prevDepositIndex..newDepositIndex]))`
+- `exitsHash = keccak256(abi.encode(exits))`
+
+Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
 This atomic design means users receive their exits immediately when the batch is posted—there is no separate finalization step.
 
@@ -118,9 +124,8 @@ struct ZoneInfo {
 }
 
 struct BatchCommitment {
-    bytes32 prevStateRoot;
     bytes32 newStateRoot;
-    uint64 depositIndex;
+    uint64 newDepositIndex;
 }
 
 struct Deposit {
@@ -168,7 +173,7 @@ interface IVerifier {
     function verify(
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
-        uint64 depositIndex,
+        bytes32 depositsHash,
         bytes32 exitsHash,
         bytes calldata proof
     ) external view returns (bool);
@@ -220,9 +225,8 @@ interface IZonePortal {
     event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 prevStateRoot,
         bytes32 newStateRoot,
-        uint64 depositIndex
+        uint64 newDepositIndex
     );
 
     function zoneId() external view returns (uint64);
@@ -231,6 +235,7 @@ interface IZonePortal {
     function verifier() external view returns (address);
     function batchIndex() external view returns (uint64);
     function stateRoot() external view returns (bytes32);
+    function depositIndex() external view returns (uint64);
 
     function nextDepositIndex() external view returns (uint64);
     function deposits(uint64 index) external view returns (Deposit memory);
