@@ -191,29 +191,38 @@ This ensures the proof works regardless of whether a queue swap happened during 
 
 ## Queue design rationale
 
-Both the deposit and withdrawal queues use Merkle chains (hash onions) to achieve constant on-chain storage while supporting unbounded queue depth. The designs optimize for different access patterns:
+Both deposits and withdrawals are FIFO queues that require constant on-chain storage. They have symmetric but inverted requirements:
 
-### Deposit queue goals
+|                      | Deposits | Withdrawals |
+|----------------------|----------|-------------|
+| On-chain operation   | Add (users deposit) | Remove (sequencer processes) |
+| Proven operation     | Remove (zone consumes) | Add (zone creates) |
+| Efficient on-chain   | Addition | Removal |
+| Stable proving target| For removals | For additions |
 
-1. **Constant storage**: 2 slots (`currentDepositsHash`, `checkpointedDepositsHash`) regardless of queue depth.
-2. **Non-blocking deposits**: Users can deposit anytime without waiting for proofs.
-3. **Stable proving target**: Proofs start from `checkpointedDepositsHash`, which remains stable during proof generation.
-4. **Graceful catch-up**: After a batch, checkpoint advances to current head, automatically including deposits that arrived during proving.
+Both use Merkle chains (hash onions) with 2 storage slots, but structured differently to optimize for their on-chain operation:
 
-The deposit chain grows at the head (`current = hash(current, deposit)`), and the proof consumes from a stable checkpoint. No race conditions because the checkpoint only changes after batch submission.
+### Deposit queue: newest-outermost
 
-### Withdrawal queue goals
+```
+deposits = hash(newest, hash(older, hash(oldest, 0)))
+```
 
-1. **Constant storage**: 2 slots (`withdrawalQueue1`, `withdrawalQueue2`) regardless of queue depth.
-2. **Proof-independent processing**: Sequencer can process withdrawals immediately without waiting for proofs.
-3. **FIFO ordering**: Withdrawals must be processed in order.
-4. **Efficient unwrapping**: Processing a withdrawal should be O(1) on-chain.
+- **On-chain addition is O(1)**: `deposits = hash(newDeposit, deposits)`
+- **Proving removals**: Proof starts from stable `checkpointedDepositsHash`, processes deposits in FIFO order (oldest first, working outward from the checkpoint).
+- **Checkpoint advances after batch**: `checkpointedDepositsHash = currentDepositsHash`
 
-The key insight is structuring the hash chain with **oldest at outermost**: `hash(oldest, hash(next, hash(newest, 0)))`. This allows O(1) FIFO processing—the sequencer provides the withdrawal and remaining hash, the portal verifies and unwraps one layer.
+### Withdrawal queue: oldest-outermost
 
-The two-queue design separates concerns: `queue1` is for processing (sequencer drains it), `queue2` is for accumulation (proofs add to it). When `queue1` empties, it swaps in `queue2`. The proof handles the race condition by outputting both "add to existing queue2" and "fresh queue" variants.
+```
+withdrawals = hash(oldest, hash(newer, hash(newest, 0)))
+```
 
-Building the queue with oldest-outermost requires O(N) work, but this happens inside the ZKP where it's acceptable. On-chain operations remain O(1).
+- **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
+- **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
+- **Two queues handle the race**: `queue1` for processing, `queue2` for accumulation. When `queue1` empties, swap in `queue2`.
+
+The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
 
 ## Interfaces and functions
 
