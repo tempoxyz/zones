@@ -109,7 +109,7 @@ The verifier validates that the state transition from `prevStateRoot` to `newSta
 
 ### Deposit chain
 
-Deposits use a Merkle chain (hash onion): each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
+Deposits use a hash chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
 
 The proof must verify that the zone correctly processed deposits from `checkpointedDepositsHash` to `newProcessedDepositsHash`.
 
@@ -200,7 +200,7 @@ Both deposits and withdrawals are FIFO queues that require constant on-chain sto
 | Efficient on-chain   | Addition | Removal |
 | Stable proving target| For removals | For additions |
 
-Both use Merkle chains (hash onions) with 2 storage slots, but with different models:
+Both use hash chains with 2 storage slots, but with different models:
 
 - **Deposits**: 1 queue + cursor (`currentDepositsHash` is the head, `checkpointedDepositsHash` is a cursor into the queue)
 - **Withdrawals**: 2 separate queues (`withdrawalQueue1` drains, `withdrawalQueue2` fills, then swap)
