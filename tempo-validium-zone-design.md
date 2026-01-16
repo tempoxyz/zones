@@ -29,10 +29,9 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 ### Actors
 
-- Zone sequencer: permissioned operator that orders zone transactions, provides data, and posts batches to Tempo.
+- Zone sequencer: permissioned operator that orders zone transactions, provides data, and posts batches to Tempo. The sequencer is the only actor that submits transactions to the portal.
 - Verifier: ZK proof system or TEE attester. Abstracted via `IVerifier`.
 - Users: deposit TIP-20 from Tempo to the zone or exit back to Tempo.
-- Relayers (optional): submit proofs or attestations to Tempo.
 
 ### Tempo contracts
 
@@ -63,17 +62,22 @@ The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone
 - The fee token is always the gas token. There is no fee token selection.
 - Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit. The fee token field is fixed to the gas token.
 
-## Batch commitment and verification
+## Batch submission
 
-The sequencer posts batches to Tempo. Each batch commitment includes:
+The sequencer posts batches to Tempo via a single `submitBatch` call that atomically:
 
-- `zoneId`
+1. Verifies the proof/attestation for the state transition.
+2. Updates the portal's state root.
+3. Processes all exits from that batch (transfers, swaps, cross-zone deposits).
+
+Each batch submission includes:
+
 - `prevStateRoot`, `newStateRoot`
 - `depositIndex` (number of Tempo-side deposits consumed)
-- `exitRoot` (commitment to zone exit intents)
-- `batchHash` (opaque commitment to the executed transactions)
+- `exits` (full list of exit intents to process)
+- `proof` (validity proof or TEE attestation)
 
-The portal calls the verifier to accept the batch:
+The portal calls the verifier to validate the batch:
 
 ```solidity
 interface IVerifier {
@@ -81,7 +85,9 @@ interface IVerifier {
 }
 ```
 
-The verifier is expected to validate the state transition and the exit root. Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
+The verifier validates the state transition, including that the provided exits match the committed exit root. Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
+
+This atomic design means users receive their exits immediately when the batch is posted—there is no separate finalization step.
 
 ## Interfaces and functions
 
@@ -106,13 +112,9 @@ struct ZoneInfo {
 }
 
 struct BatchCommitment {
-    uint64 zoneId;
-    uint64 batchIndex;
     bytes32 prevStateRoot;
     bytes32 newStateRoot;
     uint64 depositIndex;
-    bytes32 exitRoot;
-    bytes32 batchHash;
 }
 
 struct Deposit {
@@ -144,21 +146,14 @@ struct SwapAndDepositExit {
 
 struct ExitIntent {
     ExitKind kind;
-    uint64 exitIndex;
     address sender;
     TransferExit transfer;
     SwapExit swap;
     SwapAndDepositExit swapAndDeposit;
-    bytes32 memo;
-}
-
-struct ExitProof {
-    uint64 batchIndex;
-    bytes32[] merkleProof;
 }
 ```
 
-Exit intent fields are only meaningful for their `kind`. For example, `TransferExit` is used only when `kind == ExitKind.Transfer`. The `exitId` is `keccak256(abi.encode(zoneId, exitIndex, intent))`, and the portal rejects duplicate `exitId` values.
+Exit intent fields are only meaningful for their `kind`. For example, `TransferExit` is used only when `kind == ExitKind.Transfer`.
 
 ### Verifier
 
@@ -210,45 +205,32 @@ interface IZonePortal {
         bytes32 memo
     );
 
-    event BatchAccepted(
+    event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
-        uint64 depositIndex,
-        bytes32 exitRoot,
-        bytes32 batchHash
+        uint64 depositIndex
     );
-
-    event ExitFinalized(bytes32 indexed exitId, uint64 indexed zoneId, ExitKind kind);
 
     function zoneId() external view returns (uint64);
     function gasToken() external view returns (address);
     function sequencer() external view returns (address);
     function verifier() external view returns (address);
+    function batchIndex() external view returns (uint64);
+    function stateRoot() external view returns (bytes32);
 
     function nextDepositIndex() external view returns (uint64);
     function deposits(uint64 index) external view returns (Deposit memory);
 
     function deposit(address to, uint256 amount, bytes32 memo) external returns (uint64 depositIndex);
 
-    function submitBatch(BatchCommitment calldata commitment, bytes calldata proof) external;
-
-    function exitClaimed(bytes32 exitId) external view returns (bool);
-
-    function finalizeTransferExit(
-        ExitIntent calldata intent,
-        ExitProof calldata proof
-    ) external;
-
-    function finalizeSwapExit(
-        ExitIntent calldata intent,
-        ExitProof calldata proof
-    ) external;
-
-    function finalizeSwapAndDepositExit(
-        ExitIntent calldata intent,
-        ExitProof calldata proof
+    /// @notice Submit a batch, verify the proof, and process all exits atomically.
+    /// @dev Only callable by the sequencer.
+    function submitBatch(
+        BatchCommitment calldata commitment,
+        ExitIntent[] calldata exits,
+        bytes calldata proof
     ) external;
 }
 ```
@@ -258,11 +240,11 @@ interface IZonePortal {
 ```solidity
 interface IZoneRegistry {
     event ZoneRegistered(uint64 indexed zoneId, address indexed portal);
-    event BatchHeadUpdated(uint64 indexed zoneId, uint64 indexed batchIndex, bytes32 stateRoot, bytes32 exitRoot);
+    event BatchHeadUpdated(uint64 indexed zoneId, uint64 indexed batchIndex, bytes32 stateRoot);
 
     function registerZone(ZoneInfo calldata info) external;
     function getZone(uint64 zoneId) external view returns (ZoneInfo memory);
-    function batchHead(uint64 zoneId) external view returns (uint64 batchIndex, bytes32 stateRoot, bytes32 exitRoot);
+    function batchHead(uint64 zoneId) external view returns (uint64 batchIndex, bytes32 stateRoot);
 }
 ```
 
@@ -349,7 +331,7 @@ Notes:
 
 ## Bridging out (zone to Tempo)
 
-Users exit by creating an exit intent on the zone. Exit intents are committed to `exitRoot` in the batch commitment.
+Users exit by creating an exit intent on the zone. When the sequencer submits the batch containing that exit, the exit is processed immediately in the same transaction.
 
 Exit intent types:
 
@@ -357,7 +339,7 @@ Exit intent types:
 - Swap: release the gas token to the portal, swap on the Tempo DEX, and send output to a recipient.
 - Swap and deposit: release the gas token, swap on the Tempo DEX, then deposit the output token into another zone.
 
-Once a batch is verified, anyone can finalize an exit intent on Tempo by proving its inclusion in the `exitRoot`.
+There is no separate finalization step—users receive their funds as soon as the batch is submitted and verified.
 
 ## Tempo DEX integration
 
@@ -376,12 +358,14 @@ For swap exits, `tokenIn` is always the zone gas token, and `tokenOut` is any Te
 
 ## Zone-to-zone flow
 
-Zone-to-zone transfer is a composition of exit and deposit:
+Zone-to-zone transfer is a composition of exit and deposit, all processed atomically when the batch is submitted:
 
 1. Zone A user submits an exit intent of type Swap and deposit.
-2. After batch verification, the portal swaps the gas token of zone A into the gas token of zone B on the Tempo DEX.
-3. The portal calls `ZonePortal.deposit` for zone B with the swap output.
-4. The zone B sequencer consumes the deposit and credits the recipient on zone B.
+2. When the zone A sequencer submits the batch, the portal:
+   - Verifies the proof.
+   - Swaps the gas token of zone A into the gas token of zone B on the Tempo DEX.
+   - Calls `ZonePortal.deposit` for zone B with the swap output.
+3. The zone B sequencer consumes the deposit and credits the recipient on zone B.
 
 This flow uses Tempo as the hub and never requires direct zone-to-zone messaging.
 
@@ -401,5 +385,4 @@ This flow uses Tempo as the hub and never requires direct zone-to-zone messaging
 ## Open questions
 
 - Should deposits be cancellable if not consumed within a timeout?
-- Should the portal support batched exit finalization for gas efficiency?
 - Should exit intents allow fee payment for DEX swaps in the output token?
