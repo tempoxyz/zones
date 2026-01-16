@@ -109,11 +109,11 @@ The verifier validates that the state transition from `prevStateRoot` to `newSta
 
 ### Deposit chain
 
-Deposits use a hash chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
+Deposits use a hash chain: each deposit updates the hash as `newHash = keccak256(abi.encode(deposit, prevHash))`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
 
 The proof must verify that the zone correctly processed deposits from `checkpointedDepositsHash` to `newProcessedDepositsHash`.
 
-After the batch is accepted, the portal updates `checkpointedDepositsHash = currentDepositsHash`. This means the next proof will start from the current head, and any deposits that arrived after `newProcessedDepositsHash` but before batch submission will be included in the next batch.
+After the batch is accepted, the portal updates `checkpointedDepositsHash = newProcessedDepositsHash`. This means the next proof will start from where this proof ended.
 
 Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
@@ -137,6 +137,13 @@ To process the oldest withdrawal, the sequencer provides the withdrawal data and
 
 ```solidity
 function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
+    // If queue1 is empty, swap in queue2 first
+    if (withdrawalQueue1 == bytes32(0)) {
+        require(withdrawalQueue2 != bytes32(0), "no withdrawals");
+        withdrawalQueue1 = withdrawalQueue2;
+        withdrawalQueue2 = bytes32(0);
+    }
+
     require(keccak256(abi.encode(w, remainingQueue)) == withdrawalQueue1, "invalid");
 
     _executeWithdrawal(w);
@@ -211,9 +218,9 @@ The hash chains are structured differently to optimize for their on-chain operat
 
 ![Deposit Queue](docs/diagrams/deposit-queue.svg)
 
-- **On-chain addition is O(1)**: `deposits = hash(newDeposit, deposits)` — wrap the outside.
+- **On-chain addition is O(1)**: `deposits = keccak256(abi.encode(deposit, deposits))` — wrap the outside.
 - **Proving removals**: Proof starts from stable `checkpointedDepositsHash`, processes deposits in FIFO order (oldest first, working outward from the checkpoint).
-- **Checkpoint advances after batch**: `checkpointedDepositsHash = currentDepositsHash`
+- **Checkpoint advances after batch**: `checkpointedDepositsHash = newProcessedDepositsHash`
 
 ### Withdrawal queue: oldest-outermost
 
@@ -257,7 +264,7 @@ struct Deposit {
     // Deposit data
     address sender;
     address to;
-    uint256 amount;
+    uint128 amount;
     bytes32 memo;
 }
 
@@ -333,7 +340,7 @@ interface IZonePortal {
         bytes32 indexed newCurrentDepositsHash,
         address indexed sender,
         address to,
-        uint256 amount,
+        uint128 amount,
         bytes32 memo,
         bytes32 l1BlockHash,
         uint64 l1BlockNumber,
@@ -363,7 +370,7 @@ interface IZonePortal {
     function setSequencerPubkey(bytes32 pubkey) external;
 
     /// @notice Deposit gas token into the zone. Returns the new current deposits hash.
-    function deposit(address to, uint256 amount, bytes32 memo) external returns (bytes32 newCurrentDepositsHash);
+    function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositsHash);
 
     /// @notice Process the next withdrawal from queue1. Only callable by the sequencer.
     /// @param w The withdrawal to process (must be at the head of queue1).
@@ -455,7 +462,7 @@ interface IExitReceiver {
 ## Bridging in (Tempo to zone)
 
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
-2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `currentDepositsHash = keccak256(currentDepositsHash, deposit)`. The deposit includes current L1 block info (hash, number, timestamp).
+2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `currentDepositsHash = keccak256(abi.encode(deposit, currentDepositsHash))`. The deposit includes current L1 block info (hash, number, timestamp).
 3. The sequencer observes deposit events, processes them in order, and credits the zone recipient. The zone receives L1 state through the deposit data.
 4. A batch proof/attestation must prove the zone processed deposits up to `newProcessedDepositsHash`.
 
