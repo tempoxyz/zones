@@ -191,7 +191,16 @@ This ensures the proof works regardless of whether a queue swap happened during 
 
 ## Queue design rationale
 
-Both deposits and withdrawals are FIFO queues that require constant on-chain storage. Both use hash chains with 2 storage slots, but with different models:
+Both deposits and withdrawals are FIFO queues that require constant on-chain storage. They have symmetric but inverted requirements:
+
+|                      | Deposits | Withdrawals |
+|----------------------|----------|-------------|
+| On-chain operation   | Add (users deposit) | Remove (sequencer processes) |
+| Proven operation     | Remove (zone consumes) | Add (zone creates) |
+| Efficient on-chain   | Addition | Removal |
+| Stable proving target| For removals | For additions |
+
+Both use hash chains with 2 storage slots, but with different models:
 
 - **Deposits**: 1 queue + cursor (`currentDepositsHash` is the head, `checkpointedDepositsHash` is a cursor into the queue)
 - **Withdrawals**: 2 separate queues (`withdrawalQueue1` drains, `withdrawalQueue2` fills, then swap)
@@ -200,25 +209,15 @@ The hash chains are structured differently to optimize for their on-chain operat
 
 ### Deposit queue: newest-outermost
 
-![Deposit Queue](docs/diagrams/deposit-queue.svg)
-
 - **On-chain addition is O(1)**: `deposits = hash(newDeposit, deposits)` — wrap the outside.
 - **Proving removals**: Proof starts from stable `checkpointedDepositsHash`, processes deposits in FIFO order (oldest first, working outward from the checkpoint).
 - **Checkpoint advances after batch**: `checkpointedDepositsHash = currentDepositsHash`
 
 ### Withdrawal queue: oldest-outermost
 
-![Withdrawal Queue](docs/diagrams/withdrawal-queue.svg)
-
 - **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
 - **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
 - **Two queues handle the race**: `queue1` for processing, `queue2` for accumulation. When `queue1` empties, swap in `queue2`.
-
-![Two-Queue Swap](docs/diagrams/two-queue-swap.svg)
-
-### Summary
-
-![Queue Comparison](docs/diagrams/queue-comparison.svg)
 
 The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
 
