@@ -232,10 +232,14 @@ interface IZonePortal {
     function zoneId() external view returns (uint64);
     function gasToken() external view returns (address);
     function sequencer() external view returns (address);
+    function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
     function batchIndex() external view returns (uint64);
     function stateRoot() external view returns (bytes32);
     function depositIndex() external view returns (uint64);
+
+    /// @notice Set the sequencer's public key. Only callable by the sequencer.
+    function setSequencerPubkey(bytes32 pubkey) external;
 
     function nextDepositIndex() external view returns (uint64);
     function deposits(uint64 index) external view returns (Deposit memory);
