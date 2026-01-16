@@ -425,6 +425,10 @@ export default defineConfig({
             ],
           },
           {
+            text: 'Tempo Zones (draft)',
+            link: '/protocol/privacy/overview',
+          },
+          {
             text: 'Stablecoin DEX',
             collapsed: true,
             items: [

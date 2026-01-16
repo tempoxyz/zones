@@ -1,4 +1,4 @@
-# Tempo Zone Validium Design (Draft)
+# Tempo Zones (Draft)
 
 This document proposes a new validium protocol designed for Tempo. It is a design overview, not a full specification.
 
@@ -484,7 +484,7 @@ The hash chains are structured differently to optimize for their on-chain operat
 
 ### Deposit queue: newest-outermost
 
-![Deposit Queue](docs/diagrams/deposit-queue.svg)
+![Deposit Queue](../../../diagrams/deposit-queue.svg)
 
 - **On-chain addition is O(1)**: `currentDepositsHash = keccak256(abi.encode(deposit, currentDepositsHash))` — wrap the outside.
 - **Proving removals**: Proof starts from stable `processedDepositsHash`, processes deposits in FIFO order (oldest first, working outward), and must prove the result is an ancestor of `pendingDepositsHash`.
@@ -492,13 +492,13 @@ The hash chains are structured differently to optimize for their on-chain operat
 
 ### Withdrawal queue: oldest-outermost
 
-![Withdrawal Queue](docs/diagrams/withdrawal-queue.svg)
+![Withdrawal Queue](../../../diagrams/withdrawal-queue.svg)
 
 - **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
 - **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
 - **Two queues handle the race**: `queue1` for processing, `queue2` for accumulation. When `queue1` empties, swap in `queue2`.
 
-![Two-Queue Swap](docs/diagrams/two-queue-swap.svg)
+![Two-Queue Swap](../../../diagrams/two-queue-swap.svg)
 
 The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
 
