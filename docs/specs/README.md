@@ -1,6 +1,14 @@
 # Tempo Specs
 
-This directory contains Solidity specifications and fuzz tests for Tempo's precompile contracts. The tests are designed to run against both:
+This directory contains Solidity specifications and fuzz tests for Tempo's precompile contracts.
+
+## Zone Specifications
+
+- [TIP403-ZONE-MIRRORING.md](TIP403-ZONE-MIRRORING.md) - TIP-403 policy enforcement on zones via L1 state mirroring
+
+## Precompile Tests
+
+The tests are designed to run against both:
 
 1. **Solidity reference implementations** - Using standard Foundry
 2. **Rust precompile implementations** - Using tempo-foundry's custom forge
