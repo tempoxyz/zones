@@ -85,12 +85,21 @@ The portal calls the verifier to validate the batch:
 ```solidity
 interface IVerifier {
     function verify(
+        // information about the L1 block that is being processed up to
         bytes32 l1BlockHash,
+        bytes32 processedDepositsHash,
+
+        // information about the current state of the portal contract
+        bytes32 newDepositsHash,
+
+        // information about the state transition of the zone
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
-        bytes32 prevDepositsHash,
-        bytes32 newDepositsHash,
+
+        // information about the exits the sequencer is asserting
         bytes32 exitsHash,
+
+        // proof
         bytes calldata proof
     ) external view returns (bool);
 }
@@ -99,10 +108,10 @@ interface IVerifier {
 The verifier validates that the state transition from `prevStateRoot` to `newStateRoot` is correct given the inputs.
 
 Deposits use a Merkle chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. The verifier receives:
-- `prevDepositsHash` - the chain head before the batch (what the zone has already processed)
+- `processedDepositsHash` - the chain head before the batch (what the zone has already processed)
 - `newDepositsHash` - the chain head after processing this batch's deposits
 
-The portal tracks `prevDepositsHash` (the processed head) and verifies `newDepositsHash <= currentDepositsHash` (can't process deposits that don't exist yet).
+The portal tracks `processedDepositsHash` and verifies `newDepositsHash` is reachable from it (can't skip or reorder deposits).
 
 The `l1BlockHash` anchors the zone block to a recent Tempo block, allowing the zone to access L1 state (timestamp, block number, etc.) during execution. The portal can verify this hash using `blockhash()`.
 
@@ -181,12 +190,21 @@ Exit intent fields are only meaningful for their `kind`. For example, `TransferE
 ```solidity
 interface IVerifier {
     function verify(
+        // information about the L1 block that is being processed up to
         bytes32 l1BlockHash,
+        bytes32 processedDepositsHash,
+
+        // information about the current state of the portal contract
+        bytes32 newDepositsHash,
+
+        // information about the state transition of the zone
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
-        bytes32 prevDepositsHash,
-        bytes32 newDepositsHash,
+
+        // information about the exits the sequencer is asserting
         bytes32 exitsHash,
+
+        // proof
         bytes calldata proof
     ) external view returns (bool);
 }
@@ -354,7 +372,7 @@ interface IStablecoinDEX {
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
 2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `depositsHash = keccak256(depositsHash, deposit)`.
 3. The sequencer observes deposit events, processes them in order, and credits the zone recipient.
-4. A batch proof/attestation must prove the transition from `prevDepositsHash` to `newDepositsHash`.
+4. A batch proof/attestation must prove the transition from `processedDepositsHash` to `newDepositsHash`.
 
 Notes:
 
