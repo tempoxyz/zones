@@ -8,7 +8,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 - Each zone has exactly one permissioned sequencer.
 - Each zone bridges exactly one TIP-20 token, which is also the zone gas token.
 - Settlement uses fast validity proofs or TEE attestations (ZK or TEE). Data availability is fully trusted to the sequencer.
-- Cross-chain operations are Tempo-centric: bridge in, bridge out, bridge out then swap on the Tempo DEX, and bridge out then swap then deposit into another zone.
+- Cross-chain operations are Tempo-centric: bridge in, bridge out (with optional callback to receiver contracts for composability).
 - Verifier is abstracted behind a minimal `IVerifier` interface.
 
 ## Non-goals
@@ -68,13 +68,13 @@ The sequencer posts batches to Tempo via a single `submitBatch` call that atomic
 
 1. Verifies the proof/attestation for the state transition.
 2. Updates the portal's state root.
-3. Processes all exits from that batch (transfers, swaps, cross-zone deposits).
+3. Processes all withdrawals from that batch.
 
 Each batch submission includes:
 
 - `newDepositsHash` (the deposits processed up to)
 - `newStateRoot` (the resulting state after execution)
-- `exits` (full list of exit intents to process)
+- `withdrawals` (full list of withdrawals to process)
 - `proof` (validity proof or TEE attestation)
 
 The portal tracks `stateRoot`, `processedDepositsHash` (what the zone has consumed), and `depositsHash` (all queued deposits).
@@ -93,8 +93,8 @@ interface IVerifier {
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
 
-        // Exits
-        bytes32 exitsHash,
+        // Withdrawals
+        bytes32 withdrawalsHash,
 
         // Proof
         bytes calldata proof
@@ -123,11 +123,6 @@ This section defines the functions and interfaces used by the design. The signat
 ### Common types
 
 ```solidity
-enum ExitKind {
-    Transfer,
-    Swap,
-    SwapAndDeposit
-}
 
 struct ZoneInfo {
     uint64 zoneId;
@@ -155,36 +150,14 @@ struct Deposit {
     bytes32 memo;
 }
 
-struct TransferExit {
-    address recipient;
+struct Withdrawal {
+    address sender;             // who initiated the withdrawal on the zone
+    address to;                 // Tempo recipient
     uint128 amount;
-}
-
-struct SwapExit {
-    address recipient;
-    address tokenOut;
-    uint128 amountIn;
-    uint128 minAmountOut;
-}
-
-struct SwapAndDepositExit {
-    address tokenOut;
-    uint128 amountIn;
-    uint128 minAmountOut;
-    uint64 destinationZoneId;
-    address destinationRecipient;
-}
-
-struct ExitIntent {
-    ExitKind kind;
-    address sender;
-    TransferExit transfer;
-    SwapExit swap;
-    SwapAndDepositExit swapAndDeposit;
+    address fallbackRecipient;  // zone address for bounce-back if call fails
+    bytes data;                 // if non-empty, call IExitReceiver on `to`
 }
 ```
-
-Exit intent fields are only meaningful for their `kind`. For example, `TransferExit` is used only when `kind == ExitKind.Transfer`.
 
 ### Verifier
 
@@ -200,8 +173,8 @@ interface IVerifier {
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
 
-        // Exits
-        bytes32 exitsHash,
+        // Withdrawals
+        bytes32 withdrawalsHash,
 
         // Proof
         bytes calldata proof
@@ -277,11 +250,11 @@ interface IZonePortal {
     /// @notice Deposit gas token into the zone. Returns the new deposits chain hash.
     function deposit(address to, uint256 amount, bytes32 memo) external returns (bytes32 newDepositsHash);
 
-    /// @notice Submit a batch, verify the proof, and process all exits atomically.
+    /// @notice Submit a batch, verify the proof, and process all withdrawals atomically.
     /// @dev Only callable by the sequencer.
     function submitBatch(
         BatchCommitment calldata commitment,
-        ExitIntent[] calldata exits,
+        Withdrawal[] calldata withdrawals,
         bytes calldata proof
     ) external;
 }
@@ -306,33 +279,17 @@ interface IZoneRegistry {
 
 ```solidity
 interface IZoneOutbox {
-    event ExitRequested(bytes32 indexed exitId, uint64 indexed exitIndex, ExitKind kind);
+    event WithdrawalRequested(bytes32 indexed withdrawalId, uint64 indexed withdrawalIndex);
 
-    function nextExitIndex() external view returns (uint64);
-    function exitByIndex(uint64 exitIndex) external view returns (ExitIntent memory);
+    function nextWithdrawalIndex() external view returns (uint64);
+    function withdrawalByIndex(uint64 index) external view returns (Withdrawal memory);
 
-    function requestTransferExit(
-        address recipient,
+    function requestWithdrawal(
+        address to,
         uint128 amount,
-        bytes32 memo
-    ) external returns (bytes32 exitId);
-
-    function requestSwapExit(
-        address tokenOut,
-        uint128 amountIn,
-        uint128 minAmountOut,
-        address recipient,
-        bytes32 memo
-    ) external returns (bytes32 exitId);
-
-    function requestSwapAndDepositExit(
-        address tokenOut,
-        uint128 amountIn,
-        uint128 minAmountOut,
-        uint64 destinationZoneId,
-        address destinationRecipient,
-        bytes32 memo
-    ) external returns (bytes32 exitId);
+        address fallbackRecipient,
+        bytes calldata data
+    ) external returns (bytes32 withdrawalId);
 }
 ```
 
@@ -349,23 +306,22 @@ interface ITIP20 {
 }
 ```
 
-#### Tempo Stablecoin DEX (minimal)
+#### Exit receiver
+
+Contracts that want to receive transfer exits with a callback must implement this interface:
 
 ```solidity
-interface IStablecoinDEX {
-    function swapExactAmountIn(
-        address tokenIn,
-        address tokenOut,
-        uint128 amountIn,
-        uint128 minAmountOut
-    ) external returns (uint128 amountOut);
-
-    function swapExactAmountOut(
-        address tokenIn,
-        address tokenOut,
-        uint128 amountOut,
-        uint128 maxAmountIn
-    ) external returns (uint128 amountIn);
+interface IExitReceiver {
+    /// @notice Called by the portal when a transfer exit targets this contract.
+    /// @param sender The address that initiated the exit on the zone.
+    /// @param amount The amount of gas tokens transferred.
+    /// @param data User-provided data from the exit intent.
+    /// @return selector Must return IExitReceiver.onExitReceived.selector to accept.
+    function onExitReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata data
+    ) external returns (bytes4);
 }
 ```
 
@@ -385,49 +341,50 @@ Notes:
 
 ## Bridging out (zone to Tempo)
 
-Users exit by creating an exit intent on the zone. When the sequencer submits the batch containing that exit, the exit is processed immediately in the same transaction.
+Users withdraw by creating a withdrawal on the zone. When the sequencer submits the batch containing that withdrawal, it is processed immediately in the same transaction.
 
-Exit intent types:
+The portal processes each withdrawal as follows:
 
-- Transfer: release the gas token to a Tempo recipient.
-- Swap: release the gas token to the portal, swap on the Tempo DEX, and send output to a recipient.
-- Swap and deposit: release the gas token, swap on the Tempo DEX, then deposit the output token into another zone.
+1. Transfer tokens to the `to` address.
+2. If `data` is non-empty, call `IExitReceiver.onExitReceived` on the recipient.
+3. If the call fails or returns the wrong selector, bounce back the funds to the zone.
+
+```solidity
+// Transfer tokens first
+ITIP20(gasToken).transfer(withdrawal.to, withdrawal.amount);
+
+// If data provided, call the receiver
+if (withdrawal.data.length > 0) {
+    try IExitReceiver(withdrawal.to).onExitReceived(
+        withdrawal.sender,
+        withdrawal.amount,
+        withdrawal.data
+    ) returns (bytes4 selector) {
+        require(selector == IExitReceiver.onExitReceived.selector, "rejected");
+    } catch {
+        // Call failed or rejected: bounce back to zone
+        _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient, withdrawalIndex);
+    }
+}
+```
 
 There is no separate finalization step—users receive their funds as soon as the batch is submitted and verified.
 
-## Tempo DEX integration
+This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits) in a single atomic operation. The portal does not need to know about these use cases—they are handled by receiver contracts.
 
-The portal interacts with the Tempo Stablecoin DEX at `0xdec0000000000000000000000000000000000000`. Swaps use the DEX functions:
+## Withdrawal failure and bounce-back
 
-- `swapExactAmountIn(tokenIn, tokenOut, amountIn, minAmountOut)`
-- `swapExactAmountOut(tokenIn, tokenOut, amountOut, maxAmountIn)`
+Withdrawals with `data` can fail if the `IExitReceiver` call fails or returns the wrong selector. When this happens, the portal does not revert the batch. Instead, it "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
 
-For exit intents that require a swap:
-
-1. The portal approves the DEX to pull the `tokenIn` amount.
-2. The portal executes the swap with slippage limits from the exit intent.
-3. The output token is transferred to the recipient or used for a deposit into another zone.
-
-For swap exits, `tokenIn` is always the zone gas token, and `tokenOut` is any Tempo TIP-20 token supported by the DEX routing rules.
-
-### Swap failure and bounce-back
-
-If a swap exit fails due to slippage (i.e., the DEX cannot satisfy `minAmountOut`), the portal does not revert the batch. Instead, it "bounces back" the funds by re-depositing the original `amountIn` into the same zone.
-
-The bounce-back deposit uses the exit index as the memo, allowing the zone to correlate the deposit with the original failed exit:
+The bounce-back deposit uses the withdrawal index as the memo, allowing the zone to correlate the deposit with the original failed withdrawal:
 
 ```solidity
-// In submitBatch exit processing:
-try dex.swapExactAmountIn(gasToken, exit.tokenOut, exit.amountIn, exit.minAmountOut) returns (uint128 amountOut) {
-    // Success: transfer to recipient
-    ITIP20(exit.tokenOut).transfer(exit.recipient, amountOut);
-} catch {
-    // Slippage failure: bounce back into this zone
-    bytes32 memo = bytes32(uint256(exitIndex));
+function _enqueueBounceBack(uint128 amount, address fallbackRecipient, uint64 withdrawalIndex) internal {
+    bytes32 memo = bytes32(uint256(withdrawalIndex));
     depositsHash = keccak256(abi.encode(depositsHash, Deposit({
         sender: address(this),
-        to: address(0),
-        amount: exit.amountIn,
+        to: fallbackRecipient,
+        amount: amount,
         memo: memo,
         ...
     })));
@@ -435,22 +392,7 @@ try dex.swapExactAmountIn(gasToken, exit.tokenOut, exit.amountIn, exit.minAmount
 }
 ```
 
-The zone processes bounce-back deposits by looking up the original exit using the memo (exit index) and crediting the exit's original sender. This keeps batch submission atomic while allowing individual swap exits to fail gracefully without blocking other exits.
-
-The same bounce-back mechanism applies to `SwapAndDepositExit`—if the swap fails, the funds return to the originating zone rather than the destination zone.
-
-## Zone-to-zone flow
-
-Zone-to-zone transfer is a composition of exit and deposit, all processed atomically when the batch is submitted:
-
-1. Zone A user submits an exit intent of type Swap and deposit.
-2. When the zone A sequencer submits the batch, the portal:
-   - Verifies the proof.
-   - Swaps the gas token of zone A into the gas token of zone B on the Tempo DEX.
-   - Calls `ZonePortal.deposit` for zone B with the swap output.
-3. The zone B sequencer consumes the deposit and credits the recipient on zone B.
-
-This flow uses Tempo as the hub and never requires direct zone-to-zone messaging.
+The zone processes bounce-back deposits and credits the `fallbackRecipient`. This keeps batch submission atomic while allowing individual withdrawals to fail gracefully without blocking others.
 
 ## Data availability and liveness
 
@@ -462,10 +404,9 @@ This flow uses Tempo as the hub and never requires direct zone-to-zone messaging
 
 - Sequencer can halt the zone without recourse due to missing data availability.
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
-- Swap exits are exposed to DEX liquidity and slippage constraints. The exit intent must include limits to avoid adverse execution. Failed swaps bounce back as deposits to the originating zone.
+- Withdrawals with callbacks only call the `IExitReceiver` interface—no arbitrary calldata. Receivers must return the correct selector to accept funds; failed or rejected calls trigger a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
 
 ## Open questions
 
 - Should deposits be cancellable if not consumed within a timeout?
-- Should exit intents allow fee payment for DEX swaps in the output token?
