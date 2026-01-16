@@ -35,8 +35,7 @@ contract ZoneFactory is IZoneFactory {
             params.sequencer,
             params.verifier,
             params.genesisStateRoot,
-            address(registry),
-            address(this)
+            address(registry)
         ));
 
         ZoneInfo memory info = ZoneInfo({

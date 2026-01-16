@@ -2,7 +2,6 @@
 pragma solidity ^0.8.13;
 
 import {IZoneRegistry} from "./interfaces/IZoneRegistry.sol";
-import {IZoneTypes} from "./interfaces/IZoneTypes.sol";
 
 /// @title ZoneRegistry
 /// @notice Registry for zone metadata and batch heads
@@ -19,7 +18,6 @@ contract ZoneRegistry is IZoneRegistry {
     struct BatchHead {
         uint64 batchIndex;
         bytes32 stateRoot;
-        bytes32 exitRoot;
     }
 
     /// @inheritdoc IZoneRegistry
@@ -32,8 +30,7 @@ contract ZoneRegistry is IZoneRegistry {
         _portalToZone[info.portal] = info.zoneId;
         _batchHeads[info.zoneId] = BatchHead({
             batchIndex: 0,
-            stateRoot: info.genesisStateRoot,
-            exitRoot: bytes32(0)
+            stateRoot: info.genesisStateRoot
         });
 
         emit ZoneRegistered(info.zoneId, info.portal);
@@ -48,22 +45,13 @@ contract ZoneRegistry is IZoneRegistry {
     }
 
     /// @inheritdoc IZoneRegistry
-    function batchHead(uint64 zoneId)
-        external
-        view
-        returns (uint64 batchIndex, bytes32 stateRoot, bytes32 exitRoot)
-    {
+    function batchHead(uint64 zoneId) external view returns (uint64 batchIndex, bytes32 stateRoot) {
         BatchHead storage head = _batchHeads[zoneId];
-        return (head.batchIndex, head.stateRoot, head.exitRoot);
+        return (head.batchIndex, head.stateRoot);
     }
 
     /// @inheritdoc IZoneRegistry
-    function updateBatchHead(
-        uint64 zoneId,
-        uint64 batchIndex_,
-        bytes32 stateRoot,
-        bytes32 exitRoot
-    ) external {
+    function updateBatchHead(uint64 zoneId, uint64 batchIndex_, bytes32 stateRoot) external {
         ZoneInfo storage info = _zones[zoneId];
         if (info.portal == address(0)) {
             revert ZoneNotFound();
@@ -74,10 +62,9 @@ contract ZoneRegistry is IZoneRegistry {
 
         _batchHeads[zoneId] = BatchHead({
             batchIndex: batchIndex_,
-            stateRoot: stateRoot,
-            exitRoot: exitRoot
+            stateRoot: stateRoot
         });
 
-        emit BatchHeadUpdated(zoneId, batchIndex_, stateRoot, exitRoot);
+        emit BatchHeadUpdated(zoneId, batchIndex_, stateRoot);
     }
 }

@@ -10,12 +10,7 @@ interface IZoneRegistry is IZoneTypes {
     event ZoneRegistered(uint64 indexed zoneId, address indexed portal);
 
     /// @notice Emitted when a batch head is updated
-    event BatchHeadUpdated(
-        uint64 indexed zoneId,
-        uint64 indexed batchIndex,
-        bytes32 stateRoot,
-        bytes32 exitRoot
-    );
+    event BatchHeadUpdated(uint64 indexed zoneId, uint64 indexed batchIndex, bytes32 stateRoot);
 
     error ZoneAlreadyRegistered();
     error ZoneNotFound();
@@ -30,9 +25,8 @@ interface IZoneRegistry is IZoneTypes {
     /// @notice Get the batch head for a zone
     /// @return batchIndex The current batch index
     /// @return stateRoot The current state root
-    /// @return exitRoot The current exit root
-    function batchHead(uint64 zoneId) external view returns (uint64 batchIndex, bytes32 stateRoot, bytes32 exitRoot);
+    function batchHead(uint64 zoneId) external view returns (uint64 batchIndex, bytes32 stateRoot);
 
     /// @notice Update the batch head (called by portal)
-    function updateBatchHead(uint64 zoneId, uint64 batchIndex, bytes32 stateRoot, bytes32 exitRoot) external;
+    function updateBatchHead(uint64 zoneId, uint64 batchIndex, bytes32 stateRoot) external;
 }

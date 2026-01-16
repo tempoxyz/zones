@@ -7,7 +7,16 @@ import {IVerifier} from "./interfaces/IVerifier.sol";
 /// @notice A mock verifier that always returns true (for testing only)
 contract MockVerifier is IVerifier {
     /// @inheritdoc IVerifier
-    function verify(bytes32, bytes calldata) external pure returns (bool) {
+    function verify(
+        bytes32,
+        bytes32,
+        bytes32,
+        bytes32,
+        bytes32,
+        bytes32,
+        bytes32,
+        bytes calldata
+    ) external pure returns (bool) {
         return true;
     }
 }

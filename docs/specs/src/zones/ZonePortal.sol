@@ -4,16 +4,12 @@ pragma solidity ^0.8.13;
 import {IZonePortal} from "./interfaces/IZonePortal.sol";
 import {IZoneRegistry} from "./interfaces/IZoneRegistry.sol";
 import {IVerifier} from "./interfaces/IVerifier.sol";
-import {IZoneTypes} from "./interfaces/IZoneTypes.sol";
+import {IExitReceiver} from "./interfaces/IExitReceiver.sol";
 import {ITIP20} from "../interfaces/ITIP20.sol";
-import {IStablecoinDEX} from "../interfaces/IStablecoinDEX.sol";
 
 /// @title ZonePortal
-/// @notice Per-zone portal that escrows the gas token and finalizes exits
+/// @notice Per-zone portal that escrows the gas token and processes withdrawals
 contract ZonePortal is IZonePortal {
-    /// @notice The Tempo Stablecoin DEX address
-    address public constant DEX = 0xDEc0000000000000000000000000000000000000;
-
     /// @inheritdoc IZonePortal
     uint64 public immutable zoneId;
 
@@ -29,29 +25,31 @@ contract ZonePortal is IZonePortal {
     /// @notice The zone registry
     IZoneRegistry public immutable registry;
 
-    /// @notice The zone factory
-    address public immutable factory;
-
     /// @inheritdoc IZonePortal
-    uint64 public nextDepositIndex;
-
-    /// @inheritdoc IZonePortal
-    bytes32 public stateRoot;
+    bytes32 public sequencerPubkey;
 
     /// @inheritdoc IZonePortal
     uint64 public batchIndex;
 
     /// @inheritdoc IZonePortal
-    bytes32 public exitRoot;
+    bytes32 public stateRoot;
 
-    /// @notice Deposits by index
-    mapping(uint64 => Deposit) private _deposits;
+    /// @inheritdoc IZonePortal
+    bytes32 public currentDepositsHash;
 
-    /// @notice Claimed exits
-    mapping(bytes32 => bool) private _exitClaimed;
+    /// @inheritdoc IZonePortal
+    bytes32 public checkpointedDepositsHash;
 
-    /// @notice Batch exit roots by batch index
-    mapping(uint64 => bytes32) private _batchExitRoots;
+    /// @inheritdoc IZonePortal
+    bytes32 public withdrawalQueue1;
+
+    /// @inheritdoc IZonePortal
+    bytes32 public withdrawalQueue2;
+
+    modifier onlySequencer() {
+        if (msg.sender != sequencer) revert OnlySequencer();
+        _;
+    }
 
     constructor(
         uint64 zoneId_,
@@ -59,8 +57,7 @@ contract ZonePortal is IZonePortal {
         address sequencer_,
         address verifier_,
         bytes32 genesisStateRoot_,
-        address registry_,
-        address factory_
+        address registry_
     ) {
         zoneId = zoneId_;
         gasToken = gasToken_;
@@ -68,171 +65,154 @@ contract ZonePortal is IZonePortal {
         verifier = verifier_;
         stateRoot = genesisStateRoot_;
         registry = IZoneRegistry(registry_);
-        factory = factory_;
     }
 
     /// @inheritdoc IZonePortal
-    function deposits(uint64 index) external view returns (Deposit memory) {
-        return _deposits[index];
+    function setSequencerPubkey(bytes32 pubkey) external onlySequencer {
+        sequencerPubkey = pubkey;
     }
 
     /// @inheritdoc IZonePortal
-    function exitClaimed(bytes32 exitId) external view returns (bool) {
-        return _exitClaimed[exitId];
-    }
-
-    /// @inheritdoc IZonePortal
-    function deposit(address to, uint256 amount, bytes32 memo) external returns (uint64 depositIndex) {
+    function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositsHash) {
         ITIP20(gasToken).transferFrom(msg.sender, address(this), amount);
 
-        depositIndex = nextDepositIndex++;
-        _deposits[depositIndex] = Deposit({
+        Deposit memory dep = Deposit({
+            l1BlockHash: blockhash(block.number - 1),
+            l1BlockNumber: uint64(block.number),
+            l1Timestamp: uint64(block.timestamp),
             sender: msg.sender,
             to: to,
             amount: amount,
             memo: memo
         });
 
-        emit DepositEnqueued(zoneId, depositIndex, msg.sender, to, amount, memo);
-    }
+        newCurrentDepositsHash = keccak256(abi.encode(dep, currentDepositsHash));
+        currentDepositsHash = newCurrentDepositsHash;
 
-    /// @inheritdoc IZonePortal
-    function submitBatch(BatchCommitment calldata commitment, bytes calldata proof) external {
-        if (msg.sender != sequencer) {
-            revert OnlySequencer();
-        }
-        if (commitment.zoneId != zoneId) {
-            revert InvalidBatchIndex();
-        }
-        if (commitment.batchIndex != batchIndex + 1) {
-            revert InvalidBatchIndex();
-        }
-        if (commitment.prevStateRoot != stateRoot) {
-            revert InvalidPrevStateRoot();
-        }
-
-        bytes32 commitmentHash = keccak256(abi.encode(commitment));
-        if (!IVerifier(verifier).verify(commitmentHash, proof)) {
-            revert InvalidProof();
-        }
-
-        batchIndex = commitment.batchIndex;
-        stateRoot = commitment.newStateRoot;
-        exitRoot = commitment.exitRoot;
-        _batchExitRoots[commitment.batchIndex] = commitment.exitRoot;
-
-        registry.updateBatchHead(zoneId, batchIndex, stateRoot, exitRoot);
-
-        emit BatchAccepted(
+        emit DepositEnqueued(
             zoneId,
-            commitment.batchIndex,
-            commitment.prevStateRoot,
+            newCurrentDepositsHash,
+            msg.sender,
+            to,
+            amount,
+            memo,
+            dep.l1BlockHash,
+            dep.l1BlockNumber,
+            dep.l1Timestamp
+        );
+    }
+
+    /// @inheritdoc IZonePortal
+    function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
+        if (withdrawalQueue1 == bytes32(0)) {
+            if (withdrawalQueue2 == bytes32(0)) revert NoWithdrawals();
+            withdrawalQueue1 = withdrawalQueue2;
+            withdrawalQueue2 = bytes32(0);
+        }
+
+        if (keccak256(abi.encode(w, remainingQueue)) != withdrawalQueue1) {
+            revert InvalidWithdrawal();
+        }
+
+        _executeWithdrawal(w);
+
+        if (remainingQueue == bytes32(0)) {
+            withdrawalQueue1 = withdrawalQueue2;
+            withdrawalQueue2 = bytes32(0);
+        } else {
+            withdrawalQueue1 = remainingQueue;
+        }
+    }
+
+    /// @inheritdoc IZonePortal
+    function submitBatch(
+        BatchCommitment calldata commitment,
+        bytes32 expectedQueue2,
+        bytes32 updatedQueue2,
+        bytes32 newWithdrawalsOnly,
+        bytes calldata proof
+    ) external onlySequencer {
+        bool valid = IVerifier(verifier).verify(
+            checkpointedDepositsHash,
+            commitment.newProcessedDepositsHash,
+            stateRoot,
             commitment.newStateRoot,
-            commitment.depositIndex,
-            commitment.exitRoot,
-            commitment.batchHash
+            expectedQueue2,
+            updatedQueue2,
+            newWithdrawalsOnly,
+            proof
+        );
+
+        if (!valid) revert InvalidProof();
+
+        if (withdrawalQueue2 == expectedQueue2) {
+            withdrawalQueue2 = updatedQueue2;
+        } else if (withdrawalQueue2 == bytes32(0)) {
+            withdrawalQueue2 = newWithdrawalsOnly;
+        } else {
+            revert UnexpectedQueue2State();
+        }
+
+        checkpointedDepositsHash = commitment.newProcessedDepositsHash;
+        stateRoot = commitment.newStateRoot;
+        batchIndex++;
+
+        registry.updateBatchHead(zoneId, batchIndex, stateRoot);
+
+        emit BatchSubmitted(
+            zoneId,
+            batchIndex,
+            commitment.newProcessedDepositsHash,
+            commitment.newStateRoot
         );
     }
 
-    /// @inheritdoc IZonePortal
-    function finalizeTransferExit(ExitIntent calldata intent, ExitProof calldata proof) external {
-        _validateAndClaimExit(intent, proof);
+    function _executeWithdrawal(Withdrawal calldata w) internal {
+        ITIP20(gasToken).transfer(w.to, w.amount);
 
-        ITIP20(gasToken).transfer(intent.transfer.recipient, intent.transfer.amount);
+        emit WithdrawalProcessed(zoneId, w.to, w.amount);
 
-        emit ExitFinalized(_exitId(intent), zoneId, ExitKind.Transfer);
-    }
-
-    /// @inheritdoc IZonePortal
-    function finalizeSwapExit(ExitIntent calldata intent, ExitProof calldata proof) external {
-        _validateAndClaimExit(intent, proof);
-
-        ITIP20(gasToken).approve(DEX, intent.swap.amountIn);
-
-        uint128 amountOut = IStablecoinDEX(DEX).swapExactAmountIn(
-            gasToken,
-            intent.swap.tokenOut,
-            intent.swap.amountIn,
-            intent.swap.minAmountOut
-        );
-
-        IStablecoinDEX(DEX).withdraw(intent.swap.tokenOut, amountOut);
-        ITIP20(intent.swap.tokenOut).transfer(intent.swap.recipient, amountOut);
-
-        emit ExitFinalized(_exitId(intent), zoneId, ExitKind.Swap);
-    }
-
-    /// @inheritdoc IZonePortal
-    function finalizeSwapAndDepositExit(ExitIntent calldata intent, ExitProof calldata proof) external {
-        _validateAndClaimExit(intent, proof);
-
-        ITIP20(gasToken).approve(DEX, intent.swapAndDeposit.amountIn);
-
-        uint128 amountOut = IStablecoinDEX(DEX).swapExactAmountIn(
-            gasToken,
-            intent.swapAndDeposit.tokenOut,
-            intent.swapAndDeposit.amountIn,
-            intent.swapAndDeposit.minAmountOut
-        );
-
-        IStablecoinDEX(DEX).withdraw(intent.swapAndDeposit.tokenOut, amountOut);
-
-        IZoneTypes.ZoneInfo memory destZone = registry.getZone(intent.swapAndDeposit.destinationZoneId);
-        if (destZone.portal == address(0)) {
-            revert DestinationZoneNotFound();
-        }
-
-        ITIP20(intent.swapAndDeposit.tokenOut).approve(destZone.portal, amountOut);
-        IZonePortal(destZone.portal).deposit(
-            intent.swapAndDeposit.destinationRecipient,
-            amountOut,
-            intent.memo
-        );
-
-        emit ExitFinalized(_exitId(intent), zoneId, ExitKind.SwapAndDeposit);
-    }
-
-    function _validateAndClaimExit(ExitIntent calldata intent, ExitProof calldata proof) internal {
-        bytes32 exitId = _exitId(intent);
-
-        if (_exitClaimed[exitId]) {
-            revert ExitAlreadyClaimed();
-        }
-
-        bytes32 batchExitRoot = _batchExitRoots[proof.batchIndex];
-        if (batchExitRoot == bytes32(0)) {
-            revert InvalidProof();
-        }
-
-        bytes32 leaf = keccak256(abi.encode(intent));
-        if (!_verifyMerkleProof(proof.merkleProof, batchExitRoot, leaf)) {
-            revert InvalidProof();
-        }
-
-        _exitClaimed[exitId] = true;
-    }
-
-    function _exitId(ExitIntent calldata intent) internal view returns (bytes32) {
-        return keccak256(abi.encode(zoneId, intent.exitIndex, intent));
-    }
-
-    function _verifyMerkleProof(
-        bytes32[] calldata proof,
-        bytes32 root,
-        bytes32 leaf
-    ) internal pure returns (bool) {
-        bytes32 computedHash = leaf;
-
-        for (uint256 i = 0; i < proof.length; i++) {
-            bytes32 proofElement = proof[i];
-
-            if (computedHash <= proofElement) {
-                computedHash = keccak256(abi.encodePacked(computedHash, proofElement));
-            } else {
-                computedHash = keccak256(abi.encodePacked(proofElement, computedHash));
+        if (w.gasLimit > 0) {
+            try IExitReceiver(w.to).onExitReceived{gas: w.gasLimit}(
+                w.sender,
+                w.amount,
+                w.data
+            ) returns (bytes4 selector) {
+                if (selector != IExitReceiver.onExitReceived.selector) {
+                    _enqueueBounceBack(w.amount, w.fallbackRecipient);
+                }
+            } catch {
+                _enqueueBounceBack(w.amount, w.fallbackRecipient);
             }
         }
+    }
 
-        return computedHash == root;
+    function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
+        Deposit memory dep = Deposit({
+            l1BlockHash: blockhash(block.number - 1),
+            l1BlockNumber: uint64(block.number),
+            l1Timestamp: uint64(block.timestamp),
+            sender: address(this),
+            to: fallbackRecipient,
+            amount: amount,
+            memo: bytes32(0)
+        });
+
+        bytes32 newHash = keccak256(abi.encode(dep, currentDepositsHash));
+        currentDepositsHash = newHash;
+
+        emit WithdrawalBouncedBack(zoneId, fallbackRecipient, amount);
+
+        emit DepositEnqueued(
+            zoneId,
+            newHash,
+            address(this),
+            fallbackRecipient,
+            amount,
+            bytes32(0),
+            dep.l1BlockHash,
+            dep.l1BlockNumber,
+            dep.l1Timestamp
+        );
     }
 }

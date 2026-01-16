@@ -4,56 +4,32 @@ pragma solidity ^0.8.13;
 import {IZoneTypes} from "./IZoneTypes.sol";
 
 /// @title IZoneOutbox
-/// @notice Zone predeploy for exit intent management
+/// @notice Zone predeploy for withdrawal management
 interface IZoneOutbox is IZoneTypes {
-    /// @notice Emitted when an exit is requested
-    event ExitRequested(bytes32 indexed exitId, uint64 indexed exitIndex, ExitKind kind);
+    /// @notice Emitted when a withdrawal is requested
+    event WithdrawalRequested(bytes32 indexed withdrawalId, uint64 indexed withdrawalIndex);
 
     error InsufficientBalance();
     error InvalidAmount();
 
-    /// @notice Get the next exit index
-    function nextExitIndex() external view returns (uint64);
+    /// @notice Get the next withdrawal index
+    function nextWithdrawalIndex() external view returns (uint64);
 
-    /// @notice Get an exit intent by index
-    function exitByIndex(uint64 exitIndex) external view returns (ExitIntent memory);
+    /// @notice Get a withdrawal by index
+    function withdrawalByIndex(uint64 index) external view returns (Withdrawal memory);
 
-    /// @notice Request a transfer exit
-    /// @param recipient The Tempo recipient address
-    /// @param amount The amount to transfer
-    /// @param memo Optional memo
-    /// @return exitId The exit intent ID
-    function requestTransferExit(address recipient, uint128 amount, bytes32 memo) external returns (bytes32 exitId);
-
-    /// @notice Request a swap exit
-    /// @param tokenOut The output token address on Tempo
-    /// @param amountIn The input amount (gas token)
-    /// @param minAmountOut Minimum output amount (slippage protection)
-    /// @param recipient The recipient on Tempo
-    /// @param memo Optional memo
-    /// @return exitId The exit intent ID
-    function requestSwapExit(
-        address tokenOut,
-        uint128 amountIn,
-        uint128 minAmountOut,
-        address recipient,
-        bytes32 memo
-    ) external returns (bytes32 exitId);
-
-    /// @notice Request a swap and deposit exit
-    /// @param tokenOut The output token (must be destination zone's gas token)
-    /// @param amountIn The input amount (gas token)
-    /// @param minAmountOut Minimum output amount
-    /// @param destinationZoneId The destination zone ID
-    /// @param destinationRecipient The recipient on the destination zone
-    /// @param memo Optional memo
-    /// @return exitId The exit intent ID
-    function requestSwapAndDepositExit(
-        address tokenOut,
-        uint128 amountIn,
-        uint128 minAmountOut,
-        uint64 destinationZoneId,
-        address destinationRecipient,
-        bytes32 memo
-    ) external returns (bytes32 exitId);
+    /// @notice Request a withdrawal from the zone to Tempo
+    /// @param to The Tempo recipient address
+    /// @param amount The amount to withdraw
+    /// @param gasLimit Max gas for IExitReceiver callback (0 = no callback)
+    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param data Calldata for IExitReceiver (if gasLimit > 0)
+    /// @return withdrawalId The withdrawal ID
+    function requestWithdrawal(
+        address to,
+        uint128 amount,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes calldata data
+    ) external returns (bytes32 withdrawalId);
 }
