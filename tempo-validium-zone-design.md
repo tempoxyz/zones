@@ -97,7 +97,7 @@ interface IVerifier {
         // Withdrawal queue updates (proof outputs)
         bytes32 expectedQueue2,       // what proof assumed queue2 was
         bytes32 updatedQueue2,        // queue2 with new withdrawals added to innermost
-        bytes32 newWithdrawalsOnly,   // new withdrawals only (if queue2 was empty)
+        bytes32 newWithdrawalsOnly,   // new withdrawals only (only used if queue2 was empty)
 
         // Proof
         bytes calldata proof
@@ -294,7 +294,7 @@ interface IVerifier {
         // Withdrawal queue updates (proof outputs)
         bytes32 expectedQueue2,       // what proof assumed queue2 was
         bytes32 updatedQueue2,        // queue2 with new withdrawals added to innermost
-        bytes32 newWithdrawalsOnly,   // new withdrawals only (if queue2 was empty)
+        bytes32 newWithdrawalsOnly,   // new withdrawals only (only used if queue2 was empty)
 
         // Proof
         bytes calldata proof
