@@ -160,6 +160,8 @@ struct ExitProof {
 
 Exit intent fields are only meaningful for their `kind`. For example, `TransferExit` is used only when `kind == ExitKind.Transfer`. The `exitId` is `keccak256(abi.encode(zoneId, exitIndex, intent))`, and the portal rejects duplicate `exitId` values.
 
+> **Implementation note**: The `ZoneOutbox` predeploy on the zone MUST include `zoneId` in its exit ID calculation to match the portal's expectation. The outbox constructor should accept `zoneId` as a parameter.
+
 ### Verifier
 
 ```solidity
@@ -234,6 +236,10 @@ interface IZonePortal {
 
     function submitBatch(BatchCommitment calldata commitment, bytes calldata proof) external;
 
+    function stateRoot() external view returns (bytes32);
+    function batchIndex() external view returns (uint64);
+    function exitRoot() external view returns (bytes32);
+
     function exitClaimed(bytes32 exitId) external view returns (bool);
 
     function finalizeTransferExit(
@@ -274,6 +280,8 @@ interface IZoneRegistry {
 interface IZoneOutbox {
     event ExitRequested(bytes32 indexed exitId, uint64 indexed exitIndex, ExitKind kind);
 
+    function zoneId() external view returns (uint64);
+    function gasToken() external view returns (address);
     function nextExitIndex() external view returns (uint64);
     function exitByIndex(uint64 exitIndex) external view returns (ExitIntent memory);
 
@@ -301,6 +309,8 @@ interface IZoneOutbox {
     ) external returns (bytes32 exitId);
 }
 ```
+
+The `ZoneOutbox` is deployed as a predeploy on the zone at genesis. It MUST be initialized with `zoneId` and `gasToken` so that exit IDs match the portal's calculation.
 
 ### External dependencies
 
@@ -398,8 +408,43 @@ This flow uses Tempo as the hub and never requires direct zone-to-zone messaging
 - Swap exits are exposed to DEX liquidity and slippage constraints. The exit intent must include limits to avoid adverse execution.
 - Deposits are locked on Tempo until a verified batch consumes them.
 
+## Implementation notes
+
+### Batch validation
+
+When `submitBatch` is called, the portal MUST validate:
+
+1. `commitment.zoneId == zoneId` (batch is for this zone)
+2. `commitment.batchIndex == batchIndex + 1` (sequential batches)
+3. `commitment.prevStateRoot == stateRoot` (state continuity)
+4. `commitment.depositIndex <= nextDepositIndex` (deposits consumed must exist)
+
+### SwapAndDeposit validation
+
+When finalizing a `SwapAndDeposit` exit, the portal MUST validate that the destination zone's `gasToken` matches the `tokenOut` field. This ensures the swapped tokens can actually be deposited into the destination zone.
+
+### Exit root merkle tree
+
+The `exitRoot` is the root of a binary merkle tree over exit intents. Each leaf is `keccak256(abi.encode(intent))` where `intent` is the full `ExitIntent` struct. The tree uses sorted pair hashing: `keccak256(abi.encodePacked(min(a, b), max(a, b)))`.
+
+### Predeploy addresses
+
+| Contract | Address |
+|----------|---------|
+| ZoneOutbox | `0xOUTB000000000000000000000000000000000000` (TBD) |
+| Tempo Stablecoin DEX | `0xDEc0000000000000000000000000000000000000` |
+
+### Gas token burning
+
+The `ZoneOutbox` burns gas tokens when users request exits. This requires either:
+- The outbox to have `ISSUER_ROLE` on the TIP-20 to call `burn()`, OR
+- A system-level burn mechanism that the zone EL provides
+
+The recommended approach is for the zone genesis to grant the outbox the appropriate role.
+
 ## Open questions
 
 - Should deposits be cancellable if not consumed within a timeout?
 - Should the portal support batched exit finalization for gas efficiency?
 - Should exit intents allow fee payment for DEX swaps in the output token?
+- What is the canonical predeploy address for ZoneOutbox?
