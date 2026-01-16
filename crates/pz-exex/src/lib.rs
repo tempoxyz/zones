@@ -1,17 +1,20 @@
 //! Privacy Zone ExEx - Execution Extension for Tempo Privacy Zones (L2 Validium)
 //!
-//! This crate implements a privacy zone as an ExEx attached to a Tempo L1 node.
-//! Each zone:
-//! - Has exactly one permissioned sequencer
-//! - Bridges exactly one TIP-20 token (the zone gas token)
-//! - Uses SQL database for state (no reth db, no txpool)
-//! - Settles via validity proofs or TEE attestations
+//! A simple ExEx with SQL database, based on reth-exex-examples/rollup pattern.
+//!
+//! Key components:
+//! - `db`: SQL-backed state with `reth_revm::Database` implementation
+//! - `execution`: Transaction execution using tempo-evm
+//! - `exex`: ExEx event loop processing L1 deposits and batches
 
 pub mod db;
 pub mod error;
+pub mod execution;
 pub mod exex;
 pub mod types;
 
 pub use db::Database;
-pub use error::PzError;
-pub use exex::PrivacyZoneExEx;
+pub use error::{PzDbError, PzError};
+pub use execution::execute_transactions;
+pub use exex::{install_pz_exex, PrivacyZoneExEx};
+pub use types::{Deposit, ExitIntent, PzConfig, PzState};

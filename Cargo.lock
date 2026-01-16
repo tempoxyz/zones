@@ -7161,6 +7161,7 @@ name = "pz-exex"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy-consensus",
+ "alloy-evm",
  "alloy-primitives",
  "alloy-sol-types",
  "eyre",
@@ -7169,11 +7170,17 @@ dependencies = [
  "reth-exex",
  "reth-node-api",
  "reth-primitives-traits",
+ "reth-provider",
+ "reth-revm",
  "reth-tracing",
  "rusqlite",
  "serde",
  "serde_json",
  "tempfile",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-primitives",
+ "tempo-revm",
  "thiserror 2.0.17",
  "tokio",
 ]
