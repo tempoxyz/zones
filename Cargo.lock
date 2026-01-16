@@ -7179,6 +7179,7 @@ dependencies = [
  "tempfile",
  "tempo-chainspec",
  "tempo-evm",
+ "tempo-precompiles",
  "tempo-primitives",
  "tempo-revm",
  "thiserror 2.0.17",

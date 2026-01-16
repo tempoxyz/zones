@@ -312,7 +312,8 @@ mod tests {
             sender: address!("1111111111111111111111111111111111111111"),
             to: address!("2222222222222222222222222222222222222222"),
             amount: U256::from(1000),
-            memo: B256::ZERO,
+            gas_limit: 0,
+            data: Default::default(),
         };
         let deposit2 = Deposit {
             l1_block_number: 100,

@@ -138,11 +138,13 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
 
         // Credit the recipient's balance immediately
         // (In a real zone, this would happen when the deposit is included in a zone block)
-        self.db.upsert_account(deposit.to, |account| {
-            let mut account = account.unwrap_or_default();
-            account.balance += deposit.amount;
-            Ok(account)
-        })?;
+        // TODO: acutally execute and do this logic, this should increment the account balance and
+        // execute the logic in the calldata and such
+        // self.db.upsert_account(deposit.to, |account| {
+        //     let mut account = account.unwrap_or_default();
+        //     account.balance += deposit.amount;
+        //     Ok(account)
+        // })?;
 
         Ok(())
     }
@@ -236,39 +238,38 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
                     if let Ok(deposit_event) = DepositEnqueued::decode_raw_log(
                         log.topics().iter().copied(),
                         &log.data.data,
-                    ) {
-                        if deposit_event.zoneId == self.config.zone_id {
-                            let deposit = Deposit {
-                                l1_block_hash: deposit_event.l1BlockHash,
-                                l1_block_number: deposit_event.l1BlockNumber,
-                                l1_timestamp: deposit_event.l1Timestamp,
-                                sender: deposit_event.sender,
-                                to: deposit_event.to,
-                                amount: deposit_event.amount,
-                                memo: deposit_event.memo,
-                            };
-                            events.push(PortalEvent {
-                                cursor,
-                                kind: PortalEventKind::Deposit(deposit),
-                            });
-                        }
+                    ) && deposit_event.zoneId == self.config.zone_id
+                    {
+                        let deposit = Deposit {
+                            l1_block_hash: deposit_event.l1BlockHash,
+                            l1_block_number: deposit_event.l1BlockNumber,
+                            l1_timestamp: deposit_event.l1Timestamp,
+                            sender: deposit_event.sender,
+                            to: deposit_event.to,
+                            amount: deposit_event.amount,
+                            gas_limit: deposit_event.gasLimit,
+                            data: deposit_event.data,
+                        };
+                        events.push(PortalEvent {
+                            cursor,
+                            kind: PortalEventKind::Deposit(deposit),
+                        });
                     }
 
                     // Try to decode as batch submitted event
                     if let Ok(batch_event) =
                         BatchSubmitted::decode_raw_log(log.topics().iter().copied(), &log.data.data)
+                        && batch_event.zoneId == self.config.zone_id
                     {
-                        if batch_event.zoneId == self.config.zone_id {
-                            events.push(PortalEvent {
-                                cursor,
-                                kind: PortalEventKind::BatchSubmitted {
-                                    batch_index: batch_event.batchIndex,
-                                    new_state_root: batch_event.newStateRoot,
-                                    new_deposits_hash: batch_event.newDepositsHash,
-                                    exit_count: batch_event.exitCount,
-                                },
-                            });
-                        }
+                        events.push(PortalEvent {
+                            cursor,
+                            kind: PortalEventKind::BatchSubmitted {
+                                batch_index: batch_event.batchIndex,
+                                new_state_root: batch_event.newStateRoot,
+                                new_deposits_hash: batch_event.newDepositsHash,
+                                exit_count: batch_event.exitCount,
+                            },
+                        });
                     }
 
                     log_index += 1;

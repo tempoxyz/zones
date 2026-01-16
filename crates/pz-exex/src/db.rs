@@ -6,26 +6,32 @@ use crate::{
     error::PzDbError,
     types::{Deposit, ExitIntent, L1Cursor, PzConfig, PzState},
 };
-use alloy_primitives::{Address, Bytes, B256, U256};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use reth_primitives_traits::StorageEntry;
 use reth_provider::OriginalValuesKnown;
 use reth_revm::{
     db::{
-        states::{reverts::RevertToSlot, PlainStorageChangeset, PlainStorageRevert},
         BundleState,
+        states::{PlainStorageChangeset, PlainStorageRevert, reverts::RevertToSlot},
     },
     state::{AccountInfo, Bytecode},
 };
 use rusqlite::Connection;
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     str::FromStr,
     sync::{Arc, Mutex, MutexGuard},
 };
 
 /// Type used to initialize revm's bundle state.
-type BundleStateInit =
-    HashMap<Address, (Option<AccountInfo>, Option<AccountInfo>, HashMap<B256, (U256, U256)>)>;
+type BundleStateInit = HashMap<
+    Address,
+    (
+        Option<AccountInfo>,
+        Option<AccountInfo>,
+        HashMap<B256, (U256, U256)>,
+    ),
+>;
 
 /// Types used inside RevertsInit.
 pub type AccountRevertInit = (Option<Option<AccountInfo>>, Vec<StorageEntry>);
@@ -50,7 +56,9 @@ impl Database {
     }
 
     fn connection(&self) -> MutexGuard<'_, Connection> {
-        self.connection.lock().expect("failed to acquire database lock")
+        self.connection
+            .lock()
+            .expect("failed to acquire database lock")
     }
 
     fn create_tables(&self) -> eyre::Result<()> {
@@ -179,7 +187,12 @@ impl Database {
             }
         }
 
-        for PlainStorageChangeset { address, wipe_storage, storage } in changeset.storage {
+        for PlainStorageChangeset {
+            address,
+            wipe_storage,
+            storage,
+        } in changeset.storage
+        {
             if wipe_storage {
                 tx.execute(
                     "DELETE FROM storage WHERE address = ?",
@@ -199,7 +212,12 @@ impl Database {
             eyre::bail!("too many blocks in storage reverts");
         }
         if let Some(storage_reverts) = reverts.storage.into_iter().next() {
-            for PlainStorageRevert { address, wiped, storage_revert } in storage_reverts {
+            for PlainStorageRevert {
+                address,
+                wiped,
+                storage_revert,
+            } in storage_reverts
+            {
                 let storage = storage_revert
                     .into_iter()
                     .map(|(k, v)| (B256::new(k.to_be_bytes()), v))
@@ -257,7 +275,10 @@ impl Database {
             );
         }
 
-        tx.execute("DELETE FROM block WHERE number = ?", (block_number.to_string(),))?;
+        tx.execute(
+            "DELETE FROM block WHERE number = ?",
+            (block_number.to_string(),),
+        )?;
 
         let mut state = BundleStateInit::new();
         let mut reverts = RevertsInit::new();
@@ -303,13 +324,24 @@ impl Database {
             })
             .map(|result| {
                 let (address_str, key_str, data_str) = result?;
-                let data = if data_str == "destroyed" { U256::ZERO } else { U256::from_str(&data_str)? };
-                Ok((Address::from_str(&address_str)?, B256::from_str(&key_str)?, data))
+                let data = if data_str == "destroyed" {
+                    U256::ZERO
+                } else {
+                    U256::from_str(&data_str)?
+                };
+                Ok((
+                    Address::from_str(&address_str)?,
+                    B256::from_str(&key_str)?,
+                    data,
+                ))
             })
             .collect::<eyre::Result<Vec<_>>>()?;
 
         for (address, key, old_data) in storage_reverts.into_iter().rev() {
-            let old_storage = StorageEntry { key, value: old_data };
+            let old_storage = StorageEntry {
+                key,
+                value: old_data,
+            };
             reverts.entry(address).or_default().1.push(old_storage);
 
             let account_state = match state.entry(address) {
@@ -364,6 +396,12 @@ impl Database {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Set a storage slot value directly.
+    /// Used for system-level operations like crediting TIP-20 balances.
+    pub fn set_storage(&self, address: Address, key: B256, value: U256) -> eyre::Result<()> {
+        set_storage(&self.connection(), address, key, value)
     }
 
     // ========================================================================
@@ -542,10 +580,8 @@ impl Database {
 
     /// Remove journal entries after a zone block (for revert).
     pub fn remove_journals_after(&self, zone_block: u64) -> eyre::Result<()> {
-        self.connection().execute(
-            "DELETE FROM journal WHERE zone_block > ?1",
-            [zone_block],
-        )?;
+        self.connection()
+            .execute("DELETE FROM journal WHERE zone_block > ?1", [zone_block])?;
         Ok(())
     }
 
@@ -560,7 +596,12 @@ impl Database {
             "INSERT INTO exit_intent (zone_block, exit_index, exit_hash, data)
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(zone_block, exit_index) DO NOTHING",
-            (exit.zone_block, exit.exit_index, exit_hash.to_string(), &data),
+            (
+                exit.zone_block,
+                exit.exit_index,
+                exit_hash.to_string(),
+                &data,
+            ),
         )?;
         Ok(())
     }
@@ -669,7 +710,10 @@ fn upsert_account(
 }
 
 fn delete_account(connection: &Connection, address: Address) -> eyre::Result<()> {
-    connection.execute("DELETE FROM account WHERE address = ?", (address.to_string(),))?;
+    connection.execute(
+        "DELETE FROM account WHERE address = ?",
+        (address.to_string(),),
+    )?;
     Ok(())
 }
 
@@ -735,6 +779,15 @@ fn get_storage(connection: &Connection, address: Address, key: B256) -> eyre::Re
     }
 }
 
+fn set_storage(connection: &Connection, address: Address, key: B256, value: U256) -> eyre::Result<()> {
+    connection.execute(
+        "INSERT INTO storage (address, key, data) VALUES (?, ?, ?)
+         ON CONFLICT(address, key) DO UPDATE SET data = excluded.data",
+        (address.to_string(), key.to_string(), value.to_string()),
+    )?;
+    Ok(())
+}
+
 impl reth_revm::Database for Database {
     type Error = PzDbError;
 
@@ -749,7 +802,9 @@ impl reth_revm::Database for Database {
             |row| row.get(0),
         );
         match bytecode {
-            Ok(data) => Ok(Bytecode::new_raw(Bytes::from_str(&data).unwrap_or_default())),
+            Ok(data) => Ok(Bytecode::new_raw(
+                Bytes::from_str(&data).unwrap_or_default(),
+            )),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(Bytecode::default()),
             Err(err) => Err(PzDbError(err.into())),
         }
@@ -824,10 +879,12 @@ mod tests {
         assert_eq!(state.cursor, L1Cursor::default());
 
         // Update state
-        let mut new_state = PzState::default();
-        new_state.zone_block = 5;
-        new_state.cursor = L1Cursor::new(100, 3);
-        new_state.journal_hash = B256::repeat_byte(0x42);
+        let new_state = PzState {
+            zone_block: 5,
+            cursor: L1Cursor::new(100, 3),
+            journal_hash: B256::repeat_byte(0x42),
+            ..Default::default()
+        };
         db.set_zone_state(&new_state).unwrap();
 
         let state = db.get_zone_state().unwrap();
@@ -851,7 +908,8 @@ mod tests {
             sender: address!("1111111111111111111111111111111111111111"),
             to: address!("2222222222222222222222222222222222222222"),
             amount: U256::from(1000),
-            memo: B256::ZERO,
+            gas_limit: 0,
+            data: Default::default(),
         };
 
         let deposit2 = Deposit {
@@ -861,8 +919,10 @@ mod tests {
         };
 
         // Queue deposits
-        db.queue_deposit(cursor1, &deposit1, B256::repeat_byte(0x01)).unwrap();
-        db.queue_deposit(cursor2, &deposit2, B256::repeat_byte(0x02)).unwrap();
+        db.queue_deposit(cursor1, &deposit1, B256::repeat_byte(0x01))
+            .unwrap();
+        db.queue_deposit(cursor2, &deposit2, B256::repeat_byte(0x02))
+            .unwrap();
 
         // Get pending
         let pending = db.get_pending_deposits().unwrap();
@@ -876,7 +936,8 @@ mod tests {
         assert_eq!(pending.len(), 1);
 
         // Queue another and remove after cursor
-        db.queue_deposit(cursor3, &deposit1, B256::repeat_byte(0x03)).unwrap();
+        db.queue_deposit(cursor3, &deposit1, B256::repeat_byte(0x03))
+            .unwrap();
         db.remove_deposits_after(L1Cursor::new(100, 1)).unwrap();
         let pending = db.get_pending_deposits().unwrap();
         assert_eq!(pending.len(), 1); // Only cursor2 remains
@@ -887,17 +948,26 @@ mod tests {
         let db = test_db();
 
         // Insert journal entries
-        db.insert_journal(1, B256::repeat_byte(0x01), L1Cursor::new(100, 0)).unwrap();
-        db.insert_journal(2, B256::repeat_byte(0x02), L1Cursor::new(101, 0)).unwrap();
-        db.insert_journal(3, B256::repeat_byte(0x03), L1Cursor::new(102, 0)).unwrap();
+        db.insert_journal(1, B256::repeat_byte(0x01), L1Cursor::new(100, 0))
+            .unwrap();
+        db.insert_journal(2, B256::repeat_byte(0x02), L1Cursor::new(101, 0))
+            .unwrap();
+        db.insert_journal(3, B256::repeat_byte(0x03), L1Cursor::new(102, 0))
+            .unwrap();
 
         // Get journal hash
-        assert_eq!(db.get_journal_hash(2).unwrap(), Some(B256::repeat_byte(0x02)));
+        assert_eq!(
+            db.get_journal_hash(2).unwrap(),
+            Some(B256::repeat_byte(0x02))
+        );
         assert_eq!(db.get_journal_hash(99).unwrap(), None);
 
         // Remove after block 1
         db.remove_journals_after(1).unwrap();
-        assert_eq!(db.get_journal_hash(1).unwrap(), Some(B256::repeat_byte(0x01)));
+        assert_eq!(
+            db.get_journal_hash(1).unwrap(),
+            Some(B256::repeat_byte(0x01))
+        );
         assert_eq!(db.get_journal_hash(2).unwrap(), None);
         assert_eq!(db.get_journal_hash(3).unwrap(), None);
     }
@@ -929,13 +999,13 @@ mod tests {
         let exit2 = ExitIntent {
             exit_index: 1,
             amount: U256::from(2000),
-            ..exit1.clone()
+            ..exit1
         };
         let exit3 = ExitIntent {
             zone_block: 2,
             exit_index: 0,
             amount: U256::from(3000),
-            ..exit1.clone()
+            ..exit1
         };
 
         // Insert exits

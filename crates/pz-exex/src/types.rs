@@ -1,12 +1,12 @@
 //! Types for the Privacy Zone ExEx.
 
-use alloy_primitives::{address, keccak256, Address, B256, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::sol;
+use serde::{Deserialize, Serialize};
 
 /// Exit precompile address - users call this to initiate withdrawals.
 /// This is a sentinel address that the block builder intercepts.
 pub const EXIT_PRECOMPILE: Address = address!("0000000000000000000000000000000000000420");
-use serde::{Deserialize, Serialize};
 
 sol! {
     /// Deposit event emitted by the ZonePortal.
@@ -17,7 +17,8 @@ sol! {
         address indexed sender,
         address to,
         uint256 amount,
-        bytes32 memo,
+        uint64 gasLimit,
+        bytes data,
         bytes32 l1BlockHash,
         uint64 l1BlockNumber,
         uint64 l1Timestamp
@@ -56,7 +57,7 @@ impl L1Cursor {
     }
 
     /// Check if this cursor is after another.
-    pub fn is_after(&self, other: &L1Cursor) -> bool {
+    pub fn is_after(&self, other: &Self) -> bool {
         (self.block_number, self.log_index) > (other.block_number, other.log_index)
     }
 }
@@ -76,24 +77,27 @@ pub struct Deposit {
     pub to: Address,
     /// Amount of gas token deposited.
     pub amount: U256,
-    /// Optional memo.
-    pub memo: B256,
+    /// Max gas for callback (0 = no callback, just credit balance).
+    pub gas_limit: u64,
+    /// Calldata to execute at `to` (if gas_limit > 0).
+    pub data: Bytes,
 }
 
 impl Deposit {
     /// Compute the hash of this deposit for the deposits chain.
+    /// Hash structure: keccak256(abi.encode(deposit, prevHash)) - newest outermost.
     pub fn hash(&self, prev_hash: B256) -> B256 {
-        use alloy_primitives::keccak256;
-        let mut data = Vec::with_capacity(32 + 32 + 8 + 8 + 20 + 20 + 32 + 32);
-        data.extend_from_slice(prev_hash.as_slice());
-        data.extend_from_slice(self.l1_block_hash.as_slice());
-        data.extend_from_slice(&self.l1_block_number.to_be_bytes());
-        data.extend_from_slice(&self.l1_timestamp.to_be_bytes());
-        data.extend_from_slice(self.sender.as_slice());
-        data.extend_from_slice(self.to.as_slice());
-        data.extend_from_slice(&self.amount.to_be_bytes::<32>());
-        data.extend_from_slice(self.memo.as_slice());
-        keccak256(&data)
+        let mut buf = Vec::with_capacity(256);
+        buf.extend_from_slice(self.l1_block_hash.as_slice());
+        buf.extend_from_slice(&self.l1_block_number.to_be_bytes());
+        buf.extend_from_slice(&self.l1_timestamp.to_be_bytes());
+        buf.extend_from_slice(self.sender.as_slice());
+        buf.extend_from_slice(self.to.as_slice());
+        buf.extend_from_slice(&self.amount.to_be_bytes::<32>());
+        buf.extend_from_slice(&self.gas_limit.to_be_bytes());
+        buf.extend_from_slice(&self.data);
+        buf.extend_from_slice(prev_hash.as_slice());
+        keccak256(&buf)
     }
 }
 

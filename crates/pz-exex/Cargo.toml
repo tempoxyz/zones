@@ -11,6 +11,7 @@ tempo-evm = { workspace = true, features = ["rpc"] }
 tempo-revm.workspace = true
 tempo-chainspec.workspace = true
 tempo-primitives = { workspace = true, features = ["serde-bincode-compat"] }
+tempo-precompiles.workspace = true
 
 # reth - using minimal set for ExEx
 reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
