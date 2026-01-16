@@ -72,18 +72,20 @@ The sequencer posts batches to Tempo via a single `submitBatch` call that atomic
 
 Each batch submission includes:
 
+- `l1BlockHash` (the Tempo block hash the zone block is anchored to)
 - `newStateRoot` (the resulting state after execution)
 - `newDepositIndex` (how many deposits have been consumed total)
 - `exits` (full list of exit intents to process)
 - `proof` (validity proof or TEE attestation)
 
-The portal tracks `prevStateRoot` and `prevDepositIndex` from previous batches.
+The portal tracks `prevStateRoot` and `prevDepositIndex` from previous batches. The portal verifies `l1BlockHash` is a recent block using `blockhash()`.
 
 The portal calls the verifier to validate the batch:
 
 ```solidity
 interface IVerifier {
     function verify(
+        bytes32 l1BlockHash,
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
         bytes32 depositsHash,
@@ -96,6 +98,8 @@ interface IVerifier {
 The verifier validates that the state transition from `prevStateRoot` to `newStateRoot` is correct given the inputs. The portal computes:
 - `depositsHash = keccak256(abi.encode(deposits[prevDepositIndex..newDepositIndex]))`
 - `exitsHash = keccak256(abi.encode(exits))`
+
+The `l1BlockHash` anchors the zone block to a recent Tempo block, allowing the zone to access L1 state (timestamp, block number, etc.) during execution. The portal can verify this hash using `blockhash()`.
 
 Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
@@ -124,6 +128,7 @@ struct ZoneInfo {
 }
 
 struct BatchCommitment {
+    bytes32 l1BlockHash;
     bytes32 newStateRoot;
     uint64 newDepositIndex;
 }
@@ -171,6 +176,7 @@ Exit intent fields are only meaningful for their `kind`. For example, `TransferE
 ```solidity
 interface IVerifier {
     function verify(
+        bytes32 l1BlockHash,
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
         bytes32 depositsHash,
