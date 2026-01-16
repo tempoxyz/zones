@@ -107,7 +107,9 @@ interface IVerifier {
 
 The verifier validates that the state transition from `prevStateRoot` to `newStateRoot` is correct given the inputs.
 
-Deposits use a Merkle chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
+### Deposit chain
+
+Deposits use a Merkle chain (hash onion): each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
 
 The proof must verify that the zone correctly processed deposits from `checkpointedDepositsHash` to `newProcessedDepositsHash`.
 
@@ -186,6 +188,32 @@ function submitBatch(
 ```
 
 This ensures the proof works regardless of whether a queue swap happened during proving.
+
+## Queue design rationale
+
+Both the deposit and withdrawal queues use Merkle chains (hash onions) to achieve constant on-chain storage while supporting unbounded queue depth. The designs optimize for different access patterns:
+
+### Deposit queue goals
+
+1. **Constant storage**: 2 slots (`currentDepositsHash`, `checkpointedDepositsHash`) regardless of queue depth.
+2. **Non-blocking deposits**: Users can deposit anytime without waiting for proofs.
+3. **Stable proving target**: Proofs start from `checkpointedDepositsHash`, which remains stable during proof generation.
+4. **Graceful catch-up**: After a batch, checkpoint advances to current head, automatically including deposits that arrived during proving.
+
+The deposit chain grows at the head (`current = hash(current, deposit)`), and the proof consumes from a stable checkpoint. No race conditions because the checkpoint only changes after batch submission.
+
+### Withdrawal queue goals
+
+1. **Constant storage**: 2 slots (`withdrawalQueue1`, `withdrawalQueue2`) regardless of queue depth.
+2. **Proof-independent processing**: Sequencer can process withdrawals immediately without waiting for proofs.
+3. **FIFO ordering**: Withdrawals must be processed in order.
+4. **Efficient unwrapping**: Processing a withdrawal should be O(1) on-chain.
+
+The key insight is structuring the hash chain with **oldest at outermost**: `hash(oldest, hash(next, hash(newest, 0)))`. This allows O(1) FIFO processing—the sequencer provides the withdrawal and remaining hash, the portal verifies and unwraps one layer.
+
+The two-queue design separates concerns: `queue1` is for processing (sequencer drains it), `queue2` is for accumulation (proofs add to it). When `queue1` empties, it swaps in `queue2`. The proof handles the race condition by outputting both "add to existing queue2" and "fresh queue" variants.
+
+Building the queue with oldest-outermost requires O(N) work, but this happens inside the ZKP where it's acceptable. On-chain operations remain O(1).
 
 ## Interfaces and functions
 
