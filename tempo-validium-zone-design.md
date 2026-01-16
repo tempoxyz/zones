@@ -72,7 +72,7 @@ The sequencer posts batches to Tempo via a single `submitBatch` call that atomic
 
 Each batch submission includes:
 
-- `newDepositsHash` (the deposits processed up to)
+- `newProcessedDepositsHash` (the deposits processed up to)
 - `newStateRoot` (the resulting state after execution)
 - `withdrawals` (full list of withdrawals to process)
 - `proof` (validity proof or TEE attestation)
@@ -85,9 +85,9 @@ The portal calls the verifier to validate the batch:
 interface IVerifier {
     function verify(
         // Deposit chain
-        bytes32 processedDepositsHash,  // start (from portal state)
-        bytes32 newDepositsHash,        // end (from commitment)
-        bytes32 currentDepositsHash,    // portal's current head
+        bytes32 oldProcessedDepositsHash,  // where zone last stopped (from portal state)
+        bytes32 newProcessedDepositsHash,  // where zone now stops (from batch)
+        bytes32 currentDepositsHash,       // portal's current head
 
         // Zone state transition
         bytes32 prevStateRoot,
@@ -107,10 +107,10 @@ The verifier validates that the state transition from `prevStateRoot` to `newSta
 Deposits use a Merkle chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
 
 The proof must verify:
-- The zone correctly processed deposits from `processedDepositsHash` to `newDepositsHash`
-- `newDepositsHash` is an ancestor of `currentDepositsHash` (a valid point in the chain)
+- The zone correctly processed deposits from `oldProcessedDepositsHash` to `newProcessedDepositsHash`
+- `newProcessedDepositsHash` is an ancestor of `currentDepositsHash` (a valid point in the chain)
 
-After the batch is accepted, the portal updates `processedDepositsHash = newDepositsHash`.
+After the batch is accepted, the portal updates `processedDepositsHash = newProcessedDepositsHash`.
 
 Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
@@ -134,7 +134,7 @@ struct ZoneInfo {
 }
 
 struct BatchCommitment {
-    bytes32 newDepositsHash;
+    bytes32 newProcessedDepositsHash;
     bytes32 newStateRoot;
 }
 
@@ -165,9 +165,9 @@ struct Withdrawal {
 interface IVerifier {
     function verify(
         // Deposit chain
-        bytes32 processedDepositsHash,  // start (from portal state)
-        bytes32 newDepositsHash,        // end (from commitment)
-        bytes32 currentDepositsHash,    // portal's current head
+        bytes32 oldProcessedDepositsHash,  // where zone last stopped (from portal state)
+        bytes32 newProcessedDepositsHash,  // where zone now stops (from batch)
+        bytes32 currentDepositsHash,       // portal's current head
 
         // Zone state transition
         bytes32 prevStateRoot,
@@ -217,7 +217,7 @@ interface IZoneFactory {
 interface IZonePortal {
     event DepositEnqueued(
         uint64 indexed zoneId,
-        bytes32 indexed newDepositsHash,
+        bytes32 indexed newCurrentDepositsHash,
         address indexed sender,
         address to,
         uint256 amount,
@@ -230,7 +230,7 @@ interface IZonePortal {
     event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 newDepositsHash,
+        bytes32 newProcessedDepositsHash,
         bytes32 newStateRoot
     );
 
@@ -247,8 +247,8 @@ interface IZonePortal {
     /// @notice Set the sequencer's public key. Only callable by the sequencer.
     function setSequencerPubkey(bytes32 pubkey) external;
 
-    /// @notice Deposit gas token into the zone. Returns the new deposits chain hash.
-    function deposit(address to, uint256 amount, bytes32 memo) external returns (bytes32 newDepositsHash);
+    /// @notice Deposit gas token into the zone. Returns the new current deposits hash.
+    function deposit(address to, uint256 amount, bytes32 memo) external returns (bytes32 newCurrentDepositsHash);
 
     /// @notice Submit a batch, verify the proof, and process all withdrawals atomically.
     /// @dev Only callable by the sequencer.
@@ -330,7 +330,7 @@ interface IExitReceiver {
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
 2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `depositsHash = keccak256(depositsHash, deposit)`. The deposit includes current L1 block info (hash, number, timestamp).
 3. The sequencer observes deposit events, processes them in order, and credits the zone recipient. The zone receives L1 state through the deposit data.
-4. A batch proof/attestation must prove the zone processed deposits up to `newDepositsHash`.
+4. A batch proof/attestation must prove the zone processed deposits up to `newProcessedDepositsHash`.
 
 Notes:
 
