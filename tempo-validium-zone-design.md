@@ -410,6 +410,35 @@ For exit intents that require a swap:
 
 For swap exits, `tokenIn` is always the zone gas token, and `tokenOut` is any Tempo TIP-20 token supported by the DEX routing rules.
 
+### Swap failure and bounce-back
+
+If a swap exit fails due to slippage (i.e., the DEX cannot satisfy `minAmountOut`), the portal does not revert the batch. Instead, it "bounces back" the funds by re-depositing the original `amountIn` into the same zone.
+
+The bounce-back deposit uses the exit index as the memo, allowing the zone to correlate the deposit with the original failed exit:
+
+```solidity
+// In submitBatch exit processing:
+try dex.swapExactAmountIn(gasToken, exit.tokenOut, exit.amountIn, exit.minAmountOut) returns (uint128 amountOut) {
+    // Success: transfer to recipient
+    ITIP20(exit.tokenOut).transfer(exit.recipient, amountOut);
+} catch {
+    // Slippage failure: bounce back into this zone
+    bytes32 memo = bytes32(uint256(exitIndex));
+    depositsHash = keccak256(abi.encode(depositsHash, Deposit({
+        sender: address(this),
+        to: address(0),
+        amount: exit.amountIn,
+        memo: memo,
+        ...
+    })));
+    emit DepositEnqueued(...);
+}
+```
+
+The zone processes bounce-back deposits by looking up the original exit using the memo (exit index) and crediting the exit's original sender. This keeps batch submission atomic while allowing individual swap exits to fail gracefully without blocking other exits.
+
+The same bounce-back mechanism applies to `SwapAndDepositExit`—if the swap fails, the funds return to the originating zone rather than the destination zone.
+
 ## Zone-to-zone flow
 
 Zone-to-zone transfer is a composition of exit and deposit, all processed atomically when the batch is submitted:
@@ -433,7 +462,7 @@ This flow uses Tempo as the hub and never requires direct zone-to-zone messaging
 
 - Sequencer can halt the zone without recourse due to missing data availability.
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
-- Swap exits are exposed to DEX liquidity and slippage constraints. The exit intent must include limits to avoid adverse execution.
+- Swap exits are exposed to DEX liquidity and slippage constraints. The exit intent must include limits to avoid adverse execution. Failed swaps bounce back as deposits to the originating zone.
 - Deposits are locked on Tempo until a verified batch consumes them.
 
 ## Open questions
