@@ -49,7 +49,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 A zone is created via `ZoneFactory.createZone(...)` with:
 
-- `gasToken`: the Tempo TIP-20 address to bridge. This is the only bridged token and the gas token.
+- `token`: the Tempo TIP-20 address to bridge. This is the only bridged token and the gas token.
 - `sequencer`: permissioned sequencer address.
 - `verifier`: `IVerifier` implementation for proof or attestation.
 - `zoneParams`: initial configuration (genesis state root, fee parameters).
@@ -196,44 +196,6 @@ function submitBatch(
 
 This ensures the proof works regardless of whether a queue swap happened during proving.
 
-## Queue design rationale
-
-Both deposits and withdrawals are FIFO queues that require constant on-chain storage. They have symmetric but inverted requirements:
-
-|                      | Deposits | Withdrawals |
-|----------------------|----------|-------------|
-| On-chain operation   | Add (users deposit) | Remove (sequencer processes) |
-| Proven operation     | Remove (zone consumes) | Add (zone creates) |
-| Efficient on-chain   | Addition | Removal |
-| Stable proving target| For removals | For additions |
-
-Both use hash chains with 2 storage slots, but with different models:
-
-- **Deposits**: 1 queue + cursor (`currentDepositsHash` is the head, `checkpointedDepositsHash` is a cursor into the queue)
-- **Withdrawals**: 2 separate queues (`withdrawalQueue1` drains, `withdrawalQueue2` fills, then swap)
-
-The hash chains are structured differently to optimize for their on-chain operation:
-
-### Deposit queue: newest-outermost
-
-![Deposit Queue](docs/diagrams/deposit-queue.svg)
-
-- **On-chain addition is O(1)**: `deposits = keccak256(abi.encode(deposit, deposits))` — wrap the outside.
-- **Proving removals**: Proof starts from stable `checkpointedDepositsHash`, processes deposits in FIFO order (oldest first, working outward from the checkpoint).
-- **Checkpoint advances after batch**: `checkpointedDepositsHash = newProcessedDepositsHash`
-
-### Withdrawal queue: oldest-outermost
-
-![Withdrawal Queue](docs/diagrams/withdrawal-queue.svg)
-
-- **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
-- **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
-- **Two queues handle the race**: `queue1` for processing, `queue2` for accumulation. When `queue1` empties, swap in `queue2`.
-
-![Two-Queue Swap](docs/diagrams/two-queue-swap.svg)
-
-The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
-
 ## Interfaces and functions
 
 This section defines the functions and interfaces used by the design. The signatures are Solidity-style and focus on the minimum surface area.
@@ -245,7 +207,7 @@ This section defines the functions and interfaces used by the design. The signat
 struct ZoneInfo {
     uint64 zoneId;
     address portal;
-    address gasToken;
+    address token;
     address sequencer;
     address verifier;
     bytes32 genesisStateRoot;
@@ -309,7 +271,7 @@ interface IVerifier {
 ```solidity
 interface IZoneFactory {
     struct CreateZoneParams {
-        address gasToken;
+        address token;
         address sequencer;
         address verifier;
         bytes32 genesisStateRoot;
@@ -318,7 +280,7 @@ interface IZoneFactory {
     event ZoneCreated(
         uint64 indexed zoneId,
         address indexed portal,
-        address indexed gasToken,
+        address indexed token,
         address sequencer,
         address verifier,
         bytes32 genesisStateRoot
@@ -355,7 +317,7 @@ interface IZonePortal {
     );
 
     function zoneId() external view returns (uint64);
-    function gasToken() external view returns (address);
+    function token() external view returns (address);
     function sequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
@@ -459,6 +421,44 @@ interface IExitReceiver {
 }
 ```
 
+## Queue design rationale
+
+Both deposits and withdrawals are FIFO queues that require constant on-chain storage. They have symmetric but inverted requirements:
+
+|                      | Deposits | Withdrawals |
+|----------------------|----------|-------------|
+| On-chain operation   | Add (users deposit) | Remove (sequencer processes) |
+| Proven operation     | Remove (zone consumes) | Add (zone creates) |
+| Efficient on-chain   | Addition | Removal |
+| Stable proving target| For removals | For additions |
+
+Both use hash chains with 2 storage slots, but with different models:
+
+- **Deposits**: 1 queue + cursor (`currentDepositsHash` is the head, `checkpointedDepositsHash` is a cursor into the queue)
+- **Withdrawals**: 2 separate queues (`withdrawalQueue1` drains, `withdrawalQueue2` fills, then swap)
+
+The hash chains are structured differently to optimize for their on-chain operation:
+
+### Deposit queue: newest-outermost
+
+![Deposit Queue](docs/diagrams/deposit-queue.svg)
+
+- **On-chain addition is O(1)**: `deposits = keccak256(abi.encode(deposit, deposits))` — wrap the outside.
+- **Proving removals**: Proof starts from stable `checkpointedDepositsHash`, processes deposits in FIFO order (oldest first, working outward from the checkpoint).
+- **Checkpoint advances after batch**: `checkpointedDepositsHash = newProcessedDepositsHash`
+
+### Withdrawal queue: oldest-outermost
+
+![Withdrawal Queue](docs/diagrams/withdrawal-queue.svg)
+
+- **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
+- **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
+- **Two queues handle the race**: `queue1` for processing, `queue2` for accumulation. When `queue1` empties, swap in `queue2`.
+
+![Two-Queue Swap](docs/diagrams/two-queue-swap.svg)
+
+The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
+
 ## Bridging in (Tempo to zone)
 
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
@@ -493,7 +493,7 @@ When the sequencer processes a withdrawal via `processWithdrawal`:
 ```solidity
 function _executeWithdrawal(Withdrawal calldata w) internal {
     // Transfer tokens first
-    ITIP20(gasToken).transfer(w.to, w.amount);
+    ITIP20(token).transfer(w.to, w.amount);
 
     // If callback requested, call the receiver with gas limit
     if (w.gasLimit > 0) {
