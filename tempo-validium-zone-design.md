@@ -81,11 +81,17 @@ The portal calls the verifier to validate the batch:
 
 ```solidity
 interface IVerifier {
-    function verify(bytes32 batchCommitment, bytes calldata proof) external view returns (bool);
+    function verify(
+        bytes32 prevStateRoot,
+        bytes32 newStateRoot,
+        uint64 depositIndex,
+        bytes32 exitsHash,
+        bytes calldata proof
+    ) external view returns (bool);
 }
 ```
 
-The verifier validates the state transition, including that the provided exits match the committed exit root. Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
+The verifier validates that the state transition from `prevStateRoot` to `newStateRoot` is correct, that the deposits up to `depositIndex` were processed, and that the `exitsHash` matches the exits committed in the proof. The portal computes `exitsHash = keccak256(abi.encode(exits))` from the provided exits array. Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
 This atomic design means users receive their exits immediately when the batch is posted—there is no separate finalization step.
 
@@ -159,7 +165,13 @@ Exit intent fields are only meaningful for their `kind`. For example, `TransferE
 
 ```solidity
 interface IVerifier {
-    function verify(bytes32 batchCommitment, bytes calldata proof) external view returns (bool);
+    function verify(
+        bytes32 prevStateRoot,
+        bytes32 newStateRoot,
+        uint64 depositIndex,
+        bytes32 exitsHash,
+        bytes calldata proof
+    ) external view returns (bool);
 }
 ```
 
