@@ -10,6 +10,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 - Settlement uses fast validity proofs or TEE attestations (ZK or TEE). Data availability is fully trusted to the sequencer.
 - Cross-chain operations are Tempo-centric: bridge in, bridge out (with optional callback to receiver contracts for composability).
 - Verifier is abstracted behind a minimal `IVerifier` interface.
+- Liveness (including exits) is wholly dependent on the permissioned sequencer; there is no permissionless fallback.
 
 ## Non-goals
 
@@ -64,7 +65,7 @@ The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone
 
 ## Batch submission
 
-The sequencer posts batches to Tempo via a single `submitBatch` call that:
+The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-only) that:
 
 1. Verifies the proof/attestation for the state transition.
 2. Updates the portal's state root.
@@ -72,6 +73,7 @@ The sequencer posts batches to Tempo via a single `submitBatch` call that:
 
 Each batch submission includes:
 
+- `verifierData` (opaque payload forwarded to the verifier for domain separation/attestation needs)
 - `newProcessedDepositsHash` (the deposits processed up to)
 - `newStateRoot` (the resulting state after execution)
 - `expectedQueue2` (the queue2 value the proof assumed)
@@ -86,7 +88,7 @@ The portal calls the verifier to validate the batch:
 ```solidity
 interface IVerifier {
     function verify(
-        // Deposit chain (3-slot design)
+        // Deposit chain
         bytes32 processedDepositsHash,     // where proof starts (from portal state)
         bytes32 pendingDepositsHash,       // stable target ceiling (from portal state)
         bytes32 newProcessedDepositsHash,  // where zone processed up to (from batch)
@@ -100,6 +102,9 @@ interface IVerifier {
         bytes32 updatedQueue2,        // queue2 with new withdrawals added to innermost
         bytes32 newWithdrawalsOnly,   // new withdrawals only (only used if queue2 was empty)
 
+        // Opaque verifier payload (e.g., attestation envelope, domain separation data)
+        bytes calldata verifierData,
+
         // Proof
         bytes calldata proof
     ) external view returns (bool);
@@ -110,6 +115,10 @@ The verifier validates that:
 1. The state transition from `prevStateRoot` to `newStateRoot` is correct given the processed deposits.
 2. `newProcessedDepositsHash` is a descendant of `processedDepositsHash` (deposits were processed forward).
 3. `newProcessedDepositsHash` is an ancestor of `pendingDepositsHash` (no fake deposits beyond the snapshot).
+
+`verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
+
+`submitBatch` passes the portal's current `stateRoot`, `processedDepositsHash`, and `pendingDepositsHash` as verifier inputs (prev values), and reverts unless `prevStateRoot == stateRoot` and the verifier approves. On success it increments `batchIndex`, updates roots/queues, and emits `BatchSubmitted` with every verifier input/output (except the proof bytes) so off-chain observers can audit the batch.
 
 ### Deposit chain
 
@@ -193,10 +202,12 @@ The caller provides `expectedQueue2` (what the proof assumed), and the portal us
 
 ```solidity
 function submitBatch(
-    ...,
+    BatchCommitment calldata commitment,
     bytes32 expectedQueue2,
     bytes32 updatedQueue2,
-    bytes32 newWithdrawalsOnly
+    bytes32 newWithdrawalsOnly,
+    bytes calldata verifierData,
+    bytes calldata proof
 ) external onlySequencer {
     // ... verify proof ...
 
@@ -261,7 +272,7 @@ struct Withdrawal {
 ```solidity
 interface IVerifier {
     function verify(
-        // Deposit chain (3-slot design)
+        // Deposit chain
         bytes32 processedDepositsHash,     // where proof starts (from portal state)
         bytes32 pendingDepositsHash,       // stable target ceiling (from portal state)
         bytes32 newProcessedDepositsHash,  // where zone processed up to (from batch)
@@ -274,6 +285,9 @@ interface IVerifier {
         bytes32 expectedQueue2,       // what proof assumed queue2 was
         bytes32 updatedQueue2,        // queue2 with new withdrawals added to innermost
         bytes32 newWithdrawalsOnly,   // new withdrawals only (only used if queue2 was empty)
+
+        // Opaque verifier payload (e.g., attestation envelope, domain separation data)
+        bytes calldata verifierData,
 
         // Proof
         bytes calldata proof
@@ -329,8 +343,14 @@ interface IZonePortal {
     event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 newProcessedDepositsHash,
-        bytes32 newStateRoot
+        bytes32 processedDepositsHash,      // pre-state input to verifier
+        bytes32 pendingDepositsHash,        // pre-state input to verifier
+        bytes32 newProcessedDepositsHash,   // verifier input/output
+        bytes32 prevStateRoot,              // pre-state input to verifier
+        bytes32 newStateRoot,               // verifier output
+        bytes32 expectedQueue2,             // verifier input
+        bytes32 updatedQueue2,              // verifier output path 1
+        bytes32 newWithdrawalsOnly          // verifier output path 2
     );
 
     function zoneId() external view returns (uint64);
@@ -362,12 +382,14 @@ interface IZonePortal {
     /// @param expectedQueue2 The queue2 value the proof assumed during generation.
     /// @param updatedQueue2 New queue2 if expectedQueue2 matches current queue2.
     /// @param newWithdrawalsOnly New queue2 if current queue2 is empty (swap occurred).
+    /// @param verifierData Opaque payload forwarded to verifier (e.g., attestation envelope).
     /// @param proof The validity proof or TEE attestation.
     function submitBatch(
         BatchCommitment calldata commitment,
         bytes32 expectedQueue2,
         bytes32 updatedQueue2,
         bytes32 newWithdrawalsOnly,
+        bytes calldata verifierData,
         bytes calldata proof
     ) external;
 }
@@ -507,18 +529,29 @@ This separation allows the sequencer to process withdrawals immediately without 
 
 ### Withdrawal execution
 
-When the sequencer processes a withdrawal via `processWithdrawal`:
-
-1. If `gasLimit == 0`: transfer tokens directly to `to`.
-2. If `gasLimit > 0`: make an external self-call that transfers tokens to `to` first, then calls `IExitReceiver.onExitReceived`.
-   - If the call returns the correct selector: keep the transfer.
-   - If the call reverts or returns the wrong selector: the self-call reverts, and the outer call bounces back the funds to the zone.
+When the sequencer processes a withdrawal via `processWithdrawal`, the withdrawal is **popped unconditionally** (even on failure). If a callback fails, funds are bounced back via a new deposit.
 
 ```solidity
-function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external {
-    // Verify head + update queue (omitted)
+function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
+    // Swap in queue2 if queue1 is empty
+    if (withdrawalQueue1 == bytes32(0)) {
+        require(withdrawalQueue2 != bytes32(0), "no withdrawals");
+        withdrawalQueue1 = withdrawalQueue2;
+        withdrawalQueue2 = bytes32(0);
+    }
+
+    // Verify head
+    require(keccak256(abi.encode(w, remainingQueue)) == withdrawalQueue1, "invalid");
+
+    // Pop the withdrawal regardless of success/failure
+    if (remainingQueue == bytes32(0)) {
+        withdrawalQueue1 = withdrawalQueue2;
+        withdrawalQueue2 = bytes32(0);
+    } else {
+        withdrawalQueue1 = remainingQueue;
+    }
+
     if (w.gasLimit == 0) {
-        // Simple transfer, no callback
         ITIP20(token).transfer(w.to, w.amount);
         return;
     }
@@ -574,7 +607,7 @@ The zone processes bounce-back deposits and credits the `fallbackRecipient`. Thi
 ## Data availability and liveness
 
 - Zone data availability is fully trusted to the sequencer.
-- If the sequencer withholds data or halts, users cannot reconstruct zone state or force exits.
+- If the sequencer withholds data or halts, users cannot reconstruct zone state or force exits; batch posting and withdrawal processing are sequencer-only.
 - The design assumes users accept this risk in exchange for low-cost and fast settlement.
 
 ## Security considerations
@@ -609,28 +642,30 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 - **revm**: Execution uses revm with custom precompile injections for TIP-20 and payment logic.
 - **In-memory backstore**: Zone state is held in an in-memory database for fast access. State is persisted to disk for recovery.
 
-### State and receipts
+### State commitments
 
 - **State root**: Computed via SP1 (Succinct) proving. The state root is the output of the proven execution.
-- **Receipts trie**: Zone maintains a receipts trie for all executed transactions. The receipts root is included in batch commitments.
+- **L1 anchoring**: Each deposit embeds L1 block hash/number/timestamp; off-chain observers reconstruct the exact L1 context from deposit events without a separate receipts root commitment.
 
 ### Batching and proofs
 
 - **Batch interval**: Batches are produced every 250 milliseconds.
 - **SP1 proofs**: Validity proofs are generated using Succinct's SP1 prover.
 - **Mock proofs**: For development, proofs are mocked but data structures (public inputs, proof envelope) must match the real format.
-- **Permissionless posting**: Anyone can post a batch proof with headers to the L1 portal. The proof includes state root, receipts root, and processed deposits.
+- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the L1 portal. The proof includes state root and processed deposits.
 
 ```solidity
 struct BatchProof {
-    bytes32 prevStateRoot;
     bytes32 newStateRoot;
-    bytes32 receiptsRoot;
-    bytes32 processedDepositsHash;
-    bytes32 newDepositsHash;
-    bytes proof;  // SP1 proof bytes (or mock)
+    bytes32 newProcessedDepositsHash;
+    bytes32 expectedQueue2;
+    bytes32 updatedQueue2;
+    bytes32 newWithdrawalsOnly;
+    bytes verifierData; // opaque payload to IVerifier (TEE/ZK envelope)
+    bytes proof;        // SP1 proof bytes (or TEE attestation)
 }
 ```
+`prevStateRoot`, `processedDepositsHash`, and `pendingDepositsHash` come from the portal's tracked state when the proof is verified on L1.
 
 ### Deposits and withdrawals
 
@@ -656,14 +691,12 @@ Tempo L1 Node
 │   ├── TIP-20 Precompile (USDC)
 │   ├── Payments Precompile
 │   ├── In-memory State Store
-│   ├── Receipts Trie
 │   └── SP1 Prover (mock for dev)
 │
 └── ExEx: USDT Zone
     ├── TIP-20 Precompile (USDT)
     ├── Payments Precompile
     ├── In-memory State Store
-    ├── Receipts Trie
     └── SP1 Prover (mock for dev)
 ```
 
