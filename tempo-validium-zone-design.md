@@ -200,7 +200,12 @@ Both deposits and withdrawals are FIFO queues that require constant on-chain sto
 | Efficient on-chain   | Addition | Removal |
 | Stable proving target| For removals | For additions |
 
-Both use Merkle chains (hash onions) with 2 storage slots, but structured differently to optimize for their on-chain operation:
+Both use Merkle chains (hash onions) with 2 storage slots, but with different models:
+
+- **Deposits**: 1 queue + cursor (`currentDepositsHash` is the head, `checkpointedDepositsHash` is a cursor into the queue)
+- **Withdrawals**: 2 separate queues (`withdrawalQueue1` drains, `withdrawalQueue2` fills, then swap)
+
+The hash chains are structured differently to optimize for their on-chain operation:
 
 ### Deposit queue: newest-outermost
 
