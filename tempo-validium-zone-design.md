@@ -85,12 +85,13 @@ The portal calls the verifier to validate the batch:
 ```solidity
 interface IVerifier {
     function verify(
-        // L1 state being processed up to
+        // L1 anchor
         bytes32 l1BlockHash,
-        bytes32 l1DepositsHash,
 
-        // Current portal state (may be ahead of L1 anchor)
-        bytes32 currentDepositsHash,
+        // Deposit chain
+        bytes32 processedDepositsHash,  // start (from portal state)
+        bytes32 l1DepositsHash,         // end (from commitment)
+        bytes32 currentDepositsHash,    // portal's current head
 
         // Zone state transition
         bytes32 prevStateRoot,
@@ -107,11 +108,11 @@ interface IVerifier {
 
 The verifier validates that the state transition from `prevStateRoot` to `newStateRoot` is correct given the inputs.
 
-Deposits use a Merkle chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. The verifier receives:
-- `l1DepositsHash` - the deposits that existed at `l1BlockHash` (what the zone processes up to)
-- `currentDepositsHash` - the portal's current deposits hash (may have more deposits that arrived after `l1BlockHash` while the proof was being generated)
+Deposits use a Merkle chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. The proof must verify:
+- The zone correctly processed deposits from `processedDepositsHash` to `l1DepositsHash`
+- `l1DepositsHash` is an ancestor of `currentDepositsHash` (a valid point in the chain)
 
-The zone can only process deposits that existed at its L1 anchor block. After the batch is accepted, the portal updates `processedDepositsHash = l1DepositsHash`.
+After the batch is accepted, the portal updates `processedDepositsHash = l1DepositsHash`.
 
 The `l1BlockHash` anchors the zone block to a recent Tempo block, allowing the zone to access L1 state (timestamp, block number, etc.) during execution. The portal can verify this hash using `blockhash()`.
 
@@ -190,12 +191,13 @@ Exit intent fields are only meaningful for their `kind`. For example, `TransferE
 ```solidity
 interface IVerifier {
     function verify(
-        // L1 state being processed up to
+        // L1 anchor
         bytes32 l1BlockHash,
-        bytes32 l1DepositsHash,
 
-        // Current portal state (may be ahead of L1 anchor)
-        bytes32 currentDepositsHash,
+        // Deposit chain
+        bytes32 processedDepositsHash,  // start (from portal state)
+        bytes32 l1DepositsHash,         // end (from commitment)
+        bytes32 currentDepositsHash,    // portal's current head
 
         // Zone state transition
         bytes32 prevStateRoot,
