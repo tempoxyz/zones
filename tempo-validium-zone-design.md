@@ -519,13 +519,14 @@ Withdrawals with `gasLimit > 0` can fail if the `IExitReceiver` call fails, runs
 
 ```solidity
 function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
-    currentDepositsHash = keccak256(abi.encode(currentDepositsHash, Deposit({
+    Deposit memory dep = Deposit({
         sender: address(this),
         to: fallbackRecipient,
         amount: amount,
         memo: bytes32(0),
         ...
-    })));
+    });
+    currentDepositsHash = keccak256(abi.encode(dep, currentDepositsHash));
     emit DepositEnqueued(...);
 }
 ```
