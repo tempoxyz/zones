@@ -225,8 +225,9 @@ struct Withdrawal {
     address sender;             // who initiated the withdrawal on the zone
     address to;                 // Tempo recipient
     uint128 amount;
+    uint64 gasLimit;            // max gas for IExitReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
-    bytes data;                 // if non-empty, call IExitReceiver on `to`
+    bytes data;                 // calldata for IExitReceiver (if gasLimit > 0)
 }
 ```
 
@@ -372,6 +373,7 @@ interface IZoneOutbox {
     function requestWithdrawal(
         address to,
         uint128 amount,
+        uint64 gasLimit,
         address fallbackRecipient,
         bytes calldata data
     ) external returns (bytes32 withdrawalId);
@@ -438,7 +440,7 @@ This separation allows the sequencer to process withdrawals immediately without 
 When the sequencer processes a withdrawal via `processWithdrawal`:
 
 1. Transfer tokens to the `to` address.
-2. If `data` is non-empty, call `IExitReceiver.onExitReceived` on the recipient.
+2. If `gasLimit > 0`, call `IExitReceiver.onExitReceived` on the recipient with the specified gas limit.
 3. If the call fails or returns the wrong selector, bounce back the funds to the zone.
 
 ```solidity
@@ -446,9 +448,9 @@ function _executeWithdrawal(Withdrawal calldata w) internal {
     // Transfer tokens first
     ITIP20(gasToken).transfer(w.to, w.amount);
 
-    // If data provided, call the receiver
-    if (w.data.length > 0) {
-        try IExitReceiver(w.to).onExitReceived(
+    // If callback requested, call the receiver with gas limit
+    if (w.gasLimit > 0) {
+        try IExitReceiver(w.to).onExitReceived{gas: w.gasLimit}(
             w.sender,
             w.amount,
             w.data
@@ -466,7 +468,7 @@ This enables composable withdrawals where funds can flow directly into Tempo con
 
 ## Withdrawal failure and bounce-back
 
-Withdrawals with `data` can fail if the `IExitReceiver` call fails or returns the wrong selector. When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
+Withdrawals with `gasLimit > 0` can fail if the `IExitReceiver` call fails, runs out of gas, or returns the wrong selector. When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
 
 ```solidity
 function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
@@ -493,7 +495,7 @@ The zone processes bounce-back deposits and credits the `fallbackRecipient`. Thi
 
 - Sequencer can halt the zone without recourse due to missing data availability.
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
-- Withdrawals with callbacks only call the `IExitReceiver` interface—no arbitrary calldata. Receivers must return the correct selector to accept funds; failed or rejected calls trigger a bounce-back to `fallbackRecipient`.
+- Withdrawals with callbacks only call the `IExitReceiver` interface with a user-specified gas limit—no arbitrary calldata or unbounded gas. Receivers must return the correct selector to accept funds; failed or rejected calls trigger a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
 
 ## Open questions
