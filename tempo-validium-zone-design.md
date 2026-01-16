@@ -64,20 +64,22 @@ The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone
 
 ## Batch submission
 
-The sequencer posts batches to Tempo via a single `submitBatch` call that atomically:
+The sequencer posts batches to Tempo via a single `submitBatch` call that:
 
 1. Verifies the proof/attestation for the state transition.
 2. Updates the portal's state root.
-3. Processes all withdrawals from that batch.
+3. Updates the withdrawal queue (adds new withdrawals to `withdrawalQueue2`).
 
 Each batch submission includes:
 
 - `newProcessedDepositsHash` (the deposits processed up to)
 - `newStateRoot` (the resulting state after execution)
-- `withdrawals` (full list of withdrawals to process)
+- `expectedQueue2` (the queue2 value the proof assumed)
+- `updatedQueue2` (queue2 with new withdrawals if expectedQueue2 matches)
+- `newWithdrawalsOnly` (new withdrawals only, if queue2 was swapped during proving)
 - `proof` (validity proof or TEE attestation)
 
-The portal tracks `stateRoot`, `checkpointedDepositsHash` (where proofs start from), and `currentDepositsHash` (head of deposit chain).
+The portal tracks `stateRoot`, `checkpointedDepositsHash` (where proofs start from), `currentDepositsHash` (head of deposit chain), `withdrawalQueue1` (active queue), and `withdrawalQueue2` (pending queue).
 
 The portal calls the verifier to validate the batch:
 
@@ -92,8 +94,10 @@ interface IVerifier {
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
 
-        // Withdrawals
-        bytes32 withdrawalsHash,
+        // Withdrawal queue updates (proof outputs)
+        bytes32 expectedQueue2,       // what proof assumed queue2 was
+        bytes32 updatedQueue2,        // queue2 with new withdrawals added to innermost
+        bytes32 newWithdrawalsOnly,   // new withdrawals only (if queue2 was empty)
 
         // Proof
         bytes calldata proof
@@ -111,7 +115,77 @@ After the batch is accepted, the portal updates `checkpointedDepositsHash = curr
 
 Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
-This atomic design means users receive their exits immediately when the batch is posted—there is no separate finalization step.
+## Withdrawal queue
+
+Withdrawals use a two-queue system that allows the sequencer to process withdrawals independently of proof generation. The portal tracks two hash chains in constant space (2 storage slots):
+
+- `withdrawalQueue1` - the active queue, processed by the sequencer
+- `withdrawalQueue2` - the pending queue, updated by proofs
+
+### Hash chain structure
+
+Each queue is a hash chain with the **oldest withdrawal at the outermost layer**, making FIFO processing efficient:
+
+```
+queue = keccak256(abi.encode(w1, keccak256(abi.encode(w2, keccak256(abi.encode(w3, bytes32(0)))))))
+        // w1 is oldest (outermost), w3 is newest (innermost)
+```
+
+To process the oldest withdrawal, the sequencer provides the withdrawal data and the remaining queue hash. The portal verifies the hash and advances the queue:
+
+```solidity
+function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
+    require(keccak256(abi.encode(w, remainingQueue)) == withdrawalQueue1, "invalid");
+
+    _executeWithdrawal(w);
+
+    if (remainingQueue == bytes32(0)) {
+        // Queue1 exhausted, swap in queue2
+        withdrawalQueue1 = withdrawalQueue2;
+        withdrawalQueue2 = bytes32(0);
+    } else {
+        withdrawalQueue1 = remainingQueue;
+    }
+}
+```
+
+### Proof updates to queue2
+
+When a proof is submitted, it adds new withdrawals to `withdrawalQueue2`. The proof builds the queue with new withdrawals at the **innermost** layers (newest = last to process). This is an O(N) operation but happens inside the ZKP.
+
+### Race condition handling
+
+A race condition can occur:
+1. Proof generation starts when `withdrawalQueue2 = X` (non-empty)
+2. Meanwhile, sequencer drains `withdrawalQueue1`, triggering swap: `withdrawalQueue1 = X`, `withdrawalQueue2 = 0`
+3. Proof submits expecting `withdrawalQueue2 = X`, but it's now `0`
+
+To handle this, the proof generates two outputs:
+- `updatedQueue2` - new withdrawals added to innermost of the expected queue2
+- `newWithdrawalsOnly` - new withdrawals as a fresh queue (as if queue2 was empty)
+
+The caller provides `expectedQueue2` (what the proof assumed), and the portal uses the appropriate value:
+
+```solidity
+function submitBatch(
+    ...,
+    bytes32 expectedQueue2,
+    bytes32 updatedQueue2,
+    bytes32 newWithdrawalsOnly
+) external onlySequencer {
+    // ... verify proof ...
+
+    if (withdrawalQueue2 == expectedQueue2) {
+        withdrawalQueue2 = updatedQueue2;
+    } else if (withdrawalQueue2 == bytes32(0)) {
+        withdrawalQueue2 = newWithdrawalsOnly;
+    } else {
+        revert("unexpected queue2 state");
+    }
+}
+```
+
+This ensures the proof works regardless of whether a queue swap happened during proving.
 
 ## Interfaces and functions
 
@@ -169,8 +243,10 @@ interface IVerifier {
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
 
-        // Withdrawals
-        bytes32 withdrawalsHash,
+        // Withdrawal queue updates (proof outputs)
+        bytes32 expectedQueue2,       // what proof assumed queue2 was
+        bytes32 updatedQueue2,        // queue2 with new withdrawals added to innermost
+        bytes32 newWithdrawalsOnly,   // new withdrawals only (if queue2 was empty)
 
         // Proof
         bytes calldata proof
@@ -239,6 +315,8 @@ interface IZonePortal {
     function stateRoot() external view returns (bytes32);
     function currentDepositsHash() external view returns (bytes32);
     function checkpointedDepositsHash() external view returns (bytes32);
+    function withdrawalQueue1() external view returns (bytes32);
+    function withdrawalQueue2() external view returns (bytes32);
 
     /// @notice Set the sequencer's public key. Only callable by the sequencer.
     function setSequencerPubkey(bytes32 pubkey) external;
@@ -246,11 +324,22 @@ interface IZonePortal {
     /// @notice Deposit gas token into the zone. Returns the new current deposits hash.
     function deposit(address to, uint256 amount, bytes32 memo) external returns (bytes32 newCurrentDepositsHash);
 
-    /// @notice Submit a batch, verify the proof, and process all withdrawals atomically.
-    /// @dev Only callable by the sequencer.
+    /// @notice Process the next withdrawal from queue1. Only callable by the sequencer.
+    /// @param w The withdrawal to process (must be at the head of queue1).
+    /// @param remainingQueue The hash of the remaining queue after this withdrawal.
+    function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external;
+
+    /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
+    /// @param commitment The batch commitment (new state root and processed deposits hash).
+    /// @param expectedQueue2 The queue2 value the proof assumed during generation.
+    /// @param updatedQueue2 New queue2 if expectedQueue2 matches current queue2.
+    /// @param newWithdrawalsOnly New queue2 if current queue2 is empty (swap occurred).
+    /// @param proof The validity proof or TEE attestation.
     function submitBatch(
         BatchCommitment calldata commitment,
-        Withdrawal[] calldata withdrawals,
+        bytes32 expectedQueue2,
+        bytes32 updatedQueue2,
+        bytes32 newWithdrawalsOnly,
         bytes calldata proof
     ) external;
 }
@@ -337,58 +426,62 @@ Notes:
 
 ## Bridging out (zone to Tempo)
 
-Users withdraw by creating a withdrawal on the zone. When the sequencer submits the batch containing that withdrawal, it is processed immediately in the same transaction.
+Users withdraw by creating a withdrawal on the zone. Withdrawals are processed in two steps:
 
-The portal processes each withdrawal as follows:
+1. **Batch submission**: The proof adds new withdrawals to `withdrawalQueue2`.
+2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from `withdrawalQueue1` one at a time.
+
+This separation allows the sequencer to process withdrawals immediately without waiting for proofs.
+
+### Withdrawal execution
+
+When the sequencer processes a withdrawal via `processWithdrawal`:
 
 1. Transfer tokens to the `to` address.
 2. If `data` is non-empty, call `IExitReceiver.onExitReceived` on the recipient.
 3. If the call fails or returns the wrong selector, bounce back the funds to the zone.
 
 ```solidity
-// Transfer tokens first
-ITIP20(gasToken).transfer(withdrawal.to, withdrawal.amount);
+function _executeWithdrawal(Withdrawal calldata w) internal {
+    // Transfer tokens first
+    ITIP20(gasToken).transfer(w.to, w.amount);
 
-// If data provided, call the receiver
-if (withdrawal.data.length > 0) {
-    try IExitReceiver(withdrawal.to).onExitReceived(
-        withdrawal.sender,
-        withdrawal.amount,
-        withdrawal.data
-    ) returns (bytes4 selector) {
-        require(selector == IExitReceiver.onExitReceived.selector, "rejected");
-    } catch {
-        // Call failed or rejected: bounce back to zone
-        _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient, withdrawalIndex);
+    // If data provided, call the receiver
+    if (w.data.length > 0) {
+        try IExitReceiver(w.to).onExitReceived(
+            w.sender,
+            w.amount,
+            w.data
+        ) returns (bytes4 selector) {
+            require(selector == IExitReceiver.onExitReceived.selector, "rejected");
+        } catch {
+            // Call failed or rejected: bounce back to zone
+            _enqueueBounceBack(w.amount, w.fallbackRecipient);
+        }
     }
 }
 ```
 
-There is no separate finalization step—users receive their funds as soon as the batch is submitted and verified.
-
-This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits) in a single atomic operation. The portal does not need to know about these use cases—they are handled by receiver contracts.
+This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits). The portal does not need to know about these use cases—they are handled by receiver contracts.
 
 ## Withdrawal failure and bounce-back
 
-Withdrawals with `data` can fail if the `IExitReceiver` call fails or returns the wrong selector. When this happens, the portal does not revert the batch. Instead, it "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
-
-The bounce-back deposit uses the withdrawal index as the memo, allowing the zone to correlate the deposit with the original failed withdrawal:
+Withdrawals with `data` can fail if the `IExitReceiver` call fails or returns the wrong selector. When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
 
 ```solidity
-function _enqueueBounceBack(uint128 amount, address fallbackRecipient, uint64 withdrawalIndex) internal {
-    bytes32 memo = bytes32(uint256(withdrawalIndex));
+function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
     currentDepositsHash = keccak256(abi.encode(currentDepositsHash, Deposit({
         sender: address(this),
         to: fallbackRecipient,
         amount: amount,
-        memo: memo,
+        memo: bytes32(0),
         ...
     })));
     emit DepositEnqueued(...);
 }
 ```
 
-The zone processes bounce-back deposits and credits the `fallbackRecipient`. This keeps batch submission atomic while allowing individual withdrawals to fail gracefully without blocking others.
+The zone processes bounce-back deposits and credits the `fallbackRecipient`. This allows withdrawals to fail gracefully without blocking the queue.
 
 ## Data availability and liveness
 
