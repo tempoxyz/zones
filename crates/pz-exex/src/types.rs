@@ -1,7 +1,11 @@
 //! Types for the Privacy Zone ExEx.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{address, keccak256, Address, B256, U256};
 use alloy_sol_types::sol;
+
+/// Exit precompile address - users call this to initiate withdrawals.
+/// This is a sentinel address that the block builder intercepts.
+pub const EXIT_PRECOMPILE: Address = address!("0000000000000000000000000000000000000420");
 use serde::{Deserialize, Serialize};
 
 sol! {
@@ -28,6 +32,33 @@ sol! {
         bytes32 newDepositsHash,
         uint256 exitCount
     );
+
+    /// Exit precompile interface for zone transactions.
+    /// Users call this precompile to initiate an exit.
+    #[derive(Debug)]
+    function exit(address recipient, uint256 amount);
+}
+
+/// Cursor for tracking position in L1 event stream.
+/// Used for proper reorg handling - we need to know exactly where we left off.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct L1Cursor {
+    /// L1 block number.
+    pub block_number: u64,
+    /// Log index within the block.
+    pub log_index: u64,
+}
+
+impl L1Cursor {
+    /// Create a new cursor.
+    pub const fn new(block_number: u64, log_index: u64) -> Self {
+        Self { block_number, log_index }
+    }
+
+    /// Check if this cursor is after another.
+    pub fn is_after(&self, other: &L1Cursor) -> bool {
+        (self.block_number, self.log_index) > (other.block_number, other.log_index)
+    }
 }
 
 /// A deposit from L1 to the zone.
@@ -86,16 +117,31 @@ pub struct PzConfig {
 pub struct PzState {
     /// Current state root.
     pub state_root: B256,
-    /// Hash of all deposits processed so far.
+    /// Hash of all deposits processed so far (chain hash).
     pub processed_deposits_hash: B256,
-    /// Hash of all deposits queued on L1.
+    /// Hash of all deposits queued on L1 (chain hash).
     pub deposits_hash: B256,
+    /// Hash of all exits so far (chain hash).
+    pub exits_hash: B256,
     /// Current batch index.
     pub batch_index: u64,
-    /// Last L1 block number processed.
-    pub last_l1_block: u64,
-    /// Last log index processed within the L1 block.
-    pub last_log_index: u64,
+    /// Current zone block height.
+    pub zone_block: u64,
+    /// Cursor tracking last processed L1 event.
+    pub cursor: L1Cursor,
+    /// Journal hash for provenance tracking (like Signet).
+    /// Each block's journal hash = keccak256(prev_journal_hash || block_data).
+    pub journal_hash: B256,
+}
+
+impl PzState {
+    /// Compute the next journal hash given new block data.
+    pub fn next_journal_hash(&self, block_data: &[u8]) -> B256 {
+        let mut data = Vec::with_capacity(32 + block_data.len());
+        data.extend_from_slice(self.journal_hash.as_slice());
+        data.extend_from_slice(block_data);
+        keccak256(&data)
+    }
 }
 
 /// Account state in the privacy zone.
@@ -110,8 +156,79 @@ pub struct PzAccount {
 /// Exit intent from the zone.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExitIntent {
+    /// Sender address on the zone (who initiated the exit).
+    pub sender: Address,
     /// Recipient address on L1.
     pub recipient: Address,
     /// Amount to exit.
     pub amount: U256,
+    /// Zone block where this exit was included.
+    pub zone_block: u64,
+    /// Index within the zone block.
+    pub exit_index: u64,
+}
+
+impl ExitIntent {
+    /// Compute the hash of this exit for the exits chain.
+    pub fn hash(&self, prev_hash: B256) -> B256 {
+        let mut data = Vec::with_capacity(32 + 20 + 20 + 32 + 8 + 8);
+        data.extend_from_slice(prev_hash.as_slice());
+        data.extend_from_slice(self.sender.as_slice());
+        data.extend_from_slice(self.recipient.as_slice());
+        data.extend_from_slice(&self.amount.to_be_bytes::<32>());
+        data.extend_from_slice(&self.zone_block.to_be_bytes());
+        data.extend_from_slice(&self.exit_index.to_be_bytes());
+        keccak256(&data)
+    }
+}
+
+/// A decoded portal event with its position in the L1 chain.
+#[derive(Debug, Clone)]
+pub struct PortalEvent {
+    /// Position of this event in the L1 chain.
+    pub cursor: L1Cursor,
+    /// The event payload.
+    pub kind: PortalEventKind,
+}
+
+/// Types of portal events we care about.
+#[derive(Debug, Clone)]
+pub enum PortalEventKind {
+    /// A deposit was enqueued.
+    Deposit(Deposit),
+    /// A batch was submitted.
+    BatchSubmitted {
+        batch_index: u64,
+        new_state_root: B256,
+        new_deposits_hash: B256,
+        exit_count: U256,
+    },
+}
+
+/// Extraction results for a single L1 block.
+/// Accumulates all events from one L1 block before processing.
+#[derive(Debug, Clone, Default)]
+pub struct L1BlockExtracts {
+    /// L1 block number.
+    pub l1_block_number: u64,
+    /// Deposits in this block.
+    pub deposits: Vec<Deposit>,
+    /// Batch submissions in this block.
+    pub batches: Vec<PortalEventKind>,
+}
+
+impl L1BlockExtracts {
+    /// Create a new extraction result for an L1 block.
+    pub fn new(l1_block_number: u64) -> Self {
+        Self {
+            l1_block_number,
+            deposits: Vec::new(),
+            batches: Vec::new(),
+        }
+    }
+
+    /// Check if there are any events to process.
+    pub fn is_empty(&self) -> bool {
+        self.deposits.is_empty() && self.batches.is_empty()
+    }
 }

@@ -1,8 +1,11 @@
 //! SQL database for Privacy Zone state with revm::Database implementation.
 //!
-//! Based on reth-exex-examples/rollup pattern.
+//! Based on reth-exex-examples/rollup pattern with Signet-inspired improvements.
 
-use crate::error::PzDbError;
+use crate::{
+    error::PzDbError,
+    types::{Deposit, ExitIntent, L1Cursor, PzConfig, PzState},
+};
 use alloy_primitives::{Address, Bytes, B256, U256};
 use reth_primitives_traits::StorageEntry;
 use reth_provider::OriginalValuesKnown;
@@ -89,16 +92,47 @@ impl Database {
                 hash TEXT UNIQUE,
                 data TEXT
             );
+            -- Zone configuration (singleton)
+            CREATE TABLE IF NOT EXISTS zone_config (
+                id   INTEGER PRIMARY KEY CHECK (id = 1),
+                data TEXT NOT NULL
+            );
+            -- Zone state (singleton, current head state)
+            CREATE TABLE IF NOT EXISTS zone_state (
+                id   INTEGER PRIMARY KEY CHECK (id = 1),
+                data TEXT NOT NULL
+            );
+            -- Deposits from L1 (for revert tracking)
             CREATE TABLE IF NOT EXISTS deposit (
                 id              INTEGER PRIMARY KEY,
-                block_number    TEXT,
-                deposit_hash    TEXT UNIQUE,
-                data            TEXT
+                l1_block        INTEGER NOT NULL,
+                log_index       INTEGER NOT NULL,
+                deposit_hash    TEXT NOT NULL,
+                data            TEXT NOT NULL,
+                zone_block      INTEGER,
+                UNIQUE (l1_block, log_index)
             );
-            CREATE TABLE IF NOT EXISTS zone_state (
-                id   INTEGER PRIMARY KEY,
-                data TEXT
-            );",
+            -- Zone block journal hashes (for provenance)
+            CREATE TABLE IF NOT EXISTS journal (
+                zone_block      INTEGER PRIMARY KEY,
+                journal_hash    TEXT NOT NULL,
+                l1_block        INTEGER NOT NULL,
+                log_index       INTEGER NOT NULL
+            );
+            -- Exit intents (withdrawals from zone to L1)
+            CREATE TABLE IF NOT EXISTS exit_intent (
+                id              INTEGER PRIMARY KEY,
+                zone_block      INTEGER NOT NULL,
+                exit_index      INTEGER NOT NULL,
+                exit_hash       TEXT NOT NULL,
+                data            TEXT NOT NULL,
+                batch_index     INTEGER,
+                UNIQUE (zone_block, exit_index)
+            );
+            -- Create index for deposit lookups
+            CREATE INDEX IF NOT EXISTS idx_deposit_zone_block ON deposit(zone_block);
+            -- Create index for exit lookups
+            CREATE INDEX IF NOT EXISTS idx_exit_batch ON exit_intent(batch_index);",
         )?;
         Ok(())
     }
@@ -332,6 +366,279 @@ impl Database {
         }
     }
 
+    // ========================================================================
+    // Zone Config & State (Signet-inspired patterns)
+    // ========================================================================
+
+    /// Store zone configuration.
+    pub fn set_zone_config(&self, config: &PzConfig) -> eyre::Result<()> {
+        let data = serde_json::to_string(config)?;
+        self.connection().execute(
+            "INSERT INTO zone_config (id, data) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+            [&data],
+        )?;
+        Ok(())
+    }
+
+    /// Get zone configuration.
+    pub fn get_zone_config(&self) -> eyre::Result<Option<PzConfig>> {
+        match self.connection().query_row::<String, _, _>(
+            "SELECT data FROM zone_config WHERE id = 1",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(data) => Ok(Some(serde_json::from_str(&data)?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Store zone state.
+    pub fn set_zone_state(&self, state: &PzState) -> eyre::Result<()> {
+        let data = serde_json::to_string(state)?;
+        self.connection().execute(
+            "INSERT INTO zone_state (id, data) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET data = excluded.data",
+            [&data],
+        )?;
+        Ok(())
+    }
+
+    /// Get zone state.
+    pub fn get_zone_state(&self) -> eyre::Result<PzState> {
+        match self.connection().query_row::<String, _, _>(
+            "SELECT data FROM zone_state WHERE id = 1",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(data) => Ok(serde_json::from_str(&data)?),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(PzState::default()),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    // ========================================================================
+    // Deposits
+    // ========================================================================
+
+    /// Queue a deposit from L1.
+    pub fn queue_deposit(
+        &self,
+        cursor: L1Cursor,
+        deposit: &Deposit,
+        deposit_hash: B256,
+    ) -> eyre::Result<()> {
+        let data = serde_json::to_string(deposit)?;
+        self.connection().execute(
+            "INSERT INTO deposit (l1_block, log_index, deposit_hash, data)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(l1_block, log_index) DO NOTHING",
+            (
+                cursor.block_number,
+                cursor.log_index,
+                deposit_hash.to_string(),
+                &data,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Get pending deposits (not yet processed into a zone block).
+    pub fn get_pending_deposits(&self) -> eyre::Result<Vec<(L1Cursor, B256, Deposit)>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT l1_block, log_index, deposit_hash, data FROM deposit
+             WHERE zone_block IS NULL
+             ORDER BY l1_block ASC, log_index ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let l1_block: u64 = row.get(0)?;
+            let log_index: u64 = row.get(1)?;
+            let hash: String = row.get(2)?;
+            let data: String = row.get(3)?;
+            Ok((l1_block, log_index, hash, data))
+        })?;
+        let mut deposits = Vec::new();
+        for row in rows {
+            let (l1_block, log_index, hash, data) = row?;
+            let cursor = L1Cursor::new(l1_block, log_index);
+            let hash: B256 = hash.parse().map_err(|_| eyre::eyre!("invalid hash"))?;
+            let deposit: Deposit = serde_json::from_str(&data)?;
+            deposits.push((cursor, hash, deposit));
+        }
+        Ok(deposits)
+    }
+
+    /// Mark deposits as processed in a zone block.
+    pub fn mark_deposits_processed(&self, zone_block: u64, up_to: L1Cursor) -> eyre::Result<()> {
+        self.connection().execute(
+            "UPDATE deposit SET zone_block = ?1
+             WHERE zone_block IS NULL AND (l1_block < ?2 OR (l1_block = ?2 AND log_index <= ?3))",
+            (zone_block, up_to.block_number, up_to.log_index),
+        )?;
+        Ok(())
+    }
+
+    /// Unmark deposits processed after a zone block (for revert).
+    pub fn unmark_deposits_after(&self, zone_block: u64) -> eyre::Result<()> {
+        self.connection().execute(
+            "UPDATE deposit SET zone_block = NULL WHERE zone_block > ?1",
+            [zone_block],
+        )?;
+        Ok(())
+    }
+
+    /// Remove deposits after a cursor (for L1 reorg).
+    pub fn remove_deposits_after(&self, cursor: L1Cursor) -> eyre::Result<()> {
+        self.connection().execute(
+            "DELETE FROM deposit
+             WHERE l1_block > ?1 OR (l1_block = ?1 AND log_index > ?2)",
+            (cursor.block_number, cursor.log_index),
+        )?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Journal (provenance tracking like Signet)
+    // ========================================================================
+
+    /// Store a journal entry for a zone block.
+    pub fn insert_journal(
+        &self,
+        zone_block: u64,
+        journal_hash: B256,
+        cursor: L1Cursor,
+    ) -> eyre::Result<()> {
+        self.connection().execute(
+            "INSERT INTO journal (zone_block, journal_hash, l1_block, log_index)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(zone_block) DO UPDATE SET
+                journal_hash = excluded.journal_hash,
+                l1_block = excluded.l1_block,
+                log_index = excluded.log_index",
+            (
+                zone_block,
+                journal_hash.to_string(),
+                cursor.block_number,
+                cursor.log_index,
+            ),
+        )?;
+        Ok(())
+    }
+
+    /// Get the journal hash for a zone block.
+    pub fn get_journal_hash(&self, zone_block: u64) -> eyre::Result<Option<B256>> {
+        match self.connection().query_row::<String, _, _>(
+            "SELECT journal_hash FROM journal WHERE zone_block = ?1",
+            [zone_block],
+            |row| row.get(0),
+        ) {
+            Ok(data) => Ok(Some(data.parse().map_err(|_| eyre::eyre!("invalid hash"))?)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Remove journal entries after a zone block (for revert).
+    pub fn remove_journals_after(&self, zone_block: u64) -> eyre::Result<()> {
+        self.connection().execute(
+            "DELETE FROM journal WHERE zone_block > ?1",
+            [zone_block],
+        )?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Exit Intents
+    // ========================================================================
+
+    /// Record an exit intent.
+    pub fn insert_exit(&self, exit: &ExitIntent, exit_hash: B256) -> eyre::Result<()> {
+        let data = serde_json::to_string(exit)?;
+        self.connection().execute(
+            "INSERT INTO exit_intent (zone_block, exit_index, exit_hash, data)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(zone_block, exit_index) DO NOTHING",
+            (exit.zone_block, exit.exit_index, exit_hash.to_string(), &data),
+        )?;
+        Ok(())
+    }
+
+    /// Get pending exits (not yet included in a batch).
+    pub fn get_pending_exits(&self) -> eyre::Result<Vec<(B256, ExitIntent)>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT exit_hash, data FROM exit_intent
+             WHERE batch_index IS NULL
+             ORDER BY zone_block ASC, exit_index ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            let hash: String = row.get(0)?;
+            let data: String = row.get(1)?;
+            Ok((hash, data))
+        })?;
+        let mut exits = Vec::new();
+        for row in rows {
+            let (hash, data) = row?;
+            let hash: B256 = hash.parse().map_err(|_| eyre::eyre!("invalid hash"))?;
+            let exit: ExitIntent = serde_json::from_str(&data)?;
+            exits.push((hash, exit));
+        }
+        Ok(exits)
+    }
+
+    /// Mark exits as included in a batch.
+    pub fn mark_exits_batched(&self, batch_index: u64, up_to_block: u64) -> eyre::Result<()> {
+        self.connection().execute(
+            "UPDATE exit_intent SET batch_index = ?1
+             WHERE batch_index IS NULL AND zone_block <= ?2",
+            (batch_index, up_to_block),
+        )?;
+        Ok(())
+    }
+
+    /// Get exits for a specific batch.
+    pub fn get_exits_for_batch(&self, batch_index: u64) -> eyre::Result<Vec<(B256, ExitIntent)>> {
+        let conn = self.connection();
+        let mut stmt = conn.prepare(
+            "SELECT exit_hash, data FROM exit_intent
+             WHERE batch_index = ?1
+             ORDER BY zone_block ASC, exit_index ASC",
+        )?;
+        let rows = stmt.query_map([batch_index], |row| {
+            let hash: String = row.get(0)?;
+            let data: String = row.get(1)?;
+            Ok((hash, data))
+        })?;
+        let mut exits = Vec::new();
+        for row in rows {
+            let (hash, data) = row?;
+            let hash: B256 = hash.parse().map_err(|_| eyre::eyre!("invalid hash"))?;
+            let exit: ExitIntent = serde_json::from_str(&data)?;
+            exits.push((hash, exit));
+        }
+        Ok(exits)
+    }
+
+    /// Remove exits after a zone block (for revert).
+    pub fn remove_exits_after(&self, zone_block: u64) -> eyre::Result<()> {
+        self.connection().execute(
+            "DELETE FROM exit_intent WHERE zone_block > ?1",
+            [zone_block],
+        )?;
+        Ok(())
+    }
+
+    /// Unmark exits from a batch (for L1 reorg).
+    pub fn unmark_exits_from_batch(&self, batch_index: u64) -> eyre::Result<()> {
+        self.connection().execute(
+            "UPDATE exit_intent SET batch_index = NULL WHERE batch_index = ?1",
+            [batch_index],
+        )?;
+        Ok(())
+    }
+
     /// Insert or update account.
     pub fn upsert_account(
         &self,
@@ -461,6 +768,7 @@ impl reth_revm::Database for Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::address;
     use rusqlite::Connection;
 
     fn test_db() -> Database {
@@ -504,5 +812,153 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(info.balance, U256::from(1000));
+    }
+
+    #[test]
+    fn test_zone_state() {
+        let db = test_db();
+
+        // Default state
+        let state = db.get_zone_state().unwrap();
+        assert_eq!(state.zone_block, 0);
+        assert_eq!(state.cursor, L1Cursor::default());
+
+        // Update state
+        let mut new_state = PzState::default();
+        new_state.zone_block = 5;
+        new_state.cursor = L1Cursor::new(100, 3);
+        new_state.journal_hash = B256::repeat_byte(0x42);
+        db.set_zone_state(&new_state).unwrap();
+
+        let state = db.get_zone_state().unwrap();
+        assert_eq!(state.zone_block, 5);
+        assert_eq!(state.cursor.block_number, 100);
+        assert_eq!(state.cursor.log_index, 3);
+        assert_eq!(state.journal_hash, B256::repeat_byte(0x42));
+    }
+
+    #[test]
+    fn test_deposit_operations() {
+        let db = test_db();
+        let cursor1 = L1Cursor::new(100, 0);
+        let cursor2 = L1Cursor::new(100, 1);
+        let cursor3 = L1Cursor::new(101, 0);
+
+        let deposit1 = Deposit {
+            l1_block_hash: B256::ZERO,
+            l1_block_number: 100,
+            l1_timestamp: 1000,
+            sender: address!("1111111111111111111111111111111111111111"),
+            to: address!("2222222222222222222222222222222222222222"),
+            amount: U256::from(1000),
+            memo: B256::ZERO,
+        };
+
+        let deposit2 = Deposit {
+            l1_block_number: 100,
+            amount: U256::from(2000),
+            ..deposit1.clone()
+        };
+
+        // Queue deposits
+        db.queue_deposit(cursor1, &deposit1, B256::repeat_byte(0x01)).unwrap();
+        db.queue_deposit(cursor2, &deposit2, B256::repeat_byte(0x02)).unwrap();
+
+        // Get pending
+        let pending = db.get_pending_deposits().unwrap();
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending[0].0, cursor1);
+        assert_eq!(pending[1].0, cursor2);
+
+        // Mark first as processed
+        db.mark_deposits_processed(1, cursor1).unwrap();
+        let pending = db.get_pending_deposits().unwrap();
+        assert_eq!(pending.len(), 1);
+
+        // Queue another and remove after cursor
+        db.queue_deposit(cursor3, &deposit1, B256::repeat_byte(0x03)).unwrap();
+        db.remove_deposits_after(L1Cursor::new(100, 1)).unwrap();
+        let pending = db.get_pending_deposits().unwrap();
+        assert_eq!(pending.len(), 1); // Only cursor2 remains
+    }
+
+    #[test]
+    fn test_journal_operations() {
+        let db = test_db();
+
+        // Insert journal entries
+        db.insert_journal(1, B256::repeat_byte(0x01), L1Cursor::new(100, 0)).unwrap();
+        db.insert_journal(2, B256::repeat_byte(0x02), L1Cursor::new(101, 0)).unwrap();
+        db.insert_journal(3, B256::repeat_byte(0x03), L1Cursor::new(102, 0)).unwrap();
+
+        // Get journal hash
+        assert_eq!(db.get_journal_hash(2).unwrap(), Some(B256::repeat_byte(0x02)));
+        assert_eq!(db.get_journal_hash(99).unwrap(), None);
+
+        // Remove after block 1
+        db.remove_journals_after(1).unwrap();
+        assert_eq!(db.get_journal_hash(1).unwrap(), Some(B256::repeat_byte(0x01)));
+        assert_eq!(db.get_journal_hash(2).unwrap(), None);
+        assert_eq!(db.get_journal_hash(3).unwrap(), None);
+    }
+
+    #[test]
+    fn test_cursor_ordering() {
+        let c1 = L1Cursor::new(100, 0);
+        let c2 = L1Cursor::new(100, 1);
+        let c3 = L1Cursor::new(101, 0);
+
+        assert!(c2.is_after(&c1));
+        assert!(c3.is_after(&c2));
+        assert!(c3.is_after(&c1));
+        assert!(!c1.is_after(&c2));
+        assert!(!c1.is_after(&c1));
+    }
+
+    #[test]
+    fn test_exit_operations() {
+        let db = test_db();
+
+        let exit1 = ExitIntent {
+            sender: address!("1111111111111111111111111111111111111111"),
+            recipient: address!("2222222222222222222222222222222222222222"),
+            amount: U256::from(1000),
+            zone_block: 1,
+            exit_index: 0,
+        };
+        let exit2 = ExitIntent {
+            exit_index: 1,
+            amount: U256::from(2000),
+            ..exit1.clone()
+        };
+        let exit3 = ExitIntent {
+            zone_block: 2,
+            exit_index: 0,
+            amount: U256::from(3000),
+            ..exit1.clone()
+        };
+
+        // Insert exits
+        db.insert_exit(&exit1, B256::repeat_byte(0x01)).unwrap();
+        db.insert_exit(&exit2, B256::repeat_byte(0x02)).unwrap();
+        db.insert_exit(&exit3, B256::repeat_byte(0x03)).unwrap();
+
+        // Get pending (all should be pending)
+        let pending = db.get_pending_exits().unwrap();
+        assert_eq!(pending.len(), 3);
+
+        // Mark block 1 exits as batched
+        db.mark_exits_batched(1, 1).unwrap();
+        let pending = db.get_pending_exits().unwrap();
+        assert_eq!(pending.len(), 1); // Only exit3 remains
+
+        // Get exits for batch 1
+        let batch_exits = db.get_exits_for_batch(1).unwrap();
+        assert_eq!(batch_exits.len(), 2);
+
+        // Remove exits after block 1
+        db.remove_exits_after(1).unwrap();
+        let pending = db.get_pending_exits().unwrap();
+        assert!(pending.is_empty());
     }
 }
