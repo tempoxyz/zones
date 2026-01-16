@@ -26,6 +26,7 @@ members = [
   "crates/precompiles",
   "crates/precompiles-macros",
   "crates/primitives",
+  "crates/pz-exex",
   "crates/contracts",
   "crates/telemetry-util",
   "crates/transaction-pool",

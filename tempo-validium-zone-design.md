@@ -545,6 +545,89 @@ The zone processes bounce-back deposits and credits the `fallbackRecipient`. Thi
 - Withdrawals with callbacks only call the `IExitReceiver` interface with a user-specified gas limit—no arbitrary calldata or unbounded gas. Receivers must return the correct selector to accept funds; failed or rejected calls trigger a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
 
+## Implementation architecture
+
+This section describes the concrete implementation approach for zone nodes.
+
+### Node architecture
+
+Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. There are separate ExEx instances per zone—for example, one ExEx for a USDC zone and another for a USDT zone.
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  Tempo L1 Node                      │
+│  ┌─────────────┐  ┌─────────────┐                   │
+│  │ USDC Zone   │  │ USDT Zone   │                   │
+│  │   ExEx      │  │   ExEx      │  ...              │
+│  └─────────────┘  └─────────────┘                   │
+└─────────────────────────────────────────────────────┘
+```
+
+### Execution model
+
+- **Payloads**: TIP-20 payloads are submitted via a simple RPC interface (not full reth RPC).
+- **TIP-20 precompile**: Payloads are executed through a TIP-20 payments precompile that handles token transfers and fee accounting.
+- **revm**: Execution uses revm with custom precompile injections for TIP-20 and payment logic.
+- **In-memory backstore**: Zone state is held in an in-memory database for fast access. State is persisted to disk for recovery.
+
+### State and receipts
+
+- **State root**: Computed via SP1 (Succinct) proving. The state root is the output of the proven execution.
+- **Receipts trie**: Zone maintains a receipts trie for all executed transactions. The receipts root is included in batch commitments.
+
+### Batching and proofs
+
+- **Batch interval**: Batches are produced every 250 milliseconds.
+- **SP1 proofs**: Validity proofs are generated using Succinct's SP1 prover.
+- **Mock proofs**: For development, proofs are mocked but data structures (public inputs, proof envelope) must match the real format.
+- **Permissionless posting**: Anyone can post a batch proof with headers to the L1 portal. The proof includes state root, receipts root, and processed deposits.
+
+```solidity
+struct BatchProof {
+    bytes32 prevStateRoot;
+    bytes32 newStateRoot;
+    bytes32 receiptsRoot;
+    bytes32 processedDepositsHash;
+    bytes32 newDepositsHash;
+    bytes proof;  // SP1 proof bytes (or mock)
+}
+```
+
+### Deposits and withdrawals
+
+- **Deposit contract**: L1 deposit contract escrows TIP-20 tokens. The ExEx watches deposit events and queues them for zone processing.
+- **Withdrawal requests**: Users trigger withdrawals on L2 via RPC. The withdrawal is added to the pending exits and included in the next batch's exit list.
+
+### RPC interface
+
+The zone exposes a minimal RPC (not full reth JSON-RPC):
+
+```
+zone_sendPayload(payload) -> txHash
+zone_requestWithdrawal(recipient, amount) -> withdrawalId
+zone_getState(address) -> balance
+zone_getReceipt(txHash) -> receipt
+```
+
+### Multi-zone ExEx structure
+
+```
+Tempo L1 Node
+├── ExEx: USDC Zone
+│   ├── TIP-20 Precompile (USDC)
+│   ├── Payments Precompile
+│   ├── In-memory State Store
+│   ├── Receipts Trie
+│   └── SP1 Prover (mock for dev)
+│
+└── ExEx: USDT Zone
+    ├── TIP-20 Precompile (USDT)
+    ├── Payments Precompile
+    ├── In-memory State Store
+    ├── Receipts Trie
+    └── SP1 Prover (mock for dev)
+```
+
 ## Open questions
 
 - Should deposits be cancellable if not consumed within a timeout?
