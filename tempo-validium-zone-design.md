@@ -72,25 +72,21 @@ The sequencer posts batches to Tempo via a single `submitBatch` call that atomic
 
 Each batch submission includes:
 
-- `l1BlockHash` (the Tempo block hash the zone block is anchored to)
-- `l1DepositsHash` (the deposits that existed at `l1BlockHash`)
+- `newDepositsHash` (the deposits processed up to)
 - `newStateRoot` (the resulting state after execution)
 - `exits` (full list of exit intents to process)
 - `proof` (validity proof or TEE attestation)
 
-The portal tracks `stateRoot`, `processedDepositsHash` (what the zone has consumed), and `depositsHash` (all queued deposits). The portal verifies `l1BlockHash` is a recent block using `blockhash()`.
+The portal tracks `stateRoot`, `processedDepositsHash` (what the zone has consumed), and `depositsHash` (all queued deposits).
 
 The portal calls the verifier to validate the batch:
 
 ```solidity
 interface IVerifier {
     function verify(
-        // L1 anchor
-        bytes32 l1BlockHash,
-
         // Deposit chain
         bytes32 processedDepositsHash,  // start (from portal state)
-        bytes32 l1DepositsHash,         // end (from commitment)
+        bytes32 newDepositsHash,        // end (from commitment)
         bytes32 currentDepositsHash,    // portal's current head
 
         // Zone state transition
@@ -108,13 +104,13 @@ interface IVerifier {
 
 The verifier validates that the state transition from `prevStateRoot` to `newStateRoot` is correct given the inputs.
 
-Deposits use a Merkle chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. The proof must verify:
-- The zone correctly processed deposits from `processedDepositsHash` to `l1DepositsHash`
-- `l1DepositsHash` is an ancestor of `currentDepositsHash` (a valid point in the chain)
+Deposits use a Merkle chain: each deposit updates the hash as `newHash = keccak256(prevHash, deposit)`. The portal stores only the current chain head in a single storage slot. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
 
-After the batch is accepted, the portal updates `processedDepositsHash = l1DepositsHash`.
+The proof must verify:
+- The zone correctly processed deposits from `processedDepositsHash` to `newDepositsHash`
+- `newDepositsHash` is an ancestor of `currentDepositsHash` (a valid point in the chain)
 
-The `l1BlockHash` anchors the zone block to a recent Tempo block, allowing the zone to access L1 state (timestamp, block number, etc.) during execution. The portal can verify this hash using `blockhash()`.
+After the batch is accepted, the portal updates `processedDepositsHash = newDepositsHash`.
 
 Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
@@ -143,12 +139,16 @@ struct ZoneInfo {
 }
 
 struct BatchCommitment {
-    bytes32 l1BlockHash;
-    bytes32 l1DepositsHash;
+    bytes32 newDepositsHash;
     bytes32 newStateRoot;
 }
 
 struct Deposit {
+    // L1 block info (zone receives L1 state through deposits)
+    bytes32 l1BlockHash;
+    uint64 l1BlockNumber;
+    uint64 l1Timestamp;
+    // Deposit data
     address sender;
     address to;
     uint256 amount;
@@ -191,12 +191,9 @@ Exit intent fields are only meaningful for their `kind`. For example, `TransferE
 ```solidity
 interface IVerifier {
     function verify(
-        // L1 anchor
-        bytes32 l1BlockHash,
-
         // Deposit chain
         bytes32 processedDepositsHash,  // start (from portal state)
-        bytes32 l1DepositsHash,         // end (from commitment)
+        bytes32 newDepositsHash,        // end (from commitment)
         bytes32 currentDepositsHash,    // portal's current head
 
         // Zone state transition
@@ -247,18 +244,20 @@ interface IZoneFactory {
 interface IZonePortal {
     event DepositEnqueued(
         uint64 indexed zoneId,
-        uint64 indexed depositIndex,
+        bytes32 indexed newDepositsHash,
         address indexed sender,
         address to,
         uint256 amount,
-        bytes32 memo
+        bytes32 memo,
+        bytes32 l1BlockHash,
+        uint64 l1BlockNumber,
+        uint64 l1Timestamp
     );
 
     event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 l1BlockHash,
-        bytes32 l1DepositsHash,
+        bytes32 newDepositsHash,
         bytes32 newStateRoot
     );
 
@@ -373,15 +372,16 @@ interface IStablecoinDEX {
 ## Bridging in (Tempo to zone)
 
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
-2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `depositsHash = keccak256(depositsHash, deposit)`.
-3. The sequencer observes deposit events, processes them in order, and credits the zone recipient.
-4. A batch proof/attestation must prove the zone processed deposits up to `l1DepositsHash`.
+2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `depositsHash = keccak256(depositsHash, deposit)`. The deposit includes current L1 block info (hash, number, timestamp).
+3. The sequencer observes deposit events, processes them in order, and credits the zone recipient. The zone receives L1 state through the deposit data.
+4. A batch proof/attestation must prove the zone processed deposits up to `newDepositsHash`.
 
 Notes:
 
 - Deposits are finalized for Tempo once the batch is verified.
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
 - The portal only stores the chain head hash, not individual deposits. The sequencer must track deposits off-chain.
+- L1 block info is embedded in each deposit, so the zone receives L1 state through the deposit chain.
 
 ## Bridging out (zone to Tempo)
 
