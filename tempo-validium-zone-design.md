@@ -204,90 +204,25 @@ Both use Merkle chains (hash onions) with 2 storage slots, but structured differ
 
 ### Deposit queue: newest-outermost
 
-```
-deposits = hash(newest, hash(older, hash(oldest, 0)))
-```
+![Deposit Queue](docs/diagrams/deposit-queue.svg)
 
-**Adding a deposit on-chain (O(1)):**
-
-```
-Before:  hash(d2, hash(d1, 0))
-                │
-         ┌──────┴──────┐
-         │  Add d3     │  ← On-chain: wrap outside
-         └──────┬──────┘
-                ▼
-After:   hash(d3, hash(d2, hash(d1, 0)))
-```
-
-**Proving removals (inside ZKP):**
-
-```
-         checkpointedDepositsHash                    currentDepositsHash
-                    │                                        │
-                    ▼                                        ▼
-            hash(d2, hash(d1, 0))  ────────────►  hash(d4, hash(d3, hash(d2, hash(d1, 0))))
-                    │
-                    └── Proof processes d1, d2 ──►  newProcessedDepositsHash = hash(d2, hash(d1, 0))
-                        (FIFO: oldest first)
-```
-
-- **On-chain addition is O(1)**: `deposits = hash(newDeposit, deposits)`
+- **On-chain addition is O(1)**: `deposits = hash(newDeposit, deposits)` — wrap the outside.
 - **Proving removals**: Proof starts from stable `checkpointedDepositsHash`, processes deposits in FIFO order (oldest first, working outward from the checkpoint).
 - **Checkpoint advances after batch**: `checkpointedDepositsHash = currentDepositsHash`
 
 ### Withdrawal queue: oldest-outermost
 
-```
-withdrawals = hash(oldest, hash(newer, hash(newest, 0)))
-```
-
-**Removing a withdrawal on-chain (O(1)):**
-
-```
-Before:  hash(w1, hash(w2, hash(w3, 0)))
-                │
-         ┌──────┴──────┐
-         │  Remove w1  │  ← On-chain: unwrap outside
-         └──────┬──────┘
-                ▼
-After:   hash(w2, hash(w3, 0))
-```
-
-**Proving additions (inside ZKP, O(N)):**
-
-```
-         expectedQueue2                              updatedQueue2
-              │                                           │
-              ▼                                           ▼
-      hash(w1, hash(w2, 0))  ──── Add w3, w4 ────►  hash(w1, hash(w2, hash(w3, hash(w4, 0))))
-                                                          │
-                            New withdrawals at innermost ─┘
-```
-
-**Two-queue swap:**
-
-```
-    queue1                    queue2
-       │                         │
-       ▼                         ▼
-  hash(w1, hash(w2, 0))    hash(w3, hash(w4, 0))
-       │                         │
-       │ Process w1, w2          │
-       ▼                         │
-      0 (empty)                  │
-       │                         │
-       └────── SWAP ─────────────┘
-                                 │
-    queue1                    queue2
-       │                         │
-       ▼                         ▼
-  hash(w3, hash(w4, 0))         0
-```
+![Withdrawal Queue](docs/diagrams/withdrawal-queue.svg)
 
 - **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
 - **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
 - **Two queues handle the race**: `queue1` for processing, `queue2` for accumulation. When `queue1` empties, swap in `queue2`.
+
+![Two-Queue Swap](docs/diagrams/two-queue-swap.svg)
+
+### Summary
+
+![Queue Comparison](docs/diagrams/queue-comparison.svg)
 
 The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
 

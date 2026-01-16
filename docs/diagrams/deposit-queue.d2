@@ -1,0 +1,81 @@
+direction: right
+
+title: {
+  label: Deposit Queue (Newest Outermost)
+  near: top-center
+  shape: text
+  style.font-size: 24
+  style.bold: true
+}
+
+# Structure explanation
+structure: {
+  label: "Hash Chain Structure"
+  shape: rectangle
+  style.fill: "#e8f4f8"
+  style.stroke: "#2196F3"
+
+  formula: |md
+    ```
+    currentDepositsHash = hash(d3, hash(d2, hash(d1, 0)))
+                               ↑         ↑         ↑
+                            newest     older    oldest
+    ```
+  |
+}
+
+# Before state
+before: {
+  label: "Before: 2 deposits"
+  shape: rectangle
+  style.fill: "#fff3e0"
+  style.stroke: "#FF9800"
+
+  d2_outer: "hash(d2, ...)" {
+    style.fill: "#ffcc80"
+  }
+  d1_inner: "hash(d1, 0)" {
+    style.fill: "#ffe0b2"
+  }
+  d2_outer -> d1_inner: "inner"
+}
+
+# Addition operation
+add_op: {
+  label: "On-chain Addition (O(1))"
+  shape: rectangle
+  style.fill: "#e8f5e9"
+  style.stroke: "#4CAF50"
+  style.font-size: 18
+
+  code: |md
+    ```solidity
+    currentDepositsHash =
+      hash(newDeposit, currentDepositsHash)
+    ```
+  |
+}
+
+# After state
+after: {
+  label: "After: 3 deposits"
+  shape: rectangle
+  style.fill: "#e3f2fd"
+  style.stroke: "#2196F3"
+
+  d3_outer: "hash(d3, ...)" {
+    style.fill: "#90caf9"
+    style.font-color: "#000"
+  }
+  d2_middle: "hash(d2, ...)" {
+    style.fill: "#bbdefb"
+  }
+  d1_inner: "hash(d1, 0)" {
+    style.fill: "#e3f2fd"
+  }
+  d3_outer -> d2_middle: "inner"
+  d2_middle -> d1_inner: "inner"
+}
+
+before -> add_op: "add d3" {style.stroke: "#4CAF50"}
+add_op -> after: "wrap outside" {style.stroke: "#4CAF50"}
