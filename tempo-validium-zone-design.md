@@ -191,16 +191,7 @@ This ensures the proof works regardless of whether a queue swap happened during 
 
 ## Queue design rationale
 
-Both deposits and withdrawals are FIFO queues that require constant on-chain storage. They have symmetric but inverted requirements:
-
-|                      | Deposits | Withdrawals |
-|----------------------|----------|-------------|
-| On-chain operation   | Add (users deposit) | Remove (sequencer processes) |
-| Proven operation     | Remove (zone consumes) | Add (zone creates) |
-| Efficient on-chain   | Addition | Removal |
-| Stable proving target| For removals | For additions |
-
-Both use hash chains with 2 storage slots, but with different models:
+Both deposits and withdrawals are FIFO queues that require constant on-chain storage. Both use hash chains with 2 storage slots, but with different models:
 
 - **Deposits**: 1 queue + cursor (`currentDepositsHash` is the head, `checkpointedDepositsHash` is a cursor into the queue)
 - **Withdrawals**: 2 separate queues (`withdrawalQueue1` drains, `withdrawalQueue2` fills, then swap)
