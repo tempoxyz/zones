@@ -225,10 +225,6 @@ The hash chains are structured differently to optimize for their on-chain operat
 
 ![Two-Queue Swap](docs/diagrams/two-queue-swap.svg)
 
-### Summary
-
-![Queue Comparison](docs/diagrams/queue-comparison.svg)
-
 The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
 
 ## Interfaces and functions
