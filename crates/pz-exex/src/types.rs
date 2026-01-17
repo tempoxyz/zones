@@ -1,6 +1,6 @@
 //! Types for the Privacy Zone ExEx.
 
-use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{address, keccak256, Address, B256, U256};
 use alloy_sol_types::sol;
 use serde::{Deserialize, Serialize};
 
@@ -17,8 +17,6 @@ sol! {
         address indexed sender,
         address to,
         uint256 amount,
-        uint64 gasLimit,
-        bytes data,
         bytes32 l1BlockHash,
         uint64 l1BlockNumber,
         uint64 l1Timestamp
@@ -77,25 +75,19 @@ pub struct Deposit {
     pub to: Address,
     /// Amount of gas token deposited.
     pub amount: U256,
-    /// Max gas for callback (0 = no callback, just credit balance).
-    pub gas_limit: u64,
-    /// Calldata to execute at `to` (if gas_limit > 0).
-    pub data: Bytes,
 }
 
 impl Deposit {
     /// Compute the hash of this deposit for the deposits chain.
     /// Hash structure: keccak256(abi.encode(deposit, prevHash)) - newest outermost.
     pub fn hash(&self, prev_hash: B256) -> B256 {
-        let mut buf = Vec::with_capacity(256);
+        let mut buf = Vec::with_capacity(128);
         buf.extend_from_slice(self.l1_block_hash.as_slice());
         buf.extend_from_slice(&self.l1_block_number.to_be_bytes());
         buf.extend_from_slice(&self.l1_timestamp.to_be_bytes());
         buf.extend_from_slice(self.sender.as_slice());
         buf.extend_from_slice(self.to.as_slice());
         buf.extend_from_slice(&self.amount.to_be_bytes::<32>());
-        buf.extend_from_slice(&self.gas_limit.to_be_bytes());
-        buf.extend_from_slice(&self.data);
         buf.extend_from_slice(prev_hash.as_slice());
         keccak256(&buf)
     }

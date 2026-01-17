@@ -5,13 +5,12 @@
 
 use crate::{
     deposit::process_deposit,
-    root::{compute_state_root, compute_transactions_root, merge_bundles},
+    root::{compute_simple_state_root, compute_transactions_root},
     state::ZoneState,
     types::{PendingTx, PzConfig},
 };
 use alloy_primitives::{B256, keccak256};
 use parking_lot::Mutex;
-use reth_revm::db::BundleState;
 use reth_tracing::tracing::{debug, info, warn};
 use std::{
     future::Future,
@@ -187,10 +186,8 @@ impl ZoneBlockBuilder {
         let mut tx_count = 0usize;
         let mut deposit_count = 0usize;
         let mut gas_used = 0u64;
-        let exit_index = state.pending_exits().len() as u64;
 
-        // Track bundles and tx hashes for root computation
-        let mut bundles: Vec<BundleState> = Vec::new();
+        // Track tx hashes for root computation
         let mut tx_hashes: Vec<B256> = Vec::new();
 
         info!(
@@ -200,26 +197,13 @@ impl ZoneBlockBuilder {
         );
 
         for pending_tx in pending_txs {
-            // Check gas limit
-            if gas_used >= self.gas_limit {
-                debug!(
-                    gas_used,
-                    gas_limit = self.gas_limit,
-                    "Block gas limit reached"
-                );
-                // TODO: re-queue remaining txs
-                break;
-            }
-
             match pending_tx {
-                PendingTx::Deposit { deposit, deposit_hash, .. } => {
-                    match process_deposit(
-                        &mut state,
-                        self.config.gas_token,
-                        &deposit,
-                        block_number,
-                        exit_index,
-                    ) {
+                PendingTx::Deposit {
+                    deposit,
+                    deposit_hash,
+                    ..
+                } => {
+                    match process_deposit(&mut state, self.config.gas_token, &deposit) {
                         Ok(result) => {
                             gas_used += result.gas_used;
                             deposit_count += 1;
@@ -228,32 +212,14 @@ impl ZoneBlockBuilder {
                             // Track deposit hash for transactions root
                             tx_hashes.push(deposit_hash);
 
-                            // Collect bundle if present
-                            if let Some(bundle) = result.bundle {
-                                bundles.push(bundle);
-                            }
-
-                            if result.success {
-                                debug!(
-                                    to = %deposit.to,
-                                    amount = %deposit.amount,
-                                    gas_used = result.gas_used,
-                                    "Deposit processed"
-                                );
-                            } else if let Some(refund_exit) = result.refund_exit {
-                                warn!(
-                                    to = %deposit.to,
-                                    refund_to = %refund_exit.recipient,
-                                    "Deposit calldata failed, queued refund exit"
-                                );
-                                let exit_hash = refund_exit.hash(state.zone_state().exits_hash);
-                                state.zone_state_mut().exits_hash = exit_hash;
-                                state.queue_exit(refund_exit, exit_hash);
-                            }
+                            debug!(
+                                to = %deposit.to,
+                                amount = %deposit.amount,
+                                "Deposit processed"
+                            );
                         }
                         Err(err) => {
                             warn!(%err, "Failed to process deposit");
-                            // TODO: handle deposit failure
                         }
                     }
                 }
@@ -268,15 +234,15 @@ impl ZoneBlockBuilder {
             return None;
         }
 
-        // Merge all bundles from transaction execution
-        let merged_bundle = merge_bundles(bundles);
-
-        // Compute state root from previous root and bundle changes
-        let prev_state_root = state.zone_state().state_root;
-        let state_root = compute_state_root(prev_state_root, &merged_bundle);
-
         // Compute transactions root from tx hashes
         let transactions_root = compute_transactions_root(&tx_hashes);
+
+        // Compute state root: hash of (prev_state_root, deposits_hash, transactions_root)
+        // This represents the state changes from processing deposits
+        let prev_state_root = state.zone_state().state_root;
+        let deposits_hash = state.zone_state().deposits_hash;
+        let state_root =
+            compute_simple_state_root(prev_state_root, deposits_hash, transactions_root);
 
         let hash = ZoneBlock::compute_hash(
             block_number,
@@ -304,7 +270,6 @@ impl ZoneBlockBuilder {
             tx_count,
             deposit_count,
             gas_used,
-            bundle: merged_bundle,
         };
 
         info!(
@@ -347,17 +312,6 @@ mod tests {
     use super::*;
     use crate::types::{Deposit, L1Cursor};
     use alloy_primitives::{Address, U256};
-
-    fn test_config() -> PzConfig {
-        PzConfig {
-            zone_id: 1,
-            portal_address: Address::ZERO,
-            gas_token: Address::ZERO,
-            sequencer: Address::ZERO,
-            genesis_state_root: B256::ZERO,
-            data_dir: None,
-        }
-    }
 
     #[test]
     fn test_shared_state() {
