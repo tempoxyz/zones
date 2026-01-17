@@ -21,6 +21,9 @@ use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
 use tempo_node::{TempoNodeArgs, node::TempoNode};
 use tracing::info;
 
+
+// TODO:  setup with remote exex
+
 /// Privacy Zone specific arguments.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
 struct PzArgs {
