@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.13;
+
+import { IZoneGasToken } from "../../../src/zone/ZoneInbox.sol";
+
+/// @title MockZoneGasToken
+/// @notice Mock TIP-20 for zone testing with mint/burn for system operations
+/// @dev In production, this would be the actual TIP-20 at the same address as L1
+contract MockZoneGasToken is IZoneGasToken {
+    string public name;
+    string public symbol;
+    uint8 public constant decimals = 6;
+
+    uint256 public totalSupply;
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+
+    /// @notice Addresses authorized to mint (ZoneInbox)
+    mapping(address => bool) public minters;
+
+    /// @notice Addresses authorized to burn (ZoneOutbox)
+    mapping(address => bool) public burners;
+
+    address public admin;
+
+    event Transfer(address indexed from, address indexed to, uint256 amount);
+    event Approval(address indexed owner, address indexed spender, uint256 amount);
+
+    error Unauthorized();
+    error InsufficientBalance();
+    error InsufficientAllowance();
+
+    constructor(string memory _name, string memory _symbol) {
+        name = _name;
+        symbol = _symbol;
+        admin = msg.sender;
+    }
+
+    function setMinter(address minter, bool authorized) external {
+        require(msg.sender == admin, "only admin");
+        minters[minter] = authorized;
+    }
+
+    function setBurner(address burner, bool authorized) external {
+        require(msg.sender == admin, "only admin");
+        burners[burner] = authorized;
+    }
+
+    function mint(address to, uint256 amount) external {
+        if (!minters[msg.sender]) revert Unauthorized();
+        totalSupply += amount;
+        balanceOf[to] += amount;
+        emit Transfer(address(0), to, amount);
+    }
+
+    function burn(address from, uint256 amount) external {
+        if (!burners[msg.sender]) revert Unauthorized();
+        if (balanceOf[from] < amount) revert InsufficientBalance();
+        totalSupply -= amount;
+        balanceOf[from] -= amount;
+        emit Transfer(from, address(0), amount);
+    }
+
+    function transfer(address to, uint256 amount) external returns (bool) {
+        if (balanceOf[msg.sender] < amount) revert InsufficientBalance();
+        balanceOf[msg.sender] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(msg.sender, to, amount);
+        return true;
+    }
+
+    function approve(address spender, uint256 amount) external returns (bool) {
+        allowance[msg.sender][spender] = amount;
+        emit Approval(msg.sender, spender, amount);
+        return true;
+    }
+
+    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
+        if (balanceOf[from] < amount) revert InsufficientBalance();
+        if (allowance[from][msg.sender] < amount) revert InsufficientAllowance();
+
+        allowance[from][msg.sender] -= amount;
+        balanceOf[from] -= amount;
+        balanceOf[to] += amount;
+        emit Transfer(from, to, amount);
+        return true;
+    }
+}
