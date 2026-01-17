@@ -6,39 +6,30 @@ license.workspace = true
 publish = false
 
 [dependencies]
-# tempo
-tempo-evm = { workspace = true, features = ["rpc"] }
-tempo-revm.workspace = true
-tempo-chainspec.workspace = true
-tempo-primitives = { workspace = true, features = ["serde-bincode-compat"] }
-tempo-precompiles.workspace = true
-
-# reth - using minimal set for ExEx
+# reth - core infrastructure
+reth-chainspec = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-db = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-db-common = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
-reth-execution-types = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-node-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-primitives-traits = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
-reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-tracing.workspace = true
-reth-primitives-traits.workspace = true
-reth-revm.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
-alloy-sol-types.workspace = true
 alloy-consensus.workspace = true
-alloy-evm.workspace = true
 
 # async
 tokio.workspace = true
-futures = "0.3"
+futures-util = "0.3"
 
 # misc
 eyre.workspace = true
-thiserror.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-parking_lot.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

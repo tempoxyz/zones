@@ -7138,30 +7138,23 @@ name = "pz-exex"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy-consensus",
- "alloy-evm",
  "alloy-primitives",
- "alloy-sol-types",
  "eyre",
- "futures",
- "parking_lot",
- "reth-execution-types",
+ "futures-util",
+ "reth-chainspec",
+ "reth-db",
+ "reth-db-common",
  "reth-exex",
  "reth-node-api",
+ "reth-node-ethereum",
+ "reth-primitives",
  "reth-primitives-traits",
  "reth-provider",
  "reth-revm",
- "reth-tasks",
  "reth-tracing",
- "serde",
- "serde_json",
  "tempfile",
- "tempo-chainspec",
- "tempo-evm",
- "tempo-precompiles",
- "tempo-primitives",
- "tempo-revm",
- "thiserror 2.0.17",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -9358,6 +9351,7 @@ version = "1.9.3"
 source = "git+https://github.com/paradigmxyz/reth?rev=d76babb2f17773f79c9cf1eda497c539bd5cf553#d76babb2f17773f79c9cf1eda497c539bd5cf553"
 dependencies = [
  "alloy-consensus",
+ "c-kzg",
  "once_cell",
  "reth-ethereum-forks",
  "reth-ethereum-primitives",

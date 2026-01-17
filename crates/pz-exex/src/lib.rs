@@ -1,36 +1,17 @@
-//! Privacy Zone ExEx - Execution Extension for Tempo Privacy Zones (L2 Validium)
+//! Privacy Zone L2 - A simple L2 execution extension.
 //!
-//! In-memory state management for zone execution with block building.
-//!
-//! Key components:
-//! - `state`: In-memory zone state using revm's CacheDB
-//! - `deposit`: Deposit processing with TIP-20 balance crediting
-//! - `execution`: Transaction execution using tempo-evm
-//! - `exex`: ExEx event loop processing L1 deposits and batches
-//! - `builder`: Zone block builder running on 250ms interval
-//! - `types`: Domain types with cursor tracking and journal hashing
-//! - `root`: State root computation from bundle state
-//! - `storage`: Persistence for zone blocks and state
+//! This follows the Signet pattern: listen to L1 ExEx notifications,
+//! extract deposits, execute blocks with full EVM, persist to reth DB.
 
-pub mod builder;
-pub mod deposit;
-pub mod error;
-pub mod execution;
-pub mod exex;
-pub mod root;
-pub mod state;
-pub mod storage;
-pub mod types;
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![deny(unused_must_use, rust_2018_idioms)]
 
-pub use builder::{SharedZoneState, ZoneBlock, ZoneBlockBuilder};
-pub use deposit::{DepositResult, process_deposit};
-pub use error::PzError;
-pub use execution::execute_transactions;
-pub use exex::{PrivacyZoneExEx, install_pz_exex};
-pub use root::{compute_simple_state_root, compute_transactions_root};
-pub use state::ZoneState;
-pub use storage::ZoneStorage;
-pub use types::{
-    Deposit, EXIT_PRECOMPILE, ExitIntent, L1Cursor, PendingTx, PortalEvent, PortalEventKind,
-    PzConfig, PzState,
-};
+mod builder;
+mod node;
+mod processor;
+mod types;
+
+pub use builder::PzNodeBuilder;
+pub use node::PzNode;
+pub use processor::PzBlockProcessor;
+pub use types::{PzNodeTypes, PzNodeTypesDb};
