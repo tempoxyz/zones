@@ -12223,10 +12223,12 @@ version = "1.0.0-rc.5"
 dependencies = [
  "clap",
  "reth-cli-util",
+ "reth-consensus",
  "reth-ethereum",
  "reth-node-builder",
  "reth-tracing",
  "tempo-chainspec",
+ "tempo-evm",
  "tempo-zone",
 ]
 
