@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneGasToken } from "../../src/zone/ZoneInbox.sol";
+import { IZoneGasToken } from "../../../src/zone/ZoneInbox.sol";
 
 /// @title MockZoneGasToken
 /// @notice Mock TIP-20 for zone testing with mint/burn for system operations

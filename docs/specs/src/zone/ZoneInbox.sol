@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit } from "../interfaces/IZone.sol";
+import { Deposit } from "./IZone.sol";
 
 /// @title IZoneGasToken
 /// @notice Interface for the zone's gas token (TIP-20 with mint/burn for system)

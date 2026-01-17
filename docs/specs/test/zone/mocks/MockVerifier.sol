@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IVerifier } from "../../src/interfaces/IZone.sol";
+import { IVerifier } from "../../../src/zone/IZone.sol";
 
 /// @title MockVerifier
 /// @notice Mock verifier for testing that always accepts proofs (configurable)

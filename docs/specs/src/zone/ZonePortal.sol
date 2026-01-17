@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITIP20 } from "./interfaces/ITIP20.sol";
+import { ITIP20 } from "../interfaces/ITIP20.sol";
 import {
     IZonePortal,
     IVerifier,
@@ -9,7 +9,7 @@ import {
     Deposit,
     Withdrawal,
     BatchCommitment
-} from "./interfaces/IZone.sol";
+} from "./IZone.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows gas tokens on Tempo and manages deposits/withdrawals

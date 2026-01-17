@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { BaseTest } from "./BaseTest.t.sol";
-import { ZoneFactory } from "../src/ZoneFactory.sol";
-import { ZonePortal } from "../src/ZonePortal.sol";
+import { BaseTest } from "../BaseTest.t.sol";
+import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
+import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
-import { TIP20 } from "../src/TIP20.sol";
-import { ITIP20 } from "../src/interfaces/ITIP20.sol";
+import { TIP20 } from "../../src/TIP20.sol";
+import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
 import {
     IZoneFactory,
     IZonePortal,
@@ -15,7 +15,7 @@ import {
     Deposit,
     Withdrawal,
     BatchCommitment
-} from "../src/interfaces/IZone.sol";
+} from "../../src/zone/IZone.sol";
 
 /// @notice Mock exit receiver that accepts funds
 contract MockExitReceiver is IExitReceiver {

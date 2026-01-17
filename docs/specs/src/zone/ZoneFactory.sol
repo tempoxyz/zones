@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneFactory, ZoneInfo, IVerifier } from "./interfaces/IZone.sol";
+import { IZoneFactory, ZoneInfo, IVerifier } from "./IZone.sol";
 import { ZonePortal } from "./ZonePortal.sol";
-import { TempoUtilities } from "./TempoUtilities.sol";
+import { TempoUtilities } from "../TempoUtilities.sol";
 
 /// @title ZoneFactory
 /// @notice Creates zones and registers parameters
