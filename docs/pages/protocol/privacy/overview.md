@@ -69,19 +69,19 @@ The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-
 
 1. Verifies the proof/attestation for the state transition.
 2. Updates the portal's state root.
-3. Updates the withdrawal queue (adds new withdrawals to `withdrawalQueue2`).
+3. Updates the withdrawal queue (adds new withdrawals to `pendingWithdrawalQueueHash`).
 
 Each batch submission includes:
 
 - `verifierData` (opaque payload forwarded to the verifier for domain separation/attestation needs)
-- `newProcessedDepositQueueHash` (the deposit queue messages processed up to)
-- `newStateRoot` (the resulting state after execution)
-- `expectedWithdrawalQueue2` (the queue2 value the proof assumed)
-- `updatedWithdrawalQueue2` (queue2 with new withdrawals if expectedWithdrawalQueue2 matches)
-- `newWithdrawalQueueOnly` (new withdrawals only, if queue2 was swapped during proving)
+- `nextProcessedDepositQueueHash` (the deposit queue messages processed up to)
+- `nextStateRoot` (the resulting state after execution)
+- `prevPendingWithdrawalQueueHash` (the pending withdrawal queue hash the proof assumed)
+- `nextPendingWithdrawalQueueHashIfFull` (pending queue with new withdrawals if `prevPendingWithdrawalQueueHash` matches)
+- `nextPendingWithdrawalQueueHashIfEmpty` (new withdrawals only, if pending was swapped during proving)
 - `proof` (validity proof or TEE attestation)
 
-The portal tracks `stateRoot`, `processedDepositQueueHash` (where proofs start from), `pendingDepositQueueHash` (stable target for proofs), `currentDepositQueueHash` (head of deposit queue), `withdrawalQueue1` (active queue), and `withdrawalQueue2` (pending queue).
+The portal tracks `stateRoot`, `processedDepositQueueHash` (where proofs start from), `pendingDepositQueueHash` (stable target for proofs), `currentDepositQueueHash` (head of deposit queue), `activeWithdrawalQueueHash` (active queue), and `pendingWithdrawalQueueHash` (pending queue).
 
 The portal calls the verifier to validate the batch:
 
@@ -89,18 +89,18 @@ The portal calls the verifier to validate the batch:
 interface IVerifier {
     function verify(
         // Deposit queue
-        bytes32 processedDepositQueueHash,     // where proof starts (from portal state)
-        bytes32 pendingDepositQueueHash,       // stable target ceiling (from portal state)
-        bytes32 newProcessedDepositQueueHash,  // where zone processed up to (from batch)
+        bytes32 prevProcessedDepositQueueHash,     // where proof starts (from portal state)
+        bytes32 prevPendingDepositQueueHash,       // stable target ceiling (from portal state)
+        bytes32 nextProcessedDepositQueueHash,     // where zone processed up to (from batch)
 
         // Zone state transition
         bytes32 prevStateRoot,
-        bytes32 newStateRoot,
+        bytes32 nextStateRoot,
 
         // Withdrawal queue updates (proof outputs)
-        bytes32 expectedWithdrawalQueue2,       // what proof assumed queue2 was
-        bytes32 updatedWithdrawalQueue2,        // queue2 with new withdrawals added to innermost
-        bytes32 newWithdrawalQueueOnly,         // new withdrawals only (only used if queue2 was empty)
+        bytes32 prevPendingWithdrawalQueueHash,        // pending queue hash the proof assumed
+        bytes32 nextPendingWithdrawalQueueHashIfFull,  // pending queue with new withdrawals appended
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty, // new withdrawals only (pending was empty)
 
         // Opaque verifier payload (e.g., attestation envelope, domain separation data)
         bytes calldata verifierData,
@@ -112,9 +112,9 @@ interface IVerifier {
 ```
 
 The verifier validates that:
-1. The state transition from `prevStateRoot` to `newStateRoot` is correct given the processed deposit queue messages.
-2. `newProcessedDepositQueueHash` is a descendant of `processedDepositQueueHash` (messages were processed forward).
-3. `newProcessedDepositQueueHash` is an ancestor of `pendingDepositQueueHash` (no fake messages beyond the snapshot).
+1. The state transition from `prevStateRoot` to `nextStateRoot` is correct given the processed deposit queue messages.
+2. `nextProcessedDepositQueueHash` is a descendant of `processedDepositQueueHash` (messages were processed forward).
+3. `nextProcessedDepositQueueHash` is an ancestor of `pendingDepositQueueHash` (no fake messages beyond the snapshot).
 
 `verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
 
@@ -145,10 +145,10 @@ The portal uses a 3-slot design to allow partial processing while maintaining on
 | 2 | `pendingDepositQueueHash` | Stable target ceiling for the current proof |
 | 3 | `currentDepositQueueHash` | Head of chain (new messages land here) |
 
-**Proof requirements**: The proof must verify that the zone correctly processed deposit queue messages from `processedDepositQueueHash` to `newProcessedDepositQueueHash`, and that `newProcessedDepositQueueHash` is an ancestor of `pendingDepositQueueHash`. This ancestry check happens inside the proof—the prover includes the unprocessed messages between `newProcessedDepositQueueHash` and `pendingDepositQueueHash` and verifies their hashes chain correctly, without executing them.
+**Proof requirements**: The proof must verify that the zone correctly processed deposit queue messages from `processedDepositQueueHash` to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `pendingDepositQueueHash`. This ancestry check happens inside the proof—the prover includes the unprocessed messages between `nextProcessedDepositQueueHash` and `pendingDepositQueueHash` and verifies their hashes chain correctly, without executing them.
 
 **After batch accepted**:
-1. `processedDepositQueueHash = newProcessedDepositQueueHash` (advance to where we actually processed)
+1. `processedDepositQueueHash = nextProcessedDepositQueueHash` (advance to where we actually processed)
 2. `pendingDepositQueueHash = currentDepositQueueHash` (snapshot new target for next proof)
 
 This is the depositQueue-side equivalent of the two-queue withdrawal system: slots 1->2 are proven, slot 3 accumulates new messages, then rotate.
@@ -159,8 +159,8 @@ Proofs or attestations are assumed to be fast. No data availability is required 
 
 Withdrawals use a two-queue system that allows the sequencer to process withdrawals independently of proof generation. The portal tracks two hash chains in constant space (2 storage slots):
 
-- `withdrawalQueue1` - the active queue, processed by the sequencer
-- `withdrawalQueue2` - the pending queue, updated by proofs
+- `activeWithdrawalQueueHash` - the active queue, processed by the sequencer
+- `pendingWithdrawalQueueHash` - the pending queue, updated by proofs
 
 ### Hash chain structure
 
@@ -175,61 +175,62 @@ To process the oldest withdrawal, the sequencer provides the withdrawal data and
 
 ```solidity
 function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
-    // If queue1 is empty, swap in queue2 first
-    if (withdrawalQueue1 == bytes32(0)) {
-        require(withdrawalQueue2 != bytes32(0), "no withdrawals");
-        withdrawalQueue1 = withdrawalQueue2;
-        withdrawalQueue2 = bytes32(0);
+    // If active is empty, swap in pending first
+    if (activeWithdrawalQueueHash == bytes32(0)) {
+        require(pendingWithdrawalQueueHash != bytes32(0), "no withdrawals");
+        activeWithdrawalQueueHash = pendingWithdrawalQueueHash;
+        pendingWithdrawalQueueHash = bytes32(0);
     }
 
-    require(keccak256(abi.encode(w, remainingQueue)) == withdrawalQueue1, "invalid");
+    require(keccak256(abi.encode(w, remainingQueue)) == activeWithdrawalQueueHash, "invalid");
 
     _executeWithdrawal(w);
 
     if (remainingQueue == bytes32(0)) {
-        // Queue1 exhausted, swap in queue2
-        withdrawalQueue1 = withdrawalQueue2;
-        withdrawalQueue2 = bytes32(0);
+        // Active exhausted, swap in pending
+        activeWithdrawalQueueHash = pendingWithdrawalQueueHash;
+        pendingWithdrawalQueueHash = bytes32(0);
     } else {
-        withdrawalQueue1 = remainingQueue;
+        activeWithdrawalQueueHash = remainingQueue;
     }
 }
 ```
 
-### Proof updates to queue2
+### Proof updates to the pending queue
 
-When a proof is submitted, it adds new withdrawals to `withdrawalQueue2`. The proof builds the queue with new withdrawals at the **innermost** layers (newest = last to process). This is an O(N) operation but happens inside the ZKP.
+When a proof is submitted, it adds new withdrawals to `pendingWithdrawalQueueHash`. The proof builds the queue with new withdrawals at the **innermost** layers (newest = last to process). This is an O(N) operation but happens inside the ZKP.
 
 ### Race condition handling
 
 A race condition can occur:
-1. Proof generation starts when `withdrawalQueue2 = X` (non-empty)
-2. Meanwhile, sequencer drains `withdrawalQueue1`, triggering swap: `withdrawalQueue1 = X`, `withdrawalQueue2 = 0`
-3. Proof submits expecting `withdrawalQueue2 = X`, but it's now `0`
+1. Proof generation starts when `pendingWithdrawalQueueHash = X` (non-empty)
+2. Meanwhile, sequencer drains `activeWithdrawalQueueHash`, triggering swap: `activeWithdrawalQueueHash = X`, `pendingWithdrawalQueueHash = 0`
+3. Proof submits expecting `pendingWithdrawalQueueHash = X`, but it's now `0`
 
 To handle this, the proof generates two outputs:
-- `updatedWithdrawalQueue2` - new withdrawals added to innermost of the expected queue2
-- `newWithdrawalQueueOnly` - new withdrawals as a fresh queue (as if queue2 was empty)
+- `nextPendingWithdrawalQueueHashIfFull` - new withdrawals added to innermost of the expected pending queue
+- `nextPendingWithdrawalQueueHashIfEmpty` - new withdrawals as a fresh queue (as if pending was empty)
 
-The caller provides `expectedWithdrawalQueue2` (what the proof assumed), and the portal uses the appropriate value:
+The caller provides `prevPendingWithdrawalQueueHash` (what the proof assumed), and the portal uses the appropriate value:
 
 ```solidity
 function submitBatch(
-    BatchCommitment calldata commitment,
-    bytes32 expectedWithdrawalQueue2,
-    bytes32 updatedWithdrawalQueue2,
-    bytes32 newWithdrawalQueueOnly,
+    bytes32 nextProcessedDepositQueueHash,
+    bytes32 nextStateRoot,
+    bytes32 prevPendingWithdrawalQueueHash,
+    bytes32 nextPendingWithdrawalQueueHashIfFull,
+    bytes32 nextPendingWithdrawalQueueHashIfEmpty,
     bytes calldata verifierData,
     bytes calldata proof
 ) external onlySequencer {
     // ... verify proof ...
 
-    if (withdrawalQueue2 == expectedWithdrawalQueue2) {
-        withdrawalQueue2 = updatedWithdrawalQueue2;
-    } else if (withdrawalQueue2 == bytes32(0)) {
-        withdrawalQueue2 = newWithdrawalQueueOnly;
+    if (pendingWithdrawalQueueHash == prevPendingWithdrawalQueueHash) {
+        pendingWithdrawalQueueHash = nextPendingWithdrawalQueueHashIfFull;
+    } else if (pendingWithdrawalQueueHash == bytes32(0)) {
+        pendingWithdrawalQueueHash = nextPendingWithdrawalQueueHashIfEmpty;
     } else {
-        revert("unexpected queue2 state");
+        revert("unexpected pending queue");
     }
 }
 ```
@@ -252,11 +253,6 @@ struct ZoneInfo {
     address sequencer;
     address verifier;
     bytes32 genesisStateRoot;
-}
-
-struct BatchCommitment {
-    bytes32 newProcessedDepositQueueHash;
-    bytes32 newStateRoot;
 }
 
 enum DepositQueueMessageKind {
@@ -304,18 +300,18 @@ struct Withdrawal {
 interface IVerifier {
     function verify(
         // Deposit queue
-        bytes32 processedDepositQueueHash,     // where proof starts (from portal state)
-        bytes32 pendingDepositQueueHash,       // stable target ceiling (from portal state)
-        bytes32 newProcessedDepositQueueHash,  // where zone processed up to (from batch)
+        bytes32 prevProcessedDepositQueueHash,     // where proof starts (from portal state)
+        bytes32 prevPendingDepositQueueHash,       // stable target ceiling (from portal state)
+        bytes32 nextProcessedDepositQueueHash,     // where zone processed up to (from batch)
 
         // Zone state transition
         bytes32 prevStateRoot,
-        bytes32 newStateRoot,
+        bytes32 nextStateRoot,
 
         // Withdrawal queue updates (proof outputs)
-        bytes32 expectedWithdrawalQueue2,       // what proof assumed queue2 was
-        bytes32 updatedWithdrawalQueue2,        // queue2 with new withdrawals added to innermost
-        bytes32 newWithdrawalQueueOnly,         // new withdrawals only (only used if queue2 was empty)
+        bytes32 prevPendingWithdrawalQueueHash,        // pending queue hash the proof assumed
+        bytes32 nextPendingWithdrawalQueueHashIfFull,  // pending queue with new withdrawals appended
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty, // new withdrawals only (pending was empty)
 
         // Opaque verifier payload (e.g., attestation envelope, domain separation data)
         bytes calldata verifierData,
@@ -342,18 +338,18 @@ struct DepositQueue {
 }
 
 library DepositQueueLib {
-    /// @notice Insert a new message into the queue (on-chain operation)
+    /// @notice Enqueue a new message into the queue (on-chain operation)
     /// @dev Hash chain: newHash = keccak256(abi.encode(message, prevHash))
-    function insert(DepositQueue storage q, DepositQueueMessage memory message) internal returns (bytes32 newCurrent);
+    function enqueue(DepositQueue storage q, DepositQueueMessage memory message) internal returns (bytes32 newHeadQueueHash);
 
-    /// @notice Consume deposits via proof (proof operation)
+    /// @notice Dequeue deposits via proof (proof operation)
     /// @dev Validates expected state matches actual, then updates:
-    ///      processed = newProcessed, pending = current
-    function popWithProof(
+    ///      processed = nextProcessed, pending = current
+    function dequeueWithProof(
         DepositQueue storage q,
-        bytes32 expectedProcessed,
-        bytes32 expectedPending,
-        bytes32 newProcessed
+        bytes32 prevProcessedQueueHash,
+        bytes32 prevPendingQueueHash,
+        bytes32 nextProcessedQueueHash
     ) internal;
 }
 ```
@@ -364,29 +360,34 @@ Handles L2→L1 withdrawals where the producer (proof) is slow and the consumer 
 
 ```solidity
 struct WithdrawalQueue {
-    bytes32 queue1;  // active queue (being drained on-chain)
-    bytes32 queue2;  // pending queue (being filled by proofs)
+    bytes32 active;   // active queue (being drained on-chain)
+    bytes32 pending;  // pending queue (being filled by proofs)
 }
 
 library WithdrawalQueueLib {
-    /// @notice Pop the next withdrawal from the queue (on-chain operation)
-    /// @dev Verifies keccak256(abi.encode(w, remainingQueue)) == queue1
-    ///      Automatically swaps in queue2 if queue1 is empty
-    function pop(WithdrawalQueue storage q, Withdrawal calldata w, bytes32 remainingQueue) internal;
+    /// @notice Dequeue the next withdrawal from the queue (on-chain operation)
+    /// @dev Verifies keccak256(abi.encode(w, remainingQueue)) == active
+    ///      Automatically swaps in pending if active is empty
+    function dequeue(WithdrawalQueue storage q, Withdrawal calldata w, bytes32 remainingQueue) internal;
 
-    /// @notice Insert new withdrawals via proof (proof operation)
-    /// @dev Handles race condition where queue2 was swapped away during proving
-    /// @param expected What queue2 was when proof started
-    /// @param updated New withdrawals appended to expected
-    /// @param fresh New withdrawals as standalone queue (if queue2 was empty/swapped)
-    function insertWithProof(WithdrawalQueue storage q, bytes32 expected, bytes32 updated, bytes32 fresh) internal;
+    /// @notice Enqueue new withdrawals via proof (proof operation)
+    /// @dev Handles race condition where pending was swapped away during proving
+    /// @param prevPendingQueueHash What pending was when proof started
+    /// @param nextPendingQueueHashIfFull New withdrawals appended to prevPendingQueueHash
+    /// @param nextPendingQueueHashIfEmpty New withdrawals as standalone queue (pending was empty/swapped)
+    function enqueueWithProof(
+        WithdrawalQueue storage q,
+        bytes32 prevPendingQueueHash,
+        bytes32 nextPendingQueueHashIfFull,
+        bytes32 nextPendingQueueHashIfEmpty
+    ) internal;
 }
 ```
 
 | Queue | On-chain op | Proof op |
 |-------|-------------|----------|
-| Deposit | `insert` | `popWithProof` |
-| Withdrawal | `pop` | `insertWithProof` |
+| Deposit | `enqueue` | `dequeueWithProof` |
+| Withdrawal | `dequeue` | `enqueueWithProof` |
 
 ### Tempo contracts
 
@@ -445,14 +446,14 @@ interface IZonePortal {
     event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 processedDepositQueueHash,      // pre-state input to verifier
-        bytes32 pendingDepositQueueHash,        // pre-state input to verifier
-        bytes32 newProcessedDepositQueueHash,   // verifier input/output
-        bytes32 prevStateRoot,              // pre-state input to verifier
-        bytes32 newStateRoot,               // verifier output
-        bytes32 expectedWithdrawalQueue2,             // verifier input
-        bytes32 updatedWithdrawalQueue2,              // verifier output path 1
-        bytes32 newWithdrawalQueueOnly          // verifier output path 2
+        bytes32 prevProcessedDepositQueueHash,   // pre-state input to verifier
+        bytes32 prevPendingDepositQueueHash,     // pre-state input to verifier
+        bytes32 nextProcessedDepositQueueHash,   // verifier input/output
+        bytes32 prevStateRoot,                   // pre-state input to verifier
+        bytes32 nextStateRoot,                   // verifier output
+        bytes32 prevPendingWithdrawalQueueHash,          // verifier input
+        bytes32 nextPendingWithdrawalQueueHashIfFull,    // verifier output path 1
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty    // verifier output path 2
     );
 
     function zoneId() external view returns (uint64);
@@ -465,8 +466,8 @@ interface IZonePortal {
     function processedDepositQueueHash() external view returns (bytes32);
     function pendingDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
-    function withdrawalQueue1() external view returns (bytes32);
-    function withdrawalQueue2() external view returns (bytes32);
+    function activeWithdrawalQueueHash() external view returns (bytes32);
+    function pendingWithdrawalQueueHash() external view returns (bytes32);
 
     /// @notice Set the sequencer's public key. Only callable by the sequencer.
     function setSequencerPubkey(bytes32 pubkey) external;
@@ -477,23 +478,25 @@ interface IZonePortal {
     /// @notice Append an L1 sync message to the deposit queue. Only callable by the sequencer.
     function syncL1() external returns (bytes32 newCurrentDepositQueueHash);
 
-    /// @notice Process the next withdrawal from queue1. Only callable by the sequencer.
-    /// @param w The withdrawal to process (must be at the head of queue1).
+    /// @notice Process the next withdrawal from the active queue. Only callable by the sequencer.
+    /// @param w The withdrawal to process (must be at the head of the active queue).
     /// @param remainingQueue The hash of the remaining queue after this withdrawal.
     function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external;
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
-    /// @param commitment The batch commitment (new state root and processed deposit queue hash).
-    /// @param expectedWithdrawalQueue2 The queue2 value the proof assumed during generation.
-    /// @param updatedWithdrawalQueue2 New queue2 if expectedWithdrawalQueue2 matches current queue2.
-    /// @param newWithdrawalQueueOnly New queue2 if current queue2 is empty (swap occurred).
+    /// @param nextProcessedDepositQueueHash The processed deposit queue hash after the batch.
+    /// @param nextStateRoot The state root after the batch.
+    /// @param prevPendingWithdrawalQueueHash The pending queue hash the proof assumed during generation.
+    /// @param nextPendingWithdrawalQueueHashIfFull New pending queue hash if prevPendingWithdrawalQueueHash matches.
+    /// @param nextPendingWithdrawalQueueHashIfEmpty New pending queue hash if pending was empty (swap occurred).
     /// @param verifierData Opaque payload forwarded to verifier (e.g., attestation envelope).
     /// @param proof The validity proof or TEE attestation.
     function submitBatch(
-        BatchCommitment calldata commitment,
-        bytes32 expectedWithdrawalQueue2,
-        bytes32 updatedWithdrawalQueue2,
-        bytes32 newWithdrawalQueueOnly,
+        bytes32 nextProcessedDepositQueueHash,
+        bytes32 nextStateRoot,
+        bytes32 prevPendingWithdrawalQueueHash,
+        bytes32 nextPendingWithdrawalQueueHashIfFull,
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty,
         bytes calldata verifierData,
         bytes calldata proof
     ) external;
@@ -732,7 +735,7 @@ Both `depositQueue` messages and the withdrawal queue are FIFO queues that requi
 Both use hash chains, but with different models:
 
 - **Deposit queue messages**: 3 slots (`processedDepositQueueHash` is where proofs start, `pendingDepositQueueHash` is the stable target, `currentDepositQueueHash` is the head where new messages land)
-- **Withdrawal queue**: 2 separate queues (`withdrawalQueue1` drains, `withdrawalQueue2` fills, then swap)
+- **Withdrawal queue**: 2 separate queues (`activeWithdrawalQueueHash` drains, `pendingWithdrawalQueueHash` fills, then swap)
 
 The hash chains are structured differently to optimize for their on-chain operation:
 
@@ -758,7 +761,7 @@ Adding d4: currentDepositQueueHash = keccak256(abi.encode(message4, currentDepos
 
 - **On-chain addition is O(1)**: `currentDepositQueueHash = keccak256(abi.encode(message, currentDepositQueueHash))` — wrap the outside.
 - **Proving removals**: Proof starts from stable `processedDepositQueueHash`, processes messages in FIFO order (oldest first, working outward), and must prove the result is an ancestor of `pendingDepositQueueHash`.
-- **After batch**: `processedDepositQueueHash = newProcessedDepositQueueHash`, then `pendingDepositQueueHash = currentDepositQueueHash` (snapshot new target for next proof).
+- **After batch**: `processedDepositQueueHash = nextProcessedDepositQueueHash`, then `pendingDepositQueueHash = currentDepositQueueHash` (snapshot new target for next proof).
 
 ### Withdrawal queue: oldest-outermost
 
@@ -766,7 +769,7 @@ Adding d4: currentDepositQueueHash = keccak256(abi.encode(message4, currentDepos
 Oldest withdrawal on the outside (O(1) removal):
 
                     ┌─────────────────────────────────────────┐
-                    │ hash(w1, ┌─────────────────────────┐ ) │  ← withdrawalQueue1
+                    │ hash(w1, ┌─────────────────────────┐ ) │  ← activeWithdrawalQueueHash
                     │          │ hash(w2, ┌───────────┐ ) │  │
                     │          │          │ hash(w3,0) │   │  │
                     │          │          └───────────┘   │  │
@@ -782,13 +785,13 @@ Removing w1: verify hash(w1, remainingQueue) == queue, then queue = remainingQue
 
 - **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
 - **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
-- **Two queues handle the race**: `queue1` for processing, `queue2` for accumulation. When `queue1` empties, swap in `queue2`.
+- **Two queues handle the race**: `activeWithdrawalQueueHash` for processing, `pendingWithdrawalQueueHash` for accumulation. When `activeWithdrawalQueueHash` empties, swap in `pendingWithdrawalQueueHash`.
 
 ```
 Two-queue system:
 
   ┌──────────────────┐         ┌──────────────────┐
-  │  withdrawalQueue1 │         │  withdrawalQueue2 │
+  │  activeWithdrawalQueueHash │         │  pendingWithdrawalQueueHash │
   │  (being drained)  │         │  (being filled)   │
   └────────┬─────────┘         └────────┬─────────┘
            │                            │
@@ -799,9 +802,9 @@ Two-queue system:
       │ w3      │                 │ w6      │ ◄── new from proof
       └─────────┘                 └─────────┘
 
-When queue1 is empty:
-  queue1 = queue2
-  queue2 = 0
+When active is empty:
+  activeWithdrawalQueueHash = pendingWithdrawalQueueHash
+  pendingWithdrawalQueueHash = 0
 ```
 
 The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
@@ -810,9 +813,9 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
 2. `ZonePortal` transfers `amount` of the gas token into escrow and appends a deposit queue message: `currentDepositQueueHash = keccak256(abi.encode(message, currentDepositQueueHash))`. The deposit message includes current L1 block info (parent block hash, block number, timestamp) and the memo.
-3. The sequencer observes `DepositMade` events and processes messages via `processDepositQueue`, crediting `to` with `amount` of the gas token (TIP-20 balance). Deposits always succeed—there is no callback or bounce mechanism.
-4. A batch proof/attestation must prove the zone processed deposit queue messages from `processedDepositQueueHash` up to `newProcessedDepositQueueHash`, and that `newProcessedDepositQueueHash` is an ancestor of `pendingDepositQueueHash`.
-5. After the batch is accepted, `processedDepositQueueHash = newProcessedDepositQueueHash` and `pendingDepositQueueHash = currentDepositQueueHash` (snapshot for next proof).
+3. The sequencer observes `DepositMade` and `L1SyncAppended` events and processes messages in order via `processDepositQueue`, crediting `to` with `amount` of the gas token (TIP-20 balance) for deposit messages and updating the zone's L1 head for sync messages. Deposits always succeed—there is no callback or bounce mechanism.
+4. A batch proof/attestation must prove the zone processed deposit queue messages from `processedDepositQueueHash` up to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `pendingDepositQueueHash`.
+5. After the batch is accepted, `processedDepositQueueHash = nextProcessedDepositQueueHash` and `pendingDepositQueueHash = currentDepositQueueHash` (snapshot for next proof).
 
 Notes:
 
@@ -827,8 +830,8 @@ Notes:
 
 Users withdraw by creating a withdrawal on the zone. Withdrawals are processed in two steps:
 
-1. **Batch submission**: The proof adds new withdrawals to `withdrawalQueue2`.
-2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from `withdrawalQueue1` one at a time.
+1. **Batch submission**: The proof adds new withdrawals to `pendingWithdrawalQueueHash`.
+2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from `activeWithdrawalQueueHash` one at a time.
 
 This separation allows the sequencer to process withdrawals immediately without waiting for proofs.
 
@@ -838,22 +841,22 @@ When the sequencer processes a withdrawal via `processWithdrawal`, the withdrawa
 
 ```solidity
 function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
-    // Swap in queue2 if queue1 is empty
-    if (withdrawalQueue1 == bytes32(0)) {
-        require(withdrawalQueue2 != bytes32(0), "no withdrawals");
-        withdrawalQueue1 = withdrawalQueue2;
-        withdrawalQueue2 = bytes32(0);
+    // Swap in pending if active is empty
+    if (activeWithdrawalQueueHash == bytes32(0)) {
+        require(pendingWithdrawalQueueHash != bytes32(0), "no withdrawals");
+        activeWithdrawalQueueHash = pendingWithdrawalQueueHash;
+        pendingWithdrawalQueueHash = bytes32(0);
     }
 
     // Verify head
-    require(keccak256(abi.encode(w, remainingQueue)) == withdrawalQueue1, "invalid");
+    require(keccak256(abi.encode(w, remainingQueue)) == activeWithdrawalQueueHash, "invalid");
 
     // Pop the withdrawal regardless of success/failure
     if (remainingQueue == bytes32(0)) {
-        withdrawalQueue1 = withdrawalQueue2;
-        withdrawalQueue2 = bytes32(0);
+        activeWithdrawalQueueHash = pendingWithdrawalQueueHash;
+        pendingWithdrawalQueueHash = bytes32(0);
     } else {
-        withdrawalQueue1 = remainingQueue;
+        activeWithdrawalQueueHash = remainingQueue;
     }
 
     if (w.gasLimit == 0) {
@@ -991,11 +994,11 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 
 ```solidity
 struct BatchProof {
-    bytes32 newStateRoot;
-    bytes32 newProcessedDepositQueueHash;
-    bytes32 expectedWithdrawalQueue2;
-    bytes32 updatedWithdrawalQueue2;
-    bytes32 newWithdrawalQueueOnly;
+    bytes32 nextStateRoot;
+    bytes32 nextProcessedDepositQueueHash;
+    bytes32 prevPendingWithdrawalQueueHash;
+    bytes32 nextPendingWithdrawalQueueHashIfFull;
+    bytes32 nextPendingWithdrawalQueueHashIfEmpty;
     bytes verifierData; // opaque payload to IVerifier (TEE/ZK envelope)
     bytes proof;        // SP1 proof bytes (or TEE attestation)
 }

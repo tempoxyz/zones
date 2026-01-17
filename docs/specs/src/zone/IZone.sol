@@ -11,11 +11,6 @@ struct ZoneInfo {
     bytes32 genesisStateRoot;
 }
 
-struct BatchCommitment {
-    bytes32 newProcessedDepositQueueHash;
-    bytes32 newStateRoot;
-}
-
 /// @notice Deposit queue message kinds (Tempo -> zone)
 enum DepositQueueMessageKind {
     Deposit,
@@ -62,18 +57,18 @@ struct Withdrawal {
 interface IVerifier {
     function verify(
         // Deposit queue
-        bytes32 processedDepositQueueHash,     // where proof starts (from portal state)
-        bytes32 pendingDepositQueueHash,       // stable target ceiling (from portal state)
-        bytes32 newProcessedDepositQueueHash,  // where zone processed up to (from batch)
+        bytes32 prevProcessedDepositQueueHash,     // where proof starts (from portal state)
+        bytes32 prevPendingDepositQueueHash,       // stable target ceiling (from portal state)
+        bytes32 nextProcessedDepositQueueHash,     // where zone processed up to (from batch)
 
         // Zone state transition
         bytes32 prevStateRoot,
-        bytes32 newStateRoot,
+        bytes32 nextStateRoot,
 
         // Withdrawal queue updates (proof outputs)
-        bytes32 expectedWithdrawalQueue2,       // what proof assumed queue2 was
-        bytes32 updatedWithdrawalQueue2,        // queue2 with new withdrawals added to innermost
-        bytes32 newWithdrawalQueueOnly,   // new withdrawals only (only used if queue2 was empty)
+        bytes32 prevPendingWithdrawalQueueHash,        // what proof assumed pending queue was
+        bytes32 nextPendingWithdrawalQueueHashIfFull,  // pending queue after append if no swap
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty, // pending queue after append if swap occurred
 
         // Opaque verifier payload (e.g., attestation envelope, domain separation data)
         bytes calldata verifierData,
@@ -138,14 +133,14 @@ interface IZonePortal {
     event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 processedDepositQueueHash,      // pre-state input to verifier
-        bytes32 pendingDepositQueueHash,        // pre-state input to verifier
-        bytes32 newProcessedDepositQueueHash,   // verifier input/output
-        bytes32 prevStateRoot,              // pre-state input to verifier
-        bytes32 newStateRoot,               // verifier output
-        bytes32 expectedWithdrawalQueue2,             // verifier input
-        bytes32 updatedWithdrawalQueue2,              // verifier output path 1
-        bytes32 newWithdrawalQueueOnly          // verifier output path 2
+        bytes32 prevProcessedDepositQueueHash,           // pre-state input to verifier
+        bytes32 prevPendingDepositQueueHash,             // pre-state input to verifier
+        bytes32 nextProcessedDepositQueueHash,           // verifier input/output
+        bytes32 prevStateRoot,                           // pre-state input to verifier
+        bytes32 nextStateRoot,                           // verifier output
+        bytes32 prevPendingWithdrawalQueueHash,          // verifier input
+        bytes32 nextPendingWithdrawalQueueHashIfFull,    // verifier output path 1
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty    // verifier output path 2
     );
 
     event WithdrawalProcessed(
@@ -166,7 +161,7 @@ interface IZonePortal {
     error InvalidProof();
     error NoWithdrawals();
     error InvalidWithdrawal();
-    error UnexpectedWithdrawalQueue2State();
+    error UnexpectedPendingWithdrawalQueueHash();
     error CallbackRejected();
 
     function zoneId() external view returns (uint64);
@@ -179,18 +174,19 @@ interface IZonePortal {
     function processedDepositQueueHash() external view returns (bytes32);
     function pendingDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
-    function withdrawalQueue1() external view returns (bytes32);
-    function withdrawalQueue2() external view returns (bytes32);
+    function activeWithdrawalQueueHash() external view returns (bytes32);
+    function pendingWithdrawalQueueHash() external view returns (bytes32);
 
     function setSequencerPubkey(bytes32 pubkey) external;
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
     function syncL1() external returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external;
     function submitBatch(
-        BatchCommitment calldata commitment,
-        bytes32 expectedWithdrawalQueue2,
-        bytes32 updatedWithdrawalQueue2,
-        bytes32 newWithdrawalQueueOnly,
+        bytes32 nextProcessedDepositQueueHash,
+        bytes32 nextStateRoot,
+        bytes32 prevPendingWithdrawalQueueHash,
+        bytes32 nextPendingWithdrawalQueueHashIfFull,
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty,
         bytes calldata verifierData,
         bytes calldata proof
     ) external;

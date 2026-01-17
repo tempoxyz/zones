@@ -9,28 +9,28 @@ contract MockVerifier is IVerifier {
     bool public shouldAccept = true;
 
     // Track last verify call for test assertions
-    bytes32 public lastProcessedDepositQueueHash;
-    bytes32 public lastPendingDepositQueueHash;
-    bytes32 public lastNewProcessedDepositQueueHash;
+    bytes32 public lastPrevProcessedDepositQueueHash;
+    bytes32 public lastPrevPendingDepositQueueHash;
+    bytes32 public lastNextProcessedDepositQueueHash;
     bytes32 public lastPrevStateRoot;
-    bytes32 public lastNewStateRoot;
-    bytes32 public lastExpectedQueue2;
-    bytes32 public lastUpdatedQueue2;
-    bytes32 public lastNewWithdrawalsOnly;
+    bytes32 public lastNextStateRoot;
+    bytes32 public lastPrevPendingWithdrawalQueueHash;
+    bytes32 public lastNextPendingWithdrawalQueueHashIfFull;
+    bytes32 public lastNextPendingWithdrawalQueueHashIfEmpty;
 
     function setShouldAccept(bool _shouldAccept) external {
         shouldAccept = _shouldAccept;
     }
 
     function verify(
-        bytes32 processedDepositQueueHash,
-        bytes32 pendingDepositQueueHash,
-        bytes32 newProcessedDepositQueueHash,
+        bytes32 prevProcessedDepositQueueHash,
+        bytes32 prevPendingDepositQueueHash,
+        bytes32 nextProcessedDepositQueueHash,
         bytes32 prevStateRoot,
-        bytes32 newStateRoot,
-        bytes32 expectedWithdrawalQueue2,
-        bytes32 updatedWithdrawalQueue2,
-        bytes32 newWithdrawalQueueOnly,
+        bytes32 nextStateRoot,
+        bytes32 prevPendingWithdrawalQueueHash,
+        bytes32 nextPendingWithdrawalQueueHashIfFull,
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty,
         bytes calldata, // verifierData
         bytes calldata  // proof
     ) external view returns (bool) {
@@ -42,25 +42,25 @@ contract MockVerifier is IVerifier {
 
     /// @notice Non-view version for testing that records call parameters
     function verifyAndRecord(
-        bytes32 processedDepositQueueHash,
-        bytes32 pendingDepositQueueHash,
-        bytes32 newProcessedDepositQueueHash,
+        bytes32 prevProcessedDepositQueueHash,
+        bytes32 prevPendingDepositQueueHash,
+        bytes32 nextProcessedDepositQueueHash,
         bytes32 prevStateRoot,
-        bytes32 newStateRoot,
-        bytes32 expectedWithdrawalQueue2,
-        bytes32 updatedWithdrawalQueue2,
-        bytes32 newWithdrawalQueueOnly,
+        bytes32 nextStateRoot,
+        bytes32 prevPendingWithdrawalQueueHash,
+        bytes32 nextPendingWithdrawalQueueHashIfFull,
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty,
         bytes calldata,
         bytes calldata
     ) external returns (bool) {
-        lastProcessedDepositQueueHash = processedDepositQueueHash;
-        lastPendingDepositQueueHash = pendingDepositQueueHash;
-        lastNewProcessedDepositQueueHash = newProcessedDepositQueueHash;
+        lastPrevProcessedDepositQueueHash = prevProcessedDepositQueueHash;
+        lastPrevPendingDepositQueueHash = prevPendingDepositQueueHash;
+        lastNextProcessedDepositQueueHash = nextProcessedDepositQueueHash;
         lastPrevStateRoot = prevStateRoot;
-        lastNewStateRoot = newStateRoot;
-        lastExpectedQueue2 = expectedWithdrawalQueue2;
-        lastUpdatedQueue2 = updatedWithdrawalQueue2;
-        lastNewWithdrawalsOnly = newWithdrawalQueueOnly;
+        lastNextStateRoot = nextStateRoot;
+        lastPrevPendingWithdrawalQueueHash = prevPendingWithdrawalQueueHash;
+        lastNextPendingWithdrawalQueueHashIfFull = nextPendingWithdrawalQueueHashIfFull;
+        lastNextPendingWithdrawalQueueHashIfEmpty = nextPendingWithdrawalQueueHashIfEmpty;
 
         return shouldAccept;
     }

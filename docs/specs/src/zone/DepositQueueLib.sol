@@ -21,40 +21,40 @@ struct DepositQueue {
 library DepositQueueLib {
     error InvalidState();
 
-    /// @notice Insert a new message into the queue (on-chain operation)
+    /// @notice Enqueue a new message into the queue (on-chain operation)
     /// @dev Hash chain: newHash = keccak256(abi.encode(message, prevHash))
     /// @param q The deposit queue
-    /// @param message The deposit queue message to insert
-    /// @return newCurrent The new current queue hash
-    function insert(
+    /// @param message The deposit queue message to enqueue
+    /// @return newHeadQueueHash The new head queue hash
+    function enqueue(
         DepositQueue storage q,
         DepositQueueMessage memory message
-    ) internal returns (bytes32 newCurrent) {
-        newCurrent = keccak256(abi.encode(message, q.current));
-        q.current = newCurrent;
+    ) internal returns (bytes32 newHeadQueueHash) {
+        newHeadQueueHash = keccak256(abi.encode(message, q.current));
+        q.current = newHeadQueueHash;
     }
 
-    /// @notice Consume deposits via proof (proof operation)
+    /// @notice Dequeue deposits via proof (proof operation)
     /// @dev Called when a batch proof is submitted. Validates that the expected state
     ///      matches the actual state (ensuring the proof was generated against correct state).
     ///      After this call:
-    ///      - `processed = newProcessed` (advance to where we actually processed)
+    ///      - `processed = nextProcessed` (advance to where we actually processed)
     ///      - `pending = current` (snapshot new target for next proof)
     /// @param q The deposit queue
-    /// @param expectedProcessed The processed value the proof was generated against (must match current)
-    /// @param expectedPending The pending value the proof was generated against (must match current)
-    /// @param newProcessed Where the proof processed up to
-    function popWithProof(
+    /// @param prevProcessedQueueHash The processed value the proof was generated against
+    /// @param prevPendingQueueHash The pending value the proof was generated against
+    /// @param nextProcessedQueueHash Where the proof processed up to
+    function dequeueWithProof(
         DepositQueue storage q,
-        bytes32 expectedProcessed,
-        bytes32 expectedPending,
-        bytes32 newProcessed
+        bytes32 prevProcessedQueueHash,
+        bytes32 prevPendingQueueHash,
+        bytes32 nextProcessedQueueHash
     ) internal {
         // Verify the proof was generated against the correct state
-        if (q.processed != expectedProcessed) revert InvalidState();
-        if (q.pending != expectedPending) revert InvalidState();
+        if (q.processed != prevProcessedQueueHash) revert InvalidState();
+        if (q.pending != prevPendingQueueHash) revert InvalidState();
 
-        q.processed = newProcessed;
+        q.processed = nextProcessedQueueHash;
         q.pending = q.current;
     }
 

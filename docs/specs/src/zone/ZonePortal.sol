@@ -10,8 +10,7 @@ import {
     DepositQueueMessageKind,
     L1Sync,
     Deposit,
-    Withdrawal,
-    BatchCommitment
+    Withdrawal
 } from "./IZone.sol";
 import { DepositQueue, DepositQueueLib } from "./DepositQueueLib.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
@@ -92,12 +91,12 @@ contract ZonePortal is IZonePortal {
         return _depositQueue.current;
     }
 
-    function withdrawalQueue1() external view returns (bytes32) {
-        return _withdrawalQueue.queue1;
+    function activeWithdrawalQueueHash() external view returns (bytes32) {
+        return _withdrawalQueue.active;
     }
 
-    function withdrawalQueue2() external view returns (bytes32) {
-        return _withdrawalQueue.queue2;
+    function pendingWithdrawalQueueHash() external view returns (bytes32) {
+        return _withdrawalQueue.pending;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -125,7 +124,7 @@ contract ZonePortal is IZonePortal {
             kind: DepositQueueMessageKind.Deposit,
             data: abi.encode(d)
         });
-        newCurrentDepositQueueHash = _depositQueue.insert(m);
+        newCurrentDepositQueueHash = _depositQueue.enqueue(m);
 
         emit DepositMade(
             zoneId,
@@ -152,7 +151,7 @@ contract ZonePortal is IZonePortal {
             kind: DepositQueueMessageKind.L1Sync,
             data: abi.encode(sync)
         });
-        newCurrentDepositQueueHash = _depositQueue.insert(m);
+        newCurrentDepositQueueHash = _depositQueue.enqueue(m);
 
         emit L1SyncAppended(
             zoneId,
@@ -170,7 +169,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
     function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
         // Pop from withdrawal queue (library handles swap and hash verification)
-        _withdrawalQueue.pop(w, remainingQueue);
+        _withdrawalQueue.dequeue(w, remainingQueue);
 
         // Execute the withdrawal
         if (w.gasLimit == 0) {
@@ -224,7 +223,7 @@ contract ZonePortal is IZonePortal {
             kind: DepositQueueMessageKind.Deposit,
             data: abi.encode(d)
         });
-        bytes32 newCurrentDepositQueueHash = _depositQueue.insert(m);
+        bytes32 newCurrentDepositQueueHash = _depositQueue.enqueue(m);
 
         emit BounceBack(zoneId, newCurrentDepositQueueHash, fallbackRecipient, amount);
     }
@@ -235,10 +234,11 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     function submitBatch(
-        BatchCommitment calldata commitment,
-        bytes32 expectedWithdrawalQueue2,
-        bytes32 updatedWithdrawalQueue2,
-        bytes32 newWithdrawalQueueOnly,
+        bytes32 nextProcessedDepositQueueHash,
+        bytes32 nextStateRoot,
+        bytes32 prevPendingWithdrawalQueueHash,
+        bytes32 nextPendingWithdrawalQueueHashIfFull,
+        bytes32 nextPendingWithdrawalQueueHashIfEmpty,
         bytes calldata verifierData,
         bytes calldata proof
     ) external onlySequencer {
@@ -246,12 +246,12 @@ contract ZonePortal is IZonePortal {
         bool valid = IVerifier(verifier).verify(
             _depositQueue.processed,
             _depositQueue.pending,
-            commitment.newProcessedDepositQueueHash,
+            nextProcessedDepositQueueHash,
             stateRoot,
-            commitment.newStateRoot,
-            expectedWithdrawalQueue2,
-            updatedWithdrawalQueue2,
-            newWithdrawalQueueOnly,
+            nextStateRoot,
+            prevPendingWithdrawalQueueHash,
+            nextPendingWithdrawalQueueHashIfFull,
+            nextPendingWithdrawalQueueHashIfEmpty,
             verifierData,
             proof
         );
@@ -263,12 +263,12 @@ contract ZonePortal is IZonePortal {
             batchIndex,
             _depositQueue.processed,
             _depositQueue.pending,
-            commitment.newProcessedDepositQueueHash,
+            nextProcessedDepositQueueHash,
             stateRoot,
-            commitment.newStateRoot,
-            expectedWithdrawalQueue2,
-            updatedWithdrawalQueue2,
-            newWithdrawalQueueOnly
+            nextStateRoot,
+            prevPendingWithdrawalQueueHash,
+            nextPendingWithdrawalQueueHashIfFull,
+            nextPendingWithdrawalQueueHashIfEmpty
         );
 
         // Capture pre-state for library validation
@@ -277,20 +277,20 @@ contract ZonePortal is IZonePortal {
 
         // Update state
         batchIndex++;
-        stateRoot = commitment.newStateRoot;
+        stateRoot = nextStateRoot;
 
         // Update deposit queue via library (validates expected state matches)
-        _depositQueue.popWithProof(
+        _depositQueue.dequeueWithProof(
             prevProcessed,
             prevPending,
-            commitment.newProcessedDepositQueueHash
+            nextProcessedDepositQueueHash
         );
 
         // Update withdrawal queue via library
-        _withdrawalQueue.insertWithProof(
-            expectedWithdrawalQueue2,
-            updatedWithdrawalQueue2,
-            newWithdrawalQueueOnly
+        _withdrawalQueue.enqueueWithProof(
+            prevPendingWithdrawalQueueHash,
+            nextPendingWithdrawalQueueHashIfFull,
+            nextPendingWithdrawalQueueHashIfEmpty
         );
     }
 }

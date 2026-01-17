@@ -16,8 +16,7 @@ import {
     DepositQueueMessage,
     DepositQueueMessageKind,
     Deposit,
-    Withdrawal,
-    BatchCommitment
+    Withdrawal
 } from "../../src/zone/IZone.sol";
 
 /// @notice Mock exit receiver for callback tests
@@ -238,21 +237,16 @@ contract ZoneBridgeTest is BaseTest {
         // Build withdrawal queue hash from observed events
         bytes32 withdrawalQueueHash = _buildWithdrawalQueueHash();
 
-        // Get current L1 queue2 state
-        bytes32 currentQueue2 = l1Portal.withdrawalQueue2();
-
-        // Prepare batch
-        BatchCommitment memory commitment = BatchCommitment({
-            newProcessedDepositQueueHash: newProcessedDepositQueueHash,
-            newStateRoot: l2StateRoot
-        });
+        // Get current L1 pending queue state
+        bytes32 prevPendingWithdrawalQueueHash = l1Portal.pendingWithdrawalQueueHash();
 
         // Submit to L1
         l1Portal.submitBatch(
-            commitment,
-            currentQueue2,           // expectedWithdrawalQueue2
-            withdrawalQueueHash,     // updatedWithdrawalQueue2
-            withdrawalQueueHash,     // newWithdrawalQueueOnly
+            newProcessedDepositQueueHash,
+            l2StateRoot,
+            prevPendingWithdrawalQueueHash,
+            withdrawalQueueHash,     // nextPendingWithdrawalQueueHashIfFull
+            withdrawalQueueHash,     // nextPendingWithdrawalQueueHashIfEmpty
             "",                      // verifierData
             ""                       // proof
         );
@@ -344,7 +338,7 @@ contract ZoneBridgeTest is BaseTest {
             data: ""
         });
         bytes32 expectedQueueHash = keccak256(abi.encode(w, bytes32(0)));
-        assertEq(l1Portal.withdrawalQueue2(), expectedQueueHash);
+        assertEq(l1Portal.pendingWithdrawalQueueHash(), expectedQueueHash);
 
         // === STEP 8: Sequencer processes withdrawal on L1 ===
         uint256 aliceL1BalanceBefore = pathUSD.balanceOf(alice);
@@ -354,8 +348,8 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(pathUSD.balanceOf(alice), aliceL1BalanceBefore + withdrawAmount);
 
         // Verify queues are empty
-        assertEq(l1Portal.withdrawalQueue1(), bytes32(0));
-        assertEq(l1Portal.withdrawalQueue2(), bytes32(0));
+        assertEq(l1Portal.activeWithdrawalQueueHash(), bytes32(0));
+        assertEq(l1Portal.pendingWithdrawalQueueHash(), bytes32(0));
     }
 
     function test_fullFlow_multipleDepositsAndWithdrawals() public {
@@ -410,7 +404,7 @@ contract ZoneBridgeTest is BaseTest {
         });
         bytes32 innerHash = keccak256(abi.encode(w1, bytes32(0)));
         bytes32 queueHash = keccak256(abi.encode(w0, innerHash));
-        assertEq(l1Portal.withdrawalQueue2(), queueHash);
+        assertEq(l1Portal.pendingWithdrawalQueueHash(), queueHash);
 
         // Process withdrawals in order
         uint256 aliceBefore = pathUSD.balanceOf(alice);
@@ -586,10 +580,8 @@ contract ZoneBridgeTest is BaseTest {
         // Submit batch with partial processing
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "partial"));
         l1Portal.submitBatch(
-            BatchCommitment({
-                newProcessedDepositQueueHash: partialHash,
-                newStateRoot: l2StateRoot
-            }),
+            partialHash,
+            l2StateRoot,
             bytes32(0),
             bytes32(0),
             bytes32(0),
