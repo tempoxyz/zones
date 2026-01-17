@@ -4,12 +4,12 @@
 //! plus plain structs for zone-specific tracking (deposits, exits, cursors).
 //! Can be swapped to reth's ProviderFactory later.
 
-use crate::types::{Deposit, ExitIntent, L1Cursor, PzConfig, PzState};
+use crate::types::{Deposit, ExitIntent, L1Cursor, PendingTx, PzConfig, PzState};
 use alloy_primitives::{Address, B256, U256};
 use reth_revm::{
+    Database as RevmDatabase,
     db::{CacheDB, EmptyDB},
     state::{AccountInfo, Bytecode},
-    Database as RevmDatabase,
 };
 use std::collections::VecDeque;
 
@@ -25,8 +25,9 @@ pub struct ZoneState {
     config: Option<PzConfig>,
     /// Current zone state (cursors, hashes, block height).
     state: PzState,
-    /// Pending deposits (not yet included in a zone block).
-    pending_deposits: VecDeque<(L1Cursor, B256, Deposit)>,
+    /// Pending transactions to be included in next block.
+    /// Deposits are at the front (forced inclusion), user txs follow.
+    pending_txs: VecDeque<PendingTx>,
     /// Pending exits (not yet included in a batch).
     pending_exits: Vec<(B256, ExitIntent)>,
 }
@@ -44,7 +45,7 @@ impl ZoneState {
             db: CacheDB::new(EmptyDB::default()),
             config: None,
             state: PzState::default(),
-            pending_deposits: VecDeque::new(),
+            pending_txs: VecDeque::new(),
             pending_exits: Vec::new(),
         }
     }
@@ -147,27 +148,47 @@ impl ZoneState {
     }
 
     // ========================================================================
-    // Deposits
+    // Pending Transactions (Deposits + User Txs)
     // ========================================================================
 
-    /// Queue a deposit.
+    /// Queue a deposit as a pending transaction.
     pub fn queue_deposit(&mut self, cursor: L1Cursor, deposit: Deposit, hash: B256) {
-        self.pending_deposits.push_back((cursor, hash, deposit));
+        self.pending_txs
+            .push_back(PendingTx::deposit(cursor, hash, deposit));
     }
 
-    /// Get pending deposits.
-    pub fn pending_deposits(&self) -> &VecDeque<(L1Cursor, B256, Deposit)> {
-        &self.pending_deposits
+    /// Get all pending transactions.
+    pub fn pending_txs(&self) -> &VecDeque<PendingTx> {
+        &self.pending_txs
     }
 
-    /// Take pending deposits (consumes them).
-    pub fn take_pending_deposits(&mut self) -> VecDeque<(L1Cursor, B256, Deposit)> {
-        std::mem::take(&mut self.pending_deposits)
+    /// Take all pending transactions for block building.
+    pub fn take_pending_txs(&mut self) -> VecDeque<PendingTx> {
+        std::mem::take(&mut self.pending_txs)
+    }
+
+    /// Take up to `limit` pending transactions for block building.
+    pub fn take_pending_txs_limit(&mut self, limit: usize) -> Vec<PendingTx> {
+        let count = limit.min(self.pending_txs.len());
+        self.pending_txs.drain(..count).collect()
     }
 
     /// Remove deposits after a cursor (for reorgs).
+    /// Only affects deposit transactions, not user txs.
     pub fn remove_deposits_after(&mut self, cursor: L1Cursor) {
-        self.pending_deposits.retain(|(c, _, _)| !c.is_after(&cursor));
+        self.pending_txs.retain(|tx| {
+            match tx {
+                PendingTx::Deposit {
+                    cursor: tx_cursor, ..
+                } => !tx_cursor.is_after(&cursor),
+                PendingTx::UserTx { .. } => true, // Keep user txs
+            }
+        });
+    }
+
+    /// Get count of pending deposits.
+    pub fn pending_deposit_count(&self) -> usize {
+        self.pending_txs.iter().filter(|tx| tx.is_deposit()).count()
     }
 
     // ========================================================================
@@ -191,7 +212,8 @@ impl ZoneState {
 
     /// Remove exits after a zone block (for reorgs).
     pub fn remove_exits_after(&mut self, zone_block: u64) {
-        self.pending_exits.retain(|(_, e)| e.zone_block <= zone_block);
+        self.pending_exits
+            .retain(|(_, e)| e.zone_block <= zone_block);
     }
 }
 
@@ -271,14 +293,19 @@ mod tests {
             data: Default::default(),
         };
 
-        state.queue_deposit(L1Cursor::new(100, 0), deposit.clone(), B256::repeat_byte(0x01));
+        state.queue_deposit(
+            L1Cursor::new(100, 0),
+            deposit.clone(),
+            B256::repeat_byte(0x01),
+        );
         state.queue_deposit(L1Cursor::new(100, 1), deposit, B256::repeat_byte(0x02));
 
-        assert_eq!(state.pending_deposits().len(), 2);
+        assert_eq!(state.pending_txs().len(), 2);
+        assert_eq!(state.pending_deposit_count(), 2);
 
         // Remove after cursor
         state.remove_deposits_after(L1Cursor::new(100, 0));
-        assert_eq!(state.pending_deposits().len(), 1);
+        assert_eq!(state.pending_txs().len(), 1);
     }
 
     #[test]

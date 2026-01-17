@@ -1,8 +1,6 @@
 //! Transaction execution for Privacy Zone using tempo-evm.
-//!
-//! Based on reth-exex-examples/rollup pattern.
 
-use crate::db::Database;
+use crate::state::ZoneState;
 use alloy_evm::{Evm, EvmEnv, EvmFactory};
 use alloy_primitives::U256;
 use reth_revm::{
@@ -21,7 +19,7 @@ use tempo_revm::TempoTxEnv;
 
 /// Execute a batch of transactions and return the bundle state.
 pub fn execute_transactions(
-    db: &mut Database,
+    state: &mut ZoneState,
     transactions: Vec<TempoTxEnv>,
     block_number: u64,
     timestamp: u64,
@@ -41,11 +39,11 @@ pub fn execute_transactions(
     };
 
     let factory = TempoEvmFactory::default();
-    let state = State::builder()
-        .with_database(db)
+    let evm_state = State::builder()
+        .with_database(state.db_mut())
         .with_bundle_update()
         .build();
-    let mut evm = factory.create_evm(state, env);
+    let mut evm = factory.create_evm(evm_state, env);
 
     let mut results = Vec::with_capacity(transactions.len());
     let mut cumulative_gas_used = 0u64;
@@ -89,32 +87,31 @@ mod tests {
     use super::*;
     use alloy_primitives::{Address, TxKind};
     use reth_revm::context::TxEnv;
-    use rusqlite::Connection;
 
     #[test]
     fn test_execute_empty_transactions() {
-        let mut db = Database::new(Connection::open_in_memory().unwrap()).unwrap();
+        let mut state = ZoneState::new();
 
         let (_bundle, results) =
-            execute_transactions(&mut db, vec![], 1, 1000, 30_000_000).unwrap();
+            execute_transactions(&mut state, vec![], 1, 1000, 30_000_000).unwrap();
 
         assert!(results.is_empty());
     }
 
     #[test]
     fn test_execute_simple_transfer() {
-        let mut db = Database::new(Connection::open_in_memory().unwrap()).unwrap();
+        let mut state = ZoneState::new();
 
         // Fund sender with enough balance for transfer + gas
         let sender = Address::repeat_byte(0x01);
-        db.upsert_account(sender, |_| {
-            Ok(reth_revm::state::AccountInfo {
+        state.set_account(
+            sender,
+            reth_revm::state::AccountInfo {
                 balance: U256::from(1_000_000_000_000_000_000u128),
                 nonce: 0,
                 ..Default::default()
-            })
-        })
-        .unwrap();
+            },
+        );
 
         let tx = TempoTxEnv {
             inner: TxEnv {
@@ -131,7 +128,7 @@ mod tests {
         };
 
         let (_bundle, results) =
-            execute_transactions(&mut db, vec![tx], 1, 1000, 30_000_000).unwrap();
+            execute_transactions(&mut state, vec![tx], 1, 1000, 30_000_000).unwrap();
 
         // Transaction should succeed (simple ETH transfer)
         assert_eq!(results.len(), 1, "Expected 1 result, got {}", results.len());

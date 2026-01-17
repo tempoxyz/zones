@@ -8,13 +8,7 @@
 //! - `execution`: Transaction execution using tempo-evm
 //! - `exex`: ExEx event loop processing L1 deposits and batches
 //! - `types`: Domain types with cursor tracking and journal hashing
-//!
-//! Legacy (to be removed):
-//! - `db`: SQL-backed state (deprecated, use `state` instead)
-//! - `block_builder`: Zone block construction (being refactored)
 
-pub mod block_builder;
-pub mod db;
 pub mod deposit;
 pub mod error;
 pub mod execution;
@@ -23,11 +17,11 @@ pub mod state;
 pub mod types;
 
 pub use deposit::{process_deposit, DepositResult};
-pub use error::{PzDbError, PzError};
+pub use error::PzError;
 pub use execution::execute_transactions;
 pub use exex::{install_pz_exex, PrivacyZoneExEx};
 pub use state::ZoneState;
 pub use types::{
-    Deposit, ExitIntent, L1Cursor, PortalEvent, PortalEventKind, PzConfig, PzState,
+    Deposit, ExitIntent, L1Cursor, PendingTx, PortalEvent, PortalEventKind, PzConfig, PzState,
     EXIT_PRECOMPILE,
 };

@@ -114,6 +114,10 @@ pub struct PzConfig {
     pub sequencer: Address,
     /// Genesis state root.
     pub genesis_state_root: B256,
+    /// Optional data directory for persistent state.
+    /// If None, uses in-memory state only.
+    #[serde(default)]
+    pub data_dir: Option<std::path::PathBuf>,
 }
 
 /// Privacy zone state tracked by the ExEx.
@@ -234,5 +238,54 @@ impl L1BlockExtracts {
     /// Check if there are any events to process.
     pub fn is_empty(&self) -> bool {
         self.deposits.is_empty() && self.batches.is_empty()
+    }
+}
+
+/// A pending transaction in the zone mempool.
+///
+/// This is the unified queue entry for both deposits and user transactions.
+/// Deposits are forced inclusions (priority), user txs come from RPC.
+#[derive(Debug, Clone)]
+pub enum PendingTx {
+    /// A deposit from L1 - forced inclusion, executes deposit logic.
+    Deposit {
+        /// L1 cursor for ordering and reorg handling.
+        cursor: L1Cursor,
+        /// Hash of this deposit in the deposits chain.
+        deposit_hash: B256,
+        /// The deposit data.
+        deposit: Deposit,
+    },
+    /// A user transaction from RPC (to be added later).
+    /// For now this is a placeholder.
+    UserTx {
+        /// Transaction hash.
+        tx_hash: B256,
+        /// The signed transaction envelope.
+        tx: Bytes,
+    },
+}
+
+impl PendingTx {
+    /// Create a new pending deposit.
+    pub fn deposit(cursor: L1Cursor, deposit_hash: B256, deposit: Deposit) -> Self {
+        Self::Deposit {
+            cursor,
+            deposit_hash,
+            deposit,
+        }
+    }
+
+    /// Get the L1 cursor if this is a deposit.
+    pub fn cursor(&self) -> Option<L1Cursor> {
+        match self {
+            Self::Deposit { cursor, .. } => Some(*cursor),
+            Self::UserTx { .. } => None,
+        }
+    }
+
+    /// Check if this is a deposit.
+    pub fn is_deposit(&self) -> bool {
+        matches!(self, Self::Deposit { .. })
     }
 }

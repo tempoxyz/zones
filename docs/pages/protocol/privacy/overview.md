@@ -254,7 +254,8 @@ struct Deposit {
     address sender;
     address to;
     uint128 amount;
-    bytes32 memo;
+    uint64 gasLimit;            // max gas for callback (0 = no callback, just credit balance)
+    bytes data;                 // calldata to execute at `to` (if gasLimit > 0)
 }
 
 struct Withdrawal {
@@ -504,11 +505,25 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 
 ## Bridging in (Tempo to zone)
 
-1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
+1. User calls `ZonePortal.deposit(to, amount, gasLimit, data)` on Tempo.
 2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `currentDepositsHash = keccak256(abi.encode(deposit, currentDepositsHash))`. The deposit includes current L1 block info (hash, number, timestamp).
-3. The sequencer observes deposit events, processes them in order, and credits the zone recipient. The zone receives L1 state through the deposit data.
+3. The sequencer observes deposit events and processes them in order:
+   - Credit `to` with `amount` of the gas token (TIP-20 balance).
+   - If `gasLimit > 0`: execute a call to `to` with `data` as calldata, using the specified gas limit.
+   - If the call reverts: enqueue a withdrawal back to L1 for `sender` with `amount`.
 4. A batch proof/attestation must prove the zone processed deposits from `processedDepositsHash` up to `newProcessedDepositsHash`, and that `newProcessedDepositsHash` is an ancestor of `pendingDepositsHash`.
 5. After the batch is accepted, `processedDepositsHash = newProcessedDepositsHash` and `pendingDepositsHash = currentDepositsHash` (snapshot for next proof).
+
+### Deposit execution
+
+When the sequencer processes a deposit:
+
+1. Credit `to` with `amount` of the gas token.
+2. If `gasLimit == 0`: done (simple balance credit).
+3. If `gasLimit > 0`: execute call to `to` with `data` as calldata.
+   - Caller is the deposit `sender` (or a system address TBD).
+   - If call succeeds: done.
+   - If call reverts: enqueue a withdrawal to return `amount` to `sender` on L1.
 
 Notes:
 
@@ -517,6 +532,7 @@ Notes:
 - The portal only stores three hashes, not individual deposits. The sequencer must track deposits off-chain.
 - L1 block info is embedded in each deposit, so the zone receives L1 state through the deposit chain.
 - The 3-slot design ensures on-chain verifiability: the proof cannot claim to process fake deposits beyond `pendingDepositsHash`.
+- Failed deposit calls trigger automatic refunds via the withdrawal queue.
 
 ## Bridging out (zone to Tempo)
 

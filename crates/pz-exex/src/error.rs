@@ -7,10 +7,6 @@ use std::fmt::{Debug, Display, Formatter};
 /// Privacy Zone ExEx error type.
 #[derive(Debug, thiserror::Error)]
 pub enum PzError {
-    /// Database error.
-    #[error("database error: {0}")]
-    Database(#[from] rusqlite::Error),
-
     /// Serialization error.
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
