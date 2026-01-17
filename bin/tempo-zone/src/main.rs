@@ -1,6 +1,7 @@
 //! Tempo Zone L2 Node.
 //!
 //! This binary runs a lightweight L2 node using the reth node builder infrastructure.
+//! It subscribes to L1 chain events to extract deposit transactions.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
@@ -15,7 +16,18 @@ use reth_tracing::tracing::info;
 use std::sync::Arc;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use tempo_zone::{ZoneNode, ZoneNodeArgs};
+use tempo_zone::{L1SubscriberConfig, ZoneNode, ZoneNodeArgs, spawn_l1_subscriber};
+
+/// Tempo Zone CLI arguments.
+#[derive(Debug, Clone, clap::Args)]
+struct ZoneArgs {
+    #[command(flatten)]
+    pub node_args: ZoneNodeArgs,
+
+    /// L1 WebSocket RPC URL for subscribing to deposit events.
+    #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
+    pub l1_rpc_url: Option<String>,
+}
 
 fn main() {
     reth_cli_util::sigsegv_handler::install();
@@ -32,18 +44,33 @@ fn main() {
         )
     };
 
-    if let Err(err) = Cli::<TempoChainSpecParser, ZoneNodeArgs>::parse()
+    if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
         .run_with_components::<ZoneNode>(components, async move |builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
-            let node = ZoneNode::new(&args);
+            let node = ZoneNode::new(&args.node_args);
 
             let NodeHandle {
                 node_exit_future,
-                node: _node,
+                node,
             } = builder.node(node).launch().await?;
 
             info!(target: "reth::cli", "Tempo Zone node started");
+
+            // Spawn L1 subscriber if L1 RPC URL is provided
+            if let Some(l1_rpc_url) = args.l1_rpc_url {
+                let config = L1SubscriberConfig {
+                    l1_rpc_url,
+                    ..Default::default()
+                };
+
+                let _deposit_rx = spawn_l1_subscriber(config, node.task_executor.clone());
+
+                info!(target: "reth::cli", "L1 deposit subscriber started");
+
+                // TODO: Pass deposit_rx to the block builder when ready
+                // For now, deposits will be logged but not processed
+            }
 
             node_exit_future.await?;
             Ok(())

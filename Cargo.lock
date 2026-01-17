@@ -12194,10 +12194,14 @@ name = "tempo-zone"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy-primitives",
+ "alloy-provider",
  "alloy-rpc-types-eth",
+ "alloy-sol-types",
  "eyre",
+ "futures",
  "reth-engine-local",
  "reth-eth-wire-types",
+ "reth-ethereum",
  "reth-evm",
  "reth-node-api",
  "reth-node-builder",
@@ -12215,6 +12219,7 @@ dependencies = [
  "tempo-payload-types",
  "tempo-primitives",
  "tempo-transaction-pool",
+ "tokio",
 ]
 
 [[package]]
