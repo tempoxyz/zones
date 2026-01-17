@@ -147,7 +147,7 @@ async fn test_batch_input_state_roots() {
     coordinator.add_block(block2);
 
     // Flush and verify state roots
-    let batch = coordinator.flush_batch().expect("should have batch");
+    let (_batch_id, batch) = coordinator.flush_batch().expect("should have batch");
 
     assert_eq!(
         batch.prev_state_root, initial_state_root,
@@ -319,7 +319,7 @@ async fn test_end_to_end_flow() {
     coordinator.add_withdrawal(withdrawal2.clone());
 
     // 4. Flush batch
-    let mut batch_input = coordinator.flush_batch().expect("should produce batch");
+    let (_batch_id, mut batch_input) = coordinator.flush_batch().expect("should produce batch");
 
     assert_eq!(batch_input.blocks.len(), 2);
     assert_eq!(batch_input.deposits.len(), 2);
@@ -458,7 +458,7 @@ async fn test_batch_state_updates() {
     coordinator.add_block(block);
 
     // First batch
-    let batch1 = coordinator.flush_batch().expect("should have batch");
+    let (_batch_id, batch1) = coordinator.flush_batch().expect("should have batch");
     assert_eq!(batch1.prev_state_root, initial_state);
     assert_eq!(batch1.new_state_root, block_state_root);
 
@@ -480,7 +480,7 @@ async fn test_batch_state_updates() {
     coordinator.add_block(block2);
 
     // Second batch should use updated state
-    let batch2 = coordinator.flush_batch().expect("should have batch");
+    let (_batch_id, batch2) = coordinator.flush_batch().expect("should have batch");
     assert_eq!(
         batch2.prev_state_root, block_state_root,
         "prev_state_root should be updated after submission"
@@ -521,7 +521,7 @@ async fn test_multiple_withdrawal_sources() {
     coordinator.add_withdrawal(create_test_withdrawal(2));
     coordinator.add_withdrawal(create_test_withdrawal(3));
 
-    let batch = coordinator.flush_batch().expect("should have batch");
+    let (_batch_id, batch) = coordinator.flush_batch().expect("should have batch");
     assert_eq!(batch.withdrawals.len(), 3);
 
     // Verify withdrawal ordering is preserved
