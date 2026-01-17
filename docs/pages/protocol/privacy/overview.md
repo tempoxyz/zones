@@ -548,7 +548,23 @@ The hash chains are structured differently to optimize for their on-chain operat
 
 ### Deposit queue: newest-outermost
 
-![Deposit Queue](../../../diagrams/deposit-queue.svg)
+```
+Newest deposit wraps the outside (O(1) addition):
+
+                    ┌─────────────────────────────────────────┐
+                    │ hash(d3, ┌─────────────────────────┐ ) │  ← currentDepositsHash
+                    │          │ hash(d2, ┌───────────┐ ) │  │
+                    │          │          │ hash(d1,0) │   │  │
+                    │          │          └───────────┘   │  │
+                    │          └─────────────────────────┘  │
+                    └─────────────────────────────────────────┘
+                      ▲                              ▲
+                      │                              │
+                    newest                        oldest
+                   (outermost)                  (innermost)
+
+Adding d4: currentDepositsHash = keccak256(abi.encode(d4, currentDepositsHash))
+```
 
 - **On-chain addition is O(1)**: `currentDepositsHash = keccak256(abi.encode(deposit, currentDepositsHash))` — wrap the outside.
 - **Proving removals**: Proof starts from stable `processedDepositsHash`, processes deposits in FIFO order (oldest first, working outward), and must prove the result is an ancestor of `pendingDepositsHash`.
@@ -556,13 +572,47 @@ The hash chains are structured differently to optimize for their on-chain operat
 
 ### Withdrawal queue: oldest-outermost
 
-![Withdrawal Queue](../../../diagrams/withdrawal-queue.svg)
+```
+Oldest withdrawal on the outside (O(1) removal):
+
+                    ┌─────────────────────────────────────────┐
+                    │ hash(w1, ┌─────────────────────────┐ ) │  ← withdrawalQueue1
+                    │          │ hash(w2, ┌───────────┐ ) │  │
+                    │          │          │ hash(w3,0) │   │  │
+                    │          │          └───────────┘   │  │
+                    │          └─────────────────────────┘  │
+                    └─────────────────────────────────────────┘
+                      ▲                              ▲
+                      │                              │
+                    oldest                        newest
+                   (outermost)                  (innermost)
+
+Removing w1: verify hash(w1, remainingQueue) == queue, then queue = remainingQueue
+```
 
 - **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
 - **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
 - **Two queues handle the race**: `queue1` for processing, `queue2` for accumulation. When `queue1` empties, swap in `queue2`.
 
-![Two-Queue Swap](../../../diagrams/two-queue-swap.svg)
+```
+Two-queue system:
+
+  ┌──────────────────┐         ┌──────────────────┐
+  │  withdrawalQueue1 │         │  withdrawalQueue2 │
+  │  (being drained)  │         │  (being filled)   │
+  └────────┬─────────┘         └────────┬─────────┘
+           │                            │
+           ▼                            ▼
+      ┌─────────┐                 ┌─────────┐
+      │ w1 ──────► process        │ w4      │ ◄── new from proof
+      │ w2      │                 │ w5      │ ◄── new from proof
+      │ w3      │                 │ w6      │ ◄── new from proof
+      └─────────┘                 └─────────┘
+
+When queue1 is empty:
+  queue1 = queue2
+  queue2 = 0
+```
 
 The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
 
