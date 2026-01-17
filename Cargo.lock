@@ -7141,6 +7141,7 @@ dependencies = [
  "alloy-eips",
  "alloy-evm",
  "alloy-primitives",
+ "alloy-sol-types",
  "eyre",
  "futures-util",
  "reth-chainspec",

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 /// Marker for no database set.
 #[derive(Debug, Clone, Copy)]
+#[doc(hidden)]
 pub struct NoDb;
 
 /// Builder for [`PzNode`].

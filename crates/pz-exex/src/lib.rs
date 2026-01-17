@@ -16,14 +16,15 @@ mod builder;
 pub mod db;
 pub mod execution;
 mod node;
+pub mod portal;
 mod processor;
 mod types;
 
-pub use builder::PzNodeBuilder;
+pub use builder::{NoDb, PzNodeBuilder};
 pub use db::L2Database;
 pub use execution::{execute_block, process_deposit};
 pub use node::PzNode;
-pub use processor::PzBlockProcessor;
+pub use processor::{PzBlockProcessor, ReceiptExt};
 pub use types::{PzNodeTypes, PzNodeTypesDb};
 
 // TODO: implement rpc and then we can strip it out further so that its a limited RPC
