@@ -17,6 +17,13 @@ struct WithdrawalQueue {
 ///      - `active`: active queue being processed
 ///      - `pending`: pending queue receiving new withdrawals from proofs
 ///      When active empties, swap in pending.
+///
+///      Note on proof complexity: The off-chain proof that enqueues withdrawals is O(N) in the number
+///      of pending withdrawals, since it must reconstruct the hash chain to append new items. While
+///      this could theoretically become expensive if withdrawals accumulate faster than they are
+///      processed, in practice the withdrawal queue proving costs are expected to be a small fraction
+///      of the costs of proving zone blocks. If this becomes a concern, the design could be extended
+///      with overflow queues to bound proof complexity, without changing the on-chain interface.
 library WithdrawalQueueLib {
     error NoWithdrawals();
     error InvalidWithdrawal();
