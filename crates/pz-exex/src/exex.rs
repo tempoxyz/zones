@@ -5,6 +5,7 @@
 
 use crate::{
     builder::{BlockReceiver, SharedZoneState, ZoneBlock, ZoneBlockBuilder},
+    storage::{StateSnapshot, ZoneStorage},
     types::{
         BatchSubmitted, Deposit, DepositEnqueued, L1Cursor, PortalEvent, PortalEventKind, PzConfig,
     },
@@ -24,11 +25,15 @@ pub struct PrivacyZoneExEx<Node: FullNodeComponents> {
     state: Arc<SharedZoneState>,
     config: PzConfig,
     block_rx: BlockReceiver,
+    storage: ZoneStorage,
 }
 
 impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
     /// Create a new Privacy Zone ExEx and spawn the block builder task.
-    pub fn new(ctx: ExExContext<Node>, config: PzConfig) -> Self {
+    pub fn new(ctx: ExExContext<Node>, config: PzConfig) -> eyre::Result<Self> {
+        // Create storage
+        let storage = ZoneStorage::new(config.zone_id, config.data_dir.clone())?;
+
         // Create shared state
         let state = Arc::new(SharedZoneState::new());
 
@@ -49,12 +54,13 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
 
         info!(zone_id = config.zone_id, "Spawned zone block builder task");
 
-        Self {
+        Ok(Self {
             ctx,
             state,
             config,
             block_rx,
-        }
+            storage,
+        })
     }
 
     /// Start processing chain notifications.
@@ -110,13 +116,30 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
             zone_id = self.config.zone_id,
             block_number = block.number,
             block_hash = %block.hash,
+            state_root = %block.state_root,
             tx_count = block.tx_count,
             deposit_count = block.deposit_count,
             gas_used = block.gas_used,
             "Zone block built"
         );
 
-        // TODO: persist block to zone database
+        // Persist block to storage
+        self.storage.persist_block(&block)?;
+
+        // Persist state snapshot every N blocks (for faster recovery)
+        const STATE_SNAPSHOT_INTERVAL: u64 = 100;
+        if block.number % STATE_SNAPSHOT_INTERVAL == 0 {
+            let state = self.state.lock();
+            let snapshot = StateSnapshot {
+                config: self.config.clone(),
+                state: state.zone_state().clone(),
+                block_number: block.number,
+                block_hash: block.hash,
+            };
+            drop(state);
+            self.storage.persist_state(&snapshot)?;
+        }
+
         // TODO: post commitment to L1 (batch when ready)
 
         Ok(())
@@ -332,7 +355,7 @@ where
 {
     move |ctx| {
         Box::pin(async move {
-            let exex = PrivacyZoneExEx::new(ctx, config);
+            let exex = PrivacyZoneExEx::new(ctx, config)?;
             exex.start().await
         })
     }

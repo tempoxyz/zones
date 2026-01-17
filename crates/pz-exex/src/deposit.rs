@@ -11,7 +11,7 @@ use alloy_primitives::{Address, TxKind, U256};
 use reth_revm::{
     DatabaseCommit, State,
     context::{BlockEnv, TxEnv, result::ExecutionResult},
-    db::states::bundle_state::BundleRetention,
+    db::{BundleState, states::bundle_state::BundleRetention},
 };
 use reth_tracing::tracing::{debug, warn};
 use tempo_chainspec::hardfork::TempoHardfork;
@@ -28,6 +28,8 @@ pub struct DepositResult {
     pub refund_exit: Option<ExitIntent>,
     /// Gas used by the calldata execution (0 if no calldata).
     pub gas_used: u64,
+    /// Bundle state changes from execution (for state root computation).
+    pub bundle: Option<BundleState>,
 }
 
 /// Process a deposit: credit TIP-20 balance and optionally execute calldata.
@@ -59,11 +61,12 @@ pub fn process_deposit(
             success: true,
             refund_exit: None,
             gas_used: 0,
+            bundle: None,
         });
     }
 
     // Step 3: Execute calldata at `to` address
-    let execution_result = execute_deposit_call(state, deposit)?;
+    let (execution_result, bundle) = execute_deposit_call(state, deposit)?;
 
     match &execution_result {
         ExecutionResult::Success { gas_used, .. } => {
@@ -76,6 +79,7 @@ pub fn process_deposit(
                 success: true,
                 refund_exit: None,
                 gas_used: *gas_used,
+                bundle: Some(bundle),
             })
         }
         ExecutionResult::Revert { gas_used, output } => {
@@ -102,6 +106,7 @@ pub fn process_deposit(
                 success: false,
                 refund_exit: Some(refund_exit),
                 gas_used: *gas_used,
+                bundle: Some(bundle),
             })
         }
         ExecutionResult::Halt { gas_used, reason } => {
@@ -128,6 +133,7 @@ pub fn process_deposit(
                 success: false,
                 refund_exit: Some(refund_exit),
                 gas_used: *gas_used,
+                bundle: Some(bundle),
             })
         }
     }
@@ -183,10 +189,11 @@ fn debit_tip20_balance(
 }
 
 /// Execute the deposit calldata at the recipient address.
+/// Returns the execution result and the bundle state changes.
 fn execute_deposit_call(
     state: &mut ZoneState,
     deposit: &Deposit,
-) -> eyre::Result<ExecutionResult<TempoHaltReason>> {
+) -> eyre::Result<(ExecutionResult<TempoHaltReason>, BundleState)> {
     let env: EvmEnv<TempoHardfork, TempoBlockEnv> = EvmEnv {
         cfg_env: Default::default(),
         block_env: TempoBlockEnv {
@@ -229,7 +236,10 @@ fn execute_deposit_call(
     evm.db_mut().commit(result.state);
     evm.db_mut().merge_transitions(BundleRetention::Reverts);
 
-    Ok(result.result)
+    // Take the bundle state for state root computation
+    let bundle = evm.db_mut().take_bundle();
+
+    Ok((result.result, bundle))
 }
 
 #[cfg(test)]
@@ -243,6 +253,7 @@ mod tests {
             success: true,
             refund_exit: None,
             gas_used: 0,
+            bundle: None,
         };
         assert!(result.success);
         assert!(result.refund_exit.is_none());
@@ -262,6 +273,7 @@ mod tests {
             success: false,
             refund_exit: Some(refund),
             gas_used: 21000,
+            bundle: None,
         };
 
         assert!(!result.success);

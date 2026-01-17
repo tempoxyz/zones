@@ -5,6 +5,7 @@
 
 use crate::{
     deposit::process_deposit,
+    root::{compute_state_root, compute_transactions_root, merge_bundles},
     state::ZoneState,
     types::{PendingTx, PzConfig},
 };
@@ -170,6 +171,7 @@ impl ZoneBlockBuilder {
         let mut state = self.state.lock();
 
         // Take pending txs
+        // TODO: we cant take in the event that we cant fit everything into the block
         let pending_txs = state.take_pending_txs();
         if pending_txs.is_empty() {
             return None;
@@ -186,6 +188,10 @@ impl ZoneBlockBuilder {
         let mut deposit_count = 0usize;
         let mut gas_used = 0u64;
         let exit_index = state.pending_exits().len() as u64;
+
+        // Track bundles and tx hashes for root computation
+        let mut bundles: Vec<BundleState> = Vec::new();
+        let mut tx_hashes: Vec<B256> = Vec::new();
 
         info!(
             block_number,
@@ -206,7 +212,7 @@ impl ZoneBlockBuilder {
             }
 
             match pending_tx {
-                PendingTx::Deposit { deposit, .. } => {
+                PendingTx::Deposit { deposit, deposit_hash, .. } => {
                     match process_deposit(
                         &mut state,
                         self.config.gas_token,
@@ -218,6 +224,14 @@ impl ZoneBlockBuilder {
                             gas_used += result.gas_used;
                             deposit_count += 1;
                             tx_count += 1;
+
+                            // Track deposit hash for transactions root
+                            tx_hashes.push(deposit_hash);
+
+                            // Collect bundle if present
+                            if let Some(bundle) = result.bundle {
+                                bundles.push(bundle);
+                            }
 
                             if result.success {
                                 debug!(
@@ -254,10 +268,15 @@ impl ZoneBlockBuilder {
             return None;
         }
 
-        // Compute roots (simplified for now)
-        // TODO: compute proper state root from bundle
-        let state_root = B256::repeat_byte(0x42); // Placeholder
-        let transactions_root = B256::repeat_byte(0x43); // Placeholder
+        // Merge all bundles from transaction execution
+        let merged_bundle = merge_bundles(bundles);
+
+        // Compute state root from previous root and bundle changes
+        let prev_state_root = state.zone_state().state_root;
+        let state_root = compute_state_root(prev_state_root, &merged_bundle);
+
+        // Compute transactions root from tx hashes
+        let transactions_root = compute_transactions_root(&tx_hashes);
 
         let hash = ZoneBlock::compute_hash(
             block_number,
@@ -285,7 +304,7 @@ impl ZoneBlockBuilder {
             tx_count,
             deposit_count,
             gas_used,
-            bundle: BundleState::default(), // TODO: capture actual bundle
+            bundle: merged_bundle,
         };
 
         info!(
