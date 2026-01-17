@@ -1,11 +1,11 @@
 //! Tempo Zone Node configuration.
 //!
 //! This is a lightweight L2 node built on reth's node builder infrastructure.
-//! It reuses Tempo's EVM, primitives, pool, and RPC, but with noop consensus.
+//! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use alloy_primitives::U256;
-use reth_consensus::noop::NoopConsensus;
 use reth_engine_local::LocalPayloadAttributesBuilder;
+use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_evm::revm::primitives::Address;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
@@ -15,15 +15,14 @@ use reth_node_api::{
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
-        BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
-        PayloadBuilderBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
+        ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder, NoopNetworkBuilder,
+        NoopPayloadBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_node_ethereum::EthereumNetworkBuilder;
 use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock, SealedHeader};
 use reth_provider::{ChainSpecProvider, EthStorage};
 use reth_rpc::DynRpcConverter;
@@ -35,8 +34,7 @@ use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
 use tempo_evm::{TempoEvmConfig, evm::TempoEvmFactory};
-use tempo_node::rpc::TempoReceiptConverter;
-use tempo_payload_builder::TempoPayloadBuilder;
+use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
@@ -44,54 +42,43 @@ use tempo_transaction_pool::{
     validator::TempoTransactionValidator,
 };
 
-use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, TempoNodeArgs};
+pub use tempo_node::TempoNodeArgs as ZoneNodeArgs;
+
+/// Network primitives for Zone.
+type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 
 /// Tempo Zone node type configuration.
 ///
-/// Uses Tempo primitives, EVM, and pool, but with NoopConsensus.
-#[derive(Debug, Default, Clone)]
+/// Uses Tempo primitives, EVM, and pool, but with noop consensus/network/payload.
+#[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
-pub struct ZoneNode {
-    pool_builder: ZonePoolBuilder,
-    payload_builder_builder: ZonePayloadBuilderBuilder,
-}
+pub struct ZoneNode;
 
 impl ZoneNode {
     /// Create new instance of a Zone node.
-    pub fn new(args: &TempoNodeArgs) -> Self {
-        Self {
-            pool_builder: ZonePoolBuilder {
-                aa_valid_after_max_secs: args.aa_valid_after_max_secs,
-            },
-            payload_builder_builder: ZonePayloadBuilderBuilder {
-                state_provider_metrics: args.builder_state_provider_metrics,
-                disable_state_cache: args.builder_disable_state_cache,
-            },
-        }
+    pub fn new(_args: &ZoneNodeArgs) -> Self {
+        Self
     }
 
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
-    pub fn components<N>(
-        pool_builder: ZonePoolBuilder,
-        payload_builder_builder: ZonePayloadBuilderBuilder,
-    ) -> ComponentsBuilder<
+    pub fn components<N>() -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
-        EthereumNetworkBuilder,
+        NoopPayloadBuilder,
+        NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
-        ZoneConsensusBuilder,
+        NoopConsensusBuilder,
     >
     where
         N: FullNodeTypes<Types = Self>,
     {
         ComponentsBuilder::default()
             .node_types::<N>()
-            .pool(pool_builder)
+            .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
-            .payload(BasicPayloadServiceBuilder::new(payload_builder_builder))
-            .network(EthereumNetworkBuilder::default())
-            .consensus(ZoneConsensusBuilder::default())
+            .noop_payload()
+            .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
+            .noop_consensus()
     }
 }
 
@@ -130,7 +117,6 @@ where
     pub fn new() -> Self {
         Self {
             inner: RpcAddOns::new(
-                // TODO: strip out anything we dont need
                 ZoneEthApiBuilder::default(),
                 ZoneEngineValidatorBuilder,
                 NoopEngineApiBuilder::default(),
@@ -200,15 +186,15 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
-        EthereumNetworkBuilder,
+        NoopPayloadBuilder,
+        NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
-        ZoneConsensusBuilder,
+        NoopConsensusBuilder,
     >;
     type AddOns = ZoneAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        Self::components(self.pool_builder, self.payload_builder_builder)
+        Self::components()
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -242,7 +228,6 @@ struct ZonePayloadAttributesBuilder {
 }
 
 impl ZonePayloadAttributesBuilder {
-    /// Creates a new instance of the builder.
     fn new(chain_spec: Arc<TempoChainSpec>) -> Self {
         Self {
             inner: LocalPayloadAttributesBuilder::new(chain_spec).without_increasing_timestamp(),
@@ -287,22 +272,6 @@ where
     }
 }
 
-/// Consensus builder for Zone - uses NoopConsensus since L2 doesn't need BFT.
-#[derive(Debug, Default, Clone, Copy)]
-#[non_exhaustive]
-pub struct ZoneConsensusBuilder;
-
-impl<Node> ConsensusBuilder<Node> for ZoneConsensusBuilder
-where
-    Node: FullNodeTypes<Types = ZoneNode>,
-{
-    type Consensus = NoopConsensus;
-
-    async fn build_consensus(self, _ctx: &BuilderContext<Node>) -> eyre::Result<Self::Consensus> {
-        Ok(NoopConsensus::default())
-    }
-}
-
 /// Engine validator builder for Zone.
 #[derive(Debug, Default, Clone)]
 #[non_exhaustive]
@@ -319,7 +288,7 @@ where
     }
 }
 
-/// Payload validator for Zone - mirrors TempoEngineValidator.
+/// Payload validator for Zone.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ZonePayloadValidator;
 
@@ -349,21 +318,10 @@ impl PayloadValidator<TempoPayloadTypes> for ZonePayloadValidator {
     }
 }
 
-/// Transaction pool builder for Zone.
-#[derive(Debug, Clone, Copy)]
+/// Transaction pool builder for Zone - uses Tempo pool with defaults.
+#[derive(Debug, Default, Clone, Copy)]
 #[non_exhaustive]
-pub struct ZonePoolBuilder {
-    /// Maximum allowed `valid_after` offset for AA txs.
-    pub aa_valid_after_max_secs: u64,
-}
-
-impl Default for ZonePoolBuilder {
-    fn default() -> Self {
-        Self {
-            aa_valid_after_max_secs: DEFAULT_AA_VALID_AFTER_MAX_SECS,
-        }
-    }
-}
+pub struct ZonePoolBuilder;
 
 impl<Node> PoolBuilder<Node> for ZonePoolBuilder
 where
@@ -400,7 +358,7 @@ where
         let validator = validator.map(|v| {
             TempoTransactionValidator::new(
                 v,
-                self.aa_valid_after_max_secs,
+                DEFAULT_AA_VALID_AFTER_MAX_SECS,
                 amm_liquidity_cache.clone(),
             )
         });
@@ -433,39 +391,6 @@ where
         debug!(target: "reth::cli", "Spawned txpool maintenance task");
 
         Ok(transaction_pool)
-    }
-}
-
-/// Payload builder builder for Zone.
-#[derive(Debug, Default, Clone, Copy)]
-#[non_exhaustive]
-pub struct ZonePayloadBuilderBuilder {
-    /// Enable state provider metrics for the payload builder.
-    pub state_provider_metrics: bool,
-    /// Disable state cache for the payload builder.
-    pub disable_state_cache: bool,
-}
-
-impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, TempoEvmConfig>
-    for ZonePayloadBuilderBuilder
-where
-    Node: FullNodeTypes<Types = ZoneNode>,
-{
-    type PayloadBuilder = TempoPayloadBuilder<Node::Provider>;
-
-    async fn build_payload_builder(
-        self,
-        ctx: &BuilderContext<Node>,
-        pool: TempoTransactionPool<Node::Provider>,
-        evm_config: TempoEvmConfig,
-    ) -> eyre::Result<Self::PayloadBuilder> {
-        Ok(TempoPayloadBuilder::new(
-            pool,
-            ctx.provider().clone(),
-            evm_config,
-            self.state_provider_metrics,
-            self.disable_state_cache,
-        ))
     }
 }
 

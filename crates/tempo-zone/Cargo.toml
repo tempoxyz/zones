@@ -12,44 +12,34 @@ workspace = true
 
 [dependencies]
 # tempo
-tempo-chainspec = { workspace = true, features = ["default"] }
+tempo-chainspec.workspace = true
 tempo-evm = { workspace = true, features = ["rpc", "engine"] }
-tempo-node = { workspace = true }
-tempo-payload-builder.workspace = true
+tempo-node.workspace = true
 tempo-payload-types.workspace = true
-tempo-primitives = { workspace = true, features = ["default"] }
+tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
+tempo-alloy = { workspace = true, features = ["tempo-compat"] }
 
 # reth
-reth-consensus.workspace = true
 reth-engine-local.workspace = true
+reth-eth-wire-types.workspace = true
 reth-evm.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
-reth-node-ethereum.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
+reth-rpc.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
 reth-tracing.workspace = true
 reth-transaction-pool.workspace = true
 
+# alloy
+alloy-primitives.workspace = true
+alloy-rpc-types-eth.workspace = true
+
 # misc
 eyre.workspace = true
 
-# alloy (for RPC block types)
-alloy-primitives.workspace = true
-alloy-rpc-types-eth = { version = "1.4.2" }
-
-# tempo RPC/alloy
-tempo-alloy = { workspace = true, features = ["tempo-compat"] }
-
-# reth RPC
-reth-rpc.workspace = true
-
 [features]
 default = []
-
-asm-keccak = [
-    "reth-node-ethereum/asm-keccak",
-]

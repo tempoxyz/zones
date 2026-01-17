@@ -10,5 +10,4 @@ use eyre as _;
 
 mod node;
 
-pub use node::ZoneNode;
-pub use tempo_node::TempoNodeArgs as ZoneNodeArgs;
+pub use node::{ZoneNode, ZoneNodeArgs};
