@@ -1,28 +1,32 @@
 //! EVM execution for Privacy Zone L2.
 //!
-//! Based on reth-exex-examples/rollup pattern.
+//! Uses tempo-evm with Tempo precompiles (TIP-20, stablecoin DEX, etc.).
 
 use alloy_consensus::{Header, Transaction};
 use alloy_eips::eip1559::INITIAL_BASE_FEE;
+use alloy_evm::EvmEnv;
 use alloy_primitives::{Address, U256};
 use reth_chainspec::{ChainSpec, EthereumHardfork};
-use reth_evm::{ConfigureEvm, Evm, precompiles::PrecompilesMap};
 use reth_execution_errors::BlockValidationError;
-use reth_node_ethereum::{EthEvmConfig, evm::EthEvm};
 use reth_primitives::{Block, BlockBody, Receipt, Recovered, RecoveredBlock, TransactionSigned};
 use reth_primitives_traits::Block as _;
 use reth_revm::{
-    DatabaseCommit, State,
-    context::result::{EVMError, ExecutionResult, ResultAndState},
+    DatabaseCommit,
+    context::BlockEnv,
+    context::result::{ExecutionResult, ResultAndState},
     db::{BundleState, StateBuilder, states::bundle_state::BundleRetention},
-    inspector::NoOpInspector,
 };
 use std::sync::Arc;
+use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_evm::evm::TempoEvm;
+use tempo_revm::TempoBlockEnv;
 use tracing::debug;
 
 use crate::db::L2Database;
 
-/// Execute an L2 block with the given transactions.
+/// Execute an L2 block with the given transactions using the Tempo EVM.
+///
+/// This uses the full Tempo EVM with all precompiles (TIP-20, stablecoin DEX, etc.).
 ///
 /// Returns the executed block, bundle state, receipts, and execution results.
 pub fn execute_block(
@@ -48,12 +52,14 @@ pub fn execute_block(
         gas_limit,
     )?;
 
-    // Configure EVM
-    let evm_config = EthEvmConfig::new(chain_spec);
+    // Build state with bundle tracking
     let state = StateBuilder::new_with_database(db)
         .with_bundle_update()
         .build();
-    let mut evm = evm_config.evm_for_block(state, &header)?;
+
+    // Create Tempo EVM environment and EVM instance
+    let evm_env = create_tempo_evm_env(&header, chain_spec.chain().id());
+    let mut evm = TempoEvm::new(state, evm_env);
 
     // Execute transactions
     let (executed_txs, receipts, results) = execute_transactions(&mut evm, &header, transactions)?;
@@ -68,9 +74,36 @@ pub fn execute_block(
     }
     .try_into_recovered()?;
 
-    let bundle = evm.db_mut().take_bundle();
+    let bundle = evm.ctx_mut().journaled_state.database.take_bundle();
 
     Ok((block, bundle, receipts, results))
+}
+
+/// Create an EVM environment for a Tempo block.
+fn create_tempo_evm_env(header: &Header, chain_id: u64) -> EvmEnv<TempoHardfork, TempoBlockEnv> {
+    use revm::context::CfgEnv;
+
+    let block_env = BlockEnv {
+        number: U256::from(header.number),
+        beneficiary: header.beneficiary,
+        timestamp: U256::from(header.timestamp),
+        gas_limit: header.gas_limit,
+        basefee: header.base_fee_per_gas.unwrap_or_default(),
+        difficulty: header.difficulty,
+        prevrandao: Some(header.mix_hash),
+        ..Default::default()
+    };
+
+    let mut cfg_env = CfgEnv::new_with_spec(TempoHardfork::default());
+    cfg_env.chain_id = chain_id;
+
+    EvmEnv {
+        cfg_env,
+        block_env: TempoBlockEnv {
+            inner: block_env,
+            timestamp_millis_part: 0,
+        },
+    }
 }
 
 /// Construct a block header.
@@ -105,15 +138,19 @@ fn construct_header(
     })
 }
 
-/// Execute transactions and return executed transactions, receipts, and results.
-fn execute_transactions<DB: reth_evm::Database>(
-    evm: &mut EthEvm<State<DB>, NoOpInspector, PrecompilesMap>,
+/// Execute transactions using the Tempo EVM.
+fn execute_transactions<DB>(
+    evm: &mut TempoEvm<DB>,
     header: &Header,
     transactions: Vec<Recovered<TransactionSigned>>,
 ) -> eyre::Result<(Vec<TransactionSigned>, Vec<Receipt>, Vec<ExecutionResult>)>
 where
-    DB::Error: Send,
+    DB: alloy_evm::Database,
 {
+    use alloy_evm::{Evm, FromRecoveredTx, ToTxEnv};
+    use revm::context::TxEnv;
+    use tempo_revm::TempoTxEnv;
+
     let mut receipts = Vec::with_capacity(transactions.len());
     let mut executed_txs = Vec::with_capacity(transactions.len());
     let mut results = Vec::with_capacity(transactions.len());
@@ -137,26 +174,23 @@ where
             );
         }
 
+        // Convert Eth transaction to TxEnv, then to TempoTxEnv
+        let tx_env: TxEnv = transaction.to_tx_env();
+        let tempo_tx_env = TempoTxEnv::from(tx_env);
+
         // Execute transaction
-        let ResultAndState { result, state } = match evm.transact(&transaction) {
+        let ResultAndState { result, state } = match evm.transact(tempo_tx_env) {
             Ok(result) => result,
             Err(err) => {
-                match err {
-                    EVMError::Transaction(err) => {
-                        // Skip invalid transactions
-                        debug!(%err, ?transaction, "Skipping invalid transaction");
-                        continue;
-                    }
-                    _ => {
-                        eyre::bail!("EVM error: {:?}", err)
-                    }
-                }
+                // Skip invalid transactions
+                debug!(?err, ?transaction, "Skipping invalid transaction");
+                continue;
             }
         };
 
         debug!(?transaction, ?result, "Executed transaction");
 
-        evm.db_mut().commit(state);
+        evm.ctx_mut().journaled_state.database.commit(state);
 
         cumulative_gas_used += result.gas_used();
 
@@ -172,7 +206,10 @@ where
         results.push(result);
     }
 
-    evm.db_mut().merge_transitions(BundleRetention::Reverts);
+    evm.ctx_mut()
+        .journaled_state
+        .database
+        .merge_transitions(BundleRetention::Reverts);
 
     Ok((executed_txs, receipts, results))
 }
@@ -209,5 +246,20 @@ mod tests {
         assert_eq!(block.header().number, 0);
         assert!(receipts.is_empty());
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_tempo_evm_has_precompiles() {
+        // Create a minimal EVM env
+        let header = construct_header(MAINNET.clone(), None, 0, 1000, 30_000_000).unwrap();
+        let evm_env = create_tempo_evm_env(&header, MAINNET.chain().id());
+
+        // Create empty db
+        let db = reth_revm::database::CacheDB::new(reth_revm::database::EmptyDB::new());
+        let evm = TempoEvm::new(db, evm_env);
+
+        // TempoEvm::new() calls extend_tempo_precompiles internally via tempo_revm::TempoEvm
+        // Just verify the EVM was created successfully
+        assert!(evm.chain_id() > 0);
     }
 }

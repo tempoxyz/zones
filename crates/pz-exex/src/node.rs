@@ -19,6 +19,7 @@ use std::sync::Arc;
 use tracing::{debug, info, instrument};
 
 /// Genesis journal hash for the L2 chain.
+#[allow(dead_code)] // Will be used when journal tracking is implemented
 pub(crate) const GENESIS_JOURNAL_HASH: B256 =
     b256!("0x0000000000000000000000000000000000000000000000000000000000000000");
 

@@ -21,8 +21,19 @@ reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f1
 reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-tracing.workspace = true
 
+# tempo - EVM with precompiles
+tempo-evm.workspace = true
+tempo-chainspec.workspace = true
+tempo-precompiles.workspace = true
+tempo-revm.workspace = true
+tempo-primitives.workspace = true
+
+# revm - for Context types
+revm.workspace = true
+
 # alloy - eips for base fee calculation
 alloy-eips = { workspace = true }
+alloy-evm = { workspace = true }
 
 # alloy
 alloy-primitives.workspace = true

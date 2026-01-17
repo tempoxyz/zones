@@ -14,6 +14,7 @@ use std::sync::Arc;
 pub struct NoDb;
 
 /// Builder for [`PzNode`].
+#[allow(private_interfaces)]
 pub struct PzNodeBuilder<Host = (), Db = NoDb> {
     ctx: Option<Host>,
     factory: Option<Db>,

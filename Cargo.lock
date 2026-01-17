@@ -7139,6 +7139,7 @@ version = "1.0.0-rc.5"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-evm",
  "alloy-primitives",
  "eyre",
  "futures-util",
@@ -7155,7 +7156,13 @@ dependencies = [
  "reth-provider",
  "reth-revm",
  "reth-tracing",
+ "revm",
  "tempfile",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-precompiles",
+ "tempo-primitives",
+ "tempo-revm",
  "tokio",
  "tracing",
 ]
