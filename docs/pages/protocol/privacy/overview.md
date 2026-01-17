@@ -582,7 +582,8 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
 
 function _executeWithdrawal(Withdrawal calldata w) external {
     require(msg.sender == address(this), 'self only');
-    // Transfer before callback so receiver can use funds (e.g. DEX swap)
+    // Transfer before callback so receiver can use funds in the callback (e.g. DEX swap).
+    // The self-call makes transfer + callback atomic: if callback fails, transfer reverts too.
     ITIP20(token).transfer(w.to, w.amount);
 
     bytes4 selector = IExitReceiver(w.to).onExitReceived{gas: w.gasLimit}(
@@ -596,7 +597,7 @@ function _executeWithdrawal(Withdrawal calldata w) external {
 }
 ```
 
-The self-call makes the transfer and callback atomic while still letting the portal catch failures and enqueue bounce-backs. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits). The portal does not need to know about these use cases—they are handled by receiver contracts.
+The self-call makes the transfer and callback atomic: if the callback fails or returns the wrong selector, the entire self-call reverts (including the transfer), and funds remain in the portal for bounce-back. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits). The portal does not need to know about these use cases—they are handled by receiver contracts.
 
 ## Withdrawal failure and bounce-back
 
