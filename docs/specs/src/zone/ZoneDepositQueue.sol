@@ -34,7 +34,7 @@ contract ZoneDepositQueue {
     bytes32 public processedDepositQueueHash;
 
     /// @notice Latest L1 head observed from deposit queue messages
-    bytes32 public l1BlockHash;
+    bytes32 public l1ParentBlockHash;
     uint64 public l1BlockNumber;
     uint64 public l1Timestamp;
 
@@ -48,14 +48,14 @@ contract ZoneDepositQueue {
         address indexed to,
         uint128 amount,
         bytes32 memo,
-        bytes32 l1BlockHash,
+        bytes32 l1ParentBlockHash,
         uint64 l1BlockNumber,
         uint64 l1Timestamp
     );
 
     event L1SyncProcessed(
         bytes32 indexed messageHash,
-        bytes32 l1BlockHash,
+        bytes32 l1ParentBlockHash,
         uint64 l1BlockNumber,
         uint64 l1Timestamp
     );
@@ -106,7 +106,7 @@ contract ZoneDepositQueue {
                 // Mint gas tokens to the recipient
                 gasToken.mint(d.to, d.amount);
 
-                _updateL1Head(d.l1BlockHash, d.l1BlockNumber, d.l1Timestamp);
+                _updateL1Head(d.l1ParentBlockHash, d.l1BlockNumber, d.l1Timestamp);
 
                 emit DepositProcessed(
                     currentHash,
@@ -114,18 +114,18 @@ contract ZoneDepositQueue {
                     d.to,
                     d.amount,
                     d.memo,
-                    d.l1BlockHash,
+                    d.l1ParentBlockHash,
                     d.l1BlockNumber,
                     d.l1Timestamp
                 );
             } else if (m.kind == DepositQueueMessageKind.L1Sync) {
                 L1Sync memory sync = abi.decode(m.data, (L1Sync));
 
-                _updateL1Head(sync.l1BlockHash, sync.l1BlockNumber, sync.l1Timestamp);
+                _updateL1Head(sync.l1ParentBlockHash, sync.l1BlockNumber, sync.l1Timestamp);
 
                 emit L1SyncProcessed(
                     currentHash,
-                    sync.l1BlockHash,
+                    sync.l1ParentBlockHash,
                     sync.l1BlockNumber,
                     sync.l1Timestamp
                 );
@@ -141,7 +141,7 @@ contract ZoneDepositQueue {
     }
 
     function _updateL1Head(bytes32 blockHash, uint64 blockNumber, uint64 timestamp) internal {
-        l1BlockHash = blockHash;
+        l1ParentBlockHash = blockHash;
         l1BlockNumber = blockNumber;
         l1Timestamp = timestamp;
     }
