@@ -3,8 +3,7 @@
 use crate::{PzNode, PzNodeTypes, types::PzNodeTypesDb};
 use reth_db_common::init;
 use reth_exex::ExExContext;
-use reth_node_api::{FullNodeComponents, NodeTypes};
-use reth_primitives::EthPrimitives;
+use reth_node_api::FullNodeComponents;
 use reth_provider::{BlockHashReader, ProviderFactory};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -54,7 +53,6 @@ impl<Host, Db> PzNodeBuilder<Host, Db> {
     ) -> PzNodeBuilder<ExExContext<NewHost>, Db>
     where
         NewHost: FullNodeComponents,
-        NewHost::Types: NodeTypes<Primitives = EthPrimitives>,
     {
         PzNodeBuilder {
             ctx: Some(ctx),
@@ -95,7 +93,6 @@ impl<Host> PzNodeBuilder<Host, NoDb> {
 impl<Host> PzNodeBuilder<ExExContext<Host>, NoDb>
 where
     Host: FullNodeComponents,
-    Host::Types: NodeTypes<Primitives = EthPrimitives>,
 {
     /// Build with a new MDBX database at the configured data directory.
     pub fn build(self) -> eyre::Result<PzNode<Host, Arc<reth_db::DatabaseEnv>>> {
@@ -159,7 +156,6 @@ where
 impl<Host, Db> PzNodeBuilder<ExExContext<Host>, ProviderFactory<PzNodeTypes<Db>>>
 where
     Host: FullNodeComponents,
-    Host::Types: NodeTypes<Primitives = EthPrimitives>,
     Db: PzNodeTypesDb,
 {
     /// Build with a pre-configured provider factory.

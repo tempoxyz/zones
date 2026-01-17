@@ -4,8 +4,7 @@
 
 use crate::{L2Database, PzNodeTypes, execution, types::PzNodeTypesDb};
 use alloy_consensus::BlockHeader as _;
-use reth_node_api::{FullNodeComponents, NodeTypes};
-use reth_primitives::EthPrimitives;
+use reth_primitives_traits as _;
 use reth_provider::{BlockNumReader, Chain, ProviderFactory};
 use std::sync::Arc;
 use tracing::{debug, info, instrument};
@@ -49,13 +48,12 @@ impl<Db: PzNodeTypesDb> PzBlockProcessor<Db> {
 
     /// Process a committed L1 chain - extract deposits and execute L2 blocks.
     #[instrument(skip_all, fields(l1_blocks = chain.len()))]
-    pub async fn on_l1_commit<Host>(
+    pub async fn on_l1_commit<P>(
         &self,
-        chain: &Arc<Chain<<Host::Types as NodeTypes>::Primitives>>,
+        chain: &Arc<Chain<P>>,
     ) -> eyre::Result<()>
     where
-        Host: FullNodeComponents,
-        Host::Types: NodeTypes<Primitives = EthPrimitives>,
+        P: reth_primitives_traits::NodePrimitives,
     {
         let _last_l2_height = self.l2_provider.last_block_number()?;
 

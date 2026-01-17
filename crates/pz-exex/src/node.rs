@@ -10,9 +10,10 @@ use futures_util::StreamExt;
 use reth_exex::{ExExContext, ExExEvent, ExExHead};
 use reth_node_api::{FullNodeComponents, NodeTypes};
 use reth_primitives::EthPrimitives;
+use reth_primitives_traits::NodePrimitives;
 use reth_provider::{
-    BlockNumReader, BlockReader, CanonStateNotifications, CanonStateSubscriptions, Chain,
-    HeaderProvider, NodePrimitivesProvider, ProviderFactory, providers::BlockchainProvider,
+    BlockNumReader, CanonStateNotifications, CanonStateSubscriptions, Chain, HeaderProvider,
+    NodePrimitivesProvider, ProviderFactory, providers::BlockchainProvider,
 };
 use std::fmt;
 use std::sync::Arc;
@@ -33,7 +34,6 @@ type HostChain<Host> = Chain<PrimitivesOf<Host>>;
 pub struct PzNode<Host, Db>
 where
     Host: FullNodeComponents,
-    Host::Types: NodeTypes<Primitives = EthPrimitives>,
     Db: PzNodeTypesDb,
 {
     /// The host ExEx context for receiving L1 notifications.
@@ -56,7 +56,6 @@ where
 impl<Host, Db> fmt::Debug for PzNode<Host, Db>
 where
     Host: FullNodeComponents,
-    Host::Types: NodeTypes<Primitives = EthPrimitives>,
     Db: PzNodeTypesDb,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -67,7 +66,6 @@ where
 impl<Host, Db> NodePrimitivesProvider for PzNode<Host, Db>
 where
     Host: FullNodeComponents,
-    Host::Types: NodeTypes<Primitives = EthPrimitives>,
     Db: PzNodeTypesDb,
 {
     type Primitives = EthPrimitives;
@@ -76,7 +74,6 @@ where
 impl<Host, Db> CanonStateSubscriptions for PzNode<Host, Db>
 where
     Host: FullNodeComponents,
-    Host::Types: NodeTypes<Primitives = EthPrimitives>,
     Db: PzNodeTypesDb,
 {
     fn subscribe_to_canonical_state(&self) -> CanonStateNotifications<Self::Primitives> {
@@ -87,7 +84,7 @@ where
 impl<Host, Db> PzNode<Host, Db>
 where
     Host: FullNodeComponents,
-    Host::Types: NodeTypes<Primitives = EthPrimitives>,
+    PrimitivesOf<Host>: NodePrimitives,
     Db: PzNodeTypesDb,
 {
     /// Create a new PzNode.
@@ -148,26 +145,17 @@ where
     fn set_exex_head(&mut self, last_l2_block: u64) -> eyre::Result<ExExHead> {
         // For now, just use genesis block as our starting point
         // TODO: Implement proper L1<->L2 block mapping
-        if last_l2_block == 0 {
-            if let Some(genesis_block) = self.host.provider().block_by_number(0)? {
-                let exex_head = ExExHead {
-                    block: genesis_block.num_hash_slow(),
-                };
-                self.host.set_notifications_without_head();
-                return Ok(exex_head);
-            }
-        }
+        let block_number = if last_l2_block == 0 { 0 } else { last_l2_block };
 
-        // Get current L1 head
-        let l1_head = self.host.provider().last_block_number()?;
-        let l1_header = self
+        // Get the sealed header at the target block number
+        let header = self
             .host
             .provider()
-            .sealed_header(l1_head)?
-            .ok_or_else(|| eyre::eyre!("missing L1 header"))?;
+            .sealed_header(block_number)?
+            .ok_or_else(|| eyre::eyre!("missing L1 header at block {}", block_number))?;
 
         let exex_head = ExExHead {
-            block: l1_header.num_hash(),
+            block: header.num_hash(),
         };
         self.host.set_notifications_without_head();
         Ok(exex_head)
@@ -202,7 +190,7 @@ where
         debug!(blocks = chain.len(), "Processing L1 commit");
 
         // Process each L1 block to build corresponding L2 blocks
-        self.processor.on_l1_commit::<Host>(chain).await?;
+        self.processor.on_l1_commit(chain).await?;
 
         Ok(())
     }

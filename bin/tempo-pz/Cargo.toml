@@ -16,14 +16,20 @@ workspace = true
 # pz-exex
 pz-exex.workspace = true
 
+# tempo
+tempo-chainspec = { workspace = true, features = ["default"] }
+tempo-consensus.workspace = true
+tempo-evm.workspace = true
+tempo-node = { workspace = true, features = ["default"] }
+
 # reth
-reth.workspace = true
 reth-chainspec.workspace = true
 reth-cli-util.workspace = true
+reth-ethereum = { workspace = true, features = ["cli"] }
 reth-node-builder.workspace = true
-reth-node-ethereum.workspace = true
 
 # misc
+clap.workspace = true
 eyre.workspace = true
 tracing.workspace = true
 
@@ -34,5 +40,11 @@ path = "src/main.rs"
 [features]
 default = ["asm-keccak", "jemalloc"]
 
-asm-keccak = ["reth-node-ethereum/asm-keccak"]
-jemalloc = ["reth-cli-util/jemalloc"]
+asm-keccak = [
+	"tempo-node/asm-keccak"
+]
+
+jemalloc = [
+	"reth-cli-util/jemalloc",
+	"tempo-node/jemalloc"
+]

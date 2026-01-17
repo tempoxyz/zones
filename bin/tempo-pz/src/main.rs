@@ -1,6 +1,6 @@
 //! Tempo Privacy Zone L2 Node.
 //!
-//! This binary runs an Ethereum node with the Privacy Zone ExEx installed.
+//! This binary runs a Tempo node with the Privacy Zone ExEx installed.
 //! The ExEx listens to L1 chain notifications, extracts deposits, and processes L2 blocks.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
@@ -8,26 +8,46 @@
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
+use clap::Parser;
 use eyre::Context;
 use pz_exex::PzNodeBuilder;
-use reth_chainspec::MAINNET;
+use reth_chainspec::{EthChainSpec as _, MAINNET};
+use reth_ethereum::cli::Cli;
 use reth_node_builder::NodeHandle;
-use reth_node_ethereum::EthereumNode;
+use std::sync::Arc;
+use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
+use tempo_consensus::TempoConsensus;
+use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
+use tempo_node::{TempoNodeArgs, node::TempoNode};
 use tracing::info;
+
+/// Privacy Zone specific arguments.
+#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+struct PzArgs {
+    #[command(flatten)]
+    pub node_args: TempoNodeArgs,
+}
 
 fn main() -> eyre::Result<()> {
     reth_cli_util::sigsegv_handler::install();
-
-
-    // TODO: you are not starting the tempo node, alos start the tempo node and install the exex
-
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
 
-    reth::cli::Cli::parse_args().run(|builder, _| async move {
+    tempo_node::init_version_metadata();
+
+    let cli = Cli::<TempoChainSpecParser, PzArgs>::parse();
+
+    let components = |spec: Arc<TempoChainSpec>| {
+        (
+            TempoEvmConfig::new(spec.clone(), TempoEvmFactory::default()),
+            TempoConsensus::new(spec),
+        )
+    };
+
+    cli.run_with_components::<TempoNode>(components, async move |builder, args| {
         // Get data directory from builder config
         let data_dir = builder
             .config()
@@ -39,13 +59,13 @@ fn main() -> eyre::Result<()> {
 
         let l2_data_dir = data_dir.join("pz-l2");
 
-        info!(?l2_data_dir, "Starting Privacy Zone L2 ExEx");
+        info!(?l2_data_dir, "Starting Privacy Zone L2 ExEx on Tempo node");
 
         let NodeHandle {
             node: _,
             node_exit_future,
         } = builder
-            .node(EthereumNode::default())
+            .node(TempoNode::new(&args.node_args, None))
             .install_exex("PrivacyZone", move |ctx| async move {
                 // Build the PZ node with the ExEx context
                 let pz_node = PzNodeBuilder::new()
@@ -61,10 +81,14 @@ fn main() -> eyre::Result<()> {
                 Ok(pz_node.start())
             })
             .launch_with_debug_capabilities()
-            .await?;
+            .await
+            .wrap_err("failed launching Tempo node with PZ ExEx")?;
 
-        info!("Privacy Zone L2 node started");
+        info!("Tempo Privacy Zone node started");
 
         node_exit_future.await
     })
+    .wrap_err("Tempo PZ node failed")?;
+
+    Ok(())
 }
