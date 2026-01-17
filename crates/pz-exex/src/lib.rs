@@ -25,3 +25,5 @@ pub use execution::{execute_block, process_deposit};
 pub use node::PzNode;
 pub use processor::PzBlockProcessor;
 pub use types::{PzNodeTypes, PzNodeTypesDb};
+
+// TODO: implement rpc and then we can strip it out further so that its a limited RPC

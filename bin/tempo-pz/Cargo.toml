@@ -1,0 +1,38 @@
+[package]
+name = "tempo-pz"
+description = "Tempo Privacy Zone L2 node"
+default-run = "tempo-pz"
+
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# pz-exex
+pz-exex.workspace = true
+
+# reth
+reth.workspace = true
+reth-chainspec.workspace = true
+reth-cli-util.workspace = true
+reth-node-builder.workspace = true
+reth-node-ethereum.workspace = true
+
+# misc
+eyre.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "tempo-pz"
+path = "src/main.rs"
+
+[features]
+default = ["asm-keccak", "jemalloc"]
+
+asm-keccak = ["reth-node-ethereum/asm-keccak"]
+jemalloc = ["reth-cli-util/jemalloc"]

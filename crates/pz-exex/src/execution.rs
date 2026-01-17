@@ -16,11 +16,11 @@ use reth_revm::{
     context::result::ResultAndState,
     db::{BundleState, StateBuilder, states::bundle_state::BundleRetention},
 };
-use tempo_revm::TempoHaltReason;
 use std::sync::Arc;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::evm::TempoEvm;
 use tempo_revm::TempoBlockEnv;
+use tempo_revm::TempoHaltReason;
 use tracing::debug;
 
 use crate::db::L2Database;

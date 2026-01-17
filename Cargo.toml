@@ -9,6 +9,7 @@ publish = false
 members = [
   "bin/tempo",
   "bin/tempo-bench",
+  "bin/tempo-pz",
   "bin/tempo-sidecar",
   "crates/alloy",
   "crates/chainspec",
@@ -116,6 +117,7 @@ tempo-primitives = { path = "crates/primitives", default-features = false, featu
 tempo-contracts = { path = "crates/contracts", default-features = false }
 tempo-telemetry-util = { path = "crates/telemetry-util", default-features = false }
 tempo-transaction-pool = { path = "crates/transaction-pool", default-features = false }
+pz-exex = { path = "crates/pz-exex" }
 
 # reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0-rc.2" }
 # reth-chainspec = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0-rc.2" }
@@ -188,6 +190,8 @@ reth-ethereum-engine-primitives = { git = "https://github.com/paradigmxyz/reth",
 reth-ethereum-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553", default-features = false }
 reth-evm = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-evm-ethereum = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-exex = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-metrics = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-network-peers = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-node-api = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
