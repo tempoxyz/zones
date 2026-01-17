@@ -12,12 +12,31 @@ struct ZoneInfo {
 }
 
 struct BatchCommitment {
-    bytes32 newProcessedDepositsHash;
+    bytes32 newProcessedDepositQueueHash;
     bytes32 newStateRoot;
 }
 
+/// @notice Deposit queue message kinds (Tempo -> zone)
+enum DepositQueueMessageKind {
+    Deposit,
+    L1Sync
+}
+
+/// @notice L1 sync message payload (Tempo -> zone)
+struct L1Sync {
+    bytes32 l1BlockHash;
+    uint64 l1BlockNumber;
+    uint64 l1Timestamp;
+}
+
+/// @notice Deposit queue message wrapper (Tempo -> zone)
+struct DepositQueueMessage {
+    DepositQueueMessageKind kind;
+    bytes data; // abi.encode(Deposit) or abi.encode(L1Sync)
+}
+
 struct Deposit {
-    // L1 block info (zone receives L1 state through deposits)
+    // L1 block info (zone receives L1 state through deposit queue messages)
     bytes32 l1BlockHash;
     uint64 l1BlockNumber;
     uint64 l1Timestamp;
@@ -32,6 +51,7 @@ struct Withdrawal {
     address sender;             // who initiated the withdrawal on the zone
     address to;                 // Tempo recipient
     uint128 amount;
+    bytes32 memo;               // user-provided context
     uint64 gasLimit;            // max gas for IExitReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
     bytes data;                 // calldata for IExitReceiver (if gasLimit > 0)
@@ -41,19 +61,19 @@ struct Withdrawal {
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
     function verify(
-        // Deposit chain
-        bytes32 processedDepositsHash,     // where proof starts (from portal state)
-        bytes32 pendingDepositsHash,       // stable target ceiling (from portal state)
-        bytes32 newProcessedDepositsHash,  // where zone processed up to (from batch)
+        // Deposit queue
+        bytes32 processedDepositQueueHash,     // where proof starts (from portal state)
+        bytes32 pendingDepositQueueHash,       // stable target ceiling (from portal state)
+        bytes32 newProcessedDepositQueueHash,  // where zone processed up to (from batch)
 
         // Zone state transition
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
 
         // Withdrawal queue updates (proof outputs)
-        bytes32 expectedQueue2,       // what proof assumed queue2 was
-        bytes32 updatedQueue2,        // queue2 with new withdrawals added to innermost
-        bytes32 newWithdrawalsOnly,   // new withdrawals only (only used if queue2 was empty)
+        bytes32 expectedWithdrawalQueue2,       // what proof assumed queue2 was
+        bytes32 updatedWithdrawalQueue2,        // queue2 with new withdrawals added to innermost
+        bytes32 newWithdrawalQueueOnly,   // new withdrawals only (only used if queue2 was empty)
 
         // Opaque verifier payload (e.g., attestation envelope, domain separation data)
         bytes calldata verifierData,
@@ -97,7 +117,7 @@ interface IZoneFactory {
 interface IZonePortal {
     event DepositMade(
         uint64 indexed zoneId,
-        bytes32 indexed newCurrentDepositsHash,
+        bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address to,
         uint128 amount,
@@ -107,17 +127,25 @@ interface IZonePortal {
         uint64 l1Timestamp
     );
 
+    event L1SyncAppended(
+        uint64 indexed zoneId,
+        bytes32 indexed newCurrentDepositQueueHash,
+        bytes32 l1BlockHash,
+        uint64 l1BlockNumber,
+        uint64 l1Timestamp
+    );
+
     event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 processedDepositsHash,      // pre-state input to verifier
-        bytes32 pendingDepositsHash,        // pre-state input to verifier
-        bytes32 newProcessedDepositsHash,   // verifier input/output
+        bytes32 processedDepositQueueHash,      // pre-state input to verifier
+        bytes32 pendingDepositQueueHash,        // pre-state input to verifier
+        bytes32 newProcessedDepositQueueHash,   // verifier input/output
         bytes32 prevStateRoot,              // pre-state input to verifier
         bytes32 newStateRoot,               // verifier output
-        bytes32 expectedQueue2,             // verifier input
-        bytes32 updatedQueue2,              // verifier output path 1
-        bytes32 newWithdrawalsOnly          // verifier output path 2
+        bytes32 expectedWithdrawalQueue2,             // verifier input
+        bytes32 updatedWithdrawalQueue2,              // verifier output path 1
+        bytes32 newWithdrawalQueueOnly          // verifier output path 2
     );
 
     event WithdrawalProcessed(
@@ -129,7 +157,7 @@ interface IZonePortal {
 
     event BounceBack(
         uint64 indexed zoneId,
-        bytes32 indexed newCurrentDepositsHash,
+        bytes32 indexed newCurrentDepositQueueHash,
         address indexed fallbackRecipient,
         uint128 amount
     );
@@ -138,7 +166,7 @@ interface IZonePortal {
     error InvalidProof();
     error NoWithdrawals();
     error InvalidWithdrawal();
-    error UnexpectedQueue2State();
+    error UnexpectedWithdrawalQueue2State();
     error CallbackRejected();
 
     function zoneId() external view returns (uint64);
@@ -148,20 +176,21 @@ interface IZonePortal {
     function verifier() external view returns (address);
     function batchIndex() external view returns (uint64);
     function stateRoot() external view returns (bytes32);
-    function processedDepositsHash() external view returns (bytes32);
-    function pendingDepositsHash() external view returns (bytes32);
-    function currentDepositsHash() external view returns (bytes32);
+    function processedDepositQueueHash() external view returns (bytes32);
+    function pendingDepositQueueHash() external view returns (bytes32);
+    function currentDepositQueueHash() external view returns (bytes32);
     function withdrawalQueue1() external view returns (bytes32);
     function withdrawalQueue2() external view returns (bytes32);
 
     function setSequencerPubkey(bytes32 pubkey) external;
-    function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositsHash);
+    function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
+    function syncL1() external returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external;
     function submitBatch(
         BatchCommitment calldata commitment,
-        bytes32 expectedQueue2,
-        bytes32 updatedQueue2,
-        bytes32 newWithdrawalsOnly,
+        bytes32 expectedWithdrawalQueue2,
+        bytes32 updatedWithdrawalQueue2,
+        bytes32 newWithdrawalQueueOnly,
         bytes calldata verifierData,
         bytes calldata proof
     ) external;

@@ -9,9 +9,9 @@ contract MockVerifier is IVerifier {
     bool public shouldAccept = true;
 
     // Track last verify call for test assertions
-    bytes32 public lastProcessedDepositsHash;
-    bytes32 public lastPendingDepositsHash;
-    bytes32 public lastNewProcessedDepositsHash;
+    bytes32 public lastProcessedDepositQueueHash;
+    bytes32 public lastPendingDepositQueueHash;
+    bytes32 public lastNewProcessedDepositQueueHash;
     bytes32 public lastPrevStateRoot;
     bytes32 public lastNewStateRoot;
     bytes32 public lastExpectedQueue2;
@@ -23,14 +23,14 @@ contract MockVerifier is IVerifier {
     }
 
     function verify(
-        bytes32 processedDepositsHash,
-        bytes32 pendingDepositsHash,
-        bytes32 newProcessedDepositsHash,
+        bytes32 processedDepositQueueHash,
+        bytes32 pendingDepositQueueHash,
+        bytes32 newProcessedDepositQueueHash,
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
-        bytes32 expectedQueue2,
-        bytes32 updatedQueue2,
-        bytes32 newWithdrawalsOnly,
+        bytes32 expectedWithdrawalQueue2,
+        bytes32 updatedWithdrawalQueue2,
+        bytes32 newWithdrawalQueueOnly,
         bytes calldata, // verifierData
         bytes calldata  // proof
     ) external view returns (bool) {
@@ -42,25 +42,25 @@ contract MockVerifier is IVerifier {
 
     /// @notice Non-view version for testing that records call parameters
     function verifyAndRecord(
-        bytes32 processedDepositsHash,
-        bytes32 pendingDepositsHash,
-        bytes32 newProcessedDepositsHash,
+        bytes32 processedDepositQueueHash,
+        bytes32 pendingDepositQueueHash,
+        bytes32 newProcessedDepositQueueHash,
         bytes32 prevStateRoot,
         bytes32 newStateRoot,
-        bytes32 expectedQueue2,
-        bytes32 updatedQueue2,
-        bytes32 newWithdrawalsOnly,
+        bytes32 expectedWithdrawalQueue2,
+        bytes32 updatedWithdrawalQueue2,
+        bytes32 newWithdrawalQueueOnly,
         bytes calldata,
         bytes calldata
     ) external returns (bool) {
-        lastProcessedDepositsHash = processedDepositsHash;
-        lastPendingDepositsHash = pendingDepositsHash;
-        lastNewProcessedDepositsHash = newProcessedDepositsHash;
+        lastProcessedDepositQueueHash = processedDepositQueueHash;
+        lastPendingDepositQueueHash = pendingDepositQueueHash;
+        lastNewProcessedDepositQueueHash = newProcessedDepositQueueHash;
         lastPrevStateRoot = prevStateRoot;
         lastNewStateRoot = newStateRoot;
-        lastExpectedQueue2 = expectedQueue2;
-        lastUpdatedQueue2 = updatedQueue2;
-        lastNewWithdrawalsOnly = newWithdrawalsOnly;
+        lastExpectedQueue2 = expectedWithdrawalQueue2;
+        lastUpdatedQueue2 = updatedWithdrawalQueue2;
+        lastNewWithdrawalsOnly = newWithdrawalQueueOnly;
 
         return shouldAccept;
     }

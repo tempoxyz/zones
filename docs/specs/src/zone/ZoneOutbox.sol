@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneGasToken } from "./ZoneInbox.sol";
+import { IZoneGasToken } from "./ZoneDepositQueue.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
@@ -28,6 +28,7 @@ contract ZoneOutbox {
         address indexed sender,
         address to,
         uint128 amount,
+        bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
         bytes data
@@ -58,12 +59,14 @@ contract ZoneOutbox {
     ///      events to build the withdrawal queue for batch submission.
     /// @param to The Tempo recipient address
     /// @param amount Amount to withdraw
+    /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit Gas limit for IExitReceiver callback (0 = no callback)
     /// @param fallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IExitReceiver callback
     function requestWithdrawal(
         address to,
         uint128 amount,
+        bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
         bytes calldata data
@@ -90,6 +93,7 @@ contract ZoneOutbox {
             msg.sender,
             to,
             amount,
+            memo,
             gasLimit,
             fallbackRecipient,
             data

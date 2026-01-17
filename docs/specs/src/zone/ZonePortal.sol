@@ -6,14 +6,22 @@ import {
     IZonePortal,
     IVerifier,
     IExitReceiver,
+    DepositQueueMessage,
+    DepositQueueMessageKind,
+    L1Sync,
     Deposit,
     Withdrawal,
     BatchCommitment
 } from "./IZone.sol";
+import { DepositQueue, DepositQueueLib } from "./DepositQueueLib.sol";
+import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows gas tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
+    using DepositQueueLib for DepositQueue;
+    using WithdrawalQueueLib for WithdrawalQueue;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -27,14 +35,11 @@ contract ZonePortal is IZonePortal {
     uint64 public batchIndex;
     bytes32 public stateRoot;
 
-    // Deposit queue: 3-slot design
-    bytes32 public processedDepositsHash;  // where proofs start
-    bytes32 public pendingDepositsHash;    // stable target for proofs
-    bytes32 public currentDepositsHash;    // head of deposit chain
+    /// @notice Deposit queue (L1→L2): 3-slot ceiling pattern
+    DepositQueue internal _depositQueue;
 
-    // Withdrawal queue: 2-queue system
-    bytes32 public withdrawalQueue1;  // active queue
-    bytes32 public withdrawalQueue2;  // pending queue
+    /// @notice Withdrawal queue (L2→L1): 2-slot swap pattern
+    WithdrawalQueue internal _withdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -72,11 +77,35 @@ contract ZonePortal is IZonePortal {
     }
 
     /*//////////////////////////////////////////////////////////////
+                           QUEUE ACCESSORS
+    //////////////////////////////////////////////////////////////*/
+
+    function processedDepositQueueHash() external view returns (bytes32) {
+        return _depositQueue.processed;
+    }
+
+    function pendingDepositQueueHash() external view returns (bytes32) {
+        return _depositQueue.pending;
+    }
+
+    function currentDepositQueueHash() external view returns (bytes32) {
+        return _depositQueue.current;
+    }
+
+    function withdrawalQueue1() external view returns (bytes32) {
+        return _withdrawalQueue.queue1;
+    }
+
+    function withdrawalQueue2() external view returns (bytes32) {
+        return _withdrawalQueue.queue2;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                DEPOSITS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Deposit gas token into the zone. Returns the new current deposits hash.
-    function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositsHash) {
+    /// @notice Deposit gas token into the zone. Returns the new current deposit queue hash.
+    function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash) {
         // Transfer tokens into escrow
         ITIP20(token).transferFrom(msg.sender, address(this), amount);
 
@@ -91,13 +120,16 @@ contract ZonePortal is IZonePortal {
             memo: memo
         });
 
-        // Update deposit hash chain: new deposit wraps the outside (newest = outermost)
-        newCurrentDepositsHash = keccak256(abi.encode(d, currentDepositsHash));
-        currentDepositsHash = newCurrentDepositsHash;
+        // Build message and insert into deposit queue
+        DepositQueueMessage memory m = DepositQueueMessage({
+            kind: DepositQueueMessageKind.Deposit,
+            data: abi.encode(d)
+        });
+        newCurrentDepositQueueHash = _depositQueue.insert(m);
 
         emit DepositMade(
             zoneId,
-            newCurrentDepositsHash,
+            newCurrentDepositQueueHash,
             msg.sender,
             to,
             amount,
@@ -108,31 +140,37 @@ contract ZonePortal is IZonePortal {
         );
     }
 
+    /// @notice Append an L1 sync message to the deposit queue. Only callable by the sequencer.
+    function syncL1() external onlySequencer returns (bytes32 newCurrentDepositQueueHash) {
+        L1Sync memory sync = L1Sync({
+            l1BlockHash: blockhash(block.number - 1),
+            l1BlockNumber: uint64(block.number),
+            l1Timestamp: uint64(block.timestamp)
+        });
+
+        DepositQueueMessage memory m = DepositQueueMessage({
+            kind: DepositQueueMessageKind.L1Sync,
+            data: abi.encode(sync)
+        });
+        newCurrentDepositQueueHash = _depositQueue.insert(m);
+
+        emit L1SyncAppended(
+            zoneId,
+            newCurrentDepositQueueHash,
+            sync.l1BlockHash,
+            sync.l1BlockNumber,
+            sync.l1Timestamp
+        );
+    }
+
     /*//////////////////////////////////////////////////////////////
                              WITHDRAWALS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Process the next withdrawal from queue1. Only callable by the sequencer.
+    /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
     function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
-        // Swap in queue2 if queue1 is empty
-        if (withdrawalQueue1 == bytes32(0)) {
-            if (withdrawalQueue2 == bytes32(0)) revert NoWithdrawals();
-            withdrawalQueue1 = withdrawalQueue2;
-            withdrawalQueue2 = bytes32(0);
-        }
-
-        // Verify this is the head of queue1
-        if (keccak256(abi.encode(w, remainingQueue)) != withdrawalQueue1) {
-            revert InvalidWithdrawal();
-        }
-
-        // Pop the withdrawal regardless of success/failure
-        if (remainingQueue == bytes32(0)) {
-            withdrawalQueue1 = withdrawalQueue2;
-            withdrawalQueue2 = bytes32(0);
-        } else {
-            withdrawalQueue1 = remainingQueue;
-        }
+        // Pop from withdrawal queue (library handles swap and hash verification)
+        _withdrawalQueue.pop(w, remainingQueue);
 
         // Execute the withdrawal
         if (w.gasLimit == 0) {
@@ -182,10 +220,13 @@ contract ZonePortal is IZonePortal {
             memo: bytes32(0)
         });
 
-        bytes32 newCurrentDepositsHash = keccak256(abi.encode(d, currentDepositsHash));
-        currentDepositsHash = newCurrentDepositsHash;
+        DepositQueueMessage memory m = DepositQueueMessage({
+            kind: DepositQueueMessageKind.Deposit,
+            data: abi.encode(d)
+        });
+        bytes32 newCurrentDepositQueueHash = _depositQueue.insert(m);
 
-        emit BounceBack(zoneId, newCurrentDepositsHash, fallbackRecipient, amount);
+        emit BounceBack(zoneId, newCurrentDepositQueueHash, fallbackRecipient, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -195,22 +236,22 @@ contract ZonePortal is IZonePortal {
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     function submitBatch(
         BatchCommitment calldata commitment,
-        bytes32 expectedQueue2,
-        bytes32 updatedQueue2,
-        bytes32 newWithdrawalsOnly,
+        bytes32 expectedWithdrawalQueue2,
+        bytes32 updatedWithdrawalQueue2,
+        bytes32 newWithdrawalQueueOnly,
         bytes calldata verifierData,
         bytes calldata proof
     ) external onlySequencer {
         // Call verifier
         bool valid = IVerifier(verifier).verify(
-            processedDepositsHash,
-            pendingDepositsHash,
-            commitment.newProcessedDepositsHash,
+            _depositQueue.processed,
+            _depositQueue.pending,
+            commitment.newProcessedDepositQueueHash,
             stateRoot,
             commitment.newStateRoot,
-            expectedQueue2,
-            updatedQueue2,
-            newWithdrawalsOnly,
+            expectedWithdrawalQueue2,
+            updatedWithdrawalQueue2,
+            newWithdrawalQueueOnly,
             verifierData,
             proof
         );
@@ -220,31 +261,36 @@ contract ZonePortal is IZonePortal {
         emit BatchSubmitted(
             zoneId,
             batchIndex,
-            processedDepositsHash,
-            pendingDepositsHash,
-            commitment.newProcessedDepositsHash,
+            _depositQueue.processed,
+            _depositQueue.pending,
+            commitment.newProcessedDepositQueueHash,
             stateRoot,
             commitment.newStateRoot,
-            expectedQueue2,
-            updatedQueue2,
-            newWithdrawalsOnly
+            expectedWithdrawalQueue2,
+            updatedWithdrawalQueue2,
+            newWithdrawalQueueOnly
         );
+
+        // Capture pre-state for library validation
+        bytes32 prevProcessed = _depositQueue.processed;
+        bytes32 prevPending = _depositQueue.pending;
 
         // Update state
         batchIndex++;
         stateRoot = commitment.newStateRoot;
 
-        // Update deposit chain
-        processedDepositsHash = commitment.newProcessedDepositsHash;
-        pendingDepositsHash = currentDepositsHash;
+        // Update deposit queue via library (validates expected state matches)
+        _depositQueue.popWithProof(
+            prevProcessed,
+            prevPending,
+            commitment.newProcessedDepositQueueHash
+        );
 
-        // Update withdrawal queue
-        if (withdrawalQueue2 == expectedQueue2) {
-            withdrawalQueue2 = updatedQueue2;
-        } else if (withdrawalQueue2 == bytes32(0)) {
-            withdrawalQueue2 = newWithdrawalsOnly;
-        } else {
-            revert UnexpectedQueue2State();
-        }
+        // Update withdrawal queue via library
+        _withdrawalQueue.insertWithProof(
+            expectedWithdrawalQueue2,
+            updatedWithdrawalQueue2,
+            newWithdrawalQueueOnly
+        );
     }
 }

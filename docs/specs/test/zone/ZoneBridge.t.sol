@@ -4,7 +4,7 @@ pragma solidity ^0.8.13;
 import { BaseTest } from "../BaseTest.t.sol";
 import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
-import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
+import { ZoneDepositQueue } from "../../src/zone/ZoneDepositQueue.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
@@ -13,6 +13,8 @@ import {
     IZoneFactory,
     IZonePortal,
     IExitReceiver,
+    DepositQueueMessage,
+    DepositQueueMessageKind,
     Deposit,
     Withdrawal,
     BatchCommitment
@@ -40,7 +42,7 @@ contract MockExitReceiver is IExitReceiver {
 }
 
 /// @title ZoneBridgeTest
-/// @notice Tests the full L1<->L2 state machine with mocked message passing
+/// @notice Tests the full L1<->zone state machine with mocked message passing
 /// @dev Simulates sequencer relaying data between chains asynchronously
 contract ZoneBridgeTest is BaseTest {
     /*//////////////////////////////////////////////////////////////
@@ -52,11 +54,11 @@ contract ZoneBridgeTest is BaseTest {
     MockVerifier public l1Verifier;
 
     /*//////////////////////////////////////////////////////////////
-                              L2 CONTRACTS
+                             ZONE CONTRACTS
     //////////////////////////////////////////////////////////////*/
 
     MockZoneGasToken public l2GasToken;
-    ZoneInbox public l2Inbox;
+    ZoneDepositQueue public l2DepositQueue;
     ZoneOutbox public l2Outbox;
 
     /*//////////////////////////////////////////////////////////////
@@ -71,10 +73,10 @@ contract ZoneBridgeTest is BaseTest {
     /// @notice Represents an observed deposit from L1 (simulating sequencer watching events)
     struct ObservedDeposit {
         Deposit deposit;
-        bytes32 newCurrentDepositsHash;
+        bytes32 newCurrentDepositQueueHash;
     }
 
-    /// @notice Represents an observed withdrawal from L2 events
+    /// @notice Represents an observed withdrawal from zone events
     struct ObservedWithdrawal {
         uint64 index;
         Withdrawal withdrawal;
@@ -86,7 +88,7 @@ contract ZoneBridgeTest is BaseTest {
     /// @notice Sequencer's observed withdrawals for current batch
     ObservedWithdrawal[] internal pendingWithdrawals;
 
-    /// @notice Track L2 state root (in reality computed by prover)
+    /// @notice Track zone state root (in reality computed by prover)
     bytes32 internal l2StateRoot;
 
     function setUp() public override {
@@ -115,19 +117,19 @@ contract ZoneBridgeTest is BaseTest {
         (zoneId, portalAddr) = l1Factory.createZone(params);
         l1Portal = ZonePortal(portalAddr);
 
-        // === Deploy L2 Contracts ===
-        // Gas token on L2 (same concept as pathUSD, deployed at "same address" conceptually)
+        // === Deploy zone contracts ===
+        // Gas token on zone (same concept as pathUSD, deployed at "same address" conceptually)
         l2GasToken = new MockZoneGasToken("Zone USD", "zUSD");
 
-        // Zone inbox (processes deposits)
-        l2Inbox = new ZoneInbox(portalAddr, address(l2GasToken), admin);
-        l2GasToken.setMinter(address(l2Inbox), true);
+        // Zone deposit queue (processes deposit queue messages)
+        l2DepositQueue = new ZoneDepositQueue(portalAddr, address(l2GasToken), admin);
+        l2GasToken.setMinter(address(l2DepositQueue), true);
 
         // Zone outbox (handles withdrawals)
         l2Outbox = new ZoneOutbox(address(l2GasToken));
         l2GasToken.setBurner(address(l2Outbox), true);
 
-        // Initialize L2 state root
+        // Initialize zone state root
         l2StateRoot = GENESIS_STATE_ROOT;
     }
 
@@ -155,46 +157,54 @@ contract ZoneBridgeTest is BaseTest {
 
         // Calculate the new hash (matches what L1 portal computes)
         bytes32 prevHash = pendingDeposits.length > 0
-            ? pendingDeposits[pendingDeposits.length - 1].newCurrentDepositsHash
-            : l2Inbox.processedDepositsHash();
+            ? pendingDeposits[pendingDeposits.length - 1].newCurrentDepositQueueHash
+            : l2DepositQueue.processedDepositQueueHash();
 
-        newHash = keccak256(abi.encode(d, prevHash));
+        DepositQueueMessage memory m = DepositQueueMessage({
+            kind: DepositQueueMessageKind.Deposit,
+            data: abi.encode(d)
+        });
+        newHash = keccak256(abi.encode(m, prevHash));
 
         pendingDeposits.push(ObservedDeposit({
             deposit: d,
-            newCurrentDepositsHash: newHash
+            newCurrentDepositQueueHash: newHash
         }));
     }
 
-    /// @notice Simulate sequencer relaying deposits to L2 (system transaction)
+    /// @notice Simulate sequencer relaying deposits to the zone (system transaction)
     function _sequencerRelayDepositsToL2() internal returns (bytes32 newProcessedHash) {
-        if (pendingDeposits.length == 0) return l2Inbox.processedDepositsHash();
+        if (pendingDeposits.length == 0) return l2DepositQueue.processedDepositQueueHash();
 
-        // Build deposit array
-        Deposit[] memory deposits = new Deposit[](pendingDeposits.length);
+        // Build deposit queue message array
+        DepositQueueMessage[] memory messages = new DepositQueueMessage[](pendingDeposits.length);
         for (uint256 i = 0; i < pendingDeposits.length; i++) {
-            deposits[i] = pendingDeposits[i].deposit;
+            messages[i] = DepositQueueMessage({
+                kind: DepositQueueMessageKind.Deposit,
+                data: abi.encode(pendingDeposits[i].deposit)
+            });
         }
 
         // Get expected final hash
-        newProcessedHash = pendingDeposits[pendingDeposits.length - 1].newCurrentDepositsHash;
+        newProcessedHash = pendingDeposits[pendingDeposits.length - 1].newCurrentDepositQueueHash;
 
-        // Process on L2 (sequencer calls as system tx)
-        l2Inbox.processDeposits(deposits, newProcessedHash);
+        // Process on zone (sequencer calls as system tx)
+        l2DepositQueue.processDepositQueue(messages, newProcessedHash);
 
         // Clear pending
         delete pendingDeposits;
 
-        // Update L2 state root (simulated)
-        l2StateRoot = keccak256(abi.encode(l2StateRoot, "deposits", newProcessedHash));
+        // Update zone state root (simulated)
+        l2StateRoot = keccak256(abi.encode(l2StateRoot, "messages", newProcessedHash));
     }
 
-    /// @notice Simulate sequencer observing a withdrawal event on L2
+    /// @notice Simulate sequencer observing a withdrawal event on the zone
     function _sequencerObserveWithdrawal(
         uint64 index,
         address sender,
         address to,
         uint128 amount,
+        bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
         bytes memory data
@@ -205,6 +215,7 @@ contract ZoneBridgeTest is BaseTest {
                 sender: sender,
                 to: to,
                 amount: amount,
+                memo: memo,
                 gasLimit: gasLimit,
                 fallbackRecipient: fallbackRecipient,
                 data: data
@@ -223,7 +234,7 @@ contract ZoneBridgeTest is BaseTest {
     }
 
     /// @notice Simulate sequencer building and submitting a batch to L1
-    function _sequencerSubmitBatch(bytes32 newProcessedDepositsHash) internal {
+    function _sequencerSubmitBatch(bytes32 newProcessedDepositQueueHash) internal {
         // Build withdrawal queue hash from observed events
         bytes32 withdrawalQueueHash = _buildWithdrawalQueueHash();
 
@@ -232,16 +243,16 @@ contract ZoneBridgeTest is BaseTest {
 
         // Prepare batch
         BatchCommitment memory commitment = BatchCommitment({
-            newProcessedDepositsHash: newProcessedDepositsHash,
+            newProcessedDepositQueueHash: newProcessedDepositQueueHash,
             newStateRoot: l2StateRoot
         });
 
         // Submit to L1
         l1Portal.submitBatch(
             commitment,
-            currentQueue2,           // expectedQueue2
-            withdrawalQueueHash,     // updatedQueue2
-            withdrawalQueueHash,     // newWithdrawalsOnly
+            currentQueue2,           // expectedWithdrawalQueue2
+            withdrawalQueueHash,     // updatedWithdrawalQueue2
+            withdrawalQueueHash,     // newWithdrawalQueueOnly
             "",                      // verifierData
             ""                       // proof
         );
@@ -273,18 +284,18 @@ contract ZoneBridgeTest is BaseTest {
         vm.stopPrank();
 
         // Verify L1 state
-        assertEq(l1Portal.currentDepositsHash(), l1DepositHash);
+        assertEq(l1Portal.currentDepositQueueHash(), l1DepositHash);
         assertEq(pathUSD.balanceOf(address(l1Portal)), depositAmount);
 
         // === STEP 2: Sequencer observes deposit (simulated event watching) ===
         _sequencerObserveDeposit(alice, alice, depositAmount, bytes32("hello zone"));
 
-        // === STEP 3: Sequencer relays deposit to L2 (system transaction) ===
+        // === STEP 3: Sequencer relays deposit to zone (system transaction) ===
         bytes32 newProcessedHash = _sequencerRelayDepositsToL2();
 
-        // Verify L2 state
+        // Verify zone state
         assertEq(l2GasToken.balanceOf(alice), depositAmount);
-        assertEq(l2Inbox.processedDepositsHash(), newProcessedHash);
+        assertEq(l2DepositQueue.processedDepositQueueHash(), newProcessedHash);
         assertEq(l2GasToken.totalSupply(), depositAmount);
 
         // === STEP 4: Submit batch to L1 (no withdrawals yet) ===
@@ -292,29 +303,30 @@ contract ZoneBridgeTest is BaseTest {
 
         // Verify L1 batch state updated
         assertEq(l1Portal.batchIndex(), 1);
-        assertEq(l1Portal.processedDepositsHash(), newProcessedHash);
+        assertEq(l1Portal.processedDepositQueueHash(), newProcessedHash);
         assertEq(l1Portal.stateRoot(), l2StateRoot);
 
-        // === STEP 5: Alice requests withdrawal on L2 ===
+        // === STEP 5: Alice requests withdrawal on zone ===
         uint128 withdrawAmount = 400e6;
         vm.startPrank(alice);
         l2GasToken.approve(address(l2Outbox), withdrawAmount);
         l2Outbox.requestWithdrawal(
             alice,          // to (back to self on L1)
             withdrawAmount,
+            bytes32(0),     // memo
             0,              // no callback
             address(0),     // no fallback needed
             ""
         );
         vm.stopPrank();
 
-        // Verify L2 state - tokens burned
+        // Verify zone state - tokens burned
         assertEq(l2GasToken.balanceOf(alice), depositAmount - withdrawAmount);
 
         // === STEP 6: Sequencer observes withdrawal event ===
-        _sequencerObserveWithdrawal(0, alice, alice, withdrawAmount, 0, address(0), "");
+        _sequencerObserveWithdrawal(0, alice, alice, withdrawAmount, bytes32(0), 0, address(0), "");
 
-        // Update L2 state root
+        // Update zone state root
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "withdrawal", 0));
 
         // === STEP 7: Submit batch with withdrawal ===
@@ -326,6 +338,7 @@ contract ZoneBridgeTest is BaseTest {
             sender: alice,
             to: alice,
             amount: withdrawAmount,
+            memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: address(0),
             data: ""
@@ -362,7 +375,7 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveDeposit(bob, bob, 3000e6, bytes32("bob1"));
         bytes32 processedHash = _sequencerRelayDepositsToL2();
 
-        // Verify L2 balances
+        // Verify zone balances
         assertEq(l2GasToken.balanceOf(alice), 2000e6);
         assertEq(l2GasToken.balanceOf(bob), 3000e6);
 
@@ -372,17 +385,17 @@ contract ZoneBridgeTest is BaseTest {
         // === Both request withdrawals ===
         vm.startPrank(alice);
         l2GasToken.approve(address(l2Outbox), 500e6);
-        l2Outbox.requestWithdrawal(alice, 500e6, 0, address(0), "");
+        l2Outbox.requestWithdrawal(alice, 500e6, bytes32(0), 0, address(0), "");
         vm.stopPrank();
 
         vm.startPrank(bob);
         l2GasToken.approve(address(l2Outbox), 1000e6);
-        l2Outbox.requestWithdrawal(bob, 1000e6, 0, address(0), "");
+        l2Outbox.requestWithdrawal(bob, 1000e6, bytes32(0), 0, address(0), "");
         vm.stopPrank();
 
         // Sequencer observes withdrawals
-        _sequencerObserveWithdrawal(0, alice, alice, 500e6, 0, address(0), "");
-        _sequencerObserveWithdrawal(1, bob, bob, 1000e6, 0, address(0), "");
+        _sequencerObserveWithdrawal(0, alice, alice, 500e6, bytes32(0), 0, address(0), "");
+        _sequencerObserveWithdrawal(1, bob, bob, 1000e6, bytes32(0), 0, address(0), "");
 
         // Submit batch with both withdrawals
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "withdrawals"));
@@ -390,10 +403,10 @@ contract ZoneBridgeTest is BaseTest {
 
         // Build expected queue hash (oldest = outermost)
         Withdrawal memory w0 = Withdrawal({
-            sender: alice, to: alice, amount: 500e6, gasLimit: 0, fallbackRecipient: address(0), data: ""
+            sender: alice, to: alice, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: address(0), data: ""
         });
         Withdrawal memory w1 = Withdrawal({
-            sender: bob, to: bob, amount: 1000e6, gasLimit: 0, fallbackRecipient: address(0), data: ""
+            sender: bob, to: bob, amount: 1000e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: address(0), data: ""
         });
         bytes32 innerHash = keccak256(abi.encode(w1, bytes32(0)));
         bytes32 queueHash = keccak256(abi.encode(w0, innerHash));
@@ -411,7 +424,7 @@ contract ZoneBridgeTest is BaseTest {
     }
 
     function test_fullFlow_withdrawalWithCallback() public {
-        // Setup: deposit to L2
+        // Setup: deposit to zone
         vm.startPrank(alice);
         pathUSD.approve(address(l1Portal), 1000e6);
         l1Portal.deposit(alice, 1000e6, bytes32(""));
@@ -427,14 +440,15 @@ contract ZoneBridgeTest is BaseTest {
         l2Outbox.requestWithdrawal(
             address(exitReceiver),  // to: receiver contract
             500e6,
+            bytes32(0),             // memo
             100000,                 // gasLimit for callback
-            alice,                  // fallbackRecipient on L2
+            alice,                  // fallbackRecipient on zone
             "callback_data"
         );
         vm.stopPrank();
 
         // Sequencer observes and submits
-        _sequencerObserveWithdrawal(0, alice, address(exitReceiver), 500e6, 100000, alice, "callback_data");
+        _sequencerObserveWithdrawal(0, alice, address(exitReceiver), 500e6, bytes32(0), 100000, alice, "callback_data");
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "callback_withdrawal"));
         _sequencerSubmitBatch(processedHash);
 
@@ -443,6 +457,7 @@ contract ZoneBridgeTest is BaseTest {
             sender: alice,
             to: address(exitReceiver),
             amount: 500e6,
+            memo: bytes32(0),
             gasLimit: 100000,
             fallbackRecipient: alice,
             data: "callback_data"
@@ -457,7 +472,7 @@ contract ZoneBridgeTest is BaseTest {
     }
 
     function test_fullFlow_bounceBackOnCallbackFailure() public {
-        // Setup: deposit to L2
+        // Setup: deposit to zone
         vm.startPrank(alice);
         pathUSD.approve(address(l1Portal), 1000e6);
         l1Portal.deposit(alice, 1000e6, bytes32(""));
@@ -474,6 +489,7 @@ contract ZoneBridgeTest is BaseTest {
         l2Outbox.requestWithdrawal(
             address(exitReceiver),
             500e6,
+            bytes32(0),  // memo
             100000,
             alice,  // fallback recipient
             ""
@@ -481,17 +497,18 @@ contract ZoneBridgeTest is BaseTest {
         vm.stopPrank();
 
         // Sequencer observes and submits
-        _sequencerObserveWithdrawal(0, alice, address(exitReceiver), 500e6, 100000, alice, "");
+        _sequencerObserveWithdrawal(0, alice, address(exitReceiver), 500e6, bytes32(0), 100000, alice, "");
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "failing_callback"));
         _sequencerSubmitBatch(processedHash);
 
-        bytes32 depositHashBefore = l1Portal.currentDepositsHash();
+        bytes32 depositHashBefore = l1Portal.currentDepositQueueHash();
 
         // Process withdrawal - callback will fail, triggering bounce-back
         Withdrawal memory w = Withdrawal({
             sender: alice,
             to: address(exitReceiver),
             amount: 500e6,
+            memo: bytes32(0),
             gasLimit: 100000,
             fallbackRecipient: alice,
             data: ""
@@ -502,7 +519,7 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(pathUSD.balanceOf(address(exitReceiver)), 0);
 
         // Verify bounce-back deposit was created
-        assertTrue(l1Portal.currentDepositsHash() != depositHashBefore);
+        assertTrue(l1Portal.currentDepositQueueHash() != depositHashBefore);
     }
 
     function test_fullFlow_transferOnL2() public {
@@ -515,21 +532,21 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
         _sequencerRelayDepositsToL2();
 
-        // Alice transfers to Bob on L2
+        // Alice transfers to Bob on zone
         vm.prank(alice);
         l2GasToken.transfer(bob, 300e6);
 
-        // Verify L2 balances
+        // Verify zone balances
         assertEq(l2GasToken.balanceOf(alice), 700e6);
         assertEq(l2GasToken.balanceOf(bob), 300e6);
 
-        // Bob withdraws on L2
+        // Bob withdraws on zone
         vm.startPrank(bob);
         l2GasToken.approve(address(l2Outbox), 300e6);
-        l2Outbox.requestWithdrawal(bob, 300e6, 0, address(0), "");
+        l2Outbox.requestWithdrawal(bob, 300e6, bytes32(0), 0, address(0), "");
         vm.stopPrank();
 
-        // Verify Bob's L2 balance debited
+        // Verify Bob's zone balance debited
         assertEq(l2GasToken.balanceOf(bob), 0);
         assertEq(l2Outbox.nextWithdrawalIndex(), 1);
     }
@@ -549,22 +566,28 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32("d3"));
 
         // But only processes first two
-        Deposit[] memory firstTwo = new Deposit[](2);
-        firstTwo[0] = pendingDeposits[0].deposit;
-        firstTwo[1] = pendingDeposits[1].deposit;
-        bytes32 partialHash = pendingDeposits[1].newCurrentDepositsHash;
+        DepositQueueMessage[] memory firstTwo = new DepositQueueMessage[](2);
+        firstTwo[0] = DepositQueueMessage({
+            kind: DepositQueueMessageKind.Deposit,
+            data: abi.encode(pendingDeposits[0].deposit)
+        });
+        firstTwo[1] = DepositQueueMessage({
+            kind: DepositQueueMessageKind.Deposit,
+            data: abi.encode(pendingDeposits[1].deposit)
+        });
+        bytes32 partialHash = pendingDeposits[1].newCurrentDepositQueueHash;
 
-        l2Inbox.processDeposits(firstTwo, partialHash);
+        l2DepositQueue.processDepositQueue(firstTwo, partialHash);
 
-        // Verify L2 state
+        // Verify zone state
         assertEq(l2GasToken.balanceOf(alice), 2000e6); // Only 2 processed
-        assertEq(l2Inbox.processedDepositsHash(), partialHash);
+        assertEq(l2DepositQueue.processedDepositQueueHash(), partialHash);
 
         // Submit batch with partial processing
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "partial"));
         l1Portal.submitBatch(
             BatchCommitment({
-                newProcessedDepositsHash: partialHash,
+                newProcessedDepositQueueHash: partialHash,
                 newStateRoot: l2StateRoot
             }),
             bytes32(0),
@@ -575,8 +598,8 @@ contract ZoneBridgeTest is BaseTest {
         );
 
         // L1 should show partial processing
-        assertEq(l1Portal.processedDepositsHash(), partialHash);
-        assertEq(l1Portal.pendingDepositsHash(), l1Portal.currentDepositsHash());
+        assertEq(l1Portal.processedDepositQueueHash(), partialHash);
+        assertEq(l1Portal.pendingDepositQueueHash(), l1Portal.currentDepositQueueHash());
     }
 
     function test_l2_insufficientBalanceReverts() public {
@@ -593,7 +616,7 @@ contract ZoneBridgeTest is BaseTest {
         vm.startPrank(alice);
         l2GasToken.approve(address(l2Outbox), 2000e6);
         vm.expectRevert(MockZoneGasToken.InsufficientBalance.selector);
-        l2Outbox.requestWithdrawal(alice, 2000e6, 0, address(0), "");
+        l2Outbox.requestWithdrawal(alice, 2000e6, bytes32(0), 0, address(0), "");
         vm.stopPrank();
     }
 
@@ -623,11 +646,14 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
 
         // Try to process with wrong expected hash
-        Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = pendingDeposits[0].deposit;
+        DepositQueueMessage[] memory messages = new DepositQueueMessage[](1);
+        messages[0] = DepositQueueMessage({
+            kind: DepositQueueMessageKind.Deposit,
+            data: abi.encode(pendingDeposits[0].deposit)
+        });
 
-        vm.expectRevert(ZoneInbox.InvalidDepositChain.selector);
-        l2Inbox.processDeposits(deposits, bytes32("wrong hash"));
+        vm.expectRevert(ZoneDepositQueue.InvalidDepositQueueChain.selector);
+        l2DepositQueue.processDepositQueue(messages, bytes32("wrong hash"));
     }
 
     function test_l2_callbackRequiresFallbackRecipient() public {
@@ -647,6 +673,7 @@ contract ZoneBridgeTest is BaseTest {
         l2Outbox.requestWithdrawal(
             address(exitReceiver),
             500e6,
+            bytes32(0), // memo
             100000,     // gasLimit > 0 requires fallback
             address(0), // invalid!
             ""
@@ -662,13 +689,16 @@ contract ZoneBridgeTest is BaseTest {
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
 
-        Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = pendingDeposits[0].deposit;
-        bytes32 expectedHash = pendingDeposits[0].newCurrentDepositsHash;
+        DepositQueueMessage[] memory messages = new DepositQueueMessage[](1);
+        messages[0] = DepositQueueMessage({
+            kind: DepositQueueMessageKind.Deposit,
+            data: abi.encode(pendingDeposits[0].deposit)
+        });
+        bytes32 expectedHash = pendingDeposits[0].newCurrentDepositQueueHash;
 
         // Non-sequencer tries to process
         vm.prank(alice);
-        vm.expectRevert(ZoneInbox.OnlySequencer.selector);
-        l2Inbox.processDeposits(deposits, expectedHash);
+        vm.expectRevert(ZoneDepositQueue.OnlySequencer.selector);
+        l2DepositQueue.processDepositQueue(messages, expectedHash);
     }
 }
