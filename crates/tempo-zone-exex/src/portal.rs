@@ -1,7 +1,7 @@
 //! ZonePortal contract interface for deposit extraction.
 //!
 //! The ZonePortal is deployed on L1 and allows users to deposit ETH
-//! that is credited on the L2 Privacy Zone.
+//! that is credited on the L2 Tempo Zone.
 
 use alloy_primitives::{Address, U256, address};
 use alloy_sol_types::sol;

@@ -2,58 +2,78 @@
 //!
 //! Extracts deposits from L1 blocks and executes L2 blocks.
 
-use crate::{L2Database, PzNodeTypes, execution, portal, types::PzNodeTypesDb};
+use crate::{L2Database, ZoneNodeTypes, execution, portal, types::ZoneNodeTypesDb};
 use alloy_consensus::BlockHeader as _;
 use alloy_primitives::{Address, B256, Log, U256};
 use alloy_sol_types::SolEvent;
 use reth_primitives_traits as _;
 use reth_provider::{BlockNumReader, Chain, ProviderFactory};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tracing::{debug, info, instrument};
 
 /// L2 Block Processor.
 ///
 /// Handles extraction of deposits from L1 and execution of L2 blocks.
-pub struct PzBlockProcessor<Db>
+pub struct ZoneBlockProcessor<Db>
 where
-    Db: PzNodeTypesDb,
+    Db: ZoneNodeTypesDb,
 {
     /// L2 chain spec.
     #[allow(dead_code)] // Will be used for block execution
     chain_spec: Arc<reth_chainspec::ChainSpec>,
 
     /// L2 provider factory for database access.
-    l2_provider: ProviderFactory<PzNodeTypes<Db>>,
+    l2_provider: ProviderFactory<ZoneNodeTypes<Db>>,
 
-    /// In-memory L2 database for EVM execution.
-    l2_db: std::sync::Mutex<L2Database>,
+    /// In-memory L2 database for EVM execution (shared with block builder).
+    l2_db: Arc<Mutex<L2Database>>,
 }
 
-impl<Db: PzNodeTypesDb> std::fmt::Debug for PzBlockProcessor<Db> {
+impl<Db: ZoneNodeTypesDb> std::fmt::Debug for ZoneBlockProcessor<Db> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PzBlockProcessor").finish()
+        f.debug_struct("ZoneBlockProcessor").finish()
     }
 }
 
-impl<Db: PzNodeTypesDb> PzBlockProcessor<Db> {
+impl<Db: ZoneNodeTypesDb> ZoneBlockProcessor<Db> {
     /// Create a new block processor.
     pub fn new(
         chain_spec: Arc<reth_chainspec::ChainSpec>,
-        l2_provider: ProviderFactory<PzNodeTypes<Db>>,
+        l2_provider: ProviderFactory<ZoneNodeTypes<Db>>,
     ) -> Self {
         Self {
             chain_spec,
             l2_provider,
-            l2_db: std::sync::Mutex::new(L2Database::default()),
+            l2_db: Arc::new(Mutex::new(L2Database::default())),
         }
+    }
+
+    /// Create a new block processor with a shared database.
+    pub fn with_shared_db(
+        chain_spec: Arc<reth_chainspec::ChainSpec>,
+        l2_provider: ProviderFactory<ZoneNodeTypes<Db>>,
+        l2_db: Arc<Mutex<L2Database>>,
+    ) -> Self {
+        Self {
+            chain_spec,
+            l2_provider,
+            l2_db,
+        }
+    }
+
+    /// Get a clone of the shared L2 database handle.
+    pub fn l2_db(&self) -> Arc<Mutex<L2Database>> {
+        Arc::clone(&self.l2_db)
+    }
+
+    /// Get a clone of the chain spec.
+    pub fn chain_spec(&self) -> Arc<reth_chainspec::ChainSpec> {
+        Arc::clone(&self.chain_spec)
     }
 
     /// Process a committed L1 chain - extract deposits and execute L2 blocks.
     #[instrument(skip_all, fields(l1_blocks = chain.len()))]
-    pub async fn on_l1_commit<P>(
-        &self,
-        chain: &Arc<Chain<P>>,
-    ) -> eyre::Result<()>
+    pub async fn on_l1_commit<P>(&self, chain: &Arc<Chain<P>>) -> eyre::Result<()>
     where
         P: reth_primitives_traits::NodePrimitives,
         P::Receipt: ReceiptExt,
@@ -90,7 +110,9 @@ impl<Db: PzNodeTypesDb> PzBlockProcessor<Db> {
                 "Found deposits in L1 block"
             );
 
-            // Process deposits by crediting L2 balances
+            // Process deposits by crediting L2 balances.
+            // The block builder runs separately and will include these balance updates
+            // in the next produced block.
             {
                 let mut db = self.l2_db.lock().expect("poisoned lock");
                 for deposit in &deposits {
@@ -103,16 +125,18 @@ impl<Db: PzNodeTypesDb> PzBlockProcessor<Db> {
                     );
                 }
             }
-
-            // TODO: Execute L2 block with user transactions from the mempool
-            // This would call execution::execute_block() with transactions
         }
 
         Ok(())
     }
 
     /// Extract deposit events from an L1 block's receipts.
-    fn extract_deposits<R>(&self, block_number: u64, block_hash: B256, receipts: &[R]) -> Vec<DepositEvent>
+    fn extract_deposits<R>(
+        &self,
+        block_number: u64,
+        block_hash: B256,
+        receipts: &[R],
+    ) -> Vec<DepositEvent>
     where
         R: ReceiptExt,
     {
@@ -140,7 +164,6 @@ impl<Db: PzNodeTypesDb> PzBlockProcessor<Db> {
                             sender: deposit.sender,
                             to: deposit.to,
                             amount: deposit.amount,
-                            data: deposit.data,
                         });
                     }
                     Err(e) => {
@@ -198,8 +221,6 @@ pub(crate) struct DepositEvent {
     pub to: Address,
     /// Amount deposited.
     pub amount: U256,
-    /// Optional calldata for contract interactions.
-    pub data: alloy_primitives::Bytes,
 }
 
 #[cfg(test)]
@@ -246,10 +267,11 @@ mod tests {
     fn test_extract_deposits_from_empty_receipts() {
         let receipts: Vec<MockReceipt> = vec![];
         let block_number = 100;
-        let block_hash = b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
+        let block_hash =
+            b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
 
         // Create a minimal processor for testing
-        // We can't easily create a full PzBlockProcessor without a provider factory,
+        // We can't easily create a full ZoneBlockProcessor without a provider factory,
         // but we can test the extraction logic directly
         let deposits = extract_deposits_from_receipts(block_number, block_hash, &receipts);
         assert!(deposits.is_empty());
@@ -270,7 +292,8 @@ mod tests {
         }];
 
         let block_number = 100;
-        let block_hash = b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
+        let block_hash =
+            b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
 
         let deposits = extract_deposits_from_receipts(block_number, block_hash, &receipts);
 
@@ -296,11 +319,15 @@ mod tests {
         }];
 
         let block_number = 100;
-        let block_hash = b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
+        let block_hash =
+            b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
 
         let deposits = extract_deposits_from_receipts(block_number, block_hash, &receipts);
 
-        assert!(deposits.is_empty(), "Should not extract deposits from failed transactions");
+        assert!(
+            deposits.is_empty(),
+            "Should not extract deposits from failed transactions"
+        );
     }
 
     #[test]
@@ -319,11 +346,15 @@ mod tests {
         }];
 
         let block_number = 100;
-        let block_hash = b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
+        let block_hash =
+            b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
 
         let deposits = extract_deposits_from_receipts(block_number, block_hash, &receipts);
 
-        assert!(deposits.is_empty(), "Should not extract deposits from other contracts");
+        assert!(
+            deposits.is_empty(),
+            "Should not extract deposits from other contracts"
+        );
     }
 
     #[test]
@@ -351,7 +382,8 @@ mod tests {
         ];
 
         let block_number = 100;
-        let block_hash = b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
+        let block_hash =
+            b256!("0x1234567890123456789012345678901234567890123456789012345678901234");
 
         let deposits = extract_deposits_from_receipts(block_number, block_hash, &receipts);
 
@@ -360,7 +392,7 @@ mod tests {
         assert_eq!(deposits[1].amount, amount2);
     }
 
-    /// Helper function to test extraction logic without needing a full PzBlockProcessor.
+    /// Helper function to test extraction logic without needing a full ZoneBlockProcessor.
     fn extract_deposits_from_receipts<R: ReceiptExt>(
         block_number: u64,
         block_hash: B256,
@@ -387,7 +419,6 @@ mod tests {
                             sender: deposit.sender,
                             to: deposit.to,
                             amount: deposit.amount,
-                            data: deposit.data,
                         });
                     }
                     Err(_) => {}

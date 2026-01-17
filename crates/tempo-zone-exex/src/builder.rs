@@ -1,6 +1,6 @@
-//! Builder for PzNode.
+//! Builder for ZoneNode.
 
-use crate::{PzNode, PzNodeTypes, types::PzNodeTypesDb};
+use crate::{ZoneNode, ZoneNodeTypes, types::ZoneNodeTypesDb};
 use reth_db_common::init;
 use reth_exex::ExExContext;
 use reth_node_api::FullNodeComponents;
@@ -13,28 +13,29 @@ use std::sync::Arc;
 #[doc(hidden)]
 pub struct NoDb;
 
-/// Builder for [`PzNode`].
+/// Builder for [`ZoneNode`].
 #[allow(private_interfaces)]
-pub struct PzNodeBuilder<Host = (), Db = NoDb> {
+pub struct ZoneNodeBuilder<Host = (), Db = NoDb> {
+    // TODO: make this required
     ctx: Option<Host>,
     factory: Option<Db>,
     chain_spec: Option<Arc<reth_chainspec::ChainSpec>>,
     data_dir: Option<PathBuf>,
 }
 
-impl<Host, Db> std::fmt::Debug for PzNodeBuilder<Host, Db> {
+impl<Host, Db> std::fmt::Debug for ZoneNodeBuilder<Host, Db> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PzNodeBuilder").finish_non_exhaustive()
+        f.debug_struct("ZoneNodeBuilder").finish_non_exhaustive()
     }
 }
 
-impl Default for PzNodeBuilder {
+impl Default for ZoneNodeBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PzNodeBuilder {
+impl ZoneNodeBuilder {
     /// Create a new builder.
     pub fn new() -> Self {
         Self {
@@ -46,16 +47,16 @@ impl PzNodeBuilder {
     }
 }
 
-impl<Host, Db> PzNodeBuilder<Host, Db> {
+impl<Host, Db> ZoneNodeBuilder<Host, Db> {
     /// Set the ExEx context.
     pub fn with_ctx<NewHost>(
         self,
         ctx: ExExContext<NewHost>,
-    ) -> PzNodeBuilder<ExExContext<NewHost>, Db>
+    ) -> ZoneNodeBuilder<ExExContext<NewHost>, Db>
     where
         NewHost: FullNodeComponents,
     {
-        PzNodeBuilder {
+        ZoneNodeBuilder {
             ctx: Some(ctx),
             factory: self.factory,
             chain_spec: self.chain_spec,
@@ -76,13 +77,13 @@ impl<Host, Db> PzNodeBuilder<Host, Db> {
     }
 }
 
-impl<Host> PzNodeBuilder<Host, NoDb> {
+impl<Host> ZoneNodeBuilder<Host, NoDb> {
     /// Set the provider factory directly.
-    pub fn with_factory<NewDb: PzNodeTypesDb>(
+    pub fn with_factory<NewDb: ZoneNodeTypesDb>(
         self,
-        factory: ProviderFactory<PzNodeTypes<NewDb>>,
-    ) -> PzNodeBuilder<Host, ProviderFactory<PzNodeTypes<NewDb>>> {
-        PzNodeBuilder {
+        factory: ProviderFactory<ZoneNodeTypes<NewDb>>,
+    ) -> ZoneNodeBuilder<Host, ProviderFactory<ZoneNodeTypes<NewDb>>> {
+        ZoneNodeBuilder {
             ctx: self.ctx,
             factory: Some(factory),
             chain_spec: self.chain_spec,
@@ -91,12 +92,12 @@ impl<Host> PzNodeBuilder<Host, NoDb> {
     }
 }
 
-impl<Host> PzNodeBuilder<ExExContext<Host>, NoDb>
+impl<Host> ZoneNodeBuilder<ExExContext<Host>, NoDb>
 where
     Host: FullNodeComponents,
 {
     /// Build with a new MDBX database at the configured data directory.
-    pub fn build(self) -> eyre::Result<PzNode<Host, Arc<reth_db::DatabaseEnv>>> {
+    pub fn build(self) -> eyre::Result<ZoneNode<Host, Arc<reth_db::DatabaseEnv>>> {
         let data_dir = self
             .data_dir
             .ok_or_else(|| eyre::eyre!("data_dir must be set"))?;
@@ -108,7 +109,7 @@ where
         let db_path = data_dir.join("db");
         std::fs::create_dir_all(&db_path)?;
         let db = reth_db::init_db(db_path, reth_db::mdbx::DatabaseArguments::default())?;
-        
+
         // Create static file provider
         let static_files_path = data_dir.join("static_files");
         std::fs::create_dir_all(&static_files_path)?;
@@ -121,7 +122,7 @@ where
         let rocksdb = reth_provider::providers::RocksDBProvider::builder(rocksdb_path).build()?;
 
         // Create provider factory
-        let factory = ProviderFactory::<PzNodeTypes<Arc<reth_db::DatabaseEnv>>>::new(
+        let factory = ProviderFactory::<ZoneNodeTypes<Arc<reth_db::DatabaseEnv>>>::new(
             Arc::new(db),
             chain_spec.clone(),
             static_file_provider,
@@ -132,12 +133,12 @@ where
         Self::init_genesis(&factory)?;
 
         let ctx = self.ctx.ok_or_else(|| eyre::eyre!("ctx must be set"))?;
-        PzNode::new_unsafe(ctx, factory, chain_spec)
+        ZoneNode::new_unsafe(ctx, factory, chain_spec)
     }
 
     /// Initialize genesis state if the database is empty.
     fn init_genesis(
-        factory: &ProviderFactory<PzNodeTypes<Arc<reth_db::DatabaseEnv>>>,
+        factory: &ProviderFactory<ZoneNodeTypes<Arc<reth_db::DatabaseEnv>>>,
     ) -> eyre::Result<()> {
         // Check if genesis already exists
         if factory.block_hash(0).is_ok_and(|h| h.is_some()) {
@@ -154,13 +155,13 @@ where
     }
 }
 
-impl<Host, Db> PzNodeBuilder<ExExContext<Host>, ProviderFactory<PzNodeTypes<Db>>>
+impl<Host, Db> ZoneNodeBuilder<ExExContext<Host>, ProviderFactory<ZoneNodeTypes<Db>>>
 where
     Host: FullNodeComponents,
-    Db: PzNodeTypesDb,
+    Db: ZoneNodeTypesDb,
 {
     /// Build with a pre-configured provider factory.
-    pub fn build_with_factory(self) -> eyre::Result<PzNode<Host, Db>> {
+    pub fn build_with_factory(self) -> eyre::Result<ZoneNode<Host, Db>> {
         let ctx = self.ctx.ok_or_else(|| eyre::eyre!("ctx must be set"))?;
         let factory = self
             .factory
@@ -169,6 +170,6 @@ where
             .chain_spec
             .ok_or_else(|| eyre::eyre!("chain_spec must be set"))?;
 
-        PzNode::new_unsafe(ctx, factory, chain_spec)
+        ZoneNode::new_unsafe(ctx, factory, chain_spec)
     }
 }

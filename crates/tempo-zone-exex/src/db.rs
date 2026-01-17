@@ -1,4 +1,4 @@
-//! L2 Database for Privacy Zone.
+//! L2 Database for Tempo Zone.
 //!
 //! Implements reth_revm::Database for EVM execution.
 //! Based on reth-exex-examples/rollup pattern but uses reth's ProviderFactory.
@@ -7,9 +7,9 @@ use alloy_primitives::{Address, B256, U256};
 use reth_primitives::{Block, RecoveredBlock};
 use reth_provider::OriginalValuesKnown;
 use reth_revm::{
-    db::{states::PlainStorageChangeset, BundleState, DBErrorMarker},
-    state::{AccountInfo, Bytecode},
     Database as RevmDatabase,
+    db::{BundleState, DBErrorMarker, states::PlainStorageChangeset},
+    state::{AccountInfo, Bytecode},
 };
 use std::{
     collections::HashMap,
@@ -89,7 +89,12 @@ impl L2Database {
 
     /// Credit balance to an address (for deposits).
     pub fn credit_balance(&mut self, address: Address, amount: U256) -> eyre::Result<()> {
-        let account = self.accounts.entry(address).or_insert_with(AccountInfo::default);
+        // TODO: we need to update this to increment the tip20 precompile instead we can simply do
+        // this by StorageCtx::new(TIP20Token::from_address(addr).increment_balance)
+        let account = self
+            .accounts
+            .entry(address)
+            .or_insert_with(AccountInfo::default);
         account.balance = account
             .balance
             .checked_add(amount)
@@ -186,11 +191,7 @@ impl RevmDatabase for L2Database {
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        Ok(self
-            .bytecode
-            .get(&code_hash)
-            .cloned()
-            .unwrap_or_default())
+        Ok(self.bytecode.get(&code_hash).cloned().unwrap_or_default())
     }
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {

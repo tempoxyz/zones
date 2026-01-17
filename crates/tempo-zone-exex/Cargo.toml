@@ -1,5 +1,5 @@
 [package]
-name = "pz-exex"
+name = "tempo-zone-exex"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,7 +1,7 @@
 [package]
-name = "tempo-pz"
-description = "Tempo Privacy Zone L2 node"
-default-run = "tempo-pz"
+name = "tempo-zone"
+description = "Tempo Zone L2 node"
+default-run = "tempo-zone"
 
 version.workspace = true
 edition.workspace = true
@@ -13,8 +13,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# pz-exex
-pz-exex.workspace = true
+# tempo-zone-exex
+tempo-zone-exex.workspace = true
 
 # tempo
 tempo-chainspec = { workspace = true, features = ["default"] }
@@ -34,7 +34,7 @@ eyre.workspace = true
 tracing.workspace = true
 
 [[bin]]
-name = "tempo-pz"
+name = "tempo-zone"
 path = "src/main.rs"
 
 [features]

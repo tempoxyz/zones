@@ -7134,41 +7134,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "pz-exex"
-version = "1.0.0-rc.5"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-evm",
- "alloy-primitives",
- "alloy-sol-types",
- "eyre",
- "futures-util",
- "reth-chainspec",
- "reth-db",
- "reth-db-common",
- "reth-evm",
- "reth-execution-errors",
- "reth-exex",
- "reth-node-api",
- "reth-node-ethereum",
- "reth-primitives",
- "reth-primitives-traits",
- "reth-provider",
- "reth-revm",
- "reth-tracing",
- "revm",
- "tempfile",
- "tempo-chainspec",
- "tempo-evm",
- "tempo-precompiles",
- "tempo-primitives",
- "tempo-revm",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "quanta"
 version = "0.12.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12100,24 +12065,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tempo-pz"
-version = "1.0.0-rc.5"
-dependencies = [
- "clap",
- "eyre",
- "pz-exex",
- "reth-chainspec",
- "reth-cli-util",
- "reth-ethereum",
- "reth-node-builder",
- "tempo-chainspec",
- "tempo-consensus",
- "tempo-evm",
- "tempo-node",
- "tracing",
-]
-
-[[package]]
 name = "tempo-revm"
 version = "1.0.0-rc.5"
 dependencies = [
@@ -12241,6 +12188,59 @@ dependencies = [
  "tempo-precompiles",
  "tempo-revm",
  "tokio",
+]
+
+[[package]]
+name = "tempo-zone"
+version = "1.0.0-rc.5"
+dependencies = [
+ "clap",
+ "eyre",
+ "reth-chainspec",
+ "reth-cli-util",
+ "reth-ethereum",
+ "reth-node-builder",
+ "tempo-chainspec",
+ "tempo-consensus",
+ "tempo-evm",
+ "tempo-node",
+ "tempo-zone-exex",
+ "tracing",
+]
+
+[[package]]
+name = "tempo-zone-exex"
+version = "1.0.0-rc.5"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-sol-types",
+ "eyre",
+ "futures-util",
+ "reth-chainspec",
+ "reth-db",
+ "reth-db-common",
+ "reth-evm",
+ "reth-execution-errors",
+ "reth-exex",
+ "reth-node-api",
+ "reth-node-ethereum",
+ "reth-primitives",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-revm",
+ "reth-tracing",
+ "revm",
+ "tempfile",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-precompiles",
+ "tempo-primitives",
+ "tempo-revm",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -1,6 +1,6 @@
-//! Tempo Privacy Zone L2 Node.
+//! Tempo Zone L2 Node.
 //!
-//! This binary runs a Tempo node with the Privacy Zone ExEx installed.
+//! This binary runs a Tempo node with the Tempo Zone ExEx installed.
 //! The ExEx listens to L1 chain notifications, extracts deposits, and processes L2 blocks.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
@@ -10,7 +10,7 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 
 use clap::Parser;
 use eyre::Context;
-use pz_exex::PzNodeBuilder;
+use tempo_zone_exex::ZoneNodeBuilder;
 use reth_chainspec::{EthChainSpec as _, MAINNET};
 use reth_ethereum::cli::Cli;
 use reth_node_builder::NodeHandle;
@@ -22,11 +22,15 @@ use tempo_node::{TempoNodeArgs, node::TempoNode};
 use tracing::info;
 
 
-// TODO:  setup with remote exex
+// TODO:  setup with remote exex eventually
+//
+//
+// TODO: setup with subscribe chain notifications and listen to testnet
 
-/// Privacy Zone specific arguments.
+
+/// Tempo Zone specific arguments.
 #[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
-struct PzArgs {
+struct ZoneArgs {
     #[command(flatten)]
     pub node_args: TempoNodeArgs,
 }
@@ -41,7 +45,7 @@ fn main() -> eyre::Result<()> {
 
     tempo_node::init_version_metadata();
 
-    let cli = Cli::<TempoChainSpecParser, PzArgs>::parse();
+    let cli = Cli::<TempoChainSpecParser, ZoneArgs>::parse();
 
     let components = |spec: Arc<TempoChainSpec>| {
         (
@@ -60,38 +64,39 @@ fn main() -> eyre::Result<()> {
             .data_dir()
             .to_path_buf();
 
-        let l2_data_dir = data_dir.join("pz-l2");
+        let l2_data_dir = data_dir.join("zone-l2");
 
-        info!(?l2_data_dir, "Starting Privacy Zone L2 ExEx on Tempo node");
+        info!(?l2_data_dir, "Starting Tempo Zone L2 ExEx on Tempo node");
 
         let NodeHandle {
             node: _,
             node_exit_future,
         } = builder
             .node(TempoNode::new(&args.node_args, None))
-            .install_exex("PrivacyZone", move |ctx| async move {
-                // Build the PZ node with the ExEx context
-                let pz_node = PzNodeBuilder::new()
+            .install_exex("TempoZone", move |ctx| async move {
+                // Build the Zone node with the ExEx context
+                let zone_node = ZoneNodeBuilder::new()
                     .with_ctx(ctx)
+                    // TODO: update this to take in flags
                     .with_chain_spec(MAINNET.clone())
                     .with_data_dir(l2_data_dir)
                     .build()
-                    .wrap_err("failed to build PZ node")?;
+                    .wrap_err("failed to build Zone node")?;
 
-                info!("Privacy Zone L2 ExEx initialized");
+                info!("Tempo Zone L2 ExEx initialized");
 
                 // Return the node's start future
-                Ok(pz_node.start())
+                Ok(zone_node.start())
             })
             .launch_with_debug_capabilities()
             .await
-            .wrap_err("failed launching Tempo node with PZ ExEx")?;
+            .wrap_err("failed launching Tempo node with Zone ExEx")?;
 
-        info!("Tempo Privacy Zone node started");
+        info!("Tempo Zone node started");
 
         node_exit_future.await
     })
-    .wrap_err("Tempo PZ node failed")?;
+    .wrap_err("Tempo Zone node failed")?;
 
     Ok(())
 }

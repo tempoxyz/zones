@@ -1,4 +1,4 @@
-//! EVM execution for Privacy Zone L2.
+//! EVM execution for Tempo Zone L2.
 //!
 //! Uses tempo-evm with Tempo precompiles (TIP-20, stablecoin DEX, etc.).
 
