@@ -9327,7 +9327,6 @@ version = "1.9.3"
 source = "git+https://github.com/paradigmxyz/reth?rev=d76babb2f17773f79c9cf1eda497c539bd5cf553#d76babb2f17773f79c9cf1eda497c539bd5cf553"
 dependencies = [
  "alloy-consensus",
- "c-kzg",
  "once_cell",
  "reth-ethereum-forks",
  "reth-ethereum-primitives",
@@ -12194,53 +12193,45 @@ dependencies = [
 name = "tempo-zone"
 version = "1.0.0-rc.5"
 dependencies = [
- "clap",
+ "alloy-primitives",
+ "alloy-rpc-types-eth",
  "eyre",
- "reth-chainspec",
- "reth-cli-util",
- "reth-ethereum",
+ "reth-consensus",
+ "reth-engine-local",
+ "reth-evm",
+ "reth-node-api",
  "reth-node-builder",
+ "reth-node-ethereum",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-rpc",
+ "reth-rpc-builder",
+ "reth-rpc-eth-api",
+ "reth-tracing",
+ "reth-transaction-pool",
+ "tempo-alloy",
  "tempo-chainspec",
- "tempo-consensus",
  "tempo-evm",
  "tempo-node",
- "tempo-zone-exex",
- "tracing",
+ "tempo-payload-builder",
+ "tempo-payload-types",
+ "tempo-primitives",
+ "tempo-transaction-pool",
 ]
 
 [[package]]
-name = "tempo-zone-exex"
+name = "tempo-zone-bin"
 version = "1.0.0-rc.5"
 dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-evm",
- "alloy-primitives",
- "alloy-sol-types",
- "eyre",
- "futures-util",
- "reth-chainspec",
- "reth-db",
- "reth-db-common",
- "reth-evm",
- "reth-execution-errors",
- "reth-exex",
- "reth-node-api",
- "reth-node-ethereum",
- "reth-primitives",
- "reth-primitives-traits",
- "reth-provider",
- "reth-revm",
+ "clap",
+ "reth-cli-util",
+ "reth-consensus",
+ "reth-ethereum",
+ "reth-node-builder",
  "reth-tracing",
- "revm",
- "tempfile",
  "tempo-chainspec",
  "tempo-evm",
- "tempo-precompiles",
- "tempo-primitives",
- "tempo-revm",
- "tokio",
- "tracing",
+ "tempo-zone",
 ]
 
 [[package]]

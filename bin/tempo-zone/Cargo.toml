@@ -1,6 +1,6 @@
 [package]
-name = "tempo-zone"
-description = "Tempo Zone L2 node"
+name = "tempo-zone-bin"
+description = "Tempo Zone L2 node binary"
 default-run = "tempo-zone"
 
 version.workspace = true
@@ -13,25 +13,22 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-# tempo-zone-exex
-tempo-zone-exex.workspace = true
+# tempo-zone
+tempo-zone = { path = "../../crates/tempo-zone" }
 
 # tempo
 tempo-chainspec = { workspace = true, features = ["default"] }
-tempo-consensus.workspace = true
 tempo-evm.workspace = true
-tempo-node = { workspace = true, features = ["default"] }
 
 # reth
-reth-chainspec.workspace = true
 reth-cli-util.workspace = true
+reth-consensus.workspace = true
 reth-ethereum = { workspace = true, features = ["cli"] }
 reth-node-builder.workspace = true
+reth-tracing.workspace = true
 
 # misc
 clap.workspace = true
-eyre.workspace = true
-tracing.workspace = true
 
 [[bin]]
 name = "tempo-zone"
@@ -41,10 +38,9 @@ path = "src/main.rs"
 default = ["asm-keccak", "jemalloc"]
 
 asm-keccak = [
-	"tempo-node/asm-keccak"
+	"tempo-zone/asm-keccak"
 ]
 
 jemalloc = [
 	"reth-cli-util/jemalloc",
-	"tempo-node/jemalloc"
 ]

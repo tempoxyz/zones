@@ -1,0 +1,55 @@
+[package]
+name = "tempo-zone"
+description = "Tempo Zone node - a lightweight L2 node built on reth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# tempo
+tempo-chainspec = { workspace = true, features = ["default"] }
+tempo-evm = { workspace = true, features = ["rpc", "engine"] }
+tempo-node = { workspace = true }
+tempo-payload-builder.workspace = true
+tempo-payload-types.workspace = true
+tempo-primitives = { workspace = true, features = ["default"] }
+tempo-transaction-pool.workspace = true
+
+# reth
+reth-consensus.workspace = true
+reth-engine-local.workspace = true
+reth-evm.workspace = true
+reth-node-api.workspace = true
+reth-node-builder.workspace = true
+reth-node-ethereum.workspace = true
+reth-primitives-traits.workspace = true
+reth-provider.workspace = true
+reth-rpc-builder.workspace = true
+reth-rpc-eth-api.workspace = true
+reth-tracing.workspace = true
+reth-transaction-pool.workspace = true
+
+# misc
+eyre.workspace = true
+
+# alloy (for RPC block types)
+alloy-primitives.workspace = true
+alloy-rpc-types-eth = { version = "1.4.2" }
+
+# tempo RPC/alloy
+tempo-alloy = { workspace = true, features = ["tempo-compat"] }
+
+# reth RPC
+reth-rpc.workspace = true
+
+[features]
+default = []
+
+asm-keccak = [
+    "reth-node-ethereum/asm-keccak",
+]
