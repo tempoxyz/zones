@@ -1,10 +1,10 @@
 //! Privacy Zone Execution Extension.
 //!
 //! Based on reth-exex-examples/rollup pattern with Signet-inspired improvements.
-//! Uses in-memory ZoneState (CacheDB-based) instead of SQL.
+//! Spawns a block builder task that builds zone blocks every 250ms.
 
 use crate::{
-    state::ZoneState,
+    builder::{BlockReceiver, SharedZoneState, ZoneBlock, ZoneBlockBuilder},
     types::{
         BatchSubmitted, Deposit, DepositEnqueued, L1Cursor, PortalEvent, PortalEventKind, PzConfig,
     },
@@ -14,22 +14,46 @@ use futures::TryStreamExt;
 use reth_execution_types::Chain;
 use reth_exex::{ExExContext, ExExEvent};
 use reth_node_api::{FullNodeComponents, NodeTypes};
-use reth_tracing::tracing::{debug, info, warn};
+
+use reth_tracing::tracing::{debug, error, info, warn};
+use std::sync::Arc;
 
 /// Privacy Zone Execution Extension.
 pub struct PrivacyZoneExEx<Node: FullNodeComponents> {
     ctx: ExExContext<Node>,
-    state: ZoneState,
+    state: Arc<SharedZoneState>,
     config: PzConfig,
+    block_rx: BlockReceiver,
 }
 
 impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
-    /// Create a new Privacy Zone ExEx.
+    /// Create a new Privacy Zone ExEx and spawn the block builder task.
     pub fn new(ctx: ExExContext<Node>, config: PzConfig) -> Self {
+        // Create shared state
+        let state = Arc::new(SharedZoneState::new());
+
+        // Create block builder
+        let (builder, block_rx) = ZoneBlockBuilder::new(config.clone(), Arc::clone(&state));
+
+        // Spawn block builder as a critical task
+        ctx.components.task_executor().spawn_critical(
+            "pz-block-builder",
+            Box::pin(async move {
+                if let Err(err) = builder.await {
+                    error!(%err, "Zone block builder failed");
+                }
+            }),
+        );
+
+        // TODO: batcher, channel is passed to batcher struct which posts to l1
+
+        info!(zone_id = config.zone_id, "Spawned zone block builder task");
+
         Self {
             ctx,
-            state: ZoneState::new(),
+            state,
             config,
+            block_rx,
         }
     }
 
@@ -44,34 +68,71 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
         // Initialize zone state if needed
         self.init_zone_state()?;
 
-        while let Some(notification) = self.ctx.notifications.try_next().await? {
-            // Handle reverts first (Signet pattern)
-            if let Some(reverted_chain) = notification.reverted_chain() {
-                self.on_revert(&reverted_chain)?;
-            }
+        loop {
+            tokio::select! {
+                // Handle L1 chain notifications
+                notification = self.ctx.notifications.try_next() => {
+                    match notification? {
+                        Some(notification) => {
+                            // Handle reverts first (Signet pattern)
+                            if let Some(reverted_chain) = notification.reverted_chain() {
+                                self.on_revert(&reverted_chain)?;
+                            }
 
-            // Then handle commits
-            if let Some(committed_chain) = notification.committed_chain() {
-                self.on_commit(&committed_chain)?;
-                self.ctx
-                    .events
-                    .send(ExExEvent::FinishedHeight(committed_chain.tip().num_hash()))?;
+                            // Then handle commits
+                            if let Some(committed_chain) = notification.committed_chain() {
+                                self.on_commit(&committed_chain)?;
+                                self.ctx
+                                    .events
+                                    .send(ExExEvent::FinishedHeight(committed_chain.tip().num_hash()))?;
+                            }
+                        }
+                        None => {
+                            // Notification stream ended
+                            break;
+                        }
+                    }
+                }
+
+                // Handle built zone blocks
+                Some(block) = self.block_rx.recv() => {
+                    self.on_zone_block_built(block)?;
+                }
             }
         }
+
+        Ok(())
+    }
+
+    /// Handle a newly built zone block.
+    fn on_zone_block_built(&mut self, block: ZoneBlock) -> eyre::Result<()> {
+        info!(
+            zone_id = self.config.zone_id,
+            block_number = block.number,
+            block_hash = %block.hash,
+            tx_count = block.tx_count,
+            deposit_count = block.deposit_count,
+            gas_used = block.gas_used,
+            "Zone block built"
+        );
+
+        // TODO: persist block to zone database
+        // TODO: post commitment to L1 (batch when ready)
 
         Ok(())
     }
 
     /// Initialize zone state from genesis if not already set.
     fn init_zone_state(&mut self) -> eyre::Result<()> {
-        if self.state.config().is_none() {
+        let mut state = self.state.lock();
+        if state.config().is_none() {
             info!(zone_id = self.config.zone_id, "Initializing zone state");
-            self.state.set_config(self.config.clone());
+            state.set_config(self.config.clone());
         }
         Ok(())
     }
 
-    /// Process a committed chain - extract events and process deposits.
+    /// Process a committed chain - extract events and queue deposits.
     fn on_commit(
         &mut self,
         chain: &Chain<<Node::Types as NodeTypes>::Primitives>,
@@ -79,8 +140,10 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
         // Extract all portal events from the chain
         let events = self.extract_portal_events(chain);
 
+        let mut state = self.state.lock();
+
         for event in events {
-            let current_cursor = self.state.zone_state().cursor;
+            let current_cursor = state.zone_state().cursor;
 
             // Skip events we've already processed (cursor-based dedup)
             if !event.cursor.is_after(&current_cursor) {
@@ -89,7 +152,29 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
 
             match &event.kind {
                 PortalEventKind::Deposit(deposit) => {
-                    self.handle_deposit(&event.cursor, deposit)?;
+                    // Get current deposits hash for chain hash computation
+                    let prev_deposits_hash = state.zone_state().deposits_hash;
+
+                    // Compute deposit hash for the chain
+                    let deposit_hash = deposit.hash(prev_deposits_hash);
+
+                    // Queue deposit as pending transaction
+                    state.queue_deposit(event.cursor, deposit.clone(), deposit_hash);
+
+                    // Update deposits hash in zone state
+                    state.zone_state_mut().deposits_hash = deposit_hash;
+
+                    info!(
+                        zone_id = self.config.zone_id,
+                        sender = %deposit.sender,
+                        to = %deposit.to,
+                        amount = %deposit.amount,
+                        l1_block = event.cursor.block_number,
+                        log_index = event.cursor.log_index,
+                        has_calldata = !deposit.data.is_empty(),
+                        pending_txs = state.pending_txs().len(),
+                        "Queued deposit"
+                    );
                 }
                 PortalEventKind::BatchSubmitted {
                     batch_index,
@@ -106,52 +191,13 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
             }
 
             // Update cursor after processing
-            self.state.zone_state_mut().cursor = event.cursor;
+            state.zone_state_mut().cursor = event.cursor;
         }
 
         Ok(())
     }
 
-    /// Handle a deposit event - queue it for later execution in block building.
-    ///
-    /// Deposits are queued as pending transactions. When the block builder runs,
-    /// it will pull from this queue, execute the deposits (credit TIP-20 + run calldata),
-    /// and include them in a zone block.
-    fn handle_deposit(&mut self, cursor: &L1Cursor, deposit: &Deposit) -> eyre::Result<()> {
-        // Get current deposits hash for chain hash computation
-        let prev_deposits_hash = self.state.zone_state().deposits_hash;
-
-        // Compute deposit hash for the chain
-        let deposit_hash = deposit.hash(prev_deposits_hash);
-
-        // Queue deposit as pending transaction
-        self.state
-            .queue_deposit(*cursor, deposit.clone(), deposit_hash);
-
-        // Update deposits hash in zone state
-        self.state.zone_state_mut().deposits_hash = deposit_hash;
-
-        info!(
-            zone_id = self.config.zone_id,
-            sender = %deposit.sender,
-            to = %deposit.to,
-            amount = %deposit.amount,
-            l1_block = cursor.block_number,
-            log_index = cursor.log_index,
-            has_calldata = !deposit.data.is_empty(),
-            pending_txs = self.state.pending_txs().len(),
-            "Queued deposit"
-        );
-
-        Ok(())
-    }
-
-    /// Handle a chain revert - undo deposits and state changes.
-    ///
-    /// NOTE: For now, this only removes pending deposits/exits after the revert point.
-    /// Full state revert (undoing TIP-20 credits and calldata effects) would require
-    /// either journaling or rebuilding state from scratch. For in-memory state,
-    /// we'd need to track reverts properly or use reth's BundleState with reverts.
+    /// Handle a chain revert - remove pending deposits after revert point.
     fn on_revert(
         &mut self,
         chain: &Chain<<Node::Types as NodeTypes>::Primitives>,
@@ -160,7 +206,8 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
         let mut events = self.extract_portal_events(chain);
         events.reverse();
 
-        let current_cursor = self.state.zone_state().cursor;
+        let mut state = self.state.lock();
+        let current_cursor = state.zone_state().cursor;
 
         for event in events {
             // Only revert events we've actually processed
@@ -195,10 +242,10 @@ impl<Node: FullNodeComponents> PrivacyZoneExEx<Node> {
 
             // Remove deposits after the revert point
             let revert_cursor = L1Cursor::new(revert_to_block, u64::MAX);
-            self.state.remove_deposits_after(revert_cursor);
+            state.remove_deposits_after(revert_cursor);
 
             // Update state cursor
-            self.state.zone_state_mut().cursor = revert_cursor;
+            state.zone_state_mut().cursor = revert_cursor;
         }
 
         Ok(())
