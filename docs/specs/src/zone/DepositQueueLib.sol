@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { DepositQueueMessage } from "./IZone.sol";
+import { DepositQueueMessage, DepositQueueTransition } from "./IZone.sol";
 
 /// @title DepositQueue
 /// @notice 3-slot queue for L1→L2 deposits with proof ceiling pattern
 struct DepositQueue {
     bytes32 processed;  // where proofs start (last proven state)
-    bytes32 pending;    // stable target ceiling for current proof
+    bytes32 snapshot;   // stable target ceiling for current proof
     bytes32 current;    // head of queue (new messages land here)
 }
 
@@ -16,7 +16,7 @@ struct DepositQueue {
 /// @dev Deposits are inserted on-chain and popped (consumed) by proofs.
 ///      The 3-slot design handles the race where new deposits arrive while a proof is in-flight:
 ///      - `processed`: where the last proof ended
-///      - `pending`: snapshot of `current` at proof start (stable ceiling)
+///      - `snapshot`: snapshot of `current` at proof start (stable ceiling)
 ///      - `current`: head where new deposits land
 library DepositQueueLib {
     error InvalidState();
@@ -39,33 +39,29 @@ library DepositQueueLib {
     ///      matches the actual state (ensuring the proof was generated against correct state).
     ///      After this call:
     ///      - `processed = nextProcessed` (advance to where we actually processed)
-    ///      - `pending = current` (snapshot new target for next proof)
+    ///      - `snapshot = current` (snapshot new target for next proof)
     /// @param q The deposit queue
-    /// @param prevProcessedQueueHash The processed value the proof was generated against
-    /// @param prevPendingQueueHash The pending value the proof was generated against
-    /// @param nextProcessedQueueHash Where the proof processed up to
+    /// @param transition The deposit queue transition containing prev/next state hashes
     function dequeueWithProof(
         DepositQueue storage q,
-        bytes32 prevProcessedQueueHash,
-        bytes32 prevPendingQueueHash,
-        bytes32 nextProcessedQueueHash
+        DepositQueueTransition memory transition
     ) internal {
         // Verify the proof was generated against the correct state
-        if (q.processed != prevProcessedQueueHash) revert InvalidState();
-        if (q.pending != prevPendingQueueHash) revert InvalidState();
+        if (q.snapshot != transition.prevSnapshotHash) revert InvalidState();
+        if (q.processed != transition.prevProcessedHash) revert InvalidState();
 
-        q.processed = nextProcessedQueueHash;
-        q.pending = q.current;
+        q.processed = transition.nextProcessedHash;
+        q.snapshot = q.current;
     }
 
     /// @notice Get the current state for proof generation
     /// @param q The deposit queue
     /// @return processed Where proofs start from
-    /// @return pending Stable ceiling for the current proof
+    /// @return snapshot Stable ceiling for the current proof
     /// @return current Head of queue (for reference, not used in proofs)
     function getState(
         DepositQueue storage q
-    ) internal view returns (bytes32 processed, bytes32 pending, bytes32 current) {
-        return (q.processed, q.pending, q.current);
+    ) internal view returns (bytes32 processed, bytes32 snapshot, bytes32 current) {
+        return (q.processed, q.snapshot, q.current);
     }
 }

@@ -13,7 +13,10 @@ import {
     IExitReceiver,
     ZoneInfo,
     Deposit,
-    Withdrawal
+    Withdrawal,
+    StateTransition,
+    DepositQueueTransition,
+    WithdrawalQueueTransition
 } from "../../src/zone/IZone.sol";
 import { WithdrawalQueueLib } from "../../src/zone/WithdrawalQueueLib.sol";
 
@@ -209,27 +212,31 @@ contract ZonePortalTest is BaseTest {
         bytes32 newStateRoot = keccak256("newState");
 
         portal.submitBatch(
-            depositHash,
-            newStateRoot,
-            bytes32(0), // prevPendingWithdrawalQueueHash
-            bytes32(0), // nextPendingWithdrawalQueueHashIfFull
-            bytes32(0), // nextPendingWithdrawalQueueHashIfEmpty
-            "", // verifierData
-            ""  // proof
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: newStateRoot }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            "",
+            ""
         );
 
         // Verify state updated
         assertEq(portal.stateRoot(), newStateRoot);
         assertEq(portal.batchIndex(), 1);
         assertEq(portal.processedDepositQueueHash(), depositHash);
-        assertEq(portal.pendingDepositQueueHash(), depositHash); // snapshot of current
+        assertEq(portal.snapshotDepositQueueHash(), depositHash); // snapshot of current
     }
 
     function test_submitBatch_revertsIfNotSequencer() public {
         bytes32 nextStateRoot = keccak256("state");
         vm.prank(alice); // Not sequencer
         vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.submitBatch(bytes32(0), nextStateRoot, bytes32(0), bytes32(0), bytes32(0), "", "");
+        portal.submitBatch(
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: nextStateRoot }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0) }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            "",
+            ""
+        );
     }
 
     function test_submitBatch_revertsOnInvalidProof() public {
@@ -237,7 +244,13 @@ contract ZonePortalTest is BaseTest {
 
         bytes32 nextStateRoot = keccak256("state");
         vm.expectRevert(IZonePortal.InvalidProof.selector);
-        portal.submitBatch(bytes32(0), nextStateRoot, bytes32(0), bytes32(0), bytes32(0), "", "");
+        portal.submitBatch(
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: nextStateRoot }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0) }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            "",
+            ""
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -267,13 +280,11 @@ contract ZonePortalTest is BaseTest {
         bytes32 withdrawalHash = keccak256(abi.encode(w, bytes32(0)));
 
         // Submit batch that adds withdrawal to pending
-        // When prevPendingWithdrawalQueueHash matches current pending queue, use nextPendingWithdrawalQueueHashIfFull.
+        // When prevPendingHash matches current pending queue, use nextPendingHashIfFull.
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("stateWithWithdrawal"),
-            bytes32(0),      // prevPendingWithdrawalQueueHash (matches current pending queue = 0)
-            withdrawalHash,  // nextPendingWithdrawalQueueHashIfFull
-            withdrawalHash,  // nextPendingWithdrawalQueueHashIfEmpty (not used in this case)
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("stateWithWithdrawal") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: withdrawalHash, nextPendingHashIfEmpty: withdrawalHash }),
             "",
             ""
         );
@@ -313,13 +324,11 @@ contract ZonePortalTest is BaseTest {
         bytes32 pendingQueueHash = keccak256(abi.encode(w1, innerHash));
 
         // Submit batch adding both withdrawals
-        // prevPendingWithdrawalQueueHash = 0 matches current state, so use nextPendingWithdrawalQueueHashIfFull
+        // prevPendingHash = 0 matches current state, so use nextPendingHashIfFull
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("state1"),
-            bytes32(0),
-            pendingQueueHash,
-            pendingQueueHash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state1") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: pendingQueueHash, nextPendingHashIfEmpty: pendingQueueHash }),
             "",
             ""
         );
@@ -363,11 +372,9 @@ contract ZonePortalTest is BaseTest {
         bytes32 w1Hash = keccak256(abi.encode(w1, bytes32(0)));
 
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("state1"),
-            bytes32(0),
-            w1Hash,
-            w1Hash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state1") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: w1Hash, nextPendingHashIfEmpty: w1Hash }),
             "",
             ""
         );
@@ -388,17 +395,15 @@ contract ZonePortalTest is BaseTest {
         });
         bytes32 w2Hash = keccak256(abi.encode(w2, bytes32(0)));
 
-        // Proof expected pending = w1Hash, generated nextPending...IfFull with w2 added.
-        // But since pending is now 0, we use nextPending...IfEmpty.
-        bytes32 nextPendingQueueHashIfFull = keccak256(abi.encode(w2, w1Hash)); // w2 added to w1Hash
+        // Proof expected pending = w1Hash, generated nextPendingHashIfFull with w2 added.
+        // But since pending is now 0, we use nextPendingHashIfEmpty.
+        bytes32 nextPendingHashIfFull = keccak256(abi.encode(w2, w1Hash)); // w2 added to w1Hash
 
-        // This should use nextPending...IfEmpty since pending != prevPending but pending == 0
+        // This should use nextPendingHashIfEmpty since pending != prevPending but pending == 0
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("state2"),
-            w1Hash,
-            nextPendingQueueHashIfFull,
-            w2Hash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state2") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
+            WithdrawalQueueTransition({ prevPendingHash: w1Hash, nextPendingHashIfFull: nextPendingHashIfFull, nextPendingHashIfEmpty: w2Hash }),
             "",
             ""
         );
@@ -415,32 +420,37 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(alice, depositAmount, bytes32("memo"));
         vm.stopPrank();
 
-        // Add withdrawal to pending
+        // Add withdrawal to pending via first batch
         Withdrawal memory w1 = Withdrawal({
             sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
         });
         bytes32 w1Hash = keccak256(abi.encode(w1, bytes32(0)));
 
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("state1"),
-            bytes32(0),
-            w1Hash,
-            w1Hash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state1") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: w1Hash, nextPendingHashIfEmpty: w1Hash }),
             "",
             ""
         );
 
-        // Now pending = w1Hash
-        // Try to submit with wrong prevPendingWithdrawalQueueHash
+        // Verify pending is now w1Hash
+        assertEq(portal.pendingWithdrawalQueueHash(), w1Hash, "pending should be w1Hash after first batch");
+
+        // Try to submit with wrong prevPendingHash (neither matches pending nor is pending zero)
         bytes32 wrongExpected = keccak256("wrong");
+        assertTrue(wrongExpected != w1Hash, "wrongExpected must differ from w1Hash");
+        assertTrue(wrongExpected != bytes32(0), "wrongExpected must not be zero");
+
+        // Cache values before expectRevert (view calls count as "next call")
+        bytes32 currentDeposit = portal.currentDepositQueueHash();
+        bytes32 nextState = keccak256("state2");
+
         vm.expectRevert(WithdrawalQueueLib.UnexpectedPendingQueueHash.selector);
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("state2"),
-            wrongExpected,
-            bytes32(0),
-            bytes32(0),
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: nextState }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: currentDeposit }),
+            WithdrawalQueueTransition({ prevPendingHash: wrongExpected, nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
             "",
             ""
         );
@@ -472,11 +482,9 @@ contract ZonePortalTest is BaseTest {
 
         // Submit batch adding withdrawal
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("state"),
-            bytes32(0),
-            wHash,
-            wHash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
             "",
             ""
         );
@@ -518,11 +526,9 @@ contract ZonePortalTest is BaseTest {
 
         // Submit batch
         portal.submitBatch(
-            depositHashBefore,
-            keccak256("state"),
-            bytes32(0),
-            wHash,
-            wHash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
             "",
             ""
         );
@@ -562,11 +568,9 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         portal.submitBatch(
-            depositHashBefore,
-            keccak256("state"),
-            bytes32(0),
-            wHash,
-            wHash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
             "",
             ""
         );
@@ -606,11 +610,9 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("state"),
-            bytes32(0),
-            wHash,
-            wHash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
             "",
             ""
         );
@@ -637,11 +639,9 @@ contract ZonePortalTest is BaseTest {
         bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         portal.submitBatch(
-            portal.currentDepositQueueHash(),
-            keccak256("state"),
-            bytes32(0),
-            wHash,
-            wHash,
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
             "",
             ""
         );
@@ -658,12 +658,12 @@ contract ZonePortalTest is BaseTest {
     function test_depositChain_threeSlotDesign() public {
         // Test the 3-slot deposit design:
         // processedDepositQueueHash: where proofs start
-        // pendingDepositQueueHash: stable target for proofs
+        // snapshotDepositQueueHash: stable target for proofs
         // currentDepositQueueHash: head of chain (new messages land here)
 
         // Initial state: all zero
         assertEq(portal.processedDepositQueueHash(), bytes32(0));
-        assertEq(portal.pendingDepositQueueHash(), bytes32(0));
+        assertEq(portal.snapshotDepositQueueHash(), bytes32(0));
         assertEq(portal.currentDepositQueueHash(), bytes32(0));
 
         // Make deposits
@@ -677,25 +677,23 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.currentDepositQueueHash(), h2);
         // processed and pending still zero (no batch yet)
         assertEq(portal.processedDepositQueueHash(), bytes32(0));
-        assertEq(portal.pendingDepositQueueHash(), bytes32(0));
+        assertEq(portal.snapshotDepositQueueHash(), bytes32(0));
 
         // Submit batch processing only first deposit
         portal.submitBatch(
-            h1,
-            keccak256("state1"),
-            bytes32(0),
-            bytes32(0),
-            bytes32(0),
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state1") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: h1 }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
             "",
             ""
         );
 
         // After batch:
         // processedDepositQueueHash = h1 (where we processed to)
-        // pendingDepositQueueHash = h2 (snapshot of currentDepositQueueHash)
+        // snapshotDepositQueueHash = h2 (snapshot of currentDepositQueueHash)
         // currentDepositQueueHash = h2 (unchanged by batch)
         assertEq(portal.processedDepositQueueHash(), h1);
-        assertEq(portal.pendingDepositQueueHash(), h2);
+        assertEq(portal.snapshotDepositQueueHash(), h2);
         assertEq(portal.currentDepositQueueHash(), h2);
 
         // New deposit arrives
@@ -706,25 +704,23 @@ contract ZonePortalTest is BaseTest {
         // currentDepositQueueHash updated, others unchanged
         assertEq(portal.currentDepositQueueHash(), h3);
         assertEq(portal.processedDepositQueueHash(), h1);
-        assertEq(portal.pendingDepositQueueHash(), h2);
+        assertEq(portal.snapshotDepositQueueHash(), h2);
 
         // Submit batch processing up to h2
         portal.submitBatch(
-            h2,
-            keccak256("state2"),
-            bytes32(0),
-            bytes32(0),
-            bytes32(0),
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state2") }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: h2 }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
             "",
             ""
         );
 
         // Now:
         // processedDepositQueueHash = h2 (advanced)
-        // pendingDepositQueueHash = h3 (snapshot of current)
+        // snapshotDepositQueueHash = h3 (snapshot of current)
         // currentDepositQueueHash = h3 (unchanged)
         assertEq(portal.processedDepositQueueHash(), h2);
-        assertEq(portal.pendingDepositQueueHash(), h3);
+        assertEq(portal.snapshotDepositQueueHash(), h3);
         assertEq(portal.currentDepositQueueHash(), h3);
     }
 }

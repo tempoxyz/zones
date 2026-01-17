@@ -10,7 +10,10 @@ import {
     DepositQueueMessageKind,
     L1Sync,
     Deposit,
-    Withdrawal
+    Withdrawal,
+    StateTransition,
+    DepositQueueTransition,
+    WithdrawalQueueTransition
 } from "./IZone.sol";
 import { DepositQueue, DepositQueueLib } from "./DepositQueueLib.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
@@ -83,8 +86,8 @@ contract ZonePortal is IZonePortal {
         return _depositQueue.processed;
     }
 
-    function pendingDepositQueueHash() external view returns (bytes32) {
-        return _depositQueue.pending;
+    function snapshotDepositQueueHash() external view returns (bytes32) {
+        return _depositQueue.snapshot;
     }
 
     function currentDepositQueueHash() external view returns (bytes32) {
@@ -110,7 +113,7 @@ contract ZonePortal is IZonePortal {
 
         // Build deposit struct with L1 block info
         Deposit memory d = Deposit({
-            l1BlockHash: blockhash(block.number - 1),
+            l1ParentBlockHash: blockhash(block.number - 1),
             l1BlockNumber: uint64(block.number),
             l1Timestamp: uint64(block.timestamp),
             sender: msg.sender,
@@ -133,7 +136,7 @@ contract ZonePortal is IZonePortal {
             to,
             amount,
             memo,
-            d.l1BlockHash,
+            d.l1ParentBlockHash,
             d.l1BlockNumber,
             d.l1Timestamp
         );
@@ -142,7 +145,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Append an L1 sync message to the deposit queue. Only callable by the sequencer.
     function syncL1() external onlySequencer returns (bytes32 newCurrentDepositQueueHash) {
         L1Sync memory sync = L1Sync({
-            l1BlockHash: blockhash(block.number - 1),
+            l1ParentBlockHash: blockhash(block.number - 1),
             l1BlockNumber: uint64(block.number),
             l1Timestamp: uint64(block.timestamp)
         });
@@ -156,7 +159,7 @@ contract ZonePortal is IZonePortal {
         emit L1SyncAppended(
             zoneId,
             newCurrentDepositQueueHash,
-            sync.l1BlockHash,
+            sync.l1ParentBlockHash,
             sync.l1BlockNumber,
             sync.l1Timestamp
         );
@@ -210,7 +213,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Enqueue a bounce-back deposit for failed callback
     function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
         Deposit memory d = Deposit({
-            l1BlockHash: blockhash(block.number - 1),
+            l1ParentBlockHash: blockhash(block.number - 1),
             l1BlockNumber: uint64(block.number),
             l1Timestamp: uint64(block.timestamp),
             sender: address(this),
@@ -234,63 +237,63 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     function submitBatch(
-        bytes32 nextProcessedDepositQueueHash,
-        bytes32 nextStateRoot,
-        bytes32 prevPendingWithdrawalQueueHash,
-        bytes32 nextPendingWithdrawalQueueHashIfFull,
-        bytes32 nextPendingWithdrawalQueueHashIfEmpty,
+        StateTransition calldata stateTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierData,
         bytes calldata proof
     ) external onlySequencer {
+        // Build deposit queue transition with current state for verifier
+        DepositQueueTransition memory fullDepositTransition = DepositQueueTransition({
+            prevSnapshotHash: _depositQueue.snapshot,
+            prevProcessedHash: _depositQueue.processed,
+            nextProcessedHash: depositQueueTransition.nextProcessedHash
+        });
+
         // Call verifier
         bool valid = IVerifier(verifier).verify(
-            _depositQueue.processed,
-            _depositQueue.pending,
-            nextProcessedDepositQueueHash,
-            stateRoot,
-            nextStateRoot,
-            prevPendingWithdrawalQueueHash,
-            nextPendingWithdrawalQueueHashIfFull,
-            nextPendingWithdrawalQueueHashIfEmpty,
+            StateTransition({
+                prevStateRoot: stateRoot,
+                nextStateRoot: stateTransition.nextStateRoot
+            }),
+            fullDepositTransition,
+            withdrawalQueueTransition,
             verifierData,
             proof
         );
         if (!valid) revert InvalidProof();
 
         // Emit event before state updates (captures pre-state)
-        emit BatchSubmitted(
-            zoneId,
-            batchIndex,
-            _depositQueue.processed,
-            _depositQueue.pending,
-            nextProcessedDepositQueueHash,
-            stateRoot,
-            nextStateRoot,
-            prevPendingWithdrawalQueueHash,
-            nextPendingWithdrawalQueueHashIfFull,
-            nextPendingWithdrawalQueueHashIfEmpty
-        );
-
-        // Capture pre-state for library validation
-        bytes32 prevProcessed = _depositQueue.processed;
-        bytes32 prevPending = _depositQueue.pending;
+        _emitBatchSubmitted(stateTransition, fullDepositTransition, withdrawalQueueTransition);
 
         // Update state
         batchIndex++;
-        stateRoot = nextStateRoot;
+        stateRoot = stateTransition.nextStateRoot;
 
         // Update deposit queue via library (validates expected state matches)
-        _depositQueue.dequeueWithProof(
-            prevProcessed,
-            prevPending,
-            nextProcessedDepositQueueHash
-        );
+        _depositQueue.dequeueWithProof(fullDepositTransition);
 
         // Update withdrawal queue via library
-        _withdrawalQueue.enqueueWithProof(
-            prevPendingWithdrawalQueueHash,
-            nextPendingWithdrawalQueueHashIfFull,
-            nextPendingWithdrawalQueueHashIfEmpty
+        _withdrawalQueue.enqueueWithProof(withdrawalQueueTransition);
+    }
+
+    /// @dev Extracted to avoid stack-too-deep in submitBatch
+    function _emitBatchSubmitted(
+        StateTransition calldata stateTransition,
+        DepositQueueTransition memory depositTransition,
+        WithdrawalQueueTransition calldata withdrawalTransition
+    ) internal {
+        emit BatchSubmitted(
+            zoneId,
+            batchIndex,
+            depositTransition.prevSnapshotHash,
+            depositTransition.prevProcessedHash,
+            depositTransition.nextProcessedHash,
+            stateRoot,
+            stateTransition.nextStateRoot,
+            withdrawalTransition.prevPendingHash,
+            withdrawalTransition.nextPendingHashIfFull,
+            withdrawalTransition.nextPendingHashIfEmpty
         );
     }
 }

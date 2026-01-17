@@ -16,7 +16,10 @@ import {
     DepositQueueMessage,
     DepositQueueMessageKind,
     Deposit,
-    Withdrawal
+    Withdrawal,
+    StateTransition,
+    DepositQueueTransition,
+    WithdrawalQueueTransition
 } from "../../src/zone/IZone.sol";
 
 /// @notice Mock exit receiver for callback tests
@@ -145,7 +148,7 @@ contract ZoneBridgeTest is BaseTest {
     ) internal returns (bytes32 newHash) {
         // Record the deposit with L1 block info
         Deposit memory d = Deposit({
-            l1BlockHash: blockhash(block.number - 1),
+            l1ParentBlockHash: blockhash(block.number - 1),
             l1BlockNumber: uint64(block.number),
             l1Timestamp: uint64(block.timestamp),
             sender: sender,
@@ -238,17 +241,15 @@ contract ZoneBridgeTest is BaseTest {
         bytes32 withdrawalQueueHash = _buildWithdrawalQueueHash();
 
         // Get current L1 pending queue state
-        bytes32 prevPendingWithdrawalQueueHash = l1Portal.pendingWithdrawalQueueHash();
+        bytes32 prevPendingHash = l1Portal.pendingWithdrawalQueueHash();
 
         // Submit to L1
         l1Portal.submitBatch(
-            newProcessedDepositQueueHash,
-            l2StateRoot,
-            prevPendingWithdrawalQueueHash,
-            withdrawalQueueHash,     // nextPendingWithdrawalQueueHashIfFull
-            withdrawalQueueHash,     // nextPendingWithdrawalQueueHashIfEmpty
-            "",                      // verifierData
-            ""                       // proof
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash }),
+            WithdrawalQueueTransition({ prevPendingHash: prevPendingHash, nextPendingHashIfFull: withdrawalQueueHash, nextPendingHashIfEmpty: withdrawalQueueHash }),
+            "",
+            ""
         );
 
         // Clear pending withdrawals (they're now in L1 queue)
@@ -580,18 +581,16 @@ contract ZoneBridgeTest is BaseTest {
         // Submit batch with partial processing
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "partial"));
         l1Portal.submitBatch(
-            partialHash,
-            l2StateRoot,
-            bytes32(0),
-            bytes32(0),
-            bytes32(0),
+            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
+            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: partialHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
             "",
             ""
         );
 
         // L1 should show partial processing
         assertEq(l1Portal.processedDepositQueueHash(), partialHash);
-        assertEq(l1Portal.pendingDepositQueueHash(), l1Portal.currentDepositQueueHash());
+        assertEq(l1Portal.snapshotDepositQueueHash(), l1Portal.currentDepositQueueHash());
     }
 
     function test_l2_insufficientBalanceReverts() public {

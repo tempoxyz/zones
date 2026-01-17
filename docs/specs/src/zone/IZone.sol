@@ -11,6 +11,26 @@ struct ZoneInfo {
     bytes32 genesisStateRoot;
 }
 
+/// @notice State transition for zone batch proofs
+struct StateTransition {
+    bytes32 prevStateRoot;
+    bytes32 nextStateRoot;
+}
+
+/// @notice Deposit queue transition inputs/outputs for batch proofs
+struct DepositQueueTransition {
+    bytes32 prevSnapshotHash;      // stable target ceiling
+    bytes32 prevProcessedHash;     // where proof starts
+    bytes32 nextProcessedHash;     // where zone processed up to
+}
+
+/// @notice Withdrawal queue transition inputs/outputs for batch proofs
+struct WithdrawalQueueTransition {
+    bytes32 prevPendingHash;         // what proof assumed pending queue was
+    bytes32 nextPendingHashIfFull;   // pending queue after append if no swap
+    bytes32 nextPendingHashIfEmpty;  // pending queue after append if swap occurred
+}
+
 /// @notice Deposit queue message kinds (Tempo -> zone)
 enum DepositQueueMessageKind {
     Deposit,
@@ -19,7 +39,7 @@ enum DepositQueueMessageKind {
 
 /// @notice L1 sync message payload (Tempo -> zone)
 struct L1Sync {
-    bytes32 l1BlockHash;
+    bytes32 l1ParentBlockHash;
     uint64 l1BlockNumber;
     uint64 l1Timestamp;
 }
@@ -32,7 +52,7 @@ struct DepositQueueMessage {
 
 struct Deposit {
     // L1 block info (zone receives L1 state through deposit queue messages)
-    bytes32 l1BlockHash;
+    bytes32 l1ParentBlockHash;
     uint64 l1BlockNumber;
     uint64 l1Timestamp;
     // Deposit data
@@ -56,24 +76,10 @@ struct Withdrawal {
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
     function verify(
-        // Deposit queue
-        bytes32 prevProcessedDepositQueueHash,     // where proof starts (from portal state)
-        bytes32 prevPendingDepositQueueHash,       // stable target ceiling (from portal state)
-        bytes32 nextProcessedDepositQueueHash,     // where zone processed up to (from batch)
-
-        // Zone state transition
-        bytes32 prevStateRoot,
-        bytes32 nextStateRoot,
-
-        // Withdrawal queue updates (proof outputs)
-        bytes32 prevPendingWithdrawalQueueHash,        // what proof assumed pending queue was
-        bytes32 nextPendingWithdrawalQueueHashIfFull,  // pending queue after append if no swap
-        bytes32 nextPendingWithdrawalQueueHashIfEmpty, // pending queue after append if swap occurred
-
-        // Opaque verifier payload (e.g., attestation envelope, domain separation data)
+        StateTransition calldata stateTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierData,
-
-        // Proof
         bytes calldata proof
     ) external view returns (bool);
 }
@@ -117,7 +123,7 @@ interface IZonePortal {
         address to,
         uint128 amount,
         bytes32 memo,
-        bytes32 l1BlockHash,
+        bytes32 l1ParentBlockHash,
         uint64 l1BlockNumber,
         uint64 l1Timestamp
     );
@@ -125,7 +131,7 @@ interface IZonePortal {
     event L1SyncAppended(
         uint64 indexed zoneId,
         bytes32 indexed newCurrentDepositQueueHash,
-        bytes32 l1BlockHash,
+        bytes32 l1ParentBlockHash,
         uint64 l1BlockNumber,
         uint64 l1Timestamp
     );
@@ -133,8 +139,8 @@ interface IZonePortal {
     event BatchSubmitted(
         uint64 indexed zoneId,
         uint64 indexed batchIndex,
+        bytes32 prevSnapshotDepositQueueHash,            // pre-state input to verifier
         bytes32 prevProcessedDepositQueueHash,           // pre-state input to verifier
-        bytes32 prevPendingDepositQueueHash,             // pre-state input to verifier
         bytes32 nextProcessedDepositQueueHash,           // verifier input/output
         bytes32 prevStateRoot,                           // pre-state input to verifier
         bytes32 nextStateRoot,                           // verifier output
@@ -172,7 +178,7 @@ interface IZonePortal {
     function batchIndex() external view returns (uint64);
     function stateRoot() external view returns (bytes32);
     function processedDepositQueueHash() external view returns (bytes32);
-    function pendingDepositQueueHash() external view returns (bytes32);
+    function snapshotDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
     function activeWithdrawalQueueHash() external view returns (bytes32);
     function pendingWithdrawalQueueHash() external view returns (bytes32);
@@ -182,11 +188,9 @@ interface IZonePortal {
     function syncL1() external returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external;
     function submitBatch(
-        bytes32 nextProcessedDepositQueueHash,
-        bytes32 nextStateRoot,
-        bytes32 prevPendingWithdrawalQueueHash,
-        bytes32 nextPendingWithdrawalQueueHashIfFull,
-        bytes32 nextPendingWithdrawalQueueHashIfEmpty,
+        StateTransition calldata stateTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierData,
         bytes calldata proof
     ) external;

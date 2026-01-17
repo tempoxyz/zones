@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Withdrawal } from "./IZone.sol";
+import { Withdrawal, WithdrawalQueueTransition } from "./IZone.sol";
 
 /// @title WithdrawalQueue
 /// @notice 2-slot queue for L2→L1 withdrawals with swap pattern
@@ -59,8 +59,8 @@ library WithdrawalQueueLib {
     /// @notice Enqueue new withdrawals via proof (proof operation)
     /// @dev Called when a batch proof is submitted. The proof computed new withdrawals
     ///      and provides two outputs to handle the race condition:
-    ///      - `nextPendingQueueHashIfFull`: pending queue with new withdrawals appended
-    ///      - `nextPendingQueueHashIfEmpty`: new withdrawals only (pending was swapped away)
+    ///      - `nextPendingHashIfFull`: pending queue with new withdrawals appended
+    ///      - `nextPendingHashIfEmpty`: new withdrawals only (pending was swapped away)
     ///
     ///      The race condition:
     ///      1. Proof starts, sees pending = X
@@ -69,21 +69,17 @@ library WithdrawalQueueLib {
     ///
     ///      Solution: proof provides both outputs, we use the appropriate one.
     /// @param q The withdrawal queue
-    /// @param prevPendingQueueHash What pending was when the proof started
-    /// @param nextPendingQueueHashIfFull New withdrawals appended to prevPendingQueueHash
-    /// @param nextPendingQueueHashIfEmpty New withdrawals only (pending was empty/swapped)
+    /// @param transition The withdrawal queue transition containing prev/next state hashes
     function enqueueWithProof(
         WithdrawalQueue storage q,
-        bytes32 prevPendingQueueHash,
-        bytes32 nextPendingQueueHashIfFull,
-        bytes32 nextPendingQueueHashIfEmpty
+        WithdrawalQueueTransition memory transition
     ) internal {
-        if (q.pending == prevPendingQueueHash) {
+        if (q.pending == transition.prevPendingHash) {
             // No swap happened during proving, use the appended version
-            q.pending = nextPendingQueueHashIfFull;
+            q.pending = transition.nextPendingHashIfFull;
         } else if (q.pending == bytes32(0)) {
             // Swap happened during proving, pending is now empty, use fresh
-            q.pending = nextPendingQueueHashIfEmpty;
+            q.pending = transition.nextPendingHashIfEmpty;
         } else {
             // Unexpected state: pending is neither expected nor empty
             revert UnexpectedPendingQueueHash();
