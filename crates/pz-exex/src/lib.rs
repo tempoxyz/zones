@@ -6,7 +6,10 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![deny(unused_must_use, rust_2018_idioms)]
 
+use reth_evm as _;
 use reth_tracing as _;
+use tempo_precompiles as _;
+use tempo_primitives as _;
 use tokio as _;
 
 mod builder;

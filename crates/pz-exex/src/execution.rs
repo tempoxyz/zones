@@ -13,9 +13,10 @@ use reth_primitives_traits::Block as _;
 use reth_revm::{
     DatabaseCommit,
     context::BlockEnv,
-    context::result::{ExecutionResult, ResultAndState},
+    context::result::ResultAndState,
     db::{BundleState, StateBuilder, states::bundle_state::BundleRetention},
 };
+use tempo_revm::TempoHaltReason;
 use std::sync::Arc;
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::evm::TempoEvm;
@@ -41,7 +42,7 @@ pub fn execute_block(
     RecoveredBlock<Block>,
     BundleState,
     Vec<Receipt>,
-    Vec<ExecutionResult>,
+    Vec<revm::context::result::ExecutionResult<TempoHaltReason>>,
 )> {
     // Construct header
     let header = construct_header(
@@ -139,15 +140,16 @@ fn construct_header(
 }
 
 /// Execute transactions using the Tempo EVM.
-fn execute_transactions<DB>(
-    evm: &mut TempoEvm<DB>,
+fn execute_transactions(
+    evm: &mut TempoEvm<reth_revm::State<&mut L2Database>>,
     header: &Header,
     transactions: Vec<Recovered<TransactionSigned>>,
-) -> eyre::Result<(Vec<TransactionSigned>, Vec<Receipt>, Vec<ExecutionResult>)>
-where
-    DB: alloy_evm::Database,
-{
-    use alloy_evm::{Evm, FromRecoveredTx, ToTxEnv};
+) -> eyre::Result<(
+    Vec<TransactionSigned>,
+    Vec<Receipt>,
+    Vec<revm::context::result::ExecutionResult<TempoHaltReason>>,
+)> {
+    use alloy_evm::{Evm, ToTxEnv};
     use revm::context::TxEnv;
     use tempo_revm::TempoTxEnv;
 
@@ -250,12 +252,14 @@ mod tests {
 
     #[test]
     fn test_tempo_evm_has_precompiles() {
+        use alloy_evm::Evm;
+
         // Create a minimal EVM env
         let header = construct_header(MAINNET.clone(), None, 0, 1000, 30_000_000).unwrap();
         let evm_env = create_tempo_evm_env(&header, MAINNET.chain().id());
 
         // Create empty db
-        let db = reth_revm::database::CacheDB::new(reth_revm::database::EmptyDB::new());
+        let db = revm::database::CacheDB::new(revm::database::EmptyDB::new());
         let evm = TempoEvm::new(db, evm_env);
 
         // TempoEvm::new() calls extend_tempo_precompiles internally via tempo_revm::TempoEvm
