@@ -411,23 +411,86 @@ interface IZoneRegistry {
 
 ### Zone predeploys
 
+#### Zone gas token
+
+The zone's gas token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
+
+#### Zone inbox
+
+The zone inbox is a system contract that processes deposits from Tempo. It is called by the sequencer as a **system transaction at the start of each block** to credit deposited funds.
+
+```solidity
+interface IZoneInbox {
+    event DepositProcessed(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        address indexed to,
+        uint128 amount,
+        bytes32 memo,
+        bytes32 l1BlockHash,
+        uint64 l1BlockNumber,
+        uint64 l1Timestamp
+    );
+
+    /// @notice The last processed deposit hash (should match L1's processedDepositsHash after batch).
+    function processedDepositsHash() external view returns (bytes32);
+
+    /// @notice Process deposits from Tempo. Called by sequencer as system transaction.
+    /// @dev Deposits must be processed in order. The hash chain is verified.
+    /// @param deposits Array of deposits to process (oldest first).
+    /// @param expectedHash The expected hash after processing all deposits.
+    function processDeposits(Deposit[] calldata deposits, bytes32 expectedHash) external;
+}
+```
+
+The sequencer observes `Deposit` events on the L1 portal and relays them to the zone via `processDeposits`. Each deposit credits the recipient's TIP-20 balance (minted by the system).
+
 #### Zone outbox
+
+The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox burns the tokens and emits an event. The sequencer collects these events to build the withdrawal queue for batch submission.
 
 ```solidity
 interface IZoneOutbox {
-    event WithdrawalRequested(bytes32 indexed withdrawalId, uint64 indexed withdrawalIndex);
+    event WithdrawalRequested(
+        uint64 indexed withdrawalIndex,
+        address indexed sender,
+        address to,
+        uint128 amount,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes data
+    );
 
+    /// @notice The gas token address (same as L1 portal's token).
+    function gasToken() external view returns (address);
+
+    /// @notice Next withdrawal index (monotonically increasing).
     function nextWithdrawalIndex() external view returns (uint64);
-    function withdrawalByIndex(uint64 index) external view returns (Withdrawal memory);
 
+    /// @notice Request a withdrawal from the zone back to Tempo.
+    /// @dev Caller must have approved the outbox to spend `amount` of gas tokens.
+    /// @param to The Tempo recipient address.
+    /// @param amount Amount to withdraw.
+    /// @param gasLimit Gas limit for IExitReceiver callback (0 = no callback).
+    /// @param fallbackRecipient Zone address for bounce-back if callback fails.
+    /// @param data Calldata for IExitReceiver callback.
     function requestWithdrawal(
         address to,
         uint128 amount,
         uint64 gasLimit,
         address fallbackRecipient,
         bytes calldata data
-    ) external returns (bytes32 withdrawalId);
+    ) external;
 }
+```
+
+The withdrawal queue hash is constructed off-chain by the sequencer from the emitted events:
+
+```
+// Build queue hash from events (oldest = outermost for O(1) L1 removal)
+queueHash = 0
+for withdrawal in withdrawals (newest to oldest):
+    queueHash = keccak256(abi.encode(withdrawal, queueHash))
 ```
 
 ### External dependencies
