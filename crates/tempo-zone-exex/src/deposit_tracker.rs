@@ -140,6 +140,56 @@ impl DepositTracker {
         self.processed_deposit_queue_hash = processed_deposit_queue_hash;
         self.unprocessed_deposits.clear();
     }
+
+    /// Reverts deposits that were added after a certain point.
+    ///
+    /// Removes deposits with L1 block number >= the given block number
+    /// and recomputes the pending deposit queue hash.
+    ///
+    /// Returns the number of deposits reverted.
+    pub fn revert_deposits_after_l1_block(&mut self, l1_block_number: u64) -> usize {
+        let original_count = self.unprocessed_deposits.len();
+
+        // Keep only deposits before the revert point
+        self.unprocessed_deposits
+            .retain(|d| d.l1_block_number < l1_block_number);
+
+        let reverted_count = original_count - self.unprocessed_deposits.len();
+
+        if reverted_count > 0 {
+            // Recompute the pending hash from remaining deposits
+            self.pending_deposit_queue_hash = Self::compute_queue_hash(
+                &self.unprocessed_deposits,
+                self.processed_deposit_queue_hash,
+            );
+        }
+
+        reverted_count
+    }
+
+    /// Reverts a specific number of most recent deposits.
+    ///
+    /// Removes the last `count` deposits and recomputes the pending hash.
+    ///
+    /// Returns the actual number of deposits reverted.
+    pub fn revert_last_deposits(&mut self, count: usize) -> usize {
+        let to_remove = count.min(self.unprocessed_deposits.len());
+        if to_remove == 0 {
+            return 0;
+        }
+
+        // Remove the last N deposits
+        self.unprocessed_deposits
+            .truncate(self.unprocessed_deposits.len() - to_remove);
+
+        // Recompute the pending hash
+        self.pending_deposit_queue_hash = Self::compute_queue_hash(
+            &self.unprocessed_deposits,
+            self.processed_deposit_queue_hash,
+        );
+
+        to_remove
+    }
 }
 
 /// Computes the deposit queue hash for a single deposit.

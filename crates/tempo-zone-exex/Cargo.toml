@@ -33,3 +33,10 @@ futures.workspace = true
 serde = { workspace = true, features = ["derive"] }
 eyre.workspace = true
 tracing.workspace = true
+
+# sp1 (optional)
+sp1-sdk = { workspace = true, optional = true }
+
+[features]
+default = []
+sp1 = ["sp1-sdk"]

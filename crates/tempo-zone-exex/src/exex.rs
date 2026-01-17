@@ -4,7 +4,7 @@
 //! batching, proving, and submission to L1.
 
 use crate::{
-    batcher::{BatchConfig, BatchCoordinator},
+    batcher::{BatchConfig, BatchCoordinator, BatchId},
     prover::{MockProver, Prover},
     submitter::{L1Submitter, SubmitterConfig},
     types::{BatchBlock, BatchCommitment, Deposit},
@@ -288,19 +288,158 @@ impl<N: FullNodeComponents> ZoneProverExEx<N> {
                 }
             }
             ExExNotification::ChainReverted { old } => {
-                warn!(
-                    blocks = old.blocks().len(),
-                    "Chain reverted - TODO: handle revert"
-                );
-                // TODO: Handle chain reverts by removing affected blocks from pending batch
+                let reverted_blocks: Vec<_> = old
+                    .blocks()
+                    .iter()
+                    .map(|(num, block)| (*num, block.hash()))
+                    .collect();
+
+                if !reverted_blocks.is_empty() {
+                    let first_reverted_block =
+                        reverted_blocks.first().map(|(n, _)| *n).unwrap_or(0);
+                    let last_reverted_block =
+                        reverted_blocks.last().map(|(n, _)| *n).unwrap_or(0);
+
+                    warn!(
+                        first_block = first_reverted_block,
+                        last_block = last_reverted_block,
+                        block_count = reverted_blocks.len(),
+                        "Handling chain revert"
+                    );
+
+                    let mut batcher = self.batcher.write().await;
+
+                    let removed_pending =
+                        batcher.remove_pending_blocks_after(first_reverted_block);
+                    if removed_pending > 0 {
+                        debug!(
+                            removed = removed_pending,
+                            "Removed pending blocks after revert"
+                        );
+                    }
+
+                    let invalidated_batches =
+                        batcher.invalidate_batches_after(first_reverted_block);
+                    if !invalidated_batches.is_empty() {
+                        warn!(
+                            batch_ids = ?invalidated_batches,
+                            "Invalidated batches due to revert"
+                        );
+                    }
+
+                    info!(
+                        first_block = first_reverted_block,
+                        last_block = last_reverted_block,
+                        removed_pending,
+                        invalidated_batches = invalidated_batches.len(),
+                        "Chain revert handled"
+                    );
+                }
             }
             ExExNotification::ChainReorged { old, new } => {
+                let old_block_count = old.blocks().len();
+                let new_block_count = new.blocks().len();
+
+                let old_tip = old
+                    .blocks()
+                    .last_key_value()
+                    .map(|(n, _)| *n)
+                    .unwrap_or(0);
+                let new_tip = new
+                    .blocks()
+                    .last_key_value()
+                    .map(|(n, _)| *n)
+                    .unwrap_or(0);
+
                 warn!(
-                    old_blocks = old.blocks().len(),
-                    new_blocks = new.blocks().len(),
-                    "Chain reorged - TODO: handle reorg"
+                    old_blocks = old_block_count,
+                    new_blocks = new_block_count,
+                    old_tip,
+                    new_tip,
+                    "Handling chain reorg"
                 );
-                // TODO: Handle chain reorgs
+
+                // Handle the revert of the old chain
+                let reverted_blocks: Vec<_> = old
+                    .blocks()
+                    .iter()
+                    .map(|(num, block)| (*num, block.hash()))
+                    .collect();
+
+                if !reverted_blocks.is_empty() {
+                    let first_reverted_block =
+                        reverted_blocks.first().map(|(n, _)| *n).unwrap_or(0);
+
+                    let mut batcher = self.batcher.write().await;
+                    let removed_pending =
+                        batcher.remove_pending_blocks_after(first_reverted_block);
+                    let invalidated_batches =
+                        batcher.invalidate_batches_after(first_reverted_block);
+
+                    if removed_pending > 0 || !invalidated_batches.is_empty() {
+                        debug!(
+                            removed_pending,
+                            invalidated_batches = invalidated_batches.len(),
+                            "Reverted old chain during reorg"
+                        );
+                    }
+                }
+
+                // Process the new chain as commits
+                for (block_num, block) in new.blocks().iter() {
+                    let block_hash = block.hash();
+                    let header = block.header();
+
+                    debug!(
+                        number = header.number(),
+                        hash = %block_hash,
+                        "Processing reorged block"
+                    );
+
+                    let batch_block = BatchBlock {
+                        number: header.number(),
+                        hash: block_hash,
+                        parent_hash: header.parent_hash(),
+                        state_root: header.state_root(),
+                        transactions_root: header.transactions_root(),
+                        receipts_root: header.receipts_root(),
+                    };
+
+                    let mut batcher = self.batcher.write().await;
+                    batcher.add_block(batch_block);
+
+                    if let Some(receipts) = new.receipts_by_block_hash(block_hash) {
+                        let mut logs: Vec<Log> = Vec::new();
+                        for receipt in receipts {
+                            logs.extend(receipt.logs().iter().cloned());
+                        }
+
+                        if !logs.is_empty() {
+                            trace!(
+                                block_number = *block_num,
+                                log_count = logs.len(),
+                                "Extracting withdrawals from reorged logs"
+                            );
+                            batcher.add_withdrawals_from_logs(&logs);
+                        }
+                    }
+                }
+
+                // Check if we should flush after reorg
+                let should_flush = {
+                    let batcher = self.batcher.read().await;
+                    batcher.should_flush()
+                };
+                if should_flush {
+                    info!("Batch threshold reached after reorg, initiating prove");
+                    self.flush_and_prove(prove_tx).await?;
+                }
+
+                info!(
+                    old_tip,
+                    new_tip,
+                    "Chain reorg handled successfully"
+                );
             }
         }
 
@@ -315,10 +454,10 @@ impl<N: FullNodeComponents> ZoneProverExEx<N> {
     }
 
     async fn flush_and_prove(&mut self, prove_tx: &mpsc::Sender<ProveResult>) -> Result<()> {
-        let batch_input = self.batcher.write().await.flush_batch();
-        if let Some(batch_input) = batch_input {
+        let flush_result = self.batcher.write().await.flush_batch();
+        if let Some((batch_id, batch_input)) = flush_result {
             let block_count = batch_input.blocks.len();
-            info!(blocks = block_count, "Flushing batch for proving");
+            info!(batch_id, blocks = block_count, "Flushing batch for proving");
 
             // Spawn proving task
             let prover = self.prover.clone();
@@ -327,10 +466,12 @@ impl<N: FullNodeComponents> ZoneProverExEx<N> {
             tokio::spawn(async move {
                 let result = match prover.prove(&batch_input).await {
                     Ok(proof_bundle) => ProveResult::Success {
+                        batch_id,
                         proof_bundle: Box::new(proof_bundle),
                         batch_input: Box::new(batch_input),
                     },
                     Err(e) => ProveResult::Failure {
+                        batch_id,
                         error: e.to_string(),
                         batch_input: Box::new(batch_input),
                     },
@@ -346,10 +487,22 @@ impl<N: FullNodeComponents> ZoneProverExEx<N> {
     async fn handle_prove_result(&mut self, result: ProveResult) -> Result<()> {
         match result {
             ProveResult::Success {
+                batch_id,
                 proof_bundle,
                 batch_input,
             } => {
-                info!("Proof generated successfully, submitting to L1");
+                // Check if batch is still valid (not invalidated by reorg)
+                let is_valid = {
+                    let batcher = self.batcher.read().await;
+                    batcher.get_batch_range(batch_id).is_some()
+                };
+
+                if !is_valid {
+                    warn!(batch_id, "Batch was invalidated by reorg, discarding proof");
+                    return Ok(());
+                }
+
+                info!(batch_id, "Proof generated successfully, submitting to L1");
 
                 let commitment = BatchCommitment {
                     new_processed_deposit_queue_hash: batch_input.new_processed_deposit_queue_hash,
@@ -370,24 +523,34 @@ impl<N: FullNodeComponents> ZoneProverExEx<N> {
                 info!(
                     tx_hash = %submission_result.tx_hash,
                     batch_index = submission_result.batch_index,
+                    batch_id,
                     "Batch submitted to L1"
                 );
 
-                // Update batcher state
-                self.batcher.write().await.on_batch_submitted(
+                // Update batcher state and mark batch as complete
+                let mut batcher = self.batcher.write().await;
+                batcher.on_batch_submitted(
                     batch_input.new_processed_deposit_queue_hash,
                     batch_input.deposits.len(),
                     batch_input.new_state_root,
                     batch_input.updated_withdrawal_queue2,
                 );
+                batcher.complete_batch(batch_id);
             }
-            ProveResult::Failure { error, batch_input } => {
+            ProveResult::Failure {
+                batch_id,
+                error,
+                batch_input,
+            } => {
                 error!(
                     ?error,
+                    batch_id,
                     blocks = batch_input.blocks.len(),
                     "Proof generation failed"
                 );
-                // TODO: Handle proof failure (retry, alert, etc.)
+
+                // Mark batch as complete even on failure
+                self.batcher.write().await.complete_batch(batch_id);
             }
         }
 
@@ -398,10 +561,12 @@ impl<N: FullNodeComponents> ZoneProverExEx<N> {
 /// Result of a proving operation.
 enum ProveResult {
     Success {
+        batch_id: BatchId,
         proof_bundle: Box<crate::types::ProofBundle>,
         batch_input: Box<crate::types::BatchInput>,
     },
     Failure {
+        batch_id: BatchId,
         error: String,
         batch_input: Box<crate::types::BatchInput>,
     },

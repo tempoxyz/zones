@@ -45,7 +45,7 @@ pub mod prover;
 pub mod submitter;
 pub mod types;
 
-pub use batcher::{BatchConfig, BatchCoordinator};
+pub use batcher::{BatchBlockRange, BatchConfig, BatchCoordinator, BatchId};
 pub use deposit_tracker::{DepositTracker, compute_deposit_hash};
 pub use exex::{L1Deposit, L1DepositReceiver, ZoneProverConfig, ZoneProverExEx};
 pub use prover::{MockProver, Prover, Sp1Prover, Sp1ProverConfig};

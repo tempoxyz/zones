@@ -7,6 +7,7 @@ use crate::deposit_tracker::DepositTracker;
 use crate::events::extract_withdrawals;
 use crate::types::{BatchBlock, BatchInput, Deposit, StateTransitionWitness, Withdrawal};
 use alloy_primitives::{Address, Log, B256};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// Default batch interval (250ms).
@@ -36,6 +37,18 @@ impl Default for BatchConfig {
     }
 }
 
+/// Batch ID type for tracking in-flight batches.
+pub type BatchId = u64;
+
+/// Block range for a batch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchBlockRange {
+    /// Start block number (inclusive).
+    pub start_block: u64,
+    /// End block number (inclusive).
+    pub end_block: u64,
+}
+
 /// Coordinates block accumulation and batch creation.
 #[derive(Debug)]
 pub struct BatchCoordinator {
@@ -52,6 +65,15 @@ pub struct BatchCoordinator {
 
     /// Withdrawal queue state
     expected_withdrawal_queue2: B256,
+
+    /// Next batch ID to assign.
+    next_batch_id: BatchId,
+
+    /// Tracks which blocks are in each batch: batch_id → (start_block, end_block).
+    batch_block_ranges: HashMap<BatchId, BatchBlockRange>,
+
+    /// In-flight batches that are currently being proved.
+    in_flight_batches: HashMap<BatchId, BatchBlockRange>,
 }
 
 impl BatchCoordinator {
@@ -65,6 +87,9 @@ impl BatchCoordinator {
             deposit_tracker: DepositTracker::new(),
             current_state_root: B256::ZERO,
             expected_withdrawal_queue2: B256::ZERO,
+            next_batch_id: 0,
+            batch_block_ranges: HashMap::new(),
+            in_flight_batches: HashMap::new(),
         }
     }
 
@@ -144,13 +169,28 @@ impl BatchCoordinator {
     /// Flushes the pending batch and returns it for proving.
     ///
     /// Returns `None` if there are no pending blocks.
-    pub fn flush_batch(&mut self) -> Option<BatchInput> {
+    /// The returned tuple contains the batch ID and the batch input.
+    pub fn flush_batch(&mut self) -> Option<(BatchId, BatchInput)> {
         if self.pending_blocks.is_empty() {
             return None;
         }
 
         let blocks = std::mem::take(&mut self.pending_blocks);
         let withdrawals = std::mem::take(&mut self.pending_withdrawals);
+
+        // Track batch block range
+        let batch_id = self.next_batch_id;
+        self.next_batch_id += 1;
+
+        let start_block = blocks.first().map(|b| b.number).unwrap_or(0);
+        let end_block = blocks.last().map(|b| b.number).unwrap_or(0);
+        let block_range = BatchBlockRange {
+            start_block,
+            end_block,
+        };
+
+        self.batch_block_ranges.insert(batch_id, block_range);
+        self.in_flight_batches.insert(batch_id, block_range);
 
         // Take all unprocessed deposits and compute new processed hash
         let deposit_count = self.deposit_tracker.unprocessed_count();
@@ -180,7 +220,7 @@ impl BatchCoordinator {
         self.last_flush = Instant::now();
         self.current_state_root = new_state_root;
 
-        Some(batch_input)
+        Some((batch_id, batch_input))
     }
 
     /// Updates state after a successful batch submission.
@@ -205,6 +245,80 @@ impl BatchCoordinator {
     /// Returns true if there are no pending blocks.
     pub fn is_empty(&self) -> bool {
         self.pending_blocks.is_empty()
+    }
+
+    /// Marks a batch as no longer in-flight (completed or cancelled).
+    pub fn complete_batch(&mut self, batch_id: BatchId) {
+        self.in_flight_batches.remove(&batch_id);
+    }
+
+    /// Cancels an in-flight batch, removing it from tracking.
+    ///
+    /// Returns the block range if the batch was in-flight.
+    pub fn cancel_batch(&mut self, batch_id: BatchId) -> Option<BatchBlockRange> {
+        self.in_flight_batches.remove(&batch_id)
+    }
+
+    /// Returns the block range for a batch, if tracked.
+    pub fn get_batch_range(&self, batch_id: BatchId) -> Option<BatchBlockRange> {
+        self.batch_block_ranges.get(&batch_id).copied()
+    }
+
+    /// Invalidates all batches that include blocks at or after the given block number.
+    ///
+    /// Returns the list of invalidated batch IDs.
+    pub fn invalidate_batches_after(&mut self, block_number: u64) -> Vec<BatchId> {
+        let mut invalidated = Vec::new();
+
+        // Find all batches that include blocks >= block_number
+        for (&batch_id, &range) in &self.batch_block_ranges {
+            if range.end_block >= block_number {
+                invalidated.push(batch_id);
+            }
+        }
+
+        // Remove invalidated batches from tracking
+        for &batch_id in &invalidated {
+            self.batch_block_ranges.remove(&batch_id);
+            self.in_flight_batches.remove(&batch_id);
+        }
+
+        invalidated
+    }
+
+    /// Checks if a batch is still valid given the current canonical tip.
+    ///
+    /// A batch is valid if its end block is less than or equal to the canonical tip.
+    pub fn is_batch_valid(&self, batch_id: BatchId, canonical_tip: u64) -> bool {
+        match self.batch_block_ranges.get(&batch_id) {
+            Some(range) => range.end_block <= canonical_tip,
+            None => false, // Unknown batch is not valid
+        }
+    }
+
+    /// Returns all in-flight batch IDs.
+    pub fn in_flight_batch_ids(&self) -> Vec<BatchId> {
+        self.in_flight_batches.keys().copied().collect()
+    }
+
+    /// Returns batches that would be affected by a revert to the given block number.
+    ///
+    /// This includes batches where `start_block >= block_number`.
+    pub fn batches_affected_by_revert(&self, revert_to_block: u64) -> Vec<BatchId> {
+        self.batch_block_ranges
+            .iter()
+            .filter(|(_, range)| range.start_block >= revert_to_block)
+            .map(|(&id, _)| id)
+            .collect()
+    }
+
+    /// Removes pending blocks at or after the given block number.
+    ///
+    /// Returns the number of blocks removed.
+    pub fn remove_pending_blocks_after(&mut self, block_number: u64) -> usize {
+        let original_len = self.pending_blocks.len();
+        self.pending_blocks.retain(|b| b.number < block_number);
+        original_len - self.pending_blocks.len()
     }
 }
 
