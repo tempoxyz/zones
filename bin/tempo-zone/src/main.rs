@@ -8,13 +8,10 @@
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
 use clap::Parser;
-use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_node_builder::NodeHandle;
 use reth_tracing::tracing::info;
-use std::sync::Arc;
-use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
+use tempo_chainspec::spec::TempoChainSpecParser;
 use tempo_zone::{ZoneNode, ZoneNodeArgs};
 
 fn main() {
@@ -25,30 +22,23 @@ fn main() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
 
-    let components = |spec: Arc<TempoChainSpec>| {
-        (
-            TempoEvmConfig::new(spec, TempoEvmFactory::default()),
-            NoopConsensus::default(),
-        )
-    };
+    if let Err(err) =
+        Cli::<TempoChainSpecParser, ZoneNodeArgs>::parse().run(|builder, args| async move {
+            info!(target: "reth::cli", "Launching Tempo Zone node");
 
-    let cli = Cli::<TempoChainSpecParser, ZoneNodeArgs>::parse();
+            let node = ZoneNode::new(&args);
 
-    if let Err(err) = cli.run_with_components::<ZoneNode>(components, async move |builder, args| {
-        info!(target: "reth::cli", "Launching Tempo Zone node");
+            let NodeHandle {
+                node_exit_future,
+                node: _node,
+            } = builder.node(node).launch().await?;
 
-        let node = ZoneNode::new(&args);
+            info!(target: "reth::cli", "Tempo Zone node started");
 
-        let NodeHandle {
-            node_exit_future,
-            node: _node,
-        } = builder.node(node).launch().await?;
-
-        info!(target: "reth::cli", "Tempo Zone node started");
-
-        node_exit_future.await?;
-        Ok(())
-    }) {
+            node_exit_future.await?;
+            Ok(())
+        })
+    {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
     }
