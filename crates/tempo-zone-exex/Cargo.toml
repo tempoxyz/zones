@@ -1,0 +1,35 @@
+[package]
+name = "tempo-zone-exex"
+description = "ExEx that generates SP1 proofs for withdrawal batches and submits them to L1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# reth
+reth-exex.workspace = true
+reth-node-api.workspace = true
+reth-primitives-traits.workspace = true
+
+# alloy
+alloy-consensus.workspace = true
+alloy-network.workspace = true
+alloy-primitives.workspace = true
+alloy-provider = { workspace = true, features = ["reqwest"] }
+alloy-rpc-types-eth.workspace = true
+alloy-signer-local.workspace = true
+alloy-sol-types.workspace = true
+
+# async
+tokio.workspace = true
+futures.workspace = true
+
+# misc
+serde = { workspace = true, features = ["derive"] }
+eyre.workspace = true
+tracing.workspace = true

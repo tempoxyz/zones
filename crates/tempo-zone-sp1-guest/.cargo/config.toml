@@ -1,0 +1,18 @@
+# SP1 zkVM target configuration
+# This crate builds separately from the main workspace using sp1-build.
+#
+# To build this crate:
+#   cd crates/tempo-zone-sp1-guest
+#   cargo prove build
+#
+# Or from the prover crate that depends on this:
+#   sp1_build::build_program("../tempo-zone-sp1-guest")
+
+[build]
+# SP1 programs target riscv32im-succinct-zkvm-elf
+# This is set automatically by `cargo prove build`
+# target = "riscv32im-succinct-zkvm-elf"
+
+[unstable]
+# Required for sp1-zkvm
+build-std = ["alloc", "core"]

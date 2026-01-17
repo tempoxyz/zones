@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 # tempo
 tempo-zone = { path = "../../crates/tempo-zone" }
+tempo-zone-exex.workspace = true
 tempo-chainspec = { workspace = true, features = ["cli"] }
 tempo-evm.workspace = true
 
@@ -24,6 +25,12 @@ reth-consensus.workspace = true
 reth-ethereum = { workspace = true, features = ["cli"] }
 reth-node-builder.workspace = true
 reth-tracing.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+
+# async
+tokio.workspace = true
 
 # misc
 clap.workspace = true

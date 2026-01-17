@@ -1,0 +1,14 @@
+[package]
+name = "tempo-zone-sp1-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sp1-zkvm = "4.0.0"
+alloy-primitives = { version = "0.8", default-features = false, features = ["serde"] }
+alloy-sol-types = { version = "0.8", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+
+[features]
+default = []
+mock = []  # Skip state transition validation in dev mode

@@ -12226,6 +12226,7 @@ dependencies = [
 name = "tempo-zone-bin"
 version = "1.0.0-rc.5"
 dependencies = [
+ "alloy-primitives",
  "clap",
  "reth-cli-util",
  "reth-consensus",
@@ -12235,6 +12236,29 @@ dependencies = [
  "tempo-chainspec",
  "tempo-evm",
  "tempo-zone",
+ "tempo-zone-exex",
+ "tokio",
+]
+
+[[package]]
+name = "tempo-zone-exex"
+version = "1.0.0-rc.5"
+dependencies = [
+ "alloy-consensus",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "eyre",
+ "futures",
+ "reth-exex",
+ "reth-node-api",
+ "reth-primitives-traits",
+ "serde",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

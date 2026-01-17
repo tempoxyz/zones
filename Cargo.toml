@@ -6,6 +6,11 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [workspace]
+exclude = [
+  # SP1 guest programs build separately with `cargo prove build`
+  # They use different dependencies (no_std, sp1-zkvm target)
+  "crates/tempo-zone-sp1-guest",
+]
 members = [
   "bin/tempo",
   "bin/tempo-bench",
@@ -28,6 +33,7 @@ members = [
   "crates/precompiles-macros",
   "crates/primitives",
   "crates/tempo-zone",
+  "crates/tempo-zone-exex",
   "crates/contracts",
   "crates/telemetry-util",
   "crates/transaction-pool",
