@@ -234,6 +234,7 @@ This section defines the functions and interfaces used by the design. The signat
 struct ZoneInfo {
     uint64 zoneId;
     address portal;
+    address messenger;      // L1 messenger for this zone
     address token;
     address sequencer;
     address verifier;
@@ -312,7 +313,8 @@ interface IZoneFactory {
     event ZoneCreated(
         uint64 indexed zoneId,
         address indexed portal,
-        address indexed token,
+        address indexed messenger,
+        address token,
         address sequencer,
         address verifier,
         bytes32 genesisStateRoot
@@ -396,6 +398,37 @@ interface IZonePortal {
 }
 ```
 
+#### Zone messenger (L1)
+
+Each zone has a dedicated messenger contract on L1. Withdrawal callbacks originate from this contract, not the portal (which holds escrowed funds).
+
+```solidity
+interface IZoneMessenger {
+    /// @notice Returns the zone's portal address
+    function portal() external view returns (address);
+    
+    /// @notice Returns the L2 sender during callback execution
+    /// @dev Reverts if not in a callback context
+    function xDomainMessageSender() external view returns (address);
+    
+    /// @notice Relay a withdrawal message. Only callable by the portal.
+    /// @param sender The L2 origin address
+    /// @param target The L1 recipient
+    /// @param amount Already transferred to target by portal before this call
+    /// @param gasLimit Max gas for the callback
+    /// @param data Calldata for the target
+    function relayMessage(
+        address sender,
+        address target,
+        uint256 amount,
+        uint256 gasLimit,
+        bytes calldata data
+    ) external;
+}
+```
+
+Receivers check `msg.sender == zoneMessenger` and call `zoneMessenger.xDomainMessageSender()` to authenticate the L2 origin.
+
 #### Zone registry (optional)
 
 ```solidity
@@ -410,6 +443,30 @@ interface IZoneRegistry {
 ```
 
 ### Zone predeploys
+
+#### Zone messenger (L2)
+
+The L2 messenger is a predeploy that relays deposit callbacks. Deposit callbacks originate from this contract.
+
+```solidity
+// Predeploy address: 0x4200000000000000000000000000000000000007
+interface IL2ZoneMessenger {
+    /// @notice Returns the L1 sender during callback execution
+    /// @dev Reverts if not in a callback context
+    function xDomainMessageSender() external view returns (address);
+    
+    /// @notice Relay a deposit message. Only callable by system.
+    function relayMessage(
+        address sender,
+        address target,
+        uint256 amount,
+        uint256 gasLimit,
+        bytes calldata data
+    ) external;
+}
+```
+
+Receivers check `msg.sender == L2_MESSENGER` and call `messenger.xDomainMessageSender()` to authenticate the L1 origin.
 
 #### Zone outbox
 
@@ -443,27 +500,7 @@ interface ITIP20 {
 }
 ```
 
-#### Exit receiver
 
-Contracts that want to receive transfer exits with a callback must implement this interface:
-
-```solidity
-interface IExitReceiver {
-    /// @notice Called by the portal when a transfer exit targets this contract.
-    /// @dev Tokens are transferred to this contract BEFORE the callback.
-    ///      If the callback reverts or returns the wrong selector, the portal
-    ///      reverts the transfer (via a self-call) and bounces back the funds.
-    /// @param sender The address that initiated the exit on the zone.
-    /// @param amount The amount of gas tokens that will be transferred if accepted.
-    /// @param data User-provided data from the exit intent.
-    /// @return selector Must return IExitReceiver.onExitReceived.selector to accept.
-    function onExitReceived(
-        address sender,
-        uint128 amount,
-        bytes calldata data
-    ) external returns (bytes4);
-}
-```
 
 ## Queue design rationale
 
@@ -520,9 +557,9 @@ When the sequencer processes a deposit:
 
 1. Credit `to` with `amount` of the gas token.
 2. If `gasLimit == 0`: done (simple balance credit).
-3. If `gasLimit > 0`: execute call to `to` with `data` as calldata.
-   - Caller is the deposit `sender` (or a system address TBD).
-   - If call succeeds: done.
+3. If `gasLimit > 0`: call `L2Messenger.relayMessage(sender, to, amount, gasLimit, data)`.
+   - `msg.sender` for the target is the L2 messenger.
+   - Target calls `messenger.xDomainMessageSender()` to get the L1 origin.
    - If call reverts: enqueue a withdrawal to return `amount` to `sender` on L1.
 
 Notes:
@@ -585,22 +622,16 @@ function _executeWithdrawal(Withdrawal calldata w) external {
     // Transfer before callback so receiver can use funds (e.g. DEX swap)
     ITIP20(token).transfer(w.to, w.amount);
 
-    bytes4 selector = IExitReceiver(w.to).onExitReceived{gas: w.gasLimit}(
-        w.sender,
-        w.amount,
-        w.data
-    );
-    if (selector != IExitReceiver.onExitReceived.selector) {
-        revert();
-    }
+    // Callback via messenger (msg.sender = messenger, not portal)
+    messenger.relayMessage(w.sender, w.to, w.amount, w.gasLimit, w.data);
 }
 ```
 
-The self-call makes the transfer and callback atomic while still letting the portal catch failures and enqueue bounce-backs. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits). The portal does not need to know about these use cases—they are handled by receiver contracts.
+The self-call makes the transfer and callback atomic while still letting the portal catch failures and enqueue bounce-backs. The messenger relays the callback so that `msg.sender` is the messenger (not the portal which holds funds). Receivers call `messenger.xDomainMessageSender()` to authenticate the L2 origin.
 
 ## Withdrawal failure and bounce-back
 
-Withdrawals with `gasLimit > 0` can fail if the `IExitReceiver` call fails, runs out of gas, or returns the wrong selector. When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
+Withdrawals with `gasLimit > 0` can fail if the messenger callback reverts (out of gas, logic error, TIP-403 policy, etc.). When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
 
 ```solidity
 function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
