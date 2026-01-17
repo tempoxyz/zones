@@ -122,7 +122,7 @@ The verifier validates that:
 
 ### Deposit chain
 
-Deposits use a hash chain: each deposit updates the hash as `newHash = keccak256(abi.encode(deposit, prevHash))`. Each deposit includes L1 block info (hash, timestamp, block number), so the zone receives L1 state through the deposit chain rather than a separate anchor.
+Deposits use a hash chain: each deposit updates the hash as `newHash = keccak256(abi.encode(deposit, prevHash))`. Each deposit includes L1 block info (parent block hash, block number, timestamp), so the zone receives L1 state through the deposit chain rather than a separate anchor.
 
 The portal uses a 3-slot design to allow partial processing while maintaining on-chain verifiability:
 
@@ -234,6 +234,7 @@ This section defines the functions and interfaces used by the design. The signat
 struct ZoneInfo {
     uint64 zoneId;
     address portal;
+    address messenger;      // L1 messenger for this zone
     address token;
     address sequencer;
     address verifier;
@@ -247,9 +248,9 @@ struct BatchCommitment {
 
 struct Deposit {
     // L1 block info (zone receives L1 state through deposits)
-    bytes32 l1BlockHash;
-    uint64 l1BlockNumber;
-    uint64 l1Timestamp;
+    bytes32 parentBlockHash;    // blockhash(block.number - 1)
+    uint64 blockNumber;         // block.number
+    uint64 timestamp;           // block.timestamp
     // Deposit data
     address sender;
     address to;
@@ -262,9 +263,9 @@ struct Withdrawal {
     address sender;             // who initiated the withdrawal on the zone
     address to;                 // Tempo recipient
     uint128 amount;
-    uint64 gasLimit;            // max gas for IExitReceiver callback (0 = no callback)
+    uint64 gasLimit;            // max gas for messenger callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
-    bytes data;                 // calldata for IExitReceiver (if gasLimit > 0)
+    bytes data;                 // calldata for target (if gasLimit > 0)
 }
 ```
 
@@ -312,7 +313,8 @@ interface IZoneFactory {
     event ZoneCreated(
         uint64 indexed zoneId,
         address indexed portal,
-        address indexed token,
+        address indexed messenger,
+        address token,
         address sequencer,
         address verifier,
         bytes32 genesisStateRoot
@@ -336,9 +338,9 @@ interface IZonePortal {
         address to,
         uint128 amount,
         bytes32 memo,
-        bytes32 l1BlockHash,
-        uint64 l1BlockNumber,
-        uint64 l1Timestamp
+        bytes32 parentBlockHash,
+        uint64 blockNumber,
+        uint64 timestamp
     );
 
     event BatchSubmitted(
@@ -396,6 +398,42 @@ interface IZonePortal {
 }
 ```
 
+#### Zone messenger (L1)
+
+Each zone has a dedicated messenger contract on L1. The portal gives the messenger max approval for the gas token. Withdrawal callbacks originate from this contract, not the portal.
+
+```solidity
+interface IZoneMessenger {
+    /// @notice Returns the zone's portal address
+    function portal() external view returns (address);
+
+    /// @notice Returns the gas token address
+    function token() external view returns (address);
+
+    /// @notice Returns the L2 sender during callback execution
+    /// @dev Reverts if not in a callback context
+    function xDomainMessageSender() external view returns (address);
+
+    /// @notice Relay a withdrawal message. Only callable by the portal.
+    /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
+    ///      If callback reverts, the entire call reverts (including the transfer).
+    /// @param sender The L2 origin address
+    /// @param target The L1 recipient
+    /// @param amount Tokens to transfer from portal to target
+    /// @param gasLimit Max gas for the callback
+    /// @param data Calldata for the target
+    function relayMessage(
+        address sender,
+        address target,
+        uint256 amount,
+        uint256 gasLimit,
+        bytes calldata data
+    ) external;
+}
+```
+
+The messenger does `token.transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` and call `zoneMessenger.xDomainMessageSender()` to authenticate the L2 origin.
+
 #### Zone registry (optional)
 
 ```solidity
@@ -411,9 +449,66 @@ interface IZoneRegistry {
 
 ### Zone predeploys
 
+#### Zone messenger (L2)
+
+The L2 messenger is a predeploy that relays deposit callbacks. Deposit callbacks originate from this contract.
+
+```solidity
+// Predeploy address: 0x4200000000000000000000000000000000000007
+interface IL2ZoneMessenger {
+    /// @notice Returns the L1 sender during callback execution
+    /// @dev Reverts if not in a callback context
+    function xDomainMessageSender() external view returns (address);
+
+    /// @notice Relay a deposit message. Only callable by system.
+    /// @dev The gas token has already been credited to target before this call.
+    /// @param sender The L1 origin address
+    /// @param target The L2 recipient
+    /// @param amount Amount that was credited
+    /// @param gasLimit Max gas for the callback
+    /// @param data Calldata for the target
+    function relayMessage(
+        address sender,
+        address target,
+        uint256 amount,
+        uint256 gasLimit,
+        bytes calldata data
+    ) external;
+}
+```
+
+Receivers check `msg.sender == L2_MESSENGER` and call `messenger.xDomainMessageSender()` to authenticate the L1 origin.
+
 #### Zone gas token
 
 The zone's gas token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
+
+#### L1 state reader
+
+The L1 state reader precompile allows zone contracts to read L1 storage. The zone node provides L1 state values; the prover validates all accesses against the state root committed in `parentBlockHash`. This is similar to [RIP-7728 (L1SLOAD)](https://github.com/ethereum/RIPs/pull/27).
+
+```solidity
+// Predeploy address: 0x000000000000000000000000000000000000c1000
+interface IL1StateReader {
+    /// @notice Read a storage slot from an L1 contract
+    /// @param account The L1 contract address
+    /// @param slot The storage slot to read
+    /// @return value The storage value
+    function readStorageSlot(address account, bytes32 slot) external view returns (bytes32);
+
+    /// @notice Read multiple storage slots from an L1 contract
+    /// @param account The L1 contract address
+    /// @param slots The storage slots to read
+    /// @return values The storage values
+    function readStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
+}
+```
+
+L1 state staleness depends on deposit frequency—the zone uses L1 state from the latest processed deposit's parent block. The prover includes Merkle proofs for each unique account and storage slot accessed during the batch.
+
+#### TIP-403 registry
+
+The zone has a `TIP403Registry` contract deployed at the **same address** as L1. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from L1 via the L1 state reader precompile, so zone-side TIP-20 transfers enforce L1 TIP-403 policies automatically.
 
 #### Zone inbox
 
@@ -427,9 +522,9 @@ interface IZoneInbox {
         address indexed to,
         uint128 amount,
         bytes32 memo,
-        bytes32 l1BlockHash,
-        uint64 l1BlockNumber,
-        uint64 l1Timestamp
+        bytes32 parentBlockHash,
+        uint64 blockNumber,
+        uint64 timestamp
     );
 
     /// @notice The last processed deposit hash (should match L1's processedDepositsHash after batch).
@@ -471,9 +566,9 @@ interface IZoneOutbox {
     /// @dev Caller must have approved the outbox to spend `amount` of gas tokens.
     /// @param to The Tempo recipient address.
     /// @param amount Amount to withdraw.
-    /// @param gasLimit Gas limit for IExitReceiver callback (0 = no callback).
+    /// @param gasLimit Gas limit for messenger callback (0 = no callback).
     /// @param fallbackRecipient Zone address for bounce-back if callback fails.
-    /// @param data Calldata for IExitReceiver callback.
+    /// @param data Calldata for the target.
     function requestWithdrawal(
         address to,
         uint128 amount,
@@ -503,28 +598,6 @@ interface ITIP20 {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function approve(address spender, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
-}
-```
-
-#### Exit receiver
-
-Contracts that want to receive transfer exits with a callback must implement this interface:
-
-```solidity
-interface IExitReceiver {
-    /// @notice Called by the portal when a transfer exit targets this contract.
-    /// @dev Tokens are transferred to this contract BEFORE the callback.
-    ///      If the callback reverts or returns the wrong selector, the portal
-    ///      reverts the transfer (via a self-call) and bounces back the funds.
-    /// @param sender The address that initiated the exit on the zone.
-    /// @param amount The amount of gas tokens that will be transferred if accepted.
-    /// @param data User-provided data from the exit intent.
-    /// @return selector Must return IExitReceiver.onExitReceived.selector to accept.
-    function onExitReceived(
-        address sender,
-        uint128 amount,
-        bytes calldata data
-    ) external returns (bytes4);
 }
 ```
 
@@ -619,7 +692,7 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 ## Bridging in (Tempo to zone)
 
 1. User calls `ZonePortal.deposit(to, amount, gasLimit, data)` on Tempo.
-2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `currentDepositsHash = keccak256(abi.encode(deposit, currentDepositsHash))`. The deposit includes current L1 block info (hash, number, timestamp).
+2. `ZonePortal` transfers `amount` of the gas token into escrow and updates the deposits hash chain: `currentDepositsHash = keccak256(abi.encode(deposit, currentDepositsHash))`. The deposit includes L1 block info (parent block hash, block number, timestamp).
 3. The sequencer observes deposit events and processes them in order:
    - Credit `to` with `amount` of the gas token (TIP-20 balance).
    - If `gasLimit > 0`: execute a call to `to` with `data` as calldata, using the specified gas limit.
@@ -633,9 +706,9 @@ When the sequencer processes a deposit:
 
 1. Credit `to` with `amount` of the gas token.
 2. If `gasLimit == 0`: done (simple balance credit).
-3. If `gasLimit > 0`: execute call to `to` with `data` as calldata.
-   - Caller is the deposit `sender` (or a system address TBD).
-   - If call succeeds: done.
+3. If `gasLimit > 0`: call `L2Messenger.relayMessage(sender, to, amount, gasLimit, data)`.
+   - `msg.sender` for the target is the L2 messenger.
+   - Target calls `messenger.xDomainMessageSender()` to get the L1 origin.
    - If call reverts: enqueue a withdrawal to return `amount` to `sender` on L1.
 
 Notes:
@@ -658,7 +731,7 @@ This separation allows the sequencer to process withdrawals immediately without 
 
 ### Withdrawal execution
 
-When the sequencer processes a withdrawal via `processWithdrawal`, the withdrawal is **popped unconditionally** (even on failure). If a callback fails, funds are bounced back via a new deposit.
+When the sequencer processes a withdrawal via `processWithdrawal`, the withdrawal is **popped unconditionally** (even on failure). If the messenger call fails, funds are bounced back via a new deposit.
 
 ```solidity
 function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
@@ -685,43 +758,28 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
         return;
     }
 
-    try this._executeWithdrawal(w) {
-        // Success: transfer + callback already executed
+    // Messenger has max approval, does transferFrom + callback atomically
+    try messenger.relayMessage(w.sender, w.to, w.amount, w.gasLimit, w.data) {
+        // Success: messenger transferred tokens and executed callback
     } catch {
-        // Callback failed or rejected: bounce back to zone
+        // Callback failed: messenger reverted (including the transferFrom)
         _enqueueBounceBack(w.amount, w.fallbackRecipient);
-    }
-}
-
-function _executeWithdrawal(Withdrawal calldata w) external {
-    require(msg.sender == address(this), 'self only');
-    // Transfer before callback so receiver can use funds in the callback (e.g. DEX swap).
-    // The self-call makes transfer + callback atomic: if callback fails, transfer reverts too.
-    ITIP20(token).transfer(w.to, w.amount);
-
-    bytes4 selector = IExitReceiver(w.to).onExitReceived{gas: w.gasLimit}(
-        w.sender,
-        w.amount,
-        w.data
-    );
-    if (selector != IExitReceiver.onExitReceived.selector) {
-        revert();
     }
 }
 ```
 
-The self-call makes the transfer and callback atomic: if the callback fails or returns the wrong selector, the entire self-call reverts (including the transfer), and funds remain in the portal for bounce-back. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits). The portal does not need to know about these use cases—they are handled by receiver contracts.
+The messenger does `token.transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` and call `messenger.xDomainMessageSender()` to authenticate the L2 origin. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
 
 ## Withdrawal failure and bounce-back
 
-Withdrawals with `gasLimit > 0` can fail if the `IExitReceiver` call fails, runs out of gas, or returns the wrong selector. When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
+Withdrawals with `gasLimit > 0` can fail if the messenger callback reverts (out of gas, logic error, TIP-403 policy, etc.). When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
 
 ```solidity
 function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
     Deposit memory d = Deposit({
-        l1BlockHash: blockhash(block.number - 1),
-        l1BlockNumber: uint64(block.number),
-        l1Timestamp: uint64(block.timestamp),
+        parentBlockHash: blockhash(block.number - 1),
+        blockNumber: uint64(block.number),
+        timestamp: uint64(block.timestamp),
         sender: address(this),
         to: fallbackRecipient,
         amount: amount,
@@ -744,7 +802,7 @@ The zone processes bounce-back deposits and credits the `fallbackRecipient`. Thi
 
 - Sequencer can halt the zone without recourse due to missing data availability.
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
-- Withdrawals with callbacks only call the `IExitReceiver` interface with a user-specified gas limit—no arbitrary calldata or unbounded gas. Receivers must return the correct selector to accept funds; failed or rejected calls trigger a bounce-back to `fallbackRecipient`.
+- Withdrawals with callbacks go through the zone messenger with a user-specified gas limit. The messenger does `transferFrom` + callback atomically; failed callbacks trigger a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
 
 ## Implementation architecture
@@ -775,7 +833,7 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 ### State commitments
 
 - **State root**: Computed via SP1 (Succinct) proving. The state root is the output of the proven execution.
-- **L1 anchoring**: Each deposit embeds L1 block hash/number/timestamp; off-chain observers reconstruct the exact L1 context from deposit events without a separate receipts root commitment.
+- **L1 anchoring**: Each deposit embeds L1 block info (parent block hash, block number, timestamp); off-chain observers reconstruct the exact L1 context from deposit events without a separate receipts root commitment.
 
 ### Batching and proofs
 
