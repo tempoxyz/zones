@@ -12,4 +12,4 @@ pub mod l1;
 mod node;
 
 pub use l1::{Deposit, DepositReceiver, L1SubscriberConfig, spawn_l1_subscriber};
-pub use node::{ZoneNode, ZoneNodeArgs};
+pub use node::ZoneNode;

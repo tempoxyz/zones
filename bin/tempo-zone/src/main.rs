@@ -16,14 +16,11 @@ use reth_tracing::tracing::info;
 use std::sync::Arc;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use tempo_zone::{L1SubscriberConfig, ZoneNode, ZoneNodeArgs, spawn_l1_subscriber};
+use tempo_zone::{L1SubscriberConfig, ZoneNode, spawn_l1_subscriber};
 
 /// Tempo Zone CLI arguments.
 #[derive(Debug, Clone, clap::Args)]
 struct ZoneArgs {
-    #[command(flatten)]
-    pub node_args: ZoneNodeArgs,
-
     /// L1 WebSocket RPC URL for subscribing to deposit events.
     #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
     pub l1_rpc_url: Option<String>,
@@ -48,7 +45,7 @@ fn main() {
         .run_with_components::<ZoneNode>(components, async move |builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
-            let node = ZoneNode::new(&args.node_args);
+            let node = ZoneNode::default();
 
             let NodeHandle {
                 node_exit_future,

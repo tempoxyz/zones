@@ -42,7 +42,7 @@ use tempo_transaction_pool::{
     validator::TempoTransactionValidator,
 };
 
-pub use tempo_node::TempoNodeArgs as ZoneNodeArgs;
+
 
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
@@ -55,11 +55,6 @@ type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnve
 pub struct ZoneNode;
 
 impl ZoneNode {
-    /// Create new instance of a Zone node.
-    pub fn new(_args: &ZoneNodeArgs) -> Self {
-        Self
-    }
-
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>() -> ComponentsBuilder<
         N,
