@@ -847,12 +847,52 @@ The zone processes bounce-back deposits and credits the `fallbackRecipient`. Thi
 - If the sequencer withholds data or halts, users cannot reconstruct zone state or force exits; batch posting and withdrawal processing are sequencer-only.
 - The design assumes users accept this risk in exchange for low-cost and fast settlement.
 
+## Bounce-back on failure
+
+Both deposits and withdrawals can fail for various reasons. The system handles all failures gracefully via bounce-back:
+
+### Failure reasons
+
+Bridging operations can fail due to:
+- **TIP-403 policy**: Recipient not authorized under the token's transfer policy
+- **Token paused**: The gas token is globally paused
+- **Callback revert**: The receiver contract reverts (out of gas, logic error, etc.)
+- **Callback rejection**: Receiver returns wrong selector
+
+### Deposit failures (zone-side)
+
+When a deposit fails on the zone:
+1. The zone cannot credit the recipient or the callback reverts
+2. The zone enqueues a withdrawal back to the original `sender` on L1
+3. Funds return to L1 via the normal withdrawal flow
+
+### Withdrawal failures (L1-side)
+
+When a withdrawal fails on L1:
+1. The TIP-20 transfer or callback reverts
+2. The portal enqueues a bounce-back deposit to `fallbackRecipient` on the zone
+3. Funds return to zone via the normal deposit flow
+
+### TIP-403 specific considerations
+
+Tempo TIP-20 tokens use TIP-403 for transfer authorization:
+- Every transfer checks `isAuthorized(policyId, from)` AND `isAuthorized(policyId, to)`
+- Policy types: WHITELIST (must be in set) or BLACKLIST (must not be in set)
+- Policy ID 1 is "always-allow" (default for most tokens)
+
+Zone creators SHOULD choose gas tokens with `transferPolicyId == 1` to avoid complexity. If using restricted policies:
+- The portal address MUST be whitelisted
+- Users should set `fallbackRecipient` to an address they control
+
 ## Security considerations
 
 - Sequencer can halt the zone without recourse due to missing data availability.
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
 - Withdrawals with callbacks only call the `IExitReceiver` interface with a user-specified gas limit—no arbitrary calldata or unbounded gas. Receivers must return the correct selector to accept funds; failed or rejected calls trigger a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
+- **Bounce-back guarantees**: Failed deposits bounce back to L1 sender; failed withdrawals bounce back to zone `fallbackRecipient`. Users always retain their funds.
+- **TIP-403 policy changes**: If the gas token's policy restricts the portal, operations will fail and bounce back.
+- **Token pause**: If the gas token is paused, withdrawals bounce back to zone; deposits cannot be initiated.
 
 ## Implementation architecture
 
