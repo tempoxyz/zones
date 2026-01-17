@@ -2,17 +2,13 @@
 //!
 //! Extracts deposits from L1 blocks and executes L2 blocks.
 
-use crate::{PzNodeTypes, types::PzNodeTypesDb};
+use crate::{L2Database, PzNodeTypes, execution, types::PzNodeTypesDb};
 use alloy_consensus::BlockHeader as _;
 use reth_node_api::{FullNodeComponents, NodeTypes};
 use reth_primitives::EthPrimitives;
-use reth_provider::{BlockNumReader, Chain, ProviderFactory, StateProvider};
-use reth_revm::{State, database::StateProviderDatabase, db::StateBuilder};
+use reth_provider::{BlockNumReader, Chain, ProviderFactory};
 use std::sync::Arc;
 use tracing::{debug, info, instrument};
-
-/// Revm state type for L2 execution.
-pub(crate) type L2RevmState = State<StateProviderDatabase<Box<dyn StateProvider>>>;
 
 /// L2 Block Processor.
 ///
@@ -22,10 +18,14 @@ where
     Db: PzNodeTypesDb,
 {
     /// L2 chain spec.
+    #[allow(dead_code)] // Will be used for block execution
     chain_spec: Arc<reth_chainspec::ChainSpec>,
 
     /// L2 provider factory for database access.
     l2_provider: ProviderFactory<PzNodeTypes<Db>>,
+
+    /// In-memory L2 database for EVM execution.
+    l2_db: std::sync::Mutex<L2Database>,
 }
 
 impl<Db: PzNodeTypesDb> std::fmt::Debug for PzBlockProcessor<Db> {
@@ -43,15 +43,8 @@ impl<Db: PzNodeTypesDb> PzBlockProcessor<Db> {
         Self {
             chain_spec,
             l2_provider,
+            l2_db: std::sync::Mutex::new(L2Database::default()),
         }
-    }
-
-    /// Create a state provider database for EVM execution at a given L2 height.
-    fn state_provider_database(&self, height: u64) -> eyre::Result<L2RevmState> {
-        let sp = self.l2_provider.history_by_block_number(height)?;
-        let spd = StateProviderDatabase::new(sp);
-        let builder = StateBuilder::new_with_database(spd);
-        Ok(builder.with_bundle_update().build())
     }
 
     /// Process a committed L1 chain - extract deposits and execute L2 blocks.
@@ -88,15 +81,22 @@ impl<Db: PzNodeTypesDb> PzBlockProcessor<Db> {
                 "Found deposits in L1 block"
             );
 
-            // TODO: Build and execute L2 block with deposits
-            // For now, just log that we found deposits
-            // NOTE: we should probably be able to execute this as it comes in as pre-state to the
-            // block rather than execute this at block time
-            for deposit in &deposits {
-                debug!(?deposit, "Extracted deposit");
+            // Process deposits by crediting L2 balances
+            {
+                let mut db = self.l2_db.lock().expect("poisoned lock");
+                for deposit in &deposits {
+                    debug!(?deposit, "Processing deposit");
+                    execution::process_deposit(&mut db, deposit.to, deposit.amount)?;
+                    info!(
+                        to = %deposit.to,
+                        amount = %deposit.amount,
+                        "Credited deposit to L2 account"
+                    );
+                }
             }
 
-            // TODO: also this should be executing tempo transactions
+            // TODO: Execute L2 block with user transactions from the mempool
+            // This would call execution::execute_block() with transactions
         }
 
         Ok(())
@@ -112,6 +112,7 @@ impl<Db: PzNodeTypesDb> PzBlockProcessor<Db> {
 
 /// A deposit event extracted from L1.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // Fields will be used when deposit extraction is implemented
 pub(crate) struct DepositEvent {
     /// L1 block number where deposit occurred.
     pub l1_block_number: u64,

@@ -48,6 +48,7 @@ where
     processor: PzBlockProcessor<Db>,
 
     /// L2 chain spec.
+    #[allow(dead_code)] // Will be used for RPC methods
     chain_spec: Arc<reth_chainspec::ChainSpec>,
 }
 

@@ -6,12 +6,19 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![deny(unused_must_use, rust_2018_idioms)]
 
+use reth_tracing as _;
+use tokio as _;
+
 mod builder;
+pub mod db;
+pub mod execution;
 mod node;
 mod processor;
 mod types;
 
 pub use builder::PzNodeBuilder;
+pub use db::L2Database;
+pub use execution::{execute_block, process_deposit};
 pub use node::PzNode;
 pub use processor::PzBlockProcessor;
 pub use types::{PzNodeTypes, PzNodeTypesDb};
