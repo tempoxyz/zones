@@ -1,41 +1,41 @@
 //! Tempo Zone L2 Node.
 //!
-//! This binary runs a Tempo node with the Tempo Zone ExEx installed.
-//! The ExEx listens to L1 chain notifications, extracts deposits, and processes L2 blocks.
+//! This binary runs a lightweight L2 node using the reth node builder infrastructure.
+//! It subscribes to L1 chain events to extract deposit transactions.
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
+
+use std::sync::Arc;
+
+use clap::Parser;
+use reth_consensus::noop::NoopConsensus;
+use reth_ethereum::cli::Cli;
+use reth_node_builder::NodeHandle;
+use reth_tracing::tracing::info;
+use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
+use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
+use zone::{DepositQueue, L1SubscriberConfig, ZoneNode, spawn_l1_subscriber};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
-use clap::Parser;
-use eyre::Context;
-use tempo_zone_exex::ZoneNodeBuilder;
-use reth_chainspec::{EthChainSpec as _, MAINNET};
-use reth_ethereum::cli::Cli;
-use reth_node_builder::NodeHandle;
-use std::sync::Arc;
-use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use tempo_consensus::TempoConsensus;
-use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use tempo_node::{TempoNodeArgs, node::TempoNode};
-use tracing::info;
-
-
-// TODO:  setup with remote exex eventually
-//
-//
-// TODO: setup with subscribe chain notifications and listen to testnet
-
-
-/// Tempo Zone specific arguments.
-#[derive(Debug, Clone, PartialEq, Eq, clap::Args)]
+/// Tempo Zone CLI arguments.
+#[derive(Debug, Clone, clap::Args)]
 struct ZoneArgs {
-    #[command(flatten)]
-    pub node_args: TempoNodeArgs,
+    /// L1 WebSocket RPC URL for subscribing to deposit events.
+    #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
+    pub l1_rpc_url: Option<String>,
+
+    /// Block building interval in milliseconds.
+    #[arg(
+        long = "block.interval-ms",
+        env = "BLOCK_INTERVAL_MS",
+        default_value = "250"
+    )]
+    pub block_interval_ms: u64,
 }
 
-fn main() -> eyre::Result<()> {
+fn main() {
     reth_cli_util::sigsegv_handler::install();
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
@@ -43,60 +43,57 @@ fn main() -> eyre::Result<()> {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
 
-    tempo_node::init_version_metadata();
-
-    let cli = Cli::<TempoChainSpecParser, ZoneArgs>::parse();
-
     let components = |spec: Arc<TempoChainSpec>| {
         (
-            TempoEvmConfig::new(spec.clone(), TempoEvmFactory::default()),
-            TempoConsensus::new(spec),
+            TempoEvmConfig::new(spec, TempoEvmFactory::default()),
+            NoopConsensus::default(),
         )
     };
 
-    cli.run_with_components::<TempoNode>(components, async move |builder, args| {
-        // Get data directory from builder config
-        let data_dir = builder
-            .config()
-            .datadir
-            .clone()
-            .resolve_datadir(builder.config().chain.chain())
-            .data_dir()
-            .to_path_buf();
+    if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
+        .run_with_components::<ZoneNode>(components, async move |builder, args| {
+            info!(target: "reth::cli", "Launching Tempo Zone node");
 
-        let l2_data_dir = data_dir.join("zone-l2");
+            let node = ZoneNode::default();
 
-        info!(?l2_data_dir, "Starting Tempo Zone L2 ExEx on Tempo node");
+            let NodeHandle {
+                node_exit_future,
+                node,
+            } = builder.node(node).launch().await?;
 
-        let NodeHandle {
-            node: _,
-            node_exit_future,
-        } = builder
-            .node(TempoNode::new(&args.node_args, None))
-            .install_exex("TempoZone", move |ctx| async move {
-                // Build the Zone node with the ExEx context
-                let zone_node = ZoneNodeBuilder::new()
-                    .with_ctx(ctx)
-                    // TODO: update this to take in flags
-                    .with_chain_spec(MAINNET.clone())
-                    .with_data_dir(l2_data_dir)
-                    .build()
-                    .wrap_err("failed to build Zone node")?;
+            info!(target: "reth::cli", "Tempo Zone node started");
 
-                info!("Tempo Zone L2 ExEx initialized");
+            // Create shared deposit queue
+            let deposits = DepositQueue::default();
 
-                // Return the node's start future
-                Ok(zone_node.start())
-            })
-            .launch_with_debug_capabilities()
-            .await
-            .wrap_err("failed launching Tempo node with Zone ExEx")?;
+            // Spawn L1 subscriber if L1 RPC URL is provided
+            if let Some(l1_rpc_url) = args.l1_rpc_url {
+                let config = L1SubscriberConfig {
+                    l1_rpc_url,
+                    ..Default::default()
+                };
 
-        info!("Tempo Zone node started");
+                spawn_l1_subscriber(config, deposits.clone(), node.task_executor.clone());
 
-        node_exit_future.await
-    })
-    .wrap_err("Tempo Zone node failed")?;
+                info!(target: "reth::cli", "L1 deposit subscriber started");
+            }
 
-    Ok(())
+            // TODO: Spawn block builder with LocalMiner using args.block_interval_ms
+            // The block builder will:
+            // 1. Drain deposits from the queue
+            // 2. Convert deposits to L2 transactions
+            // 3. Build blocks at the configured interval
+            info!(
+                target: "reth::cli",
+                interval_ms = args.block_interval_ms,
+                "Block builder interval configured (not yet active)"
+            );
+
+            node_exit_future.await?;
+            Ok(())
+        })
+    {
+        eprintln!("Error: {err:?}");
+        std::process::exit(1);
+    }
 }
