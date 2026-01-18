@@ -19,6 +19,7 @@ import {
     DepositQueueTransition,
     WithdrawalQueueTransition
 } from "../../src/zone/IZone.sol";
+import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
 
 /// @notice Mock withdrawal receiver for callback tests
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
@@ -133,7 +134,7 @@ contract ZoneBridgeTest is BaseTest {
         l2GasToken.setMinter(address(l2Inbox), true);
 
         // Zone outbox (handles withdrawals)
-        l2Outbox = new ZoneOutbox(address(l2GasToken));
+        l2Outbox = new ZoneOutbox(address(l2GasToken), admin);
         l2GasToken.setBurner(address(l2Outbox), true);
 
         // Initialize zone state root
@@ -221,9 +222,13 @@ contract ZoneBridgeTest is BaseTest {
     }
 
     /// @notice Build withdrawal queue hash from observed events (oldest = outermost)
+    /// @dev Only used for verification in tests, actual hash is built by l2Outbox.batch()
     function _buildWithdrawalQueueHash() internal view returns (bytes32 queueHash) {
+        if (pendingWithdrawals.length == 0) return bytes32(0);
+
         // Build from newest to oldest (so oldest ends up outermost)
-        queueHash = bytes32(0);
+        // Innermost element wraps EMPTY_SENTINEL
+        queueHash = EMPTY_SENTINEL;
         for (uint256 i = pendingWithdrawals.length; i > 0; ) {
             unchecked { i--; }
             queueHash = keccak256(abi.encode(pendingWithdrawals[i].withdrawal, queueHash));
@@ -232,11 +237,9 @@ contract ZoneBridgeTest is BaseTest {
 
     /// @notice Simulate sequencer building and submitting a batch to Tempo
     function _sequencerSubmitBatch(bytes32 newProcessedDepositQueueHash) internal {
-        // Build withdrawal queue hash from observed events
-        bytes32 withdrawalQueueHash = _buildWithdrawalQueueHash();
-
-        // Get current Tempo pending queue state
-        bytes32 prevPendingHash = l1Portal.pendingWithdrawalQueueHash();
+        // Sequencer calls batch() on zone outbox to get withdrawal hash on-chain
+        vm.prank(admin);
+        bytes32 withdrawalQueueHash = l2Outbox.batch(type(uint256).max);
 
         // Advance a block so we can use blockhash
         vm.roll(block.number + 1);
@@ -246,12 +249,12 @@ contract ZoneBridgeTest is BaseTest {
             uint64(block.number - 1),
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash }),
-            WithdrawalQueueTransition({ prevPendingHash: prevPendingHash, nextPendingHashIfNoSwap: withdrawalQueueHash, nextPendingHashIfSwapped: withdrawalQueueHash }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalQueueHash }),
             "",
             ""
         );
 
-        // Clear pending withdrawals (they're now in Tempo queue)
+        // Clear pending withdrawals observation (they're now in Tempo queue)
         delete pendingWithdrawals;
     }
 
@@ -337,19 +340,21 @@ contract ZoneBridgeTest is BaseTest {
             fallbackRecipient: address(0),
             callbackData: ""
         });
-        bytes32 expectedQueueHash = keccak256(abi.encode(w, bytes32(0)));
-        assertEq(l1Portal.pendingWithdrawalQueueHash(), expectedQueueHash);
+        bytes32 expectedQueueHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        // Withdrawal should be in slot 0 (first batch with withdrawals)
+        assertEq(l1Portal.withdrawalQueueSlot(0), expectedQueueHash);
+        assertEq(l1Portal.withdrawalQueueTail(), 1);
 
         // === STEP 8: Sequencer processes withdrawal on L1 ===
         uint256 aliceL1BalanceBefore = pathUSD.balanceOf(alice);
-        l1Portal.processWithdrawal(w, bytes32(0));
+        l1Portal.processWithdrawal(w, bytes32(0));  // 0 = last item in slot
 
         // Verify Alice received funds on L1
         assertEq(pathUSD.balanceOf(alice), aliceL1BalanceBefore + withdrawAmount);
 
-        // Verify queues are empty
-        assertEq(l1Portal.activeWithdrawalQueueHash(), bytes32(0));
-        assertEq(l1Portal.pendingWithdrawalQueueHash(), bytes32(0));
+        // Verify slot cleared and head advanced
+        assertEq(l1Portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(l1Portal.withdrawalQueueHead(), 1);
     }
 
     function test_fullFlow_multipleDepositsAndWithdrawals() public {
@@ -395,16 +400,17 @@ contract ZoneBridgeTest is BaseTest {
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "withdrawals"));
         _sequencerSubmitBatch(processedHash);
 
-        // Build expected queue hash (oldest = outermost)
+        // Build expected queue hash (oldest = outermost, innermost wraps EMPTY_SENTINEL)
         Withdrawal memory w0 = Withdrawal({
             sender: alice, to: alice, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
         });
         Withdrawal memory w1 = Withdrawal({
             sender: bob, to: bob, amount: 1000e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
         });
-        bytes32 innerHash = keccak256(abi.encode(w1, bytes32(0)));
+        bytes32 innerHash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
         bytes32 queueHash = keccak256(abi.encode(w0, innerHash));
-        assertEq(l1Portal.pendingWithdrawalQueueHash(), queueHash);
+        // Both withdrawals are in slot 0 (same batch)
+        assertEq(l1Portal.withdrawalQueueSlot(0), queueHash);
 
         // Process withdrawals in order
         uint256 aliceBefore = pathUSD.balanceOf(alice);
@@ -413,7 +419,7 @@ contract ZoneBridgeTest is BaseTest {
         l1Portal.processWithdrawal(w0, innerHash);
         assertEq(pathUSD.balanceOf(alice), aliceBefore + 500e6);
 
-        l1Portal.processWithdrawal(w1, bytes32(0));
+        l1Portal.processWithdrawal(w1, bytes32(0));  // 0 = last item in slot
         assertEq(pathUSD.balanceOf(bob), bobBefore + 1000e6);
     }
 
@@ -580,7 +586,7 @@ contract ZoneBridgeTest is BaseTest {
             uint64(block.number - 1),
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: partialHash }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: bytes32(0), nextPendingHashIfSwapped: bytes32(0) }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );

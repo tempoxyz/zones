@@ -68,19 +68,18 @@ The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-
 
 1. Verifies the proof/attestation for the state transition.
 2. Updates the portal's state root.
-3. Updates the withdrawal queue (adds new withdrawals to `pendingWithdrawalQueueHash`).
+3. Updates the withdrawal queue (adds new withdrawals to the next slot in the circular buffer).
 
 Each batch submission includes:
 
-- `verifierData` (opaque payload forwarded to the verifier for domain separation/attestation needs)
+- `tempoBlockNumber` (the Tempo block number for blockhash verification)
+- `verifierConfig` (opaque payload forwarded to the verifier for domain separation/attestation needs)
 - `nextProcessedDepositQueueHash` (the deposit queue messages processed up to)
 - `nextStateRoot` (the resulting state after execution)
-- `prevPendingWithdrawalQueueHash` (the pending withdrawal queue hash the proof assumed)
-- `nextPendingWithdrawalQueueHashIfNoSwap` (pending queue with new withdrawals if `prevPendingWithdrawalQueueHash` matches)
-- `nextPendingWithdrawalQueueHashIfSwapped` (new withdrawals only, if pending was swapped during proving)
+- `withdrawalQueueHash` (hash chain of withdrawals for this batch, or 0 if none)
 - `proof` (validity proof or TEE attestation)
 
-The portal tracks `stateRoot`, `processedDepositQueueHash` (where proofs start from), `snapshotDepositQueueHash` (stable target for proofs), `currentDepositQueueHash` (head of deposit queue), `activeWithdrawalQueueHash` (active queue), and `pendingWithdrawalQueueHash` (pending queue).
+The portal tracks `stateRoot`, `processedDepositQueueHash` (where proofs start from), `snapshotDepositQueueHash` (stable target for proofs), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
 
 The portal calls the verifier to validate the batch:
 
@@ -98,15 +97,16 @@ struct DepositQueueTransition {
     bytes32 nextProcessedHash;     // where zone processed up to
 }
 
-/// @notice Withdrawal queue transition inputs/outputs for batch proofs
+/// @notice Withdrawal queue transition for batch proofs
+/// @dev Each batch gets its own slot in an unbounded buffer.
+///      The withdrawalQueueHash is the hash chain of withdrawals for this batch.
 struct WithdrawalQueueTransition {
-    bytes32 prevPendingHash;           // what proof assumed pending queue was
-    bytes32 nextPendingHashIfNoSwap;   // pending queue after append if no swap occurred
-    bytes32 nextPendingHashIfSwapped;  // pending queue after append if swap occurred
+    bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
 }
 
 interface IVerifier {
     function verify(
+        bytes32 tempoBlockHash,
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -155,83 +155,86 @@ Proofs or attestations are assumed to be fast. No data availability is required 
 
 ## Withdrawal queue
 
-Withdrawals use a two-queue system that allows the sequencer to process withdrawals independently of proof generation. The portal tracks two hash chains in constant space (2 storage slots):
+Withdrawals use an unbounded buffer that allows the sequencer to process withdrawals independently of proof generation. Each batch gets its own slot, and the sequencer processes withdrawals from the oldest slot while new batches add to the next available slot.
 
-- `activeWithdrawalQueueHash` - the active queue, processed by the sequencer
-- `pendingWithdrawalQueueHash` - the pending queue, updated by proofs
+The portal tracks:
+- `head` - slot index of the oldest unprocessed batch (where sequencer removes)
+- `tail` - slot index where the next batch will write (where proofs add)
+- `maxSize` - maximum queue length ever reached (for gas accounting)
+- `slots` - mapping of slot index to hash chain (`EMPTY_SENTINEL` = empty)
+
+**Gas note**: Since this is implemented as a precompile on Tempo, storage gas should only be charged when `(tail - head) > maxSize`, i.e., when the queue length exceeds its previous maximum. This allows the queue to shrink and regrow without repeated storage charges.
 
 ### Hash chain structure
 
-Each queue is a hash chain with the **oldest withdrawal at the outermost layer**, making FIFO processing efficient:
+Each slot contains a hash chain with the **oldest withdrawal at the outermost layer**, making FIFO processing efficient. The innermost element wraps `EMPTY_SENTINEL` (0xffffffff...fff) instead of 0x00 to avoid clearing storage:
 
 ```
-queue = keccak256(abi.encode(w1, keccak256(abi.encode(w2, keccak256(abi.encode(w3, bytes32(0)))))))
+slot = keccak256(abi.encode(w1, keccak256(abi.encode(w2, keccak256(abi.encode(w3, EMPTY_SENTINEL))))))
       // w1 is oldest (outermost), w3 is newest (innermost)
 ```
 
-To process the oldest withdrawal, the sequencer provides the withdrawal data and the remaining queue hash. The portal verifies the hash and advances the queue:
+To process the oldest withdrawal, the sequencer provides the withdrawal data and the remaining queue hash. The portal verifies the hash and updates the slot:
 
 ```solidity
 function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
-    // If active is empty, swap in pending first
-    if (activeWithdrawalQueueHash == bytes32(0)) {
-        require(pendingWithdrawalQueueHash != bytes32(0), "no withdrawals");
-        activeWithdrawalQueueHash = pendingWithdrawalQueueHash;
-        pendingWithdrawalQueueHash = bytes32(0);
+    uint256 head = _withdrawalQueue.head;
+
+    // Check if queue is empty
+    if (head == _withdrawalQueue.tail) {
+        revert NoWithdrawalsInQueue();
     }
 
-    require(keccak256(abi.encode(w, remainingQueue)) == activeWithdrawalQueueHash, "invalid");
+    bytes32 currentSlot = _withdrawalQueue.slots[head];
+
+    // Verify this is the head of the current slot
+    // The remainingQueue for the last item should be 0 (we convert to EMPTY_SENTINEL internally)
+    bytes32 expectedRemainingQueue = remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
+    require(keccak256(abi.encode(w, expectedRemainingQueue)) == currentSlot, "invalid");
 
     _executeWithdrawal(w);
 
     if (remainingQueue == bytes32(0)) {
-        // Active exhausted, swap in pending
-        activeWithdrawalQueueHash = pendingWithdrawalQueueHash;
-        pendingWithdrawalQueueHash = bytes32(0);
+        // Slot exhausted, mark as empty and advance head
+        _withdrawalQueue.slots[head] = EMPTY_SENTINEL;
+        _withdrawalQueue.head = head + 1;
     } else {
-        activeWithdrawalQueueHash = remainingQueue;
+        // More withdrawals in this slot
+        _withdrawalQueue.slots[head] = remainingQueue;
     }
 }
 ```
 
-### Proof updates to the pending queue
+### Batch submission adds withdrawals
 
-When a proof is submitted, it adds new withdrawals to `pendingWithdrawalQueueHash`. The proof builds the queue with new withdrawals at the **innermost** layers (newest = last to process). This is an O(N) operation but happens inside the ZKP.
-
-### Race condition handling
-
-A race condition can occur:
-1. Proof generation starts when `pendingWithdrawalQueueHash = X` (non-empty)
-2. Meanwhile, sequencer drains `activeWithdrawalQueueHash`, triggering swap: `activeWithdrawalQueueHash = X`, `pendingWithdrawalQueueHash = 0`
-3. Proof submits expecting `pendingWithdrawalQueueHash = X`, but it's now `0`
-
-To handle this, the proof generates two outputs:
-- `nextPendingWithdrawalQueueHashIfNoSwap` - new withdrawals added to innermost of the expected pending queue
-- `nextPendingWithdrawalQueueHashIfSwapped` - new withdrawals as a fresh queue (as if pending was empty)
-
-The caller provides `prevPendingHash` in `WithdrawalQueueTransition` (what the proof assumed), and the portal uses the appropriate value:
+When a batch is submitted with withdrawals, they go into the slot at `tail`, then `tail` advances:
 
 ```solidity
-function submitBatch(
-    StateTransition calldata stateTransition,
-    DepositQueueTransition calldata depositQueueTransition,
-    WithdrawalQueueTransition calldata withdrawalQueueTransition,
-    bytes calldata verifierData,
-    bytes calldata proof
-) external onlySequencer {
+function submitBatch(...) external onlySequencer {
     // ... verify proof ...
 
-    if (pendingWithdrawalQueueHash == prevPendingWithdrawalQueueHash) {
-        pendingWithdrawalQueueHash = nextPendingWithdrawalQueueHashIfNoSwap;
-    } else if (pendingWithdrawalQueueHash == bytes32(0)) {
-        pendingWithdrawalQueueHash = nextPendingWithdrawalQueueHashIfSwapped;
-    } else {
-        revert("unexpected pending queue");
+    // If no withdrawals in this batch, nothing to do
+    if (withdrawalQueueTransition.withdrawalQueueHash == bytes32(0)) {
+        return;
+    }
+
+    uint256 tail = _withdrawalQueue.tail;
+
+    // Write the withdrawal hash chain to this slot
+    _withdrawalQueue.slots[tail] = withdrawalQueueTransition.withdrawalQueueHash;
+
+    // Advance tail
+    _withdrawalQueue.tail = tail + 1;
+
+    // Update maxSize if current queue length exceeds previous maximum
+    uint256 currentSize = _withdrawalQueue.tail - _withdrawalQueue.head;
+    if (currentSize > _withdrawalQueue.maxSize) {
+        _withdrawalQueue.maxSize = currentSize;
     }
 }
 ```
 
-This ensures the proof works regardless of whether a queue swap happened during proving.
+This design eliminates race conditions entirely - each batch has its own independent slot, and the sequencer processes slots in order. The unbounded buffer means the queue can never be "full".
 
 ## Interfaces and functions
 
@@ -317,35 +320,46 @@ library DepositQueueLib {
 }
 ```
 
-#### WithdrawalQueueLib (2-slot swap pattern)
+#### WithdrawalQueueLib (unbounded buffer)
 
-Handles L2→L1 withdrawals where the producer (proof) is slow and the consumer (on-chain) is fast.
+Handles L2→L1 withdrawals where the producer (proof) is slow and the consumer (on-chain) is fast. Each batch gets its own slot in an unbounded buffer.
 
 ```solidity
+/// @dev Sentinel value for empty slots. Using 0xff...ff instead of 0x00 to avoid
+///      clearing storage (which would refund gas and create incentive issues).
+bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
+
 struct WithdrawalQueue {
-    bytes32 active;   // active queue (being drained on-chain)
-    bytes32 pending;  // pending queue (being filled by proofs)
+    uint256 head;     // slot index of oldest unprocessed batch
+    uint256 tail;     // slot index where next batch will write
+    uint256 maxSize;  // maximum queue length ever reached (for gas accounting)
+    mapping(uint256 => bytes32) slots;  // hash chains per batch (EMPTY_SENTINEL = empty)
 }
 
 library WithdrawalQueueLib {
-    /// @notice Dequeue the next withdrawal from the queue (on-chain operation)
-    /// @dev Verifies keccak256(abi.encode(w, remainingQueue)) == active
-    ///      Automatically swaps in pending if active is empty
+    /// @notice Add a batch's withdrawals to the queue (proof operation)
+    /// @dev Writes to slot at tail, then advances tail. Updates maxSize if needed.
+    function enqueue(WithdrawalQueue storage q, WithdrawalQueueTransition memory transition) internal;
+
+    /// @notice Pop the next withdrawal from the queue (on-chain operation)
+    /// @dev Verifies the withdrawal is at the head of the current slot and advances.
+    ///      When a slot is exhausted, it's set to EMPTY_SENTINEL and head advances.
     function dequeue(WithdrawalQueue storage q, Withdrawal calldata w, bytes32 remainingQueue) internal;
 
-    /// @notice Enqueue new withdrawals via proof (proof operation)
-    /// @dev Handles race condition where pending was swapped away during proving
-    function enqueueWithProof(
-        WithdrawalQueue storage q,
-        WithdrawalQueueTransition memory transition
-    ) internal;
+    /// @notice Check if the queue has any pending withdrawals
+    function hasWithdrawals(WithdrawalQueue storage q) internal view returns (bool);
+
+    /// @notice Get current queue length
+    function length(WithdrawalQueue storage q) internal view returns (uint256);
 }
 ```
+
+**Gas note**: Storage gas should only be charged when `(tail - head) > maxSize`. This is enforced by the precompile implementation.
 
 | Queue | On-chain op | Proof op |
 |-------|-------------|----------|
 | Deposit | `enqueue` | `dequeueWithProof` |
-| Withdrawal | `dequeue` | `enqueueWithProof` |
+| Withdrawal | `dequeue` | `enqueue` |
 
 ### Tempo contracts
 
@@ -397,7 +411,8 @@ interface IZonePortal {
         uint64 tempoBlockNumber,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextStateRoot,
-        bytes32 nextPendingWithdrawalQueueHash
+        uint256 withdrawalQueueTail,
+        bytes32 withdrawalQueueHash
     );
 
     function zoneId() external view returns (uint64);
@@ -410,8 +425,10 @@ interface IZonePortal {
     function processedDepositQueueHash() external view returns (bytes32);
     function snapshotDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
-    function activeWithdrawalQueueHash() external view returns (bytes32);
-    function pendingWithdrawalQueueHash() external view returns (bytes32);
+    function withdrawalQueueHead() external view returns (uint256);
+    function withdrawalQueueTail() external view returns (uint256);
+    function withdrawalQueueMaxSize() external view returns (uint256);
+    function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     /// @notice Set the sequencer's public key. Only callable by the sequencer.
     function setSequencerPubkey(bytes32 pubkey) external;
@@ -419,16 +436,16 @@ interface IZonePortal {
     /// @notice Deposit gas token into the zone. Returns the new current deposit queue hash.
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
 
-    /// @notice Process the next withdrawal from the active queue. Only callable by the sequencer.
-    /// @param withdrawal The withdrawal to process (must be at the head of the active queue).
-    /// @param remainingQueue The hash of the remaining queue after this withdrawal.
+    /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
+    /// @param withdrawal The withdrawal to process (must be at the head of the current slot).
+    /// @param remainingQueue The hash of the remaining withdrawals in this slot (0 if last).
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     /// @param tempoBlockNumber The Tempo block number to verify against (must be recent for blockhash lookup).
     /// @param stateTransition The state root transition (prev filled from storage, next from batch).
     /// @param depositQueueTransition The deposit queue transition (prev hashes from storage).
-    /// @param withdrawalQueueTransition The withdrawal queue transition with both possible outcomes.
+    /// @param withdrawalQueueTransition The withdrawal queue hash chain for this batch (0 if none).
     /// @param verifierConfig Opaque payload forwarded to verifier (e.g., attestation envelope).
     /// @param proof The validity proof or TEE attestation.
     function submitBatch(
@@ -643,7 +660,7 @@ Both the deposit queue and withdrawal queue are FIFO queues that require constan
 Both use hash chains, but with different models:
 
 - **Deposit queue**: 3 slots (`processedDepositQueueHash` is where proofs start, `snapshotDepositQueueHash` is the stable target, `currentDepositQueueHash` is the head where new deposits land)
-- **Withdrawal queue**: 2 separate queues (`activeWithdrawalQueueHash` drains, `pendingWithdrawalQueueHash` fills, then swap)
+- **Withdrawal queue**: unbounded buffer (each batch gets its own slot, `head` points to oldest unprocessed batch, `tail` points to where next batch writes, `maxSize` tracks peak queue length for gas accounting)
 
 The hash chains are structured differently to optimize for their on-chain operation:
 
@@ -671,51 +688,51 @@ Adding d4: currentDepositQueueHash = keccak256(abi.encode(deposit4, currentDepos
 - **Proving removals**: Proof starts from stable `processedDepositQueueHash`, processes deposits in FIFO order (oldest first, working outward), and must prove the result is an ancestor of `snapshotDepositQueueHash`.
 - **After batch**: `processedDepositQueueHash = nextProcessedDepositQueueHash`, then `snapshotDepositQueueHash = currentDepositQueueHash` (snapshot new target for next proof).
 
-### Withdrawal queue: oldest-outermost
+### Withdrawal queue: oldest-outermost per slot
 
 ```
 Oldest withdrawal on the outside (O(1) removal):
 
-                    ┌─────────────────────────────────────────┐
-                    │ hash(w1, ┌─────────────────────────┐ ) │  ← activeWithdrawalQueueHash
-                    │          │ hash(w2, ┌───────────┐ ) │  │
-                    │          │          │ hash(w3,0) │   │  │
-                    │          │          └───────────┘   │  │
-                    │          └─────────────────────────┘  │
-                    └─────────────────────────────────────────┘
-                      ▲                              ▲
-                      │                              │
-                    oldest                        newest
-                   (outermost)                  (innermost)
+                    ┌────────────────────────────────────────────────────┐
+                    │ hash(w1, ┌──────────────────────────────────────┐) │  ← slots[head]
+                    │          │ hash(w2, ┌───────────────────────┐ ) │  │
+                    │          │          │ hash(w3, EMPTY_SENTINEL) │  │  │
+                    │          │          └───────────────────────┘  │  │
+                    │          └──────────────────────────────────────┘  │
+                    └────────────────────────────────────────────────────┘
+                      ▲                                     ▲
+                      │                                     │
+                    oldest                              newest
+                   (outermost)                       (innermost)
 
-Removing w1: verify hash(w1, remainingQueue) == queue, then queue = remainingQueue
+Removing w1: verify hash(w1, remainingQueue) == slots[head], then slots[head] = remainingQueue
+When slot exhausted: slots[head] = EMPTY_SENTINEL, head++
 ```
 
 - **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
-- **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP).
-- **Two queues handle the race**: `activeWithdrawalQueueHash` for processing, `pendingWithdrawalQueueHash` for accumulation. When `activeWithdrawalQueueHash` empties, swap in `pendingWithdrawalQueueHash`.
+- **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP), writes to slot at tail.
+- **Unbounded buffer**: Each batch gets its own slot. Sequencer processes from `head`, proofs add at `tail`. The `maxSize` field tracks peak queue length for gas accounting.
 
 ```
-Two-queue system:
+Unbounded buffer:
 
-  ┌──────────────────┐         ┌──────────────────┐
-  │  activeWithdrawalQueueHash │         │  pendingWithdrawalQueueHash │
-  │  (being drained)  │         │  (being filled)   │
-  └────────┬─────────┘         └────────┬─────────┘
-           │                            │
-           ▼                            ▼
-      ┌─────────┐                 ┌─────────┐
-      │ w1 ──────► process        │ w4      │ ◄── new from proof
-      │ w2      │                 │ w5      │ ◄── new from proof
-      │ w3      │                 │ w6      │ ◄── new from proof
-      └─────────┘                 └─────────┘
+     head                              tail
+      │                                 │
+      ▼                                 ▼
+  ┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐
+  │ w1  │ w4  │ w6  │EMPTY│EMPTY│EMPTY│     │     │  ...unbounded
+  │ w2  │ w5  │     │     │     │     │     │     │
+  │ w3  │     │     │     │     │     │     │     │
+  └─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘
+  slot 0 slot 1 slot 2 ...
 
-When active is empty:
-  activeWithdrawalQueueHash = pendingWithdrawalQueueHash
-  pendingWithdrawalQueueHash = 0
+- Batches write to slots[tail], then tail++
+- Sequencer processes from slots[head], then head++ when slot exhausted
+- maxSize updated when (tail - head) exceeds previous maximum
+- Gas only charged for new storage when queue length exceeds maxSize
 ```
 
-The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable.
+The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable. Using `EMPTY_SENTINEL` (0xffffffff...fff) instead of 0x00 avoids storage clearing and gas refund incentive issues.
 
 ## Bridging in (Tempo to zone)
 
@@ -738,10 +755,10 @@ Notes:
 
 Users withdraw by creating a withdrawal on the zone. Withdrawals are processed in two steps:
 
-1. **Batch submission**: The proof adds new withdrawals to `pendingWithdrawalQueueHash`.
-2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from `activeWithdrawalQueueHash` one at a time.
+1. **Batch submission**: The proof adds new withdrawals to the next available slot in the circular buffer.
+2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from the oldest slot (`head`).
 
-This separation allows the sequencer to process withdrawals immediately without waiting for proofs.
+This separation allows the sequencer to process withdrawals immediately without waiting for proofs, as long as the slot has been filled by a batch.
 
 ### Withdrawal execution
 
@@ -749,22 +766,27 @@ When the sequencer processes a withdrawal via `processWithdrawal`, the withdrawa
 
 ```solidity
 function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
-    // Swap in pending if active is empty
-    if (activeWithdrawalQueueHash == bytes32(0)) {
-        require(pendingWithdrawalQueueHash != bytes32(0), "no withdrawals");
-        activeWithdrawalQueueHash = pendingWithdrawalQueueHash;
-        pendingWithdrawalQueueHash = bytes32(0);
+    uint256 head = _withdrawalQueue.head;
+
+    // Check if queue is empty
+    if (head == _withdrawalQueue.tail) {
+        revert NoWithdrawalsInQueue();
     }
 
-    // Verify head
-    require(keccak256(abi.encode(w, remainingQueue)) == activeWithdrawalQueueHash, "invalid");
+    bytes32 currentSlot = _withdrawalQueue.slots[head];
+
+    // Verify head (remainingQueue of 0 means last item, we check against EMPTY_SENTINEL)
+    bytes32 expectedRemainingQueue = remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
+    require(keccak256(abi.encode(w, expectedRemainingQueue)) == currentSlot, "invalid");
 
     // Pop the withdrawal regardless of success/failure
     if (remainingQueue == bytes32(0)) {
-        activeWithdrawalQueueHash = pendingWithdrawalQueueHash;
-        pendingWithdrawalQueueHash = bytes32(0);
+        // Slot exhausted, mark as empty and advance head
+        _withdrawalQueue.slots[head] = EMPTY_SENTINEL;
+        _withdrawalQueue.head = head + 1;
     } else {
-        activeWithdrawalQueueHash = remainingQueue;
+        // More withdrawals in this slot
+        _withdrawalQueue.slots[head] = remainingQueue;
     }
 
     if (w.gasLimit == 0) {
@@ -772,11 +794,11 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
         return;
     }
 
-    // Messenger has max approval, does transferFrom + callback atomically
-    try messenger.relayMessage(w.sender, w.to, w.amount, w.gasLimit, w.data) {
-        // Success: messenger transferred tokens and executed callback
+    // Try callback via self-call for atomicity
+    try this._executeWithdrawal(w) {
+        // Success: tokens transferred and callback executed
     } catch {
-        // Callback failed: messenger reverted (including the transferFrom)
+        // Callback failed: bounce back to zone
         _enqueueBounceBack(w.amount, w.fallbackRecipient);
     }
 }
@@ -897,11 +919,9 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 struct BatchProof {
     bytes32 nextStateRoot;
     bytes32 nextProcessedDepositQueueHash;
-    bytes32 prevPendingWithdrawalQueueHash;
-    bytes32 nextPendingWithdrawalQueueHashIfNoSwap;
-    bytes32 nextPendingWithdrawalQueueHashIfSwapped;
-    bytes verifierConfig; // opaque payload to IVerifier (TEE/ZK envelope)
-    bytes proof;          // SP1 proof bytes (or TEE attestation)
+    bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
+    bytes verifierConfig;         // opaque payload to IVerifier (TEE/ZK envelope)
+    bytes proof;                  // SP1 proof bytes (or TEE attestation)
 }
 ```
 `prevStateRoot`, `processedDepositQueueHash`, and `snapshotDepositQueueHash` come from the portal's tracked state when the proof is verified on L1.

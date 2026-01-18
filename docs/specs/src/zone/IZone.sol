@@ -26,11 +26,11 @@ struct DepositQueueTransition {
     bytes32 nextProcessedHash;     // where zone processed up to
 }
 
-/// @notice Withdrawal queue transition inputs/outputs for batch proofs
+/// @notice Withdrawal queue transition for batch proofs
+/// @dev Each batch gets its own slot in a 256-slot circular buffer.
+///      The withdrawalQueueHash is the hash chain of withdrawals for this batch.
 struct WithdrawalQueueTransition {
-    bytes32 prevPendingHash;           // what proof assumed pending queue was
-    bytes32 nextPendingHashIfNoSwap;   // pending queue after append if no swap occurred
-    bytes32 nextPendingHashIfSwapped;  // pending queue after append if swap occurred
+    bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
 }
 
 struct Deposit {
@@ -112,7 +112,8 @@ interface IZonePortal {
         uint64 tempoBlockNumber,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextStateRoot,
-        bytes32 nextPendingWithdrawalQueueHash
+        uint256 withdrawalQueueTail,
+        bytes32 withdrawalQueueHash
     );
 
     event WithdrawalProcessed(
@@ -142,8 +143,10 @@ interface IZonePortal {
     function processedDepositQueueHash() external view returns (bytes32);
     function snapshotDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
-    function activeWithdrawalQueueHash() external view returns (bytes32);
-    function pendingWithdrawalQueueHash() external view returns (bytes32);
+    function withdrawalQueueHead() external view returns (uint256);
+    function withdrawalQueueTail() external view returns (uint256);
+    function withdrawalQueueMaxSize() external view returns (uint256);
+    function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);
 
@@ -168,4 +171,26 @@ interface IWithdrawalReceiver {
         uint128 amount,
         bytes calldata callbackData
     ) external returns (bytes4);
+}
+
+/// @title IZoneOutbox
+/// @notice Interface for zone outbox on the zone
+interface IZoneOutbox {
+    /// @notice Request a withdrawal from the zone back to Tempo
+    function requestWithdrawal(
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes calldata data
+    ) external;
+
+    /// @notice Build withdrawal hash chain and clear pending withdrawals
+    /// @param count Max number of withdrawals to process
+    /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
+    function batch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+
+    /// @notice Number of pending withdrawals
+    function pendingWithdrawalsCount() external view returns (uint256);
 }

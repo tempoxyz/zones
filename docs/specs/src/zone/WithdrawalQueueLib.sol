@@ -3,110 +3,123 @@ pragma solidity ^0.8.13;
 
 import { Withdrawal, WithdrawalQueueTransition } from "./IZone.sol";
 
+/// @dev Sentinel value for empty slots. Using 0xff...ff instead of 0x00 to avoid
+///      clearing storage (which would refund gas and create incentive issues).
+bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
+
 /// @title WithdrawalQueue
-/// @notice 2-slot queue for zone→L1 withdrawals with swap pattern
+/// @notice Unbounded buffer for zone→Tempo withdrawals
+/// @dev Each batch gets its own slot. Head points to the oldest unprocessed batch,
+///      tail points to where the next batch will write. Slots contain hash chains
+///      of withdrawals for that batch.
+///
+///      Gas note: This is implemented as a precompile on Tempo. Storage gas should
+///      only be charged when (tail - head) > maxSize, i.e., when the queue length
+///      exceeds its previous maximum. This allows the queue to shrink and regrow
+///      without repeated storage charges.
 struct WithdrawalQueue {
-    bytes32 active;   // active queue (being drained on-chain)
-    bytes32 pending;  // pending queue (being filled by proofs)
+    uint256 head;     // slot index of oldest unprocessed batch
+    uint256 tail;     // slot index where next batch will write
+    uint256 maxSize;  // maximum queue length ever reached (for gas accounting)
+    mapping(uint256 => bytes32) slots;  // hash chains per batch (EMPTY_SENTINEL = empty)
 }
 
 /// @title WithdrawalQueueLib
-/// @notice Library for managing the withdrawal queue hash chain
-/// @dev Withdrawals are inserted by proofs and dequeued on-chain by the sequencer.
-///      The 2-queue design handles the race where the sequencer drains active while a proof is in-flight:
-///      - `active`: active queue being processed
-///      - `pending`: pending queue receiving new withdrawals from proofs
-///      When active empties, swap in pending.
+/// @notice Library for managing the withdrawal queue unbounded buffer
+/// @dev Withdrawals are inserted by proofs (one slot per batch) and dequeued
+///      on-chain by the sequencer. The sequencer processes withdrawals from
+///      the head slot, advancing head when the slot is exhausted.
 ///
-///      Note on proof complexity: The off-chain proof that enqueues withdrawals is O(N) in the number
-///      of pending withdrawals, since it must reconstruct the hash chain to append new items. While
-///      this could theoretically become expensive if withdrawals accumulate faster than they are
-///      processed, in practice the withdrawal queue proving costs are expected to be a small fraction
-///      of the costs of proving zone blocks. If this becomes a concern, the design could be extended
-///      with overflow queues to bound proof complexity, without changing the on-chain interface.
+///      Invariants:
+///      - Slots between head (inclusive) and tail (exclusive) contain withdrawal hash chains
+///      - If head == tail, the queue is empty
+///      - Slots at head contain EMPTY_SENTINEL only after being fully processed
 library WithdrawalQueueLib {
     error NoWithdrawalsInQueue();
     error InvalidWithdrawalHash();
-    error UnexpectedPendingQueueHash();
 
-    /// @notice Pop the next withdrawal from the queue (on-chain operation)
-    /// @dev Verifies the withdrawal is at the head of active and advances the queue.
-    ///      If active is empty, automatically swaps in pending first.
+    /// @notice Add a batch's withdrawals to the queue
+    /// @dev Called during submitBatch. The batch's withdrawal hash chain goes into
+    ///      the slot at tail, then tail advances.
     /// @param queue The withdrawal queue
-    /// @param withdrawal The withdrawal to pop (must be at head of queue)
+    /// @param transition The withdrawal queue transition containing the hash chain
+    function enqueue(
+        WithdrawalQueue storage queue,
+        WithdrawalQueueTransition memory transition
+    ) internal {
+        // If no withdrawals in this batch, nothing to do
+        if (transition.withdrawalQueueHash == bytes32(0)) {
+            return;
+        }
+
+        uint256 tail = queue.tail;
+
+        // Write the withdrawal hash chain to this slot
+        queue.slots[tail] = transition.withdrawalQueueHash;
+
+        // Advance tail
+        queue.tail = tail + 1;
+
+        // Update maxSize if current queue length exceeds previous maximum
+        // Note: Gas charging for new storage should only happen when this increases
+        uint256 currentSize = queue.tail - queue.head;
+        if (currentSize > queue.maxSize) {
+            queue.maxSize = currentSize;
+        }
+    }
+
+    /// @notice Pop the next withdrawal from the queue
+    /// @dev Verifies the withdrawal is at the head of the current slot and advances.
+    ///      When a slot is exhausted (remainingQueue would be empty), we set it to
+    ///      EMPTY_SENTINEL and advance head to the next slot.
+    /// @param queue The withdrawal queue
+    /// @param withdrawal The withdrawal to pop (must be at head of current slot)
     /// @param remainingQueue The hash of the remaining queue after this withdrawal
     function dequeue(
         WithdrawalQueue storage queue,
         Withdrawal calldata withdrawal,
         bytes32 remainingQueue
     ) internal {
-        // Swap in pending if active is empty
-        if (queue.active == bytes32(0)) {
-            if (queue.pending == bytes32(0)) revert NoWithdrawalsInQueue();
-            queue.active = queue.pending;
-            queue.pending = bytes32(0);
+        uint256 head = queue.head;
+
+        // Check if queue is empty
+        if (head == queue.tail) {
+            revert NoWithdrawalsInQueue();
         }
 
-        // Verify this is the head of active
+        // Get the current slot's hash chain
+        bytes32 currentSlot = queue.slots[head];
+
+        // Verify this is the head of the current slot
         // Queue structure: oldest withdrawal at outermost layer for O(1) removal
-        if (keccak256(abi.encode(withdrawal, remainingQueue)) != queue.active) {
+        // The remainingQueue for the last item should be EMPTY_SENTINEL, not 0
+        bytes32 expectedRemainingQueue = remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
+        if (keccak256(abi.encode(withdrawal, expectedRemainingQueue)) != currentSlot) {
             revert InvalidWithdrawalHash();
         }
 
-        // Advance active
+        // Update the slot
         if (remainingQueue == bytes32(0)) {
-            // Active exhausted, swap in pending
-            queue.active = queue.pending;
-            queue.pending = bytes32(0);
+            // Slot exhausted, clear and advance head
+            queue.slots[head] = EMPTY_SENTINEL;
+            queue.head = head + 1;
         } else {
-            queue.active = remainingQueue;
+            // More withdrawals in this slot
+            queue.slots[head] = remainingQueue;
         }
     }
 
-    /// @notice Enqueue new withdrawals via proof (proof operation)
-    /// @dev Called when a batch proof is submitted. The proof computed new withdrawals
-    ///      and provides two outputs to handle the race condition:
-    ///      - `nextPendingHashIfNoSwap`: pending queue with new withdrawals appended
-    ///      - `nextPendingHashIfSwapped`: new withdrawals only (pending was swapped away)
-    ///
-    ///      The race condition:
-    ///      1. Proof starts, sees pending = X
-    ///      2. Sequencer drains active, triggers swap: active = X, pending = 0
-    ///      3. Proof submits expecting pending = X, but it's now 0
-    ///
-    ///      Solution: proof provides both outputs, we use the appropriate one.
+    /// @notice Check if the queue has any pending withdrawals
     /// @param queue The withdrawal queue
-    /// @param transition The withdrawal queue transition containing prev/next state hashes
-    function enqueueWithProof(
-        WithdrawalQueue storage queue,
-        WithdrawalQueueTransition memory transition
-    ) internal {
-        if (queue.pending == transition.prevPendingHash) {
-            // No swap happened during proving, use the appended version
-            queue.pending = transition.nextPendingHashIfNoSwap;
-        } else if (queue.pending == bytes32(0)) {
-            // Swap happened during proving, pending is now empty, use fresh
-            queue.pending = transition.nextPendingHashIfSwapped;
-        } else {
-            // Unexpected state: pending is neither expected nor empty
-            revert UnexpectedPendingQueueHash();
-        }
-    }
-
-    /// @notice Get the current state for proof generation
-    /// @param queue The withdrawal queue
-    /// @return activeQueueHash Active queue being drained
-    /// @return pendingQueueHash Pending queue being filled
-    function getState(
-        WithdrawalQueue storage queue
-    ) internal view returns (bytes32 activeQueueHash, bytes32 pendingQueueHash) {
-        return (queue.active, queue.pending);
-    }
-
-    /// @notice Check if there are any pending withdrawals
-    /// @param queue The withdrawal queue
-    /// @return True if either queue has withdrawals
+    /// @return True if there are withdrawals to process
     function hasWithdrawals(WithdrawalQueue storage queue) internal view returns (bool) {
-        return queue.active != bytes32(0) || queue.pending != bytes32(0);
+        return queue.head != queue.tail;
+    }
+
+    /// @notice Get current queue length
+    /// @param queue The withdrawal queue
+    /// @return The number of batch slots with pending withdrawals
+    function length(WithdrawalQueue storage queue) internal view returns (uint256) {
+        return queue.tail - queue.head;
     }
 }

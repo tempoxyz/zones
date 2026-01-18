@@ -35,10 +35,10 @@ contract ZonePortal is IZonePortal {
     uint64 public batchIndex;
     bytes32 public stateRoot;
 
-    /// @notice Deposit queue (L1→L2): 3-slot ceiling pattern
+    /// @notice Deposit queue (Tempo→zone): 3-slot ceiling pattern
     DepositQueue internal _depositQueue;
 
-    /// @notice Withdrawal queue (L2→L1): 2-slot swap pattern
+    /// @notice Withdrawal queue (zone→Tempo): unbounded buffer
     WithdrawalQueue internal _withdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
@@ -94,12 +94,20 @@ contract ZonePortal is IZonePortal {
         return _depositQueue.current;
     }
 
-    function activeWithdrawalQueueHash() external view returns (bytes32) {
-        return _withdrawalQueue.active;
+    function withdrawalQueueHead() external view returns (uint256) {
+        return _withdrawalQueue.head;
     }
 
-    function pendingWithdrawalQueueHash() external view returns (bytes32) {
-        return _withdrawalQueue.pending;
+    function withdrawalQueueTail() external view returns (uint256) {
+        return _withdrawalQueue.tail;
+    }
+
+    function withdrawalQueueMaxSize() external view returns (uint256) {
+        return _withdrawalQueue.maxSize;
+    }
+
+    function withdrawalQueueSlot(uint256 slot) external view returns (bytes32) {
+        return _withdrawalQueue.slots[slot];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -241,16 +249,18 @@ contract ZonePortal is IZonePortal {
         // Update deposit queue via library (validates expected state matches)
         _depositQueue.dequeueWithProof(fullDepositTransition);
 
-        // Update withdrawal queue via library
-        _withdrawalQueue.enqueueWithProof(withdrawalQueueTransition);
+        // Update withdrawal queue - each batch gets its own slot
+        // Reverts with WithdrawalQueueFull if sequencer hasn't processed enough withdrawals
+        _withdrawalQueue.enqueue(withdrawalQueueTransition);
 
-        // Emit event after state updates (captures new state including actual withdrawal queue used)
+        // Emit event after state updates
         emit BatchSubmitted(
             batchIndex,
             tempoBlockNumber,
             _depositQueue.processed,
             stateRoot,
-            _withdrawalQueue.pending
+            _withdrawalQueue.tail,
+            withdrawalQueueTransition.withdrawalQueueHash
         );
     }
 }
