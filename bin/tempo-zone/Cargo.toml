@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 # tempo
-tempo-zone = { path = "../../crates/tempo-zone" }
+zone = { path = "../../crates/tempo-zone" }
 tempo-chainspec = { workspace = true, features = ["cli"] }
 tempo-evm.workspace = true
 

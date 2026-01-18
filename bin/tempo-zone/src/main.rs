@@ -14,7 +14,7 @@ use reth_node_builder::NodeHandle;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use tempo_zone::{L1SubscriberConfig, ZoneNode, spawn_l1_subscriber, DepositQueue};
+use zone::{DepositQueue, L1SubscriberConfig, ZoneNode, spawn_l1_subscriber};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();

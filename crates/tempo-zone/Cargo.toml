@@ -1,5 +1,5 @@
 [package]
-name = "tempo-zone"
+name = "zone"
 description = "Tempo Zone node - a lightweight L2 node built on reth"
 version.workspace = true
 edition.workspace = true
