@@ -14,7 +14,7 @@ use reth_node_builder::NodeHandle;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use tempo_zone::{L1SubscriberConfig, ZoneNode, deposit_queue, spawn_l1_subscriber};
+use tempo_zone::{L1SubscriberConfig, ZoneNode, spawn_l1_subscriber, DepositQueue};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -64,7 +64,7 @@ fn main() {
             info!(target: "reth::cli", "Tempo Zone node started");
 
             // Create shared deposit queue
-            let deposits = deposit_queue();
+            let deposits = DepositQueue::default();
 
             // Spawn L1 subscriber if L1 RPC URL is provided
             if let Some(l1_rpc_url) = args.l1_rpc_url {

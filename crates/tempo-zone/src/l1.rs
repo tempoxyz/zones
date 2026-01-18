@@ -58,11 +58,6 @@ impl Deposit {
 /// Shared deposit queue for passing deposits between L1 subscriber and block builder.
 pub type DepositQueue = Arc<Mutex<Vec<Deposit>>>;
 
-/// Create a new empty deposit queue.
-pub fn deposit_queue() -> DepositQueue {
-    Arc::new(Mutex::new(Vec::new()))
-}
-
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
 pub struct L1SubscriberConfig {
