@@ -42,8 +42,6 @@ use tempo_transaction_pool::{
     validator::TempoTransactionValidator,
 };
 
-
-
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 

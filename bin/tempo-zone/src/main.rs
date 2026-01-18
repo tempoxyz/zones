@@ -27,7 +27,11 @@ struct ZoneArgs {
     pub l1_rpc_url: Option<String>,
 
     /// Block building interval in milliseconds.
-    #[arg(long = "block.interval-ms", env = "BLOCK_INTERVAL_MS", default_value = "250")]
+    #[arg(
+        long = "block.interval-ms",
+        env = "BLOCK_INTERVAL_MS",
+        default_value = "250"
+    )]
     pub block_interval_ms: u64,
 }
 

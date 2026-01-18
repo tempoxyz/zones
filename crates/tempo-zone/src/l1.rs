@@ -91,7 +91,10 @@ pub struct L1Subscriber {
 impl L1Subscriber {
     /// Create a new L1 subscriber.
     pub fn new(config: L1SubscriberConfig, deposit_queue: DepositQueue) -> Self {
-        Self { config, deposit_queue }
+        Self {
+            config,
+            deposit_queue,
+        }
     }
 
     /// Start the L1 subscriber.
