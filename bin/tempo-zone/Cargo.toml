@@ -1,5 +1,5 @@
 [package]
-name = "tempo-zone-bin"
+name = "tempo-zone"
 description = "Tempo Zone L2 node binary"
 default-run = "tempo-zone"
 
@@ -35,6 +35,4 @@ path = "src/main.rs"
 [features]
 default = ["jemalloc"]
 
-jemalloc = [
-	"reth-cli-util/jemalloc",
-]
+jemalloc = ["reth-cli-util/jemalloc"]
