@@ -69,8 +69,10 @@ contract ZoneBridgeTest is BaseTest {
     uint64 public zoneId;
 
     bytes32 constant GENESIS_STATE_ROOT = keccak256("genesis");
+    bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
+    uint64 public genesisTempoBlockNumber;
 
-    /// @notice Represents an observed deposit from L1 (simulating sequencer watching events)
+    /// @notice Represents an observed deposit from Tempo (simulating sequencer watching events)
     struct ObservedDeposit {
         Deposit deposit;
         bytes32 newCurrentDepositQueueHash;
@@ -106,12 +108,17 @@ contract ZoneBridgeTest is BaseTest {
         pathUSD.mint(bob, 100_000e6);
         vm.stopPrank();
 
+        // Record genesis block number for Tempo
+        genesisTempoBlockNumber = uint64(block.number);
+
         // Create zone on L1
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(l1Verifier),
-            genesisStateRoot: GENESIS_STATE_ROOT
+            genesisStateRoot: GENESIS_STATE_ROOT,
+            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+            genesisTempoBlockNumber: genesisTempoBlockNumber
         });
         address portalAddr;
         (zoneId, portalAddr) = l1Factory.createZone(params);
@@ -137,25 +144,22 @@ contract ZoneBridgeTest is BaseTest {
                        SEQUENCER SIMULATION HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Simulate sequencer observing a deposit event on L1
+    /// @notice Simulate sequencer observing a deposit event on Tempo
     function _sequencerObserveDeposit(
         address sender,
         address to,
         uint128 amount,
         bytes32 memo
     ) internal returns (bytes32 newHash) {
-        // Record the deposit with L1 block info
+        // Record the deposit
         Deposit memory d = Deposit({
-            l1ParentBlockHash: blockhash(block.number - 1),
-            l1BlockNumber: uint64(block.number),
-            l1Timestamp: uint64(block.timestamp),
             sender: sender,
             to: to,
             amount: amount,
             memo: memo
         });
 
-        // Calculate the new hash (matches what L1 portal computes)
+        // Calculate the new hash (matches what Tempo portal computes)
         bytes32 prevHash = pendingDeposits.length > 0
             ? pendingDeposits[pendingDeposits.length - 1].newCurrentDepositQueueHash
             : l2Inbox.processedDepositQueueHash();
@@ -226,16 +230,20 @@ contract ZoneBridgeTest is BaseTest {
         }
     }
 
-    /// @notice Simulate sequencer building and submitting a batch to L1
+    /// @notice Simulate sequencer building and submitting a batch to Tempo
     function _sequencerSubmitBatch(bytes32 newProcessedDepositQueueHash) internal {
         // Build withdrawal queue hash from observed events
         bytes32 withdrawalQueueHash = _buildWithdrawalQueueHash();
 
-        // Get current L1 pending queue state
+        // Get current Tempo pending queue state
         bytes32 prevPendingHash = l1Portal.pendingWithdrawalQueueHash();
 
-        // Submit to L1
+        // Advance a block so we can use blockhash
+        vm.roll(block.number + 1);
+
+        // Submit to Tempo
         l1Portal.submitBatch(
+            uint64(block.number - 1),
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash }),
             WithdrawalQueueTransition({ prevPendingHash: prevPendingHash, nextPendingHashIfNoSwap: withdrawalQueueHash, nextPendingHashIfSwapped: withdrawalQueueHash }),
@@ -243,7 +251,7 @@ contract ZoneBridgeTest is BaseTest {
             ""
         );
 
-        // Clear pending withdrawals (they're now in L1 queue)
+        // Clear pending withdrawals (they're now in Tempo queue)
         delete pendingWithdrawals;
     }
 
@@ -563,9 +571,13 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(l2GasToken.balanceOf(alice), 2000e6); // Only 2 processed
         assertEq(l2Inbox.processedDepositQueueHash(), partialHash);
 
+        // Advance a block so we can use blockhash
+        vm.roll(block.number + 1);
+
         // Submit batch with partial processing
         l2StateRoot = keccak256(abi.encode(l2StateRoot, "partial"));
         l1Portal.submitBatch(
+            uint64(block.number - 1),
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: partialHash }),
             WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: bytes32(0), nextPendingHashIfSwapped: bytes32(0) }),

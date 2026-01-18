@@ -21,22 +21,17 @@ contract ZoneInbox {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The L1 portal address (for reference)
-    address public immutable l1Portal;
+    /// @notice The Tempo portal address (for reference)
+    address public immutable tempoPortal;
 
-    /// @notice The gas token (TIP-20 at same address as L1)
+    /// @notice The gas token (TIP-20 at same address as Tempo)
     IZoneGasToken public immutable gasToken;
 
     /// @notice The sequencer address (only caller for processDepositQueue)
     address public immutable sequencer;
 
-    /// @notice Last processed deposit queue hash (matches L1's processedDepositQueueHash after batch)
+    /// @notice Last processed deposit queue hash (matches Tempo's processedDepositQueueHash after batch)
     bytes32 public processedDepositQueueHash;
-
-    /// @notice Latest L1 head observed from deposit queue messages
-    bytes32 public l1ParentBlockHash;
-    uint64 public l1BlockNumber;
-    uint64 public l1Timestamp;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -47,10 +42,7 @@ contract ZoneInbox {
         address indexed sender,
         address indexed to,
         uint128 amount,
-        bytes32 memo,
-        bytes32 l1ParentBlockHash,
-        uint64 l1BlockNumber,
-        uint64 l1Timestamp
+        bytes32 memo
     );
 
     /*//////////////////////////////////////////////////////////////
@@ -64,8 +56,8 @@ contract ZoneInbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _l1Portal, address _gasToken, address _sequencer) {
-        l1Portal = _l1Portal;
+    constructor(address _tempoPortal, address _gasToken, address _sequencer) {
+        tempoPortal = _tempoPortal;
         gasToken = IZoneGasToken(_gasToken);
         sequencer = _sequencer;
     }
@@ -90,26 +82,18 @@ contract ZoneInbox {
             Deposit calldata depositData = deposits[i];
 
             // Advance the hash chain
-            // L1 builds: newHash = keccak256(abi.encode(deposit, prevHash))
+            // Tempo builds: newHash = keccak256(abi.encode(deposit, prevHash))
             currentHash = keccak256(abi.encode(depositData, currentHash));
 
             // Mint gas tokens to the recipient
             gasToken.mint(depositData.to, depositData.amount);
-
-            // Update L1 head info
-            l1ParentBlockHash = depositData.l1ParentBlockHash;
-            l1BlockNumber = depositData.l1BlockNumber;
-            l1Timestamp = depositData.l1Timestamp;
 
             emit DepositProcessed(
                 currentHash,
                 depositData.sender,
                 depositData.to,
                 depositData.amount,
-                depositData.memo,
-                depositData.l1ParentBlockHash,
-                depositData.l1BlockNumber,
-                depositData.l1Timestamp
+                depositData.memo
             );
         }
 

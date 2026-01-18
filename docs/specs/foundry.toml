@@ -4,6 +4,7 @@ out = "out"
 libs = ["lib"]
 optimizer = true
 optimizer_runs = 200
+via_ir = true
 extra_output = ["storageLayout"]
 invariant = { fail_on_revert = true, show_solidity = true }
 fs_permissions = [{ access = "read-write", path = "./"}]
@@ -11,6 +12,7 @@ fs_permissions = [{ access = "read-write", path = "./"}]
 [profile.ci]
 optimizer = true
 optimizer_runs = 1
+via_ir = true
 invariant = { depth = 100, fail_on_revert = true, show_solidity = true }
 
 [fmt]

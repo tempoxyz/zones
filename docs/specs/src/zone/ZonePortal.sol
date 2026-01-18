@@ -29,6 +29,7 @@ contract ZonePortal is IZonePortal {
     address public immutable token;
     address public immutable sequencer;
     address public immutable verifier;
+    uint64 public immutable genesisTempoBlockNumber;
 
     bytes32 public sequencerPubkey;
     uint64 public batchIndex;
@@ -49,13 +50,15 @@ contract ZonePortal is IZonePortal {
         address _token,
         address _sequencer,
         address _verifier,
-        bytes32 _genesisStateRoot
+        bytes32 _genesisStateRoot,
+        uint64 _genesisTempoBlockNumber
     ) {
         zoneId = _zoneId;
         token = _token;
         sequencer = _sequencer;
         verifier = _verifier;
         stateRoot = _genesisStateRoot;
+        genesisTempoBlockNumber = _genesisTempoBlockNumber;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -108,11 +111,8 @@ contract ZonePortal is IZonePortal {
         // Transfer tokens into escrow
         ITIP20(token).transferFrom(msg.sender, address(this), amount);
 
-        // Build deposit struct with L1 block info
+        // Build deposit struct
         Deposit memory depositData = Deposit({
-            l1ParentBlockHash: blockhash(block.number - 1),
-            l1BlockNumber: uint64(block.number),
-            l1Timestamp: uint64(block.timestamp),
             sender: msg.sender,
             to: to,
             amount: amount,
@@ -127,10 +127,7 @@ contract ZonePortal is IZonePortal {
             msg.sender,
             to,
             amount,
-            memo,
-            depositData.l1ParentBlockHash,
-            depositData.l1BlockNumber,
-            depositData.l1Timestamp
+            memo
         );
     }
 
@@ -182,9 +179,6 @@ contract ZonePortal is IZonePortal {
     /// @notice Enqueue a bounce-back deposit for failed callback
     function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
         Deposit memory depositData = Deposit({
-            l1ParentBlockHash: blockhash(block.number - 1),
-            l1BlockNumber: uint64(block.number),
-            l1Timestamp: uint64(block.timestamp),
             sender: address(this),
             to: fallbackRecipient,
             amount: amount,
@@ -202,12 +196,23 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     function submitBatch(
+        uint64 tempoBlockNumber,
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external onlySequencer {
+        // Validate tempoBlockNumber is within valid range for blockhash lookup
+        // blockhash() only works for the last 256 blocks
+        if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
+        if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
+        if (block.number - tempoBlockNumber > 256) revert InvalidTempoBlockNumber();
+
+        // Look up the actual Tempo block hash
+        bytes32 tempoBlockHash = blockhash(tempoBlockNumber);
+        if (tempoBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
+
         // Build deposit queue transition with current state for verifier
         DepositQueueTransition memory fullDepositTransition = DepositQueueTransition({
             prevSnapshotHash: _depositQueue.snapshot,
@@ -215,8 +220,9 @@ contract ZonePortal is IZonePortal {
             nextProcessedHash: depositQueueTransition.nextProcessedHash
         });
 
-        // Call verifier
+        // Call verifier with tempoBlockHash
         bool valid = IVerifier(verifier).verify(
+            tempoBlockHash,
             StateTransition({
                 prevStateRoot: stateRoot,
                 nextStateRoot: stateTransition.nextStateRoot
@@ -241,6 +247,7 @@ contract ZonePortal is IZonePortal {
         // Emit event after state updates (captures new state including actual withdrawal queue used)
         emit BatchSubmitted(
             batchIndex,
+            tempoBlockNumber,
             _depositQueue.processed,
             stateRoot,
             _withdrawalQueue.pending

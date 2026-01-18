@@ -9,6 +9,8 @@ struct ZoneInfo {
     address sequencer;
     address verifier;
     bytes32 genesisStateRoot;
+    bytes32 genesisTempoBlockHash;
+    uint64 genesisTempoBlockNumber;
 }
 
 /// @notice State transition for zone batch proofs
@@ -32,11 +34,6 @@ struct WithdrawalQueueTransition {
 }
 
 struct Deposit {
-    // L1 block info (zone receives L1 state through deposit queue messages)
-    bytes32 l1ParentBlockHash;
-    uint64 l1BlockNumber;
-    uint64 l1Timestamp;
-    // Deposit data
     address sender;
     address to;
     uint128 amount;
@@ -57,6 +54,7 @@ struct Withdrawal {
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
     function verify(
+        bytes32 tempoBlockHash,
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -73,6 +71,8 @@ interface IZoneFactory {
         address sequencer;
         address verifier;
         bytes32 genesisStateRoot;
+        bytes32 genesisTempoBlockHash;
+        uint64 genesisTempoBlockNumber;
     }
 
     event ZoneCreated(
@@ -81,7 +81,9 @@ interface IZoneFactory {
         address indexed token,
         address sequencer,
         address verifier,
-        bytes32 genesisStateRoot
+        bytes32 genesisStateRoot,
+        bytes32 genesisTempoBlockHash,
+        uint64 genesisTempoBlockNumber
     );
 
     error InvalidToken();
@@ -102,14 +104,12 @@ interface IZonePortal {
         address indexed sender,
         address to,
         uint128 amount,
-        bytes32 memo,
-        bytes32 l1ParentBlockHash,
-        uint64 l1BlockNumber,
-        uint64 l1Timestamp
+        bytes32 memo
     );
 
     event BatchSubmitted(
         uint64 indexed batchIndex,
+        uint64 tempoBlockNumber,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextStateRoot,
         bytes32 nextPendingWithdrawalQueueHash
@@ -129,6 +129,7 @@ interface IZonePortal {
 
     error NotSequencer();
     error InvalidProof();
+    error InvalidTempoBlockNumber();
     error CallbackRejected();
 
     function zoneId() external view returns (uint64);
@@ -144,10 +145,13 @@ interface IZonePortal {
     function activeWithdrawalQueueHash() external view returns (bytes32);
     function pendingWithdrawalQueueHash() external view returns (bytes32);
 
+    function genesisTempoBlockNumber() external view returns (uint64);
+
     function setSequencerPubkey(bytes32 pubkey) external;
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
+        uint64 tempoBlockNumber,
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,

@@ -133,7 +133,7 @@ Tempo to zone communication uses a single `depositQueue` chain. Each deposit is 
 newHash = keccak256(abi.encode(deposit, prevHash))
 ```
 
-Where `deposit` is a `Deposit` struct containing the deposit data plus L1 block info (parent block hash, block number, timestamp). This enables the zone to update its L1 view in-order with deposits, allowing the L1 state reader precompile to access L1 storage.
+Where `deposit` is a `Deposit` struct containing the sender, recipient, amount, and memo. Tempo state is obtained separately through the TempoState predeploy's `finalizeTempo()` function, which the sequencer calls to update the zone's view of Tempo blocks.
 
 The portal uses a 3-slot design to allow partial processing while maintaining on-chain verifiability:
 
@@ -248,14 +248,11 @@ struct ZoneInfo {
     address sequencer;
     address verifier;
     bytes32 genesisStateRoot;
+    bytes32 genesisTempoBlockHash;
+    uint64 genesisTempoBlockNumber;
 }
 
 struct Deposit {
-    // L1 block info (zone receives L1 state through deposit queue messages)
-    bytes32 l1ParentBlockHash;  // blockhash(block.number - 1) - used for L1 state reader
-    uint64 l1BlockNumber;       // block.number
-    uint64 l1Timestamp;         // block.timestamp
-    // Deposit data
     address sender;
     address to;
     uint128 amount;
@@ -278,6 +275,7 @@ struct Withdrawal {
 ```solidity
 interface IVerifier {
     function verify(
+        bytes32 tempoBlockHash,
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -286,6 +284,8 @@ interface IVerifier {
     ) external view returns (bool);
 }
 ```
+
+The verifier receives the `tempoBlockHash` which is looked up on-chain via `blockhash(tempoBlockNumber)` when the prover submits a batch. The proof must demonstrate that the zone's internal Tempo view (stored in the TempoState predeploy) matches this value.
 
 ### Queue libraries
 
@@ -358,6 +358,8 @@ interface IZoneFactory {
         address sequencer;
         address verifier;
         bytes32 genesisStateRoot;
+        bytes32 genesisTempoBlockHash;
+        uint64 genesisTempoBlockNumber;
     }
 
     event ZoneCreated(
@@ -366,7 +368,9 @@ interface IZoneFactory {
         address indexed token,
         address sequencer,
         address verifier,
-        bytes32 genesisStateRoot
+        bytes32 genesisStateRoot,
+        bytes32 genesisTempoBlockHash,
+        uint64 genesisTempoBlockNumber
     );
 
     function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
@@ -385,14 +389,12 @@ interface IZonePortal {
         address indexed sender,
         address to,
         uint128 amount,
-        bytes32 memo,
-        bytes32 l1ParentBlockHash,
-        uint64 l1BlockNumber,
-        uint64 l1Timestamp
+        bytes32 memo
     );
 
     event BatchSubmitted(
         uint64 indexed batchIndex,
+        uint64 tempoBlockNumber,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextStateRoot,
         bytes32 nextPendingWithdrawalQueueHash
@@ -423,12 +425,14 @@ interface IZonePortal {
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
+    /// @param tempoBlockNumber The Tempo block number to verify against (must be recent for blockhash lookup).
     /// @param stateTransition The state root transition (prev filled from storage, next from batch).
     /// @param depositQueueTransition The deposit queue transition (prev hashes from storage).
     /// @param withdrawalQueueTransition The withdrawal queue transition with both possible outcomes.
     /// @param verifierConfig Opaque payload forwarded to verifier (e.g., attestation envelope).
     /// @param proof The validity proof or TEE attestation.
     function submitBatch(
+        uint64 tempoBlockNumber,
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -480,28 +484,55 @@ The messenger does `token.transferFrom(portal, target, amount)` then calls the t
 
 The zone's gas token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
 
-#### L1 state reader
+#### TempoState predeploy
 
-The L1 state reader precompile allows zone contracts to read L1 storage. The zone node provides L1 state values; the prover validates all accesses against the state root committed in `parentBlockHash`. This is similar to [RIP-7728 (L1SLOAD)](https://github.com/ethereum/RIPs/pull/27).
+The TempoState predeploy allows zones to verify they have a correct view of Tempo (L1) state. It stores the latest finalized Tempo block info and provides storage reading functionality.
 
 ```solidity
-// Predeploy address: 0x000000000000000000000000000000000000c1000
-interface IL1StateReader {
-    /// @notice Read a storage slot from an L1 contract
-    /// @param account The L1 contract address
+// Predeploy address: 0x1c00000000000000000000000000000000000000
+interface ITempoState {
+    /// @notice Current finalized Tempo block hash
+    function tempoBlockHash() external view returns (bytes32);
+
+    /// @notice Current finalized Tempo block number
+    function tempoBlockNumber() external view returns (uint64);
+
+    /// @notice Current finalized Tempo block timestamp (seconds)
+    function tempoTimestamp() external view returns (uint64);
+
+    /// @notice Current finalized Tempo state root (for storage proofs)
+    function tempoStateRoot() external view returns (bytes32);
+
+    /// @notice Current finalized Tempo receipts root (for event/log proofs)
+    function tempoReceiptsRoot() external view returns (bytes32);
+
+    /// @notice Finalize a Tempo block header. Only callable by sequencer.
+    /// @dev Validates chain continuity (parent hash must match, number must be +1)
+    /// @param header RLP-encoded Tempo header
+    function finalizeTempo(bytes calldata header) external;
+
+    /// @notice Read a storage slot from a Tempo contract
+    /// @param account The Tempo contract address
     /// @param slot The storage slot to read
     /// @return value The storage value
-    function readStorageSlot(address account, bytes32 slot) external view returns (bytes32);
+    function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
-    /// @notice Read multiple storage slots from an L1 contract
-    /// @param account The L1 contract address
+    /// @notice Read multiple storage slots from a Tempo contract
+    /// @param account The Tempo contract address
     /// @param slots The storage slots to read
     /// @return values The storage values
-    function readStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
+    function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
 }
 ```
 
-L1 state staleness depends on deposit frequency—the zone uses L1 state from the latest processed deposit's parent block. The prover includes Merkle proofs for each unique account and storage slot accessed during the batch.
+**How it works:**
+
+1. The sequencer submits Tempo block headers via `finalizeTempo()`, which validates chain continuity and updates the stored state.
+2. When submitting a batch, the prover specifies a `tempoBlockNumber`. The portal calls `blockhash(tempoBlockNumber)` to get the actual hash.
+3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the value passed by the portal.
+4. The `readTempoStorageSlot` functions are precompile stubs - actual implementation is in the zone node, validated against `tempoStateRoot`.
+
+Tempo state staleness depends on how frequently the sequencer calls `finalizeTempo()`. The prover includes Merkle proofs for each unique account and storage slot accessed during the batch.
 
 #### TIP-403 registry
 
@@ -518,19 +549,11 @@ interface IZoneInbox {
         address indexed sender,
         address indexed to,
         uint128 amount,
-        bytes32 memo,
-        bytes32 l1ParentBlockHash,
-        uint64 l1BlockNumber,
-        uint64 l1Timestamp
+        bytes32 memo
     );
 
-    /// @notice The last processed deposit queue hash (should match L1's processedDepositQueueHash after batch).
+    /// @notice The last processed deposit queue hash (should match Tempo's processedDepositQueueHash after batch).
     function processedDepositQueueHash() external view returns (bytes32);
-
-    /// @notice Latest L1 head observed from deposits.
-    function l1ParentBlockHash() external view returns (bytes32);
-    function l1BlockNumber() external view returns (uint64);
-    function l1Timestamp() external view returns (uint64);
 
     /// @notice Process deposits from Tempo. Called by sequencer as system transaction.
     /// @dev Deposits must be processed in order. The hash chain is verified.
@@ -540,7 +563,7 @@ interface IZoneInbox {
 }
 ```
 
-The sequencer observes `DepositMade` events on the L1 portal and relays them to the zone via `processDepositQueue`. Deposits credit the recipient's TIP-20 balance (minted by the system) and update the zone's L1 head from the embedded L1 block info.
+The sequencer observes `DepositMade` events on the Tempo portal and relays them to the zone via `processDepositQueue`. Deposits credit the recipient's TIP-20 balance (minted by the system). Tempo state is obtained separately via the TempoState predeploy's `finalizeTempo()` function.
 
 #### Zone outbox
 
@@ -697,8 +720,8 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 ## Bridging in (Tempo to zone)
 
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
-2. `ZonePortal` transfers `amount` of the gas token into escrow and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))`. The deposit includes current L1 block info (parent block hash, block number, timestamp) and the memo.
-3. The sequencer observes `DepositMade` events and processes deposits in order via `processDepositQueue`, crediting `to` with `amount` of the gas token (TIP-20 balance) and updating the zone's L1 head from the embedded L1 block info. Deposits always succeed—there is no callback or bounce mechanism.
+2. `ZonePortal` transfers `amount` of the gas token into escrow and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))`.
+3. The sequencer observes `DepositMade` events and processes deposits in order via `processDepositQueue`, crediting `to` with `amount` of the gas token (TIP-20 balance). Deposits always succeed—there is no callback or bounce mechanism.
 4. A batch proof/attestation must prove the zone processed deposits from `processedDepositQueueHash` up to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `snapshotDepositQueueHash`.
 5. After the batch is accepted, `processedDepositQueueHash = nextProcessedDepositQueueHash` and `snapshotDepositQueueHash = currentDepositQueueHash` (snapshot for next proof).
 
@@ -708,7 +731,7 @@ Notes:
 - Deposits are finalized for Tempo once the batch is verified.
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
 - The portal only stores three hashes, not individual deposits. The sequencer must track deposits off-chain.
-- L1 block info is embedded in each deposit, so the zone receives L1 state in-order with deposits.
+- Tempo state is obtained separately via `TempoState.finalizeTempo()`, not embedded in deposits.
 - The 3-slot design ensures on-chain verifiability: the proof cannot claim to process fake deposits beyond `snapshotDepositQueueHash`.
 
 ## Bridging out (zone to Tempo)
@@ -768,9 +791,6 @@ Withdrawals with `gasLimit > 0` can fail if the messenger callback reverts (out 
 ```solidity
 function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
     Deposit memory d = Deposit({
-        l1ParentBlockHash: blockhash(block.number - 1),
-        l1BlockNumber: uint64(block.number),
-        l1Timestamp: uint64(block.timestamp),
         sender: address(this),
         to: fallbackRecipient,
         amount: amount,
@@ -864,7 +884,7 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 ### State commitments
 
 - **State root**: Computed via SP1 (Succinct) proving. The state root is the output of the proven execution.
-- **L1 anchoring**: Each deposit queue message embeds L1 block info (parent block hash, block number, timestamp); off-chain observers reconstruct the exact L1 context from deposit queue events without a separate receipts root commitment. The parent block hash enables the L1 state reader precompile.
+- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. The sequencer calls `finalizeTempo()` with Tempo block headers. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from `blockhash(tempoBlockNumber)`.
 
 ### Batching and proofs
 
@@ -888,7 +908,8 @@ struct BatchProof {
 
 ### Deposits and withdrawals
 
-- **Deposit contract**: L1 portal escrows TIP-20 tokens. The ExEx watches `DepositMade` events and queues deposits for zone processing.
+- **Deposit contract**: Tempo portal escrows TIP-20 tokens. The ExEx watches `DepositMade` events and queues deposits for zone processing.
+- **Tempo state sync**: The ExEx also watches Tempo blocks and calls `TempoState.finalizeTempo()` to keep the zone's Tempo view current.
 - **Withdrawal requests**: Users trigger withdrawals on the zone via RPC. The withdrawal is added to the pending exits and included in the next batch's exit list.
 
 ### RPC interface
