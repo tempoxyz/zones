@@ -5,18 +5,19 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-#[global_allocator]
-static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
+use std::sync::Arc;
 
 use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_node_builder::NodeHandle;
 use reth_tracing::tracing::info;
-use std::sync::Arc;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use tempo_zone::{L1SubscriberConfig, ZoneNode, spawn_l1_subscriber};
+use tempo_zone::{L1SubscriberConfig, ZoneNode, deposit_queue, spawn_l1_subscriber};
+
+#[global_allocator]
+static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
 /// Tempo Zone CLI arguments.
 #[derive(Debug, Clone, clap::Args)]
@@ -24,6 +25,10 @@ struct ZoneArgs {
     /// L1 WebSocket RPC URL for subscribing to deposit events.
     #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
     pub l1_rpc_url: Option<String>,
+
+    /// Block building interval in milliseconds.
+    #[arg(long = "block.interval-ms", env = "BLOCK_INTERVAL_MS", default_value = "250")]
+    pub block_interval_ms: u64,
 }
 
 fn main() {
@@ -54,6 +59,9 @@ fn main() {
 
             info!(target: "reth::cli", "Tempo Zone node started");
 
+            // Create shared deposit queue
+            let deposits = deposit_queue();
+
             // Spawn L1 subscriber if L1 RPC URL is provided
             if let Some(l1_rpc_url) = args.l1_rpc_url {
                 let config = L1SubscriberConfig {
@@ -61,13 +69,21 @@ fn main() {
                     ..Default::default()
                 };
 
-                let _deposit_rx = spawn_l1_subscriber(config, node.task_executor.clone());
+                spawn_l1_subscriber(config, deposits.clone(), node.task_executor.clone());
 
                 info!(target: "reth::cli", "L1 deposit subscriber started");
-
-                // TODO: Pass deposit_rx to the block builder when ready
-                // For now, deposits will be logged but not processed
             }
+
+            // TODO: Spawn block builder with LocalMiner using args.block_interval_ms
+            // The block builder will:
+            // 1. Drain deposits from the queue
+            // 2. Convert deposits to L2 transactions
+            // 3. Build blocks at the configured interval
+            info!(
+                target: "reth::cli",
+                interval_ms = args.block_interval_ms,
+                "Block builder interval configured (not yet active)"
+            );
 
             node_exit_future.await?;
             Ok(())

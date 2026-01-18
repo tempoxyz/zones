@@ -11,5 +11,5 @@ use eyre as _;
 pub mod l1;
 mod node;
 
-pub use l1::{Deposit, DepositReceiver, L1SubscriberConfig, spawn_l1_subscriber};
+pub use l1::{Deposit, DepositQueue, L1SubscriberConfig, deposit_queue, spawn_l1_subscriber};
 pub use node::ZoneNode;

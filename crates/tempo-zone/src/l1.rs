@@ -4,10 +4,12 @@
 //! from the ZonePortal contract.
 
 use alloy_primitives::{Address, U256, address};
-use alloy_rpc_types_eth::Log;
+use alloy_provider::{Provider, ProviderBuilder, WsConnect};
+use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, sol};
+use futures::StreamExt;
 use reth_tracing::tracing::{debug, error, info, warn};
-use tokio::sync::mpsc;
+use std::sync::{Arc, Mutex};
 
 /// Default ZonePortal contract address on L1.
 ///
@@ -53,15 +55,12 @@ impl Deposit {
     }
 }
 
-/// Handle to the deposit queue for receiving deposits.
-pub type DepositReceiver = mpsc::UnboundedReceiver<Deposit>;
+/// Shared deposit queue for passing deposits between L1 subscriber and block builder.
+pub type DepositQueue = Arc<Mutex<Vec<Deposit>>>;
 
-/// Handle for sending deposits to the queue.
-pub type DepositSender = mpsc::UnboundedSender<Deposit>;
-
-/// Create a new deposit queue channel.
-pub fn deposit_queue() -> (DepositSender, DepositReceiver) {
-    mpsc::unbounded_channel()
+/// Create a new empty deposit queue.
+pub fn deposit_queue() -> DepositQueue {
+    Arc::new(Mutex::new(Vec::new()))
 }
 
 /// Configuration for the L1 subscriber.
@@ -83,15 +82,16 @@ impl Default for L1SubscriberConfig {
 }
 
 /// L1 chain subscriber that listens for deposit events.
+#[derive(Clone)]
 pub struct L1Subscriber {
     config: L1SubscriberConfig,
-    deposit_tx: DepositSender,
+    deposit_queue: DepositQueue,
 }
 
 impl L1Subscriber {
     /// Create a new L1 subscriber.
-    pub fn new(config: L1SubscriberConfig, deposit_tx: DepositSender) -> Self {
-        Self { config, deposit_tx }
+    pub fn new(config: L1SubscriberConfig, deposit_queue: DepositQueue) -> Self {
+        Self { config, deposit_queue }
     }
 
     /// Start the L1 subscriber.
@@ -99,10 +99,6 @@ impl L1Subscriber {
     /// This will connect to the L1 node and subscribe to chain notifications,
     /// extracting deposit events and sending them to the deposit queue.
     pub async fn start(self) -> eyre::Result<()> {
-        use alloy_provider::{Provider, ProviderBuilder, WsConnect};
-        use alloy_rpc_types_eth::Filter;
-        use futures::StreamExt;
-
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
         let ws = WsConnect::new(&self.config.l1_rpc_url);
@@ -149,12 +145,18 @@ impl L1Subscriber {
                     "Received deposit from L1"
                 );
 
-                if self.deposit_tx.send(deposit).is_err() {
-                    error!("Deposit queue closed, stopping L1 subscriber");
-                    return Err(eyre::eyre!("Deposit queue closed"));
+                // Add deposit to the queue
+                if let Ok(mut queue) = self.deposit_queue.lock() {
+                    queue.push(deposit);
+                    info!(
+                        l1_block = block_number,
+                        queue_len = queue.len(),
+                        "Enqueued deposit from L1"
+                    );
+                } else {
+                    error!("Failed to lock deposit queue");
+                    return Err(eyre::eyre!("Deposit queue lock poisoned"));
                 }
-
-                info!(l1_block = block_number, "Enqueued deposit from L1");
             }
             Err(e) => {
                 debug!(
@@ -170,14 +172,13 @@ impl L1Subscriber {
 
 /// Spawn the L1 subscriber as a background task.
 ///
-/// Returns a receiver for deposits that can be passed to the block builder.
+/// Returns the shared deposit queue that the block builder can drain.
 pub fn spawn_l1_subscriber(
     config: L1SubscriberConfig,
+    deposit_queue: DepositQueue,
     task_executor: impl reth_ethereum::tasks::TaskSpawner,
-) -> DepositReceiver {
-    let (deposit_tx, deposit_rx) = deposit_queue();
-
-    let subscriber = L1Subscriber::new(config, deposit_tx);
+) {
+    let subscriber = L1Subscriber::new(config, deposit_queue);
 
     task_executor.spawn_critical(
         "l1-deposit-subscriber",
@@ -190,15 +191,4 @@ pub fn spawn_l1_subscriber(
             }
         }),
     );
-
-    deposit_rx
-}
-
-impl Clone for L1Subscriber {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            deposit_tx: self.deposit_tx.clone(),
-        }
-    }
 }
