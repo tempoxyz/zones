@@ -5,10 +5,7 @@ import { ITIP20 } from "../interfaces/ITIP20.sol";
 import {
     IZonePortal,
     IVerifier,
-    IExitReceiver,
-    DepositQueueMessage,
-    DepositQueueMessageKind,
-    L1Sync,
+    IWithdrawalReceiver,
     Deposit,
     Withdrawal,
     StateTransition,
@@ -112,7 +109,7 @@ contract ZonePortal is IZonePortal {
         ITIP20(token).transferFrom(msg.sender, address(this), amount);
 
         // Build deposit struct with L1 block info
-        Deposit memory d = Deposit({
+        Deposit memory depositData = Deposit({
             l1ParentBlockHash: blockhash(block.number - 1),
             l1BlockNumber: uint64(block.number),
             l1Timestamp: uint64(block.timestamp),
@@ -122,46 +119,18 @@ contract ZonePortal is IZonePortal {
             memo: memo
         });
 
-        // Build message and insert into deposit queue
-        DepositQueueMessage memory m = DepositQueueMessage({
-            kind: DepositQueueMessageKind.Deposit,
-            data: abi.encode(d)
-        });
-        newCurrentDepositQueueHash = _depositQueue.enqueue(m);
+        // Insert deposit into queue
+        newCurrentDepositQueueHash = _depositQueue.enqueue(depositData);
 
         emit DepositMade(
-            zoneId,
             newCurrentDepositQueueHash,
             msg.sender,
             to,
             amount,
             memo,
-            d.l1ParentBlockHash,
-            d.l1BlockNumber,
-            d.l1Timestamp
-        );
-    }
-
-    /// @notice Append an L1 sync message to the deposit queue. Only callable by the sequencer.
-    function syncL1() external onlySequencer returns (bytes32 newCurrentDepositQueueHash) {
-        L1Sync memory sync = L1Sync({
-            l1ParentBlockHash: blockhash(block.number - 1),
-            l1BlockNumber: uint64(block.number),
-            l1Timestamp: uint64(block.timestamp)
-        });
-
-        DepositQueueMessage memory m = DepositQueueMessage({
-            kind: DepositQueueMessageKind.L1Sync,
-            data: abi.encode(sync)
-        });
-        newCurrentDepositQueueHash = _depositQueue.enqueue(m);
-
-        emit L1SyncAppended(
-            zoneId,
-            newCurrentDepositQueueHash,
-            sync.l1ParentBlockHash,
-            sync.l1BlockNumber,
-            sync.l1Timestamp
+            depositData.l1ParentBlockHash,
+            depositData.l1BlockNumber,
+            depositData.l1Timestamp
         );
     }
 
@@ -170,49 +139,49 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
-    function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
+    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external onlySequencer {
         // Pop from withdrawal queue (library handles swap and hash verification)
-        _withdrawalQueue.dequeue(w, remainingQueue);
+        _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
         // Execute the withdrawal
-        if (w.gasLimit == 0) {
+        if (withdrawal.gasLimit == 0) {
             // Simple transfer, no callback
-            ITIP20(token).transfer(w.to, w.amount);
-            emit WithdrawalProcessed(zoneId, w.to, w.amount, true);
+            ITIP20(token).transfer(withdrawal.to, withdrawal.amount);
+            emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
             return;
         }
 
         // Try callback
-        try this._executeWithdrawal(w) {
-            emit WithdrawalProcessed(zoneId, w.to, w.amount, true);
+        try this._executeWithdrawal(withdrawal) {
+            emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
         } catch {
             // Callback failed: bounce back to zone
-            _enqueueBounceBack(w.amount, w.fallbackRecipient);
-            emit WithdrawalProcessed(zoneId, w.to, w.amount, false);
+            _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient);
+            emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, false);
         }
     }
 
     /// @notice Internal function for atomic transfer + callback (called via self-call)
-    function _executeWithdrawal(Withdrawal calldata w) external {
+    function _executeWithdrawal(Withdrawal calldata withdrawal) external {
         if (msg.sender != address(this)) revert NotSequencer(); // self-call only
 
         // Transfer before callback so receiver can use funds
-        ITIP20(token).transfer(w.to, w.amount);
+        ITIP20(token).transfer(withdrawal.to, withdrawal.amount);
 
         // Call the receiver
-        bytes4 selector = IExitReceiver(w.to).onExitReceived{gas: w.gasLimit}(
-            w.sender,
-            w.amount,
-            w.data
+        bytes4 selector = IWithdrawalReceiver(withdrawal.to).onWithdrawalReceived{gas: withdrawal.gasLimit}(
+            withdrawal.sender,
+            withdrawal.amount,
+            withdrawal.callbackData
         );
-        if (selector != IExitReceiver.onExitReceived.selector) {
+        if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
             revert CallbackRejected();
         }
     }
 
     /// @notice Enqueue a bounce-back deposit for failed callback
     function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
-        Deposit memory d = Deposit({
+        Deposit memory depositData = Deposit({
             l1ParentBlockHash: blockhash(block.number - 1),
             l1BlockNumber: uint64(block.number),
             l1Timestamp: uint64(block.timestamp),
@@ -222,13 +191,9 @@ contract ZonePortal is IZonePortal {
             memo: bytes32(0)
         });
 
-        DepositQueueMessage memory m = DepositQueueMessage({
-            kind: DepositQueueMessageKind.Deposit,
-            data: abi.encode(d)
-        });
-        bytes32 newCurrentDepositQueueHash = _depositQueue.enqueue(m);
+        bytes32 newCurrentDepositQueueHash = _depositQueue.enqueue(depositData);
 
-        emit BounceBack(zoneId, newCurrentDepositQueueHash, fallbackRecipient, amount);
+        emit BounceBack(newCurrentDepositQueueHash, fallbackRecipient, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -240,7 +205,7 @@ contract ZonePortal is IZonePortal {
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
-        bytes calldata verifierData,
+        bytes calldata verifierConfig,
         bytes calldata proof
     ) external onlySequencer {
         // Build deposit queue transition with current state for verifier
@@ -258,13 +223,10 @@ contract ZonePortal is IZonePortal {
             }),
             fullDepositTransition,
             withdrawalQueueTransition,
-            verifierData,
+            verifierConfig,
             proof
         );
         if (!valid) revert InvalidProof();
-
-        // Emit event before state updates (captures pre-state)
-        _emitBatchSubmitted(stateTransition, fullDepositTransition, withdrawalQueueTransition);
 
         // Update state
         batchIndex++;
@@ -275,25 +237,13 @@ contract ZonePortal is IZonePortal {
 
         // Update withdrawal queue via library
         _withdrawalQueue.enqueueWithProof(withdrawalQueueTransition);
-    }
 
-    /// @dev Extracted to avoid stack-too-deep in submitBatch
-    function _emitBatchSubmitted(
-        StateTransition calldata stateTransition,
-        DepositQueueTransition memory depositTransition,
-        WithdrawalQueueTransition calldata withdrawalTransition
-    ) internal {
+        // Emit event after state updates (captures new state including actual withdrawal queue used)
         emit BatchSubmitted(
-            zoneId,
             batchIndex,
-            depositTransition.prevSnapshotHash,
-            depositTransition.prevProcessedHash,
-            depositTransition.nextProcessedHash,
+            _depositQueue.processed,
             stateRoot,
-            stateTransition.nextStateRoot,
-            withdrawalTransition.prevPendingHash,
-            withdrawalTransition.nextPendingHashIfFull,
-            withdrawalTransition.nextPendingHashIfEmpty
+            _withdrawalQueue.pending
         );
     }
 }

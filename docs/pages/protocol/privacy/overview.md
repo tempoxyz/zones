@@ -38,7 +38,6 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 - `ZoneFactory`: creates zones and registers parameters.
 - `ZonePortal`: per-zone portal that escrows the gas token on Tempo and finalizes exits.
-- `ZoneRegistry`: optional registry for zone metadata and active batch head.
 
 ### Zone components (off-chain or zone-side)
 
@@ -77,8 +76,8 @@ Each batch submission includes:
 - `nextProcessedDepositQueueHash` (the deposit queue messages processed up to)
 - `nextStateRoot` (the resulting state after execution)
 - `prevPendingWithdrawalQueueHash` (the pending withdrawal queue hash the proof assumed)
-- `nextPendingWithdrawalQueueHashIfFull` (pending queue with new withdrawals if `prevPendingWithdrawalQueueHash` matches)
-- `nextPendingWithdrawalQueueHashIfEmpty` (new withdrawals only, if pending was swapped during proving)
+- `nextPendingWithdrawalQueueHashIfNoSwap` (pending queue with new withdrawals if `prevPendingWithdrawalQueueHash` matches)
+- `nextPendingWithdrawalQueueHashIfSwapped` (new withdrawals only, if pending was swapped during proving)
 - `proof` (validity proof or TEE attestation)
 
 The portal tracks `stateRoot`, `processedDepositQueueHash` (where proofs start from), `snapshotDepositQueueHash` (stable target for proofs), `currentDepositQueueHash` (head of deposit queue), `activeWithdrawalQueueHash` (active queue), and `pendingWithdrawalQueueHash` (pending queue).
@@ -101,9 +100,9 @@ struct DepositQueueTransition {
 
 /// @notice Withdrawal queue transition inputs/outputs for batch proofs
 struct WithdrawalQueueTransition {
-    bytes32 prevPendingHash;         // what proof assumed pending queue was
-    bytes32 nextPendingHashIfFull;   // pending queue after append if no swap
-    bytes32 nextPendingHashIfEmpty;  // pending queue after append if swap occurred
+    bytes32 prevPendingHash;           // what proof assumed pending queue was
+    bytes32 nextPendingHashIfNoSwap;   // pending queue after append if no swap occurred
+    bytes32 nextPendingHashIfSwapped;  // pending queue after append if swap occurred
 }
 
 interface IVerifier {
@@ -111,7 +110,7 @@ interface IVerifier {
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
-        bytes calldata verifierData,
+        bytes calldata verifierConfig,
         bytes calldata proof
     ) external view returns (bool);
 }
@@ -128,20 +127,13 @@ The verifier validates that:
 
 ### Deposit queue
 
-Tempo to zone communication uses a single `depositQueue` chain. Each message is either:
-
-- **Deposit**: user deposit, including L1 block info + deposit data
-- **L1Sync**: sequencer-triggered L1 head sync, including L1 block info only
-
-Messages are hashed into a chain:
+Tempo to zone communication uses a single `depositQueue` chain. Each deposit is hashed into a chain:
 
 ```
-newHash = keccak256(abi.encode(message, prevHash))
+newHash = keccak256(abi.encode(deposit, prevHash))
 ```
 
-Where `message` is `DepositQueueMessage { kind, data }` and `data` is `abi.encode(Deposit)` or `abi.encode(L1Sync)`.
-
-Deposits and L1 syncs both carry L1 block info (parent block hash, block number, timestamp), so the zone updates its L1 view in-order with other deposit queue messages. This enables the L1 state reader precompile to access L1 storage.
+Where `deposit` is a `Deposit` struct containing the deposit data plus L1 block info (parent block hash, block number, timestamp). This enables the zone to update its L1 view in-order with deposits, allowing the L1 state reader precompile to access L1 storage.
 
 The portal uses a 3-slot design to allow partial processing while maintaining on-chain verifiability:
 
@@ -149,15 +141,15 @@ The portal uses a 3-slot design to allow partial processing while maintaining on
 |------|------|------|
 | 1 | `processedDepositQueueHash` | Where proofs start (last proven state) |
 | 2 | `snapshotDepositQueueHash` | Stable target ceiling for the current proof |
-| 3 | `currentDepositQueueHash` | Head of chain (new messages land here) |
+| 3 | `currentDepositQueueHash` | Head of chain (new deposits land here) |
 
-**Proof requirements**: The proof must verify that the zone correctly processed deposit queue messages from `processedDepositQueueHash` to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `snapshotDepositQueueHash`. This ancestry check happens inside the proof—the prover includes the unprocessed messages between `nextProcessedDepositQueueHash` and `snapshotDepositQueueHash` and verifies their hashes chain correctly, without executing them.
+**Proof requirements**: The proof must verify that the zone correctly processed deposits from `processedDepositQueueHash` to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `snapshotDepositQueueHash`. This ancestry check happens inside the proof—the prover includes the unprocessed deposits between `nextProcessedDepositQueueHash` and `snapshotDepositQueueHash` and verifies their hashes chain correctly, without executing them.
 
 **After batch accepted**:
 1. `processedDepositQueueHash = nextProcessedDepositQueueHash` (advance to where we actually processed)
 2. `snapshotDepositQueueHash = currentDepositQueueHash` (snapshot new target for next proof)
 
-This is the depositQueue-side equivalent of the two-queue withdrawal system: slots 1->2 are proven, slot 3 accumulates new messages, then rotate.
+This is the depositQueue-side equivalent of the two-queue withdrawal system: slots 1->2 are proven, slot 3 accumulates new deposits, then rotate.
 
 Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
@@ -214,8 +206,8 @@ A race condition can occur:
 3. Proof submits expecting `pendingWithdrawalQueueHash = X`, but it's now `0`
 
 To handle this, the proof generates two outputs:
-- `nextPendingWithdrawalQueueHashIfFull` - new withdrawals added to innermost of the expected pending queue
-- `nextPendingWithdrawalQueueHashIfEmpty` - new withdrawals as a fresh queue (as if pending was empty)
+- `nextPendingWithdrawalQueueHashIfNoSwap` - new withdrawals added to innermost of the expected pending queue
+- `nextPendingWithdrawalQueueHashIfSwapped` - new withdrawals as a fresh queue (as if pending was empty)
 
 The caller provides `prevPendingHash` in `WithdrawalQueueTransition` (what the proof assumed), and the portal uses the appropriate value:
 
@@ -230,9 +222,9 @@ function submitBatch(
     // ... verify proof ...
 
     if (pendingWithdrawalQueueHash == prevPendingWithdrawalQueueHash) {
-        pendingWithdrawalQueueHash = nextPendingWithdrawalQueueHashIfFull;
+        pendingWithdrawalQueueHash = nextPendingWithdrawalQueueHashIfNoSwap;
     } else if (pendingWithdrawalQueueHash == bytes32(0)) {
-        pendingWithdrawalQueueHash = nextPendingWithdrawalQueueHashIfEmpty;
+        pendingWithdrawalQueueHash = nextPendingWithdrawalQueueHashIfSwapped;
     } else {
         revert("unexpected pending queue");
     }
@@ -252,34 +244,17 @@ This section defines the functions and interfaces used by the design. The signat
 struct ZoneInfo {
     uint64 zoneId;
     address portal;
-    address messenger;      // L1 messenger for this zone
     address token;
     address sequencer;
     address verifier;
     bytes32 genesisStateRoot;
 }
 
-enum DepositQueueMessageKind {
-    Deposit,
-    L1Sync
-}
-
-struct L1Sync {
-    bytes32 l1ParentBlockHash;
-    uint64 l1BlockNumber;
-    uint64 l1Timestamp;
-}
-
-struct DepositQueueMessage {
-    DepositQueueMessageKind kind;
-    bytes data; // abi.encode(Deposit) or abi.encode(L1Sync)
-}
-
 struct Deposit {
     // L1 block info (zone receives L1 state through deposit queue messages)
-    bytes32 parentBlockHash;    // blockhash(block.number - 1) - used for L1 state reader
-    uint64 blockNumber;         // block.number
-    uint64 timestamp;           // block.timestamp
+    bytes32 l1ParentBlockHash;  // blockhash(block.number - 1) - used for L1 state reader
+    uint64 l1BlockNumber;       // block.number
+    uint64 l1Timestamp;         // block.timestamp
     // Deposit data
     address sender;
     address to;
@@ -292,9 +267,9 @@ struct Withdrawal {
     address to;                 // Tempo recipient
     uint128 amount;
     bytes32 memo;
-    uint64 gasLimit;            // max gas for messenger callback (0 = no callback)
+    uint64 gasLimit;            // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
-    bytes data;                 // calldata for target (if gasLimit > 0)
+    bytes callbackData;         // calldata for IWithdrawalReceiver (if gasLimit > 0)
 }
 ```
 
@@ -306,7 +281,7 @@ interface IVerifier {
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
-        bytes calldata verifierData,
+        bytes calldata verifierConfig,
         bytes calldata proof
     ) external view returns (bool);
 }
@@ -316,21 +291,21 @@ interface IVerifier {
 
 The portal uses two queue libraries that encapsulate the hash chain management patterns:
 
-#### DepositQueueLib (3-slot ceiling pattern)
+#### DepositQueueLib (3-slot proof target pattern)
 
 Handles L1→L2 deposits where the producer (L1) is fast and the consumer (proof) is slow.
 
 ```solidity
 struct DepositQueue {
     bytes32 processed;  // where proofs start (last proven state)
-    bytes32 snapshot;   // stable target ceiling for current proof
-    bytes32 current;    // head of queue (new messages land here)
+    bytes32 snapshot;   // stable proof target for current proof
+    bytes32 current;    // head of queue (new deposits land here)
 }
 
 library DepositQueueLib {
-    /// @notice Enqueue a new message into the queue (on-chain operation)
-    /// @dev Hash chain: newHash = keccak256(abi.encode(message, prevHash))
-    function enqueue(DepositQueue storage q, DepositQueueMessage memory message) internal returns (bytes32 newHeadQueueHash);
+    /// @notice Enqueue a new deposit into the queue (on-chain operation)
+    /// @dev Hash chain: newHash = keccak256(abi.encode(deposit, prevHash))
+    function enqueue(DepositQueue storage q, Deposit memory deposit) internal returns (bytes32 newHeadQueueHash);
 
     /// @notice Dequeue deposits via proof (proof operation)
     /// @dev Validates expected state matches actual, then updates:
@@ -388,8 +363,7 @@ interface IZoneFactory {
     event ZoneCreated(
         uint64 indexed zoneId,
         address indexed portal,
-        address indexed messenger,
-        address token,
+        address indexed token,
         address sequencer,
         address verifier,
         bytes32 genesisStateRoot
@@ -407,36 +381,21 @@ interface IZoneFactory {
 ```solidity
 interface IZonePortal {
     event DepositMade(
-        uint64 indexed zoneId,
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address to,
         uint128 amount,
         bytes32 memo,
-        bytes32 parentBlockHash,
-        uint64 blockNumber,
-        uint64 timestamp
-    );
-
-    event L1SyncAppended(
-        uint64 indexed zoneId,
-        bytes32 indexed newCurrentDepositQueueHash,
         bytes32 l1ParentBlockHash,
         uint64 l1BlockNumber,
         uint64 l1Timestamp
     );
 
     event BatchSubmitted(
-        uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 prevSnapshotDepositQueueHash,     // pre-state input to verifier
-        bytes32 prevProcessedDepositQueueHash,   // pre-state input to verifier
-        bytes32 nextProcessedDepositQueueHash,   // verifier input/output
-        bytes32 prevStateRoot,                   // pre-state input to verifier
-        bytes32 nextStateRoot,                   // verifier output
-        bytes32 prevPendingWithdrawalQueueHash,          // verifier input
-        bytes32 nextPendingWithdrawalQueueHashIfFull,    // verifier output path 1
-        bytes32 nextPendingWithdrawalQueueHashIfEmpty    // verifier output path 2
+        bytes32 nextProcessedDepositQueueHash,
+        bytes32 nextStateRoot,
+        bytes32 nextPendingWithdrawalQueueHash
     );
 
     function zoneId() external view returns (uint64);
@@ -458,25 +417,22 @@ interface IZonePortal {
     /// @notice Deposit gas token into the zone. Returns the new current deposit queue hash.
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
 
-    /// @notice Append an L1 sync message to the deposit queue. Only callable by the sequencer.
-    function syncL1() external returns (bytes32 newCurrentDepositQueueHash);
-
     /// @notice Process the next withdrawal from the active queue. Only callable by the sequencer.
-    /// @param w The withdrawal to process (must be at the head of the active queue).
+    /// @param withdrawal The withdrawal to process (must be at the head of the active queue).
     /// @param remainingQueue The hash of the remaining queue after this withdrawal.
-    function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external;
+    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     /// @param stateTransition The state root transition (prev filled from storage, next from batch).
     /// @param depositQueueTransition The deposit queue transition (prev hashes from storage).
     /// @param withdrawalQueueTransition The withdrawal queue transition with both possible outcomes.
-    /// @param verifierData Opaque payload forwarded to verifier (e.g., attestation envelope).
+    /// @param verifierConfig Opaque payload forwarded to verifier (e.g., attestation envelope).
     /// @param proof The validity proof or TEE attestation.
     function submitBatch(
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
-        bytes calldata verifierData,
+        bytes calldata verifierConfig,
         bytes calldata proof
     ) external;
 }
@@ -518,50 +474,7 @@ interface IZoneMessenger {
 
 The messenger does `token.transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` and call `zoneMessenger.xDomainMessageSender()` to authenticate the L2 origin.
 
-#### Zone registry (optional)
-
-```solidity
-interface IZoneRegistry {
-    event ZoneRegistered(uint64 indexed zoneId, address indexed portal);
-    event BatchHeadUpdated(uint64 indexed zoneId, uint64 indexed batchIndex, bytes32 stateRoot);
-
-    function registerZone(ZoneInfo calldata info) external;
-    function getZone(uint64 zoneId) external view returns (ZoneInfo memory);
-    function batchHead(uint64 zoneId) external view returns (uint64 batchIndex, bytes32 stateRoot);
-}
-```
-
 ### Zone predeploys
-
-#### Zone messenger (L2)
-
-The L2 messenger is a predeploy that relays deposit callbacks. Deposit callbacks originate from this contract.
-
-```solidity
-// Predeploy address: 0x4200000000000000000000000000000000000007
-interface IL2ZoneMessenger {
-    /// @notice Returns the L1 sender during callback execution
-    /// @dev Reverts if not in a callback context
-    function xDomainMessageSender() external view returns (address);
-
-    /// @notice Relay a deposit message. Only callable by system.
-    /// @dev The gas token has already been credited to target before this call.
-    /// @param sender The L1 origin address
-    /// @param target The L2 recipient
-    /// @param amount Amount that was credited
-    /// @param gasLimit Max gas for the callback
-    /// @param data Calldata for the target
-    function relayMessage(
-        address sender,
-        address target,
-        uint256 amount,
-        uint256 gasLimit,
-        bytes calldata data
-    ) external;
-}
-```
-
-Receivers check `msg.sender == L2_MESSENGER` and call `messenger.xDomainMessageSender()` to authenticate the L1 origin.
 
 #### Zone gas token
 
@@ -594,25 +507,18 @@ L1 state staleness depends on deposit frequency—the zone uses L1 state from th
 
 The zone has a `TIP403Registry` contract deployed at the **same address** as L1. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from L1 via the L1 state reader precompile, so zone-side TIP-20 transfers enforce L1 TIP-403 policies automatically.
 
-#### Zone deposit queue
+#### Zone inbox
 
-The zone deposit queue is a system contract that processes deposit queue messages from Tempo. It is called by the sequencer as a **system transaction at the start of each block** to apply deposits and L1 syncs.
+The zone inbox is a system contract that processes deposits from Tempo. It is called by the sequencer as a **system transaction at the start of each block** to apply deposits.
 
 ```solidity
-interface IZoneDepositQueue {
+interface IZoneInbox {
     event DepositProcessed(
         bytes32 indexed depositHash,
         address indexed sender,
         address indexed to,
         uint128 amount,
         bytes32 memo,
-        bytes32 parentBlockHash,
-        uint64 blockNumber,
-        uint64 timestamp
-    );
-
-    event L1SyncProcessed(
-        bytes32 indexed messageHash,
         bytes32 l1ParentBlockHash,
         uint64 l1BlockNumber,
         uint64 l1Timestamp
@@ -621,20 +527,20 @@ interface IZoneDepositQueue {
     /// @notice The last processed deposit queue hash (should match L1's processedDepositQueueHash after batch).
     function processedDepositQueueHash() external view returns (bytes32);
 
-    /// @notice Latest L1 head observed from deposit queue messages.
+    /// @notice Latest L1 head observed from deposits.
     function l1ParentBlockHash() external view returns (bytes32);
     function l1BlockNumber() external view returns (uint64);
     function l1Timestamp() external view returns (uint64);
 
-    /// @notice Process deposit queue messages from Tempo. Called by sequencer as system transaction.
-    /// @dev Messages must be processed in order. The hash chain is verified.
-    /// @param messages Array of deposit queue messages to process (oldest first).
-    /// @param expectedHash The expected hash after processing all messages.
-    function processDepositQueue(DepositQueueMessage[] calldata messages, bytes32 expectedHash) external;
+    /// @notice Process deposits from Tempo. Called by sequencer as system transaction.
+    /// @dev Deposits must be processed in order. The hash chain is verified.
+    /// @param deposits Array of deposits to process (oldest first).
+    /// @param expectedHash The expected hash after processing all deposits.
+    function processDepositQueue(Deposit[] calldata deposits, bytes32 expectedHash) external;
 }
 ```
 
-The sequencer observes `DepositMade` and `L1SyncAppended` events on the L1 portal and relays them to the zone via `processDepositQueue`. Deposit messages credit the recipient's TIP-20 balance (minted by the system). L1 sync messages update the zone's L1 head without changing balances.
+The sequencer observes `DepositMade` events on the L1 portal and relays them to the zone via `processDepositQueue`. Deposits credit the recipient's TIP-20 balance (minted by the system) and update the zone's L1 head from the embedded L1 block info.
 
 #### Zone outbox
 
@@ -702,18 +608,18 @@ interface ITIP20 {
 
 ## Queue design rationale
 
-Both `depositQueue` messages and the withdrawal queue are FIFO queues that require constant on-chain storage. They have symmetric but inverted requirements:
+Both the deposit queue and withdrawal queue are FIFO queues that require constant on-chain storage. They have symmetric but inverted requirements:
 
-|                      | Deposit queue messages | Withdrawal queue |
-|----------------------|----------------|-------------|
-| On-chain operation   | Add (users deposit / sequencer sync) | Remove (sequencer processes) |
+|                      | Deposit queue | Withdrawal queue |
+|----------------------|---------------|------------------|
+| On-chain operation   | Add (users deposit) | Remove (sequencer processes) |
 | Proven operation     | Remove (zone consumes) | Add (zone creates) |
 | Efficient on-chain   | Addition | Removal |
 | Stable proving target| For removals | For additions |
 
 Both use hash chains, but with different models:
 
-- **Deposit queue messages**: 3 slots (`processedDepositQueueHash` is where proofs start, `snapshotDepositQueueHash` is the stable target, `currentDepositQueueHash` is the head where new messages land)
+- **Deposit queue**: 3 slots (`processedDepositQueueHash` is where proofs start, `snapshotDepositQueueHash` is the stable target, `currentDepositQueueHash` is the head where new deposits land)
 - **Withdrawal queue**: 2 separate queues (`activeWithdrawalQueueHash` drains, `pendingWithdrawalQueueHash` fills, then swap)
 
 The hash chains are structured differently to optimize for their on-chain operation:
@@ -721,7 +627,7 @@ The hash chains are structured differently to optimize for their on-chain operat
 ### Deposit queue: newest-outermost
 
 ```
-Newest message wraps the outside (O(1) addition):
+Newest deposit wraps the outside (O(1) addition):
 
                     ┌─────────────────────────────────────────┐
                     │ hash(d3, ┌─────────────────────────┐ ) │  ← currentDepositQueueHash
@@ -735,11 +641,11 @@ Newest message wraps the outside (O(1) addition):
                     newest                        oldest
                    (outermost)                  (innermost)
 
-Adding d4: currentDepositQueueHash = keccak256(abi.encode(message4, currentDepositQueueHash))
+Adding d4: currentDepositQueueHash = keccak256(abi.encode(deposit4, currentDepositQueueHash))
 ```
 
-- **On-chain addition is O(1)**: `currentDepositQueueHash = keccak256(abi.encode(message, currentDepositQueueHash))` — wrap the outside.
-- **Proving removals**: Proof starts from stable `processedDepositQueueHash`, processes messages in FIFO order (oldest first, working outward), and must prove the result is an ancestor of `snapshotDepositQueueHash`.
+- **On-chain addition is O(1)**: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))` — wrap the outside.
+- **Proving removals**: Proof starts from stable `processedDepositQueueHash`, processes deposits in FIFO order (oldest first, working outward), and must prove the result is an ancestor of `snapshotDepositQueueHash`.
 - **After batch**: `processedDepositQueueHash = nextProcessedDepositQueueHash`, then `snapshotDepositQueueHash = currentDepositQueueHash` (snapshot new target for next proof).
 
 ### Withdrawal queue: oldest-outermost
@@ -791,9 +697,9 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 ## Bridging in (Tempo to zone)
 
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
-2. `ZonePortal` transfers `amount` of the gas token into escrow and appends a deposit queue message: `currentDepositQueueHash = keccak256(abi.encode(message, currentDepositQueueHash))`. The deposit message includes current L1 block info (parent block hash, block number, timestamp) and the memo.
-3. The sequencer observes `DepositMade` and `L1SyncAppended` events and processes messages in order via `processDepositQueue`, crediting `to` with `amount` of the gas token (TIP-20 balance) for deposit messages and updating the zone's L1 head for sync messages. Deposits always succeed—there is no callback or bounce mechanism.
-4. A batch proof/attestation must prove the zone processed deposit queue messages from `processedDepositQueueHash` up to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `snapshotDepositQueueHash`.
+2. `ZonePortal` transfers `amount` of the gas token into escrow and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))`. The deposit includes current L1 block info (parent block hash, block number, timestamp) and the memo.
+3. The sequencer observes `DepositMade` events and processes deposits in order via `processDepositQueue`, crediting `to` with `amount` of the gas token (TIP-20 balance) and updating the zone's L1 head from the embedded L1 block info. Deposits always succeed—there is no callback or bounce mechanism.
+4. A batch proof/attestation must prove the zone processed deposits from `processedDepositQueueHash` up to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `snapshotDepositQueueHash`.
 5. After the batch is accepted, `processedDepositQueueHash = nextProcessedDepositQueueHash` and `snapshotDepositQueueHash = currentDepositQueueHash` (snapshot for next proof).
 
 Notes:
@@ -801,9 +707,9 @@ Notes:
 - Deposits are simple token credits. There are no callbacks or failure modes on the zone side.
 - Deposits are finalized for Tempo once the batch is verified.
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
-- The portal only stores three hashes, not individual messages. The sequencer must track messages off-chain.
-- L1 block info is embedded in each deposit queue message, so the zone receives L1 state in-order with deposits and L1 syncs.
-- The 3-slot design ensures on-chain verifiability: the proof cannot claim to process fake messages beyond `snapshotDepositQueueHash`.
+- The portal only stores three hashes, not individual deposits. The sequencer must track deposits off-chain.
+- L1 block info is embedded in each deposit, so the zone receives L1 state in-order with deposits.
+- The 3-slot design ensures on-chain verifiability: the proof cannot claim to process fake deposits beyond `snapshotDepositQueueHash`.
 
 ## Bridging out (zone to Tempo)
 
@@ -862,20 +768,16 @@ Withdrawals with `gasLimit > 0` can fail if the messenger callback reverts (out 
 ```solidity
 function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
     Deposit memory d = Deposit({
-        parentBlockHash: blockhash(block.number - 1),
-        blockNumber: uint64(block.number),
-        timestamp: uint64(block.timestamp),
+        l1ParentBlockHash: blockhash(block.number - 1),
+        l1BlockNumber: uint64(block.number),
+        l1Timestamp: uint64(block.timestamp),
         sender: address(this),
         to: fallbackRecipient,
         amount: amount,
         memo: bytes32(0)
     });
-    DepositQueueMessage memory m = DepositQueueMessage({
-        kind: DepositQueueMessageKind.Deposit,
-        data: abi.encode(d)
-    });
-    currentDepositQueueHash = keccak256(abi.encode(m, currentDepositQueueHash));
-    emit DepositMade(...);
+    currentDepositQueueHash = keccak256(abi.encode(d, currentDepositQueueHash));
+    emit BounceBack(...);
 }
 ```
 
@@ -969,24 +871,24 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 - **Batch interval**: Batches are produced every 250 milliseconds.
 - **SP1 proofs**: Validity proofs are generated using Succinct's SP1 prover.
 - **Mock proofs**: For development, proofs are mocked but data structures (public inputs, proof envelope) must match the real format.
-- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the L1 portal. The proof includes state root and processed deposit queue messages.
+- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the L1 portal. The proof includes state root and processed deposits.
 
 ```solidity
 struct BatchProof {
     bytes32 nextStateRoot;
     bytes32 nextProcessedDepositQueueHash;
     bytes32 prevPendingWithdrawalQueueHash;
-    bytes32 nextPendingWithdrawalQueueHashIfFull;
-    bytes32 nextPendingWithdrawalQueueHashIfEmpty;
-    bytes verifierData; // opaque payload to IVerifier (TEE/ZK envelope)
-    bytes proof;        // SP1 proof bytes (or TEE attestation)
+    bytes32 nextPendingWithdrawalQueueHashIfNoSwap;
+    bytes32 nextPendingWithdrawalQueueHashIfSwapped;
+    bytes verifierConfig; // opaque payload to IVerifier (TEE/ZK envelope)
+    bytes proof;          // SP1 proof bytes (or TEE attestation)
 }
 ```
 `prevStateRoot`, `processedDepositQueueHash`, and `snapshotDepositQueueHash` come from the portal's tracked state when the proof is verified on L1.
 
-### Deposit queue messages and withdrawals
+### Deposits and withdrawals
 
-- **Deposit contract**: L1 portal escrows TIP-20 tokens. The ExEx watches `DepositMade` and `L1SyncAppended` events and queues deposit queue messages for zone processing.
+- **Deposit contract**: L1 portal escrows TIP-20 tokens. The ExEx watches `DepositMade` events and queues deposits for zone processing.
 - **Withdrawal requests**: Users trigger withdrawals on the zone via RPC. The withdrawal is added to the pending exits and included in the next batch's exit list.
 
 ### RPC interface

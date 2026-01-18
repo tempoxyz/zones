@@ -10,7 +10,7 @@ import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
 import {
     IZoneFactory,
     IZonePortal,
-    IExitReceiver,
+    IWithdrawalReceiver,
     ZoneInfo,
     Deposit,
     Withdrawal,
@@ -20,14 +20,14 @@ import {
 } from "../../src/zone/IZone.sol";
 import { WithdrawalQueueLib } from "../../src/zone/WithdrawalQueueLib.sol";
 
-/// @notice Mock exit receiver that accepts funds
-contract MockExitReceiver is IExitReceiver {
+/// @notice Mock withdrawal receiver that accepts funds
+contract MockWithdrawalReceiver is IWithdrawalReceiver {
     bool public shouldAccept = true;
     bool public shouldRevert = false;
 
     address public lastSender;
     uint128 public lastAmount;
-    bytes public lastData;
+    bytes public lastCallbackData;
 
     function setShouldAccept(bool _shouldAccept) external {
         shouldAccept = _shouldAccept;
@@ -37,21 +37,21 @@ contract MockExitReceiver is IExitReceiver {
         shouldRevert = _shouldRevert;
     }
 
-    function onExitReceived(
+    function onWithdrawalReceived(
         address sender,
         uint128 amount,
-        bytes calldata data
+        bytes calldata callbackData
     ) external returns (bytes4) {
         lastSender = sender;
         lastAmount = amount;
-        lastData = data;
+        lastCallbackData = callbackData;
 
         if (shouldRevert) {
-            revert("MockExitReceiver: intentional revert");
+            revert("MockWithdrawalReceiver: intentional revert");
         }
 
         if (shouldAccept) {
-            return IExitReceiver.onExitReceived.selector;
+            return IWithdrawalReceiver.onWithdrawalReceived.selector;
         } else {
             return bytes4(0xdeadbeef); // Wrong selector
         }
@@ -63,7 +63,7 @@ contract ZonePortalTest is BaseTest {
     ZoneFactory public zoneFactory;
     MockVerifier public mockVerifier;
     ZonePortal public portal;
-    MockExitReceiver public exitReceiver;
+    MockWithdrawalReceiver public withdrawalReceiver;
 
     uint64 public testZoneId;
     bytes32 public constant GENESIS_STATE_ROOT = keccak256("genesis");
@@ -74,7 +74,7 @@ contract ZonePortalTest is BaseTest {
         // Deploy zone infrastructure
         zoneFactory = new ZoneFactory();
         mockVerifier = new MockVerifier();
-        exitReceiver = new MockExitReceiver();
+        withdrawalReceiver = new MockWithdrawalReceiver();
 
         // Grant issuer role and mint tokens for tests
         vm.startPrank(pathUSDAdmin);
@@ -214,7 +214,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: newStateRoot }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: bytes32(0), nextPendingHashIfSwapped: bytes32(0) }),
             "",
             ""
         );
@@ -233,7 +233,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: nextStateRoot }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0) }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: bytes32(0), nextPendingHashIfSwapped: bytes32(0) }),
             "",
             ""
         );
@@ -247,7 +247,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: nextStateRoot }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0) }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: bytes32(0), nextPendingHashIfSwapped: bytes32(0) }),
             "",
             ""
         );
@@ -273,7 +273,7 @@ contract ZonePortalTest is BaseTest {
             memo: bytes32(0),
             gasLimit: 0, // No callback
             fallbackRecipient: alice,
-            data: ""
+            callbackData: ""
         });
 
         // Build withdrawal hash (oldest = outermost for FIFO processing)
@@ -284,7 +284,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("stateWithWithdrawal") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: withdrawalHash, nextPendingHashIfEmpty: withdrawalHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: withdrawalHash, nextPendingHashIfSwapped: withdrawalHash }),
             "",
             ""
         );
@@ -313,10 +313,10 @@ contract ZonePortalTest is BaseTest {
 
         // Create two withdrawals
         Withdrawal memory w1 = Withdrawal({
-            sender: alice, to: bob, amount: 300e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: bob, amount: 300e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         Withdrawal memory w2 = Withdrawal({
-            sender: alice, to: charlie, amount: 400e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: charlie, amount: 400e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
 
         // Build queue: w1 is oldest (outermost), w2 is newest (innermost)
@@ -328,7 +328,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state1") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: pendingQueueHash, nextPendingHashIfEmpty: pendingQueueHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: pendingQueueHash, nextPendingHashIfSwapped: pendingQueueHash }),
             "",
             ""
         );
@@ -367,14 +367,14 @@ contract ZonePortalTest is BaseTest {
 
         // First batch: add withdrawal w1 to pending
         Withdrawal memory w1 = Withdrawal({
-            sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 w1Hash = keccak256(abi.encode(w1, bytes32(0)));
 
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state1") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: w1Hash, nextPendingHashIfEmpty: w1Hash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: w1Hash, nextPendingHashIfSwapped: w1Hash }),
             "",
             ""
         );
@@ -391,7 +391,7 @@ contract ZonePortalTest is BaseTest {
         // Second batch was generated when pending = w1Hash
         // But now pending = 0 (swap occurred)
         Withdrawal memory w2 = Withdrawal({
-            sender: alice, to: charlie, amount: 600e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: charlie, amount: 600e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 w2Hash = keccak256(abi.encode(w2, bytes32(0)));
 
@@ -403,7 +403,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state2") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
-            WithdrawalQueueTransition({ prevPendingHash: w1Hash, nextPendingHashIfFull: nextPendingHashIfFull, nextPendingHashIfEmpty: w2Hash }),
+            WithdrawalQueueTransition({ prevPendingHash: w1Hash, nextPendingHashIfNoSwap: nextPendingHashIfFull, nextPendingHashIfSwapped: w2Hash }),
             "",
             ""
         );
@@ -422,14 +422,14 @@ contract ZonePortalTest is BaseTest {
 
         // Add withdrawal to pending via first batch
         Withdrawal memory w1 = Withdrawal({
-            sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 w1Hash = keccak256(abi.encode(w1, bytes32(0)));
 
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state1") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: w1Hash, nextPendingHashIfEmpty: w1Hash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: w1Hash, nextPendingHashIfSwapped: w1Hash }),
             "",
             ""
         );
@@ -450,7 +450,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: nextState }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: currentDeposit }),
-            WithdrawalQueueTransition({ prevPendingHash: wrongExpected, nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            WithdrawalQueueTransition({ prevPendingHash: wrongExpected, nextPendingHashIfNoSwap: bytes32(0), nextPendingHashIfSwapped: bytes32(0) }),
             "",
             ""
         );
@@ -471,12 +471,12 @@ contract ZonePortalTest is BaseTest {
         // Create withdrawal with callback
         Withdrawal memory w = Withdrawal({
             sender: alice,
-            to: address(exitReceiver),
+            to: address(withdrawalReceiver),
             amount: 500e6,
             memo: bytes32(0),
             gasLimit: 100000,
             fallbackRecipient: alice,
-            data: "callback_data"
+            callbackData: "callback_data"
         });
         bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
@@ -484,7 +484,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: wHash, nextPendingHashIfSwapped: wHash }),
             "",
             ""
         );
@@ -493,10 +493,10 @@ contract ZonePortalTest is BaseTest {
         portal.processWithdrawal(w, bytes32(0));
 
         // Receiver should have gotten funds and callback
-        assertEq(pathUSD.balanceOf(address(exitReceiver)), 500e6);
-        assertEq(exitReceiver.lastSender(), alice);
-        assertEq(exitReceiver.lastAmount(), 500e6);
-        assertEq(exitReceiver.lastData(), "callback_data");
+        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 500e6);
+        assertEq(withdrawalReceiver.lastSender(), alice);
+        assertEq(withdrawalReceiver.lastAmount(), 500e6);
+        assertEq(withdrawalReceiver.lastCallbackData(), "callback_data");
     }
 
     function test_withdrawal_bounceBackOnRevert() public {
@@ -510,17 +510,17 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHashBefore = portal.currentDepositQueueHash();
 
         // Set receiver to revert
-        exitReceiver.setShouldRevert(true);
+        withdrawalReceiver.setShouldRevert(true);
 
         // Create withdrawal with callback
         Withdrawal memory w = Withdrawal({
             sender: alice,
-            to: address(exitReceiver),
+            to: address(withdrawalReceiver),
             amount: 500e6,
             memo: bytes32(0),
             gasLimit: 100000,
             fallbackRecipient: alice,
-            data: ""
+            callbackData: ""
         });
         bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
@@ -528,7 +528,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: wHash, nextPendingHashIfSwapped: wHash }),
             "",
             ""
         );
@@ -537,7 +537,7 @@ contract ZonePortalTest is BaseTest {
         portal.processWithdrawal(w, bytes32(0));
 
         // Receiver should NOT have funds (they stayed in portal)
-        assertEq(pathUSD.balanceOf(address(exitReceiver)), 0);
+        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 0);
 
         // Deposit hash should have changed (bounce-back added a deposit)
         assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
@@ -554,23 +554,23 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHashBefore = portal.currentDepositQueueHash();
 
         // Set receiver to return wrong selector
-        exitReceiver.setShouldAccept(false);
+        withdrawalReceiver.setShouldAccept(false);
 
         Withdrawal memory w = Withdrawal({
             sender: alice,
-            to: address(exitReceiver),
+            to: address(withdrawalReceiver),
             amount: 500e6,
             memo: bytes32(0),
             gasLimit: 100000,
             fallbackRecipient: alice,
-            data: ""
+            callbackData: ""
         });
         bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: wHash, nextPendingHashIfSwapped: wHash }),
             "",
             ""
         );
@@ -579,7 +579,7 @@ contract ZonePortalTest is BaseTest {
         portal.processWithdrawal(w, bytes32(0));
 
         // Funds should still be in portal (bounce-back)
-        assertEq(pathUSD.balanceOf(address(exitReceiver)), 0);
+        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 0);
         assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
     }
 
@@ -589,10 +589,10 @@ contract ZonePortalTest is BaseTest {
 
     function test_processWithdrawal_revertsIfEmpty() public {
         Withdrawal memory w = Withdrawal({
-            sender: alice, to: bob, amount: 100e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: bob, amount: 100e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
 
-        vm.expectRevert(IZonePortal.NoWithdrawals.selector);
+        vm.expectRevert(WithdrawalQueueLib.NoWithdrawalsInQueue.selector);
         portal.processWithdrawal(w, bytes32(0));
     }
 
@@ -605,24 +605,24 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         Withdrawal memory w = Withdrawal({
-            sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: wHash, nextPendingHashIfSwapped: wHash }),
             "",
             ""
         );
 
         // Try to process with wrong withdrawal data
         Withdrawal memory wrongW = Withdrawal({
-            sender: alice, to: charlie, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: charlie, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
 
-        vm.expectRevert(IZonePortal.InvalidWithdrawal.selector);
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
         portal.processWithdrawal(wrongW, bytes32(0));
     }
 
@@ -634,14 +634,14 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         Withdrawal memory w = Withdrawal({
-            sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, data: ""
+            sender: alice, to: bob, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 wHash = keccak256(abi.encode(w, bytes32(0)));
 
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash() }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: wHash, nextPendingHashIfEmpty: wHash }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: wHash, nextPendingHashIfSwapped: wHash }),
             "",
             ""
         );
@@ -683,7 +683,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state1") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: h1 }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: bytes32(0), nextPendingHashIfSwapped: bytes32(0) }),
             "",
             ""
         );
@@ -710,7 +710,7 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: keccak256("state2") }),
             DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: h2 }),
-            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfFull: bytes32(0), nextPendingHashIfEmpty: bytes32(0) }),
+            WithdrawalQueueTransition({ prevPendingHash: bytes32(0), nextPendingHashIfNoSwap: bytes32(0), nextPendingHashIfSwapped: bytes32(0) }),
             "",
             ""
         );

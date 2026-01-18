@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneGasToken } from "./ZoneDepositQueue.sol";
+import { IZoneGasToken } from "./ZoneInbox.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo

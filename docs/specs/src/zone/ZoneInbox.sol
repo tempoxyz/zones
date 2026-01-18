@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, DepositQueueMessage, DepositQueueMessageKind, L1Sync } from "./IZone.sol";
+import { Deposit } from "./IZone.sol";
 
 /// @title IZoneGasToken
 /// @notice Interface for the zone's gas token (TIP-20 with mint/burn for system)
@@ -13,10 +13,10 @@ interface IZoneGasToken {
     function balanceOf(address account) external view returns (uint256);
 }
 
-/// @title ZoneDepositQueue
+/// @title ZoneInbox
 /// @notice Zone-side system contract for processing deposit queue messages from Tempo
 /// @dev Called by sequencer as a system transaction at the start of each block
-contract ZoneDepositQueue {
+contract ZoneInbox {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -53,13 +53,6 @@ contract ZoneDepositQueue {
         uint64 l1Timestamp
     );
 
-    event L1SyncProcessed(
-        bytes32 indexed messageHash,
-        bytes32 l1ParentBlockHash,
-        uint64 l1BlockNumber,
-        uint64 l1Timestamp
-    );
-
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -81,68 +74,48 @@ contract ZoneDepositQueue {
                      DEPOSIT QUEUE PROCESSING
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Process deposit queue messages from Tempo. Called by sequencer as system transaction.
-    /// @dev Messages must be processed in order. The hash chain is verified.
-    /// @param messages Array of deposit queue messages to process (oldest first).
-    /// @param expectedHash The expected hash after processing all messages.
+    /// @notice Process deposits from Tempo. Called by sequencer as system transaction.
+    /// @dev Deposits must be processed in order. The hash chain is verified.
+    /// @param deposits Array of deposits to process (oldest first).
+    /// @param expectedHash The expected hash after processing all deposits.
     function processDepositQueue(
-        DepositQueueMessage[] calldata messages,
+        Deposit[] calldata deposits,
         bytes32 expectedHash
     ) external {
         if (msg.sender != sequencer) revert OnlySequencer();
 
         bytes32 currentHash = processedDepositQueueHash;
 
-        for (uint256 i = 0; i < messages.length; i++) {
-            DepositQueueMessage calldata m = messages[i];
+        for (uint256 i = 0; i < deposits.length; i++) {
+            Deposit calldata depositData = deposits[i];
 
             // Advance the hash chain
-            // L1 builds: newHash = keccak256(abi.encode(message, prevHash))
-            currentHash = keccak256(abi.encode(m, currentHash));
+            // L1 builds: newHash = keccak256(abi.encode(deposit, prevHash))
+            currentHash = keccak256(abi.encode(depositData, currentHash));
 
-            if (m.kind == DepositQueueMessageKind.Deposit) {
-                Deposit memory d = abi.decode(m.data, (Deposit));
+            // Mint gas tokens to the recipient
+            gasToken.mint(depositData.to, depositData.amount);
 
-                // Mint gas tokens to the recipient
-                gasToken.mint(d.to, d.amount);
+            // Update L1 head info
+            l1ParentBlockHash = depositData.l1ParentBlockHash;
+            l1BlockNumber = depositData.l1BlockNumber;
+            l1Timestamp = depositData.l1Timestamp;
 
-                _updateL1Head(d.l1ParentBlockHash, d.l1BlockNumber, d.l1Timestamp);
-
-                emit DepositProcessed(
-                    currentHash,
-                    d.sender,
-                    d.to,
-                    d.amount,
-                    d.memo,
-                    d.l1ParentBlockHash,
-                    d.l1BlockNumber,
-                    d.l1Timestamp
-                );
-            } else if (m.kind == DepositQueueMessageKind.L1Sync) {
-                L1Sync memory sync = abi.decode(m.data, (L1Sync));
-
-                _updateL1Head(sync.l1ParentBlockHash, sync.l1BlockNumber, sync.l1Timestamp);
-
-                emit L1SyncProcessed(
-                    currentHash,
-                    sync.l1ParentBlockHash,
-                    sync.l1BlockNumber,
-                    sync.l1Timestamp
-                );
-            } else {
-                revert InvalidDepositQueueChain();
-            }
+            emit DepositProcessed(
+                currentHash,
+                depositData.sender,
+                depositData.to,
+                depositData.amount,
+                depositData.memo,
+                depositData.l1ParentBlockHash,
+                depositData.l1BlockNumber,
+                depositData.l1Timestamp
+            );
         }
 
         // Verify we reached the expected hash
         if (currentHash != expectedHash) revert InvalidDepositQueueChain();
 
         processedDepositQueueHash = currentHash;
-    }
-
-    function _updateL1Head(bytes32 blockHash, uint64 blockNumber, uint64 timestamp) internal {
-        l1ParentBlockHash = blockHash;
-        l1BlockNumber = blockNumber;
-        l1Timestamp = timestamp;
     }
 }

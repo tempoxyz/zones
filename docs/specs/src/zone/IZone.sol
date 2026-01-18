@@ -26,28 +26,9 @@ struct DepositQueueTransition {
 
 /// @notice Withdrawal queue transition inputs/outputs for batch proofs
 struct WithdrawalQueueTransition {
-    bytes32 prevPendingHash;         // what proof assumed pending queue was
-    bytes32 nextPendingHashIfFull;   // pending queue after append if no swap
-    bytes32 nextPendingHashIfEmpty;  // pending queue after append if swap occurred
-}
-
-/// @notice Deposit queue message kinds (Tempo -> zone)
-enum DepositQueueMessageKind {
-    Deposit,
-    L1Sync
-}
-
-/// @notice L1 sync message payload (Tempo -> zone)
-struct L1Sync {
-    bytes32 l1ParentBlockHash;
-    uint64 l1BlockNumber;
-    uint64 l1Timestamp;
-}
-
-/// @notice Deposit queue message wrapper (Tempo -> zone)
-struct DepositQueueMessage {
-    DepositQueueMessageKind kind;
-    bytes data; // abi.encode(Deposit) or abi.encode(L1Sync)
+    bytes32 prevPendingHash;           // what proof assumed pending queue was
+    bytes32 nextPendingHashIfNoSwap;   // pending queue after append if no swap occurred
+    bytes32 nextPendingHashIfSwapped;  // pending queue after append if swap occurred
 }
 
 struct Deposit {
@@ -67,9 +48,9 @@ struct Withdrawal {
     address to;                 // Tempo recipient
     uint128 amount;
     bytes32 memo;               // user-provided context
-    uint64 gasLimit;            // max gas for IExitReceiver callback (0 = no callback)
+    uint64 gasLimit;            // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
-    bytes data;                 // calldata for IExitReceiver (if gasLimit > 0)
+    bytes callbackData;         // calldata for IWithdrawalReceiver (if gasLimit > 0)
 }
 
 /// @title IVerifier
@@ -79,7 +60,7 @@ interface IVerifier {
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
-        bytes calldata verifierData,
+        bytes calldata verifierConfig,
         bytes calldata proof
     ) external view returns (bool);
 }
@@ -117,7 +98,6 @@ interface IZoneFactory {
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
     event DepositMade(
-        uint64 indexed zoneId,
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address to,
@@ -128,36 +108,20 @@ interface IZonePortal {
         uint64 l1Timestamp
     );
 
-    event L1SyncAppended(
-        uint64 indexed zoneId,
-        bytes32 indexed newCurrentDepositQueueHash,
-        bytes32 l1ParentBlockHash,
-        uint64 l1BlockNumber,
-        uint64 l1Timestamp
-    );
-
     event BatchSubmitted(
-        uint64 indexed zoneId,
         uint64 indexed batchIndex,
-        bytes32 prevSnapshotDepositQueueHash,            // pre-state input to verifier
-        bytes32 prevProcessedDepositQueueHash,           // pre-state input to verifier
-        bytes32 nextProcessedDepositQueueHash,           // verifier input/output
-        bytes32 prevStateRoot,                           // pre-state input to verifier
-        bytes32 nextStateRoot,                           // verifier output
-        bytes32 prevPendingWithdrawalQueueHash,          // verifier input
-        bytes32 nextPendingWithdrawalQueueHashIfFull,    // verifier output path 1
-        bytes32 nextPendingWithdrawalQueueHashIfEmpty    // verifier output path 2
+        bytes32 nextProcessedDepositQueueHash,
+        bytes32 nextStateRoot,
+        bytes32 nextPendingWithdrawalQueueHash
     );
 
     event WithdrawalProcessed(
-        uint64 indexed zoneId,
         address indexed to,
         uint128 amount,
         bool callbackSuccess
     );
 
     event BounceBack(
-        uint64 indexed zoneId,
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed fallbackRecipient,
         uint128 amount
@@ -165,9 +129,6 @@ interface IZonePortal {
 
     error NotSequencer();
     error InvalidProof();
-    error NoWithdrawals();
-    error InvalidWithdrawal();
-    error UnexpectedPendingWithdrawalQueueHash();
     error CallbackRejected();
 
     function zoneId() external view returns (uint64);
@@ -185,23 +146,22 @@ interface IZonePortal {
 
     function setSequencerPubkey(bytes32 pubkey) external;
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
-    function syncL1() external returns (bytes32 newCurrentDepositQueueHash);
-    function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external;
+    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
         StateTransition calldata stateTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
-        bytes calldata verifierData,
+        bytes calldata verifierConfig,
         bytes calldata proof
     ) external;
 }
 
-/// @title IExitReceiver
-/// @notice Interface for contracts that receive exits with callbacks
-interface IExitReceiver {
-    function onExitReceived(
+/// @title IWithdrawalReceiver
+/// @notice Interface for contracts that receive withdrawals with callbacks
+interface IWithdrawalReceiver {
+    function onWithdrawalReceived(
         address sender,
         uint128 amount,
-        bytes calldata data
+        bytes calldata callbackData
     ) external returns (bytes4);
 }
