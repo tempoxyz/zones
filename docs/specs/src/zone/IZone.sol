@@ -20,14 +20,15 @@ struct StateTransition {
 }
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
+/// @dev The proof reads currentDepositQueueHash from Tempo state to validate
+///      that nextProcessedHash is a valid ancestor. No ceiling needed on-chain.
 struct DepositQueueTransition {
-    bytes32 prevSnapshotHash;      // stable target ceiling
-    bytes32 prevProcessedHash;     // where proof starts
-    bytes32 nextProcessedHash;     // where zone processed up to
+    bytes32 prevProcessedHash;     // where proof starts (verified against on-chain state)
+    bytes32 nextProcessedHash;     // where zone processed up to (proof output)
 }
 
 /// @notice Withdrawal queue transition for batch proofs
-/// @dev Each batch gets its own slot in a 256-slot circular buffer.
+/// @dev Each batch gets its own slot in an unbounded buffer.
 ///      The withdrawalQueueHash is the hash chain of withdrawals for this batch.
 struct WithdrawalQueueTransition {
     bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
@@ -141,7 +142,6 @@ interface IZonePortal {
     function batchIndex() external view returns (uint64);
     function stateRoot() external view returns (bytes32);
     function processedDepositQueueHash() external view returns (bytes32);
-    function snapshotDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);

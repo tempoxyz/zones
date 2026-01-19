@@ -248,7 +248,7 @@ contract ZoneBridgeTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
-            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash }),
+            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash }),
             WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalQueueHash }),
             "",
             ""
@@ -585,7 +585,7 @@ contract ZoneBridgeTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
-            DepositQueueTransition({ prevSnapshotHash: bytes32(0), prevProcessedHash: bytes32(0), nextProcessedHash: partialHash }),
+            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: partialHash }),
             WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
@@ -593,7 +593,6 @@ contract ZoneBridgeTest is BaseTest {
 
         // L1 should show partial processing
         assertEq(l1Portal.processedDepositQueueHash(), partialHash);
-        assertEq(l1Portal.snapshotDepositQueueHash(), l1Portal.currentDepositQueueHash());
     }
 
     function test_l2_insufficientBalanceReverts() public {

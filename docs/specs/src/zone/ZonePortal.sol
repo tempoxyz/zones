@@ -35,7 +35,7 @@ contract ZonePortal is IZonePortal {
     uint64 public batchIndex;
     bytes32 public stateRoot;
 
-    /// @notice Deposit queue (Tempo→zone): 3-slot ceiling pattern
+    /// @notice Deposit queue (Tempo→zone): 2-slot pattern
     DepositQueue internal _depositQueue;
 
     /// @notice Withdrawal queue (zone→Tempo): unbounded buffer
@@ -84,10 +84,6 @@ contract ZonePortal is IZonePortal {
 
     function processedDepositQueueHash() external view returns (bytes32) {
         return _depositQueue.processed;
-    }
-
-    function snapshotDepositQueueHash() external view returns (bytes32) {
-        return _depositQueue.snapshot;
     }
 
     function currentDepositQueueHash() external view returns (bytes32) {
@@ -221,14 +217,14 @@ contract ZonePortal is IZonePortal {
         bytes32 tempoBlockHash = blockhash(tempoBlockNumber);
         if (tempoBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
 
-        // Build deposit queue transition with current state for verifier
+        // Build deposit queue transition with current processed state
         DepositQueueTransition memory fullDepositTransition = DepositQueueTransition({
-            prevSnapshotHash: _depositQueue.snapshot,
             prevProcessedHash: _depositQueue.processed,
             nextProcessedHash: depositQueueTransition.nextProcessedHash
         });
 
         // Call verifier with tempoBlockHash
+        // The proof reads currentDepositQueueHash from Tempo state to validate ancestry
         bool valid = IVerifier(verifier).verify(
             tempoBlockHash,
             StateTransition({
@@ -246,11 +242,10 @@ contract ZonePortal is IZonePortal {
         batchIndex++;
         stateRoot = stateTransition.nextStateRoot;
 
-        // Update deposit queue via library (validates expected state matches)
+        // Update deposit queue (validates prevProcessedHash matches)
         _depositQueue.dequeueWithProof(fullDepositTransition);
 
         // Update withdrawal queue - each batch gets its own slot
-        // Reverts with WithdrawalQueueFull if sequencer hasn't processed enough withdrawals
         _withdrawalQueue.enqueue(withdrawalQueueTransition);
 
         // Emit event after state updates

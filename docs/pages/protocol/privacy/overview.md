@@ -79,7 +79,7 @@ Each batch submission includes:
 - `withdrawalQueueHash` (hash chain of withdrawals for this batch, or 0 if none)
 - `proof` (validity proof or TEE attestation)
 
-The portal tracks `stateRoot`, `processedDepositQueueHash` (where proofs start from), `snapshotDepositQueueHash` (stable target for proofs), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
+The portal tracks `stateRoot`, `processedDepositQueueHash` (where proofs have processed up to), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
 
 The portal calls the verifier to validate the batch:
 
@@ -91,10 +91,10 @@ struct StateTransition {
 }
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
+/// @dev The proof reads currentDepositQueueHash from Tempo state to validate ancestry.
 struct DepositQueueTransition {
-    bytes32 prevSnapshotHash;      // stable target ceiling
-    bytes32 prevProcessedHash;     // where proof starts
-    bytes32 nextProcessedHash;     // where zone processed up to
+    bytes32 prevProcessedHash;     // where proof starts (verified against on-chain state)
+    bytes32 nextProcessedHash;     // where zone processed up to (proof output)
 }
 
 /// @notice Withdrawal queue transition for batch proofs
@@ -118,12 +118,14 @@ interface IVerifier {
 
 The verifier validates that:
 1. The state transition from `prevStateRoot` to `nextStateRoot` is correct given the processed deposit queue messages.
-2. `nextProcessedDepositQueueHash` is a descendant of `processedDepositQueueHash` (messages were processed forward).
-3. `nextProcessedDepositQueueHash` is an ancestor of `snapshotDepositQueueHash` (no fake messages beyond the snapshot).
+2. `nextProcessedDepositQueueHash` is a descendant of `prevProcessedDepositQueueHash` (messages were processed forward).
+3. `nextProcessedDepositQueueHash` is an ancestor of `currentDepositQueueHash` as read from Tempo state at the proven block.
+
+The zone has access to Tempo state via the TempoState predeploy, so the proof can read `currentDepositQueueHash` directly from Tempo storage at the proven block. This eliminates the need for an on-chain "ceiling" slot.
 
 `verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
 
-`submitBatch` passes the portal's current `stateRoot`, `processedDepositQueueHash`, and `snapshotDepositQueueHash` as verifier inputs (prev values), and reverts unless `prevStateRoot == stateRoot` and the verifier approves. On success it increments `batchIndex`, updates roots/queues, and emits `BatchSubmitted` with every verifier input/output (except the proof bytes) so off-chain observers can audit the batch.
+`submitBatch` passes the portal's current `stateRoot` and `processedDepositQueueHash` as verifier inputs (prev values), and reverts unless `prevStateRoot == stateRoot` and the verifier approves. On success it increments `batchIndex`, updates roots/queues, and emits `BatchSubmitted` with every verifier input/output (except the proof bytes) so off-chain observers can audit the batch.
 
 ### Deposit queue
 
@@ -135,21 +137,19 @@ newHash = keccak256(abi.encode(deposit, prevHash))
 
 Where `deposit` is a `Deposit` struct containing the sender, recipient, amount, and memo. Tempo state is obtained separately through the TempoState predeploy's `finalizeTempo()` function, which the sequencer calls to update the zone's view of Tempo blocks.
 
-The portal uses a 3-slot design to allow partial processing while maintaining on-chain verifiability:
+The portal uses a 2-slot design:
 
 | Slot | Name | Role |
 |------|------|------|
-| 1 | `processedDepositQueueHash` | Where proofs start (last proven state) |
-| 2 | `snapshotDepositQueueHash` | Stable target ceiling for the current proof |
-| 3 | `currentDepositQueueHash` | Head of chain (new deposits land here) |
+| 1 | `processedDepositQueueHash` | Where proofs have processed up to |
+| 2 | `currentDepositQueueHash` | Head of chain (new deposits land here) |
 
-**Proof requirements**: The proof must verify that the zone correctly processed deposits from `processedDepositQueueHash` to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `snapshotDepositQueueHash`. This ancestry check happens inside the proof—the prover includes the unprocessed deposits between `nextProcessedDepositQueueHash` and `snapshotDepositQueueHash` and verifies their hashes chain correctly, without executing them.
+**Proof requirements**: The proof must verify that the zone correctly processed deposits from `prevProcessedDepositQueueHash` to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `currentDepositQueueHash` (read from Tempo state at the proven block). This ancestry check happens inside the proof—the prover reads `currentDepositQueueHash` from Tempo storage and verifies the hash chain, without needing an on-chain ceiling slot.
 
 **After batch accepted**:
-1. `processedDepositQueueHash = nextProcessedDepositQueueHash` (advance to where we actually processed)
-2. `snapshotDepositQueueHash = currentDepositQueueHash` (snapshot new target for next proof)
+1. `processedDepositQueueHash = nextProcessedDepositQueueHash` (advance to where we processed)
 
-This is the depositQueue-side equivalent of the two-queue withdrawal system: slots 1->2 are proven, slot 3 accumulates new deposits, then rotate.
+New deposits continue to land in `currentDepositQueueHash` while proofs are in flight. The proof validates ancestry by reading Tempo state directly.
 
 Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
 
@@ -294,14 +294,13 @@ The verifier receives the `tempoBlockHash` which is looked up on-chain via `bloc
 
 The portal uses two queue libraries that encapsulate the hash chain management patterns:
 
-#### DepositQueueLib (3-slot proof target pattern)
+#### DepositQueueLib (2-slot pattern)
 
-Handles L1→L2 deposits where the producer (L1) is fast and the consumer (proof) is slow.
+Handles L1→L2 deposits where the producer (L1) is fast and the consumer (proof) is slow. The proof validates ancestry by reading `currentDepositQueueHash` from Tempo state directly.
 
 ```solidity
 struct DepositQueue {
-    bytes32 processed;  // where proofs start (last proven state)
-    bytes32 snapshot;   // stable proof target for current proof
+    bytes32 processed;  // where proofs have processed up to
     bytes32 current;    // head of queue (new deposits land here)
 }
 
@@ -310,9 +309,9 @@ library DepositQueueLib {
     /// @dev Hash chain: newHash = keccak256(abi.encode(deposit, prevHash))
     function enqueue(DepositQueue storage q, Deposit memory deposit) internal returns (bytes32 newHeadQueueHash);
 
-    /// @notice Dequeue deposits via proof (proof operation)
-    /// @dev Validates expected state matches actual, then updates:
-    ///      processed = nextProcessed, snapshot = current
+    /// @notice Update processed hash after proof verification
+    /// @dev The proof itself validates that nextProcessedHash is an ancestor of
+    ///      currentDepositQueueHash by reading Tempo state.
     function dequeueWithProof(
         DepositQueue storage q,
         DepositQueueTransition memory transition
@@ -423,7 +422,6 @@ interface IZonePortal {
     function batchIndex() external view returns (uint64);
     function stateRoot() external view returns (bytes32);
     function processedDepositQueueHash() external view returns (bytes32);
-    function snapshotDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
@@ -659,7 +657,7 @@ Both the deposit queue and withdrawal queue are FIFO queues that require constan
 
 Both use hash chains, but with different models:
 
-- **Deposit queue**: 3 slots (`processedDepositQueueHash` is where proofs start, `snapshotDepositQueueHash` is the stable target, `currentDepositQueueHash` is the head where new deposits land)
+- **Deposit queue**: 2 slots (`processedDepositQueueHash` is where proofs have processed up to, `currentDepositQueueHash` is the head where new deposits land). The proof validates ancestry by reading `currentDepositQueueHash` from Tempo state.
 - **Withdrawal queue**: unbounded buffer (each batch gets its own slot, `head` points to oldest unprocessed batch, `tail` points to where next batch writes, `maxSize` tracks peak queue length for gas accounting)
 
 The hash chains are structured differently to optimize for their on-chain operation:
@@ -685,8 +683,8 @@ Adding d4: currentDepositQueueHash = keccak256(abi.encode(deposit4, currentDepos
 ```
 
 - **On-chain addition is O(1)**: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))` — wrap the outside.
-- **Proving removals**: Proof starts from stable `processedDepositQueueHash`, processes deposits in FIFO order (oldest first, working outward), and must prove the result is an ancestor of `snapshotDepositQueueHash`.
-- **After batch**: `processedDepositQueueHash = nextProcessedDepositQueueHash`, then `snapshotDepositQueueHash = currentDepositQueueHash` (snapshot new target for next proof).
+- **Proving removals**: Proof starts from `processedDepositQueueHash`, processes deposits in FIFO order (oldest first, working outward), and validates the result is an ancestor of `currentDepositQueueHash` (read from Tempo state).
+- **After batch**: `processedDepositQueueHash = nextProcessedDepositQueueHash`.
 
 ### Withdrawal queue: oldest-outermost per slot
 
@@ -739,17 +737,17 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
 2. `ZonePortal` transfers `amount` of the gas token into escrow and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))`.
 3. The sequencer observes `DepositMade` events and processes deposits in order via `processDepositQueue`, crediting `to` with `amount` of the gas token (TIP-20 balance). Deposits always succeed—there is no callback or bounce mechanism.
-4. A batch proof/attestation must prove the zone processed deposits from `processedDepositQueueHash` up to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `snapshotDepositQueueHash`.
-5. After the batch is accepted, `processedDepositQueueHash = nextProcessedDepositQueueHash` and `snapshotDepositQueueHash = currentDepositQueueHash` (snapshot for next proof).
+4. A batch proof/attestation must prove the zone processed deposits from `processedDepositQueueHash` up to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `currentDepositQueueHash` (read from Tempo state at the proven block).
+5. After the batch is accepted, `processedDepositQueueHash = nextProcessedDepositQueueHash`.
 
 Notes:
 
 - Deposits are simple token credits. There are no callbacks or failure modes on the zone side.
 - Deposits are finalized for Tempo once the batch is verified.
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
-- The portal only stores three hashes, not individual deposits. The sequencer must track deposits off-chain.
+- The portal only stores two hashes, not individual deposits. The sequencer must track deposits off-chain.
 - Tempo state is obtained separately via `TempoState.finalizeTempo()`, not embedded in deposits.
-- The 3-slot design ensures on-chain verifiability: the proof cannot claim to process fake deposits beyond `snapshotDepositQueueHash`.
+- The proof validates ancestry by reading `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits.
 
 ## Bridging out (zone to Tempo)
 
@@ -924,7 +922,7 @@ struct BatchProof {
     bytes proof;                  // SP1 proof bytes (or TEE attestation)
 }
 ```
-`prevStateRoot`, `processedDepositQueueHash`, and `snapshotDepositQueueHash` come from the portal's tracked state when the proof is verified on L1.
+`prevStateRoot` and `processedDepositQueueHash` come from the portal's tracked state when the proof is verified on L1. The proof reads `currentDepositQueueHash` from Tempo storage to validate ancestry.
 
 ### Deposits and withdrawals
 
