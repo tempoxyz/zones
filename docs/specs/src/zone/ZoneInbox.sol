@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { Deposit } from "./IZone.sol";
+import { TempoState } from "./TempoState.sol";
 
 /// @title IZoneGasToken
 /// @notice Interface for the zone's gas token (TIP-20 with mint/burn for system)
@@ -14,28 +15,48 @@ interface IZoneGasToken {
 }
 
 /// @title ZoneInbox
-/// @notice Zone-side system contract for processing deposit queue messages from Tempo
-/// @dev Called by sequencer as a system transaction at the start of each block
+/// @notice Zone-side system contract for advancing Tempo state and processing deposits
+/// @dev Called by sequencer as a system transaction. Combines Tempo header advancement
+///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The Tempo portal address (for reference)
+    /// @notice The Tempo portal address (for reading deposit queue hash)
     address public immutable tempoPortal;
+
+    /// @notice The TempoState predeploy address
+    TempoState public immutable tempoState;
 
     /// @notice The gas token (TIP-20 at same address as Tempo)
     IZoneGasToken public immutable gasToken;
 
-    /// @notice The sequencer address (only caller for processDepositQueue)
+    /// @notice The sequencer address (only caller for advanceTempo)
     address public immutable sequencer;
 
-    /// @notice Last processed deposit queue hash (matches Tempo's processedDepositQueueHash after batch)
+    /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
+
+    /// @notice Storage slot for currentDepositQueueHash in ZonePortal
+    /// @dev ZonePortal storage layout:
+    ///      slot 0: sequencerPubkey (bytes32)
+    ///      slot 1: batchIndex (uint64)
+    ///      slot 2: stateRoot (bytes32)
+    ///      slot 3: _depositQueue.processed (bytes32)
+    ///      slot 4: _depositQueue.current (bytes32) ← this one
+    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
+
+    event TempoAdvanced(
+        bytes32 indexed tempoBlockHash,
+        uint64 indexed tempoBlockNumber,
+        uint256 depositsProcessed,
+        bytes32 newProcessedDepositQueueHash
+    );
 
     event DepositProcessed(
         bytes32 indexed depositHash,
@@ -49,57 +70,81 @@ contract ZoneInbox {
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
-    error InvalidDepositQueueChain();
     error OnlySequencer();
+    error InvalidDepositQueueHash();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _tempoPortal, address _gasToken, address _sequencer) {
+    constructor(
+        address _tempoPortal,
+        address _tempoState,
+        address _gasToken,
+        address _sequencer
+    ) {
         tempoPortal = _tempoPortal;
+        tempoState = TempoState(_tempoState);
         gasToken = IZoneGasToken(_gasToken);
         sequencer = _sequencer;
     }
 
     /*//////////////////////////////////////////////////////////////
-                     DEPOSIT QUEUE PROCESSING
+                         SYSTEM TRANSACTION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Process deposits from Tempo. Called by sequencer as system transaction.
-    /// @dev Deposits must be processed in order. The hash chain is verified.
-    /// @param deposits Array of deposits to process (oldest first).
-    /// @param expectedHash The expected hash after processing all deposits.
-    function processDepositQueue(
-        Deposit[] calldata deposits,
-        bytes32 expectedHash
+    /// @notice Advance Tempo state and process deposits in a single system transaction
+    /// @dev This is the main entry point for the sequencer's system transaction.
+    ///      1. Advances the zone's view of Tempo by processing the header
+    ///      2. Processes deposits from the deposit queue
+    ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    /// @param header RLP-encoded Tempo block header
+    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
+    function advanceTempo(
+        bytes calldata header,
+        Deposit[] calldata deposits
     ) external {
         if (msg.sender != sequencer) revert OnlySequencer();
 
+        // Step 1: Advance Tempo state (validates chain continuity internally)
+        tempoState.finalizeTempo(header);
+
+        // Step 2: Process deposits and build hash chain
         bytes32 currentHash = processedDepositQueueHash;
 
         for (uint256 i = 0; i < deposits.length; i++) {
-            Deposit calldata depositData = deposits[i];
+            Deposit calldata d = deposits[i];
 
-            // Advance the hash chain
-            // Tempo builds: newHash = keccak256(abi.encode(deposit, prevHash))
-            currentHash = keccak256(abi.encode(depositData, currentHash));
+            // Advance the hash chain (matches Tempo's deposit queue structure)
+            currentHash = keccak256(abi.encode(d, currentHash));
 
             // Mint gas tokens to the recipient
-            gasToken.mint(depositData.to, depositData.amount);
+            gasToken.mint(d.to, d.amount);
 
-            emit DepositProcessed(
-                currentHash,
-                depositData.sender,
-                depositData.to,
-                depositData.amount,
-                depositData.memo
-            );
+            emit DepositProcessed(currentHash, d.sender, d.to, d.amount, d.memo);
         }
 
-        // Verify we reached the expected hash
-        if (currentHash != expectedHash) revert InvalidDepositQueueChain();
+        // Step 3: Validate against Tempo state
+        // Read currentDepositQueueHash from the portal's storage using the new Tempo state
+        bytes32 tempoCurrentHash = tempoState.readTempoStorageSlot(
+            tempoPortal,
+            CURRENT_DEPOSIT_QUEUE_HASH_SLOT
+        );
 
+        // Our processed hash must be an ancestor of (or equal to) Tempo's current hash
+        // For now, we require exact match - partial processing can be added later
+        if (currentHash != tempoCurrentHash) {
+            revert InvalidDepositQueueHash();
+        }
+
+        // Step 4: Update state
         processedDepositQueueHash = currentHash;
+
+        emit TempoAdvanced(
+            tempoState.tempoBlockHash(),
+            tempoState.tempoBlockNumber(),
+            deposits.length,
+            currentHash
+        );
     }
 }

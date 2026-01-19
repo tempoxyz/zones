@@ -135,7 +135,7 @@ Tempo to zone communication uses a single `depositQueue` chain. Each deposit is 
 newHash = keccak256(abi.encode(deposit, prevHash))
 ```
 
-Where `deposit` is a `Deposit` struct containing the sender, recipient, amount, and memo. Tempo state is obtained separately through the TempoState predeploy's `finalizeTempo()` function, which the sequencer calls to update the zone's view of Tempo blocks.
+Where `deposit` is a `Deposit` struct containing the sender, recipient, amount, and memo. Tempo state advancement and deposit processing are combined in the ZoneInbox's `advanceTempo()` function, which calls `TempoState.finalizeTempo()` internally.
 
 The portal uses a 2-slot design:
 
@@ -555,10 +555,17 @@ The zone has a `TIP403Registry` contract deployed at the **same address** as L1.
 
 #### Zone inbox
 
-The zone inbox is a system contract that processes deposits from Tempo. It is called by the sequencer as a **system transaction at the start of each block** to apply deposits.
+The zone inbox is a system contract that advances Tempo state and processes deposits from Tempo in a single atomic operation. It is called by the sequencer as a **system transaction at the start of each block**.
 
 ```solidity
 interface IZoneInbox {
+    event TempoAdvanced(
+        bytes32 indexed tempoBlockHash,
+        uint64 indexed tempoBlockNumber,
+        uint256 depositsProcessed,
+        bytes32 newProcessedDepositQueueHash
+    );
+
     event DepositProcessed(
         bytes32 indexed depositHash,
         address indexed sender,
@@ -570,19 +577,29 @@ interface IZoneInbox {
     /// @notice The last processed deposit queue hash (should match Tempo's processedDepositQueueHash after batch).
     function processedDepositQueueHash() external view returns (bytes32);
 
-    /// @notice Process deposits from Tempo. Called by sequencer as system transaction.
-    /// @dev Deposits must be processed in order. The hash chain is verified.
-    /// @param deposits Array of deposits to process (oldest first).
-    /// @param expectedHash The expected hash after processing all deposits.
-    function processDepositQueue(Deposit[] calldata deposits, bytes32 expectedHash) external;
+    /// @notice Advance Tempo state and process deposits in a single system transaction.
+    /// @dev This is the main entry point for the sequencer's system transaction.
+    ///      1. Advances the zone's view of Tempo by processing the header
+    ///      2. Processes deposits from the deposit queue
+    ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    /// @param header RLP-encoded Tempo block header
+    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
+    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;
 }
 ```
 
-The sequencer observes `DepositMade` events on the Tempo portal and relays them to the zone via `processDepositQueue`. Deposits credit the recipient's TIP-20 balance (minted by the system). Tempo state is obtained separately via the TempoState predeploy's `finalizeTempo()` function.
+The sequencer observes `DepositMade` events on the Tempo portal and relays them to the zone via `advanceTempo`. This function:
+
+1. Calls `TempoState.finalizeTempo(header)` to advance the zone's view of Tempo
+2. Processes deposits in order, building the hash chain and minting gas tokens
+3. Reads `currentDepositQueueHash` from the Tempo portal's storage via `TempoState.readTempoStorageSlot()`
+4. Validates the resulting hash matches Tempo's current state
+
+This combined approach ensures Tempo state advancement and deposit processing are atomic, and the deposit hash is validated against the actual Tempo state at the newly finalized block.
 
 #### Zone outbox
 
-The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox burns the tokens and emits an event. The sequencer collects these events to build the withdrawal queue for batch submission.
+The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to submit a batch, it calls `batch(count)` to construct the withdrawal queue hash on-chain.
 
 ```solidity
 interface IZoneOutbox {
@@ -597,14 +614,20 @@ interface IZoneOutbox {
         bytes data
     );
 
+    event BatchWithdrawals(bytes32 indexed withdrawalQueueHash, uint256 count);
+
     /// @notice The gas token address (same as L1 portal's token).
     function gasToken() external view returns (address);
 
     /// @notice Next withdrawal index (monotonically increasing).
     function nextWithdrawalIndex() external view returns (uint64);
 
+    /// @notice Number of pending withdrawals waiting to be batched.
+    function pendingWithdrawalsCount() external view returns (uint256);
+
     /// @notice Request a withdrawal from the zone back to Tempo.
     /// @dev Caller must have approved the outbox to spend `amount` of gas tokens.
+    ///      Tokens are burned immediately and withdrawal is stored in pending array.
     /// @param to The Tempo recipient address.
     /// @param amount Amount to withdraw.
     /// @param memo User-provided context (e.g., payment reference).
@@ -619,16 +642,24 @@ interface IZoneOutbox {
         address fallbackRecipient,
         bytes calldata data
     ) external;
+
+    /// @notice Build withdrawal hash chain and clear pending withdrawals.
+    /// @dev Only callable by sequencer. Processes up to `count` withdrawals.
+    ///      Returns 0 if no withdrawals or count is 0.
+    /// @param count Max number of withdrawals to process (avoids unbounded loops).
+    /// @return withdrawalQueueHash The hash chain for L1 batch submission.
+    function batch(uint256 count) external returns (bytes32 withdrawalQueueHash);
 }
 ```
 
-The withdrawal queue hash is constructed off-chain by the sequencer from the emitted events:
+The `batch()` function constructs the hash chain on-chain by processing withdrawals in reverse order (newest to oldest), so the oldest ends up outermost for O(1) L1 removal:
 
 ```
-// Build queue hash from events (oldest = outermost for O(1) L1 removal)
-queueHash = 0
-for withdrawal in withdrawals (newest to oldest):
-    queueHash = keccak256(abi.encode(withdrawal, queueHash))
+// On-chain hash chain construction (inside batch())
+withdrawalQueueHash = EMPTY_SENTINEL
+for i from (pendingCount - 1) down to 0:
+    withdrawalQueueHash = keccak256(abi.encode(withdrawals[i], withdrawalQueueHash))
+    pop withdrawal from storage
 ```
 
 ### External dependencies
@@ -736,7 +767,7 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
 2. `ZonePortal` transfers `amount` of the gas token into escrow and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))`.
-3. The sequencer observes `DepositMade` events and processes deposits in order via `processDepositQueue`, crediting `to` with `amount` of the gas token (TIP-20 balance). Deposits always succeed—there is no callback or bounce mechanism.
+3. The sequencer observes `DepositMade` events and processes deposits in order via `ZoneInbox.advanceTempo()`, crediting `to` with `amount` of the gas token (TIP-20 balance). Deposits always succeed—there is no callback or bounce mechanism.
 4. A batch proof/attestation must prove the zone processed deposits from `processedDepositQueueHash` up to `nextProcessedDepositQueueHash`, and that `nextProcessedDepositQueueHash` is an ancestor of `currentDepositQueueHash` (read from Tempo state at the proven block).
 5. After the batch is accepted, `processedDepositQueueHash = nextProcessedDepositQueueHash`.
 
@@ -746,7 +777,7 @@ Notes:
 - Deposits are finalized for Tempo once the batch is verified.
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
 - The portal only stores two hashes, not individual deposits. The sequencer must track deposits off-chain.
-- Tempo state is obtained separately via `TempoState.finalizeTempo()`, not embedded in deposits.
+- Tempo state advancement is combined with deposit processing in `ZoneInbox.advanceTempo()`, which calls `TempoState.finalizeTempo()` internally.
 - The proof validates ancestry by reading `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits.
 
 ## Bridging out (zone to Tempo)
@@ -904,7 +935,7 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 ### State commitments
 
 - **State root**: Computed via SP1 (Succinct) proving. The state root is the output of the proven execution.
-- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. The sequencer calls `finalizeTempo()` with Tempo block headers. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from `blockhash(tempoBlockNumber)`.
+- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from `blockhash(tempoBlockNumber)`.
 
 ### Batching and proofs
 
@@ -927,7 +958,7 @@ struct BatchProof {
 ### Deposits and withdrawals
 
 - **Deposit contract**: Tempo portal escrows TIP-20 tokens. The ExEx watches `DepositMade` events and queues deposits for zone processing.
-- **Tempo state sync**: The ExEx also watches Tempo blocks and calls `TempoState.finalizeTempo()` to keep the zone's Tempo view current.
+- **Combined system transaction**: Each zone block starts with a system transaction that calls `ZoneInbox.advanceTempo(header, deposits)`. This atomically advances the zone's Tempo view and processes pending deposits, validating the deposit hash against Tempo state.
 - **Withdrawal requests**: Users trigger withdrawals on the zone via RPC. The withdrawal is added to the pending exits and included in the next batch's exit list.
 
 ### RPC interface

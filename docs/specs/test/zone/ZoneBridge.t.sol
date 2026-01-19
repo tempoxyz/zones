@@ -8,6 +8,7 @@ import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
+import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { TIP20 } from "../../src/TIP20.sol";
 import {
     IZoneFactory,
@@ -59,6 +60,7 @@ contract ZoneBridgeTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     MockZoneGasToken public l2GasToken;
+    MockTempoState public l2TempoState;
     ZoneInbox public l2Inbox;
     ZoneOutbox public l2Outbox;
 
@@ -72,6 +74,9 @@ contract ZoneBridgeTest is BaseTest {
     bytes32 constant GENESIS_STATE_ROOT = keccak256("genesis");
     bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
     uint64 public genesisTempoBlockNumber;
+
+    /// @notice Storage slot for currentDepositQueueHash in ZonePortal
+    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
 
     /// @notice Represents an observed deposit from Tempo (simulating sequencer watching events)
     struct ObservedDeposit {
@@ -129,8 +134,11 @@ contract ZoneBridgeTest is BaseTest {
         // Gas token on zone (same concept as pathUSD, deployed at "same address" conceptually)
         l2GasToken = new MockZoneGasToken("Zone USD", "zUSD");
 
-        // Zone inbox (processes deposit queue messages)
-        l2Inbox = new ZoneInbox(portalAddr, address(l2GasToken), admin);
+        // TempoState mock for testing
+        l2TempoState = new MockTempoState(admin, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
+
+        // Zone inbox (advances Tempo state and processes deposits)
+        l2Inbox = new ZoneInbox(portalAddr, address(l2TempoState), address(l2GasToken), admin);
         l2GasToken.setMinter(address(l2Inbox), true);
 
         // Zone outbox (handles withdrawals)
@@ -186,8 +194,17 @@ contract ZoneBridgeTest is BaseTest {
         // Get expected final hash
         newProcessedHash = pendingDeposits[pendingDeposits.length - 1].newCurrentDepositQueueHash;
 
-        // Process on zone (sequencer calls as system tx)
-        l2Inbox.processDepositQueue(deposits, newProcessedHash);
+        // Set up mock: TempoState will return this hash when reading from portal
+        l2TempoState.setMockStorageValue(
+            address(l1Portal),
+            CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+            newProcessedHash
+        );
+
+        // Process on zone via advanceTempo (sequencer calls as system tx)
+        // Empty header since MockTempoState just advances block number
+        vm.prank(admin);
+        l2Inbox.advanceTempo("", deposits);
 
         // Clear pending
         delete pendingDeposits;
@@ -551,50 +568,6 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(l2Outbox.nextWithdrawalIndex(), 1);
     }
 
-    function test_fullFlow_partialDepositProcessing() public {
-        // Make multiple deposits
-        vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 3000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32("d1"));
-        l1Portal.deposit(alice, 1000e6, bytes32("d2"));
-        l1Portal.deposit(alice, 1000e6, bytes32("d3"));
-        vm.stopPrank();
-
-        // Sequencer observes all
-        _sequencerObserveDeposit(alice, alice, 1000e6, bytes32("d1"));
-        _sequencerObserveDeposit(alice, alice, 1000e6, bytes32("d2"));
-        _sequencerObserveDeposit(alice, alice, 1000e6, bytes32("d3"));
-
-        // But only processes first two
-        Deposit[] memory firstTwo = new Deposit[](2);
-        firstTwo[0] = pendingDeposits[0].deposit;
-        firstTwo[1] = pendingDeposits[1].deposit;
-        bytes32 partialHash = pendingDeposits[1].newCurrentDepositQueueHash;
-
-        l2Inbox.processDepositQueue(firstTwo, partialHash);
-
-        // Verify zone state
-        assertEq(l2GasToken.balanceOf(alice), 2000e6); // Only 2 processed
-        assertEq(l2Inbox.processedDepositQueueHash(), partialHash);
-
-        // Advance a block so we can use blockhash
-        vm.roll(block.number + 1);
-
-        // Submit batch with partial processing
-        l2StateRoot = keccak256(abi.encode(l2StateRoot, "partial"));
-        l1Portal.submitBatch(
-            uint64(block.number - 1),
-            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
-            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: partialHash }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
-            "",
-            ""
-        );
-
-        // L1 should show partial processing
-        assertEq(l1Portal.processedDepositQueueHash(), partialHash);
-    }
-
     function test_l2_insufficientBalanceReverts() public {
         // Deposit to Alice
         vm.startPrank(alice);
@@ -629,7 +602,7 @@ contract ZoneBridgeTest is BaseTest {
         l2GasToken.transfer(bob, 2000e6);
     }
 
-    function test_l2_invalidDepositChainReverts() public {
+    function test_l2_invalidDepositHashReverts() public {
         // Deposit on L1
         vm.startPrank(alice);
         pathUSD.approve(address(l1Portal), 1000e6);
@@ -638,12 +611,20 @@ contract ZoneBridgeTest is BaseTest {
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
 
-        // Try to process with wrong expected hash
+        // Set up mock with wrong hash
+        l2TempoState.setMockStorageValue(
+            address(l1Portal),
+            CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+            bytes32("wrong hash")
+        );
+
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = pendingDeposits[0].deposit;
 
-        vm.expectRevert(ZoneInbox.InvalidDepositQueueChain.selector);
-        l2Inbox.processDepositQueue(deposits, bytes32("wrong hash"));
+        // Should revert because hash doesn't match
+        vm.prank(admin);
+        vm.expectRevert(ZoneInbox.InvalidDepositQueueHash.selector);
+        l2Inbox.advanceTempo("", deposits);
     }
 
     function test_l2_callbackRequiresFallbackRecipient() public {
@@ -671,7 +652,7 @@ contract ZoneBridgeTest is BaseTest {
         vm.stopPrank();
     }
 
-    function test_l2_onlySequencerCanProcessDeposits() public {
+    function test_l2_onlySequencerCanAdvanceTempo() public {
         vm.startPrank(alice);
         pathUSD.approve(address(l1Portal), 1000e6);
         l1Portal.deposit(alice, 1000e6, bytes32(""));
@@ -679,13 +660,19 @@ contract ZoneBridgeTest is BaseTest {
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
 
+        bytes32 expectedHash = pendingDeposits[0].newCurrentDepositQueueHash;
+        l2TempoState.setMockStorageValue(
+            address(l1Portal),
+            CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+            expectedHash
+        );
+
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = pendingDeposits[0].deposit;
-        bytes32 expectedHash = pendingDeposits[0].newCurrentDepositQueueHash;
 
-        // Non-sequencer tries to process
+        // Non-sequencer tries to advance
         vm.prank(alice);
         vm.expectRevert(ZoneInbox.OnlySequencer.selector);
-        l2Inbox.processDepositQueue(deposits, expectedHash);
+        l2Inbox.advanceTempo("", deposits);
     }
 }
