@@ -34,7 +34,7 @@ contract ZoneFactory is IZoneFactory {
             params.token,
             params.sequencer,
             params.verifier,
-            params.genesisStateRoot,
+            params.genesisBlockHash,
             params.genesisTempoBlockNumber
         );
         portal = address(portalContract);
@@ -46,7 +46,7 @@ contract ZoneFactory is IZoneFactory {
             token: params.token,
             sequencer: params.sequencer,
             verifier: params.verifier,
-            genesisStateRoot: params.genesisStateRoot,
+            genesisBlockHash: params.genesisBlockHash,
             genesisTempoBlockHash: params.genesisTempoBlockHash,
             genesisTempoBlockNumber: params.genesisTempoBlockNumber
         });
@@ -59,7 +59,7 @@ contract ZoneFactory is IZoneFactory {
             params.token,
             params.sequencer,
             params.verifier,
-            params.genesisStateRoot,
+            params.genesisBlockHash,
             params.genesisTempoBlockHash,
             params.genesisTempoBlockNumber
         );

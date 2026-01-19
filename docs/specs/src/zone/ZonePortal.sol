@@ -8,7 +8,7 @@ import {
     IWithdrawalReceiver,
     Deposit,
     Withdrawal,
-    StateTransition,
+    BlockTransition,
     DepositQueueTransition,
     WithdrawalQueueTransition
 } from "./IZone.sol";
@@ -33,7 +33,7 @@ contract ZonePortal is IZonePortal {
 
     bytes32 public sequencerPubkey;
     uint64 public batchIndex;
-    bytes32 public stateRoot;
+    bytes32 public blockHash;
 
     /// @notice Deposit queue (Tempo→zone): 2-slot pattern
     DepositQueue internal _depositQueue;
@@ -50,14 +50,14 @@ contract ZonePortal is IZonePortal {
         address _token,
         address _sequencer,
         address _verifier,
-        bytes32 _genesisStateRoot,
+        bytes32 _genesisBlockHash,
         uint64 _genesisTempoBlockNumber
     ) {
         zoneId = _zoneId;
         token = _token;
         sequencer = _sequencer;
         verifier = _verifier;
-        stateRoot = _genesisStateRoot;
+        blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
     }
 
@@ -201,7 +201,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     function submitBatch(
         uint64 tempoBlockNumber,
-        StateTransition calldata stateTransition,
+        BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
@@ -227,9 +227,9 @@ contract ZonePortal is IZonePortal {
         // The proof reads currentDepositQueueHash from Tempo state to validate ancestry
         bool valid = IVerifier(verifier).verify(
             tempoBlockHash,
-            StateTransition({
-                prevStateRoot: stateRoot,
-                nextStateRoot: stateTransition.nextStateRoot
+            BlockTransition({
+                prevBlockHash: blockHash,
+                nextBlockHash: blockTransition.nextBlockHash
             }),
             fullDepositTransition,
             withdrawalQueueTransition,
@@ -240,7 +240,7 @@ contract ZonePortal is IZonePortal {
 
         // Update state
         batchIndex++;
-        stateRoot = stateTransition.nextStateRoot;
+        blockHash = blockTransition.nextBlockHash;
 
         // Update deposit queue (validates prevProcessedHash matches)
         _depositQueue.dequeueWithProof(fullDepositTransition);
@@ -253,7 +253,7 @@ contract ZonePortal is IZonePortal {
             batchIndex,
             tempoBlockNumber,
             _depositQueue.processed,
-            stateRoot,
+            blockHash,
             _withdrawalQueue.tail,
             withdrawalQueueTransition.withdrawalQueueHash
         );

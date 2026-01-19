@@ -8,15 +8,17 @@ struct ZoneInfo {
     address token;
     address sequencer;
     address verifier;
-    bytes32 genesisStateRoot;
+    bytes32 genesisBlockHash;
     bytes32 genesisTempoBlockHash;
     uint64 genesisTempoBlockNumber;
 }
 
-/// @notice State transition for zone batch proofs
-struct StateTransition {
-    bytes32 prevStateRoot;
-    bytes32 nextStateRoot;
+/// @notice Block transition for zone batch proofs
+/// @dev Uses block hash instead of state root to commit to full block structure
+///      (includes state root, transactions root, receipts root, etc.)
+struct BlockTransition {
+    bytes32 prevBlockHash;
+    bytes32 nextBlockHash;
 }
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
@@ -56,7 +58,7 @@ struct Withdrawal {
 interface IVerifier {
     function verify(
         bytes32 tempoBlockHash,
-        StateTransition calldata stateTransition,
+        BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
@@ -71,7 +73,7 @@ interface IZoneFactory {
         address token;
         address sequencer;
         address verifier;
-        bytes32 genesisStateRoot;
+        bytes32 genesisBlockHash;
         bytes32 genesisTempoBlockHash;
         uint64 genesisTempoBlockNumber;
     }
@@ -82,7 +84,7 @@ interface IZoneFactory {
         address indexed token,
         address sequencer,
         address verifier,
-        bytes32 genesisStateRoot,
+        bytes32 genesisBlockHash,
         bytes32 genesisTempoBlockHash,
         uint64 genesisTempoBlockNumber
     );
@@ -112,7 +114,7 @@ interface IZonePortal {
         uint64 indexed batchIndex,
         uint64 tempoBlockNumber,
         bytes32 nextProcessedDepositQueueHash,
-        bytes32 nextStateRoot,
+        bytes32 nextBlockHash,
         uint256 withdrawalQueueTail,
         bytes32 withdrawalQueueHash
     );
@@ -140,7 +142,7 @@ interface IZonePortal {
     function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
     function batchIndex() external view returns (uint64);
-    function stateRoot() external view returns (bytes32);
+    function blockHash() external view returns (bytes32);
     function processedDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
     function withdrawalQueueHead() external view returns (uint256);
@@ -155,7 +157,7 @@ interface IZonePortal {
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
         uint64 tempoBlockNumber,
-        StateTransition calldata stateTransition,
+        BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
@@ -186,10 +188,11 @@ interface IZoneOutbox {
         bytes calldata data
     ) external;
 
-    /// @notice Build withdrawal hash chain and clear pending withdrawals
+    /// @notice Finalize batch at end of block - build withdrawal hash and emit proof inputs
+    /// @dev Only callable by sequencer as system transaction. Optional per block.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function batch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+    function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256);

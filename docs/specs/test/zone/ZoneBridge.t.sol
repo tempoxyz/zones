@@ -16,7 +16,7 @@ import {
     IWithdrawalReceiver,
     Deposit,
     Withdrawal,
-    StateTransition,
+    BlockTransition,
     DepositQueueTransition,
     WithdrawalQueueTransition
 } from "../../src/zone/IZone.sol";
@@ -71,7 +71,7 @@ contract ZoneBridgeTest is BaseTest {
     MockWithdrawalReceiver public withdrawalReceiver;
     uint64 public zoneId;
 
-    bytes32 constant GENESIS_STATE_ROOT = keccak256("genesis");
+    bytes32 constant GENESIS_BLOCK_HASH = keccak256("genesis");
     bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
     uint64 public genesisTempoBlockNumber;
 
@@ -96,8 +96,8 @@ contract ZoneBridgeTest is BaseTest {
     /// @notice Sequencer's observed withdrawals for current batch
     ObservedWithdrawal[] internal pendingWithdrawals;
 
-    /// @notice Track zone state root (in reality computed by prover)
-    bytes32 internal l2StateRoot;
+    /// @notice Track zone block hash (in reality from block header)
+    bytes32 internal l2BlockHash;
 
     function setUp() public override {
         super.setUp();
@@ -122,7 +122,7 @@ contract ZoneBridgeTest is BaseTest {
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(l1Verifier),
-            genesisStateRoot: GENESIS_STATE_ROOT,
+            genesisBlockHash: GENESIS_BLOCK_HASH,
             genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
             genesisTempoBlockNumber: genesisTempoBlockNumber
         });
@@ -141,12 +141,12 @@ contract ZoneBridgeTest is BaseTest {
         l2Inbox = new ZoneInbox(portalAddr, address(l2TempoState), address(l2GasToken), admin);
         l2GasToken.setMinter(address(l2Inbox), true);
 
-        // Zone outbox (handles withdrawals)
-        l2Outbox = new ZoneOutbox(address(l2GasToken), admin);
+        // Zone outbox (handles withdrawals, references inbox and tempoState for BatchFinalized event)
+        l2Outbox = new ZoneOutbox(address(l2GasToken), admin, address(l2Inbox), address(l2TempoState));
         l2GasToken.setBurner(address(l2Outbox), true);
 
-        // Initialize zone state root
-        l2StateRoot = GENESIS_STATE_ROOT;
+        // Initialize zone block hash
+        l2BlockHash = GENESIS_BLOCK_HASH;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -209,8 +209,8 @@ contract ZoneBridgeTest is BaseTest {
         // Clear pending
         delete pendingDeposits;
 
-        // Update zone state root (simulated)
-        l2StateRoot = keccak256(abi.encode(l2StateRoot, "deposits", newProcessedHash));
+        // Update zone block hash (simulated)
+        l2BlockHash = keccak256(abi.encode(l2BlockHash, "deposits", newProcessedHash));
     }
 
     /// @notice Simulate sequencer observing a withdrawal event on the zone
@@ -254,9 +254,9 @@ contract ZoneBridgeTest is BaseTest {
 
     /// @notice Simulate sequencer building and submitting a batch to Tempo
     function _sequencerSubmitBatch(bytes32 newProcessedDepositQueueHash) internal {
-        // Sequencer calls batch() on zone outbox to get withdrawal hash on-chain
+        // Sequencer calls finalizeBatch() on zone outbox to get withdrawal hash on-chain
         vm.prank(admin);
-        bytes32 withdrawalQueueHash = l2Outbox.batch(type(uint256).max);
+        bytes32 withdrawalQueueHash = l2Outbox.finalizeBatch(type(uint256).max);
 
         // Advance a block so we can use blockhash
         vm.roll(block.number + 1);
@@ -264,7 +264,7 @@ contract ZoneBridgeTest is BaseTest {
         // Submit to Tempo
         l1Portal.submitBatch(
             uint64(block.number - 1),
-            StateTransition({ prevStateRoot: bytes32(0), nextStateRoot: l2StateRoot }),
+            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: l2BlockHash }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash }),
             WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalQueueHash }),
             "",
@@ -318,7 +318,7 @@ contract ZoneBridgeTest is BaseTest {
         // Verify L1 batch state updated
         assertEq(l1Portal.batchIndex(), 1);
         assertEq(l1Portal.processedDepositQueueHash(), newProcessedHash);
-        assertEq(l1Portal.stateRoot(), l2StateRoot);
+        assertEq(l1Portal.blockHash(), l2BlockHash);
 
         // === STEP 5: Alice requests withdrawal on zone ===
         uint128 withdrawAmount = 400e6;
@@ -341,7 +341,7 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveWithdrawal(0, alice, alice, withdrawAmount, bytes32(0), 0, address(0), "");
 
         // Update zone state root
-        l2StateRoot = keccak256(abi.encode(l2StateRoot, "withdrawal", 0));
+        l2BlockHash = keccak256(abi.encode(l2BlockHash, "withdrawal", 0));
 
         // === STEP 7: Submit batch with withdrawal ===
         _sequencerSubmitBatch(newProcessedHash);
@@ -414,7 +414,7 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveWithdrawal(1, bob, bob, 1000e6, bytes32(0), 0, address(0), "");
 
         // Submit batch with both withdrawals
-        l2StateRoot = keccak256(abi.encode(l2StateRoot, "withdrawals"));
+        l2BlockHash = keccak256(abi.encode(l2BlockHash, "withdrawals"));
         _sequencerSubmitBatch(processedHash);
 
         // Build expected queue hash (oldest = outermost, innermost wraps EMPTY_SENTINEL)
@@ -466,7 +466,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Sequencer observes and submits
         _sequencerObserveWithdrawal(0, alice, address(withdrawalReceiver), 500e6, bytes32(0), 100000, alice, "callback_data");
-        l2StateRoot = keccak256(abi.encode(l2StateRoot, "callback_withdrawal"));
+        l2BlockHash = keccak256(abi.encode(l2BlockHash, "callback_withdrawal"));
         _sequencerSubmitBatch(processedHash);
 
         // Process withdrawal
@@ -515,7 +515,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Sequencer observes and submits
         _sequencerObserveWithdrawal(0, alice, address(withdrawalReceiver), 500e6, bytes32(0), 100000, alice, "");
-        l2StateRoot = keccak256(abi.encode(l2StateRoot, "failing_callback"));
+        l2BlockHash = keccak256(abi.encode(l2BlockHash, "failing_callback"));
         _sequencerSubmitBatch(processedHash);
 
         bytes32 depositHashBefore = l1Portal.currentDepositQueueHash();

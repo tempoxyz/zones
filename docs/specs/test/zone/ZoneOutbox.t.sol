@@ -3,25 +3,36 @@ pragma solidity ^0.8.13;
 
 import { Test } from "forge-std/Test.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
+import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
+import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { Withdrawal } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
 
 /// @title ZoneOutboxTest
-/// @notice Tests for ZoneOutbox batch() functionality and withdrawal storage
+/// @notice Tests for ZoneOutbox finalizeBatch() functionality and withdrawal storage
 contract ZoneOutboxTest is Test {
     ZoneOutbox public outbox;
+    ZoneInbox public inbox;
     MockZoneGasToken public gasToken;
+    MockTempoState public tempoState;
 
     address public sequencer = address(0x1);
     address public alice = address(0x200);
     address public bob = address(0x300);
+    address public mockPortal = address(0x400);
+
+    bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
+    uint64 constant GENESIS_TEMPO_BLOCK_NUMBER = 1;
 
     function setUp() public {
         gasToken = new MockZoneGasToken("Zone USD", "zUSD");
-        outbox = new ZoneOutbox(address(gasToken), sequencer);
+        tempoState = new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
+        inbox = new ZoneInbox(mockPortal, address(tempoState), address(gasToken), sequencer);
+        outbox = new ZoneOutbox(address(gasToken), sequencer, address(inbox), address(tempoState));
 
-        // Grant burner role to outbox
+        // Grant minter role to inbox and burner role to outbox
+        gasToken.setMinter(address(inbox), true);
         gasToken.setBurner(address(outbox), true);
 
         // Give alice and bob tokens
@@ -51,17 +62,18 @@ contract ZoneOutboxTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
-                          BATCH TESTS
+                       FINALIZE BATCH TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_batch_emptyQueue_returnsZero() public {
+    function test_finalizeBatch_emptyQueue_returnsZero() public {
         vm.prank(sequencer);
-        bytes32 hash = outbox.batch(100);
+        bytes32 hash = outbox.finalizeBatch(100);
 
+        // Still emits event with zero count
         assertEq(hash, bytes32(0));
     }
 
-    function test_batch_zeroCount_returnsZero() public {
+    function test_finalizeBatch_zeroCount_returnsZero() public {
         // Add a withdrawal
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 500e6);
@@ -70,15 +82,15 @@ contract ZoneOutboxTest is Test {
 
         assertEq(outbox.pendingWithdrawalsCount(), 1);
 
-        // Batch with count=0 should return 0 and not process
+        // finalizeBatch with count=0 should return 0 and not process withdrawals
         vm.prank(sequencer);
-        bytes32 hash = outbox.batch(0);
+        bytes32 hash = outbox.finalizeBatch(0);
 
         assertEq(hash, bytes32(0));
         assertEq(outbox.pendingWithdrawalsCount(), 1);
     }
 
-    function test_batch_singleWithdrawal_correctHash() public {
+    function test_finalizeBatch_singleWithdrawal_correctHash() public {
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 500e6);
         outbox.requestWithdrawal(alice, 500e6, bytes32("memo"), 0, address(0), "");
@@ -97,12 +109,12 @@ contract ZoneOutboxTest is Test {
         bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.prank(sequencer);
-        bytes32 hash = outbox.batch(100);
+        bytes32 hash = outbox.finalizeBatch(100);
 
         assertEq(hash, expectedHash);
     }
 
-    function test_batch_multipleWithdrawals_correctHashChain() public {
+    function test_finalizeBatch_multipleWithdrawals_correctHashChain() public {
         // Alice withdraws
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 500e6);
@@ -142,12 +154,12 @@ contract ZoneOutboxTest is Test {
         bytes32 expectedHash = keccak256(abi.encode(w0, innerHash));
 
         vm.prank(sequencer);
-        bytes32 hash = outbox.batch(100);
+        bytes32 hash = outbox.finalizeBatch(100);
 
         assertEq(hash, expectedHash);
     }
 
-    function test_batch_clearsStorage() public {
+    function test_finalizeBatch_clearsStorage() public {
         // Add withdrawals
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 1000e6);
@@ -159,12 +171,12 @@ contract ZoneOutboxTest is Test {
 
         // Batch all
         vm.prank(sequencer);
-        outbox.batch(type(uint256).max);
+        outbox.finalizeBatch(type(uint256).max);
 
         assertEq(outbox.pendingWithdrawalsCount(), 0);
     }
 
-    function test_batch_partialBatch_processesOnlyCount() public {
+    function test_finalizeBatch_partialBatch_processesOnlyCount() public {
         // Add 3 withdrawals
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 1500e6);
@@ -177,7 +189,7 @@ contract ZoneOutboxTest is Test {
 
         // Batch only 2 (should process w2 and w3, leaving w1)
         vm.prank(sequencer);
-        bytes32 hash = outbox.batch(2);
+        bytes32 hash = outbox.finalizeBatch(2);
 
         // Should have 1 left (w1)
         assertEq(outbox.pendingWithdrawalsCount(), 1);
@@ -208,7 +220,7 @@ contract ZoneOutboxTest is Test {
         assertEq(hash, expectedHash);
     }
 
-    function test_batch_emitsEvent() public {
+    function test_finalizeBatch_emitsEvent() public {
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 500e6);
         outbox.requestWithdrawal(alice, 500e6, bytes32(0), 0, address(0), "");
@@ -225,18 +237,25 @@ contract ZoneOutboxTest is Test {
         });
         bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
+        // Event includes withdrawal hash, deposit hash (0 initially), tempo block info, and count
         vm.expectEmit(true, false, false, true);
-        emit ZoneOutbox.BatchWithdrawals(expectedHash, 1);
+        emit ZoneOutbox.BatchFinalized(
+            expectedHash,
+            inbox.processedDepositQueueHash(),  // 0 initially
+            tempoState.tempoBlockNumber(),
+            tempoState.tempoBlockHash(),
+            1
+        );
 
         vm.prank(sequencer);
-        outbox.batch(100);
+        outbox.finalizeBatch(100);
     }
 
     /*//////////////////////////////////////////////////////////////
                           ACCESS CONTROL TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_batch_onlySequencer() public {
+    function test_finalizeBatch_onlySequencer() public {
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 500e6);
         outbox.requestWithdrawal(alice, 500e6, bytes32(0), 0, address(0), "");
@@ -245,11 +264,11 @@ contract ZoneOutboxTest is Test {
         // Non-sequencer should revert
         vm.prank(alice);
         vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
-        outbox.batch(100);
+        outbox.finalizeBatch(100);
 
         // Sequencer should succeed
         vm.prank(sequencer);
-        bytes32 hash = outbox.batch(100);
+        bytes32 hash = outbox.finalizeBatch(100);
         assertTrue(hash != bytes32(0));
     }
 
@@ -257,7 +276,7 @@ contract ZoneOutboxTest is Test {
                     WITHDRAWAL WITH CALLBACK TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_batch_withdrawalWithCallback_correctHash() public {
+    function test_finalizeBatch_withdrawalWithCallback_correctHash() public {
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 500e6);
         outbox.requestWithdrawal(
@@ -282,7 +301,7 @@ contract ZoneOutboxTest is Test {
         bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.prank(sequencer);
-        bytes32 hash = outbox.batch(100);
+        bytes32 hash = outbox.finalizeBatch(100);
 
         assertEq(hash, expectedHash);
     }

@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneGasToken } from "./ZoneInbox.sol";
+import { IZoneGasToken, ZoneInbox } from "./ZoneInbox.sol";
+import { TempoState } from "./TempoState.sol";
 import { Withdrawal } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
-/// @dev Burns gas tokens and stores pending withdrawals. Sequencer calls batch() to
-///      construct withdrawal queue hash on-chain.
+/// @dev Burns gas tokens and stores pending withdrawals. Sequencer calls finalizeBatch()
+///      at the end of a block to construct withdrawal queue hash on-chain.
 contract ZoneOutbox {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -17,8 +18,14 @@ contract ZoneOutbox {
     /// @notice The gas token (TIP-20 at same address as L1)
     IZoneGasToken public immutable gasToken;
 
-    /// @notice The sequencer address (only sequencer can call batch)
+    /// @notice The sequencer address (only sequencer can call finalizeBatch)
     address public immutable sequencer;
+
+    /// @notice The ZoneInbox (for reading processedDepositQueueHash)
+    ZoneInbox public immutable zoneInbox;
+
+    /// @notice The TempoState predeploy (for reading Tempo block info)
+    TempoState public immutable tempoState;
 
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
@@ -43,8 +50,15 @@ contract ZoneOutbox {
         bytes data
     );
 
-    /// @notice Emitted when sequencer batches pending withdrawals
-    event BatchWithdrawals(bytes32 indexed withdrawalQueueHash, uint256 count);
+    /// @notice Emitted when sequencer finalizes a batch at end of block
+    /// @dev Contains all proof inputs except state/block hash (computed after this tx)
+    event BatchFinalized(
+        bytes32 indexed withdrawalQueueHash,
+        bytes32 processedDepositQueueHash,
+        uint64 tempoBlockNumber,
+        bytes32 tempoBlockHash,
+        uint256 withdrawalCount
+    );
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -58,9 +72,16 @@ contract ZoneOutbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _gasToken, address _sequencer) {
+    constructor(
+        address _gasToken,
+        address _sequencer,
+        address _zoneInbox,
+        address _tempoState
+    ) {
         gasToken = IZoneGasToken(_gasToken);
         sequencer = _sequencer;
+        zoneInbox = ZoneInbox(_zoneInbox);
+        tempoState = TempoState(_tempoState);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -129,18 +150,16 @@ contract ZoneOutbox {
                               BATCH OPERATIONS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Build withdrawal hash chain and clear pending withdrawals
-    /// @dev Only callable by sequencer. Builds hash chain with oldest withdrawal
-    ///      outermost (matching L1 expectations for O(1) dequeue).
+    /// @notice Finalize the batch at end of block - build withdrawal hash and emit proof inputs
+    /// @dev Only callable by sequencer as a system transaction at the end of a block.
+    ///      This is optional - blocks without withdrawals don't need to call this.
+    ///      Emits BatchFinalized with all proof inputs except state/block hash.
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function batch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
+    function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
         if (msg.sender != sequencer) revert OnlySequencer();
 
         uint256 pending = _pendingWithdrawals.length;
-        if (pending == 0 || count == 0) {
-            return bytes32(0);
-        }
 
         // Clamp to actual pending count
         if (count > pending) {
@@ -149,17 +168,26 @@ contract ZoneOutbox {
 
         // Build hash chain in reverse order (newest to oldest)
         // So oldest ends up outermost, matching L1 expectations
-        withdrawalQueueHash = EMPTY_SENTINEL;
+        if (count > 0) {
+            withdrawalQueueHash = EMPTY_SENTINEL;
 
-        for (uint256 i = 0; i < count; ) {
-            // Always read from current end (array shrinks each iteration)
-            Withdrawal memory w = _pendingWithdrawals[_pendingWithdrawals.length - 1];
-            withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
-            _pendingWithdrawals.pop();
-            unchecked { i++; }
+            for (uint256 i = 0; i < count; ) {
+                // Always read from current end (array shrinks each iteration)
+                Withdrawal memory w = _pendingWithdrawals[_pendingWithdrawals.length - 1];
+                withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
+                _pendingWithdrawals.pop();
+                unchecked { i++; }
+            }
         }
 
-        emit BatchWithdrawals(withdrawalQueueHash, count);
+        // Emit all proof inputs (except block hash which is computed after this tx)
+        emit BatchFinalized(
+            withdrawalQueueHash,
+            zoneInbox.processedDepositQueueHash(),
+            tempoState.tempoBlockNumber(),
+            tempoState.tempoBlockHash(),
+            count
+        );
     }
 
     /// @notice Number of pending withdrawals

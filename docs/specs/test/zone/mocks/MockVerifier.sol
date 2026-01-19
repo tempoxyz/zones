@@ -3,7 +3,7 @@ pragma solidity ^0.8.13;
 
 import {
     IVerifier,
-    StateTransition,
+    BlockTransition,
     DepositQueueTransition,
     WithdrawalQueueTransition
 } from "../../../src/zone/IZone.sol";
@@ -19,7 +19,7 @@ contract MockVerifier is IVerifier {
 
     function verify(
         bytes32, // tempoBlockHash
-        StateTransition calldata,
+        BlockTransition calldata,
         DepositQueueTransition calldata,
         WithdrawalQueueTransition calldata,
         bytes calldata, // verifierData
