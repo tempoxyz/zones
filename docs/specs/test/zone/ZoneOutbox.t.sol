@@ -251,6 +251,35 @@ contract ZoneOutboxTest is Test {
         outbox.finalizeBatch(100);
     }
 
+    function test_finalizeBatch_writesLastBatchToState() public {
+        vm.startPrank(alice);
+        gasToken.approve(address(outbox), 500e6);
+        outbox.requestWithdrawal(alice, 500e6, bytes32(0), 0, address(0), "");
+        vm.stopPrank();
+
+        Withdrawal memory w = Withdrawal({
+            sender: alice,
+            to: alice,
+            amount: 500e6,
+            memo: bytes32(0),
+            gasLimit: 0,
+            fallbackRecipient: address(0),
+            callbackData: ""
+        });
+        bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+
+        vm.prank(sequencer);
+        outbox.finalizeBatch(100);
+
+        // Verify lastBatch storage was written correctly
+        LastBatch memory batch = outbox.lastBatch();
+        assertEq(batch.withdrawalQueueHash, expectedHash);
+        assertEq(batch.tempoBlockNumber, tempoState.tempoBlockNumber());
+        assertEq(batch.tempoBlockHash, tempoState.tempoBlockHash());
+        assertEq(batch.batchIndex, 0);
+        assertEq(batch.batchBlockNumber, uint64(block.number));
+    }
+
     /*//////////////////////////////////////////////////////////////
                           ACCESS CONTROL TESTS
     //////////////////////////////////////////////////////////////*/

@@ -291,7 +291,7 @@ interface IVerifier {
 }
 ```
 
-The verifier receives the `tempoBlockHash` (looked up on-chain via `blockhash(tempoBlockNumber)`), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that a `BatchFinalized` event with the correct `batchIndex` exists in the final block.
+The verifier receives the `tempoBlockHash` (looked up on-chain via `blockhash(tempoBlockNumber)`), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that the `lastBatch` storage in ZoneOutbox contains the correct `batchIndex` and batch parameters.
 
 ### Queue libraries
 
@@ -591,9 +591,18 @@ This combined approach ensures Tempo state advancement and deposit processing ar
 
 #### Zone outbox
 
-The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a block that will be batched, it calls `finalizeBatch(count)` as a system transaction at the end of the block. This constructs the withdrawal queue hash on-chain and emits a `BatchFinalized` event containing all proof inputs (except the block hash, which is computed after this transaction).
+The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a block that will be batched, it calls `finalizeBatch(count)` as a system transaction at the end of the block. This constructs the withdrawal queue hash on-chain and writes batch parameters to storage. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
 
 ```solidity
+/// @notice Batch parameters stored in state for proof access
+struct LastBatch {
+    bytes32 withdrawalQueueHash;
+    uint64 tempoBlockNumber;
+    bytes32 tempoBlockHash;
+    uint64 batchIndex;
+    uint64 batchBlockNumber;
+}
+
 interface IZoneOutbox {
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex,
@@ -607,7 +616,7 @@ interface IZoneOutbox {
     );
 
     /// @notice Emitted when sequencer finalizes a batch at end of block.
-    /// @dev Contains all proof inputs except block hash (computed after this tx).
+    /// @dev Kept for observability. Proof reads from lastBatch storage instead.
     event BatchFinalized(
         bytes32 indexed withdrawalQueueHash,
         uint64 tempoBlockNumber,
@@ -624,6 +633,9 @@ interface IZoneOutbox {
 
     /// @notice Current batch index (monotonically increasing).
     function batchIndex() external view returns (uint64);
+
+    /// @notice Last finalized batch parameters (for proof access via state root).
+    function lastBatch() external view returns (LastBatch memory);
 
     /// @notice Number of pending withdrawals waiting to be batched.
     function pendingWithdrawalsCount() external view returns (uint256);
@@ -646,9 +658,9 @@ interface IZoneOutbox {
         bytes calldata data
     ) external;
 
-    /// @notice Finalize batch at end of block - build withdrawal hash and emit proof inputs.
+    /// @notice Finalize batch at end of block - build withdrawal hash and write to state.
     /// @dev Only callable by sequencer as a system transaction at end of block.
-    ///      This is optional - blocks without a batch don't need to call this.
+    ///      Writes batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process (avoids unbounded loops).
     /// @return withdrawalQueueHash The hash chain for L1 batch submission.
     function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);

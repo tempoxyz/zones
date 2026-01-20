@@ -209,11 +209,22 @@ interface IWithdrawalReceiver {
     ) external returns (bytes4);
 }
 
+/// @notice Batch parameters stored in state for proof access
+/// @dev Written to storage on each finalizeBatch() call so proofs can read from state root
+///      instead of parsing event logs (which are expensive and hard to prove)
+struct LastBatch {
+    bytes32 withdrawalQueueHash;
+    uint64 tempoBlockNumber;
+    bytes32 tempoBlockHash;
+    uint64 batchIndex;
+    uint64 batchBlockNumber;
+}
+
 /// @title IZoneOutbox
 /// @notice Interface for zone outbox on the zone
 interface IZoneOutbox {
     /// @notice Emitted when sequencer finalizes a batch at end of block
-    /// @dev Contains all proof inputs except state/block hash (computed after this tx)
+    /// @dev Kept for observability. Proof reads from lastBatch storage instead.
     event BatchFinalized(
         bytes32 indexed withdrawalQueueHash,
         uint64 tempoBlockNumber,
@@ -232,8 +243,9 @@ interface IZoneOutbox {
         bytes calldata data
     ) external;
 
-    /// @notice Finalize batch at end of block - build withdrawal hash and emit proof inputs
+    /// @notice Finalize batch at end of block - build withdrawal hash and write to state
     /// @dev Only callable by sequencer as system transaction. Optional per block.
+    ///      Writes batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
@@ -243,4 +255,7 @@ interface IZoneOutbox {
 
     /// @notice Current batch index (monotonically increasing)
     function batchIndex() external view returns (uint64);
+
+    /// @notice Last finalized batch parameters (for proof access via state root)
+    function lastBatch() external view returns (LastBatch memory);
 }

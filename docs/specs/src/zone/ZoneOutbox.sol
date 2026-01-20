@@ -3,7 +3,7 @@ pragma solidity ^0.8.13;
 
 import { IZoneGasToken, ZoneInbox } from "./ZoneInbox.sol";
 import { TempoState } from "./TempoState.sol";
-import { IZoneOutbox, Withdrawal } from "./IZone.sol";
+import { IZoneOutbox, Withdrawal, LastBatch } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
@@ -32,6 +32,11 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Current batch index (monotonically increasing)
     uint64 public batchIndex;
+
+    /// @notice Last finalized batch parameters (for proof access via state root)
+    /// @dev Written on each finalizeBatch() call so proofs can read from state
+    ///      instead of parsing event logs
+    LastBatch internal _lastBatch;
 
     /// @notice Pending withdrawals waiting to be batched
     Withdrawal[] internal _pendingWithdrawals;
@@ -176,18 +181,37 @@ contract ZoneOutbox is IZoneOutbox {
         // Increment batch index
         uint64 currentBatchIndex = batchIndex++;
 
-        // Emit all proof inputs (except block hash which is computed after this tx)
+        // Capture current values
+        uint64 tempoBlockNumber = tempoState.tempoBlockNumber();
+        bytes32 tempoBlockHash = tempoState.tempoBlockHash();
+        uint64 batchBlockNumber = uint64(block.number);
+
+        // Write batch parameters to state (for proof access via state root)
+        _lastBatch = LastBatch({
+            withdrawalQueueHash: withdrawalQueueHash,
+            tempoBlockNumber: tempoBlockNumber,
+            tempoBlockHash: tempoBlockHash,
+            batchIndex: currentBatchIndex,
+            batchBlockNumber: batchBlockNumber
+        });
+
+        // Emit event for observability (proof reads from state, not events)
         emit BatchFinalized(
             withdrawalQueueHash,
-            tempoState.tempoBlockNumber(),
-            tempoState.tempoBlockHash(),
+            tempoBlockNumber,
+            tempoBlockHash,
             currentBatchIndex,
-            uint64(block.number)
+            batchBlockNumber
         );
     }
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
         return _pendingWithdrawals.length;
+    }
+
+    /// @notice Last finalized batch parameters (for proof access via state root)
+    function lastBatch() external view returns (LastBatch memory) {
+        return _lastBatch;
     }
 }
