@@ -52,7 +52,7 @@ A zone is created via `ZoneFactory.createZone(...)` with:
 - `token`: the Tempo TIP-20 address to bridge. This is the only bridged token and the gas token.
 - `sequencer`: permissioned sequencer address.
 - `verifier`: `IVerifier` implementation for proof or attestation.
-- `zoneParams`: initial configuration (genesis state root, fee parameters).
+- `zoneParams`: initial configuration (genesis block hash, fee parameters).
 
 The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone genesis includes the portal address and the gas token configuration.
 
@@ -67,7 +67,7 @@ The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone
 The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-only) that:
 
 1. Verifies the proof/attestation for the state transition.
-2. Updates the portal's state root.
+2. Updates the portal's block hash.
 3. Updates the withdrawal queue (adds new withdrawals to the next slot in the circular buffer).
 
 Each batch submission includes:
@@ -75,19 +75,19 @@ Each batch submission includes:
 - `tempoBlockNumber` (the Tempo block number for blockhash verification)
 - `verifierConfig` (opaque payload forwarded to the verifier for domain separation/attestation needs)
 - `nextProcessedDepositQueueHash` (the deposit queue messages processed up to)
-- `nextStateRoot` (the resulting state after execution)
+- `nextBlockHash` (the zone block hash after execution)
 - `withdrawalQueueHash` (hash chain of withdrawals for this batch, or 0 if none)
 - `proof` (validity proof or TEE attestation)
 
-The portal tracks `stateRoot`, `processedDepositQueueHash` (where proofs have processed up to), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
+The portal tracks `blockHash` (full zone block hash, not just state root), `processedDepositQueueHash` (where proofs have processed up to), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
 
 The portal calls the verifier to validate the batch:
 
 ```solidity
 /// @notice State transition for zone batch proofs
-struct StateTransition {
-    bytes32 prevStateRoot;
-    bytes32 nextStateRoot;
+struct BlockTransition {
+    bytes32 prevBlockHash;
+    bytes32 nextBlockHash;
 }
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
@@ -107,7 +107,7 @@ struct WithdrawalQueueTransition {
 interface IVerifier {
     function verify(
         bytes32 tempoBlockHash,
-        StateTransition calldata stateTransition,
+        BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
@@ -117,7 +117,7 @@ interface IVerifier {
 ```
 
 The verifier validates that:
-1. The state transition from `prevStateRoot` to `nextStateRoot` is correct given the processed deposit queue messages.
+1. The block transition from `prevBlockHash` to `nextBlockHash` is correct given the processed deposit queue messages.
 2. `nextProcessedDepositQueueHash` is a descendant of `prevProcessedDepositQueueHash` (messages were processed forward).
 3. `nextProcessedDepositQueueHash` is an ancestor of `currentDepositQueueHash` as read from Tempo state at the proven block.
 
@@ -125,7 +125,7 @@ The zone has access to Tempo state via the TempoState predeploy, so the proof ca
 
 `verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
 
-`submitBatch` passes the portal's current `stateRoot` and `processedDepositQueueHash` as verifier inputs (prev values), and reverts unless `prevStateRoot == stateRoot` and the verifier approves. On success it increments `batchIndex`, updates roots/queues, and emits `BatchSubmitted` with every verifier input/output (except the proof bytes) so off-chain observers can audit the batch.
+`submitBatch` passes the portal's current `blockHash` and `processedDepositQueueHash` as verifier inputs (prev values), and reverts unless `prevBlockHash == blockHash` and the verifier approves. On success it increments `batchIndex`, updates hashes/queues, and emits `BatchSubmitted` with every verifier input/output (except the proof bytes) so off-chain observers can audit the batch.
 
 ### Deposit queue
 
@@ -250,7 +250,7 @@ struct ZoneInfo {
     address token;
     address sequencer;
     address verifier;
-    bytes32 genesisStateRoot;
+    bytes32 genesisBlockHash;
     bytes32 genesisTempoBlockHash;
     uint64 genesisTempoBlockNumber;
 }
@@ -279,7 +279,7 @@ struct Withdrawal {
 interface IVerifier {
     function verify(
         bytes32 tempoBlockHash,
-        StateTransition calldata stateTransition,
+        BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
@@ -370,7 +370,7 @@ interface IZoneFactory {
         address token;
         address sequencer;
         address verifier;
-        bytes32 genesisStateRoot;
+        bytes32 genesisBlockHash;
         bytes32 genesisTempoBlockHash;
         uint64 genesisTempoBlockNumber;
     }
@@ -409,7 +409,7 @@ interface IZonePortal {
         uint64 indexed batchIndex,
         uint64 tempoBlockNumber,
         bytes32 nextProcessedDepositQueueHash,
-        bytes32 nextStateRoot,
+        bytes32 nextBlockHash,
         uint256 withdrawalQueueTail,
         bytes32 withdrawalQueueHash
     );
@@ -420,7 +420,7 @@ interface IZonePortal {
     function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
     function batchIndex() external view returns (uint64);
-    function stateRoot() external view returns (bytes32);
+    function blockHash() external view returns (bytes32);
     function processedDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
     function withdrawalQueueHead() external view returns (uint256);
@@ -441,14 +441,14 @@ interface IZonePortal {
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     /// @param tempoBlockNumber The Tempo block number to verify against (must be recent for blockhash lookup).
-    /// @param stateTransition The state root transition (prev filled from storage, next from batch).
+    /// @param blockTransition The block hash transition (prev filled from storage, next from batch).
     /// @param depositQueueTransition The deposit queue transition (prev hashes from storage).
     /// @param withdrawalQueueTransition The withdrawal queue hash chain for this batch (0 if none).
     /// @param verifierConfig Opaque payload forwarded to verifier (e.g., attestation envelope).
     /// @param proof The validity proof or TEE attestation.
     function submitBatch(
         uint64 tempoBlockNumber,
-        StateTransition calldata stateTransition,
+        BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
@@ -599,7 +599,7 @@ This combined approach ensures Tempo state advancement and deposit processing ar
 
 #### Zone outbox
 
-The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to submit a batch, it calls `batch(count)` to construct the withdrawal queue hash on-chain.
+The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a block that will be batched, it calls `finalizeBatch(count)` as a system transaction at the end of the block. This constructs the withdrawal queue hash on-chain and emits a `BatchFinalized` event containing all proof inputs (except the block hash, which is computed after this transaction).
 
 ```solidity
 interface IZoneOutbox {
@@ -614,7 +614,15 @@ interface IZoneOutbox {
         bytes data
     );
 
-    event BatchWithdrawals(bytes32 indexed withdrawalQueueHash, uint256 count);
+    /// @notice Emitted when sequencer finalizes a batch at end of block.
+    /// @dev Contains all proof inputs except block hash (computed after this tx).
+    event BatchFinalized(
+        bytes32 indexed withdrawalQueueHash,
+        bytes32 processedDepositQueueHash,
+        uint64 tempoBlockNumber,
+        bytes32 tempoBlockHash,
+        uint256 withdrawalCount
+    );
 
     /// @notice The gas token address (same as L1 portal's token).
     function gasToken() external view returns (address);
@@ -643,19 +651,19 @@ interface IZoneOutbox {
         bytes calldata data
     ) external;
 
-    /// @notice Build withdrawal hash chain and clear pending withdrawals.
-    /// @dev Only callable by sequencer. Processes up to `count` withdrawals.
-    ///      Returns 0 if no withdrawals or count is 0.
+    /// @notice Finalize batch at end of block - build withdrawal hash and emit proof inputs.
+    /// @dev Only callable by sequencer as a system transaction at end of block.
+    ///      This is optional - blocks without a batch don't need to call this.
     /// @param count Max number of withdrawals to process (avoids unbounded loops).
     /// @return withdrawalQueueHash The hash chain for L1 batch submission.
-    function batch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+    function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
 }
 ```
 
-The `batch()` function constructs the hash chain on-chain by processing withdrawals in reverse order (newest to oldest), so the oldest ends up outermost for O(1) L1 removal:
+The `finalizeBatch()` function constructs the hash chain on-chain by processing withdrawals in reverse order (newest to oldest), so the oldest ends up outermost for O(1) L1 removal:
 
 ```
-// On-chain hash chain construction (inside batch())
+// On-chain hash chain construction (inside finalizeBatch())
 withdrawalQueueHash = EMPTY_SENTINEL
 for i from (pendingCount - 1) down to 0:
     withdrawalQueueHash = keccak256(abi.encode(withdrawals[i], withdrawalQueueHash))
@@ -934,7 +942,7 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 
 ### State commitments
 
-- **State root**: Computed via SP1 (Succinct) proving. The state root is the output of the proven execution.
+- **Block hash**: Computed from the block header after execution. The block hash commits to state root, transactions root, receipts root, and other block metadata.
 - **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from `blockhash(tempoBlockNumber)`.
 
 ### Batching and proofs
@@ -942,18 +950,18 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 - **Batch interval**: Batches are produced every 250 milliseconds.
 - **SP1 proofs**: Validity proofs are generated using Succinct's SP1 prover.
 - **Mock proofs**: For development, proofs are mocked but data structures (public inputs, proof envelope) must match the real format.
-- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the L1 portal. The proof includes state root and processed deposits.
+- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the L1 portal. The proof includes block hash and processed deposits.
 
 ```solidity
 struct BatchProof {
-    bytes32 nextStateRoot;
+    bytes32 nextBlockHash;
     bytes32 nextProcessedDepositQueueHash;
     bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
     bytes verifierConfig;         // opaque payload to IVerifier (TEE/ZK envelope)
     bytes proof;                  // SP1 proof bytes (or TEE attestation)
 }
 ```
-`prevStateRoot` and `processedDepositQueueHash` come from the portal's tracked state when the proof is verified on L1. The proof reads `currentDepositQueueHash` from Tempo storage to validate ancestry.
+`prevBlockHash` and `processedDepositQueueHash` come from the portal's tracked state when the proof is verified on L1. The proof reads `currentDepositQueueHash` from Tempo storage to validate ancestry.
 
 ### Deposits and withdrawals
 
