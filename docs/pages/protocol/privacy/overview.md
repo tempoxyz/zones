@@ -109,7 +109,7 @@ interface IVerifier {
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
     ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash
-    ///      3. BatchFinalized event exists in final block with correct batchIndex
+    ///      3. ZoneOutbox.lastBatch() contains correct batchIndex and batch parameters
     ///      4. Deposit processing is correct (validated via Tempo state read inside proof)
     function verify(
         bytes32 tempoBlockHash,
@@ -125,7 +125,7 @@ interface IVerifier {
 The verifier validates that:
 1. The state transition from `prevBlockHash` to `nextBlockHash` is correct (all transactions executed properly).
 2. The zone's `TempoState.tempoBlockHash()` matches the `tempoBlockHash` provided by the portal.
-3. A `BatchFinalized` event exists in the final block with the correct `batchIndex`.
+3. The `ZoneOutbox.lastBatch()` storage contains the correct `batchIndex` and batch parameters.
 4. Deposit processing is correct: the zone read `currentDepositQueueHash` from Tempo state and processed deposits accordingly.
 
 The zone has access to Tempo state via the TempoState predeploy, so the proof can read `currentDepositQueueHash` directly from Tempo storage at the proven block. This eliminates the need for an on-chain "ceiling" slot.
@@ -291,7 +291,7 @@ interface IVerifier {
 }
 ```
 
-The verifier receives the `tempoBlockHash` (looked up on-chain via `blockhash(tempoBlockNumber)`), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that the `lastBatch` storage in ZoneOutbox contains the correct `batchIndex` and batch parameters.
+The verifier receives the `tempoBlockHash` (looked up on-chain via `blockhash(tempoBlockNumber)`), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that `ZoneOutbox.lastBatch()` contains the correct `batchIndex` and batch parameters (read from state root, not events).
 
 ### Queue libraries
 
@@ -493,25 +493,32 @@ The zone's gas token is the bridged TIP-20 from Tempo. It is deployed at the **s
 
 #### TempoState predeploy
 
-The TempoState predeploy allows zones to verify they have a correct view of Tempo (L1) state. It stores the latest finalized Tempo block info and provides storage reading functionality.
+The TempoState predeploy allows zones to verify they have a correct view of Tempo (L1) state. It stores the complete finalized Tempo block header and provides storage reading functionality.
 
 ```solidity
 // Predeploy address: 0x1c00000000000000000000000000000000000000
 interface ITempoState {
-    /// @notice Current finalized Tempo block hash
+    /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     function tempoBlockHash() external view returns (bytes32);
 
-    /// @notice Current finalized Tempo block number
-    function tempoBlockNumber() external view returns (uint64);
+    // Tempo wrapper fields
+    function generalGasLimit() external view returns (uint64);
+    function sharedGasLimit() external view returns (uint64);
 
-    /// @notice Current finalized Tempo block timestamp (seconds)
-    function tempoTimestamp() external view returns (uint64);
-
-    /// @notice Current finalized Tempo state root (for storage proofs)
+    // Inner Ethereum header fields
+    function tempoParentHash() external view returns (bytes32);
+    function tempoBeneficiary() external view returns (address);
     function tempoStateRoot() external view returns (bytes32);
-
-    /// @notice Current finalized Tempo receipts root (for event/log proofs)
+    function tempoTransactionsRoot() external view returns (bytes32);
     function tempoReceiptsRoot() external view returns (bytes32);
+    function tempoBlockNumber() external view returns (uint64);
+    function tempoGasLimit() external view returns (uint64);
+    function tempoGasUsed() external view returns (uint64);
+    function tempoTimestamp() external view returns (uint64);
+    function tempoTimestampMillis() external view returns (uint64);
+    function tempoBaseFeePerGas() external view returns (uint256);
+    function tempoWithdrawalsRoot() external view returns (bytes32);
+    function tempoPrevRandao() external view returns (bytes32);
 
     /// @notice Finalize a Tempo block header. Only callable by sequencer.
     /// @dev Validates chain continuity (parent hash must match, number must be +1)
@@ -519,22 +526,18 @@ interface ITempoState {
     function finalizeTempo(bytes calldata header) external;
 
     /// @notice Read a storage slot from a Tempo contract
-    /// @param account The Tempo contract address
-    /// @param slot The storage slot to read
-    /// @return value The storage value
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
-    /// @param account The Tempo contract address
-    /// @param slots The storage slots to read
-    /// @return values The storage values
     function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
 }
 ```
 
+The TempoState stores the **complete Tempo block header** since the proof must validate the entire header anyway. This provides zones with full visibility into Tempo block metadata.
+
 **How it works:**
 
-1. The sequencer submits Tempo block headers via `finalizeTempo()`, which validates chain continuity and updates the stored state.
+1. The sequencer submits Tempo block headers via `finalizeTempo()`, which decodes the RLP header, validates chain continuity, and stores all fields.
 2. When submitting a batch, the prover specifies a `tempoBlockNumber`. The portal calls `blockhash(tempoBlockNumber)` to get the actual hash.
 3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the value passed by the portal.
 4. The `readTempoStorageSlot` functions are precompile stubs - actual implementation is in the zone node, validated against `tempoStateRoot`.
@@ -949,7 +952,11 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 
 ### State commitments
 
-- **Block hash**: Computed from the block header after execution. The block hash commits to state root, transactions root, receipts root, and other block metadata.
+- **Zone block hash**: Computed from the zone block header after execution. The zone block header is a simplified Ethereum header that includes:
+  - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`
+  - **Omitted fields**: `gasLimit`, `gasUsed` (zones have no hard gas limit), `logsBloom`, `extraData` (not needed for proofs)
+- **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
+- **Receipts root**: Committed in the block hash but not proven on-chain. Batch parameters are read from `lastBatch` state storage instead of event logs.
 - **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from `blockhash(tempoBlockNumber)`.
 
 ### Batching and proofs
@@ -969,7 +976,7 @@ struct BatchProof {
     bytes proof;                  // SP1 proof bytes (or TEE attestation)
 }
 ```
-The portal provides `blockHash` and `batchIndex` as the previous batch's values. The proof validates that the zone's `TempoState.tempoBlockHash()` matches `blockhash(tempoBlockNumber)`, and that a `BatchFinalized` event with the correct `batchIndex` exists in the final block.
+The portal provides `blockHash` and `batchIndex` as the previous batch's values. The proof reads batch parameters from `ZoneOutbox.lastBatch()` state storage and validates that `TempoState.tempoBlockHash()` matches `blockhash(tempoBlockNumber)`.
 
 ### Deposits and withdrawals
 

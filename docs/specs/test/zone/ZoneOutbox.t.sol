@@ -6,7 +6,7 @@ import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { IZoneOutbox, Withdrawal } from "../../src/zone/IZone.sol";
+import { IZoneOutbox, Withdrawal, LastBatch } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
 
 /// @title ZoneOutboxTest

@@ -14,31 +14,72 @@ contract TempoState {
     /// @notice The sequencer address (only caller for finalizeTempo)
     address public immutable sequencer;
 
-    /// @notice Current finalized Tempo block hash
+    /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     bytes32 public tempoBlockHash;
 
-    /// @notice Current finalized Tempo block number
-    uint64 public tempoBlockNumber;
+    /*//////////////////////////////////////////////////////////////
+                          TEMPO WRAPPER FIELDS
+    //////////////////////////////////////////////////////////////*/
 
-    /// @notice Current finalized Tempo block timestamp (seconds)
-    uint64 public tempoTimestamp;
+    /// @notice Tempo general gas limit (outer header field)
+    uint64 public generalGasLimit;
 
-    /// @notice Current finalized Tempo state root (for storage proofs)
+    /// @notice Tempo shared gas limit (outer header field)
+    uint64 public sharedGasLimit;
+
+    /*//////////////////////////////////////////////////////////////
+                        INNER ETHEREUM HEADER FIELDS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Parent block hash
+    bytes32 public tempoParentHash;
+
+    /// @notice Block producer address
+    address public tempoBeneficiary;
+
+    /// @notice State root (for storage proofs)
     bytes32 public tempoStateRoot;
 
-    /// @notice Current finalized Tempo receipts root (for event/log proofs)
+    /// @notice Transactions root (for audit trail)
+    bytes32 public tempoTransactionsRoot;
+
+    /// @notice Receipts root
     bytes32 public tempoReceiptsRoot;
+
+    /// @notice Block number
+    uint64 public tempoBlockNumber;
+
+    /// @notice Gas limit
+    uint64 public tempoGasLimit;
+
+    /// @notice Gas used
+    uint64 public tempoGasUsed;
+
+    /// @notice Block timestamp (seconds, combined with millisPart for full precision)
+    uint64 public tempoTimestamp;
+
+    /// @notice Millisecond part of timestamp (from Tempo wrapper)
+    uint64 public tempoTimestampMillis;
+
+    /// @notice Base fee per gas (EIP-1559)
+    uint256 public tempoBaseFeePerGas;
+
+    /// @notice Withdrawals root (EIP-4895, may be zero if not applicable)
+    bytes32 public tempoWithdrawalsRoot;
+
+    /// @notice Previous RANDAO value (post-merge mixHash)
+    bytes32 public tempoPrevRandao;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Emitted when a Tempo block is finalized
+    /// @dev Only includes indexed fields for filtering; read storage for full header
     event TempoBlockFinalized(
         bytes32 indexed blockHash,
         uint64 indexed blockNumber,
-        uint64 timestamp,
-        bytes32 stateRoot,
-        bytes32 receiptsRoot
+        bytes32 stateRoot
     );
 
     /*//////////////////////////////////////////////////////////////
@@ -54,20 +95,14 @@ contract TempoState {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(
-        address _sequencer,
-        bytes32 _genesisTempoBlockHash,
-        uint64 _genesisTempoBlockNumber,
-        uint64 _genesisTempoTimestamp,
-        bytes32 _genesisTempoStateRoot,
-        bytes32 _genesisTempoReceiptsRoot
-    ) {
+    /// @notice Initialize with genesis Tempo block
+    /// @param _sequencer The sequencer address
+    /// @param _genesisHeader RLP-encoded genesis Tempo header
+    constructor(address _sequencer, bytes memory _genesisHeader) {
         sequencer = _sequencer;
-        tempoBlockHash = _genesisTempoBlockHash;
-        tempoBlockNumber = _genesisTempoBlockNumber;
-        tempoTimestamp = _genesisTempoTimestamp;
-        tempoStateRoot = _genesisTempoStateRoot;
-        tempoReceiptsRoot = _genesisTempoReceiptsRoot;
+
+        // Decode and store genesis header
+        _decodeAndStoreHeader(_genesisHeader);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -82,30 +117,18 @@ contract TempoState {
     function finalizeTempo(bytes calldata header) external {
         if (msg.sender != sequencer) revert OnlySequencer();
 
-        // Decode the Tempo header
-        (
-            bytes32 parentHash,
-            bytes32 stateRoot,
-            bytes32 receiptsRoot,
-            uint64 number,
-            uint64 timestamp
-        ) = _decodeTempoHeader(header);
+        // Store previous values for validation
+        bytes32 prevBlockHash = tempoBlockHash;
+        uint64 prevBlockNumber = tempoBlockNumber;
+
+        // Decode and store all header fields
+        _decodeAndStoreHeader(header);
 
         // Validate chain continuity
-        if (parentHash != tempoBlockHash) revert InvalidParentHash();
-        if (number != tempoBlockNumber + 1) revert InvalidBlockNumber();
+        if (tempoParentHash != prevBlockHash) revert InvalidParentHash();
+        if (tempoBlockNumber != prevBlockNumber + 1) revert InvalidBlockNumber();
 
-        // Compute new block hash (keccak of full RLP bytes)
-        bytes32 newBlockHash = keccak256(header);
-
-        // Update state
-        tempoBlockHash = newBlockHash;
-        tempoBlockNumber = number;
-        tempoTimestamp = timestamp;
-        tempoStateRoot = stateRoot;
-        tempoReceiptsRoot = receiptsRoot;
-
-        emit TempoBlockFinalized(newBlockHash, number, timestamp, stateRoot, receiptsRoot);
+        emit TempoBlockFinalized(tempoBlockHash, tempoBlockNumber, tempoStateRoot);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -140,85 +163,118 @@ contract TempoState {
                           RLP DECODING (INTERNAL)
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Decode a Tempo header to extract relevant fields
+    /// @notice Decode a Tempo header and store all fields
     /// @dev Tempo header format: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
     ///      Inner Ethereum header fields (0-indexed):
     ///        0: parentHash, 1: ommersHash, 2: beneficiary, 3: stateRoot,
     ///        4: transactionsRoot, 5: receiptsRoot, 6: logsBloom, 7: difficulty,
-    ///        8: number, 9: gasLimit, 10: gasUsed, 11: timestamp, ...
-    function _decodeTempoHeader(bytes calldata header) internal pure returns (
-        bytes32 parentHash,
-        bytes32 stateRoot,
-        bytes32 receiptsRoot,
-        uint64 number,
-        uint64 timestamp
-    ) {
+    ///        8: number, 9: gasLimit, 10: gasUsed, 11: timestamp, 12: extraData,
+    ///        13: mixHash (prevRandao), 14: nonce, 15: baseFeePerGas, 16: withdrawalsRoot
+    function _decodeAndStoreHeader(bytes memory header) internal {
         uint256 ptr = 0;
 
+        // Compute and store block hash
+        tempoBlockHash = keccak256(header);
+
         // Decode outer list header
-        (uint256 outerListLen, uint256 outerListOffset) = _decodeListHeader(header, ptr);
+        (uint256 outerListLen, uint256 outerListOffset) = _decodeListHeaderMem(header, ptr);
         if (outerListOffset == 0) revert InvalidRlpData();
         ptr = outerListOffset;
-        uint256 outerEnd = ptr + outerListLen;
 
-        // Skip first 3 fields: general_gas_limit, shared_gas_limit, timestamp_millis_part
-        for (uint256 i = 0; i < 3; i++) {
-            (, uint256 nextPtr) = _skipRlpItem(header, ptr);
-            ptr = nextPtr;
-        }
+        // Field 0: general_gas_limit
+        generalGasLimit = _decodeUint64Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Fourth field is the inner Ethereum header (a list)
-        (uint256 innerListLen, uint256 innerListOffset) = _decodeListHeader(header, ptr);
+        // Field 1: shared_gas_limit
+        sharedGasLimit = _decodeUint64Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
+
+        // Field 2: timestamp_millis_part
+        tempoTimestampMillis = _decodeUint64Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
+
+        // Field 3: inner Ethereum header (a list)
+        (uint256 innerListLen, uint256 innerListOffset) = _decodeListHeaderMem(header, ptr);
         if (innerListOffset == 0) revert InvalidRlpData();
         ptr = innerListOffset;
-        uint256 innerEnd = ptr + innerListLen;
 
-        // Field 0: parentHash (bytes32)
-        parentHash = _decodeBytes32(header, ptr);
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 0: parentHash
+        tempoParentHash = _decodeBytes32Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 1: ommersHash - skip
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 1: ommersHash - skip
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 2: beneficiary - skip
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 2: beneficiary
+        tempoBeneficiary = _decodeAddressMem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 3: stateRoot (bytes32)
-        stateRoot = _decodeBytes32(header, ptr);
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 3: stateRoot
+        tempoStateRoot = _decodeBytes32Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 4: transactionsRoot - skip
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 4: transactionsRoot
+        tempoTransactionsRoot = _decodeBytes32Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 5: receiptsRoot (bytes32)
-        receiptsRoot = _decodeBytes32(header, ptr);
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 5: receiptsRoot
+        tempoReceiptsRoot = _decodeBytes32Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 6: logsBloom - skip
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 6: logsBloom - skip
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 7: difficulty - skip
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 7: difficulty - skip
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 8: number (uint64)
-        number = _decodeUint64(header, ptr);
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 8: number
+        tempoBlockNumber = _decodeUint64Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Skip fields 9 and 10
-        (, ptr) = _skipRlpItem(header, ptr);
-        (, ptr) = _skipRlpItem(header, ptr);
+        // Inner field 9: gasLimit
+        tempoGasLimit = _decodeUint64Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Field 11: timestamp (uint64)
-        timestamp = _decodeUint64(header, ptr);
+        // Inner field 10: gasUsed
+        tempoGasUsed = _decodeUint64Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Silence unused variable warnings
-        outerEnd; innerEnd;
+        // Inner field 11: timestamp
+        tempoTimestamp = _decodeUint64Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
+
+        // Inner field 12: extraData - skip
+        (, ptr) = _skipRlpItemMem(header, ptr);
+
+        // Inner field 13: mixHash (prevRandao)
+        tempoPrevRandao = _decodeBytes32Mem(header, ptr);
+        (, ptr) = _skipRlpItemMem(header, ptr);
+
+        // Inner field 14: nonce - skip
+        (, ptr) = _skipRlpItemMem(header, ptr);
+
+        // Inner field 15: baseFeePerGas (optional, may not exist in all headers)
+        if (ptr < innerListOffset + innerListLen) {
+            tempoBaseFeePerGas = _decodeUint256Mem(header, ptr);
+            (, ptr) = _skipRlpItemMem(header, ptr);
+        }
+
+        // Inner field 16: withdrawalsRoot (optional)
+        if (ptr < innerListOffset + innerListLen) {
+            tempoWithdrawalsRoot = _decodeBytes32Mem(header, ptr);
+            (, ptr) = _skipRlpItemMem(header, ptr);
+        }
+
+        // Silence unused variable warning
+        outerListLen;
     }
 
-    /// @notice Decode an RLP list header
-    /// @return listLen The length of the list content
-    /// @return offset The offset where list content begins
-    function _decodeListHeader(bytes calldata data, uint256 ptr) internal pure returns (uint256 listLen, uint256 offset) {
+    /*//////////////////////////////////////////////////////////////
+                    MEMORY-BASED RLP DECODING HELPERS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Decode an RLP list header from memory
+    function _decodeListHeaderMem(bytes memory data, uint256 ptr) internal pure returns (uint256 listLen, uint256 offset) {
         if (ptr >= data.length) return (0, 0);
 
         uint8 prefix = uint8(data[ptr]);
@@ -243,21 +299,18 @@ contract TempoState {
         }
     }
 
-    /// @notice Skip an RLP item and return its length and next position
-    function _skipRlpItem(bytes calldata data, uint256 ptr) internal pure returns (uint256 itemLen, uint256 nextPtr) {
+    /// @notice Skip an RLP item in memory and return next position
+    function _skipRlpItemMem(bytes memory data, uint256 ptr) internal pure returns (uint256 itemLen, uint256 nextPtr) {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
 
         if (prefix <= 0x7f) {
-            // Single byte
             return (1, ptr + 1);
         } else if (prefix <= 0xb7) {
-            // Short string: 0x80 + length
             uint256 strLen = prefix - 0x80;
             return (1 + strLen, ptr + 1 + strLen);
         } else if (prefix <= 0xbf) {
-            // Long string: 0xb7 + length of length
             uint256 lenLen = prefix - 0xb7;
             uint256 strLen = 0;
             for (uint256 i = 0; i < lenLen; i++) {
@@ -265,11 +318,9 @@ contract TempoState {
             }
             return (1 + lenLen + strLen, ptr + 1 + lenLen + strLen);
         } else if (prefix <= 0xf7) {
-            // Short list: 0xc0 + length
             uint256 listLen = prefix - 0xc0;
             return (1 + listLen, ptr + 1 + listLen);
         } else {
-            // Long list: 0xf7 + length of length
             uint256 lenLen = prefix - 0xf7;
             uint256 listLen = 0;
             for (uint256 i = 0; i < lenLen; i++) {
@@ -279,8 +330,8 @@ contract TempoState {
         }
     }
 
-    /// @notice Decode a bytes32 from RLP
-    function _decodeBytes32(bytes calldata data, uint256 ptr) internal pure returns (bytes32 value) {
+    /// @notice Decode a bytes32 from RLP in memory
+    function _decodeBytes32Mem(bytes memory data, uint256 ptr) internal pure returns (bytes32 value) {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -289,27 +340,21 @@ contract TempoState {
             // 32-byte string: 0x80 + 32 = 0xa0
             if (ptr + 33 > data.length) revert InvalidRlpData();
             assembly {
-                value := calldataload(add(data.offset, add(ptr, 1)))
+                value := mload(add(add(data, 0x20), add(ptr, 1)))
             }
         } else if (prefix <= 0x7f) {
-            // Single byte value
             value = bytes32(uint256(prefix));
         } else if (prefix >= 0x80 && prefix <= 0xb7) {
-            // Short string
             uint256 strLen = prefix - 0x80;
             if (strLen == 0) {
                 value = bytes32(0);
             } else if (strLen <= 32) {
                 if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
-                bytes32 temp;
                 assembly {
-                    temp := calldataload(add(data.offset, add(ptr, 1)))
+                    value := mload(add(add(data, 0x20), add(ptr, 1)))
                 }
-                // Shift to align to left
-                value = temp >> (8 * (32 - strLen));
-                // But we want it as a bytes32 (right-padded with zeros is fine for hashes)
-                // Actually for hashes we want the raw bytes, so shift back
-                value = bytes32(uint256(value) << (8 * (32 - strLen)));
+                // Clear extra bytes on the right
+                value = value & bytes32(~((1 << (8 * (32 - strLen))) - 1));
             } else {
                 revert InvalidRlpData();
             }
@@ -318,20 +363,17 @@ contract TempoState {
         }
     }
 
-    /// @notice Decode a uint64 from RLP
-    function _decodeUint64(bytes calldata data, uint256 ptr) internal pure returns (uint64 value) {
+    /// @notice Decode a uint64 from RLP in memory
+    function _decodeUint64Mem(bytes memory data, uint256 ptr) internal pure returns (uint64 value) {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
 
         if (prefix <= 0x7f) {
-            // Single byte value
             return uint64(prefix);
         } else if (prefix == 0x80) {
-            // Empty string = 0
             return 0;
         } else if (prefix >= 0x81 && prefix <= 0x88) {
-            // Short string (1-8 bytes)
             uint256 strLen = prefix - 0x80;
             if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
 
@@ -339,6 +381,49 @@ contract TempoState {
             for (uint256 i = 0; i < strLen; i++) {
                 value = (value << 8) | uint64(uint8(data[ptr + 1 + i]));
             }
+        } else {
+            revert InvalidRlpData();
+        }
+    }
+
+    /// @notice Decode a uint256 from RLP in memory
+    function _decodeUint256Mem(bytes memory data, uint256 ptr) internal pure returns (uint256 value) {
+        if (ptr >= data.length) revert InvalidRlpData();
+
+        uint8 prefix = uint8(data[ptr]);
+
+        if (prefix <= 0x7f) {
+            return uint256(prefix);
+        } else if (prefix == 0x80) {
+            return 0;
+        } else if (prefix >= 0x81 && prefix <= 0xa0) {
+            uint256 strLen = prefix - 0x80;
+            if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
+
+            value = 0;
+            for (uint256 i = 0; i < strLen; i++) {
+                value = (value << 8) | uint256(uint8(data[ptr + 1 + i]));
+            }
+        } else {
+            revert InvalidRlpData();
+        }
+    }
+
+    /// @notice Decode an address from RLP in memory
+    function _decodeAddressMem(bytes memory data, uint256 ptr) internal pure returns (address value) {
+        if (ptr >= data.length) revert InvalidRlpData();
+
+        uint8 prefix = uint8(data[ptr]);
+
+        if (prefix == 0x94) {
+            // 20-byte string: 0x80 + 20 = 0x94
+            if (ptr + 21 > data.length) revert InvalidRlpData();
+            assembly {
+                value := shr(96, mload(add(add(data, 0x20), add(ptr, 1))))
+            }
+        } else if (prefix == 0x80) {
+            // Empty = zero address
+            value = address(0);
         } else {
             revert InvalidRlpData();
         }

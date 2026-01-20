@@ -7,11 +7,23 @@ pragma solidity ^0.8.13;
 contract MockTempoState {
     address public immutable sequencer;
 
+    // Core fields (matching real TempoState)
     bytes32 public tempoBlockHash;
-    uint64 public tempoBlockNumber;
-    uint64 public tempoTimestamp;
+    uint64 public generalGasLimit;
+    uint64 public sharedGasLimit;
+    bytes32 public tempoParentHash;
+    address public tempoBeneficiary;
     bytes32 public tempoStateRoot;
+    bytes32 public tempoTransactionsRoot;
     bytes32 public tempoReceiptsRoot;
+    uint64 public tempoBlockNumber;
+    uint64 public tempoGasLimit;
+    uint64 public tempoGasUsed;
+    uint64 public tempoTimestamp;
+    uint64 public tempoTimestampMillis;
+    uint256 public tempoBaseFeePerGas;
+    bytes32 public tempoWithdrawalsRoot;
+    bytes32 public tempoPrevRandao;
 
     /// @notice Mock storage values for readTempoStorageSlot
     mapping(address => mapping(bytes32 => bytes32)) public mockStorageValues;

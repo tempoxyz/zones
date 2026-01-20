@@ -12,21 +12,32 @@ contract TempoStateTest is Test {
     address public sequencer = address(0x1);
     address public notSequencer = address(0x2);
 
-    bytes32 constant GENESIS_BLOCK_HASH = keccak256("genesisBlock");
+    // Genesis values - we'll use a real encoded header
     uint64 constant GENESIS_BLOCK_NUMBER = 100;
     uint64 constant GENESIS_TIMESTAMP = 1700000000;
     bytes32 constant GENESIS_STATE_ROOT = keccak256("genesisStateRoot");
     bytes32 constant GENESIS_RECEIPTS_ROOT = keccak256("genesisReceiptsRoot");
+    bytes32 constant GENESIS_TX_ROOT = keccak256("genesisTxRoot");
+    bytes32 constant GENESIS_PARENT_HASH = keccak256("genesisParent");
+    address constant GENESIS_BENEFICIARY = address(0xBEEF);
+
+    bytes public genesisHeader;
+    bytes32 public genesisBlockHash;
 
     function setUp() public {
-        tempoState = new TempoState(
-            sequencer,
-            GENESIS_BLOCK_HASH,
-            GENESIS_BLOCK_NUMBER,
-            GENESIS_TIMESTAMP,
+        // Build genesis header
+        genesisHeader = _buildTempoHeader(
+            GENESIS_PARENT_HASH,
             GENESIS_STATE_ROOT,
-            GENESIS_RECEIPTS_ROOT
+            GENESIS_RECEIPTS_ROOT,
+            GENESIS_TX_ROOT,
+            GENESIS_BENEFICIARY,
+            GENESIS_BLOCK_NUMBER,
+            GENESIS_TIMESTAMP
         );
+        genesisBlockHash = keccak256(genesisHeader);
+
+        tempoState = new TempoState(sequencer, genesisHeader);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -35,11 +46,14 @@ contract TempoStateTest is Test {
 
     function test_constructor_initializesState() public view {
         assertEq(tempoState.sequencer(), sequencer);
-        assertEq(tempoState.tempoBlockHash(), GENESIS_BLOCK_HASH);
+        assertEq(tempoState.tempoBlockHash(), genesisBlockHash);
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER);
         assertEq(tempoState.tempoTimestamp(), GENESIS_TIMESTAMP);
         assertEq(tempoState.tempoStateRoot(), GENESIS_STATE_ROOT);
         assertEq(tempoState.tempoReceiptsRoot(), GENESIS_RECEIPTS_ROOT);
+        assertEq(tempoState.tempoTransactionsRoot(), GENESIS_TX_ROOT);
+        assertEq(tempoState.tempoParentHash(), GENESIS_PARENT_HASH);
+        assertEq(tempoState.tempoBeneficiary(), GENESIS_BENEFICIARY);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -47,11 +61,18 @@ contract TempoStateTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_finalizeTempo_updatesState() public {
+        bytes32 newStateRoot = keccak256("newStateRoot");
+        bytes32 newReceiptsRoot = keccak256("newReceiptsRoot");
+        bytes32 newTxRoot = keccak256("newTxRoot");
+        address newBeneficiary = address(0xCAFE);
+
         // Build a valid Tempo header that references the genesis block
         bytes memory header = _buildTempoHeader(
-            GENESIS_BLOCK_HASH,  // parentHash
-            keccak256("newStateRoot"),
-            keccak256("newReceiptsRoot"),
+            genesisBlockHash,  // parentHash
+            newStateRoot,
+            newReceiptsRoot,
+            newTxRoot,
+            newBeneficiary,
             GENESIS_BLOCK_NUMBER + 1,
             GENESIS_TIMESTAMP + 12
         );
@@ -63,16 +84,21 @@ contract TempoStateTest is Test {
         assertEq(tempoState.tempoBlockHash(), keccak256(header));
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER + 1);
         assertEq(tempoState.tempoTimestamp(), GENESIS_TIMESTAMP + 12);
-        assertEq(tempoState.tempoStateRoot(), keccak256("newStateRoot"));
-        assertEq(tempoState.tempoReceiptsRoot(), keccak256("newReceiptsRoot"));
+        assertEq(tempoState.tempoStateRoot(), newStateRoot);
+        assertEq(tempoState.tempoReceiptsRoot(), newReceiptsRoot);
+        assertEq(tempoState.tempoTransactionsRoot(), newTxRoot);
+        assertEq(tempoState.tempoParentHash(), genesisBlockHash);
+        assertEq(tempoState.tempoBeneficiary(), newBeneficiary);
     }
 
     function test_finalizeTempo_multipleBlocks() public {
         // Finalize block 101
         bytes memory header1 = _buildTempoHeader(
-            GENESIS_BLOCK_HASH,
+            genesisBlockHash,
             keccak256("stateRoot1"),
             keccak256("receiptsRoot1"),
+            keccak256("txRoot1"),
+            address(0x1),
             GENESIS_BLOCK_NUMBER + 1,
             GENESIS_TIMESTAMP + 12
         );
@@ -89,6 +115,8 @@ contract TempoStateTest is Test {
             block101Hash,  // parentHash = block 101's hash
             keccak256("stateRoot2"),
             keccak256("receiptsRoot2"),
+            keccak256("txRoot2"),
+            address(0x2),
             GENESIS_BLOCK_NUMBER + 2,
             GENESIS_TIMESTAMP + 24
         );
@@ -107,6 +135,8 @@ contract TempoStateTest is Test {
             keccak256("wrongParent"),  // Invalid parent hash
             keccak256("stateRoot"),
             keccak256("receiptsRoot"),
+            keccak256("txRoot"),
+            address(0x1),
             GENESIS_BLOCK_NUMBER + 1,
             GENESIS_TIMESTAMP + 12
         );
@@ -118,9 +148,11 @@ contract TempoStateTest is Test {
 
     function test_finalizeTempo_revertsOnInvalidBlockNumber() public {
         bytes memory header = _buildTempoHeader(
-            GENESIS_BLOCK_HASH,
+            genesisBlockHash,
             keccak256("stateRoot"),
             keccak256("receiptsRoot"),
+            keccak256("txRoot"),
+            address(0x1),
             GENESIS_BLOCK_NUMBER + 2,  // Should be +1
             GENESIS_TIMESTAMP + 12
         );
@@ -132,9 +164,11 @@ contract TempoStateTest is Test {
 
     function test_finalizeTempo_revertsOnSkippedBlockNumber() public {
         bytes memory header = _buildTempoHeader(
-            GENESIS_BLOCK_HASH,
+            genesisBlockHash,
             keccak256("stateRoot"),
             keccak256("receiptsRoot"),
+            keccak256("txRoot"),
+            address(0x1),
             GENESIS_BLOCK_NUMBER,  // Same as current, not +1
             GENESIS_TIMESTAMP + 12
         );
@@ -146,9 +180,11 @@ contract TempoStateTest is Test {
 
     function test_finalizeTempo_revertsIfNotSequencer() public {
         bytes memory header = _buildTempoHeader(
-            GENESIS_BLOCK_HASH,
+            genesisBlockHash,
             keccak256("stateRoot"),
             keccak256("receiptsRoot"),
+            keccak256("txRoot"),
+            address(0x1),
             GENESIS_BLOCK_NUMBER + 1,
             GENESIS_TIMESTAMP + 12
         );
@@ -159,10 +195,13 @@ contract TempoStateTest is Test {
     }
 
     function test_finalizeTempo_emitsEvent() public {
+        bytes32 newStateRoot = keccak256("stateRoot");
         bytes memory header = _buildTempoHeader(
-            GENESIS_BLOCK_HASH,
-            keccak256("stateRoot"),
+            genesisBlockHash,
+            newStateRoot,
             keccak256("receiptsRoot"),
+            keccak256("txRoot"),
+            address(0x1),
             GENESIS_BLOCK_NUMBER + 1,
             GENESIS_TIMESTAMP + 12
         );
@@ -172,9 +211,7 @@ contract TempoStateTest is Test {
         emit TempoState.TempoBlockFinalized(
             keccak256(header),
             GENESIS_BLOCK_NUMBER + 1,
-            GENESIS_TIMESTAMP + 12,
-            keccak256("stateRoot"),
-            keccak256("receiptsRoot")
+            newStateRoot
         );
         tempoState.finalizeTempo(header);
     }
@@ -208,6 +245,8 @@ contract TempoStateTest is Test {
         bytes32 parentHash,
         bytes32 stateRoot,
         bytes32 receiptsRoot,
+        bytes32 transactionsRoot,
+        address beneficiary,
         uint64 number,
         uint64 timestamp
     ) internal pure returns (bytes memory) {
@@ -216,6 +255,8 @@ contract TempoStateTest is Test {
             parentHash,
             stateRoot,
             receiptsRoot,
+            transactionsRoot,
+            beneficiary,
             number,
             timestamp
         );
@@ -236,6 +277,8 @@ contract TempoStateTest is Test {
         bytes32 parentHash,
         bytes32 stateRoot,
         bytes32 receiptsRoot,
+        bytes32 transactionsRoot,
+        address beneficiary,
         uint64 number,
         uint64 timestamp
     ) internal pure returns (bytes memory) {
@@ -247,9 +290,9 @@ contract TempoStateTest is Test {
         bytes memory content = abi.encodePacked(
             _encodeBytes32(parentHash),                           // 0: parentHash
             _encodeBytes32(keccak256("ommersHash")),             // 1: ommersHash
-            _encodeAddress(address(0)),                          // 2: beneficiary
+            _encodeAddress(beneficiary),                         // 2: beneficiary
             _encodeBytes32(stateRoot),                           // 3: stateRoot
-            _encodeBytes32(keccak256("txRoot")),                 // 4: transactionsRoot
+            _encodeBytes32(transactionsRoot),                    // 4: transactionsRoot
             _encodeBytes32(receiptsRoot),                        // 5: receiptsRoot
             _encodeBloom(),                                      // 6: logsBloom (256 bytes)
             _encodeUint64(0),                                    // 7: difficulty
