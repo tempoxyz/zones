@@ -4,21 +4,20 @@ pragma solidity ^0.8.13;
 import { ITIP20 } from "../interfaces/ITIP20.sol";
 import {
     IZonePortal,
+    IZoneMessenger,
     IVerifier,
-    IWithdrawalReceiver,
     Deposit,
     Withdrawal,
     BlockTransition,
     DepositQueueTransition,
     WithdrawalQueueTransition
 } from "./IZone.sol";
-import { DepositQueue, DepositQueueLib } from "./DepositQueueLib.sol";
+import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows gas tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
-    using DepositQueueLib for DepositQueue;
     using WithdrawalQueueLib for WithdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
@@ -27,6 +26,7 @@ contract ZonePortal is IZonePortal {
 
     uint64 public immutable zoneId;
     address public immutable token;
+    address public immutable messenger;
     address public immutable sequencer;
     address public immutable verifier;
     uint64 public immutable genesisTempoBlockNumber;
@@ -35,8 +35,11 @@ contract ZonePortal is IZonePortal {
     uint64 public batchIndex;
     bytes32 public blockHash;
 
-    /// @notice Deposit queue (Tempo→zone): 2-slot pattern
-    DepositQueue internal _depositQueue;
+    /// @notice Current deposit queue hash (where new deposits land)
+    bytes32 public currentDepositQueueHash;
+
+    /// @notice Last Tempo block number the zone has synced to
+    uint64 public lastSyncedTempoBlockNumber;
 
     /// @notice Withdrawal queue (zone→Tempo): unbounded buffer
     WithdrawalQueue internal _withdrawalQueue;
@@ -48,6 +51,7 @@ contract ZonePortal is IZonePortal {
     constructor(
         uint64 _zoneId,
         address _token,
+        address _messenger,
         address _sequencer,
         address _verifier,
         bytes32 _genesisBlockHash,
@@ -55,10 +59,14 @@ contract ZonePortal is IZonePortal {
     ) {
         zoneId = _zoneId;
         token = _token;
+        messenger = _messenger;
         sequencer = _sequencer;
         verifier = _verifier;
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
+
+        // Give messenger max approval for the gas token
+        ITIP20(_token).approve(_messenger, type(uint256).max);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -81,14 +89,6 @@ contract ZonePortal is IZonePortal {
     /*//////////////////////////////////////////////////////////////
                            QUEUE ACCESSORS
     //////////////////////////////////////////////////////////////*/
-
-    function processedDepositQueueHash() external view returns (bytes32) {
-        return _depositQueue.processed;
-    }
-
-    function currentDepositQueueHash() external view returns (bytes32) {
-        return _depositQueue.current;
-    }
 
     function withdrawalQueueHead() external view returns (uint256) {
         return _withdrawalQueue.head;
@@ -124,7 +124,8 @@ contract ZonePortal is IZonePortal {
         });
 
         // Insert deposit into queue
-        newCurrentDepositQueueHash = _depositQueue.enqueue(depositData);
+        newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
+        currentDepositQueueHash = newCurrentDepositQueueHash;
 
         emit DepositMade(
             newCurrentDepositQueueHash,
@@ -152,31 +153,21 @@ contract ZonePortal is IZonePortal {
             return;
         }
 
-        // Try callback
-        try this._executeWithdrawal(withdrawal) {
+        // Try callback via messenger
+        bool success = IZoneMessenger(messenger).relayMessage(
+            withdrawal.sender,
+            withdrawal.to,
+            withdrawal.amount,
+            withdrawal.gasLimit,
+            withdrawal.callbackData
+        );
+
+        if (success) {
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
-        } catch {
+        } else {
             // Callback failed: bounce back to zone
             _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient);
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, false);
-        }
-    }
-
-    /// @notice Internal function for atomic transfer + callback (called via self-call)
-    function _executeWithdrawal(Withdrawal calldata withdrawal) external {
-        if (msg.sender != address(this)) revert NotSequencer(); // self-call only
-
-        // Transfer before callback so receiver can use funds
-        ITIP20(token).transfer(withdrawal.to, withdrawal.amount);
-
-        // Call the receiver
-        bytes4 selector = IWithdrawalReceiver(withdrawal.to).onWithdrawalReceived{gas: withdrawal.gasLimit}(
-            withdrawal.sender,
-            withdrawal.amount,
-            withdrawal.callbackData
-        );
-        if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
-            revert CallbackRejected();
         }
     }
 
@@ -189,7 +180,8 @@ contract ZonePortal is IZonePortal {
             memo: bytes32(0)
         });
 
-        bytes32 newCurrentDepositQueueHash = _depositQueue.enqueue(depositData);
+        bytes32 newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
+        currentDepositQueueHash = newCurrentDepositQueueHash;
 
         emit BounceBack(newCurrentDepositQueueHash, fallbackRecipient, amount);
     }
@@ -217,12 +209,6 @@ contract ZonePortal is IZonePortal {
         bytes32 tempoBlockHash = blockhash(tempoBlockNumber);
         if (tempoBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
 
-        // Build deposit queue transition with current processed state
-        DepositQueueTransition memory fullDepositTransition = DepositQueueTransition({
-            prevProcessedHash: _depositQueue.processed,
-            nextProcessedHash: depositQueueTransition.nextProcessedHash
-        });
-
         // Call verifier with tempoBlockHash
         // The proof reads currentDepositQueueHash from Tempo state to validate ancestry
         bool valid = IVerifier(verifier).verify(
@@ -231,7 +217,7 @@ contract ZonePortal is IZonePortal {
                 prevBlockHash: blockHash,
                 nextBlockHash: blockTransition.nextBlockHash
             }),
-            fullDepositTransition,
+            depositQueueTransition,
             withdrawalQueueTransition,
             verifierConfig,
             proof
@@ -241,9 +227,7 @@ contract ZonePortal is IZonePortal {
         // Update state
         batchIndex++;
         blockHash = blockTransition.nextBlockHash;
-
-        // Update deposit queue (validates prevProcessedHash matches)
-        _depositQueue.dequeueWithProof(fullDepositTransition);
+        lastSyncedTempoBlockNumber = tempoBlockNumber;
 
         // Update withdrawal queue - each batch gets its own slot
         _withdrawalQueue.enqueue(withdrawalQueueTransition);
@@ -252,7 +236,7 @@ contract ZonePortal is IZonePortal {
         emit BatchSubmitted(
             batchIndex,
             tempoBlockNumber,
-            _depositQueue.processed,
+            depositQueueTransition.nextProcessedHash,
             blockHash,
             _withdrawalQueue.tail,
             withdrawalQueueTransition.withdrawalQueueHash

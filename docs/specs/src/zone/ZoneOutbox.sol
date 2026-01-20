@@ -3,14 +3,14 @@ pragma solidity ^0.8.13;
 
 import { IZoneGasToken, ZoneInbox } from "./ZoneInbox.sol";
 import { TempoState } from "./TempoState.sol";
-import { Withdrawal } from "./IZone.sol";
+import { IZoneOutbox, Withdrawal } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
 /// @dev Burns gas tokens and stores pending withdrawals. Sequencer calls finalizeBatch()
 ///      at the end of a block to construct withdrawal queue hash on-chain.
-contract ZoneOutbox {
+contract ZoneOutbox is IZoneOutbox {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -30,6 +30,9 @@ contract ZoneOutbox {
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
 
+    /// @notice Current batch index (monotonically increasing)
+    uint64 public batchIndex;
+
     /// @notice Pending withdrawals waiting to be batched
     Withdrawal[] internal _pendingWithdrawals;
 
@@ -48,16 +51,6 @@ contract ZoneOutbox {
         uint64 gasLimit,
         address fallbackRecipient,
         bytes data
-    );
-
-    /// @notice Emitted when sequencer finalizes a batch at end of block
-    /// @dev Contains all proof inputs except state/block hash (computed after this tx)
-    event BatchFinalized(
-        bytes32 indexed withdrawalQueueHash,
-        bytes32 processedDepositQueueHash,
-        uint64 tempoBlockNumber,
-        bytes32 tempoBlockHash,
-        uint256 withdrawalCount
     );
 
     /*//////////////////////////////////////////////////////////////
@@ -180,13 +173,16 @@ contract ZoneOutbox {
             }
         }
 
+        // Increment batch index
+        uint64 currentBatchIndex = batchIndex++;
+
         // Emit all proof inputs (except block hash which is computed after this tx)
         emit BatchFinalized(
             withdrawalQueueHash,
-            zoneInbox.processedDepositQueueHash(),
             tempoState.tempoBlockNumber(),
             tempoState.tempoBlockHash(),
-            count
+            currentBatchIndex,
+            uint64(block.number)
         );
     }
 

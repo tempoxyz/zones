@@ -6,7 +6,7 @@ import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { Withdrawal } from "../../src/zone/IZone.sol";
+import { IZoneOutbox, Withdrawal } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
 
 /// @title ZoneOutboxTest
@@ -237,14 +237,14 @@ contract ZoneOutboxTest is Test {
         });
         bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
-        // Event includes withdrawal hash, deposit hash (0 initially), tempo block info, and count
+        // New event format: BatchFinalized(withdrawalQueueHash, tempoBlockNumber, tempoBlockHash, batchIndex, batchBlockNumber)
         vm.expectEmit(true, false, false, true);
-        emit ZoneOutbox.BatchFinalized(
+        emit IZoneOutbox.BatchFinalized(
             expectedHash,
-            inbox.processedDepositQueueHash(),  // 0 initially
             tempoState.tempoBlockNumber(),
             tempoState.tempoBlockHash(),
-            1
+            0,  // batchIndex starts at 0
+            uint64(block.number)
         );
 
         vm.prank(sequencer);

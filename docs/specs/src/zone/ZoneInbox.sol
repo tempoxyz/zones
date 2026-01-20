@@ -42,10 +42,10 @@ contract ZoneInbox {
     /// @dev ZonePortal storage layout:
     ///      slot 0: sequencerPubkey (bytes32)
     ///      slot 1: batchIndex (uint64)
-    ///      slot 2: stateRoot (bytes32)
-    ///      slot 3: _depositQueue.processed (bytes32)
-    ///      slot 4: _depositQueue.current (bytes32) ← this one
-    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
+    ///      slot 2: blockHash (bytes32)
+    ///      slot 3: currentDepositQueueHash (bytes32) ← this one
+    ///      slot 4: lastSyncedTempoBlockNumber (uint64)
+    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS

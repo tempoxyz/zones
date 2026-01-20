@@ -84,25 +84,38 @@ The portal tracks `blockHash` and `blockNumber` (the last proven batch block), `
 The portal calls the verifier to validate the batch:
 
 ```solidity
-/// @notice Batch proof inputs for zone state transitions
-/// @dev The proof validates:
-///      1. Valid state transition from prevBlockHash to nextBlockHash
-///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash
-///      3. BatchFinalized event exists in final block with correct prevBatchBlockNumber
-///      4. Deposit processing is correct (validated via Tempo state read inside proof)
-struct BatchProofInputs {
-    bytes32 tempoBlockHash;       // L1 provides via blockhash(tempoBlockNumber)
-    bytes32 prevBlockHash;        // must match portal.blockHash
-    bytes32 nextBlockHash;        // new zone block hash after batch
-    uint64 prevBatchBlockNumber;  // must match portal.blockNumber
-    uint64 batchBlockNumber;      // block number of this batch (from BatchFinalized)
-    uint64 tempoBlockNumber;      // Tempo block the zone synced to
-    bytes32 withdrawalQueueHash;  // hash chain of withdrawals (0 if none)
+/// @notice Block transition for zone batch proofs
+/// @dev Uses block hash instead of state root to commit to full block structure
+struct BlockTransition {
+    bytes32 prevBlockHash;
+    bytes32 nextBlockHash;
+}
+
+/// @notice Deposit queue transition inputs/outputs for batch proofs
+/// @dev The proof reads currentDepositQueueHash from Tempo state to validate
+///      that nextProcessedHash is a valid ancestor. No ceiling needed on-chain.
+struct DepositQueueTransition {
+    bytes32 prevProcessedHash;     // where proof starts (verified against zone state)
+    bytes32 nextProcessedHash;     // where zone processed up to (proof output)
+}
+
+/// @notice Withdrawal queue transition for batch proofs
+struct WithdrawalQueueTransition {
+    bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
 }
 
 interface IVerifier {
+    /// @notice Verify a batch proof
+    /// @dev The proof validates:
+    ///      1. Valid state transition from prevBlockHash to nextBlockHash
+    ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash
+    ///      3. BatchFinalized event exists in final block with correct batchIndex
+    ///      4. Deposit processing is correct (validated via Tempo state read inside proof)
     function verify(
-        BatchProofInputs calldata inputs,
+        bytes32 tempoBlockHash,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external view returns (bool);
@@ -112,14 +125,14 @@ interface IVerifier {
 The verifier validates that:
 1. The state transition from `prevBlockHash` to `nextBlockHash` is correct (all transactions executed properly).
 2. The zone's `TempoState.tempoBlockHash()` matches the `tempoBlockHash` provided by the portal.
-3. A `BatchFinalized` event exists in the final block with `prevBatchBlockNumber` matching the portal's `blockNumber`.
+3. A `BatchFinalized` event exists in the final block with the correct `batchIndex`.
 4. Deposit processing is correct: the zone read `currentDepositQueueHash` from Tempo state and processed deposits accordingly.
 
 The zone has access to Tempo state via the TempoState predeploy, so the proof can read `currentDepositQueueHash` directly from Tempo storage at the proven block. This eliminates the need for an on-chain "ceiling" slot.
 
 `verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
 
-`submitBatch` verifies that `prevBlockHash == blockHash` and `prevBatchBlockNumber == blockNumber`, then calls the verifier. On success it updates `blockHash`, `blockNumber`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with every verifier input/output (except the proof bytes) so off-chain observers can audit the batch.
+`submitBatch` verifies that `prevBlockHash == blockHash`, then calls the verifier. On success it updates `batchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with every verifier input/output (except the proof bytes) so off-chain observers can audit the batch.
 
 ### Deposit queue
 
@@ -236,6 +249,7 @@ This section defines the functions and interfaces used by the design. The signat
 struct ZoneInfo {
     uint64 zoneId;
     address portal;
+    address messenger;
     address token;
     address sequencer;
     address verifier;
@@ -267,14 +281,17 @@ struct Withdrawal {
 ```solidity
 interface IVerifier {
     function verify(
-        BatchProofInputs calldata inputs,
+        bytes32 tempoBlockHash,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external view returns (bool);
 }
 ```
 
-The verifier receives `BatchProofInputs` containing the `tempoBlockHash` (looked up on-chain via `blockhash(tempoBlockNumber)`), block transition hashes, batch block numbers, and the withdrawal queue hash. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that a `BatchFinalized` event with the correct `prevBatchBlockNumber` exists in the final block.
+The verifier receives the `tempoBlockHash` (looked up on-chain via `blockhash(tempoBlockNumber)`), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that a `BatchFinalized` event with the correct `batchIndex` exists in the final block.
 
 ### Queue libraries
 
@@ -282,16 +299,16 @@ The portal uses two queue libraries that encapsulate the hash chain management p
 
 #### DepositQueueLib
 
-Handles L1→L2 deposits. The L1 portal only tracks `currentDepositQueueHash` (the head of the queue). The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
+Handles L1→L2 deposits. The L1 portal only tracks `currentDepositQueueHash` (the head of the queue where new deposits land). The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
 
 ```solidity
 library DepositQueueLib {
     /// @notice Enqueue a new deposit into the queue (on-chain operation)
     /// @dev Hash chain: newHash = keccak256(abi.encode(deposit, prevHash))
     /// @param currentHash The current head of the deposit queue
-    /// @param deposit The deposit to enqueue
+    /// @param depositData The deposit to enqueue
     /// @return newHash The new head of the deposit queue
-    function enqueue(bytes32 currentHash, Deposit memory deposit) internal pure returns (bytes32 newHash);
+    function enqueue(bytes32 currentHash, Deposit memory depositData) internal pure returns (bytes32 newHash);
 }
 ```
 
@@ -354,10 +371,11 @@ interface IZoneFactory {
     event ZoneCreated(
         uint64 indexed zoneId,
         address indexed portal,
-        address indexed token,
+        address indexed messenger,
+        address token,
         address sequencer,
         address verifier,
-        bytes32 genesisStateRoot,
+        bytes32 genesisBlockHash,
         bytes32 genesisTempoBlockHash,
         uint64 genesisTempoBlockNumber
     );
@@ -382,8 +400,9 @@ interface IZonePortal {
     );
 
     event BatchSubmitted(
-        uint64 indexed batchBlockNumber,
+        uint64 indexed batchIndex,
         uint64 tempoBlockNumber,
+        bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
         uint256 withdrawalQueueTail,
         bytes32 withdrawalQueueHash
@@ -391,13 +410,14 @@ interface IZonePortal {
 
     function zoneId() external view returns (uint64);
     function token() external view returns (address);
+    function messenger() external view returns (address);
     function sequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
+    function batchIndex() external view returns (uint64);
     function blockHash() external view returns (bytes32);
-    function blockNumber() external view returns (uint64);
-    function lastSyncedTempoBlockNumber() external view returns (uint64);
     function currentDepositQueueHash() external view returns (bytes32);
+    function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
     function withdrawalQueueMaxSize() external view returns (uint256);
@@ -415,20 +435,14 @@ interface IZonePortal {
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
-    /// @dev Verifies prevBlockHash == blockHash and prevBatchBlockNumber == blockNumber,
-    ///      then calls the verifier. On success updates blockHash, blockNumber,
-    ///      lastSyncedTempoBlockNumber, and adds withdrawals to the queue.
-    /// @param tempoBlockNumber The Tempo block number to verify against (must be recent for blockhash lookup).
-    /// @param nextBlockHash The zone block hash after this batch.
-    /// @param batchBlockNumber The zone block number of this batch (from BatchFinalized event).
-    /// @param withdrawalQueueHash The withdrawal hash chain for this batch (0 if none).
-    /// @param verifierConfig Opaque payload forwarded to verifier (e.g., attestation envelope).
-    /// @param proof The validity proof or TEE attestation.
+    /// @dev Verifies prevBlockHash == blockHash, then calls the verifier.
+    ///      On success updates batchIndex, blockHash, lastSyncedTempoBlockNumber,
+    ///      and adds withdrawals to the queue.
     function submitBatch(
         uint64 tempoBlockNumber,
-        bytes32 nextBlockHash,
-        uint64 batchBlockNumber,
-        bytes32 withdrawalQueueHash,
+        BlockTransition calldata blockTransition,
+        DepositQueueTransition calldata depositQueueTransition,
+        WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external;
@@ -594,24 +608,22 @@ interface IZoneOutbox {
 
     /// @notice Emitted when sequencer finalizes a batch at end of block.
     /// @dev Contains all proof inputs except block hash (computed after this tx).
-    ///      prevBatchBlockNumber links to the previous batch for chain integrity.
     event BatchFinalized(
-        uint64 indexed batchBlockNumber,
-        uint64 prevBatchBlockNumber,
-        bytes32 withdrawalQueueHash,
+        bytes32 indexed withdrawalQueueHash,
         uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
-        uint256 withdrawalCount
+        uint64 batchIndex,
+        uint64 batchBlockNumber
     );
 
     /// @notice The gas token address (same as L1 portal's token).
     function gasToken() external view returns (address);
 
-    /// @notice Block number of the last finalizeBatch() call (0 at genesis).
-    function lastBatchBlockNumber() external view returns (uint64);
-
     /// @notice Next withdrawal index (monotonically increasing).
     function nextWithdrawalIndex() external view returns (uint64);
+
+    /// @notice Current batch index (monotonically increasing).
+    function batchIndex() external view returns (uint64);
 
     /// @notice Number of pending withdrawals waiting to be batched.
     function pendingWithdrawalsCount() external view returns (uint256);
@@ -775,10 +787,10 @@ Notes:
 
 Users withdraw by creating a withdrawal on the zone. Withdrawals are processed in two steps:
 
-1. **Batch submission**: The sequencer calls `finalizeBatch()` on the zone, which constructs the withdrawal hash and emits a `BatchFinalized` event with `prevBatchBlockNumber` linking to the previous batch. The proof validates this event and adds the withdrawal hash to L1's queue.
+1. **Batch submission**: The sequencer calls `finalizeBatch()` on the zone, which constructs the withdrawal hash and emits a `BatchFinalized` event with the current `batchIndex`. The proof validates this event and adds the withdrawal hash to L1's queue.
 2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from the oldest slot (`head`).
 
-The `prevBatchBlockNumber` chain ensures batches cannot be skipped: each batch's `prevBatchBlockNumber` must match the L1 portal's `blockNumber`. This prevents the sequencer from omitting batches that contain withdrawals.
+The `batchIndex` ensures batches are submitted in order: each batch's `batchIndex` must match the L1 portal's expected next batch. This prevents the sequencer from omitting batches that contain withdrawals.
 
 ### Withdrawal execution
 
@@ -938,14 +950,14 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 ```solidity
 struct BatchProof {
     bytes32 nextBlockHash;
-    uint64 batchBlockNumber;      // zone block number of this batch
+    uint64 batchIndex;            // batch index matching portal.batchIndex
     uint64 tempoBlockNumber;      // Tempo block the zone synced to
     bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
     bytes verifierConfig;         // opaque payload to IVerifier (TEE/ZK envelope)
     bytes proof;                  // SP1 proof bytes (or TEE attestation)
 }
 ```
-The portal provides `blockHash` and `blockNumber` as the previous batch's values. The proof validates that the zone's `TempoState.tempoBlockHash()` matches `blockhash(tempoBlockNumber)`, and that a `BatchFinalized` event with the correct `prevBatchBlockNumber` exists in the final block.
+The portal provides `blockHash` and `batchIndex` as the previous batch's values. The proof validates that the zone's `TempoState.tempoBlockHash()` matches `blockhash(tempoBlockNumber)`, and that a `BatchFinalized` event with the correct `batchIndex` exists in the final block.
 
 ### Deposits and withdrawals
 

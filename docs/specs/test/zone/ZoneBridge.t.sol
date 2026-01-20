@@ -76,7 +76,8 @@ contract ZoneBridgeTest is BaseTest {
     uint64 public genesisTempoBlockNumber;
 
     /// @notice Storage slot for currentDepositQueueHash in ZonePortal
-    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
+    /// @dev Layout: sequencerPubkey(0), batchIndex(1), blockHash(2), currentDepositQueueHash(3)
+    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
 
     /// @notice Represents an observed deposit from Tempo (simulating sequencer watching events)
     struct ObservedDeposit {
@@ -317,7 +318,6 @@ contract ZoneBridgeTest is BaseTest {
 
         // Verify L1 batch state updated
         assertEq(l1Portal.batchIndex(), 1);
-        assertEq(l1Portal.processedDepositQueueHash(), newProcessedHash);
         assertEq(l1Portal.blockHash(), l2BlockHash);
 
         // === STEP 5: Alice requests withdrawal on zone ===

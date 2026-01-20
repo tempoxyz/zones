@@ -5,6 +5,7 @@ pragma solidity ^0.8.13;
 struct ZoneInfo {
     uint64 zoneId;
     address portal;
+    address messenger;
     address token;
     address sequencer;
     address verifier;
@@ -81,7 +82,8 @@ interface IZoneFactory {
     event ZoneCreated(
         uint64 indexed zoneId,
         address indexed portal,
-        address indexed token,
+        address indexed messenger,
+        address token,
         address sequencer,
         address verifier,
         bytes32 genesisBlockHash,
@@ -138,13 +140,14 @@ interface IZonePortal {
 
     function zoneId() external view returns (uint64);
     function token() external view returns (address);
+    function messenger() external view returns (address);
     function sequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
     function batchIndex() external view returns (uint64);
     function blockHash() external view returns (bytes32);
-    function processedDepositQueueHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
+    function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
     function withdrawalQueueMaxSize() external view returns (uint256);
@@ -165,6 +168,37 @@ interface IZonePortal {
     ) external;
 }
 
+/// @title IZoneMessenger
+/// @notice Interface for zone messenger on Tempo (handles withdrawal callbacks)
+interface IZoneMessenger {
+    /// @notice Returns the zone's portal address
+    function portal() external view returns (address);
+
+    /// @notice Returns the gas token address
+    function token() external view returns (address);
+
+    /// @notice Returns the L2 sender during callback execution
+    /// @dev Reverts if not in a callback context
+    function xDomainMessageSender() external view returns (address);
+
+    /// @notice Relay a withdrawal message. Only callable by the portal.
+    /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
+    ///      If callback reverts, the entire call reverts (including the transfer).
+    /// @param sender The L2 origin address
+    /// @param target The L1 recipient
+    /// @param amount Tokens to transfer from portal to target
+    /// @param gasLimit Max gas for the callback
+    /// @param data Calldata for the target
+    /// @return success Whether the callback was successful
+    function relayMessage(
+        address sender,
+        address target,
+        uint128 amount,
+        uint64 gasLimit,
+        bytes calldata data
+    ) external returns (bool success);
+}
+
 /// @title IWithdrawalReceiver
 /// @notice Interface for contracts that receive withdrawals with callbacks
 interface IWithdrawalReceiver {
@@ -178,6 +212,16 @@ interface IWithdrawalReceiver {
 /// @title IZoneOutbox
 /// @notice Interface for zone outbox on the zone
 interface IZoneOutbox {
+    /// @notice Emitted when sequencer finalizes a batch at end of block
+    /// @dev Contains all proof inputs except state/block hash (computed after this tx)
+    event BatchFinalized(
+        bytes32 indexed withdrawalQueueHash,
+        uint64 tempoBlockNumber,
+        bytes32 tempoBlockHash,
+        uint64 batchIndex,
+        uint64 batchBlockNumber
+    );
+
     /// @notice Request a withdrawal from the zone back to Tempo
     function requestWithdrawal(
         address to,
@@ -196,4 +240,7 @@ interface IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256);
+
+    /// @notice Current batch index (monotonically increasing)
+    function batchIndex() external view returns (uint64);
 }

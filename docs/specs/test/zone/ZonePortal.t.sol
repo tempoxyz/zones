@@ -4,12 +4,14 @@ pragma solidity ^0.8.13;
 import { BaseTest } from "../BaseTest.t.sol";
 import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
+import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { TIP20 } from "../../src/TIP20.sol";
 import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
 import {
     IZoneFactory,
     IZonePortal,
+    IZoneMessenger,
     IWithdrawalReceiver,
     ZoneInfo,
     Deposit,
@@ -28,6 +30,11 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     address public lastSender;
     uint128 public lastAmount;
     bytes public lastCallbackData;
+    address public expectedMessenger;
+
+    function setExpectedMessenger(address _messenger) external {
+        expectedMessenger = _messenger;
+    }
 
     function setShouldAccept(bool _shouldAccept) external {
         shouldAccept = _shouldAccept;
@@ -63,6 +70,7 @@ contract ZonePortalTest is BaseTest {
     ZoneFactory public zoneFactory;
     MockVerifier public mockVerifier;
     ZonePortal public portal;
+    ZoneMessenger public messenger;
     MockWithdrawalReceiver public withdrawalReceiver;
 
     uint64 public testZoneId;
@@ -102,6 +110,13 @@ contract ZonePortalTest is BaseTest {
         address portalAddr;
         (testZoneId, portalAddr) = zoneFactory.createZone(params);
         portal = ZonePortal(portalAddr);
+
+        // Get the messenger
+        ZoneInfo memory info = zoneFactory.zones(testZoneId);
+        messenger = ZoneMessenger(info.messenger);
+
+        // Set expected messenger for withdrawal receiver
+        withdrawalReceiver.setExpectedMessenger(address(messenger));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -115,6 +130,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.verifier(), address(mockVerifier));
         assertEq(portal.blockHash(), GENESIS_BLOCK_HASH);
         assertEq(portal.batchIndex(), 0);
+        assertEq(portal.messenger(), address(messenger));
     }
 
     function test_zoneFactoryTracksZones() public view {
@@ -124,6 +140,7 @@ contract ZonePortalTest is BaseTest {
         ZoneInfo memory info = zoneFactory.zones(testZoneId);
         assertEq(info.zoneId, testZoneId);
         assertEq(info.portal, address(portal));
+        assertEq(info.messenger, address(messenger));
         assertEq(info.token, address(pathUSD));
     }
 
@@ -233,7 +250,7 @@ contract ZonePortalTest is BaseTest {
         // Verify state updated
         assertEq(portal.blockHash(), newStateRoot);
         assertEq(portal.batchIndex(), 1);
-        assertEq(portal.processedDepositQueueHash(), depositHash);
+        assertEq(portal.lastSyncedTempoBlockNumber(), uint64(block.number - 1));
     }
 
     function test_submitBatch_revertsIfNotSequencer() public {
@@ -678,14 +695,13 @@ contract ZonePortalTest is BaseTest {
                          DEPOSIT CHAIN TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_depositChain_twoSlotDesign() public {
-        // Test the 2-slot deposit design:
-        // processedDepositQueueHash: where proofs have processed up to
+    function test_depositChain_singleSlotDesign() public {
+        // Test the simplified single-slot deposit design:
         // currentDepositQueueHash: head of chain (new deposits land here)
+        // The zone tracks its own processedDepositQueueHash in EVM state.
         // The proof reads currentDepositQueueHash from Tempo state to validate ancestry.
 
-        // Initial state: both zero
-        assertEq(portal.processedDepositQueueHash(), bytes32(0));
+        // Initial state: zero
         assertEq(portal.currentDepositQueueHash(), bytes32(0));
 
         // Make deposits
@@ -697,13 +713,11 @@ contract ZonePortalTest is BaseTest {
 
         // currentDepositQueueHash should be h2 (latest)
         assertEq(portal.currentDepositQueueHash(), h2);
-        // processed still zero (no batch yet)
-        assertEq(portal.processedDepositQueueHash(), bytes32(0));
 
         // Advance a block so we can use blockhash
         vm.roll(block.number + 1);
 
-        // Submit batch processing only first deposit
+        // Submit batch - portal no longer tracks processed, just updates lastSyncedTempoBlockNumber
         portal.submitBatch(
             uint64(block.number - 1),
             BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("state1") }),
@@ -713,39 +727,16 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        // After batch:
-        // processedDepositQueueHash = h1 (where we processed to)
-        // currentDepositQueueHash = h2 (unchanged)
-        assertEq(portal.processedDepositQueueHash(), h1);
+        // After batch: currentDepositQueueHash unchanged, lastSyncedTempoBlockNumber updated
         assertEq(portal.currentDepositQueueHash(), h2);
+        assertEq(portal.lastSyncedTempoBlockNumber(), uint64(block.number - 1));
 
         // New deposit arrives
         vm.startPrank(alice);
         bytes32 h3 = portal.deposit(alice, 1000e6, bytes32("d3"));
         vm.stopPrank();
 
-        // currentDepositQueueHash updated, processed unchanged
-        assertEq(portal.currentDepositQueueHash(), h3);
-        assertEq(portal.processedDepositQueueHash(), h1);
-
-        // Advance a block so we can use blockhash
-        vm.roll(block.number + 1);
-
-        // Submit batch processing up to h2
-        // Note: prevProcessedHash must match current processed (h1)
-        portal.submitBatch(
-            uint64(block.number - 1),
-            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("state2") }),
-            DepositQueueTransition({ prevProcessedHash: h1, nextProcessedHash: h2 }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
-            "",
-            ""
-        );
-
-        // Now:
-        // processedDepositQueueHash = h2 (advanced)
-        // currentDepositQueueHash = h3 (unchanged)
-        assertEq(portal.processedDepositQueueHash(), h2);
+        // currentDepositQueueHash updated
         assertEq(portal.currentDepositQueueHash(), h3);
     }
 }
