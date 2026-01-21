@@ -1032,7 +1032,7 @@ contract ZonePortalTest is BaseTest {
         // Submit batch with withdrawals
         Withdrawal memory w1 = Withdrawal({
             sender: alice, to: bob, amount: 100e6, memo: bytes32(0),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
 
@@ -1054,7 +1054,7 @@ contract ZonePortalTest is BaseTest {
         // Submit another batch with withdrawals
         Withdrawal memory w2 = Withdrawal({
             sender: alice, to: charlie, amount: 200e6, memo: bytes32(0),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
 
@@ -1118,7 +1118,7 @@ contract ZonePortalTest is BaseTest {
         // Create two batches with different withdrawals
         Withdrawal memory w1 = Withdrawal({
             sender: alice, to: bob, amount: 100e6, memo: bytes32("w1"),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
 
@@ -1134,7 +1134,7 @@ contract ZonePortalTest is BaseTest {
 
         Withdrawal memory w2 = Withdrawal({
             sender: alice, to: charlie, amount: 200e6, memo: bytes32("w2"),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
 
@@ -1220,7 +1220,7 @@ contract ZonePortalTest is BaseTest {
             amount: 500e6,
             memo: bytes32(0),
             gasLimit: 0, // No callback
-            fallbackRecipient: address(0),
+            fallbackRecipient: alice,
             callbackData: ""
         });
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
@@ -1413,7 +1413,7 @@ contract ZonePortalTest is BaseTest {
 
         Withdrawal memory w = Withdrawal({
             sender: alice, to: bob, amount: 500e6, memo: bytes32(0),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 

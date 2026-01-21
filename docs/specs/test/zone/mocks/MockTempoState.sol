@@ -21,8 +21,6 @@ contract MockTempoState {
     uint64 public tempoGasUsed;
     uint64 public tempoTimestamp;
     uint64 public tempoTimestampMillis;
-    uint256 public tempoBaseFeePerGas;
-    bytes32 public tempoWithdrawalsRoot;
     bytes32 public tempoPrevRandao;
 
     /// @notice Mock storage values for readTempoStorageSlot

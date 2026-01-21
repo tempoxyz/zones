@@ -113,7 +113,7 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Deposit gas token into the zone. Returns the new current deposit queue hash.
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash) {
-        // Transfer tokens into escrow
+        // TIP-20 transfers revert on failure, so no boolean check is needed here.
         ITIP20(token).transferFrom(msg.sender, address(this), amount);
 
         // Build deposit struct

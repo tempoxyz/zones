@@ -24,7 +24,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 - Zone: the validium chain anchored to Tempo.
 - Gas token: the zone's only TIP-20, bridged from Tempo.
 - Portal: the Tempo-side contract that escrows the gas token and finalizes exits.
-- Batch: a sequencer-produced commitment covering one or more zone blocks, ending with a `finalizeBatch()` call. The sequencer controls batch frequency.
+- Batch: a sequencer-produced commitment covering one or more zone blocks. The batch **must** end with a single `finalizeBatch()` call in the final block, and intermediate blocks **must not** call `finalizeBatch()`. The sequencer controls batch frequency.
 
 ## System overview
 
@@ -496,7 +496,7 @@ The zone's gas token is the bridged TIP-20 from Tempo. It is deployed at the **s
 
 #### TempoState predeploy
 
-The TempoState predeploy allows zones to verify they have a correct view of Tempo (L1) state. It stores the complete finalized Tempo block header and provides storage reading functionality.
+The TempoState predeploy allows zones to verify they have a correct view of Tempo (L1) state. It stores the Tempo wrapper fields and selected inner Ethereum header fields, and provides storage reading functionality.
 
 ```solidity
 // Predeploy address: 0x1c00000000000000000000000000000000000000
@@ -519,8 +519,6 @@ interface ITempoState {
     function tempoGasUsed() external view returns (uint64);
     function tempoTimestamp() external view returns (uint64);
     function tempoTimestampMillis() external view returns (uint64);
-    function tempoBaseFeePerGas() external view returns (uint256);
-    function tempoWithdrawalsRoot() external view returns (bytes32);
     function tempoPrevRandao() external view returns (bytes32);
 
     /// @notice Finalize a Tempo block header. Only callable by sequencer.
@@ -536,11 +534,13 @@ interface ITempoState {
 }
 ```
 
-The TempoState stores the **complete Tempo block header** since the proof must validate the entire header anyway. This provides zones with full visibility into Tempo block metadata.
+Tempo headers are RLP encoded as `rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])`, where `inner` is a standard Ethereum header. The inner header uses trailing-field semantics for optional fields: `baseFeePerGas` (EIP-1559), `withdrawalsRoot` (EIP-4895), `blobGasUsed`/`excessBlobGas` (EIP-4844), `parentBeaconBlockRoot` (EIP-4788), and `requestsHash` (EIP-7685). TempoState skips these trailing optional fields and does not expose them.
+
+The TempoState stores the Tempo wrapper fields and the inner fields needed by the zone/proof logic; the `tempoBlockHash` is always `keccak256(RLP(TempoHeader))`, so proofs still commit to the complete header contents.
 
 **How it works:**
 
-1. The sequencer submits Tempo block headers via `finalizeTempo()`, which decodes the RLP header, validates chain continuity, and stores all fields.
+1. The sequencer submits Tempo block headers via `finalizeTempo()`, which decodes the RLP header, validates chain continuity, and stores the wrapper fields and selected inner fields.
 2. When submitting a batch, the prover specifies a `tempoBlockNumber`. The portal reads the hash via the EIP-2935 block hash history precompile.
 3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the value passed by the portal.
 4. The `readTempoStorageSlot` functions are precompile stubs - actual implementation is in the zone node, validated against `tempoStateRoot`.
@@ -597,7 +597,7 @@ This combined approach ensures Tempo state advancement and deposit processing ar
 
 #### Zone outbox
 
-The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a block that will be batched, it calls `finalizeBatch(count)` as a system transaction at the end of the block. This constructs the withdrawal queue hash on-chain and writes batch parameters to storage. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
+The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a **batch**, it calls `finalizeBatch(count)` as a system transaction at the end of the **final block** in that batch. This constructs the withdrawal queue hash on-chain and writes batch parameters to storage. Intermediate blocks **must not** call `finalizeBatch()`. The call is required even if there are zero withdrawals (use `count = 0`) so the batch index advances. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
 
 ```solidity
 /// @notice Batch parameters stored in state for proof access
@@ -662,9 +662,10 @@ interface IZoneOutbox {
         bytes calldata data
     ) external;
 
-    /// @notice Finalize batch at end of block - build withdrawal hash and write to state.
-    /// @dev Only callable by sequencer as a system transaction at end of block.
-    ///      Writes batch parameters to lastBatch storage for proof access.
+    /// @notice Finalize batch at end of final block - build withdrawal hash and write to state.
+    /// @dev Only callable by sequencer as a system transaction in the final block of a batch.
+    ///      Must be called exactly once per batch (count may be 0). Writes batch parameters
+    ///      to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process (avoids unbounded loops).
     /// @return withdrawalQueueHash The hash chain for L1 batch submission.
     function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
@@ -803,14 +804,14 @@ Notes:
 
 Users withdraw by creating a withdrawal on the zone. Withdrawals are processed in two steps:
 
-1. **Batch submission**: The sequencer calls `finalizeBatch()` on the zone, which constructs the withdrawal hash and emits a `BatchFinalized` event with the current `batchIndex`. The proof validates `ZoneOutbox.lastBatch()` state and adds the withdrawal hash to L1's queue.
+1. **Batch submission**: The sequencer calls `finalizeBatch()` at the end of the final block in the batch (even if `count = 0`), which constructs the withdrawal hash and emits a `BatchFinalized` event with the current `batchIndex`. The proof validates `ZoneOutbox.lastBatch()` state and adds the withdrawal hash to L1's queue.
 2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from the oldest slot (`head`).
 
 The `batchIndex` ensures batches are submitted in order: each batch's `batchIndex` must match the L1 portal's expected next batch. This prevents the sequencer from omitting batches that contain withdrawals.
 
 ### Withdrawal execution
 
-When the sequencer processes a withdrawal via `processWithdrawal`, the withdrawal is **popped unconditionally** (even on failure). If the messenger call fails, funds are bounced back via a new deposit.
+When the sequencer processes a withdrawal via `processWithdrawal`, the withdrawal is **popped unconditionally** (even on failure). If the transfer or messenger call fails, funds are bounced back via a new deposit.
 
 ```solidity
 function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
@@ -856,7 +857,7 @@ The messenger does `token.transferFrom(portal, target, amount)` then executes th
 
 ## Withdrawal failure and bounce-back
 
-Withdrawals with `gasLimit > 0` can fail if the messenger callback reverts (out of gas, logic error, TIP-403 policy, etc.). When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
+Withdrawals can fail if the token transfer or messenger callback reverts (out of gas, logic error, TIP-403 policy, token pause, etc.). When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
 
 ```solidity
 function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
@@ -886,6 +887,7 @@ Withdrawals can fail for various reasons. The system handles failures gracefully
 ### Failure reasons
 
 Withdrawals can fail due to:
+- **Transfer failure**: `transfer` or `transferFrom` reverts (includes gasLimit = 0 cases)
 - **TIP-403 policy**: Recipient not authorized under the token's transfer policy
 - **Token paused**: The gas token is globally paused
 - **Callback revert**: The receiver contract reverts (out of gas, logic error, etc.)
@@ -913,7 +915,7 @@ Zone creators SHOULD choose gas tokens with `transferPolicyId == 1` to avoid com
 
 - Sequencer can halt the zone without recourse due to missing data availability.
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
-- Withdrawals with callbacks go through the zone messenger with a user-specified gas limit. The messenger does `transferFrom` + callback atomically; failed callbacks trigger a bounce-back to `fallbackRecipient`.
+- Withdrawals with callbacks go through the zone messenger with a user-specified gas limit. The messenger does `transferFrom` + callback atomically; any transfer or callback failure triggers a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
 - **Bounce-back guarantees**: Failed withdrawals bounce back to zone `fallbackRecipient`. Users always retain their funds.
 - **TIP-403 policy changes**: If the gas token's policy restricts the portal, withdrawals will fail and bounce back.

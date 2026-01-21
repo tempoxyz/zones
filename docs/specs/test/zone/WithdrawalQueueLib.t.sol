@@ -297,7 +297,7 @@ contract WithdrawalQueueLibTest is Test {
             amount: amount,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackRecipient: sender,
             callbackData: ""
         });
     }

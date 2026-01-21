@@ -105,8 +105,8 @@ contract ZoneOutbox is IZoneOutbox {
         address fallbackRecipient,
         bytes calldata data
     ) external {
-        // If callback requested, must have valid fallback recipient
-        if (gasLimit > 0 && fallbackRecipient == address(0)) {
+        // Always require a valid fallback recipient
+        if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
         }
 
@@ -190,8 +190,9 @@ contract ZoneOutbox is IZoneOutbox {
             }
         }
 
-        // Increment batch index
-        uint64 currentBatchIndex = batchIndex++;
+        // Increment batch index (matches L1 portal's next expected batch index)
+        batchIndex += 1;
+        uint64 currentBatchIndex = batchIndex;
 
         // Capture current values
         uint64 tempoBlockNumber = tempoState.tempoBlockNumber();

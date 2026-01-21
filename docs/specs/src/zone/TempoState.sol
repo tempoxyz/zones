@@ -61,12 +61,6 @@ contract TempoState {
     /// @notice Millisecond part of timestamp (from Tempo wrapper)
     uint64 public tempoTimestampMillis;
 
-    /// @notice Base fee per gas (EIP-1559)
-    uint256 public tempoBaseFeePerGas;
-
-    /// @notice Withdrawals root (EIP-4895, may be zero if not applicable)
-    bytes32 public tempoWithdrawalsRoot;
-
     /// @notice Previous RANDAO value (post-merge mixHash)
     bytes32 public tempoPrevRandao;
 
@@ -163,13 +157,13 @@ contract TempoState {
                           RLP DECODING (INTERNAL)
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Decode a Tempo header and store all fields
+    /// @notice Decode a Tempo header and store fields used by the zone
     /// @dev Tempo header format: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
     ///      Inner Ethereum header fields (0-indexed):
     ///        0: parentHash, 1: ommersHash, 2: beneficiary, 3: stateRoot,
     ///        4: transactionsRoot, 5: receiptsRoot, 6: logsBloom, 7: difficulty,
     ///        8: number, 9: gasLimit, 10: gasUsed, 11: timestamp, 12: extraData,
-    ///        13: mixHash (prevRandao), 14: nonce, 15: baseFeePerGas, 16: withdrawalsRoot
+    ///        13: mixHash (prevRandao), 14: nonce, remaining fields are optional and ignored
     function _decodeAndStoreHeader(bytes memory header) internal {
         uint256 ptr = 0;
 
@@ -253,15 +247,8 @@ contract TempoState {
         // Inner field 14: nonce - skip
         (, ptr) = _skipRlpItemMem(header, ptr);
 
-        // Inner field 15: baseFeePerGas (optional, may not exist in all headers)
-        if (ptr < innerListOffset + innerListLen) {
-            tempoBaseFeePerGas = _decodeUint256Mem(header, ptr);
-            (, ptr) = _skipRlpItemMem(header, ptr);
-        }
-
-        // Inner field 16: withdrawalsRoot (optional)
-        if (ptr < innerListOffset + innerListLen) {
-            tempoWithdrawalsRoot = _decodeBytes32Mem(header, ptr);
+        // Skip any remaining optional fields we don't record.
+        while (ptr < innerListOffset + innerListLen) {
             (, ptr) = _skipRlpItemMem(header, ptr);
         }
 

@@ -332,7 +332,7 @@ contract ZoneBridgeTest is BaseTest {
             withdrawAmount,
             bytes32(0),     // memo
             0,              // no callback
-            address(0),     // no fallback needed
+            alice,          // fallback to self
             ""
         );
         vm.stopPrank();
@@ -341,7 +341,7 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(l2GasToken.balanceOf(alice), depositAmount - withdrawAmount);
 
         // === STEP 6: Sequencer observes withdrawal event ===
-        _sequencerObserveWithdrawal(0, alice, alice, withdrawAmount, bytes32(0), 0, address(0), "");
+        _sequencerObserveWithdrawal(0, alice, alice, withdrawAmount, bytes32(0), 0, alice, "");
 
         // Update zone state root
         l2BlockHash = keccak256(abi.encode(l2BlockHash, "withdrawal", 0));
@@ -357,7 +357,7 @@ contract ZoneBridgeTest is BaseTest {
             amount: withdrawAmount,
             memo: bytes32(0),
             gasLimit: 0,
-            fallbackRecipient: address(0),
+            fallbackRecipient: alice,
             callbackData: ""
         });
         bytes32 expectedQueueHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
@@ -404,17 +404,17 @@ contract ZoneBridgeTest is BaseTest {
         // === Both request withdrawals ===
         vm.startPrank(alice);
         l2GasToken.approve(address(l2Outbox), 500e6);
-        l2Outbox.requestWithdrawal(alice, 500e6, bytes32(0), 0, address(0), "");
+        l2Outbox.requestWithdrawal(alice, 500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
         vm.startPrank(bob);
         l2GasToken.approve(address(l2Outbox), 1000e6);
-        l2Outbox.requestWithdrawal(bob, 1000e6, bytes32(0), 0, address(0), "");
+        l2Outbox.requestWithdrawal(bob, 1000e6, bytes32(0), 0, bob, "");
         vm.stopPrank();
 
         // Sequencer observes withdrawals
-        _sequencerObserveWithdrawal(0, alice, alice, 500e6, bytes32(0), 0, address(0), "");
-        _sequencerObserveWithdrawal(1, bob, bob, 1000e6, bytes32(0), 0, address(0), "");
+        _sequencerObserveWithdrawal(0, alice, alice, 500e6, bytes32(0), 0, alice, "");
+        _sequencerObserveWithdrawal(1, bob, bob, 1000e6, bytes32(0), 0, bob, "");
 
         // Submit batch with both withdrawals
         l2BlockHash = keccak256(abi.encode(l2BlockHash, "withdrawals"));
@@ -422,10 +422,10 @@ contract ZoneBridgeTest is BaseTest {
 
         // Build expected queue hash (oldest = outermost, innermost wraps EMPTY_SENTINEL)
         Withdrawal memory w0 = Withdrawal({
-            sender: alice, to: alice, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            sender: alice, to: alice, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         Withdrawal memory w1 = Withdrawal({
-            sender: bob, to: bob, amount: 1000e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            sender: bob, to: bob, amount: 1000e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: bob, callbackData: ""
         });
         bytes32 innerHash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
         bytes32 queueHash = keccak256(abi.encode(w0, innerHash));
@@ -563,7 +563,7 @@ contract ZoneBridgeTest is BaseTest {
         // Bob withdraws on zone
         vm.startPrank(bob);
         l2GasToken.approve(address(l2Outbox), 300e6);
-        l2Outbox.requestWithdrawal(bob, 300e6, bytes32(0), 0, address(0), "");
+        l2Outbox.requestWithdrawal(bob, 300e6, bytes32(0), 0, bob, "");
         vm.stopPrank();
 
         // Verify Bob's zone balance debited
@@ -585,7 +585,7 @@ contract ZoneBridgeTest is BaseTest {
         vm.startPrank(alice);
         l2GasToken.approve(address(l2Outbox), 2000e6);
         vm.expectRevert(MockZoneGasToken.InsufficientBalance.selector);
-        l2Outbox.requestWithdrawal(alice, 2000e6, bytes32(0), 0, address(0), "");
+        l2Outbox.requestWithdrawal(alice, 2000e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
     }
 
@@ -648,8 +648,8 @@ contract ZoneBridgeTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0), // memo
-            100000,     // gasLimit > 0 requires fallback
-            address(0), // invalid!
+            100000,     // gasLimit > 0
+            address(0), // invalid fallback
             ""
         );
         vm.stopPrank();

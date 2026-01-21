@@ -288,7 +288,7 @@ contract ZoneIntegrationTest is BaseTest {
         // First batch: Alice withdraws to Bob
         vm.startPrank(alice);
         l2GasToken.approve(address(l2Outbox), 50000e6);
-        l2Outbox.requestWithdrawal(bob, 1000e6, bytes32("to bob"), 0, address(0), "");
+        l2Outbox.requestWithdrawal(bob, 1000e6, bytes32("to bob"), 0, alice, "");
         vm.stopPrank();
 
         vm.prank(admin);
@@ -306,7 +306,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Second batch: Alice withdraws to Charlie
         vm.startPrank(alice);
-        l2Outbox.requestWithdrawal(charlie, 2000e6, bytes32("to charlie"), 0, address(0), "");
+        l2Outbox.requestWithdrawal(charlie, 2000e6, bytes32("to charlie"), 0, alice, "");
         vm.stopPrank();
 
         vm.prank(admin);
@@ -324,7 +324,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Third batch: Alice withdraws to herself
         vm.startPrank(alice);
-        l2Outbox.requestWithdrawal(alice, 3000e6, bytes32("to self"), 0, address(0), "");
+        l2Outbox.requestWithdrawal(alice, 3000e6, bytes32("to self"), 0, alice, "");
         vm.stopPrank();
 
         vm.prank(admin);
@@ -352,21 +352,21 @@ contract ZoneIntegrationTest is BaseTest {
 
         Withdrawal memory w1 = Withdrawal({
             sender: alice, to: bob, amount: 1000e6, memo: bytes32("to bob"),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         l1Portal.processWithdrawal(w1, bytes32(0));
         assertEq(pathUSD.balanceOf(bob), bobBefore + 1000e6);
 
         Withdrawal memory w2 = Withdrawal({
             sender: alice, to: charlie, amount: 2000e6, memo: bytes32("to charlie"),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         l1Portal.processWithdrawal(w2, bytes32(0));
         assertEq(pathUSD.balanceOf(charlie), charlieBefore + 2000e6);
 
         Withdrawal memory w3 = Withdrawal({
             sender: alice, to: alice, amount: 3000e6, memo: bytes32("to self"),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         l1Portal.processWithdrawal(w3, bytes32(0));
         assertEq(pathUSD.balanceOf(alice), aliceBefore + 3000e6);
@@ -404,12 +404,12 @@ contract ZoneIntegrationTest is BaseTest {
         // Phase 2: Withdrawals
         vm.startPrank(alice);
         l2GasToken.approve(address(l2Outbox), 5000e6);
-        l2Outbox.requestWithdrawal(charlie, 2000e6, bytes32(0), 0, address(0), "");
+        l2Outbox.requestWithdrawal(charlie, 2000e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
         vm.startPrank(bob);
         l2GasToken.approve(address(l2Outbox), 3000e6);
-        l2Outbox.requestWithdrawal(charlie, 1500e6, bytes32(0), 0, address(0), "");
+        l2Outbox.requestWithdrawal(charlie, 1500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
         vm.prank(admin);
@@ -448,11 +448,11 @@ contract ZoneIntegrationTest is BaseTest {
         // Process withdrawals
         Withdrawal memory w1 = Withdrawal({
             sender: alice, to: charlie, amount: 2000e6, memo: bytes32(0),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         Withdrawal memory w2 = Withdrawal({
             sender: bob, to: charlie, amount: 1500e6, memo: bytes32(0),
-            gasLimit: 0, fallbackRecipient: address(0), callbackData: ""
+            gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
 
         bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
@@ -486,7 +486,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Withdraw 3000
         vm.startPrank(alice);
         l2GasToken.approve(address(l2Outbox), 3000e6);
-        l2Outbox.requestWithdrawal(bob, 3000e6, bytes32(0), 0, address(0), "");
+        l2Outbox.requestWithdrawal(bob, 3000e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
         assertEq(l2GasToken.totalSupply(), 7000e6); // Tokens burned on withdrawal request
