@@ -151,7 +151,9 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Finalize the batch at end of block - build withdrawal hash and emit proof inputs
     /// @dev Only callable by sequencer as a system transaction at the end of a block.
-    ///      This is optional - blocks without withdrawals don't need to call this.
+    ///      The proof enforces that this is the last call in the block and that a batch
+    ///      ends with exactly one finalizeBatch call (use count = 0 if no withdrawals).
+    ///      Protocol and proof enforce this runs at the end of the final block in the batch.
     ///      Emits BatchFinalized with all proof inputs except state/block hash.
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)

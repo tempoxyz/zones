@@ -23,10 +23,13 @@ pub struct PublicInputs {
     /// Previous batch's block hash (must equal portal.blockHash)
     pub prev_block_hash: B256,
 
+    /// Tempo block number for the batch (must equal portal's tempoBlockNumber)
+    pub tempo_block_number: u64,
+
     /// Tempo block hash for the batch (must equal portal's EIP-2935 lookup)
     pub tempo_block_hash: B256,
 
-    /// Registered sequencer (must match portal.sequencer)
+    /// Registered sequencer (set by verifier from portal.sequencer; not prover-controlled)
     pub sequencer: Address,
 }
 
@@ -123,7 +126,10 @@ The system transactions must mirror the Solidity reference implementation:
 - `ZoneInbox.advanceTempo(tempo_header_rlp, deposits)` at the start of the block
 - `ZoneOutbox.finalizeBatch(count)` at the end of the block **only if this is the final block of the batch**
 
-User transactions may call the `TempoState` precompile to read L1 state.
+User transactions may call the `TempoState` precompile to read L1 state. User transactions
+**must not** call `ZoneInbox` or `ZoneOutbox`; those are system-only predeploys. The executor
+must reject any non-system call to these addresses and enforce exactly one `advanceTempo`
+at the start of each block and exactly one `finalizeBatch` in the final block of the batch.
 The block hash is computed from the simplified zone header:
 `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`.
 The transactions and receipts roots are computed over the full ordered list:
@@ -157,7 +163,9 @@ pub struct AccountWitness {
 }
 ```
 
-The witness only includes accounts and storage slots that will be accessed during batch execution. Standard MPT proofs allow verification against the zone state root.
+The witness only includes accounts and storage slots that will be accessed during batch execution. Standard MPT proofs allow verification against the zone state root. Any
+account or storage access not present in the witness must be treated as an error (do not
+default to zero) so the prover cannot omit non-zero state.
 
 ### Tempo State Proofs
 
@@ -168,9 +176,6 @@ pub struct BatchStateProof {
 
     /// L1 state reads with proof paths
     pub reads: Vec<L1StateRead>,
-
-    /// Tempo block headers
-    pub tempo_headers: Vec<TempoHeader>,
 }
 
 pub struct L1StateRead {
@@ -190,25 +195,21 @@ pub struct L1StateRead {
     /// Expected value
     pub value: U256,
 }
-
-pub struct TempoHeader {
-    pub number: u64,
-    pub hash: B256,
-    pub state_root: B256,
-    pub parent_hash: B256,
-    pub timestamp: u64,
-    pub rlp: Vec<u8>,
-}
 ```
 
 The `BatchStateProof` structure enables efficient proving of potentially thousands of L1 state reads across multiple zone blocks.
 
 **Binding to Tempo:**
-- For each `TempoHeader`, the prover must check `keccak256(rlp) == hash`.
-- The header chain must be continuous (`parent_hash` and `number` increments), matching `TempoState.finalizeTempo`.
-- The header fields used for proofs (`state_root`, `parent_hash`, `number`, `timestamp`) are derived by decoding `rlp` (not trusted from the witness).
-- The header for the batch's final `tempo_block_number` (from `ZoneOutbox.lastBatch.tempoBlockNumber`) must satisfy `hash == public_inputs.tempo_block_hash`.
-- Each L1 read is verified against the decoded `state_root` for its `tempo_block_number`, so reads are bound to the exact Tempo block hash.
+- Tempo headers are validated by executing `TempoState.finalizeTempo` during the system tx
+  in each zone block. The resulting `tempoBlockNumber`, `tempoBlockHash`, and
+  `tempoStateRoot` are part of the proven zone state.
+- `ZoneOutbox.lastBatch.tempoBlockNumber` must equal `public_inputs.tempo_block_number`.
+- Each L1 read is verified against the `tempoStateRoot` currently bound in `TempoState`
+  at the time of the read. The precompile must reject reads if the block is not yet bound.
+- For a given zone block, all L1 reads must use the Tempo block number finalized by that
+  block's `advanceTempo` system tx (checked against `TempoState.tempoBlockNumber()`).
+- L1 reads performed inside `advanceTempo` (e.g., deposit queue hash) must be bound to the
+  Tempo header finalized by that call.
 
 Inside execution, `TempoState.readTempoStorageSlot` is modeled to read from the current `tempoStateRoot` (derived from the finalized header), so the proof and the precompile agree on the same root.
 
@@ -269,10 +270,7 @@ Deduplicated approach:
 ```rust
 pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
     // Phase 1: Verify Tempo state proofs
-    let tempo_state = verify_tempo_proofs(
-        &witness.tempo_state_proofs,
-        witness.public_inputs.tempo_block_hash,
-    )?;
+    let tempo_state = verify_tempo_proofs(&witness.tempo_state_proofs)?;
 
     // Phase 2: Initialize zone state
     let mut zone_state = ZoneState::from_witness(&witness.initial_zone_state)?;
@@ -349,7 +347,13 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
     let tempo_hash = tempo_state
         .block_hash(last_batch.tempo_block_number)
         .ok_or(Error::InvalidProof)?;
+    if last_batch.tempo_block_hash != tempo_hash {
+        return Err(Error::InconsistentState);
+    }
     if tempo_hash != witness.public_inputs.tempo_block_hash {
+        return Err(Error::InconsistentState);
+    }
+    if last_batch.tempo_block_number != witness.public_inputs.tempo_block_number {
         return Err(Error::InconsistentState);
     }
 
@@ -375,7 +379,6 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
 
 fn verify_tempo_proofs(
     proofs: &BatchStateProof,
-    expected_tempo_block_hash: B256,
 ) -> Result<TempoStateAccessor, Error> {
     // Verify each node in pool exactly once
     let mut verified_nodes = HashMap::new();
@@ -387,35 +390,16 @@ fn verify_tempo_proofs(
         verified_nodes.insert(*claimed_hash, MptNode::decode(rlp_data)?);
     }
 
-    // Verify Tempo headers and chain continuity
-    let tempo_index = verify_tempo_headers(&proofs.tempo_headers, expected_tempo_block_hash)?;
-
-    // Pre-verify all read paths and cache results
-    let mut read_cache = HashMap::new();
+    // Index read proofs for on-demand verification during execution
+    let mut read_index = HashMap::new();
     for read in &proofs.reads {
-        let header = tempo_index
-            .get(&read.tempo_block_number)
-            .ok_or(Error::InvalidProof)?;
-
-        let value = verify_storage_proof(
-            &verified_nodes,
-            &read.node_path,
-            header.state_root,
-            read.account,
-            read.slot,
-        )?;
-
-        if value != read.value {
-            return Err(Error::InconsistentState);
-        }
-
-        read_cache.insert(
-            (read.zone_block_index, read.tempo_block_number, read.account, read.slot),
-            value,
+        read_index.insert(
+            (read.zone_block_index, read.account, read.slot),
+            read,
         );
     }
 
-    Ok(TempoStateAccessor { read_cache })
+    Ok(TempoStateAccessor { verified_nodes, read_index })
 }
 
 fn execute_zone_block(
@@ -434,7 +418,9 @@ fn execute_zone_block(
         )
         .build();
 
-    // System tx: advance Tempo and process deposits
+    // System tx: advance Tempo and process deposits.
+    // The TempoState precompile must bind reads during this call to the newly finalized
+    // Tempo header, and reject any unbound reads.
     evm.transact_commit(system_tx_advance_tempo(
         &block.tempo_header_rlp,
         &block.deposits,
@@ -442,6 +428,7 @@ fn execute_zone_block(
     .map_err(|e| Error::ExecutionError(e.to_string()))?;
 
     let finalized_tempo_number = zone_state.tempo_state_block_number()?;
+    tempo_state.bind_block(block_index, finalized_tempo_number)?;
 
     // Execute transactions
     for tx in &block.transactions {
@@ -500,14 +487,17 @@ pub extern "C" fn ecall_prove_batch(
 ## On-Chain Verification
 
 The portal contract receives:
-- `tempoBlockNumber` - validates against EIP-2935 block hash history
+- `tempoBlockNumber` - validates against EIP-2935 block hash history and passes to the verifier
 - `blockTransition` - from `BatchOutput` (block hash based)
 - `proof` - ZKVM proof or TEE attestation
 
 The verifier validates that the prover correctly executed the state transition and produced the output commitments.
 In particular, the proof must enforce:
-- `TempoState.tempoBlockHash == tempoBlockHash` from the portal (EIP-2935)
+- `TempoState.tempoBlockHash == tempoBlockHash` from the portal (EIP-2935) for `tempoBlockNumber`
+- `ZoneOutbox.lastBatch.tempoBlockNumber == tempoBlockNumber`
 - `ZoneOutbox.lastBatch()` fields (batchIndex, tempoBlockNumber, tempoBlockHash, withdrawalQueueHash)
 - `lastBatch.batchIndex == portal.batchIndex + 1` (the batch ends with `finalizeBatch` in the final block)
+- Zone block `beneficiary` equals the registered sequencer (verifier reads `portal.sequencer` via `msg.sender`)
+- `public_inputs.sequencer` is set by the verifier from `portal.sequencer` (not prover-controlled)
 - `DepositQueueTransition` matches `ZoneInbox.processedDepositQueueHash` changes
 - `BlockTransition` is computed from the zone block header hash (not raw state root)

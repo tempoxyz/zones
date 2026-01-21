@@ -98,6 +98,7 @@ contract ZoneInbox {
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the deposit queue
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    ///      Protocol and proof enforce this runs at the start of each block.
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
     function advanceTempo(
