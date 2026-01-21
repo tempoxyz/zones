@@ -72,7 +72,7 @@ The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-
 
 Each batch submission includes:
 
-- `tempoBlockNumber` (the Tempo block number for blockhash verification)
+- `tempoBlockNumber` (the Tempo block number for EIP-2935 block hash history verification)
 - `nextBlockHash` (the zone block hash after execution)
 - `batchBlockNumber` (the zone block number of this batch, from the `BatchFinalized` event)
 - `withdrawalQueueHash` (hash chain of withdrawals for this batch, or 0 if none)
@@ -80,6 +80,8 @@ Each batch submission includes:
 - `proof` (validity proof or TEE attestation)
 
 The portal tracks `blockHash` and `blockNumber` (the last proven batch block), `lastSyncedTempoBlockNumber` (the Tempo block the zone has synced to), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
+
+If `tempoBlockNumber` falls outside the EIP-2935 history window, batch submission must use a recursive proof or checkpointed proof that anchors to a newer block (TODO).
 
 The portal calls the verifier to validate the batch:
 
@@ -291,7 +293,7 @@ interface IVerifier {
 }
 ```
 
-The verifier receives the `tempoBlockHash` (looked up on-chain via `blockhash(tempoBlockNumber)`), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that `ZoneOutbox.lastBatch()` contains the correct `batchIndex` and batch parameters (read from state root, not events).
+The verifier receives the `tempoBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that `ZoneOutbox.lastBatch()` contains the correct `batchIndex` and batch parameters (read from state root, not events).
 
 ### Queue libraries
 
@@ -538,11 +540,11 @@ The TempoState stores the **complete Tempo block header** since the proof must v
 **How it works:**
 
 1. The sequencer submits Tempo block headers via `finalizeTempo()`, which decodes the RLP header, validates chain continuity, and stores all fields.
-2. When submitting a batch, the prover specifies a `tempoBlockNumber`. The portal calls `blockhash(tempoBlockNumber)` to get the actual hash.
+2. When submitting a batch, the prover specifies a `tempoBlockNumber`. The portal reads the hash via the EIP-2935 block hash history precompile.
 3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the value passed by the portal.
 4. The `readTempoStorageSlot` functions are precompile stubs - actual implementation is in the zone node, validated against `tempoStateRoot`.
 
-Tempo state staleness depends on how frequently the sequencer calls `finalizeTempo()`. The prover includes Merkle proofs for each unique account and storage slot accessed during the batch.
+Tempo state staleness depends on how frequently the sequencer calls `finalizeTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed during the batch.
 
 #### TIP-403 registry
 
@@ -957,7 +959,23 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
   - **Omitted fields**: `gasLimit`, `gasUsed` (zones have no hard gas limit), `logsBloom`, `extraData` (not needed for proofs)
 - **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
 - **Receipts root**: Committed in the block hash but not proven on-chain. Batch parameters are read from `lastBatch` state storage instead of event logs.
-- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from `blockhash(tempoBlockNumber)`.
+- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from the EIP-2935 history precompile.
+
+#### Block header field coverage
+
+| Field | In Hash | Proven | How verified |
+|-------|---------|--------|--------------|
+| `parentHash` | ✓ | ✓ | Portal checks `prevBlockHash == blockHash`; proof validates chain continuity |
+| `beneficiary` | ✓ | ✓ | Proof validates beneficiary matches the registered sequencer address |
+| `stateRoot` | ✓ | ✓ | Core of proof; `lastBatch` and other state reads validated against this |
+| `transactionsRoot` | ✓ | ✗ | Committed but not proven on-chain; prevents sequencer revisionism |
+| `receiptsRoot` | ✓ | ✗ | Committed but not proven on-chain; batch params read from state instead |
+| `number` | ✓ | ✓ | Verified via `lastBatch.batchBlockNumber` in state |
+| `timestamp` | ✓ | ✓ | Proof validates timestamp is monotonically increasing from previous block |
+| `gasLimit` | ✗ | N/A | Omitted — zones have no hard gas limit |
+| `gasUsed` | ✗ | N/A | Omitted — zones have no hard gas limit |
+| `logsBloom` | ✗ | N/A | Omitted — not needed for proofs |
+| `extraData` | ✗ | N/A | Omitted — not needed for proofs |
 
 ### Batching and proofs
 
@@ -976,7 +994,7 @@ struct BatchProof {
     bytes proof;                  // SP1 proof bytes (or TEE attestation)
 }
 ```
-The portal provides `blockHash` and `batchIndex` as the previous batch's values. The proof reads batch parameters from `ZoneOutbox.lastBatch()` state storage and validates that `TempoState.tempoBlockHash()` matches `blockhash(tempoBlockNumber)`.
+The portal provides `blockHash` and `batchIndex` as the previous batch's values. The proof reads batch parameters from `ZoneOutbox.lastBatch()` state storage and validates that `TempoState.tempoBlockHash()` matches the EIP-2935 history precompile value for `tempoBlockNumber`.
 
 ### Deposits and withdrawals
 

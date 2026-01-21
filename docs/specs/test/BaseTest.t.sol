@@ -8,6 +8,7 @@ import { StablecoinDEX } from "../src/StablecoinDEX.sol";
 import { TIP20 } from "../src/TIP20.sol";
 import { TIP20Factory } from "../src/TIP20Factory.sol";
 import { TIP403Registry } from "../src/TIP403Registry.sol";
+import { BLOCKHASH_HISTORY } from "../src/zone/BlockHashHistory.sol";
 import { IAccountKeychain } from "../src/interfaces/IAccountKeychain.sol";
 import { INonce } from "../src/interfaces/INonce.sol";
 import { ITIP20 } from "../src/interfaces/ITIP20.sol";
@@ -27,6 +28,7 @@ contract BaseTest is Test {
     address internal constant _FEE_AMM = 0xfeEC000000000000000000000000000000000000;
     address internal constant _NONCE = 0x4e4F4E4345000000000000000000000000000000;
     address internal constant _VALIDATOR_CONFIG = 0xCccCcCCC00000000000000000000000000000000;
+    address internal constant _BLOCKHASH_HISTORY = BLOCKHASH_HISTORY;
 
     // Role constants
     bytes32 internal constant _ISSUER_ROLE = keccak256("ISSUER_ROLE");
@@ -82,6 +84,7 @@ contract BaseTest is Test {
             deployCodeTo("Nonce", _NONCE);
             // Deploy ValidatorConfig with admin as owner
             deployCodeTo("ValidatorConfig.sol", abi.encode(admin), _VALIDATOR_CONFIG);
+            deployCodeTo("BlockHashHistory", _BLOCKHASH_HISTORY);
         }
 
         if (isTempo) {
@@ -108,6 +111,9 @@ contract BaseTest is Test {
             }
             if (_VALIDATOR_CONFIG.code.length == 0) {
                 revert MissingPrecompile("ValidatorConfig", _VALIDATOR_CONFIG);
+            }
+            if (_BLOCKHASH_HISTORY.code.length == 0) {
+                revert MissingPrecompile("BlockHashHistory", _BLOCKHASH_HISTORY);
             }
 
             // Set ValidatorConfig owner to admin via direct storage write

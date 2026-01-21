@@ -14,6 +14,7 @@ import {
 } from "./IZone.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
+import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows gas tokens on Tempo and manages deposits/withdrawals
@@ -199,14 +200,12 @@ contract ZonePortal is IZonePortal {
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external onlySequencer {
-        // Validate tempoBlockNumber is within valid range for blockhash lookup
-        // blockhash() only works for the last 256 blocks
+        // Validate tempoBlockNumber is within valid range for history lookup
         if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
         if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
-        if (block.number - tempoBlockNumber > 256) revert InvalidTempoBlockNumber();
 
-        // Look up the actual Tempo block hash
-        bytes32 tempoBlockHash = blockhash(tempoBlockNumber);
+        // Look up the actual Tempo block hash via EIP-2935 history precompile
+        bytes32 tempoBlockHash = IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(tempoBlockNumber);
         if (tempoBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
 
         // Call verifier with tempoBlockHash
@@ -230,6 +229,7 @@ contract ZonePortal is IZonePortal {
         lastSyncedTempoBlockNumber = tempoBlockNumber;
 
         // Update withdrawal queue - each batch gets its own slot
+        // Gas note: charge new storage only when (tail - head) exceeds maxSize.
         _withdrawalQueue.enqueue(withdrawalQueueTransition);
 
         // Emit event after state updates

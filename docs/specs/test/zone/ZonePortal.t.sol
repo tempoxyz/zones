@@ -235,7 +235,7 @@ contract ZonePortalTest is BaseTest {
         // Submit a batch (as sequencer)
         bytes32 newStateRoot = keccak256("newState");
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         portal.submitBatch(
@@ -254,7 +254,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_submitBatch_revertsIfNotSequencer() public {
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         bytes32 nextStateRoot = keccak256("state");
@@ -273,7 +273,7 @@ contract ZonePortalTest is BaseTest {
     function test_submitBatch_revertsOnInvalidProof() public {
         mockVerifier.setShouldAccept(false);
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         bytes32 nextStateRoot = keccak256("state");
@@ -314,7 +314,7 @@ contract ZonePortalTest is BaseTest {
         // Build withdrawal hash (oldest = outermost, innermost = EMPTY_SENTINEL)
         bytes32 withdrawalHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         // Submit batch that adds withdrawal to slot 0
@@ -363,7 +363,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
         bytes32 batchQueueHash = keccak256(abi.encode(w1, innerHash));
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         // Submit batch adding both withdrawals to slot 0
@@ -500,7 +500,7 @@ contract ZonePortalTest is BaseTest {
         });
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         // Submit batch adding withdrawal
@@ -548,7 +548,7 @@ contract ZonePortalTest is BaseTest {
         });
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         // Submit batch
@@ -595,7 +595,7 @@ contract ZonePortalTest is BaseTest {
         });
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         portal.submitBatch(
@@ -641,7 +641,7 @@ contract ZonePortalTest is BaseTest {
         });
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         portal.submitBatch(
@@ -674,7 +674,7 @@ contract ZonePortalTest is BaseTest {
         });
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         portal.submitBatch(
@@ -714,7 +714,7 @@ contract ZonePortalTest is BaseTest {
         // currentDepositQueueHash should be h2 (latest)
         assertEq(portal.currentDepositQueueHash(), h2);
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         // Submit batch - portal no longer tracks processed, just updates lastSyncedTempoBlockNumber

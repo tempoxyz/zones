@@ -18,6 +18,7 @@ import {
 } from "../../src/zone/IZone.sol";
 import { DepositQueueLib } from "../../src/zone/DepositQueueLib.sol";
 import { WithdrawalQueueLib, EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
+import { BLOCKHASH_HISTORY_WINDOW } from "../../src/zone/BlockHashHistory.sol";
 
 /// @notice Mock receiver that consumes all gas
 contract GasConsumingReceiver is IWithdrawalReceiver {
@@ -157,12 +158,12 @@ contract ZonePortalExtendedTest is BaseTest {
     }
 
     function test_submitBatch_revertsIfTempoBlockNumberTooOld() public {
-        // Advance more than 256 blocks
-        vm.roll(block.number + 300);
+        // Advance beyond the EIP-2935 history window
+        vm.roll(block.number + BLOCKHASH_HISTORY_WINDOW + 1);
 
         vm.expectRevert(IZonePortal.InvalidTempoBlockNumber.selector);
         portal.submitBatch(
-            genesisTempoBlockNumber, // Valid but > 256 blocks ago
+            genesisTempoBlockNumber, // Valid but beyond history window
             BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("state") }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0) }),
             WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
@@ -171,11 +172,11 @@ contract ZonePortalExtendedTest is BaseTest {
         );
     }
 
-    function test_submitBatch_succeedsAtBoundary256Blocks() public {
-        // Advance exactly 256 blocks
-        vm.roll(genesisTempoBlockNumber + 256);
+    function test_submitBatch_succeedsAtHistoryWindowBoundary() public {
+        // Advance exactly to the history window boundary
+        vm.roll(genesisTempoBlockNumber + BLOCKHASH_HISTORY_WINDOW);
 
-        // Should still work at exactly 256 blocks
+        // Should still work at the window boundary
         portal.submitBatch(
             genesisTempoBlockNumber,
             BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("state") }),

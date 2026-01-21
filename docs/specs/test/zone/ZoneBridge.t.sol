@@ -259,7 +259,7 @@ contract ZoneBridgeTest is BaseTest {
         vm.prank(admin);
         bytes32 withdrawalQueueHash = l2Outbox.finalizeBatch(type(uint256).max);
 
-        // Advance a block so we can use blockhash
+        // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
 
         // Submit to Tempo
