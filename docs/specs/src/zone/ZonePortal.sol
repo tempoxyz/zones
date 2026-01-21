@@ -223,6 +223,7 @@ contract ZonePortal is IZonePortal {
         // Call verifier with tempoBlockHash
         // The proof reads currentDepositQueueHash from Tempo state to validate ancestry
         bool valid = IVerifier(verifier).verify(
+            tempoBlockNumber,
             tempoBlockHash,
             blockTransition,
             depositQueueTransition,

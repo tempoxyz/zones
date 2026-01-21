@@ -18,6 +18,7 @@ contract MockVerifier is IVerifier {
     }
 
     function verify(
+        uint64, // tempoBlockNumber
         bytes32, // tempoBlockHash
         BlockTransition calldata,
         DepositQueueTransition calldata,
