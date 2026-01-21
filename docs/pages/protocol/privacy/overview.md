@@ -52,7 +52,7 @@ A zone is created via `ZoneFactory.createZone(...)` with:
 - `token`: the Tempo TIP-20 address to bridge. This is the only bridged token and the gas token.
 - `sequencer`: permissioned sequencer address.
 - `verifier`: `IVerifier` implementation for proof or attestation.
-- `zoneParams`: initial configuration (genesis block hash, fee parameters).
+- `zoneParams`: initial configuration (genesis block hash, genesis Tempo block hash/number).
 
 The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone genesis includes the portal address and the gas token configuration.
 
@@ -66,20 +66,19 @@ The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone
 
 The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-only) that:
 
-1. Verifies the proof/attestation for the state transition (including batch chain integrity via `prevBatchBlockNumber`).
-2. Updates the portal's `blockHash`, `blockNumber`, and `lastSyncedTempoBlockNumber`.
+1. Verifies the proof/attestation for the state transition (including chain integrity via `prevBlockHash`).
+2. Updates the portal's `batchIndex`, `blockHash`, and `lastSyncedTempoBlockNumber`.
 3. Updates the withdrawal queue (adds new withdrawals to the next slot in the unbounded buffer).
 
 Each batch submission includes:
 
 - `tempoBlockNumber` (the Tempo block number for EIP-2935 block hash history verification)
 - `nextBlockHash` (the zone block hash after execution)
-- `batchBlockNumber` (the zone block number of this batch, from the `BatchFinalized` event)
 - `withdrawalQueueHash` (hash chain of withdrawals for this batch, or 0 if none)
 - `verifierConfig` (opaque payload forwarded to the verifier for domain separation/attestation needs)
 - `proof` (validity proof or TEE attestation)
 
-The portal tracks `blockHash` and `blockNumber` (the last proven batch block), `lastSyncedTempoBlockNumber` (the Tempo block the zone has synced to), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
+The portal tracks `batchIndex`, `blockHash` (the last proven batch block), `lastSyncedTempoBlockNumber` (the Tempo block the zone has synced to), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
 
 If `tempoBlockNumber` falls outside the EIP-2935 history window, batch submission must use a recursive proof or checkpointed proof that anchors to a newer block (TODO).
 
@@ -95,7 +94,7 @@ struct BlockTransition {
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
-///      that nextProcessedHash is a valid ancestor. No ceiling needed on-chain.
+///      that nextProcessedHash matches currentDepositQueueHash for now. TODO: allow ancestor checks.
 struct DepositQueueTransition {
     bytes32 prevProcessedHash;     // where proof starts (verified against zone state)
     bytes32 nextProcessedHash;     // where zone processed up to (proof output)
@@ -134,7 +133,7 @@ The zone has access to Tempo state via the TempoState predeploy, so the proof ca
 
 `verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
 
-`submitBatch` verifies that `prevBlockHash == blockHash`, then calls the verifier. On success it updates `batchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with every verifier input/output (except the proof bytes) so off-chain observers can audit the batch.
+`submitBatch` verifies that `prevBlockHash == blockHash`, then calls the verifier. On success it updates `batchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with `batchIndex`, `nextProcessedDepositQueueHash`, `nextBlockHash`, and `withdrawalQueueHash` for off-chain auditing.
 
 ### Deposit queue
 
@@ -148,7 +147,7 @@ Where `deposit` is a `Deposit` struct containing the sender, recipient, amount, 
 
 The portal tracks `currentDepositQueueHash` where new deposits land. The zone tracks its own `processedDepositQueueHash` in EVM state.
 
-**Proof requirements**: The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof. The zone's `advanceTempo()` function processes deposits and updates the zone's `processedDepositQueueHash`. The proof ensures this was done correctly by validating the Tempo state read.
+**Proof requirements**: The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof. The zone's `advanceTempo()` function processes deposits and updates the zone's `processedDepositQueueHash`. The proof ensures this was done correctly by validating the Tempo state read. For now, the on-chain inbox requires an exact match; TODO: implement a recursive ancestor check in the proof or on-chain as a fallback.
 
 **After batch accepted**:
 1. `lastSyncedTempoBlockNumber = tempoBlockNumber` (record how far Tempo state was synced)
@@ -260,6 +259,12 @@ struct ZoneInfo {
     uint64 genesisTempoBlockNumber;
 }
 
+struct ZoneParams {
+    bytes32 genesisBlockHash;
+    bytes32 genesisTempoBlockHash;
+    uint64 genesisTempoBlockNumber;
+}
+
 struct Deposit {
     address sender;
     address to;
@@ -365,9 +370,7 @@ interface IZoneFactory {
         address token;
         address sequencer;
         address verifier;
-        bytes32 genesisBlockHash;
-        bytes32 genesisTempoBlockHash;
-        uint64 genesisTempoBlockNumber;
+        ZoneParams zoneParams;
     }
 
     event ZoneCreated(
@@ -403,10 +406,8 @@ interface IZonePortal {
 
     event BatchSubmitted(
         uint64 indexed batchIndex,
-        uint64 tempoBlockNumber,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
-        uint256 withdrawalQueueTail,
         bytes32 withdrawalQueueHash
     );
 
@@ -478,8 +479,8 @@ interface IZoneMessenger {
     function relayMessage(
         address sender,
         address target,
-        uint256 amount,
-        uint256 gasLimit,
+        uint128 amount,
+        uint64 gasLimit,
         bytes calldata data
     ) external;
 }
@@ -605,7 +606,6 @@ struct LastBatch {
     uint64 tempoBlockNumber;
     bytes32 tempoBlockHash;
     uint64 batchIndex;
-    uint64 batchBlockNumber;
 }
 
 interface IZoneOutbox {
@@ -626,8 +626,7 @@ interface IZoneOutbox {
         bytes32 indexed withdrawalQueueHash,
         uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
-        uint64 batchIndex,
-        uint64 batchBlockNumber
+        uint64 batchIndex
     );
 
     /// @notice The gas token address (same as L1 portal's token).
@@ -734,7 +733,7 @@ Adding d4: currentDepositQueueHash = keccak256(abi.encode(deposit4, currentDepos
 ```
 
 - **On-chain addition is O(1)**: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))` — wrap the outside.
-- **Zone processing**: The zone's `advanceTempo()` processes deposits in FIFO order (oldest first, working outward from its `processedDepositQueueHash`), and validates the result is an ancestor of `currentDepositQueueHash` (read from Tempo state).
+- **Zone processing**: The zone's `advanceTempo()` processes deposits in FIFO order (oldest first, working outward from its `processedDepositQueueHash`), and validates the result matches `currentDepositQueueHash` (read from Tempo state). TODO: implement a recursive ancestor check in the proof or on-chain as a fallback.
 - **After batch**: L1 updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced.
 
 ### Withdrawal queue: oldest-outermost per slot
@@ -798,13 +797,13 @@ Notes:
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
 - The portal only stores `currentDepositQueueHash`, not individual deposits. The sequencer must track deposits off-chain.
 - Tempo state advancement is combined with deposit processing in `ZoneInbox.advanceTempo()`, which calls `TempoState.finalizeTempo()` internally.
-- The proof validates ancestry by reading `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits.
+- The proof validates an exact match to `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits. TODO: implement a recursive ancestor check in the proof or on-chain as a fallback.
 
 ## Bridging out (zone to Tempo)
 
 Users withdraw by creating a withdrawal on the zone. Withdrawals are processed in two steps:
 
-1. **Batch submission**: The sequencer calls `finalizeBatch()` on the zone, which constructs the withdrawal hash and emits a `BatchFinalized` event with the current `batchIndex`. The proof validates this event and adds the withdrawal hash to L1's queue.
+1. **Batch submission**: The sequencer calls `finalizeBatch()` on the zone, which constructs the withdrawal hash and emits a `BatchFinalized` event with the current `batchIndex`. The proof validates `ZoneOutbox.lastBatch()` state and adds the withdrawal hash to L1's queue.
 2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from the oldest slot (`head`).
 
 The `batchIndex` ensures batches are submitted in order: each batch's `batchIndex` must match the L1 portal's expected next batch. This prevents the sequencer from omitting batches that contain withdrawals.
@@ -880,24 +879,17 @@ The zone processes bounce-back deposits and credits the `fallbackRecipient`. Thi
 - If the sequencer withholds data or halts, users cannot reconstruct zone state or force exits; batch posting and withdrawal processing are sequencer-only.
 - The design assumes users accept this risk in exchange for low-cost and fast settlement.
 
-## Bounce-back on failure
+## Withdrawal failure details
 
-Both deposits and withdrawals can fail for various reasons. The system handles all failures gracefully via bounce-back:
+Withdrawals can fail for various reasons. The system handles failures gracefully via bounce-back:
 
 ### Failure reasons
 
-Bridging operations can fail due to:
+Withdrawals can fail due to:
 - **TIP-403 policy**: Recipient not authorized under the token's transfer policy
 - **Token paused**: The gas token is globally paused
 - **Callback revert**: The receiver contract reverts (out of gas, logic error, etc.)
 - **Callback rejection**: Receiver returns wrong selector
-
-### Deposit failures (zone-side)
-
-When a deposit fails on the zone:
-1. The zone cannot credit the recipient or the callback reverts
-2. The zone enqueues a withdrawal back to the original `sender` on L1
-3. Funds return to L1 via the normal withdrawal flow
 
 ### Withdrawal failures (L1-side)
 
@@ -923,9 +915,9 @@ Zone creators SHOULD choose gas tokens with `transferPolicyId == 1` to avoid com
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
 - Withdrawals with callbacks go through the zone messenger with a user-specified gas limit. The messenger does `transferFrom` + callback atomically; failed callbacks trigger a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
-- **Bounce-back guarantees**: Failed deposits bounce back to L1 sender; failed withdrawals bounce back to zone `fallbackRecipient`. Users always retain their funds.
-- **TIP-403 policy changes**: If the gas token's policy restricts the portal, operations will fail and bounce back.
-- **Token pause**: If the gas token is paused, withdrawals bounce back to zone; deposits cannot be initiated.
+- **Bounce-back guarantees**: Failed withdrawals bounce back to zone `fallbackRecipient`. Users always retain their funds.
+- **TIP-403 policy changes**: If the gas token's policy restricts the portal, withdrawals will fail and bounce back.
+- **Token pause**: If the gas token is paused, withdrawals bounce back to zone.
 
 ## Implementation architecture
 
@@ -970,7 +962,7 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 | `stateRoot` | ✓ | ✓ | Core of proof; `lastBatch` and other state reads validated against this |
 | `transactionsRoot` | ✓ | ✗ | Committed but not proven on-chain; prevents sequencer revisionism |
 | `receiptsRoot` | ✓ | ✗ | Committed but not proven on-chain; batch params read from state instead |
-| `number` | ✓ | ✓ | Verified via `lastBatch.batchBlockNumber` in state |
+| `number` | ✓ | ✓ | Proof validates block number as part of the header transition |
 | `timestamp` | ✓ | ✓ | Proof validates timestamp is monotonically increasing from previous block |
 | `gasLimit` | ✗ | N/A | Omitted — zones have no hard gas limit |
 | `gasUsed` | ✗ | N/A | Omitted — zones have no hard gas limit |

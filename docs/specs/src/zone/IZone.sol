@@ -14,6 +14,13 @@ struct ZoneInfo {
     uint64 genesisTempoBlockNumber;
 }
 
+/// @notice Zone creation parameters stored in genesis
+struct ZoneParams {
+    bytes32 genesisBlockHash;
+    bytes32 genesisTempoBlockHash;
+    uint64 genesisTempoBlockNumber;
+}
+
 /// @notice Block transition for zone batch proofs
 /// @dev Uses block hash instead of state root to commit to full block structure
 ///      (includes state root, transactions root, receipts root, etc.)
@@ -24,7 +31,7 @@ struct BlockTransition {
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
-///      that nextProcessedHash is a valid ancestor. No ceiling needed on-chain.
+///      that nextProcessedHash matches currentDepositQueueHash for now. TODO: allow ancestor checks.
 struct DepositQueueTransition {
     bytes32 prevProcessedHash;     // where proof starts (verified against on-chain state)
     bytes32 nextProcessedHash;     // where zone processed up to (proof output)
@@ -74,9 +81,7 @@ interface IZoneFactory {
         address token;
         address sequencer;
         address verifier;
-        bytes32 genesisBlockHash;
-        bytes32 genesisTempoBlockHash;
-        uint64 genesisTempoBlockNumber;
+        ZoneParams zoneParams;
     }
 
     event ZoneCreated(
@@ -114,10 +119,8 @@ interface IZonePortal {
 
     event BatchSubmitted(
         uint64 indexed batchIndex,
-        uint64 tempoBlockNumber,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
-        uint256 withdrawalQueueTail,
         bytes32 withdrawalQueueHash
     );
 
@@ -189,14 +192,13 @@ interface IZoneMessenger {
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
-    /// @return success Whether the callback was successful
     function relayMessage(
         address sender,
         address target,
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    ) external returns (bool success);
+    ) external;
 }
 
 /// @title IWithdrawalReceiver
@@ -217,7 +219,6 @@ struct LastBatch {
     uint64 tempoBlockNumber;
     bytes32 tempoBlockHash;
     uint64 batchIndex;
-    uint64 batchBlockNumber;
 }
 
 /// @title IZoneOutbox
@@ -229,8 +230,7 @@ interface IZoneOutbox {
         bytes32 indexed withdrawalQueueHash,
         uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
-        uint64 batchIndex,
-        uint64 batchBlockNumber
+        uint64 batchIndex
     );
 
     /// @notice Request a withdrawal from the zone back to Tempo

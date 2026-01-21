@@ -131,8 +131,8 @@ contract ZoneInbox {
             CURRENT_DEPOSIT_QUEUE_HASH_SLOT
         );
 
-        // Our processed hash must be an ancestor of (or equal to) Tempo's current hash
-        // For now, we require exact match - partial processing can be added later
+        // Our processed hash must match Tempo's current hash for now.
+        // TODO: Implement recursive ancestor check in proof or on-chain as a fallback.
         if (currentHash != tempoCurrentHash) {
             revert InvalidDepositQueueHash();
         }

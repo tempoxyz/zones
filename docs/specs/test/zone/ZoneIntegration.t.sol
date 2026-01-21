@@ -14,6 +14,7 @@ import {
     IZoneFactory,
     IZonePortal,
     IWithdrawalReceiver,
+    ZoneParams,
     Deposit,
     Withdrawal,
     BlockTransition,
@@ -86,9 +87,11 @@ contract ZoneIntegrationTest is BaseTest {
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(l1Verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: genesisTempoBlockNumber
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: genesisTempoBlockNumber
+            })
         });
         address portalAddr;
         (zoneId, portalAddr) = l1Factory.createZone(params);
@@ -174,7 +177,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
-            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("s1") }),
+            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1") }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: d1 }),
             WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
@@ -239,7 +242,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
-            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("state") }),
+            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("state") }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
             WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalHash }),
             "",
@@ -294,7 +297,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
-            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("s1") }),
+            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1") }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
             WithdrawalQueueTransition({ withdrawalQueueHash: wHash1 }),
             "",
@@ -312,7 +315,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
-            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("s2") }),
+            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s2") }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
             WithdrawalQueueTransition({ withdrawalQueueHash: wHash2 }),
             "",
@@ -330,7 +333,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
-            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("s3") }),
+            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s3") }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
             WithdrawalQueueTransition({ withdrawalQueueHash: wHash3 }),
             "",
@@ -422,7 +425,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
-            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: keccak256("s1") }),
+            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1") }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: d2 }),
             WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",

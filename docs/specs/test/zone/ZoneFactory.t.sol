@@ -8,7 +8,7 @@ import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { TIP20 } from "../../src/TIP20.sol";
-import { IZoneFactory, ZoneInfo } from "../../src/zone/IZone.sol";
+import { IZoneFactory, ZoneInfo, ZoneParams } from "../../src/zone/IZone.sol";
 
 /// @title ZoneFactoryTest
 /// @notice Comprehensive tests for ZoneFactory validation and zone creation
@@ -34,9 +34,11 @@ contract ZoneFactoryTest is BaseTest {
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         (uint64 zoneId, address portal) = zoneFactory.createZone(params);
@@ -62,9 +64,11 @@ contract ZoneFactoryTest is BaseTest {
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         (uint64 zoneId, address portal) = zoneFactory.createZone(params);
@@ -87,9 +91,11 @@ contract ZoneFactoryTest is BaseTest {
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         (uint64 zoneId1, address portal1) = zoneFactory.createZone(params1);
@@ -98,9 +104,11 @@ contract ZoneFactoryTest is BaseTest {
             token: address(pathUSD),
             sequencer: alice,
             verifier: address(verifier),
-            genesisBlockHash: keccak256("genesis2"),
-            genesisTempoBlockHash: keccak256("tempoGenesis2"),
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: keccak256("genesis2"),
+                genesisTempoBlockHash: keccak256("tempoGenesis2"),
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         (uint64 zoneId2, address portal2) = zoneFactory.createZone(params2);
@@ -123,9 +131,11 @@ contract ZoneFactoryTest is BaseTest {
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         // Record logs and verify ZoneCreated event was emitted
@@ -161,9 +171,11 @@ contract ZoneFactoryTest is BaseTest {
             token: address(0),
             sequencer: admin,
             verifier: address(verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -178,9 +190,11 @@ contract ZoneFactoryTest is BaseTest {
             token: notTip20,
             sequencer: admin,
             verifier: address(verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -192,9 +206,11 @@ contract ZoneFactoryTest is BaseTest {
             token: alice, // EOA, not a contract
             sequencer: admin,
             verifier: address(verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -210,9 +226,11 @@ contract ZoneFactoryTest is BaseTest {
             token: address(pathUSD),
             sequencer: address(0),
             verifier: address(verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         vm.expectRevert(IZoneFactory.InvalidSequencer.selector);
@@ -228,9 +246,11 @@ contract ZoneFactoryTest is BaseTest {
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(0),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: uint64(block.number)
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            })
         });
 
         vm.expectRevert(IZoneFactory.InvalidVerifier.selector);

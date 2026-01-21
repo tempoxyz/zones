@@ -40,6 +40,7 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Pending withdrawals waiting to be batched
     Withdrawal[] internal _pendingWithdrawals;
+    uint256 internal _pendingWithdrawalsHead;
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -157,7 +158,7 @@ contract ZoneOutbox is IZoneOutbox {
     function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
         if (msg.sender != sequencer) revert OnlySequencer();
 
-        uint256 pending = _pendingWithdrawals.length;
+        uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
 
         // Clamp to actual pending count
         if (count > pending) {
@@ -165,16 +166,27 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         // Build hash chain in reverse order (newest to oldest)
-        // So oldest ends up outermost, matching L1 expectations
+        // So oldest ends up outermost, matching L1 expectations.
+        // Process the oldest withdrawals first (FIFO).
         if (count > 0) {
             withdrawalQueueHash = EMPTY_SENTINEL;
 
-            for (uint256 i = 0; i < count; ) {
-                // Always read from current end (array shrinks each iteration)
-                Withdrawal memory w = _pendingWithdrawals[_pendingWithdrawals.length - 1];
+            uint256 start = _pendingWithdrawalsHead;
+            uint256 end = start + count;
+
+            for (uint256 i = end; i > start; ) {
+                uint256 index = i - 1;
+                Withdrawal memory w = _pendingWithdrawals[index];
                 withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
-                _pendingWithdrawals.pop();
-                unchecked { i++; }
+                delete _pendingWithdrawals[index];
+                unchecked { i--; }
+            }
+
+            _pendingWithdrawalsHead = end;
+
+            if (_pendingWithdrawalsHead == _pendingWithdrawals.length) {
+                delete _pendingWithdrawals;
+                _pendingWithdrawalsHead = 0;
             }
         }
 
@@ -184,15 +196,12 @@ contract ZoneOutbox is IZoneOutbox {
         // Capture current values
         uint64 tempoBlockNumber = tempoState.tempoBlockNumber();
         bytes32 tempoBlockHash = tempoState.tempoBlockHash();
-        uint64 batchBlockNumber = uint64(block.number);
-
         // Write batch parameters to state (for proof access via state root)
         _lastBatch = LastBatch({
             withdrawalQueueHash: withdrawalQueueHash,
             tempoBlockNumber: tempoBlockNumber,
             tempoBlockHash: tempoBlockHash,
-            batchIndex: currentBatchIndex,
-            batchBlockNumber: batchBlockNumber
+            batchIndex: currentBatchIndex
         });
 
         // Emit event for observability (proof reads from state, not events)
@@ -200,14 +209,16 @@ contract ZoneOutbox is IZoneOutbox {
             withdrawalQueueHash,
             tempoBlockNumber,
             tempoBlockHash,
-            currentBatchIndex,
-            batchBlockNumber
+            currentBatchIndex
         );
     }
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
-        return _pendingWithdrawals.length;
+        if (_pendingWithdrawalsHead >= _pendingWithdrawals.length) {
+            return 0;
+        }
+        return _pendingWithdrawals.length - _pendingWithdrawalsHead;
     }
 
     /// @notice Last finalized batch parameters (for proof access via state root)

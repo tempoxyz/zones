@@ -7,9 +7,9 @@ import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { Deposit } from "../../src/zone/IZone.sol";
 
-/// @title ZoneInboxExtendedTest
-/// @notice Extended tests for ZoneInbox covering edge cases
-contract ZoneInboxExtendedTest is Test {
+/// @title ZoneInboxTest
+/// @notice Tests for ZoneInbox covering edge cases
+contract ZoneInboxTest is Test {
     ZoneInbox public inbox;
     MockZoneGasToken public gasToken;
     MockTempoState public tempoState;

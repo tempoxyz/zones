@@ -14,6 +14,7 @@ import {
     IZoneFactory,
     IZonePortal,
     IWithdrawalReceiver,
+    ZoneParams,
     Deposit,
     Withdrawal,
     BlockTransition,
@@ -123,9 +124,11 @@ contract ZoneBridgeTest is BaseTest {
             token: address(pathUSD),
             sequencer: admin,
             verifier: address(l1Verifier),
-            genesisBlockHash: GENESIS_BLOCK_HASH,
-            genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-            genesisTempoBlockNumber: genesisTempoBlockNumber
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: genesisTempoBlockNumber
+            })
         });
         address portalAddr;
         (zoneId, portalAddr) = l1Factory.createZone(params);
@@ -265,7 +268,7 @@ contract ZoneBridgeTest is BaseTest {
         // Submit to Tempo
         l1Portal.submitBatch(
             uint64(block.number - 1),
-            BlockTransition({ prevBlockHash: bytes32(0), nextBlockHash: l2BlockHash }),
+            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: l2BlockHash }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash }),
             WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalQueueHash }),
             "",

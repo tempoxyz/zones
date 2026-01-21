@@ -149,23 +149,33 @@ contract ZonePortal is IZonePortal {
         // Execute the withdrawal
         if (withdrawal.gasLimit == 0) {
             // Simple transfer, no callback
-            ITIP20(token).transfer(withdrawal.to, withdrawal.amount);
+            bool success;
+            try ITIP20(token).transfer(withdrawal.to, withdrawal.amount) returns (bool ok) {
+                success = ok;
+            } catch {
+                success = false;
+            }
+
+            if (!success) {
+                _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient);
+                emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, false);
+                return;
+            }
+
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
             return;
         }
 
-        // Try callback via messenger
-        bool success = IZoneMessenger(messenger).relayMessage(
+        // Try callback via messenger; revert is treated as failure
+        try IZoneMessenger(messenger).relayMessage(
             withdrawal.sender,
             withdrawal.to,
             withdrawal.amount,
             withdrawal.gasLimit,
             withdrawal.callbackData
-        );
-
-        if (success) {
+        ) {
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
-        } else {
+        } catch {
             // Callback failed: bounce back to zone
             _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient);
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, false);
@@ -200,6 +210,8 @@ contract ZonePortal is IZonePortal {
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external onlySequencer {
+        if (blockTransition.prevBlockHash != blockHash) revert InvalidProof();
+
         // Validate tempoBlockNumber is within valid range for history lookup
         if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
         if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
@@ -212,10 +224,7 @@ contract ZonePortal is IZonePortal {
         // The proof reads currentDepositQueueHash from Tempo state to validate ancestry
         bool valid = IVerifier(verifier).verify(
             tempoBlockHash,
-            BlockTransition({
-                prevBlockHash: blockHash,
-                nextBlockHash: blockTransition.nextBlockHash
-            }),
+            blockTransition,
             depositQueueTransition,
             withdrawalQueueTransition,
             verifierConfig,
@@ -235,10 +244,8 @@ contract ZonePortal is IZonePortal {
         // Emit event after state updates
         emit BatchSubmitted(
             batchIndex,
-            tempoBlockNumber,
             depositQueueTransition.nextProcessedHash,
             blockHash,
-            _withdrawalQueue.tail,
             withdrawalQueueTransition.withdrawalQueueHash
         );
     }

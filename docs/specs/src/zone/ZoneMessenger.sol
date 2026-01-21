@@ -29,6 +29,7 @@ contract ZoneMessenger is IZoneMessenger {
     error OnlyPortal();
     error NotInCallback();
     error CallbackRejected();
+    error TransferFailed();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -68,20 +69,15 @@ contract ZoneMessenger is IZoneMessenger {
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
-    /// @return success Whether the callback was successful
     function relayMessage(
         address sender,
         address target,
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    ) external onlyPortal returns (bool success) {
-        // Try atomic transfer + callback via self-call
-        try this._executeRelay(sender, target, amount, gasLimit, data) {
-            success = true;
-        } catch {
-            success = false;
-        }
+    ) external onlyPortal {
+        // Atomic transfer + callback via self-call
+        this._executeRelay(sender, target, amount, gasLimit, data);
     }
 
     /// @notice Internal function for atomic transfer + callback (called via self-call)
@@ -97,7 +93,9 @@ contract ZoneMessenger is IZoneMessenger {
         if (msg.sender != address(this)) revert OnlyPortal();
 
         // Transfer tokens from portal to target
-        ITIP20(token).transferFrom(portal, target, amount);
+        if (!ITIP20(token).transferFrom(portal, target, amount)) {
+            revert TransferFailed();
+        }
 
         // Set the L2 sender for the callback
         _xDomainMessageSender = sender;
