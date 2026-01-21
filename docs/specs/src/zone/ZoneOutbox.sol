@@ -15,7 +15,7 @@ contract ZoneOutbox is IZoneOutbox {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The gas token (TIP-20 at same address as L1)
+    /// @notice The gas token (TIP-20 at same address as Tempo)
     IZoneGasToken public immutable gasToken;
 
     /// @notice The sequencer address (only sequencer can call finalizeBatch)
@@ -116,7 +116,7 @@ contract ZoneOutbox is IZoneOutbox {
             revert TransferFailed();
         }
 
-        // Burn the tokens (they'll be released on L1 when withdrawal is processed)
+        // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
         gasToken.burn(address(this), amount);
 
         // Store withdrawal in pending array
@@ -168,7 +168,7 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         // Build hash chain in reverse order (newest to oldest)
-        // So oldest ends up outermost, matching L1 expectations.
+        // So oldest ends up outermost, matching Tempo expectations.
         // Process the oldest withdrawals first (FIFO).
         if (count > 0) {
             withdrawalQueueHash = EMPTY_SENTINEL;
@@ -192,7 +192,7 @@ contract ZoneOutbox is IZoneOutbox {
             }
         }
 
-        // Increment batch index (matches L1 portal's next expected batch index)
+        // Increment batch index (matches Tempo portal's next expected batch index)
         batchIndex += 1;
         uint64 currentBatchIndex = batchIndex;
 

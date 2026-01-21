@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 /// @title TempoState
-/// @notice Zone-side predeploy for Tempo (L1) state verification
+/// @notice Zone-side predeploy for Tempo state verification
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
 ///      Stores the latest finalized Tempo block info. Sequencer submits Tempo headers
 ///      which are validated for chain continuity and decoded to update state.

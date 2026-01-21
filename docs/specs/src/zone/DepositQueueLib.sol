@@ -5,7 +5,7 @@ import { Deposit } from "./IZone.sol";
 
 /// @title DepositQueueLib
 /// @notice Library for managing the deposit queue hash chain
-/// @dev The L1 portal only tracks `currentDepositQueueHash` (where new deposits land).
+/// @dev The Tempo portal only tracks `currentDepositQueueHash` (where new deposits land).
 ///      The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof
 ///      validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
 library DepositQueueLib {

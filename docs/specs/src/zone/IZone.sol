@@ -65,6 +65,7 @@ struct Withdrawal {
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
     function verify(
+        uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
@@ -188,7 +189,7 @@ interface IZoneMessenger {
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
     /// @param sender The L2 origin address
-    /// @param target The L1 recipient
+    /// @param target The Tempo recipient
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target

@@ -8,7 +8,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 - Each zone has exactly one permissioned sequencer.
 - Each zone bridges exactly one TIP-20 token, which is also the zone gas token.
 - Settlement uses fast validity proofs or TEE attestations (ZK or TEE). Data availability is fully trusted to the sequencer.
-- Cross-chain operations are Tempo-centric: bridge in (simple deposit), bridge out (with optional callback to receiver contracts for L1 composability).
+- Cross-chain operations are Tempo-centric: bridge in (simple deposit), bridge out (with optional callback to receiver contracts for Tempo composability).
 - Verifier is abstracted behind a minimal `IVerifier` interface.
 - Liveness (including exits) is wholly dependent on the permissioned sequencer; there is no permissionless fallback.
 
@@ -20,7 +20,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 ## Terminology
 
-- Tempo: the L1 chain.
+- Tempo: the base chain.
 - Zone: the validium chain anchored to Tempo.
 - Gas token: the zone's only TIP-20, bridged from Tempo.
 - Portal: the Tempo-side contract that escrows the gas token and finalizes exits.
@@ -109,10 +109,11 @@ interface IVerifier {
     /// @notice Verify a batch proof
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
-    ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash
-    ///      3. ZoneOutbox.lastBatch() contains correct batchIndex and batch parameters
+    ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash for tempoBlockNumber
+    ///      3. ZoneOutbox.lastBatch() contains correct batchIndex and batch parameters (including tempoBlockNumber)
     ///      4. Deposit processing is correct (validated via Tempo state read inside proof)
     function verify(
+        uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
@@ -125,9 +126,10 @@ interface IVerifier {
 
 The verifier validates that:
 1. The state transition from `prevBlockHash` to `nextBlockHash` is correct (all transactions executed properly).
-2. The zone's `TempoState.tempoBlockHash()` matches the `tempoBlockHash` provided by the portal.
-3. The `ZoneOutbox.lastBatch()` storage contains the correct `batchIndex` and batch parameters.
+2. The zone's `TempoState.tempoBlockHash()` matches the `tempoBlockHash` provided by the portal for `tempoBlockNumber`.
+3. The `ZoneOutbox.lastBatch()` storage contains the correct `batchIndex` and batch parameters, and `lastBatch.tempoBlockNumber == tempoBlockNumber`.
 4. Deposit processing is correct: the zone read `currentDepositQueueHash` from Tempo state and processed deposits accordingly.
+5. The zone block `beneficiary` matches the registered sequencer.
 
 The zone has access to Tempo state via the TempoState predeploy, so the proof can read `currentDepositQueueHash` directly from Tempo storage at the proven block. This eliminates the need for an on-chain "ceiling" slot.
 
@@ -288,6 +290,7 @@ struct Withdrawal {
 ```solidity
 interface IVerifier {
     function verify(
+        uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
@@ -298,7 +301,7 @@ interface IVerifier {
 }
 ```
 
-The verifier receives the `tempoBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash`, that the state transition is valid, and that `ZoneOutbox.lastBatch()` contains the correct `batchIndex` and batch parameters (read from state root, not events).
+The verifier receives the `tempoBlockNumber` and `tempoBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash` for `tempoBlockNumber`, that the state transition is valid, and that `ZoneOutbox.lastBatch()` contains the correct `batchIndex` and batch parameters (read from state root, not events).
 
 ### Queue libraries
 
@@ -306,7 +309,7 @@ The portal uses two queue libraries that encapsulate the hash chain management p
 
 #### DepositQueueLib
 
-Handles L1→L2 deposits. The L1 portal only tracks `currentDepositQueueHash` (the head of the queue where new deposits land). The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
+Handles Tempo→L2 deposits. The Tempo portal only tracks `currentDepositQueueHash` (the head of the queue where new deposits land). The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
 
 ```solidity
 library DepositQueueLib {
@@ -321,7 +324,7 @@ library DepositQueueLib {
 
 #### WithdrawalQueueLib (unbounded buffer)
 
-Handles L2→L1 withdrawals where the producer (proof) is slow and the consumer (on-chain) is fast. Each batch gets its own slot in an unbounded buffer.
+Handles L2→Tempo withdrawals where the producer (proof) is slow and the consumer (on-chain) is fast. Each batch gets its own slot in an unbounded buffer.
 
 ```solidity
 /// @dev Sentinel value for empty slots. Using 0xff...ff instead of 0x00 to avoid
@@ -355,7 +358,7 @@ library WithdrawalQueueLib {
 
 **Gas note**: Storage gas should only be charged when `(tail - head) > maxSize`. This is enforced by the precompile implementation.
 
-| Queue | L1 operation | Zone/Proof operation |
+| Queue | Tempo operation | Zone/Proof operation |
 |-------|--------------|---------------------|
 | Deposit | `enqueue` (users deposit) | Process via `advanceTempo()` |
 | Withdrawal | `dequeue` (sequencer processes) | Create via `finalizeBatch()` |
@@ -452,9 +455,9 @@ interface IZonePortal {
 }
 ```
 
-#### Zone messenger (L1)
+#### Zone messenger (Tempo)
 
-Each zone has a dedicated messenger contract on L1. The portal gives the messenger max approval for the gas token. Withdrawal callbacks originate from this contract, not the portal.
+Each zone has a dedicated messenger contract on Tempo. The portal gives the messenger max approval for the gas token. Withdrawal callbacks originate from this contract, not the portal.
 
 ```solidity
 interface IZoneMessenger {
@@ -472,7 +475,7 @@ interface IZoneMessenger {
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
     /// @param sender The L2 origin address
-    /// @param target The L1 recipient
+    /// @param target The Tempo recipient
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
@@ -496,7 +499,7 @@ The zone's gas token is the bridged TIP-20 from Tempo. It is deployed at the **s
 
 #### TempoState predeploy
 
-The TempoState predeploy allows zones to verify they have a correct view of Tempo (L1) state. It stores the Tempo wrapper fields and selected inner Ethereum header fields, and provides storage reading functionality.
+The TempoState predeploy allows zones to verify they have a correct view of Tempo state. It stores the Tempo wrapper fields and selected inner Ethereum header fields, and provides storage reading functionality.
 
 ```solidity
 // Predeploy address: 0x1c00000000000000000000000000000000000000
@@ -549,7 +552,7 @@ Tempo state staleness depends on how frequently the sequencer calls `finalizeTem
 
 #### TIP-403 registry
 
-The zone has a `TIP403Registry` contract deployed at the **same address** as L1. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from L1 via the L1 state reader precompile, so zone-side TIP-20 transfers enforce L1 TIP-403 policies automatically.
+The zone has a `TIP403Registry` contract deployed at the **same address** as Tempo. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the Tempo state reader precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.
 
 #### Zone inbox
 
@@ -629,7 +632,7 @@ interface IZoneOutbox {
         uint64 batchIndex
     );
 
-    /// @notice The gas token address (same as L1 portal's token).
+    /// @notice The gas token address (same as Tempo portal's token).
     function gasToken() external view returns (address);
 
     /// @notice Next withdrawal index (monotonically increasing).
@@ -667,12 +670,12 @@ interface IZoneOutbox {
     ///      Must be called exactly once per batch (count may be 0). Writes batch parameters
     ///      to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process (avoids unbounded loops).
-    /// @return withdrawalQueueHash The hash chain for L1 batch submission.
+    /// @return withdrawalQueueHash The hash chain for Tempo batch submission.
     function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
 }
 ```
 
-The `finalizeBatch()` function constructs the hash chain on-chain by processing withdrawals in reverse order (newest to oldest), so the oldest ends up outermost for O(1) L1 removal:
+The `finalizeBatch()` function constructs the hash chain on-chain by processing withdrawals in reverse order (newest to oldest), so the oldest ends up outermost for O(1) Tempo removal:
 
 ```
 // On-chain hash chain construction (inside finalizeBatch())
@@ -708,7 +711,7 @@ Both the deposit queue and withdrawal queue are FIFO queues that require constan
 
 Both use hash chains, but with different models:
 
-- **Deposit queue**: L1 tracks only `currentDepositQueueHash` (where new deposits land). The zone tracks its own `processedDepositQueueHash` in EVM state. The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof.
+- **Deposit queue**: Tempo tracks only `currentDepositQueueHash` (where new deposits land). The zone tracks its own `processedDepositQueueHash` in EVM state. The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof.
 - **Withdrawal queue**: unbounded buffer (each batch gets its own slot, `head` points to oldest unprocessed batch, `tail` points to where next batch writes, `maxSize` tracks peak queue length for gas accounting)
 
 The hash chains are structured differently to optimize for their on-chain operation:
@@ -735,7 +738,7 @@ Adding d4: currentDepositQueueHash = keccak256(abi.encode(deposit4, currentDepos
 
 - **On-chain addition is O(1)**: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))` — wrap the outside.
 - **Zone processing**: The zone's `advanceTempo()` processes deposits in FIFO order (oldest first, working outward from its `processedDepositQueueHash`), and validates the result matches `currentDepositQueueHash` (read from Tempo state). TODO: implement a recursive ancestor check in the proof or on-chain as a fallback.
-- **After batch**: L1 updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced.
+- **After batch**: Tempo updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced.
 
 ### Withdrawal queue: oldest-outermost per slot
 
@@ -804,10 +807,10 @@ Notes:
 
 Users withdraw by creating a withdrawal on the zone. Withdrawals are processed in two steps:
 
-1. **Batch submission**: The sequencer calls `finalizeBatch()` at the end of the final block in the batch (even if `count = 0`), which constructs the withdrawal hash and emits a `BatchFinalized` event with the current `batchIndex`. The proof validates `ZoneOutbox.lastBatch()` state and adds the withdrawal hash to L1's queue.
+1. **Batch submission**: The sequencer calls `finalizeBatch()` at the end of the final block in the batch (even if `count = 0`), which constructs the withdrawal hash and emits a `BatchFinalized` event with the current `batchIndex`. The proof validates `ZoneOutbox.lastBatch()` state and adds the withdrawal hash to Tempo's queue.
 2. **Withdrawal processing**: The sequencer calls `processWithdrawal` to process withdrawals from the oldest slot (`head`).
 
-The `batchIndex` ensures batches are submitted in order: each batch's `batchIndex` must match the L1 portal's expected next batch. This prevents the sequencer from omitting batches that contain withdrawals.
+The `batchIndex` ensures batches are submitted in order: each batch's `batchIndex` must match the Tempo portal's expected next batch. This prevents the sequencer from omitting batches that contain withdrawals.
 
 ### Withdrawal execution
 
@@ -893,9 +896,9 @@ Withdrawals can fail due to:
 - **Callback revert**: The receiver contract reverts (out of gas, logic error, etc.)
 - **Callback rejection**: Receiver returns wrong selector
 
-### Withdrawal failures (L1-side)
+### Withdrawal failures (Tempo-side)
 
-When a withdrawal fails on L1:
+When a withdrawal fails on Tempo:
 1. The TIP-20 transfer or callback reverts
 2. The portal enqueues a bounce-back deposit to `fallbackRecipient` on the zone
 3. Funds return to zone via the normal deposit flow
@@ -927,11 +930,11 @@ This section describes the concrete implementation approach for zone nodes.
 
 ### Node architecture
 
-Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. There are separate ExEx instances per zone—for example, one ExEx for a USDC zone and another for a USDT zone.
+Each zone runs as an ExEx (Execution Extension) attached to a Tempo node. There are separate ExEx instances per zone—for example, one ExEx for a USDC zone and another for a USDT zone.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                  Tempo L1 Node                      │
+│                  Tempo Node                      │
 │  ┌─────────────┐  ┌─────────────┐                   │
 │  │ USDC Zone   │  │ USDT Zone   │                   │
 │  │   ExEx      │  │   ExEx      │  ...              │
@@ -951,6 +954,7 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 - **Zone block hash**: Computed from the zone block header after execution. The zone block header is a simplified Ethereum header that includes:
   - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`
   - **Omitted fields**: `gasLimit`, `gasUsed` (zones have no hard gas limit), `logsBloom`, `extraData` (not needed for proofs)
+- **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo, user txs..., finalizeBatch?]`.
 - **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
 - **Receipts root**: Committed in the block hash but not proven on-chain. Batch parameters are read from `lastBatch` state storage instead of event logs.
 - **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from the EIP-2935 history precompile.
@@ -976,13 +980,13 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo L1 node. The
 - **Batch interval**: Batches are produced every 250 milliseconds.
 - **SP1 proofs**: Validity proofs are generated using Succinct's SP1 prover.
 - **Mock proofs**: For development, proofs are mocked but data structures (public inputs, proof envelope) must match the real format.
-- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the L1 portal. The proof includes block hash and processed deposits.
+- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the Tempo portal. The proof includes block hash and processed deposits.
 
 ```solidity
 struct BatchProof {
     bytes32 nextBlockHash;
-    uint64 batchIndex;            // batch index matching portal.batchIndex
-    uint64 tempoBlockNumber;      // Tempo block the zone synced to
+    uint64 batchIndex;            // batch index from ZoneOutbox.lastBatch (must equal portal.batchIndex + 1)
+    uint64 tempoBlockNumber;      // Tempo block the zone synced to (must equal lastBatch.tempoBlockNumber)
     bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
     bytes verifierConfig;         // opaque payload to IVerifier (TEE/ZK envelope)
     bytes proof;                  // SP1 proof bytes (or TEE attestation)
@@ -1010,7 +1014,7 @@ zone_getReceipt(txHash) -> receipt
 ### Multi-zone ExEx structure
 
 ```
-Tempo L1 Node
+Tempo Node
 ├── ExEx: USDC Zone
 │   ├── TIP-20 Precompile (USDC)
 │   ├── Payments Precompile

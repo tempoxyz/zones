@@ -65,7 +65,7 @@ contract ZoneMessenger is IZoneMessenger {
     ///      If callback reverts, returns false (does not revert). The transfer is atomic
     ///      with the callback via a self-call pattern.
     /// @param sender The L2 origin address
-    /// @param target The L1 recipient
+    /// @param target The Tempo recipient
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target

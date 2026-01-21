@@ -46,7 +46,7 @@ pub struct BatchWitness {
     /// Initial zone state
     pub initial_zone_state: ZoneStateWitness,
 
-    /// Tempo state proofs for L1 reads
+    /// Tempo state proofs for Tempo reads
     pub tempo_state_proofs: BatchStateProof,
 }
 
@@ -126,7 +126,7 @@ The system transactions must mirror the Solidity reference implementation:
 - `ZoneInbox.advanceTempo(tempo_header_rlp, deposits)` at the start of the block
 - `ZoneOutbox.finalizeBatch(count)` at the end of the block **only if this is the final block of the batch**
 
-User transactions may call the `TempoState` precompile to read L1 state. User transactions
+User transactions may call the `TempoState` precompile to read Tempo state. User transactions
 **must not** call `ZoneInbox` or `ZoneOutbox`; those are system-only predeploys. The executor
 must reject any non-system call to these addresses and enforce exactly one `advanceTempo`
 at the start of each block and exactly one `finalizeBatch` in the final block of the batch.
@@ -174,7 +174,7 @@ pub struct BatchStateProof {
     /// Deduplicated pool of all MPT nodes
     pub node_pool: HashMap<B256, Vec<u8>>,
 
-    /// L1 state reads with proof paths
+    /// Tempo state reads with proof paths
     pub reads: Vec<L1StateRead>,
 }
 
@@ -185,7 +185,7 @@ pub struct L1StateRead {
     /// Which Tempo block to read from (must match TempoState for this block)
     pub tempo_block_number: u64,
 
-    /// L1 account and storage slot
+    /// Tempo account and storage slot
     pub account: Address,
     pub slot: U256,
 
@@ -197,28 +197,28 @@ pub struct L1StateRead {
 }
 ```
 
-The `BatchStateProof` structure enables efficient proving of potentially thousands of L1 state reads across multiple zone blocks.
+The `BatchStateProof` structure enables efficient proving of potentially thousands of Tempo state reads across multiple zone blocks.
 
 **Binding to Tempo:**
 - Tempo headers are validated by executing `TempoState.finalizeTempo` during the system tx
   in each zone block. The resulting `tempoBlockNumber`, `tempoBlockHash`, and
   `tempoStateRoot` are part of the proven zone state.
 - `ZoneOutbox.lastBatch.tempoBlockNumber` must equal `public_inputs.tempo_block_number`.
-- Each L1 read is verified against the `tempoStateRoot` currently bound in `TempoState`
+- Each Tempo read is verified against the `tempoStateRoot` currently bound in `TempoState`
   at the time of the read. The precompile must reject reads if the block is not yet bound.
-- For a given zone block, all L1 reads must use the Tempo block number finalized by that
+- For a given zone block, all Tempo reads must use the Tempo block number finalized by that
   block's `advanceTempo` system tx (checked against `TempoState.tempoBlockNumber()`).
-- L1 reads performed inside `advanceTempo` (e.g., deposit queue hash) must be bound to the
+- Tempo reads performed inside `advanceTempo` (e.g., deposit queue hash) must be bound to the
   Tempo header finalized by that call.
 
 Inside execution, `TempoState.readTempoStorageSlot` is modeled to read from the current `tempoStateRoot` (derived from the finalized header), so the proof and the precompile agree on the same root.
 
 #### Deduplication Strategy
 
-The key optimization is the **deduplicated node pool**. Instead of including separate MPT proofs for each L1 storage read, all proofs share a single pool of verified nodes.
+The key optimization is the **deduplicated node pool**. Instead of including separate MPT proofs for each Tempo storage read, all proofs share a single pool of verified nodes.
 
 **Why this matters:**
-- A batch might perform 100,000 L1 state reads across 100 zone blocks
+- A batch might perform 100,000 Tempo state reads across 100 zone blocks
 - Many reads access the same accounts (shared account trie paths)
 - Many reads access slots in nearby addresses (shared storage trie paths)
 - Across multiple Tempo blocks, unchanged state shares identical nodes
@@ -313,7 +313,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
             return Err(Error::InconsistentState);
         }
 
-        // Execute block with system txs + user txs, and L1 access via tempo_state
+        // Execute block with system txs + user txs, and Tempo access via tempo_state
         let (tx_root, receipts_root, finalized_tempo_number) =
             execute_zone_block(&mut zone_state, block, &tempo_state, idx)?;
 
