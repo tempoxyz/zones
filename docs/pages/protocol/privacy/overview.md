@@ -278,6 +278,14 @@ This section defines the functions and interfaces used by the design. The signat
 ### Common types
 
 ```solidity
+/// @notice Interface for the zone's gas token (TIP-20 with mint/burn for system)
+interface IZoneGasToken {
+    function mint(address to, uint256 amount) external;
+    function burn(address from, uint256 amount) external;
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
 
 struct ZoneInfo {
     uint64 zoneId;
@@ -561,6 +569,16 @@ The TempoState predeploy allows zones to verify they have a correct view of Temp
 ```solidity
 // Predeploy address: 0x1c00000000000000000000000000000000000000
 interface ITempoState {
+    event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    /// @notice Current sequencer address
+    function sequencer() external view returns (address);
+
+    /// @notice Pending sequencer for two-step transfer
+    function pendingSequencer() external view returns (address);
+
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     function tempoBlockHash() external view returns (bytes32);
 
@@ -580,6 +598,12 @@ interface ITempoState {
     function tempoTimestamp() external view returns (uint64);
     function tempoTimestampMillis() external view returns (uint64);
     function tempoPrevRandao() external view returns (bytes32);
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
 
     /// @notice Finalize a Tempo block header. Only callable by sequencer.
     /// @dev Validates chain continuity (parent hash must match, number must be +1)
@@ -632,8 +656,32 @@ interface IZoneInbox {
         bytes32 memo
     );
 
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    /// @notice The Tempo portal address (for reading deposit queue hash).
+    function tempoPortal() external view returns (address);
+
+    /// @notice The TempoState predeploy address.
+    function tempoState() external view returns (address);
+
+    /// @notice The gas token (TIP-20 at same address as Tempo).
+    function gasToken() external view returns (IZoneGasToken);
+
+    /// @notice Current sequencer address.
+    function sequencer() external view returns (address);
+
+    /// @notice Pending sequencer for two-step transfer.
+    function pendingSequencer() external view returns (address);
+
     /// @notice The zone's last processed deposit queue hash.
     function processedDepositQueueHash() external view returns (bytes32);
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
 
     /// @notice Advance Tempo state and process deposits in a single system transaction.
     /// @dev This is the main entry point for the sequencer's system transaction.
@@ -691,8 +739,17 @@ interface IZoneOutbox {
         uint64 withdrawalBatchIndex
     );
 
-    /// @notice The gas token address (same as Tempo portal's token).
-    function gasToken() external view returns (address);
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    /// @notice The gas token (same as Tempo portal's token).
+    function gasToken() external view returns (IZoneGasToken);
+
+    /// @notice Current sequencer address.
+    function sequencer() external view returns (address);
+
+    /// @notice Pending sequencer for two-step transfer.
+    function pendingSequencer() external view returns (address);
 
     /// @notice Base fee for withdrawal processing.
     function withdrawalBaseFee() external view returns (uint128);
@@ -711,6 +768,12 @@ interface IZoneOutbox {
 
     /// @notice Number of pending withdrawals waiting to be batched.
     function pendingWithdrawalsCount() external view returns (uint256);
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
 
     /// @notice Set withdrawal fee parameters. Only callable by sequencer.
     function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external;
