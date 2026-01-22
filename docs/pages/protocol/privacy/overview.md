@@ -447,12 +447,29 @@ interface IZonePortal {
         bytes32 withdrawalQueueHash
     );
 
+    event WithdrawalProcessed(
+        address indexed to,
+        uint128 amount,
+        bool callbackSuccess
+    );
+
+    event BounceBack(
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed fallbackRecipient,
+        uint128 amount
+    );
+
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
     function zoneId() external view returns (uint64);
     function token() external view returns (address);
     function messenger() external view returns (address);
     function sequencer() external view returns (address);
+    function pendingSequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
+    function genesisTempoBlockNumber() external view returns (uint64);
     function withdrawalBatchIndex() external view returns (uint64);
     function blockHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
@@ -462,6 +479,12 @@ interface IZonePortal {
     function withdrawalQueueMaxSize() external view returns (uint256);
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
+
     /// @notice Set the sequencer's public key. Only callable by the sequencer.
     function setSequencerPubkey(bytes32 pubkey) external;
 
@@ -469,6 +492,7 @@ interface IZonePortal {
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
 
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
+    /// @dev Fee is paid to sequencer regardless of success/failure.
     /// @param withdrawal The withdrawal to process (must be at the head of the current slot).
     /// @param remainingQueue The hash of the remaining withdrawals in this slot (0 if last).
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;

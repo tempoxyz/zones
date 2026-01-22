@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+/// @title IZoneGasToken
+/// @notice Interface for the zone's gas token (TIP-20 with mint/burn for system)
+interface IZoneGasToken {
+    function mint(address to, uint256 amount) external;
+    function burn(address from, uint256 amount) external;
+    function transfer(address to, uint256 amount) external returns (bool);
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function balanceOf(address account) external view returns (uint256);
+}
+
 /// @notice Common types for the Zone protocol
 struct ZoneInfo {
     uint64 zoneId;
@@ -255,6 +265,23 @@ struct LastBatch {
 /// @title IZoneOutbox
 /// @notice Interface for zone outbox on the zone
 interface IZoneOutbox {
+    /// @notice Maximum callback data size (1KB)
+    function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
+
+    event WithdrawalRequested(
+        uint64 indexed withdrawalIndex,
+        address indexed sender,
+        address to,
+        uint128 amount,
+        uint128 fee,
+        bytes32 memo,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes data
+    );
+
+    event WithdrawalFeesUpdated(uint128 baseFee, uint128 gasFeeRate);
+
     /// @notice Emitted when sequencer finalizes a batch at end of block
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
     event BatchFinalized(
@@ -262,7 +289,50 @@ interface IZoneOutbox {
         uint64 withdrawalBatchIndex
     );
 
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    /// @notice The gas token (same as Tempo portal's token)
+    function gasToken() external view returns (IZoneGasToken);
+
+    /// @notice Current sequencer address
+    function sequencer() external view returns (address);
+
+    /// @notice Pending sequencer for two-step transfer
+    function pendingSequencer() external view returns (address);
+
+    /// @notice Base fee for withdrawal processing
+    function withdrawalBaseFee() external view returns (uint128);
+
+    /// @notice Fee per unit of gasLimit
+    function withdrawalGasFeeRate() external view returns (uint128);
+
+    /// @notice Next withdrawal index (monotonically increasing)
+    function nextWithdrawalIndex() external view returns (uint64);
+
+    /// @notice Current withdrawal batch index (monotonically increasing)
+    function withdrawalBatchIndex() external view returns (uint64);
+
+    /// @notice Last finalized batch parameters (for proof access via state root)
+    function lastBatch() external view returns (LastBatch memory);
+
+    /// @notice Number of pending withdrawals
+    function pendingWithdrawalsCount() external view returns (uint256);
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
+
+    /// @notice Set withdrawal fee parameters. Only callable by sequencer.
+    function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external;
+
+    /// @notice Calculate the fee for a withdrawal with the given gasLimit
+    function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
+
     /// @notice Request a withdrawal from the zone back to Tempo
+    /// @dev Caller must approve outbox to spend amount + fee
     function requestWithdrawal(
         address to,
         uint128 amount,
@@ -273,18 +343,9 @@ interface IZoneOutbox {
     ) external;
 
     /// @notice Finalize batch at end of block - build withdrawal hash and write to state
-    /// @dev Only callable by sequencer as system transaction. Optional per block.
+    /// @dev Only callable by sequencer as system transaction. Required per batch (count may be 0).
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
-
-    /// @notice Number of pending withdrawals
-    function pendingWithdrawalsCount() external view returns (uint256);
-
-    /// @notice Current withdrawal batch index (monotonically increasing)
-    function withdrawalBatchIndex() external view returns (uint64);
-
-    /// @notice Last finalized batch parameters (for proof access via state root)
-    function lastBatch() external view returns (LastBatch memory);
 }

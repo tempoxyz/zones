@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneGasToken } from "./ZoneInbox.sol";
-import { IZoneOutbox, Withdrawal, LastBatch } from "./IZone.sol";
+import { IZoneOutbox, IZoneGasToken, Withdrawal, LastBatch } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
@@ -53,30 +52,6 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Pending withdrawals waiting to be batched
     Withdrawal[] internal _pendingWithdrawals;
     uint256 internal _pendingWithdrawalsHead;
-
-    /*//////////////////////////////////////////////////////////////
-                                EVENTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Emitted when a user requests a withdrawal
-    /// @dev Kept for observability, even though hash is now built on-chain
-    event WithdrawalRequested(
-        uint64 indexed withdrawalIndex,
-        address indexed sender,
-        address to,
-        uint128 amount,
-        uint128 fee,
-        bytes32 memo,
-        uint64 gasLimit,
-        address fallbackRecipient,
-        bytes data
-    );
-
-    /// @notice Emitted when sequencer updates withdrawal fee parameters
-    event WithdrawalFeesUpdated(uint128 baseFee, uint128 gasFeeRate);
-
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS

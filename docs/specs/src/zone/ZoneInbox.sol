@@ -1,18 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit } from "./IZone.sol";
+import { Deposit, IZoneGasToken } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
-
-/// @title IZoneGasToken
-/// @notice Interface for the zone's gas token (TIP-20 with mint/burn for system)
-interface IZoneGasToken {
-    function mint(address to, uint256 amount) external;
-    function burn(address from, uint256 amount) external;
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
-}
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits

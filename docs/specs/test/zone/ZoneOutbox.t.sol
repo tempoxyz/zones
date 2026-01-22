@@ -760,7 +760,7 @@ contract ZoneOutboxTest is Test {
 
         uint128 expectedFee = outbox.calculateWithdrawalFee(50000);
         vm.expectEmit(true, true, false, true);
-        emit ZoneOutbox.WithdrawalRequested(
+        emit IZoneOutbox.WithdrawalRequested(
             0,          // index
             alice,      // sender
             bob,        // to
