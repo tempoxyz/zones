@@ -98,8 +98,9 @@ The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-
 Each batch submission includes:
 
 - `tempoBlockNumber` (the Tempo block number for EIP-2935 block hash history verification)
-- `nextBlockHash` (the zone block hash after execution)
-- `withdrawalQueueHash` (hash chain of withdrawals for this batch, or 0 if none)
+- `blockTransition` (contains `prevBlockHash` and `nextBlockHash` - the zone block hash transition)
+- `depositQueueTransition` (contains `prevProcessedHash` and `nextProcessedHash` - deposit queue processing)
+- `withdrawalQueueTransition` (contains `withdrawalQueueHash` - hash chain of withdrawals for this batch, or 0 if none)
 - `verifierConfig` (opaque payload forwarded to the verifier for domain separation/attestation needs)
 - `proof` (validity proof or TEE attestation)
 

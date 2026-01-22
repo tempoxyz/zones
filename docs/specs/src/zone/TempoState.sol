@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+import { ITempoState } from "./IZone.sol";
+
 /// @title TempoState
 /// @notice Zone-side predeploy for Tempo state verification
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
 ///      Stores the latest finalized Tempo block info. Sequencer submits Tempo headers
 ///      which are validated for chain continuity and decoded to update state.
-contract TempoState {
+contract TempoState is ITempoState {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -66,31 +68,6 @@ contract TempoState {
 
     /// @notice Previous RANDAO value (post-merge mixHash)
     bytes32 public tempoPrevRandao;
-
-    /*//////////////////////////////////////////////////////////////
-                                EVENTS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Emitted when a Tempo block is finalized
-    /// @dev Only includes indexed fields for filtering; read storage for full header
-    event TempoBlockFinalized(
-        bytes32 indexed blockHash,
-        uint64 indexed blockNumber,
-        bytes32 stateRoot
-    );
-
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
-
-    /*//////////////////////////////////////////////////////////////
-                                ERRORS
-    //////////////////////////////////////////////////////////////*/
-
-    error OnlySequencer();
-    error NotPendingSequencer();
-    error InvalidParentHash();
-    error InvalidBlockNumber();
-    error InvalidRlpData();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR

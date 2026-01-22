@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, IZoneGasToken } from "./IZone.sol";
+import { Deposit, IZoneGasToken, IZoneInbox, ITempoState } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
 /// @dev Called by sequencer as a system transaction. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
-contract ZoneInbox {
+contract ZoneInbox is IZoneInbox {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -16,8 +16,8 @@ contract ZoneInbox {
     /// @notice The Tempo portal address (for reading deposit queue hash)
     address public immutable tempoPortal;
 
-    /// @notice The TempoState predeploy address
-    TempoState public immutable tempoState;
+    /// @notice The TempoState predeploy address (stored as concrete type for internal use)
+    TempoState internal immutable _tempoState;
 
     /// @notice The gas token (TIP-20 at same address as Tempo)
     IZoneGasToken public immutable gasToken;
@@ -43,49 +43,24 @@ contract ZoneInbox {
     bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
 
     /*//////////////////////////////////////////////////////////////
-                                EVENTS
-    //////////////////////////////////////////////////////////////*/
-
-    event TempoAdvanced(
-        bytes32 indexed tempoBlockHash,
-        uint64 indexed tempoBlockNumber,
-        uint256 depositsProcessed,
-        bytes32 newProcessedDepositQueueHash
-    );
-
-    event DepositProcessed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,
-        uint128 amount,
-        bytes32 memo
-    );
-
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
-
-    /*//////////////////////////////////////////////////////////////
-                                ERRORS
-    //////////////////////////////////////////////////////////////*/
-
-    error OnlySequencer();
-    error NotPendingSequencer();
-    error InvalidDepositQueueHash();
-
-    /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
     constructor(
-        address _tempoPortal,
-        address _tempoState,
+        address _tempoPortalAddr,
+        address _tempoStateAddr,
         address _gasToken,
         address _sequencer
     ) {
-        tempoPortal = _tempoPortal;
-        tempoState = TempoState(_tempoState);
+        tempoPortal = _tempoPortalAddr;
+        _tempoState = TempoState(_tempoStateAddr);
         gasToken = IZoneGasToken(_gasToken);
         sequencer = _sequencer;
+    }
+
+    /// @notice The TempoState predeploy address
+    function tempoState() external view returns (ITempoState) {
+        return _tempoState;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -127,7 +102,7 @@ contract ZoneInbox {
         if (msg.sender != sequencer) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
-        tempoState.finalizeTempo(header);
+        _tempoState.finalizeTempo(header);
 
         // Step 2: Process deposits and build hash chain
         bytes32 currentHash = processedDepositQueueHash;
@@ -146,7 +121,7 @@ contract ZoneInbox {
 
         // Step 3: Validate against Tempo state
         // Read currentDepositQueueHash from the portal's storage using the new Tempo state
-        bytes32 tempoCurrentHash = tempoState.readTempoStorageSlot(
+        bytes32 tempoCurrentHash = _tempoState.readTempoStorageSlot(
             tempoPortal,
             CURRENT_DEPOSIT_QUEUE_HASH_SLOT
         );
@@ -161,8 +136,8 @@ contract ZoneInbox {
         processedDepositQueueHash = currentHash;
 
         emit TempoAdvanced(
-            tempoState.tempoBlockHash(),
-            tempoState.tempoBlockNumber(),
+            _tempoState.tempoBlockHash(),
+            _tempoState.tempoBlockNumber(),
             deposits.length,
             currentHash
         );

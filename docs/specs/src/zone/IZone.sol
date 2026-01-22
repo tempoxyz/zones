@@ -43,7 +43,7 @@ struct BlockTransition {
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
 ///      that nextProcessedHash matches currentDepositQueueHash for now. TODO: allow ancestor checks.
 struct DepositQueueTransition {
-    bytes32 prevProcessedHash;     // where proof starts (verified against on-chain state)
+    bytes32 prevProcessedHash;     // where proof starts (verified against zone state)
     bytes32 nextProcessedHash;     // where zone processed up to (proof output)
 }
 
@@ -260,6 +260,123 @@ interface IWithdrawalReceiver {
 struct LastBatch {
     bytes32 withdrawalQueueHash;
     uint64 withdrawalBatchIndex;
+}
+
+/// @title ITempoState
+/// @notice Interface for zone-side Tempo state verification predeploy
+/// @dev Deployed at 0x1c00000000000000000000000000000000000000
+interface ITempoState {
+    event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    error OnlySequencer();
+    error NotPendingSequencer();
+    error InvalidParentHash();
+    error InvalidBlockNumber();
+    error InvalidRlpData();
+
+    /// @notice Current sequencer address
+    function sequencer() external view returns (address);
+
+    /// @notice Pending sequencer for two-step transfer
+    function pendingSequencer() external view returns (address);
+
+    /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
+    function tempoBlockHash() external view returns (bytes32);
+
+    // Tempo wrapper fields
+    function generalGasLimit() external view returns (uint64);
+    function sharedGasLimit() external view returns (uint64);
+
+    // Inner Ethereum header fields
+    function tempoParentHash() external view returns (bytes32);
+    function tempoBeneficiary() external view returns (address);
+    function tempoStateRoot() external view returns (bytes32);
+    function tempoTransactionsRoot() external view returns (bytes32);
+    function tempoReceiptsRoot() external view returns (bytes32);
+    function tempoBlockNumber() external view returns (uint64);
+    function tempoGasLimit() external view returns (uint64);
+    function tempoGasUsed() external view returns (uint64);
+    function tempoTimestamp() external view returns (uint64);
+    function tempoTimestampMillis() external view returns (uint64);
+    function tempoPrevRandao() external view returns (bytes32);
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
+
+    /// @notice Finalize a Tempo block header. Only callable by sequencer.
+    /// @dev Validates chain continuity (parent hash must match, number must be +1)
+    /// @param header RLP-encoded Tempo header
+    function finalizeTempo(bytes calldata header) external;
+
+    /// @notice Read a storage slot from a Tempo contract
+    function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
+
+    /// @notice Read multiple storage slots from a Tempo contract
+    function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
+}
+
+/// @title IZoneInbox
+/// @notice Interface for zone-side system contract that advances Tempo state and processes deposits
+interface IZoneInbox {
+    event TempoAdvanced(
+        bytes32 indexed tempoBlockHash,
+        uint64 indexed tempoBlockNumber,
+        uint256 depositsProcessed,
+        bytes32 newProcessedDepositQueueHash
+    );
+
+    event DepositProcessed(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        address indexed to,
+        uint128 amount,
+        bytes32 memo
+    );
+
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    error OnlySequencer();
+    error NotPendingSequencer();
+    error InvalidDepositQueueHash();
+
+    /// @notice The Tempo portal address (for reading deposit queue hash)
+    function tempoPortal() external view returns (address);
+
+    /// @notice The TempoState predeploy address
+    function tempoState() external view returns (ITempoState);
+
+    /// @notice The gas token (TIP-20 at same address as Tempo)
+    function gasToken() external view returns (IZoneGasToken);
+
+    /// @notice Current sequencer address
+    function sequencer() external view returns (address);
+
+    /// @notice Pending sequencer for two-step transfer
+    function pendingSequencer() external view returns (address);
+
+    /// @notice The zone's last processed deposit queue hash
+    function processedDepositQueueHash() external view returns (bytes32);
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
+
+    /// @notice Advance Tempo state and process deposits in a single system transaction.
+    /// @dev This is the main entry point for the sequencer's system transaction.
+    ///      1. Advances the zone's view of Tempo by processing the header
+    ///      2. Processes deposits from the deposit queue
+    ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    /// @param header RLP-encoded Tempo block header
+    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
+    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;
 }
 
 /// @title IZoneOutbox

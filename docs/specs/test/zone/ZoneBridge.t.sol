@@ -13,6 +13,7 @@ import { TIP20 } from "../../src/TIP20.sol";
 import {
     IZoneFactory,
     IZonePortal,
+    IZoneInbox,
     IWithdrawalReceiver,
     ZoneParams,
     Deposit,
@@ -630,7 +631,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Should revert because hash doesn't match
         vm.prank(admin);
-        vm.expectRevert(ZoneInbox.InvalidDepositQueueHash.selector);
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
         l2Inbox.advanceTempo("", deposits);
     }
 
@@ -679,7 +680,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Non-sequencer tries to advance
         vm.prank(alice);
-        vm.expectRevert(ZoneInbox.OnlySequencer.selector);
+        vm.expectRevert(IZoneInbox.OnlySequencer.selector);
         l2Inbox.advanceTempo("", deposits);
     }
 }

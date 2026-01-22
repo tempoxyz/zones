@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import { Test } from "forge-std/Test.sol";
 import { TempoState } from "../../src/zone/TempoState.sol";
+import { ITempoState } from "../../src/zone/IZone.sol";
 
 /// @title TempoStateTest
 /// @notice Tests for the TempoState predeploy contract
@@ -142,7 +143,7 @@ contract TempoStateTest is Test {
         );
 
         vm.prank(sequencer);
-        vm.expectRevert(TempoState.InvalidParentHash.selector);
+        vm.expectRevert(ITempoState.InvalidParentHash.selector);
         tempoState.finalizeTempo(header);
     }
 
@@ -158,7 +159,7 @@ contract TempoStateTest is Test {
         );
 
         vm.prank(sequencer);
-        vm.expectRevert(TempoState.InvalidBlockNumber.selector);
+        vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
         tempoState.finalizeTempo(header);
     }
 
@@ -174,7 +175,7 @@ contract TempoStateTest is Test {
         );
 
         vm.prank(sequencer);
-        vm.expectRevert(TempoState.InvalidBlockNumber.selector);
+        vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
         tempoState.finalizeTempo(header);
     }
 
@@ -190,7 +191,7 @@ contract TempoStateTest is Test {
         );
 
         vm.prank(notSequencer);
-        vm.expectRevert(TempoState.OnlySequencer.selector);
+        vm.expectRevert(ITempoState.OnlySequencer.selector);
         tempoState.finalizeTempo(header);
     }
 
@@ -208,7 +209,7 @@ contract TempoStateTest is Test {
 
         vm.prank(sequencer);
         vm.expectEmit(true, true, false, true);
-        emit TempoState.TempoBlockFinalized(
+        emit ITempoState.TempoBlockFinalized(
             keccak256(header),
             GENESIS_BLOCK_NUMBER + 1,
             newStateRoot

@@ -5,7 +5,7 @@ import { Test } from "forge-std/Test.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { Deposit } from "../../src/zone/IZone.sol";
+import { Deposit, IZoneInbox } from "../../src/zone/IZone.sol";
 
 /// @title ZoneInboxTest
 /// @notice Tests for ZoneInbox covering edge cases
@@ -142,7 +142,7 @@ contract ZoneInboxTest is Test {
         );
 
         vm.prank(sequencer);
-        vm.expectRevert(ZoneInbox.InvalidDepositQueueHash.selector);
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
         inbox.advanceTempo("", deposits);
     }
 
@@ -178,7 +178,7 @@ contract ZoneInboxTest is Test {
         oneDeposit[0] = allDeposits[0];
 
         vm.prank(sequencer);
-        vm.expectRevert(ZoneInbox.InvalidDepositQueueHash.selector);
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
         inbox.advanceTempo("", oneDeposit);
     }
 
@@ -224,7 +224,7 @@ contract ZoneInboxTest is Test {
 
         // Processing in wrong order should fail
         vm.prank(sequencer);
-        vm.expectRevert(ZoneInbox.InvalidDepositQueueHash.selector);
+        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
         inbox.advanceTempo("", deposits);
     }
 
@@ -243,7 +243,7 @@ contract ZoneInboxTest is Test {
 
         // Random user should fail
         vm.prank(alice);
-        vm.expectRevert(ZoneInbox.OnlySequencer.selector);
+        vm.expectRevert(IZoneInbox.OnlySequencer.selector);
         inbox.advanceTempo("", deposits);
 
         // Sequencer should succeed
@@ -323,7 +323,7 @@ contract ZoneInboxTest is Test {
         vm.prank(sequencer);
         vm.expectEmit(true, true, false, true);
         // After finalizeTempo, block number will be GENESIS + 1
-        emit ZoneInbox.TempoAdvanced(
+        emit IZoneInbox.TempoAdvanced(
             keccak256(abi.encode(GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER + 1)),
             GENESIS_TEMPO_BLOCK_NUMBER + 1,
             1,
@@ -347,7 +347,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectEmit(true, true, true, true);
-        emit ZoneInbox.DepositProcessed(expectedHash, alice, bob, 1000e6, bytes32("payment"));
+        emit IZoneInbox.DepositProcessed(expectedHash, alice, bob, 1000e6, bytes32("payment"));
         inbox.advanceTempo("", deposits);
     }
 
