@@ -382,7 +382,7 @@ struct WithdrawalQueue {
 library WithdrawalQueueLib {
     /// @notice Add a batch's withdrawals to the queue (called during batch submission)
     /// @dev Writes to slot at tail, then advances tail. Updates maxSize if needed.
-    function enqueue(WithdrawalQueue storage q, bytes32 withdrawalQueueHash) internal;
+    function enqueue(WithdrawalQueue storage q, WithdrawalQueueTransition memory transition) internal;
 
     /// @notice Pop the next withdrawal from the queue (on-chain operation)
     /// @dev Verifies the withdrawal is at the head of the current slot and advances.
@@ -556,6 +556,27 @@ interface IZoneMessenger {
 
 The messenger does `token.transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` and call `zoneMessenger.xDomainMessageSender()` to authenticate the L2 origin.
 
+#### Withdrawal receiver
+
+Contracts that receive withdrawals with callbacks must implement this interface:
+
+```solidity
+interface IWithdrawalReceiver {
+    /// @notice Called when a withdrawal with callback is received
+    /// @param sender The L2 origin address
+    /// @param amount The amount of tokens transferred
+    /// @param callbackData The callback data from the withdrawal request
+    /// @return The function selector to confirm successful handling
+    function onWithdrawalReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata callbackData
+    ) external returns (bytes4);
+}
+```
+
+The receiver must return `IWithdrawalReceiver.onWithdrawalReceived.selector` to confirm successful handling. If the receiver reverts or returns the wrong selector, the withdrawal fails and bounces back.
+
 ### Zone predeploys
 
 #### Zone gas token
@@ -663,7 +684,7 @@ interface IZoneInbox {
     function tempoPortal() external view returns (address);
 
     /// @notice The TempoState predeploy address.
-    function tempoState() external view returns (address);
+    function tempoState() external view returns (TempoState);
 
     /// @notice The gas token (TIP-20 at same address as Tempo).
     function gasToken() external view returns (IZoneGasToken);
