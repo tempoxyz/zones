@@ -41,7 +41,7 @@ contract ZoneInbox {
     /// @notice Storage slot for currentDepositQueueHash in ZonePortal
     /// @dev ZonePortal storage layout:
     ///      slot 0: sequencerPubkey (bytes32)
-    ///      slot 1: batchIndex (uint64)
+    ///      slot 1: withdrawalBatchIndex (uint64)
     ///      slot 2: blockHash (bytes32)
     ///      slot 3: currentDepositQueueHash (bytes32) ← this one
     ///      slot 4: lastSyncedTempoBlockNumber (uint64)

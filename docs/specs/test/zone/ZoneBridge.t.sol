@@ -77,7 +77,7 @@ contract ZoneBridgeTest is BaseTest {
     uint64 public genesisTempoBlockNumber;
 
     /// @notice Storage slot for currentDepositQueueHash in ZonePortal
-    /// @dev Layout: sequencerPubkey(0), batchIndex(1), blockHash(2), currentDepositQueueHash(3)
+    /// @dev Layout: sequencerPubkey(0), withdrawalBatchIndex(1), blockHash(2), currentDepositQueueHash(3)
     bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
 
     /// @notice Represents an observed deposit from Tempo (simulating sequencer watching events)
@@ -145,8 +145,8 @@ contract ZoneBridgeTest is BaseTest {
         l2Inbox = new ZoneInbox(portalAddr, address(l2TempoState), address(l2GasToken), admin);
         l2GasToken.setMinter(address(l2Inbox), true);
 
-        // Zone outbox (handles withdrawals, references inbox and tempoState for BatchFinalized event)
-        l2Outbox = new ZoneOutbox(address(l2GasToken), admin, address(l2Inbox), address(l2TempoState));
+        // Zone outbox (handles withdrawals)
+        l2Outbox = new ZoneOutbox(address(l2GasToken), admin);
         l2GasToken.setBurner(address(l2Outbox), true);
 
         // Initialize zone block hash
@@ -243,7 +243,7 @@ contract ZoneBridgeTest is BaseTest {
     }
 
     /// @notice Build withdrawal queue hash from observed events (oldest = outermost)
-    /// @dev Only used for verification in tests, actual hash is built by l2Outbox.batch()
+    /// @dev Only used for verification in tests, actual hash is built by l2Outbox.finalizeWithdrawalBatch()
     function _buildWithdrawalQueueHash() internal view returns (bytes32 queueHash) {
         if (pendingWithdrawals.length == 0) return bytes32(0);
 
@@ -258,9 +258,9 @@ contract ZoneBridgeTest is BaseTest {
 
     /// @notice Simulate sequencer building and submitting a batch to Tempo
     function _sequencerSubmitBatch(bytes32 newProcessedDepositQueueHash) internal {
-        // Sequencer calls finalizeBatch() on zone outbox to get withdrawal hash on-chain
+        // Sequencer calls finalizeWithdrawalBatch() on zone outbox to get withdrawal hash on-chain
         vm.prank(admin);
-        bytes32 withdrawalQueueHash = l2Outbox.finalizeBatch(type(uint256).max);
+        bytes32 withdrawalQueueHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
@@ -320,7 +320,7 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerSubmitBatch(newProcessedHash);
 
         // Verify L1 batch state updated
-        assertEq(l1Portal.batchIndex(), 1);
+        assertEq(l1Portal.withdrawalBatchIndex(), 1);
         assertEq(l1Portal.blockHash(), l2BlockHash);
 
         // === STEP 5: Alice requests withdrawal on zone ===
@@ -350,7 +350,7 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerSubmitBatch(newProcessedHash);
 
         // Verify L1 queue updated
-        assertEq(l1Portal.batchIndex(), 2);
+        assertEq(l1Portal.withdrawalBatchIndex(), 2);
         Withdrawal memory w = Withdrawal({
             sender: alice,
             to: alice,

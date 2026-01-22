@@ -62,7 +62,7 @@ contract ZoneIntegrationTest is BaseTest {
     uint64 public genesisTempoBlockNumber;
 
     /// @notice Storage slot for currentDepositQueueHash in ZonePortal
-    /// @dev Layout: sequencerPubkey(0), batchIndex(1), blockHash(2), currentDepositQueueHash(3)
+    /// @dev Layout: sequencerPubkey(0), withdrawalBatchIndex(1), blockHash(2), currentDepositQueueHash(3)
     bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
 
     function setUp() public override {
@@ -101,7 +101,7 @@ contract ZoneIntegrationTest is BaseTest {
         l2GasToken = new MockZoneGasToken("Zone USD", "zUSD");
         l2TempoState = new MockTempoState(admin, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
         l2Inbox = new ZoneInbox(portalAddr, address(l2TempoState), address(l2GasToken), admin);
-        l2Outbox = new ZoneOutbox(address(l2GasToken), admin, address(l2Inbox), address(l2TempoState));
+        l2Outbox = new ZoneOutbox(address(l2GasToken), admin);
 
         l2GasToken.setMinter(address(l2Inbox), true);
         l2GasToken.setBurner(address(l2Outbox), true);
@@ -236,7 +236,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Finalize L2 batch
         vm.prank(admin);
-        bytes32 withdrawalHash = l2Outbox.finalizeBatch(type(uint256).max);
+        bytes32 withdrawalHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
 
         // Submit L1 batch
         vm.roll(block.number + 1);
@@ -292,7 +292,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.stopPrank();
 
         vm.prank(admin);
-        bytes32 wHash1 = l2Outbox.finalizeBatch(type(uint256).max);
+        bytes32 wHash1 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
 
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
@@ -310,7 +310,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.stopPrank();
 
         vm.prank(admin);
-        bytes32 wHash2 = l2Outbox.finalizeBatch(type(uint256).max);
+        bytes32 wHash2 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
 
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
@@ -328,7 +328,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.stopPrank();
 
         vm.prank(admin);
-        bytes32 wHash3 = l2Outbox.finalizeBatch(type(uint256).max);
+        bytes32 wHash3 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
 
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
@@ -413,7 +413,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.stopPrank();
 
         vm.prank(admin);
-        bytes32 wHash = l2Outbox.finalizeBatch(type(uint256).max);
+        bytes32 wHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
 
         // Phase 3: More deposits arrive while withdrawals are pending
         vm.startPrank(charlie);

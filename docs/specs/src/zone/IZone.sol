@@ -119,7 +119,7 @@ interface IZonePortal {
     );
 
     event BatchSubmitted(
-        uint64 indexed batchIndex,
+        uint64 indexed withdrawalBatchIndex,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
         bytes32 withdrawalQueueHash
@@ -148,7 +148,7 @@ interface IZonePortal {
     function sequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
-    function batchIndex() external view returns (uint64);
+    function withdrawalBatchIndex() external view returns (uint64);
     function blockHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
     function lastSyncedTempoBlockNumber() external view returns (uint64);
@@ -212,14 +212,12 @@ interface IWithdrawalReceiver {
     ) external returns (bytes4);
 }
 
-/// @notice Batch parameters stored in state for proof access
-/// @dev Written to storage on each finalizeBatch() call so proofs can read from state root
+/// @notice Withdrawal batch parameters stored in state for proof access
+/// @dev Written to storage on each finalizeWithdrawalBatch() call so proofs can read from state root
 ///      instead of parsing event logs (which are expensive and hard to prove)
 struct LastBatch {
     bytes32 withdrawalQueueHash;
-    uint64 tempoBlockNumber;
-    bytes32 tempoBlockHash;
-    uint64 batchIndex;
+    uint64 withdrawalBatchIndex;
 }
 
 /// @title IZoneOutbox
@@ -229,9 +227,7 @@ interface IZoneOutbox {
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
     event BatchFinalized(
         bytes32 indexed withdrawalQueueHash,
-        uint64 tempoBlockNumber,
-        bytes32 tempoBlockHash,
-        uint64 batchIndex
+        uint64 withdrawalBatchIndex
     );
 
     /// @notice Request a withdrawal from the zone back to Tempo
@@ -246,16 +242,16 @@ interface IZoneOutbox {
 
     /// @notice Finalize batch at end of block - build withdrawal hash and write to state
     /// @dev Only callable by sequencer as system transaction. Optional per block.
-    ///      Writes batch parameters to lastBatch storage for proof access.
+    ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256);
 
-    /// @notice Current batch index (monotonically increasing)
-    function batchIndex() external view returns (uint64);
+    /// @notice Current withdrawal batch index (monotonically increasing)
+    function withdrawalBatchIndex() external view returns (uint64);
 
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory);

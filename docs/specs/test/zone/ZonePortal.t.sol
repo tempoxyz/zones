@@ -164,7 +164,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.sequencer(), admin);
         assertEq(portal.verifier(), address(mockVerifier));
         assertEq(portal.blockHash(), GENESIS_BLOCK_HASH);
-        assertEq(portal.batchIndex(), 0);
+        assertEq(portal.withdrawalBatchIndex(), 0);
         assertEq(portal.messenger(), address(messenger));
     }
 
@@ -284,7 +284,7 @@ contract ZonePortalTest is BaseTest {
 
         // Verify state updated
         assertEq(portal.blockHash(), newStateRoot);
-        assertEq(portal.batchIndex(), 1);
+        assertEq(portal.withdrawalBatchIndex(), 1);
         assertEq(portal.lastSyncedTempoBlockNumber(), uint64(block.number - 1));
     }
 
@@ -935,7 +935,7 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        assertEq(portal.batchIndex(), 1);
+        assertEq(portal.withdrawalBatchIndex(), 1);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -972,7 +972,7 @@ contract ZonePortalTest is BaseTest {
         );
 
         // Verify batch was accepted
-        assertEq(portal.batchIndex(), 1);
+        assertEq(portal.withdrawalBatchIndex(), 1);
         // Portal no longer tracks processedDepositQueueHash - that's on the zone
     }
 
@@ -1010,7 +1010,7 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        assertEq(portal.batchIndex(), 2);
+        assertEq(portal.withdrawalBatchIndex(), 2);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1341,7 +1341,7 @@ contract ZonePortalTest is BaseTest {
                       BATCH INDEX INCREMENT TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_batchIndex_incrementsOnEachBatch() public {
+    function test_withdrawalBatchIndex_incrementsOnEachBatch() public {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 3000e6);
         portal.deposit(alice, 1000e6, bytes32(""));
@@ -1349,7 +1349,7 @@ contract ZonePortalTest is BaseTest {
 
         bytes32 depositHash = portal.currentDepositQueueHash();
 
-        assertEq(portal.batchIndex(), 0);
+        assertEq(portal.withdrawalBatchIndex(), 0);
 
         vm.roll(block.number + 1);
         portal.submitBatch(
@@ -1360,7 +1360,7 @@ contract ZonePortalTest is BaseTest {
             "",
             ""
         );
-        assertEq(portal.batchIndex(), 1);
+        assertEq(portal.withdrawalBatchIndex(), 1);
 
         vm.roll(block.number + 1);
         portal.submitBatch(
@@ -1371,7 +1371,7 @@ contract ZonePortalTest is BaseTest {
             "",
             ""
         );
-        assertEq(portal.batchIndex(), 2);
+        assertEq(portal.withdrawalBatchIndex(), 2);
 
         vm.roll(block.number + 1);
         portal.submitBatch(
@@ -1382,7 +1382,7 @@ contract ZonePortalTest is BaseTest {
             "",
             ""
         );
-        assertEq(portal.batchIndex(), 3);
+        assertEq(portal.withdrawalBatchIndex(), 3);
     }
 
     /*//////////////////////////////////////////////////////////////

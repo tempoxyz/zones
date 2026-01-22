@@ -23,7 +23,7 @@ contract ZoneInboxTest is Test {
     uint64 constant GENESIS_TEMPO_BLOCK_NUMBER = 1;
 
     /// @notice Storage slot for currentDepositQueueHash in ZonePortal
-    /// @dev Layout: sequencerPubkey(0), batchIndex(1), blockHash(2), currentDepositQueueHash(3)
+    /// @dev Layout: sequencerPubkey(0), withdrawalBatchIndex(1), blockHash(2), currentDepositQueueHash(3)
     bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
 
     function setUp() public {

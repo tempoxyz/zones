@@ -33,7 +33,7 @@ contract ZonePortal is IZonePortal {
     uint64 public immutable genesisTempoBlockNumber;
 
     bytes32 public sequencerPubkey;
-    uint64 public batchIndex;
+    uint64 public withdrawalBatchIndex;
     bytes32 public blockHash;
 
     /// @notice Current deposit queue hash (where new deposits land)
@@ -234,7 +234,7 @@ contract ZonePortal is IZonePortal {
         if (!valid) revert InvalidProof();
 
         // Update state
-        batchIndex++;
+        withdrawalBatchIndex++;
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
 
@@ -244,7 +244,7 @@ contract ZonePortal is IZonePortal {
 
         // Emit event after state updates
         emit BatchSubmitted(
-            batchIndex,
+            withdrawalBatchIndex,
             depositQueueTransition.nextProcessedHash,
             blockHash,
             withdrawalQueueTransition.withdrawalQueueHash
