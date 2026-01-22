@@ -295,6 +295,7 @@ contract WithdrawalQueueLibTest is Test {
             sender: sender,
             to: to,
             amount: amount,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: sender,

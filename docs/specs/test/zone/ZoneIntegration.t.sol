@@ -63,7 +63,7 @@ contract ZoneIntegrationTest is BaseTest {
 
     /// @notice Storage slot for currentDepositQueueHash in ZonePortal
     /// @dev Layout: sequencerPubkey(0), withdrawalBatchIndex(1), blockHash(2), currentDepositQueueHash(3)
-    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
+    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
 
     function setUp() public override {
         super.setUp();
@@ -254,6 +254,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: address(receiver),
             amount: 2000e6,
+            fee: 0,
             memo: bytes32("payment"),
             gasLimit: 100000,
             fallbackRecipient: alice,
@@ -351,21 +352,21 @@ contract ZoneIntegrationTest is BaseTest {
         uint256 aliceBefore = pathUSD.balanceOf(alice);
 
         Withdrawal memory w1 = Withdrawal({
-            sender: alice, to: bob, amount: 1000e6, memo: bytes32("to bob"),
+            sender: alice, to: bob, amount: 1000e6, fee: 0, memo: bytes32("to bob"),
             gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         l1Portal.processWithdrawal(w1, bytes32(0));
         assertEq(pathUSD.balanceOf(bob), bobBefore + 1000e6);
 
         Withdrawal memory w2 = Withdrawal({
-            sender: alice, to: charlie, amount: 2000e6, memo: bytes32("to charlie"),
+            sender: alice, to: charlie, amount: 2000e6, fee: 0, memo: bytes32("to charlie"),
             gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         l1Portal.processWithdrawal(w2, bytes32(0));
         assertEq(pathUSD.balanceOf(charlie), charlieBefore + 2000e6);
 
         Withdrawal memory w3 = Withdrawal({
-            sender: alice, to: alice, amount: 3000e6, memo: bytes32("to self"),
+            sender: alice, to: alice, amount: 3000e6, fee: 0, memo: bytes32("to self"),
             gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         l1Portal.processWithdrawal(w3, bytes32(0));
@@ -447,11 +448,11 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Process withdrawals
         Withdrawal memory w1 = Withdrawal({
-            sender: alice, to: charlie, amount: 2000e6, memo: bytes32(0),
+            sender: alice, to: charlie, amount: 2000e6, fee: 0, memo: bytes32(0),
             gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         Withdrawal memory w2 = Withdrawal({
-            sender: bob, to: charlie, amount: 1500e6, memo: bytes32(0),
+            sender: bob, to: charlie, amount: 1500e6, fee: 0, memo: bytes32(0),
             gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
 

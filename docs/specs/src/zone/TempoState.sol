@@ -11,8 +11,11 @@ contract TempoState {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The sequencer address (only caller for finalizeTempo)
-    address public immutable sequencer;
+    /// @notice Current sequencer address
+    address public sequencer;
+
+    /// @notice Pending sequencer for two-step transfer
+    address public pendingSequencer;
 
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     bytes32 public tempoBlockHash;
@@ -76,11 +79,15 @@ contract TempoState {
         bytes32 stateRoot
     );
 
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
     error OnlySequencer();
+    error NotPendingSequencer();
     error InvalidParentHash();
     error InvalidBlockNumber();
     error InvalidRlpData();
@@ -97,6 +104,26 @@ contract TempoState {
 
         // Decode and store genesis header
         _decodeAndStoreHeader(_genesisHeader);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         SEQUENCER MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external {
+        if (msg.sender != sequencer) revert OnlySequencer();
+        pendingSequencer = newSequencer;
+        emit SequencerTransferStarted(sequencer, newSequencer);
+    }
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external {
+        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
+        address previousSequencer = sequencer;
+        sequencer = pendingSequencer;
+        pendingSequencer = address(0);
+        emit SequencerTransferred(previousSequencer, sequencer);
     }
 
     /*//////////////////////////////////////////////////////////////

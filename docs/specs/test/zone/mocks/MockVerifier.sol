@@ -20,10 +20,12 @@ contract MockVerifier is IVerifier {
     function verify(
         uint64, // tempoBlockNumber
         bytes32, // tempoBlockHash
+        uint64, // expectedWithdrawalBatchIndex
+        address, // sequencer
         BlockTransition calldata,
         DepositQueueTransition calldata,
         WithdrawalQueueTransition calldata,
-        bytes calldata, // verifierData
+        bytes calldata, // verifierConfig
         bytes calldata  // proof
     ) external view returns (bool) {
         return shouldAccept;

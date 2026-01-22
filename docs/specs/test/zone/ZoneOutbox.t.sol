@@ -103,6 +103,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 500e6,
+            fee: 0,
             memo: bytes32("memo"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -137,6 +138,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 500e6,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -146,6 +148,7 @@ contract ZoneOutboxTest is Test {
             sender: bob,
             to: bob,
             amount: 300e6,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -201,6 +204,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 500e6,
+            fee: 0,
             memo: bytes32("w1"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -210,6 +214,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 500e6,
+            fee: 0,
             memo: bytes32("w2"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -242,6 +247,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 100e6,
+            fee: 0,
             memo: bytes32("w1"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -251,6 +257,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 200e6,
+            fee: 0,
             memo: bytes32("w2"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -270,6 +277,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 300e6,
+            fee: 0,
             memo: bytes32("w3"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -279,6 +287,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 400e6,
+            fee: 0,
             memo: bytes32("w4"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -301,6 +310,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 500e6,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -329,6 +339,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 500e6,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -388,6 +399,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: bob,
             amount: 500e6,
+            fee: 0,
             memo: bytes32("pay"),
             gasLimit: 100000,
             fallbackRecipient: alice,
@@ -574,6 +586,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: alice,
             amount: 100e6,
+            fee: 0,
             memo: bytes32("w1"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -583,6 +596,7 @@ contract ZoneOutboxTest is Test {
             sender: bob,
             to: bob,
             amount: 200e6,
+            fee: 0,
             memo: bytes32("w2"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -592,6 +606,7 @@ contract ZoneOutboxTest is Test {
             sender: charlie,
             to: charlie,
             amount: 300e6,
+            fee: 0,
             memo: bytes32("w3"),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -690,6 +705,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: bob,
             amount: 500e6,
+            fee: 0,
             memo: bytes32("payment123"),
             gasLimit: 50000,
             fallbackRecipient: charlie,
@@ -720,6 +736,7 @@ contract ZoneOutboxTest is Test {
             sender: alice,
             to: bob,
             amount: 0,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -741,12 +758,14 @@ contract ZoneOutboxTest is Test {
         vm.startPrank(alice);
         gasToken.approve(address(outbox), 500e6);
 
+        uint128 expectedFee = outbox.calculateWithdrawalFee(50000);
         vm.expectEmit(true, true, false, true);
         emit ZoneOutbox.WithdrawalRequested(
             0,          // index
             alice,      // sender
             bob,        // to
             500e6,      // amount
+            expectedFee,// fee
             bytes32("memo"),
             50000,      // gasLimit
             charlie,    // fallbackRecipient

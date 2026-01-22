@@ -11,14 +11,33 @@ import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 ///      at the end of a block to construct withdrawal queue hash on-chain.
 contract ZoneOutbox is IZoneOutbox {
     /*//////////////////////////////////////////////////////////////
+                               CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Maximum size of callback data in bytes
+    /// @dev Limits storage costs and hash computation overhead
+    uint256 public constant MAX_CALLBACK_DATA_SIZE = 1024;
+
+    /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
     /// @notice The gas token (TIP-20 at same address as Tempo)
     IZoneGasToken public immutable gasToken;
 
-    /// @notice The sequencer address (only sequencer can call finalizeWithdrawalBatch)
-    address public immutable sequencer;
+    /// @notice Current sequencer address
+    address public sequencer;
+
+    /// @notice Pending sequencer for two-step transfer
+    address public pendingSequencer;
+
+    /// @notice Base fee for withdrawal processing (in gas token units)
+    /// @dev Covers fixed costs of processWithdrawal on Tempo
+    uint128 public withdrawalBaseFee;
+
+    /// @notice Fee per unit of gasLimit (in gas token units)
+    /// @dev Covers callback execution costs on Tempo: fee = baseFee + gasLimit * gasFeeRate
+    uint128 public withdrawalGasFeeRate;
 
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
@@ -46,19 +65,28 @@ contract ZoneOutbox is IZoneOutbox {
         address indexed sender,
         address to,
         uint128 amount,
+        uint128 fee,
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
         bytes data
     );
 
+    /// @notice Emitted when sequencer updates withdrawal fee parameters
+    event WithdrawalFeesUpdated(uint128 baseFee, uint128 gasFeeRate);
+
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
     error InvalidFallbackRecipient();
+    error CallbackDataTooLarge();
     error TransferFailed();
     error OnlySequencer();
+    error NotPendingSequencer();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -73,15 +101,56 @@ contract ZoneOutbox is IZoneOutbox {
     }
 
     /*//////////////////////////////////////////////////////////////
+                         SEQUENCER MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external {
+        if (msg.sender != sequencer) revert OnlySequencer();
+        pendingSequencer = newSequencer;
+        emit SequencerTransferStarted(sequencer, newSequencer);
+    }
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external {
+        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
+        address previousSequencer = sequencer;
+        sequencer = pendingSequencer;
+        pendingSequencer = address(0);
+        emit SequencerTransferred(previousSequencer, sequencer);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            FEE CONFIGURATION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Set withdrawal fee parameters. Only callable by sequencer.
+    /// @param baseFee Base fee for each withdrawal (covers processWithdrawal overhead)
+    /// @param gasFeeRate Fee per unit of gasLimit (covers callback execution)
+    function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external {
+        if (msg.sender != sequencer) revert OnlySequencer();
+        withdrawalBaseFee = baseFee;
+        withdrawalGasFeeRate = gasFeeRate;
+        emit WithdrawalFeesUpdated(baseFee, gasFeeRate);
+    }
+
+    /// @notice Calculate the fee for a withdrawal with the given gasLimit
+    /// @param gasLimit The gas limit for the callback (0 if no callback)
+    /// @return fee The total fee (baseFee + gasLimit * gasFeeRate)
+    function calculateWithdrawalFee(uint64 gasLimit) public view returns (uint128 fee) {
+        fee = withdrawalBaseFee + uint128(gasLimit) * withdrawalGasFeeRate;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                           WITHDRAWAL REQUESTS
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Request a withdrawal from the zone back to Tempo
-    /// @dev Caller must have approved the outbox to spend `amount` of gas tokens.
+    /// @dev Caller must have approved the outbox to spend `amount + fee` of gas tokens.
     ///      The outbox burns the tokens and stores the withdrawal. The sequencer
     ///      calls finalizeWithdrawalBatch() to construct the withdrawal queue hash.
     /// @param to The Tempo recipient address
-    /// @param amount Amount to withdraw
+    /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
     /// @param gasLimit Gas limit for IWithdrawalReceiver callback (0 = no callback)
     /// @param fallbackRecipient Zone address for bounce-back if callback fails
@@ -99,20 +168,31 @@ contract ZoneOutbox is IZoneOutbox {
             revert InvalidFallbackRecipient();
         }
 
+        // Limit callback data size to prevent storage bloat and hash computation abuse
+        if (data.length > MAX_CALLBACK_DATA_SIZE) {
+            revert CallbackDataTooLarge();
+        }
+
+        // Calculate processing fee (locked in at request time)
+        uint128 fee = calculateWithdrawalFee(gasLimit);
+        uint128 totalBurn = amount + fee;
+
         // Transfer tokens from sender to this contract, then burn
         // (Using transferFrom so user must approve first)
-        if (!gasToken.transferFrom(msg.sender, address(this), amount)) {
+        if (!gasToken.transferFrom(msg.sender, address(this), totalBurn)) {
             revert TransferFailed();
         }
 
         // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
-        gasToken.burn(address(this), amount);
+        // Amount goes to recipient, fee goes to sequencer
+        gasToken.burn(address(this), totalBurn);
 
         // Store withdrawal in pending array
         _pendingWithdrawals.push(Withdrawal({
             sender: msg.sender,
             to: to,
             amount: amount,
+            fee: fee,
             memo: memo,
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
@@ -127,6 +207,7 @@ contract ZoneOutbox is IZoneOutbox {
             msg.sender,
             to,
             amount,
+            fee,
             memo,
             gasLimit,
             fallbackRecipient,

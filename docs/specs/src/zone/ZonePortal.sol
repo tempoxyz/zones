@@ -28,9 +28,14 @@ contract ZonePortal is IZonePortal {
     uint64 public immutable zoneId;
     address public immutable token;
     address public immutable messenger;
-    address public immutable sequencer;
     address public immutable verifier;
     uint64 public immutable genesisTempoBlockNumber;
+
+    /// @notice Current sequencer address
+    address public sequencer;
+
+    /// @notice Pending sequencer for two-step transfer
+    address public pendingSequencer;
 
     bytes32 public sequencerPubkey;
     uint64 public withdrawalBatchIndex;
@@ -80,8 +85,24 @@ contract ZonePortal is IZonePortal {
     }
 
     /*//////////////////////////////////////////////////////////////
-                           SEQUENCER CONFIG
+                           SEQUENCER MANAGEMENT
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    /// @param newSequencer The address that will become sequencer after accepting.
+    function transferSequencer(address newSequencer) external onlySequencer {
+        pendingSequencer = newSequencer;
+        emit SequencerTransferStarted(sequencer, newSequencer);
+    }
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external {
+        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
+        address previousSequencer = sequencer;
+        sequencer = pendingSequencer;
+        pendingSequencer = address(0);
+        emit SequencerTransferred(previousSequencer, sequencer);
+    }
 
     function setSequencerPubkey(bytes32 pubkey) external onlySequencer {
         sequencerPubkey = pubkey;
@@ -142,9 +163,16 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
+    /// @dev Fee is always paid to sequencer regardless of success/failure.
+    ///      On failure, only the amount (not fee) is bounced back.
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external onlySequencer {
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
+
+        // Transfer fee to sequencer (always, regardless of withdrawal success)
+        if (withdrawal.fee > 0) {
+            ITIP20(token).transfer(sequencer, withdrawal.fee);
+        }
 
         // Execute the withdrawal
         if (withdrawal.gasLimit == 0) {
@@ -176,7 +204,7 @@ contract ZonePortal is IZonePortal {
         ) {
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
         } catch {
-            // Callback failed: bounce back to zone
+            // Callback failed: bounce back to zone (only amount, not fee)
             _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient);
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, false);
         }
@@ -225,6 +253,8 @@ contract ZonePortal is IZonePortal {
         bool valid = IVerifier(verifier).verify(
             tempoBlockNumber,
             tempoBlockHash,
+            withdrawalBatchIndex + 1,  // expected batch index after this batch
+            sequencer,
             blockTransition,
             depositQueueTransition,
             withdrawalQueueTransition,

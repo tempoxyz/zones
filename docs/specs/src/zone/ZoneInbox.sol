@@ -32,20 +32,25 @@ contract ZoneInbox {
     /// @notice The gas token (TIP-20 at same address as Tempo)
     IZoneGasToken public immutable gasToken;
 
-    /// @notice The sequencer address (only caller for advanceTempo)
-    address public immutable sequencer;
+    /// @notice Current sequencer address
+    address public sequencer;
+
+    /// @notice Pending sequencer for two-step transfer
+    address public pendingSequencer;
 
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
 
     /// @notice Storage slot for currentDepositQueueHash in ZonePortal
-    /// @dev ZonePortal storage layout:
-    ///      slot 0: sequencerPubkey (bytes32)
-    ///      slot 1: withdrawalBatchIndex (uint64)
-    ///      slot 2: blockHash (bytes32)
-    ///      slot 3: currentDepositQueueHash (bytes32) ← this one
-    ///      slot 4: lastSyncedTempoBlockNumber (uint64)
-    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
+    /// @dev ZonePortal storage layout (non-immutable variables only):
+    ///      slot 0: sequencer (address)
+    ///      slot 1: pendingSequencer (address)
+    ///      slot 2: sequencerPubkey (bytes32)
+    ///      slot 3: withdrawalBatchIndex (uint64)
+    ///      slot 4: blockHash (bytes32)
+    ///      slot 5: currentDepositQueueHash (bytes32) ← this one
+    ///      slot 6: lastSyncedTempoBlockNumber (uint64)
+    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
 
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
@@ -66,11 +71,15 @@ contract ZoneInbox {
         bytes32 memo
     );
 
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
     error OnlySequencer();
+    error NotPendingSequencer();
     error InvalidDepositQueueHash();
 
     /*//////////////////////////////////////////////////////////////
@@ -87,6 +96,26 @@ contract ZoneInbox {
         tempoState = TempoState(_tempoState);
         gasToken = IZoneGasToken(_gasToken);
         sequencer = _sequencer;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         SEQUENCER MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external {
+        if (msg.sender != sequencer) revert OnlySequencer();
+        pendingSequencer = newSequencer;
+        emit SequencerTransferStarted(sequencer, newSequencer);
+    }
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external {
+        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
+        address previousSequencer = sequencer;
+        sequencer = pendingSequencer;
+        pendingSequencer = address(0);
+        emit SequencerTransferred(previousSequencer, sequencer);
     }
 
     /*//////////////////////////////////////////////////////////////

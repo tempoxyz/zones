@@ -56,11 +56,36 @@ A zone is created via `ZoneFactory.createZone(...)` with:
 
 The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone genesis includes the portal address and the gas token configuration.
 
+### Sequencer transfer
+
+The sequencer can transfer control to a new address via a two-step process:
+
+1. Current sequencer calls `transferSequencer(newSequencer)` to nominate a new sequencer
+2. New sequencer calls `acceptSequencer()` to accept the transfer
+
+This applies to all zone contracts: `ZonePortal` (Tempo-side), `ZoneInbox`, `ZoneOutbox`, and `TempoState` (zone-side). The two-step pattern prevents accidental transfers to incorrect addresses.
+
 ## Execution and fees
 
 - The zone reuses Tempo's fee units and accounting model.
 - The fee token is always the gas token. There is no fee token selection.
 - Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit. The fee token field is fixed to the gas token.
+
+### Deposit fees
+
+> **TODO**: Deposit fee mechanism is undecided. Options include: minimum deposit amount (spam prevention), fixed fee deducted from deposit, or no fee (sequencer absorbs zone-side gas costs). Zone gas should be cheap due to no data availability costs.
+
+### Withdrawal processing fees
+
+Withdrawals incur a processing fee to compensate the sequencer for Tempo-side gas costs:
+
+- **Base fee**: Fixed cost per withdrawal (covers `processWithdrawal` overhead)
+- **Gas fee**: Proportional to `gasLimit` (covers callback execution)
+- **Total fee**: `baseFee + gasLimit * gasFeeRate`
+
+The sequencer configures these parameters via `ZoneOutbox.setWithdrawalFees(baseFee, gasFeeRate)`. The fee is calculated and locked in at request time, stored in the `Withdrawal.fee` field, and paid to the sequencer when the withdrawal is processed on Tempo (regardless of success or failure).
+
+Users burn `amount + fee` when requesting a withdrawal. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`; the sequencer keeps the fee.
 
 ## Batch submission
 
@@ -110,11 +135,15 @@ interface IVerifier {
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
     ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash for tempoBlockNumber
-    ///      3. ZoneOutbox.lastBatch() contains correct withdrawalBatchIndex and withdrawalQueueHash
-    ///      4. Deposit processing is correct (validated via Tempo state read inside proof)
+    ///      3. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
+    ///      4. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
+    ///      5. Zone block beneficiary matches sequencer
+    ///      6. Deposit processing is correct (validated via Tempo state read inside proof)
     function verify(
         uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
+        uint64 expectedWithdrawalBatchIndex,
+        address sequencer,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -278,11 +307,12 @@ struct Deposit {
 struct Withdrawal {
     address sender;             // who initiated the withdrawal on the zone
     address to;                 // Tempo recipient
-    uint128 amount;
+    uint128 amount;             // amount to send to recipient (excludes fee)
+    uint128 fee;                // processing fee for sequencer (calculated at request time)
     bytes32 memo;
     uint64 gasLimit;            // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
-    bytes callbackData;         // calldata for IWithdrawalReceiver (if gasLimit > 0)
+    bytes callbackData;         // calldata for IWithdrawalReceiver (if gasLimit > 0, max 1KB)
 }
 ```
 
@@ -293,6 +323,8 @@ interface IVerifier {
     function verify(
         uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
+        uint64 expectedWithdrawalBatchIndex,
+        address sequencer,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -302,7 +334,7 @@ interface IVerifier {
 }
 ```
 
-The verifier receives the `tempoBlockNumber` and `tempoBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash` for `tempoBlockNumber`, that the state transition is valid, and that `ZoneOutbox.lastBatch()` contains the correct `withdrawalBatchIndex` and `withdrawalQueueHash` (read from state root, not events).
+The verifier receives the `tempoBlockNumber` and `tempoBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), `expectedWithdrawalBatchIndex` (portal's current batch index + 1), `sequencer` (the registered sequencer address), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash` for `tempoBlockNumber`, that the state transition is valid, that `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`, that the zone block `beneficiary` matches `sequencer`, and that `ZoneOutbox.lastBatch().withdrawalQueueHash` matches `withdrawalQueueTransition.withdrawalQueueHash` (read from state root, not events).
 
 ### Queue libraries
 
@@ -611,16 +643,22 @@ struct LastBatch {
 }
 
 interface IZoneOutbox {
+    /// @notice Maximum callback data size (1KB)
+    function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
+
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex,
         address indexed sender,
         address to,
         uint128 amount,
+        uint128 fee,
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
         bytes data
     );
+
+    event WithdrawalFeesUpdated(uint128 baseFee, uint128 gasFeeRate);
 
     /// @notice Emitted when sequencer finalizes a batch at end of block.
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
@@ -631,6 +669,12 @@ interface IZoneOutbox {
 
     /// @notice The gas token address (same as Tempo portal's token).
     function gasToken() external view returns (address);
+
+    /// @notice Base fee for withdrawal processing.
+    function withdrawalBaseFee() external view returns (uint128);
+
+    /// @notice Fee per unit of gasLimit.
+    function withdrawalGasFeeRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing).
     function nextWithdrawalIndex() external view returns (uint64);
@@ -644,15 +688,21 @@ interface IZoneOutbox {
     /// @notice Number of pending withdrawals waiting to be batched.
     function pendingWithdrawalsCount() external view returns (uint256);
 
+    /// @notice Set withdrawal fee parameters. Only callable by sequencer.
+    function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external;
+
+    /// @notice Calculate the fee for a withdrawal with the given gasLimit.
+    function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
+
     /// @notice Request a withdrawal from the zone back to Tempo.
-    /// @dev Caller must have approved the outbox to spend `amount` of gas tokens.
+    /// @dev Caller must have approved the outbox to spend `amount + fee` of gas tokens.
     ///      Tokens are burned immediately and withdrawal is stored in pending array.
     /// @param to The Tempo recipient address.
-    /// @param amount Amount to withdraw.
+    /// @param amount Amount to send to recipient (fee is additional).
     /// @param memo User-provided context (e.g., payment reference).
     /// @param gasLimit Gas limit for messenger callback (0 = no callback).
     /// @param fallbackRecipient Zone address for bounce-back if callback fails.
-    /// @param data Calldata for the target.
+    /// @param data Calldata for the target (max 1KB).
     function requestWithdrawal(
         address to,
         uint128 amount,

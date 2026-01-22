@@ -29,7 +29,10 @@ pub struct PublicInputs {
     /// Tempo block hash for the batch (must equal portal's EIP-2935 lookup)
     pub tempo_block_hash: B256,
 
-    /// Registered sequencer (set by verifier from portal.sequencer; not prover-controlled)
+    /// Expected withdrawal batch index (passed by portal as withdrawalBatchIndex + 1)
+    pub expected_withdrawal_batch_index: u64,
+
+    /// Registered sequencer (passed by portal; zone block beneficiary must match)
     pub sequencer: Address,
 }
 
@@ -485,13 +488,19 @@ The portal contract receives:
 - `blockTransition` - from `BatchOutput` (block hash based)
 - `proof` - ZKVM proof or TEE attestation
 
+The portal passes the following to the verifier:
+- `tempoBlockNumber` and `tempoBlockHash` (from EIP-2935)
+- `expectedWithdrawalBatchIndex` (portal's `withdrawalBatchIndex + 1`)
+- `sequencer` (the registered sequencer address)
+- `blockTransition`, `depositQueueTransition`, `withdrawalQueueTransition`
+- `verifierConfig` and `proof`
+
 The verifier validates that the prover correctly executed the state transition and produced the output commitments.
 In particular, the proof must enforce:
 - `TempoState.tempoBlockHash == tempoBlockHash` from the portal (EIP-2935) for `tempoBlockNumber`
 - `TempoState.tempoBlockNumber == tempoBlockNumber`
-- `ZoneOutbox.lastBatch()` fields (withdrawalBatchIndex, withdrawalQueueHash)
-- `lastBatch.withdrawalBatchIndex == portal.withdrawalBatchIndex + 1` (the batch ends with `finalizeWithdrawalBatch` in the final block)
-- Zone block `beneficiary` equals the registered sequencer (verifier reads `portal.sequencer` via `msg.sender`)
-- `public_inputs.sequencer` is set by the verifier from `portal.sequencer` (not prover-controlled)
+- `ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex` (passed by portal)
+- `ZoneOutbox.lastBatch().withdrawalQueueHash == withdrawalQueueTransition.withdrawalQueueHash`
+- Zone block `beneficiary` equals `sequencer` (passed by portal)
 - `DepositQueueTransition` matches `ZoneInbox.processedDepositQueueHash` changes
 - `BlockTransition` is computed from the zone block header hash (not raw state root)

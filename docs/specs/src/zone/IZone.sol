@@ -54,7 +54,8 @@ struct Deposit {
 struct Withdrawal {
     address sender;             // who initiated the withdrawal on the zone
     address to;                 // Tempo recipient
-    uint128 amount;
+    uint128 amount;             // amount to send to recipient (excludes fee)
+    uint128 fee;                // processing fee for sequencer (calculated at request time)
     bytes32 memo;               // user-provided context
     uint64 gasLimit;            // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
@@ -64,9 +65,28 @@ struct Withdrawal {
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
+    /// @notice Verify a batch proof
+    /// @dev The proof validates:
+    ///      1. Valid state transition from prevBlockHash to nextBlockHash
+    ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash for tempoBlockNumber
+    ///      3. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
+    ///      4. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
+    ///      5. Zone block beneficiary matches sequencer
+    ///      6. Deposit processing is correct (validated via Tempo state read inside proof)
+    /// @param tempoBlockNumber The Tempo block number for EIP-2935 lookup
+    /// @param tempoBlockHash The Tempo block hash (from EIP-2935)
+    /// @param expectedWithdrawalBatchIndex The expected batch index (portal.withdrawalBatchIndex + 1)
+    /// @param sequencer The registered sequencer address (zone block beneficiary must match)
+    /// @param blockTransition The zone block hash transition
+    /// @param depositQueueTransition The deposit queue processing transition
+    /// @param withdrawalQueueTransition The withdrawal queue hash for this batch
+    /// @param verifierConfig Opaque payload for verifier (TEE attestation envelope, etc.)
+    /// @param proof The validity proof or TEE attestation
     function verify(
         uint64 tempoBlockNumber,
         bytes32 tempoBlockHash,
+        uint64 expectedWithdrawalBatchIndex,
+        address sequencer,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -137,7 +157,11 @@ interface IZonePortal {
         uint128 amount
     );
 
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
     error NotSequencer();
+    error NotPendingSequencer();
     error InvalidProof();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
@@ -146,6 +170,7 @@ interface IZonePortal {
     function token() external view returns (address);
     function messenger() external view returns (address);
     function sequencer() external view returns (address);
+    function pendingSequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
     function verifier() external view returns (address);
     function withdrawalBatchIndex() external view returns (uint64);
@@ -158,6 +183,13 @@ interface IZonePortal {
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    /// @param newSequencer The address that will become sequencer after accepting.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
 
     function setSequencerPubkey(bytes32 pubkey) external;
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);

@@ -78,7 +78,7 @@ contract ZoneBridgeTest is BaseTest {
 
     /// @notice Storage slot for currentDepositQueueHash in ZonePortal
     /// @dev Layout: sequencerPubkey(0), withdrawalBatchIndex(1), blockHash(2), currentDepositQueueHash(3)
-    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(3));
+    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
 
     /// @notice Represents an observed deposit from Tempo (simulating sequencer watching events)
     struct ObservedDeposit {
@@ -234,6 +234,7 @@ contract ZoneBridgeTest is BaseTest {
                 sender: sender,
                 to: to,
                 amount: amount,
+                fee: 0,
                 memo: memo,
                 gasLimit: gasLimit,
                 fallbackRecipient: fallbackRecipient,
@@ -355,6 +356,7 @@ contract ZoneBridgeTest is BaseTest {
             sender: alice,
             to: alice,
             amount: withdrawAmount,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: alice,
@@ -422,10 +424,10 @@ contract ZoneBridgeTest is BaseTest {
 
         // Build expected queue hash (oldest = outermost, innermost wraps EMPTY_SENTINEL)
         Withdrawal memory w0 = Withdrawal({
-            sender: alice, to: alice, amount: 500e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
+            sender: alice, to: alice, amount: 500e6, fee: 0, memo: bytes32(0), gasLimit: 0, fallbackRecipient: alice, callbackData: ""
         });
         Withdrawal memory w1 = Withdrawal({
-            sender: bob, to: bob, amount: 1000e6, memo: bytes32(0), gasLimit: 0, fallbackRecipient: bob, callbackData: ""
+            sender: bob, to: bob, amount: 1000e6, fee: 0, memo: bytes32(0), gasLimit: 0, fallbackRecipient: bob, callbackData: ""
         });
         bytes32 innerHash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
         bytes32 queueHash = keccak256(abi.encode(w0, innerHash));
@@ -477,6 +479,7 @@ contract ZoneBridgeTest is BaseTest {
             sender: alice,
             to: address(withdrawalReceiver),
             amount: 500e6,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 100000,
             fallbackRecipient: alice,
@@ -528,6 +531,7 @@ contract ZoneBridgeTest is BaseTest {
             sender: alice,
             to: address(withdrawalReceiver),
             amount: 500e6,
+            fee: 0,
             memo: bytes32(0),
             gasLimit: 100000,
             fallbackRecipient: alice,
