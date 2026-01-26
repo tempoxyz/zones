@@ -36,8 +36,8 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 ### Tempo contracts
 
-- `ZoneFactory`: creates zones and registers parameters.
-- `ZonePortal`: per-zone portal that escrows the gas token on Tempo and finalizes exits.
+- [`ZoneFactory`](../../../specs/src/zone/ZoneFactory.sol): creates zones and registers parameters.
+- [`ZonePortal`](../../../specs/src/zone/ZonePortal.sol): per-zone portal that escrows the gas token on Tempo and finalizes exits.
 
 ### Zone components (off-chain or zone-side)
 
@@ -349,7 +349,7 @@ The verifier receives the `tempoBlockNumber` and `tempoBlockHash` (looked up on-
 
 The portal uses two queue libraries that encapsulate the hash chain management patterns:
 
-#### DepositQueueLib
+#### [DepositQueueLib](../../../specs/src/zone/DepositQueueLib.sol)
 
 Handles Tempo→L2 deposits. The Tempo portal only tracks `currentDepositQueueHash` (the head of the queue where new deposits land). The zone tracks its own `processedDepositQueueHash` in EVM state, and the proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state.
 
@@ -364,7 +364,7 @@ library DepositQueueLib {
 }
 ```
 
-#### WithdrawalQueueLib (unbounded buffer)
+#### [WithdrawalQueueLib](../../../specs/src/zone/WithdrawalQueueLib.sol) (unbounded buffer)
 
 Handles L2→Tempo withdrawals where the producer (proof) is slow and the consumer (on-chain) is fast. Each batch gets its own slot in an unbounded buffer.
 
@@ -407,7 +407,7 @@ library WithdrawalQueueLib {
 
 ### Tempo contracts
 
-#### Zone factory
+#### [Zone factory](../../../specs/src/zone/ZoneFactory.sol)
 
 ```solidity
 interface IZoneFactory {
@@ -437,7 +437,7 @@ interface IZoneFactory {
 }
 ```
 
-#### Zone portal
+#### [Zone portal](../../../specs/src/zone/ZonePortal.sol)
 
 ```solidity
 interface IZonePortal {
@@ -521,7 +521,7 @@ interface IZonePortal {
 }
 ```
 
-#### Zone messenger (Tempo)
+#### [Zone messenger](../../../specs/src/zone/ZoneMessenger.sol) (Tempo)
 
 Each zone has a dedicated messenger contract on Tempo. The portal gives the messenger max approval for the gas token. Withdrawal callbacks originate from this contract, not the portal.
 
@@ -584,7 +584,7 @@ The receiver must return `IWithdrawalReceiver.onWithdrawalReceived.selector` to 
 
 The zone's gas token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
 
-#### TempoState predeploy
+#### [TempoState predeploy](../../../specs/src/zone/TempoState.sol)
 
 The TempoState predeploy allows zones to verify they have a correct view of Tempo state. It stores the Tempo wrapper fields and selected inner Ethereum header fields, and provides storage reading functionality.
 
@@ -657,7 +657,7 @@ Tempo state staleness depends on how frequently the sequencer calls `finalizeTem
 
 The zone has a `TIP403Registry` contract deployed at the **same address** as Tempo. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the Tempo state reader precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.
 
-#### Zone inbox
+#### [Zone inbox](../../../specs/src/zone/ZoneInbox.sol)
 
 The zone inbox is a system contract that advances Tempo state and processes deposits from Tempo in a single atomic operation. It is called by the sequencer as a **system transaction at the start of each block**.
 
@@ -725,7 +725,7 @@ The sequencer observes `DepositMade` events on the Tempo portal and relays them 
 
 This combined approach ensures Tempo state advancement and deposit processing are atomic, and the deposit hash is validated against the actual Tempo state at the newly finalized block.
 
-#### Zone outbox
+#### [Zone outbox](../../../specs/src/zone/ZoneOutbox.sol)
 
 The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a **batch**, it calls `finalizeWithdrawalBatch(count)` as a system transaction at the end of the **final block** in that batch. This constructs the withdrawal queue hash on-chain and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to storage. Intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The call is required even if there are zero withdrawals (use `count = 0`) so the withdrawal batch index advances. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
 

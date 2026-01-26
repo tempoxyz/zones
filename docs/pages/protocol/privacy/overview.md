@@ -85,19 +85,19 @@ The system consists of contracts on both Tempo (the main chain) and within each 
 
 ### Tempo-Side Contracts
 
-**ZoneFactory** deploys new zones. Each zone gets its own portal and messenger contracts with deterministic addresses.
+**[ZoneFactory](../../../specs/src/zone/ZoneFactory.sol)** deploys new zones. Each zone gets its own portal and messenger contracts with deterministic addresses.
 
-**ZonePortal** is the central bridge contract. It holds all deposited tokens in escrow, verifies validity proofs, and processes withdrawals. The portal maintains the authoritative state: which deposits have been made, which batches have been proven, and which withdrawals are pending.
+**[ZonePortal](../../../specs/src/zone/ZonePortal.sol)** is the central bridge contract. It holds all deposited tokens in escrow, verifies validity proofs, and processes withdrawals. The portal maintains the authoritative state: which deposits have been made, which batches have been proven, and which withdrawals are pending.
 
-**ZoneMessenger** handles withdrawals that include callbacks. When a user wants to withdraw tokens and trigger a contract call atomically, the messenger executes both operations together. If the callback fails, the entire withdrawal reverts and funds bounce back to the zone.
+**[ZoneMessenger](../../../specs/src/zone/ZoneMessenger.sol)** handles withdrawals that include callbacks. When a user wants to withdraw tokens and trigger a contract call atomically, the messenger executes both operations together. If the callback fails, the entire withdrawal reverts and funds bounce back to the zone.
 
 ### Zone-Side Contracts
 
-**TempoState** is a system contract at a fixed address that stores the zone's view of Tempo. The sequencer updates this contract with Tempo block headers, allowing zone contracts to read Tempo state within proofs.
+**[TempoState](../../../specs/src/zone/TempoState.sol)** is a system contract at a fixed address that stores the zone's view of Tempo. The sequencer updates this contract with Tempo block headers, allowing zone contracts to read Tempo state within proofs.
 
-**ZoneInbox** processes incoming deposits. At the start of each zone block, a system transaction calls this contract to mint tokens to recipients. The inbox validates that processed deposits match what the portal expects.
+**[ZoneInbox](../../../specs/src/zone/ZoneInbox.sol)** processes incoming deposits. At the start of each zone block, a system transaction calls this contract to mint tokens to recipients. The inbox validates that processed deposits match what the portal expects.
 
-**ZoneOutbox** handles withdrawal requests. Users burn their zone tokens here and specify a Tempo recipient. At the end of each batch, the sequencer finalizes pending withdrawals into a queue that will be proven and processed on Tempo.
+**[ZoneOutbox](../../../specs/src/zone/ZoneOutbox.sol)** handles withdrawal requests. Users burn their zone tokens here and specify a Tempo recipient. At the end of each batch, the sequencer finalizes pending withdrawals into a queue that will be proven and processed on Tempo.
 
 ## How Deposits Work
 
@@ -162,3 +162,4 @@ The factory deploys a new `ZonePortal` and `ZoneMessenger` for the zone. The zon
 
 - [Contract Design](./contract-design.md) — Detailed contract specifications
 - [Prover Design](./prover-design.md) — How validity proofs work
+- [Reference Implementation](../../../specs/src/zone/) — Solidity contracts for privacy zones
