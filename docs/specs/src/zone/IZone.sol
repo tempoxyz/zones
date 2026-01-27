@@ -461,7 +461,7 @@ interface IZoneOutbox {
     ) external;
 
     /// @notice Finalize batch at end of block - build withdrawal hash and write to state
-    /// @dev Only callable by sequencer as system transaction. Required per batch (count may be 0).
+    /// @dev Only callable by sequencer as a sequencer-only transaction. Required per batch (count may be 0).
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
