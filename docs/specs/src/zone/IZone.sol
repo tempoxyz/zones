@@ -369,11 +369,12 @@ interface IZoneInbox {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    /// @notice Advance Tempo state and process deposits in a single system transaction.
-    /// @dev This is the main entry point for the sequencer's system transaction.
+    /// @notice Advance Tempo state and process deposits in a single sequencer-only transaction.
+    /// @dev This is the main entry point for the sequencer's Tempo sync + deposit processing.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the deposit queue
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    ///      May be called zero or more times per block and can be interleaved with user txs.
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
     function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;

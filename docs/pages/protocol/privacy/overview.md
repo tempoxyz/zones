@@ -95,7 +95,7 @@ The system consists of contracts on both Tempo (the main chain) and within each 
 
 **[TempoState](../../../specs/src/zone/TempoState.sol)** is a system contract at a fixed address that stores the zone's view of Tempo. The sequencer updates this contract with Tempo block headers, allowing zone contracts to read Tempo state within proofs.
 
-**[ZoneInbox](../../../specs/src/zone/ZoneInbox.sol)** processes incoming deposits. At the start of each zone block, a system transaction calls this contract to mint tokens to recipients. The inbox validates that processed deposits match what the portal expects.
+**[ZoneInbox](../../../specs/src/zone/ZoneInbox.sol)** processes incoming deposits. The sequencer calls this contract as needed (zero or more times per block) to advance Tempo state and mint tokens to recipients. The inbox validates that processed deposits match what the portal expects.
 
 **[ZoneOutbox](../../../specs/src/zone/ZoneOutbox.sol)** handles withdrawal requests. Users burn their zone tokens here and specify a Tempo recipient. At the end of each batch, the sequencer finalizes pending withdrawals into a queue that will be proven and processed on Tempo.
 
@@ -107,7 +107,7 @@ Deposits move tokens from Tempo into a zone:
 
 2. **Sequencer relays deposits**: The sequencer watches for deposit events and includes them in zone blocks.
 
-3. **Zone processes deposits**: At block start, `ZoneInbox.advanceTempo()` processes deposits in order, minting the zone's native token to each recipient. The inbox builds a hash chain that must match the portal's record.
+3. **Zone processes deposits**: When the sequencer calls `ZoneInbox.advanceTempo()`, it processes deposits in order, minting the zone's native token to each recipient. The inbox builds a hash chain that must match the portal's record.
 
 4. **Proof validates processing**: When the sequencer submits a batch proof, it demonstrates that deposits were processed correctly by reading the portal's state from within the proof.
 

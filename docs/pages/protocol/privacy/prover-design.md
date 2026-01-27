@@ -4,7 +4,7 @@
 
 The zone prover implements a pure state transition function in Rust with `no_std` compatibility, allowing it to run in both ZKVMs like SP1 and TEEs like SGX or TDX.
 
-The function takes a complete witness of zone blocks and their dependencies, executes the EVM state transitions (including required system transactions), and outputs commitments for on-chain verification.
+The function takes a complete witness of zone blocks and their dependencies, executes the EVM state transitions (including sequencer-only protocol transactions), and outputs commitments for on-chain verification.
 The core commitment is the **zone block hash transition** (not the raw state root), matching the privacy zone spec and Solidity reference implementation.
 
 ## Interface
@@ -94,6 +94,22 @@ pub enum Error {
 ### Zone Blocks
 
 ```rust
+pub enum ZoneTx {
+    /// Sequencer-only: advance Tempo state and process deposits
+    AdvanceTempo {
+        /// Tempo header RLP used by the call
+        tempo_header_rlp: Vec<u8>,
+        /// Deposits processed by the call (oldest first)
+        deposits: Vec<Deposit>,
+    },
+
+    /// User transaction
+    User(Transaction),
+
+    /// Sequencer-only: finalize a batch (only in final block, must be last)
+    FinalizeWithdrawalBatch { count: u64 },
+}
+
 pub struct ZoneBlock {
     /// Block number
     pub number: u64,
@@ -107,34 +123,23 @@ pub struct ZoneBlock {
     /// Beneficiary (must match registered sequencer)
     pub beneficiary: Address,
 
-    /// Tempo header RLP used by the system tx (ZoneInbox.advanceTempo)
-    pub tempo_header_rlp: Vec<u8>,
-
-    /// Deposits processed by the system tx (oldest first)
-    pub deposits: Vec<Deposit>,
-
-    /// System tx at end of block (ZoneOutbox.finalizeWithdrawalBatch)
-    /// Required for the final block in a batch; must be absent in intermediate blocks.
-    pub finalize_withdrawal_batch_count: Option<u64>,
-
-    /// Transactions to execute
-    pub transactions: Vec<Transaction>,
+    /// Ordered transactions to execute (sequencer-only + user)
+    pub transactions: Vec<ZoneTx>,
 }
 ```
 
-Each zone block contains the required system transactions plus user transactions that will be executed using `revm`.
-The system transactions must mirror the Solidity reference implementation:
-- `ZoneInbox.advanceTempo(tempo_header_rlp, deposits)` at the start of the block
-- `ZoneOutbox.finalizeWithdrawalBatch(count)` at the end of the block **only if this is the final block of the batch**
+Each zone block contains an ordered list of transactions executed using `revm`. The list can include:
+- Zero or more sequencer-only `AdvanceTempo` calls (can appear anywhere, including multiple times per block)
+- User transactions
+- A sequencer-only `FinalizeWithdrawalBatch` call (only in the final block of a batch, and it must be last)
 
 User transactions may call the `TempoState` precompile to read Tempo state. User transactions
-**must not** call `ZoneInbox` or `ZoneOutbox`; those are system-only predeploys. The executor
-must reject any non-system call to these addresses and enforce exactly one `advanceTempo`
-at the start of each block and exactly one `finalizeWithdrawalBatch` in the final block of the batch.
+**must not** call `ZoneInbox` or `ZoneOutbox`; those are sequencer-only predeploys. The executor
+must reject any non-sequencer call to these addresses and enforce that `FinalizeWithdrawalBatch`
+appears at most once, only in the final block, and as the final transaction.
 The block hash is computed from the simplified zone header:
 `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`.
-The transactions and receipts roots are computed over the full ordered list:
-`[advanceTempo, user txs..., finalizeWithdrawalBatch?]`.
+The transactions and receipts roots are computed over the full ordered list of zone transactions.
 
 ### Zone State Witness
 
@@ -201,16 +206,17 @@ pub struct L1StateRead {
 The `BatchStateProof` structure enables efficient proving of potentially thousands of Tempo state reads across multiple zone blocks.
 
 **Binding to Tempo:**
-- Tempo headers are validated by executing `TempoState.finalizeTempo` during the system tx
-  in each zone block. The resulting `tempoBlockNumber`, `tempoBlockHash`, and
-  `tempoStateRoot` are part of the proven zone state.
+- Tempo headers are validated whenever `ZoneInbox.advanceTempo` executes. Each call runs
+  `TempoState.finalizeTempo`, updating `tempoBlockNumber`, `tempoBlockHash`, and `tempoStateRoot`
+  in the proven zone state.
 - `TempoState.tempoBlockNumber()` at end of batch must equal `public_inputs.tempo_block_number`.
 - Each Tempo read is verified against the `tempoStateRoot` currently bound in `TempoState`
   at the time of the read. The precompile must reject reads if the block is not yet bound.
-- For a given zone block, all Tempo reads must use the Tempo block number finalized by that
-  block's `advanceTempo` system tx (checked against `TempoState.tempoBlockNumber()`).
+- For any Tempo read, the `tempo_block_number` must match the value currently bound in
+  `TempoState` at the time of the read. If a block contains no `advanceTempo` calls, reads
+  use the binding from the previous block.
 - Tempo reads performed inside `advanceTempo` (e.g., deposit queue hash) must be bound to the
-  Tempo header finalized by that call.
+  Tempo header finalized by that specific call.
 
 Inside execution, `TempoState.readTempoStorageSlot` is modeled to read from the current `tempoStateRoot` (derived from the finalized header), so the proof and the precompile agree on the same root.
 
@@ -307,15 +313,25 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
             return Err(Error::InconsistentState);
         }
 
-        if is_last_block && block.finalize_withdrawal_batch_count.is_none() {
-            return Err(Error::InconsistentState);
-        }
-        if !is_last_block && block.finalize_withdrawal_batch_count.is_some() {
+        let finalize_positions: Vec<usize> = block
+            .transactions
+            .iter()
+            .enumerate()
+            .filter_map(|(i, tx)| matches!(tx, ZoneTx::FinalizeWithdrawalBatch { .. }).then_some(i))
+            .collect();
+        if is_last_block {
+            if finalize_positions.len() != 1 {
+                return Err(Error::InconsistentState);
+            }
+            if finalize_positions[0] != block.transactions.len().saturating_sub(1) {
+                return Err(Error::InconsistentState);
+            }
+        } else if !finalize_positions.is_empty() {
             return Err(Error::InconsistentState);
         }
 
-        // Execute block with system txs + user txs, and Tempo access via tempo_state
-        let (tx_root, receipts_root, finalized_tempo_number) =
+        // Execute block with ordered txs (sequencer-only + user), and Tempo access via tempo_state
+        let (tx_root, receipts_root) =
             execute_zone_block(&mut zone_state, block, &tempo_state, idx)?;
 
         // Build the zone block header and compute the block hash
@@ -331,13 +347,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
         prev_block_hash = keccak256(rlp_encode(header));
         prev_header = header;
 
-        // Bind the block's Tempo header to the finalized Tempo state number
-        let expected_tempo_hash = tempo_state
-            .block_hash(finalized_tempo_number)
-            .ok_or(Error::InvalidProof)?;
-        if expected_tempo_hash != keccak256(&block.tempo_header_rlp) {
-            return Err(Error::InconsistentState);
-        }
+        // Tempo header binding is validated inside each AdvanceTempo call.
     }
 
     // Phase 4: Extract output commitments
@@ -404,7 +414,7 @@ fn execute_zone_block(
     block: &ZoneBlock,
     tempo_state: &TempoStateAccessor,
     block_index: usize,
-) -> Result<(B256, B256, u64), Error> {
+) -> Result<(B256, B256), Error> {
     // Set up revm with TempoState precompile
     let mut evm = revm::EVM::builder()
         .with_db(zone_state)
@@ -415,42 +425,45 @@ fn execute_zone_block(
         )
         .build();
 
-    // System tx: advance Tempo and process deposits.
-    // The TempoState precompile must bind reads during this call to the newly finalized
-    // Tempo header, and reject any unbound reads.
-    evm.transact_commit(system_tx_advance_tempo(
-        &block.tempo_header_rlp,
-        &block.deposits,
-    ))
-    .map_err(|e| Error::ExecutionError(e.to_string()))?;
-
-    let finalized_tempo_number = zone_state.tempo_state_block_number()?;
-    tempo_state.bind_block(block_index, finalized_tempo_number)?;
-
-    // Execute transactions
+    // Execute ordered transactions (sequencer-only + user)
     for tx in &block.transactions {
-        evm.transact_commit(tx)
-            .map_err(|e| Error::ExecutionError(e.to_string()))?;
-    }
+        match tx {
+            ZoneTx::AdvanceTempo {
+                tempo_header_rlp,
+                deposits,
+            } => {
+                // Advance Tempo and process deposits.
+                // The TempoState precompile must bind reads during this call to the newly
+                // finalized Tempo header, and reject any unbound reads.
+                evm.transact_commit(system_tx_advance_tempo(tempo_header_rlp, deposits))
+                    .map_err(|e| Error::ExecutionError(e.to_string()))?;
 
-    // Optional system tx: finalize batch
-    let finalize_tx = block
-        .finalize_withdrawal_batch_count
-        .map(system_tx_finalize_withdrawal_batch);
-    if let Some(tx) = &finalize_tx {
-        evm.transact_commit(tx)
-            .map_err(|e| Error::ExecutionError(e.to_string()))?;
+                let tempo_number = zone_state.tempo_state_block_number()?;
+                tempo_state.bind_block(block_index, tempo_number)?;
+
+                let expected_tempo_hash = tempo_state
+                    .block_hash(tempo_number)
+                    .ok_or(Error::InvalidProof)?;
+                if expected_tempo_hash != keccak256(tempo_header_rlp) {
+                    return Err(Error::InconsistentState);
+                }
+            }
+            ZoneTx::User(user_tx) => {
+                evm.transact_commit(user_tx)
+                    .map_err(|e| Error::ExecutionError(e.to_string()))?;
+            }
+            ZoneTx::FinalizeWithdrawalBatch { count } => {
+                evm.transact_commit(system_tx_finalize_withdrawal_batch(*count))
+                    .map_err(|e| Error::ExecutionError(e.to_string()))?;
+            }
+        }
     }
 
     // Compute roots for block hash commitment
-    let tx_root = compute_transactions_root(
-        &system_tx_advance_tempo(&block.tempo_header_rlp, &block.deposits),
-        &block.transactions,
-        finalize_tx.as_ref(),
-    );
+    let tx_root = compute_transactions_root(&block.transactions);
     let receipts_root = compute_receipts_root(evm.last_block_receipts());
 
-    Ok((tx_root, receipts_root, finalized_tempo_number))
+    Ok((tx_root, receipts_root))
 }
 ```
 
