@@ -2,35 +2,32 @@
 pragma solidity ^0.8.13;
 
 import { ITIP20 } from "../interfaces/ITIP20.sol";
-import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
-import { DepositQueueLib } from "./DepositQueueLib.sol";
 import {
-    BlockTransition,
-    Deposit,
-    DepositQueueTransition,
-    IVerifier,
-    IZoneMessenger,
     IZonePortal,
+    IZoneMessenger,
+    IVerifier,
+    Deposit,
     Withdrawal,
+    BlockTransition,
+    DepositQueueTransition,
     WithdrawalQueueTransition
 } from "./IZone.sol";
+import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
+import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 
 /// @title ZonePortal
-/// @notice Per-zone portal that escrows zone tokens on Tempo and manages deposits/withdrawals
+/// @notice Per-zone portal that escrows gas tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
-
     using WithdrawalQueueLib for WithdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Fixed gas value for deposit fee calculation
-    /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
-    ///      This provides a stable pricing basis for deposits while allowing sequencer
-    ///      flexibility to adjust the zoneGasRate based on operational costs.
-    uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
+    /// @notice Estimated gas cost for processing a deposit on the zone
+    /// @dev Covers ZoneInbox.advanceTempo processing: hash computation, token minting, event emission
+    uint64 public constant DEPOSIT_GAS_ESTIMATE = 50000;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -52,7 +49,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Future functionality: allows users to encrypt data only the sequencer can read
     bytes32 public sequencerPubkey;
 
-    /// @notice Zone gas rate (zone token units per gas unit on the zone)
+    /// @notice Zone gas rate (gas token units per gas unit on the zone)
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
     ///      Deposit fee = DEPOSIT_GAS_ESTIMATE * zoneGasRate
     uint128 public zoneGasRate;
@@ -90,7 +87,7 @@ contract ZonePortal is IZonePortal {
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
 
-        // Give messenger max approval for the zone token
+        // Give messenger max approval for the gas token
         ITIP20(_token).approve(_messenger, type(uint256).max);
     }
 
@@ -162,13 +159,13 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Calculate the fee for a deposit
-    /// @dev Fee = FIXED_DEPOSIT_GAS * zoneGasRate
-    /// @return fee The deposit fee in zone token units
+    /// @dev Fee = DEPOSIT_GAS_ESTIMATE * zoneGasRate
+    /// @return fee The deposit fee in gas token units
     function calculateDepositFee() public view returns (uint128 fee) {
-        fee = uint128(FIXED_DEPOSIT_GAS) * zoneGasRate;
+        fee = uint128(DEPOSIT_GAS_ESTIMATE) * zoneGasRate;
     }
 
-    /// @notice Deposit zone token into the zone. Returns the new current deposit queue hash.
+    /// @notice Deposit gas token into the zone. Returns the new current deposit queue hash.
     /// @dev Fee is deducted from amount and paid to sequencer. Net amount is credited on zone.
     /// @param to Recipient address on the zone
     /// @param amount Total amount to deposit (fee will be deducted)
@@ -197,8 +194,12 @@ contract ZonePortal is IZonePortal {
         }
 
         // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
-        Deposit memory depositData =
-            Deposit({ sender: msg.sender, to: to, amount: netAmount, memo: memo });
+        Deposit memory depositData = Deposit({
+            sender: msg.sender,
+            to: to,
+            amount: netAmount,
+            memo: memo
+        });
 
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
@@ -250,14 +251,13 @@ contract ZonePortal is IZonePortal {
         }
 
         // Try callback via messenger; revert is treated as failure
-        try IZoneMessenger(messenger)
-            .relayMessage(
-                withdrawal.sender,
-                withdrawal.to,
-                withdrawal.amount,
-                withdrawal.gasLimit,
-                withdrawal.callbackData
-            ) {
+        try IZoneMessenger(messenger).relayMessage(
+            withdrawal.sender,
+            withdrawal.to,
+            withdrawal.amount,
+            withdrawal.gasLimit,
+            withdrawal.callbackData
+        ) {
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
         } catch {
             // Callback failed: bounce back to zone (only amount, not fee)
@@ -269,11 +269,13 @@ contract ZonePortal is IZonePortal {
     /// @notice Enqueue a bounce-back deposit for failed callback
     function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
         Deposit memory depositData = Deposit({
-            sender: address(this), to: fallbackRecipient, amount: amount, memo: bytes32(0)
+            sender: address(this),
+            to: fallbackRecipient,
+            amount: amount,
+            memo: bytes32(0)
         });
 
-        bytes32 newCurrentDepositQueueHash =
-            DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
+        bytes32 newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
         emit BounceBack(newCurrentDepositQueueHash, fallbackRecipient, amount);
@@ -327,19 +329,18 @@ contract ZonePortal is IZonePortal {
         }
 
         // Verify proof (handles both direct and ancestry modes)
-        bool valid = IVerifier(verifier)
-            .verify(
-                tempoBlockNumber,
-                anchorBlockNumber,
-                anchorBlockHash,
-                withdrawalBatchIndex + 1, // expected batch index after this batch
-                sequencer,
-                blockTransition,
-                depositQueueTransition,
-                withdrawalQueueTransition,
-                verifierConfig,
-                proof
-            );
+        bool valid = IVerifier(verifier).verify(
+            tempoBlockNumber,
+            anchorBlockNumber,
+            anchorBlockHash,
+            withdrawalBatchIndex + 1,
+            sequencer,
+            blockTransition,
+            depositQueueTransition,
+            withdrawalQueueTransition,
+            verifierConfig,
+            proof
+        );
         if (!valid) revert InvalidProof();
 
         // Update state
@@ -359,5 +360,4 @@ contract ZonePortal is IZonePortal {
             withdrawalQueueTransition.withdrawalQueueHash
         );
     }
-
 }
