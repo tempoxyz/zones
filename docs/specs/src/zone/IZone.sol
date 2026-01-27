@@ -144,7 +144,8 @@ interface IZonePortal {
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address to,
-        uint128 amount,
+        uint128 netAmount,
+        uint128 fee,
         bytes32 memo
     );
 
@@ -169,12 +170,17 @@ interface IZonePortal {
 
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+    event ZoneGasRateUpdated(uint128 zoneGasRate);
 
     error NotSequencer();
     error NotPendingSequencer();
     error InvalidProof();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
+    error DepositTooSmall();
+
+    /// @notice Estimated gas cost for processing a deposit on the zone
+    function DEPOSIT_GAS_ESTIMATE() external view returns (uint64);
 
     function zoneId() external view returns (uint64);
     function token() external view returns (address);
@@ -182,6 +188,7 @@ interface IZonePortal {
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
+    function zoneGasRate() external view returns (uint128);
     function verifier() external view returns (address);
     function withdrawalBatchIndex() external view returns (uint64);
     function blockHash() external view returns (bytes32);
@@ -202,6 +209,14 @@ interface IZonePortal {
     function acceptSequencer() external;
 
     function setSequencerPubkey(bytes32 pubkey) external;
+
+    /// @notice Set zone gas rate. Only callable by sequencer.
+    /// @param _zoneGasRate Gas token units per gas unit on the zone
+    function setZoneGasRate(uint128 _zoneGasRate) external;
+
+    /// @notice Calculate the fee for a deposit
+    function calculateDepositFee() external view returns (uint128 fee);
+
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
@@ -385,6 +400,9 @@ interface IZoneOutbox {
     /// @notice Maximum callback data size (1KB)
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
 
+    /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
+    function WITHDRAWAL_BASE_GAS() external view returns (uint64);
+
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex,
         address indexed sender,
@@ -397,7 +415,7 @@ interface IZoneOutbox {
         bytes data
     );
 
-    event WithdrawalFeesUpdated(uint128 baseFee, uint128 gasFeeRate);
+    event TempoGasRateUpdated(uint128 tempoGasRate);
 
     /// @notice Emitted when sequencer finalizes a batch at end of block
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
@@ -418,11 +436,9 @@ interface IZoneOutbox {
     /// @notice Pending sequencer for two-step transfer
     function pendingSequencer() external view returns (address);
 
-    /// @notice Base fee for withdrawal processing
-    function withdrawalBaseFee() external view returns (uint128);
-
-    /// @notice Fee per unit of gasLimit
-    function withdrawalGasFeeRate() external view returns (uint128);
+    /// @notice Tempo gas rate (gas token units per gas unit on Tempo)
+    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    function tempoGasRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing)
     function nextWithdrawalIndex() external view returns (uint64);
@@ -442,10 +458,13 @@ interface IZoneOutbox {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    /// @notice Set withdrawal fee parameters. Only callable by sequencer.
-    function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external;
+    /// @notice Set Tempo gas rate. Only callable by sequencer.
+    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
+    /// @param _tempoGasRate Gas token units per gas unit on Tempo
+    function setTempoGasRate(uint128 _tempoGasRate) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
+    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo

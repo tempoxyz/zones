@@ -22,6 +22,14 @@ contract ZonePortal is IZonePortal {
     using WithdrawalQueueLib for WithdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
+                               CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Estimated gas cost for processing a deposit on the zone
+    /// @dev Covers ZoneInbox.advanceTempo processing: hash computation, token minting, event emission
+    uint64 public constant DEPOSIT_GAS_ESTIMATE = 50000;
+
+    /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
@@ -37,7 +45,15 @@ contract ZonePortal is IZonePortal {
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
 
+    /// @notice Sequencer's public key for encrypting messages (e.g., deposit memos)
+    /// @dev Future functionality: allows users to encrypt data only the sequencer can read
     bytes32 public sequencerPubkey;
+
+    /// @notice Zone gas rate (gas token units per gas unit on the zone)
+    /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
+    ///      Deposit fee = DEPOSIT_GAS_ESTIMATE * zoneGasRate
+    uint128 public zoneGasRate;
+
     uint64 public withdrawalBatchIndex;
     bytes32 public blockHash;
 
@@ -108,6 +124,16 @@ contract ZonePortal is IZonePortal {
         sequencerPubkey = pubkey;
     }
 
+    /// @notice Set zone gas rate. Only callable by sequencer.
+    /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
+    ///      If actual zone gas is higher, sequencer covers the difference.
+    ///      If actual zone gas is lower, sequencer keeps the surplus.
+    /// @param _zoneGasRate Gas token units per gas unit on the zone
+    function setZoneGasRate(uint128 _zoneGasRate) external onlySequencer {
+        zoneGasRate = _zoneGasRate;
+        emit ZoneGasRateUpdated(_zoneGasRate);
+    }
+
     /*//////////////////////////////////////////////////////////////
                            QUEUE ACCESSORS
     //////////////////////////////////////////////////////////////*/
@@ -132,16 +158,39 @@ contract ZonePortal is IZonePortal {
                                DEPOSITS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Calculate the fee for a deposit
+    /// @dev Fee = DEPOSIT_GAS_ESTIMATE * zoneGasRate
+    /// @return fee The deposit fee in gas token units
+    function calculateDepositFee() public view returns (uint128 fee) {
+        fee = uint128(DEPOSIT_GAS_ESTIMATE) * zoneGasRate;
+    }
+
     /// @notice Deposit gas token into the zone. Returns the new current deposit queue hash.
+    /// @dev Fee is deducted from amount and paid to sequencer. Net amount is credited on zone.
+    /// @param to Recipient address on the zone
+    /// @param amount Total amount to deposit (fee will be deducted)
+    /// @param memo User-provided context
+    /// @return newCurrentDepositQueueHash The new deposit queue hash after this deposit
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash) {
+        // Calculate deposit fee
+        uint128 fee = calculateDepositFee();
+        if (amount <= fee) revert DepositTooSmall();
+        uint128 netAmount = amount - fee;
+
+        // Transfer full amount from sender to this contract
         // TIP-20 transfers revert on failure, so no boolean check is needed here.
         ITIP20(token).transferFrom(msg.sender, address(this), amount);
 
-        // Build deposit struct
+        // Transfer fee to sequencer
+        if (fee > 0) {
+            ITIP20(token).transfer(sequencer, fee);
+        }
+
+        // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
         Deposit memory depositData = Deposit({
             sender: msg.sender,
             to: to,
-            amount: amount,
+            amount: netAmount,
             memo: memo
         });
 
@@ -153,7 +202,8 @@ contract ZonePortal is IZonePortal {
             newCurrentDepositQueueHash,
             msg.sender,
             to,
-            amount,
+            netAmount,
+            fee,
             memo
         );
     }
