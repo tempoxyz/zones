@@ -17,6 +17,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Limits storage costs and hash computation overhead
     uint256 public constant MAX_CALLBACK_DATA_SIZE = 1024;
 
+    /// @notice Maximum gas fee rate ($1 per gas for 6-decimal stablecoins)
+    /// @dev Ensures gasLimit (uint64) * gasFeeRate fits in uint128 without overflow.
+    ///      Any practical fee rate would be orders of magnitude lower.
+    uint128 public constant MAX_GAS_FEE_RATE = 1e18;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -59,6 +64,7 @@ contract ZoneOutbox is IZoneOutbox {
 
     error InvalidFallbackRecipient();
     error CallbackDataTooLarge();
+    error GasFeeRateTooHigh();
     error TransferFailed();
     error OnlySequencer();
     error NotPendingSequencer();
@@ -104,6 +110,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param gasFeeRate Fee per unit of gasLimit (covers callback execution)
     function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external {
         if (msg.sender != sequencer) revert OnlySequencer();
+        if (gasFeeRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         withdrawalBaseFee = baseFee;
         withdrawalGasFeeRate = gasFeeRate;
         emit WithdrawalFeesUpdated(baseFee, gasFeeRate);

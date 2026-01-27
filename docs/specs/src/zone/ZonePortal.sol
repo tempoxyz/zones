@@ -37,6 +37,8 @@ contract ZonePortal is IZonePortal {
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
 
+    /// @notice Sequencer's public key for encrypting messages (e.g., deposit memos)
+    /// @dev Future functionality: allows users to encrypt data only the sequencer can read
     bytes32 public sequencerPubkey;
     uint64 public withdrawalBatchIndex;
     bytes32 public blockHash;
