@@ -728,7 +728,7 @@ This combined approach ensures Tempo state advancement and deposit processing ar
 
 #### [Zone outbox](../../../specs/src/zone/ZoneOutbox.sol)
 
-The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a **batch**, it calls `finalizeWithdrawalBatch(count)` as a system transaction at the end of the **final block** in that batch. This constructs the withdrawal queue hash on-chain and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to storage. Intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The call is required even if there are zero withdrawals (use `count = 0`) so the withdrawal batch index advances. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
+The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a **batch**, it calls `finalizeWithdrawalBatch(count)` as a sequencer-only transaction at the end of the **final block** in that batch. This constructs the withdrawal queue hash on-chain and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to storage. Intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The call is required even if there are zero withdrawals (use `count = 0`) so the withdrawal batch index advances. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
 
 ```solidity
 /// @notice Withdrawal batch parameters stored in state for proof access
@@ -823,7 +823,7 @@ interface IZoneOutbox {
     ) external;
 
     /// @notice Finalize batch at end of final block - build withdrawal hash and write to state.
-    /// @dev Only callable by sequencer as a system transaction in the final block of a batch.
+    /// @dev Only callable by sequencer as a sequencer-only transaction in the final block of a batch.
     ///      Must be called exactly once per batch (count may be 0). Writes `withdrawalQueueHash`
     ///      and `withdrawalBatchIndex` to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process (avoids unbounded loops).
