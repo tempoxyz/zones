@@ -659,7 +659,7 @@ The zone has a `TIP403Registry` contract deployed at the **same address** as Tem
 
 #### [Zone inbox](../../../specs/src/zone/ZoneInbox.sol)
 
-The zone inbox is a system contract that advances Tempo state and processes deposits from Tempo in a single atomic operation. It is called by the sequencer as a **system transaction at the start of each block**.
+The zone inbox is a system contract that advances Tempo state and processes deposits from Tempo in a single atomic operation. It is called by the sequencer as a privileged transaction **whenever needed** (zero or more times per block), and may be interleaved with user transactions.
 
 ```solidity
 interface IZoneInbox {
@@ -705,11 +705,12 @@ interface IZoneInbox {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    /// @notice Advance Tempo state and process deposits in a single system transaction.
-    /// @dev This is the main entry point for the sequencer's system transaction.
+    /// @notice Advance Tempo state and process deposits in a single sequencer-only transaction.
+    /// @dev This is the main entry point for the sequencer's Tempo sync + deposit processing.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the deposit queue
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    ///      May be called zero or more times per block and can be interleaved with user txs.
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
     function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;
@@ -1110,10 +1111,10 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo node. There 
 - **Zone block hash**: Computed from the zone block header after execution. The zone block header is a simplified Ethereum header that includes:
   - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`
   - **Omitted fields**: `gasLimit`, `gasUsed` (zones have no hard gas limit), `logsBloom`, `extraData` (not needed for proofs)
-- **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo, user txs..., finalizeWithdrawalBatch?]`.
+- **Transactions/receipts roots**: Computed over the full ordered list of zone transactions (user txs plus any `advanceTempo` calls), with `finalizeWithdrawalBatch` (if present) required to be the last tx in the final block of a batch.
 - **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
 - **Receipts root**: Committed in the block hash but not proven on-chain. Batch parameters are read from `lastBatch` state storage instead of event logs.
-- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from the EIP-2935 history precompile.
+- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. The sequencer may call `ZoneInbox.advanceTempo()` at any time (zero or more times per block); each call finalizes a Tempo header via `TempoState.finalizeTempo()`. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's final `tempoBlockHash` matches the actual hash from the EIP-2935 history precompile.
 
 #### Block header field coverage
 
@@ -1153,7 +1154,7 @@ The portal provides `blockHash` and `withdrawalBatchIndex` as the previous batch
 ### Deposits and withdrawals
 
 - **Deposit contract**: Tempo portal escrows TIP-20 tokens. The ExEx watches `DepositMade` events and queues deposits for zone processing.
-- **Combined system transaction**: Each zone block starts with a system transaction that calls `ZoneInbox.advanceTempo(header, deposits)`. This atomically advances the zone's Tempo view and processes pending deposits, validating the deposit hash against Tempo state.
+- **Combined sequencer transaction**: The sequencer calls `ZoneInbox.advanceTempo(header, deposits)` as needed (zero or more times per block). Each call atomically advances the zone's Tempo view and processes pending deposits, validating the deposit hash against Tempo state.
 - **Withdrawal requests**: Users trigger withdrawals on the zone via RPC. The withdrawal is added to the pending exits and included in the next batch's exit list.
 
 ### RPC interface
