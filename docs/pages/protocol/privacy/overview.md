@@ -653,6 +653,100 @@ The TempoState stores the Tempo wrapper fields and the inner fields needed by th
 
 Tempo state staleness depends on how frequently the sequencer calls `finalizeTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed during the batch.
 
+#### Tempo state declarations (transaction type `0x7A`)
+
+Zone transactions that read Tempo state must include a **Tempo state declaration**—an extension of EIP-2930 access lists that includes the actual values. This enables the sequencer to validate transactions without blocking on Tempo state fetches.
+
+**Format (analogous to EIP-2930):**
+
+| EIP-2930 Access List | Tempo State Declaration |
+|---------------------|-------------------------|
+| `[[address, [slot, ...]], ...]` | `[[address, [[slot, value], ...]], ...]` |
+
+```solidity
+/// @notice A single storage slot and its declared value
+struct TempoStorageEntry {
+    bytes32 slot;   // Storage slot key
+    bytes32 value;  // Declared value at this slot
+}
+
+/// @notice Tempo state for a single account (contract)
+struct TempoAccountState {
+    address account;                    // Tempo contract address
+    TempoStorageEntry[] storageEntries; // Declared storage slots and values
+}
+
+/// @notice Complete Tempo state declaration for a transaction
+struct TempoStateDeclaration {
+    uint64 tempoBlockNumber;            // Tempo block this declaration is valid for
+    TempoAccountState[] accountStates;  // Declared state per account
+}
+```
+
+**Transaction type:** `0x7A` ('z' for zone)
+
+Transactions using Tempo state declarations use a new transaction type. The format extends EIP-1559 (type 2) transactions:
+
+```
+0x7A || rlp([chainId, nonce, maxPriorityFeePerGas, maxFeePerGas, gasLimit, to, value, data, accessList, tempoStateDeclaration, signatureYParity, signatureR, signatureS])
+```
+
+Where `tempoStateDeclaration` is:
+
+```
+[[tempoBlockNumber], [[account1, [[slot1, value1], [slot2, value2], ...]], [account2, [[slot1, value1], ...]], ...]]
+```
+
+**Validation rules:**
+
+1. `tempoBlockNumber` must match the zone's current finalized Tempo block (from `TempoState.tempoBlockNumber()`)
+2. All declared values must match actual Tempo state at that block
+3. Execution must not read any Tempo state not covered by the declaration
+4. Transactions that fail any check are **invalid** and cannot be included in a block (the zone block itself becomes invalid)
+
+**Gas costs (similar to EIP-2930):**
+
+| Operation | Gas Cost |
+|-----------|----------|
+| Declare account | 2,400 |
+| Declare storage slot | 1,900 |
+| Read declared slot during execution | 100 (warm read) |
+
+**Benefits:**
+
+- **Non-blocking mempool**: The sequencer can validate and order transactions without fetching Tempo state synchronously
+- **User responsibility**: Wallets/dapps fetch and declare state, shifting work off the critical path
+- **Early rejection**: Invalid declarations are rejected before execution, saving gas
+- **Proof efficiency**: The batch proof only needs to verify the declared state matches Tempo, not trace all storage accesses
+
+**Example usage:**
+
+A transaction calling `TIP403Registry.isAuthorized()` (which reads Tempo state internally) must declare the policy storage slots it will access:
+
+```javascript
+const tx = {
+  type: 0x7a,
+  chainId: zoneChainId,
+  nonce: 0,
+  maxPriorityFeePerGas: 0,
+  maxFeePerGas: 1000000000,
+  gasLimit: 100000,
+  to: tip403RegistryAddress,
+  value: 0,
+  data: isAuthorizedCalldata,
+  accessList: [],
+  tempoStateDeclaration: {
+    tempoBlockNumber: currentTempoBlock,
+    accountStates: [{
+      account: tempoPolicyContractAddress,
+      storageEntries: [
+        { slot: policySlot, value: policyValue }
+      ]
+    }]
+  }
+};
+```
+
 #### TIP-403 registry
 
 The zone has a `TIP403Registry` contract deployed at the **same address** as Tempo. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the Tempo state reader precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.

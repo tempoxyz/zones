@@ -134,11 +134,21 @@ contract TempoState is ITempoState {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Read a storage slot from a Tempo contract
-    /// @dev In production, this is a precompile that reads from proven Tempo state.
+    /// @dev In production, this is a precompile that reads from the transaction's
+    ///      Tempo state declaration (type 0x7A transactions).
+    ///
+    ///      The precompile:
+    ///      1. Looks up (account, slot) in the transaction's TempoStateDeclaration
+    ///      2. If found, returns the declared value (already validated at tx submission)
+    ///      3. If not found, the transaction is INVALID (block cannot include it)
+    ///
+    ///      This enables the sequencer to validate transactions without blocking
+    ///      on Tempo state fetches - users declare state upfront, sequencer verifies.
+    ///
     ///      This stub reverts - actual implementation is in the zone node.
     /// @param account The Tempo contract address
     /// @param slot The storage slot to read
-    /// @return value The storage value (stub always reverts)
+    /// @return value The storage value from the declaration (stub always reverts)
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32) {
         // Silence unused variable warnings
         account; slot;
@@ -146,11 +156,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Read multiple storage slots from a Tempo contract
-    /// @dev In production, this is a precompile that reads from proven Tempo state.
+    /// @dev In production, this is a precompile that reads from the transaction's
+    ///      Tempo state declaration (type 0x7A transactions).
+    ///
+    ///      See readTempoStorageSlot for details on how declarations work.
     ///      This stub reverts - actual implementation is in the zone node.
     /// @param account The Tempo contract address
     /// @param slots The storage slots to read
-    /// @return values The storage values (stub always reverts)
+    /// @return values The storage values from the declaration (stub always reverts)
     function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory) {
         // Silence unused variable warnings
         account; slots;

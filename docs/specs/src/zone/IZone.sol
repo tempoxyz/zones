@@ -262,6 +262,49 @@ struct LastBatch {
     uint64 withdrawalBatchIndex;
 }
 
+/*//////////////////////////////////////////////////////////////
+                    TEMPO STATE DECLARATIONS
+//////////////////////////////////////////////////////////////*/
+
+/// @notice A single storage slot and its declared value
+/// @dev Analogous to a storage key in EIP-2930, but includes the value.
+///      Used in Tempo state declarations for zone transactions.
+struct TempoStorageEntry {
+    bytes32 slot;   // Storage slot key
+    bytes32 value;  // Declared value at this slot
+}
+
+/// @notice Tempo state for a single account (contract)
+/// @dev Analogous to AccessListEntry in EIP-2930
+struct TempoAccountState {
+    address account;                    // Tempo contract address
+    TempoStorageEntry[] storageEntries; // Declared storage slots and values
+}
+
+/// @notice Complete Tempo state declaration for a transaction
+/// @dev A transaction includes this to declare all Tempo state it will access.
+///      The zone node validates that:
+///      1. All declared values match the actual Tempo state at the reference block
+///      2. All Tempo state reads during execution are covered by the declaration
+///      Transactions that fail either check are invalid.
+///
+///      Format mirrors EIP-2930 access lists:
+///      - EIP-2930: [[address, [slot, ...]], ...]
+///      - This:     [[address, [[slot, value], ...]], ...]
+struct TempoStateDeclaration {
+    uint64 tempoBlockNumber;            // Tempo block this declaration is valid for
+    TempoAccountState[] accountStates;  // Declared state per account
+}
+
+/// @notice Transaction type for zone transactions with Tempo state declarations
+/// @dev 'z' for zone - extends EIP-1559 with tempoStateDeclaration field
+uint8 constant ZONE_TX_TYPE_TEMPO_STATE = 0x7A;
+
+/// @notice Gas costs for Tempo state declarations (analogous to EIP-2930 costs)
+uint64 constant TEMPO_DECLARATION_ACCOUNT_COST = 2400;  // Per declared account
+uint64 constant TEMPO_DECLARATION_SLOT_COST = 1900;     // Per declared slot
+uint64 constant TEMPO_DECLARED_SLOT_READ_COST = 100;    // Warm read during execution
+
 /// @title ITempoState
 /// @notice Interface for zone-side Tempo state verification predeploy
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
