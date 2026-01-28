@@ -712,40 +712,6 @@ By not including a block number in the declaration, transactions remain valid as
 | Declare storage slot | 1,900 |
 | Read declared slot during execution | 100 (warm read) |
 
-**Benefits:**
-
-- **Non-blocking mempool**: The sequencer can validate and order transactions without fetching Tempo state synchronously
-- **User responsibility**: Wallets/dapps fetch and declare state, shifting work off the critical path
-- **Early rejection**: Invalid declarations are rejected before execution, saving gas
-- **Proof efficiency**: The batch proof only needs to verify the declared state matches Tempo, not trace all storage accesses
-
-**Example usage:**
-
-A transaction calling `TIP403Registry.isAuthorized()` (which reads Tempo state internally) must declare the policy storage slots it will access:
-
-```javascript
-const tx = {
-  type: 0x7a,
-  chainId: zoneChainId,
-  nonce: 0,
-  maxPriorityFeePerGas: 0,
-  maxFeePerGas: 1000000000,
-  gasLimit: 100000,
-  to: tip403RegistryAddress,
-  value: 0,
-  data: isAuthorizedCalldata,
-  accessList: [],
-  tempoStateDeclaration: {
-    accountStates: [{
-      account: tempoPolicyContractAddress,
-      storageEntries: [
-        { slot: policySlot, value: policyValue }
-      ]
-    }]
-  }
-};
-```
-
 #### TIP-403 registry
 
 The zone has a `TIP403Registry` contract deployed at the **same address** as Tempo. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the Tempo state reader precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.
