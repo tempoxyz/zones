@@ -712,9 +712,95 @@ By not including a block number in the declaration, transactions remain valid as
 | Declare storage slot | 1,900 |
 | Read declared slot during execution | 100 (warm read) |
 
+**Transaction signing workflow:**
+
+Transactions that read Tempo state require coordination between the user's wallet and the sequencer:
+
+1. **User intent**: User initiates a transaction (e.g., a TIP-20 transfer that requires policy checks)
+2. **Create unsigned transaction**: Wallet creates the transaction without the `tempoStateDeclaration` field
+3. **Get declaration from sequencer**: Wallet calls `eth_getTempoStateDeclaration(tx)` on the sequencer's RPC. The sequencer simulates the transaction, traces all Tempo state reads, fetches the current values, and returns the required declaration.
+4. **Sign transaction**: Wallet adds the declaration to the transaction and prompts user to sign (tx type `0x7A`)
+5. **Send transaction**: Wallet submits the signed transaction to the sequencer
+
+```
+┌─────────┐                    ┌────────────┐                    ┌─────────┐
+│  User   │                    │   Wallet   │                    │Sequencer│
+└────┬────┘                    └─────┬──────┘                    └────┬────┘
+     │  Initiate transfer           │                                 │
+     │─────────────────────────────>│                                 │
+     │                              │                                 │
+     │                              │  eth_getTempoStateDeclaration   │
+     │                              │────────────────────────────────>│
+     │                              │                                 │
+     │                              │  TempoStateDeclaration          │
+     │                              │<────────────────────────────────│
+     │                              │                                 │
+     │  Sign tx (type 0x7A)?        │                                 │
+     │<─────────────────────────────│                                 │
+     │                              │                                 │
+     │  Signature                   │                                 │
+     │─────────────────────────────>│                                 │
+     │                              │                                 │
+     │                              │  eth_sendRawTransaction         │
+     │                              │────────────────────────────────>│
+     │                              │                                 │
+```
+
+If Tempo state changes between steps 3 and 5, the sequencer will reject the transaction as invalid (declared values don't match). The wallet can retry from step 3.
+
 #### TIP-403 registry
 
-The zone has a `TIP403Registry` contract deployed at the **same address** as Tempo. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the Tempo state reader precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.
+The zone has a `ZoneTIP403Registry` contract deployed at the **same address** as Tempo's `TIP403Registry`. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the `TempoState` precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.
+
+```solidity
+/// @title ZoneTIP403Registry
+/// @notice Read-only TIP-403 policy registry for zones
+/// @dev Deployed at the SAME ADDRESS as Tempo's TIP403Registry.
+///      Transactions calling this contract MUST use tx type 0x7A with
+///      a TempoStateDeclaration that declares the required policy slots.
+contract ZoneTIP403Registry {
+    address public constant TEMPO_STATE = 0x1c00000000000000000000000000000000000000;
+    address public immutable TEMPO_REGISTRY; // = address(this)
+
+    /// @notice Checks if a user is authorized under a policy on Tempo
+    /// @dev Reads _policyData[policyId] and policySet[policyId][user] from Tempo
+    function isAuthorized(uint64 policyId, address user) public view returns (bool) {
+        // Special policies: 0 = always-reject, 1 = always-allow
+        if (policyId < 2) return policyId == 1;
+
+        // Read policy type from Tempo
+        (PolicyType policyType, ) = policyData(policyId);
+
+        // Read whether user is in the policy set from Tempo
+        bool inPolicySet = _isInPolicySet(policyId, user);
+
+        // Whitelist: authorized if in set; Blacklist: authorized if NOT in set
+        return policyType == PolicyType.WHITELIST ? inPolicySet : !inPolicySet;
+    }
+
+    function _readTempoSlot(bytes32 slot) internal view returns (bytes32) {
+        // Calls TempoState.readTempoStorageSlot(TEMPO_REGISTRY, slot)
+        // Reverts if slot not in transaction's TempoStateDeclaration
+    }
+
+    // Write functions revert: "read-only on zones, manage policies on Tempo"
+}
+```
+
+**Storage slot calculation for declarations:**
+
+When calling `isAuthorized(policyId, user)`, the transaction must declare these Tempo storage slots:
+
+```solidity
+// 1. Policy data: _policyData[policyId]
+bytes32 policyDataSlot = keccak256(abi.encode(policyId, uint256(1)));
+
+// 2. Policy set membership: policySet[policyId][user]
+bytes32 innerSlot = keccak256(abi.encode(policyId, uint256(2)));
+bytes32 policySetSlot = keccak256(abi.encode(user, innerSlot));
+```
+
+The sequencer's `eth_getTempoStateDeclaration` RPC handles this automatically.
 
 #### Zone inbox
 
