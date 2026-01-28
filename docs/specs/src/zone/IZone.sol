@@ -400,9 +400,6 @@ interface IZoneOutbox {
     /// @notice Maximum callback data size (1KB)
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
 
-    /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
-    function WITHDRAWAL_BASE_GAS() external view returns (uint64);
-
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex,
         address indexed sender,
@@ -437,7 +434,7 @@ interface IZoneOutbox {
     function pendingSequencer() external view returns (address);
 
     /// @notice Tempo gas rate (gas token units per gas unit on Tempo)
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
     function tempoGasRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing)
@@ -464,7 +461,7 @@ interface IZoneOutbox {
     function setTempoGasRate(uint128 _tempoGasRate) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo

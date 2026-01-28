@@ -17,10 +17,6 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Limits storage costs and hash computation overhead
     uint256 public constant MAX_CALLBACK_DATA_SIZE = 1024;
 
-    /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
-    /// @dev Covers processWithdrawal overhead: queue dequeue, transfer, event emission
-    uint64 public constant WITHDRAWAL_BASE_GAS = 50000;
-
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -36,7 +32,7 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Tempo gas rate (gas token units per gas unit)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
-    ///      Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    ///      Fee = gasLimit * tempoGasRate. User must include all gas costs in gasLimit.
     uint128 public tempoGasRate;
 
     /// @notice Next withdrawal index (monotonically increasing)
@@ -112,11 +108,11 @@ contract ZoneOutbox is IZoneOutbox {
     }
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
-    /// @param gasLimit The gas limit for the callback (0 if no callback)
+    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
+    /// @param gasLimit Total gas limit (must cover processWithdrawal + any callback)
     /// @return fee The total fee in gas token units
     function calculateWithdrawalFee(uint64 gasLimit) public view returns (uint128 fee) {
-        fee = uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate;
+        fee = uint128(gasLimit) * tempoGasRate;
     }
 
     /*//////////////////////////////////////////////////////////////

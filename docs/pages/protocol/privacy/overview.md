@@ -88,11 +88,10 @@ The fee is deducted from the deposit amount and paid to the sequencer immediatel
 Withdrawals incur a processing fee to compensate the sequencer for Tempo-side gas costs:
 
 - **Tempo gas rate**: Sequencer publishes `tempoGasRate` (gas token units per gas unit)
-- **Base gas**: Fixed `WITHDRAWAL_BASE_GAS` constant (e.g., 50,000 gas for `processWithdrawal` overhead)
-- **Callback gas**: User-specified `gasLimit` for callback execution
-- **Total fee**: `(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate`
+- **Gas limit**: User specifies `gasLimit` covering all execution costs (processing + callback)
+- **Total fee**: `gasLimit * tempoGasRate`
 
-The sequencer configures `tempoGasRate` via `ZoneOutbox.setTempoGasRate()` and takes the risk on Tempo gas price fluctuations. If actual Tempo gas is higher, the sequencer covers the difference; if lower, they keep the surplus.
+The user must estimate total gas needed for their withdrawal, including `processWithdrawal` overhead and any callback. The sequencer configures `tempoGasRate` via `ZoneOutbox.setTempoGasRate()` and takes the risk on Tempo gas price fluctuations. If actual Tempo gas is higher, the sequencer covers the difference; if lower, they keep the surplus.
 
 Users burn `amount + fee` when requesting a withdrawal. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`; the sequencer keeps the fee.
 
@@ -795,10 +794,8 @@ interface IZoneOutbox {
     /// @notice Pending sequencer for two-step transfer.
     function pendingSequencer() external view returns (address);
 
-    /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback).
-    function WITHDRAWAL_BASE_GAS() external view returns (uint64);
-
     /// @notice Tempo gas rate (gas token units per gas unit on Tempo).
+    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
     function tempoGasRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing).
@@ -823,7 +820,7 @@ interface IZoneOutbox {
     function setTempoGasRate(uint128 _tempoGasRate) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit.
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo.
