@@ -284,15 +284,18 @@ struct TempoAccountState {
 /// @notice Complete Tempo state declaration for a transaction
 /// @dev A transaction includes this to declare all Tempo state it will access.
 ///      The zone node validates that:
-///      1. All declared values match the actual Tempo state at the reference block
+///      1. All declared values match the current Tempo state (at the zone's finalized block)
 ///      2. All Tempo state reads during execution are covered by the declaration
 ///      Transactions that fail either check are invalid.
+///
+///      By not including a block number, transactions remain valid as long as the
+///      declared values match current state - they only become invalid when the
+///      actual Tempo state changes, not just because a new block was finalized.
 ///
 ///      Format mirrors EIP-2930 access lists:
 ///      - EIP-2930: [[address, [slot, ...]], ...]
 ///      - This:     [[address, [[slot, value], ...]], ...]
 struct TempoStateDeclaration {
-    uint64 tempoBlockNumber;            // Tempo block this declaration is valid for
     TempoAccountState[] accountStates;  // Declared state per account
 }
 

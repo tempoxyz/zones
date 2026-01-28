@@ -678,7 +678,6 @@ struct TempoAccountState {
 
 /// @notice Complete Tempo state declaration for a transaction
 struct TempoStateDeclaration {
-    uint64 tempoBlockNumber;            // Tempo block this declaration is valid for
     TempoAccountState[] accountStates;  // Declared state per account
 }
 ```
@@ -694,15 +693,16 @@ Transactions using Tempo state declarations use a new transaction type. The form
 Where `tempoStateDeclaration` is:
 
 ```
-[[tempoBlockNumber], [[account1, [[slot1, value1], [slot2, value2], ...]], [account2, [[slot1, value1], ...]], ...]]
+[[[account1, [[slot1, value1], [slot2, value2], ...]], [account2, [[slot1, value1], ...]], ...]]
 ```
 
 **Validation rules:**
 
-1. `tempoBlockNumber` must match the zone's current finalized Tempo block (from `TempoState.tempoBlockNumber()`)
-2. All declared values must match actual Tempo state at that block
-3. Execution must not read any Tempo state not covered by the declaration
-4. Transactions that fail any check are **invalid** and cannot be included in a block (the zone block itself becomes invalid)
+1. All declared values must match current Tempo state (at the zone's finalized Tempo block)
+2. Execution must not read any Tempo state not covered by the declaration
+3. Transactions that fail either check are **invalid** and cannot be included in a block (the zone block itself becomes invalid)
+
+By not including a block number in the declaration, transactions remain valid as long as the declared values match current Tempo state. They only become invalid when the actual state changes, not just because a new Tempo block was finalized. This makes transactions more robust and reduces unnecessary invalidation.
 
 **Gas costs (similar to EIP-2930):**
 
@@ -736,7 +736,6 @@ const tx = {
   data: isAuthorizedCalldata,
   accessList: [],
   tempoStateDeclaration: {
-    tempoBlockNumber: currentTempoBlock,
     accountStates: [{
       account: tempoPolicyContractAddress,
       storageEntries: [
