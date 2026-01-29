@@ -76,34 +76,36 @@ library EncryptedDepositLib {
 }
 
 /*//////////////////////////////////////////////////////////////
-                        ZONE INBOX EXTENSION
+                    UNIFIED DEPOSIT QUEUE PROCESSING
 //////////////////////////////////////////////////////////////*/
 
-/// @title IEncryptedDepositProcessor
-/// @notice Extension interface for ZoneInbox to process encrypted deposits
-interface IEncryptedDepositProcessor {
-    /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
-    event EncryptedDepositProcessed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,  // Now revealed after decryption
-        uint128 amount,
-        bytes32 memo         // Now revealed after decryption
-    );
+/// @notice Wrapper for processing deposits from the unified queue
+/// @dev The deposit queue on Tempo contains both regular and encrypted deposits
+///      in a single ordered sequence. The sequencer must provide decryption data
+///      for encrypted deposits when processing the queue on the zone.
+///
+///      Queue hash chain includes type discriminator:
+///      - Regular:   keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
+///      - Encrypted: keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
+///
+///      The zone's advanceTempo() processes deposits in order. For encrypted deposits,
+///      the sequencer provides the decrypted (to, memo) alongside the encrypted data.
+///      The proof/TEE validates that decryptions are correct.
 
-    /// @notice Advance Tempo state and process deposits including encrypted ones
-    /// @dev The sequencer provides decrypted versions of encrypted deposits.
-    ///      The proof must validate that decryptions are correct (or use TEE attestation).
-    /// @param header RLP-encoded Tempo block header
-    /// @param deposits Array of regular deposits
-    /// @param encryptedDeposits Array of encrypted deposits (from Tempo)
-    /// @param decryptedRecipients Decrypted recipients for encrypted deposits (same order)
-    /// @param decryptedMemos Decrypted memos for encrypted deposits (same order)
-    function advanceTempoWithEncrypted(
-        bytes calldata header,
-        /* regular Deposit[] */ bytes calldata deposits,
-        EncryptedDeposit[] calldata encryptedDeposits,
-        address[] calldata decryptedRecipients,
-        bytes32[] calldata decryptedMemos
-    ) external;
+/// @notice A deposit entry in the unified queue (for zone-side processing)
+/// @dev Used by the sequencer when calling advanceTempo with mixed deposit types
+struct QueuedDeposit {
+    DepositType depositType;
+    // For Regular: decode as Deposit
+    // For Encrypted: decode as EncryptedDeposit + decrypted values provided separately
+    bytes depositData;
 }
+
+/// @notice Decryption data provided by sequencer for encrypted deposits
+/// @dev Must match 1:1 with encrypted deposits in the queue (in order)
+struct DecryptionData {
+    address to;      // Decrypted recipient
+    bytes32 memo;    // Decrypted memo
+}
+
+import {DepositType} from "./IZone.sol";
