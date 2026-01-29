@@ -27,12 +27,13 @@ struct EncryptedDepositPayload {
 }
 
 /// @notice Encrypted deposit stored in the queue
-/// @dev The sender, amount, and deposit block are public; recipient and memo are encrypted.
-///      The tempoBlockNumber is recorded so the prover knows which encryption key was valid.
+/// @dev The sender, amount, and key index are public; recipient and memo are encrypted.
+///      The keyIndex specifies which encryption key the user used, allowing the prover
+///      to look up the correct key for decryption even after key rotations.
 struct EncryptedDeposit {
     address sender;             // Depositor (public, needed for refunds)
     uint128 amount;             // Deposit amount (public, needed for accounting)
-    uint64 tempoBlockNumber;    // Tempo block when deposit was made (for key lookup)
+    uint256 keyIndex;           // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
 
@@ -74,14 +75,17 @@ interface IEncryptedDeposits {
     );
 
     /// @notice Deposit with encrypted recipient and memo
-    /// @dev The encrypted payload contains (to, memo) encrypted to sequencerPubkey.
-    ///      Only the sequencer can decrypt and credit the correct recipient.
+    /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key
+    ///      at the specified keyIndex. The user must specify which key they encrypted to,
+    ///      ensuring correct decryption even if the key rotates before inclusion.
     ///      If the sequencer cannot decrypt (malformed), they may reject or refund.
     /// @param amount Amount to deposit
+    /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
     /// @param encrypted The encrypted payload (recipient and memo)
     /// @return newCurrentDepositQueueHash The new deposit queue hash
     function depositEncrypted(
         uint128 amount,
+        uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted
     ) external returns (bytes32 newCurrentDepositQueueHash);
 }
