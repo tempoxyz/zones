@@ -97,6 +97,11 @@ struct EncryptionKeyEntry {
     uint64 activationBlock; // Tempo block number when this key became active
 }
 
+/// Grace period after key rotation during which old keys are still accepted.
+/// After this period, deposits using the old key are rejected.
+/// 1 day at 1 second block time = 86400 blocks
+uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86400;
+
 struct Withdrawal {
     address sender; // who initiated the withdrawal on the zone
     address to; // Tempo recipient
@@ -240,6 +245,7 @@ interface IZonePortal {
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         uint128 amount,
+        uint256 keyIndex,
         bytes32 ephemeralPubkeyX,
         uint8 ephemeralPubkeyYParity
     );
@@ -262,6 +268,8 @@ interface IZonePortal {
     error InvalidProof();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
+    error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
+    error InvalidEncryptionKeyIndex(uint256 keyIndex);
     error DepositTooSmall();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
@@ -330,6 +338,17 @@ interface IZonePortal {
 
     /// @notice Calculate the fee for a deposit
     function calculateDepositFee() external view returns (uint128 fee);
+
+    /// @notice Check if an encryption key is still valid for new deposits
+    /// @dev A key is valid if it's the current key OR if it was superseded less than
+    ///      ENCRYPTION_KEY_GRACE_PERIOD blocks ago
+    /// @param keyIndex The key index to check
+    /// @return valid True if the key can be used for new deposits
+    /// @return expiresAtBlock Block number when this key expires (0 if current key, never expires)
+    function isEncryptionKeyValid(uint256 keyIndex)
+        external
+        view
+        returns (bool valid, uint64 expiresAtBlock);
 
     function deposit(address to, uint128 amount, bytes32 memo)
         external
