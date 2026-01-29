@@ -1034,6 +1034,59 @@ Notes:
 - Tempo state advancement is combined with deposit processing in `ZoneInbox.advanceTempo()`, which calls `TempoState.finalizeTempo()` internally.
 - The proof validates an exact match to `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits. TODO: implement a recursive ancestor check in the proof or on-chain as a fallback.
 
+### Encrypted deposits
+
+For privacy-sensitive use cases, users can make **encrypted deposits** where the recipient and memo are encrypted using the sequencer's public key. Only the sequencer can decrypt and credit the correct recipient on the zone.
+
+**Encryption scheme**: ECIES with secp256k1
+
+1. Sequencer publishes a secp256k1 encryption public key via `setSequencerEncryptionKey(x, yParity)`
+2. User generates an ephemeral keypair and derives a shared secret via ECDH
+3. User encrypts `(to || memo)` with AES-256-GCM using the derived key
+4. User calls `depositEncrypted(amount, encryptedPayload)` on the portal
+
+```solidity
+/// @notice Encrypted deposit payload
+struct EncryptedDepositPayload {
+    bytes32 ephemeralPubkeyX;     // Ephemeral public key X coordinate (for ECDH)
+    uint8 ephemeralPubkeyYParity; // Y coordinate parity (0x02 or 0x03)
+    bytes ciphertext;             // AES-256-GCM encrypted (to || memo || padding)
+    bytes12 nonce;                // GCM nonce
+    bytes16 tag;                  // GCM authentication tag
+}
+
+/// @notice Encrypted deposit stored in the queue
+struct EncryptedDeposit {
+    address sender;              // Depositor (public, for refunds)
+    uint128 amount;              // Amount (public, for accounting)
+    EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+}
+```
+
+**What's public vs. private:**
+
+| Field | Visibility | Reason |
+|-------|------------|--------|
+| `sender` | Public | Needed for potential refunds if decryption fails |
+| `amount` | Public | Needed for on-chain accounting/escrow |
+| `to` | Encrypted | Privacy - only sequencer knows recipient |
+| `memo` | Encrypted | Privacy - only sequencer knows payment context |
+
+**Processing flow:**
+
+1. User calls `depositEncrypted(amount, encrypted)` on Tempo portal
+2. Portal escrows funds and emits `EncryptedDepositMade` (no recipient revealed)
+3. Sequencer decrypts the payload off-chain using their private key
+4. Sequencer calls `advanceTempoWithEncrypted()` on zone, providing decrypted values
+5. Zone credits the decrypted recipient with the deposited amount
+
+**Security considerations:**
+
+- **Sequencer trust**: Users trust the sequencer to decrypt correctly and credit the right recipient. A malicious sequencer could steal encrypted deposits.
+- **Decryption proof**: For ZK-based verification, the proof must validate that the sequencer's decryption is correct. For TEE-based verification, the TEE performs decryption.
+- **Key rotation**: If the sequencer rotates their encryption key, in-flight encrypted deposits using the old key must still be decryptable (sequencer should retain old keys).
+- **Malformed ciphertext**: If decryption fails, the sequencer may refund to `sender` or hold funds pending resolution.
+
 ## Bridging out (zone to Tempo)
 
 Users withdraw by creating a withdrawal on the zone. Withdrawals are processed in two steps:
