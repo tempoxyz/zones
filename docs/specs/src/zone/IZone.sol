@@ -54,6 +54,13 @@ struct WithdrawalQueueTransition {
     bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
 }
 
+/// @notice Deposit type discriminator for the unified deposit queue
+/// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
+enum DepositType {
+    Regular,    // Standard deposit with plaintext recipient and memo
+    Encrypted   // Encrypted deposit with hidden recipient and memo
+}
+
 struct Deposit {
     address sender;
     address to;

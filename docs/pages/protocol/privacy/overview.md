@@ -999,17 +999,34 @@ struct EncryptedDeposit {
 
 **Processing flow:**
 
-1. User calls `depositEncrypted(amount, encrypted)` on Tempo portal
-2. Portal escrows funds and emits `EncryptedDepositMade` (no recipient revealed)
+1. User calls `depositEncrypted(amount, keyIndex, encrypted)` on Tempo portal
+2. Portal escrows funds, adds to the **unified deposit queue**, and emits `EncryptedDepositMade`
 3. Sequencer decrypts the payload off-chain using their private key
-4. Sequencer calls `advanceTempoWithEncrypted()` on zone, providing decrypted values
-5. Zone credits the decrypted recipient with the deposited amount
+4. When processing the zone block, sequencer calls `advanceTempo()` with deposits from the unified queue
+5. For each encrypted deposit, sequencer provides decrypted `(to, memo)` alongside the encrypted data
+6. Zone/proof validates decryption and credits the recipient
+
+**Unified deposit queue:**
+
+Regular and encrypted deposits share a single ordered queue with a type discriminator in the hash chain:
+
+```solidity
+enum DepositType { Regular, Encrypted }
+
+// Regular deposit hash:
+keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
+
+// Encrypted deposit hash:
+keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
+```
+
+This ensures deposits are processed in the exact order they were made, regardless of type.
 
 **Security considerations:**
 
 - **Sequencer trust**: Users trust the sequencer to decrypt correctly and credit the right recipient. A malicious sequencer could steal encrypted deposits.
 - **Decryption proof**: For ZK-based verification, the proof must validate that the sequencer's decryption is correct. For TEE-based verification, the TEE performs decryption.
-- **Key rotation**: The portal maintains a history of encryption keys with their activation block numbers. Each encrypted deposit records the `tempoBlockNumber` when it was made, allowing the prover to determine which key was valid at that time. See "Encryption key history" below.
+- **Key rotation**: The portal maintains a history of encryption keys. Each encrypted deposit includes the `keyIndex` the user encrypted to, allowing the prover to look up the correct key for decryption. See "Encryption key history" below.
 - **Malformed ciphertext**: If decryption fails, the sequencer may refund to `sender` or hold funds pending resolution.
 
 **Encryption key history:**
