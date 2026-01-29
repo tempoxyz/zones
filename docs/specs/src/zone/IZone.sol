@@ -76,12 +76,13 @@ struct EncryptedDepositPayload {
 }
 
 /// @notice Encrypted deposit stored in the queue
-/// @dev Sender, amount, and deposit block are public; recipient and memo are encrypted.
-///      The tempoBlockNumber is recorded so the prover knows which encryption key was valid.
+/// @dev Sender, amount, and key index are public; recipient and memo are encrypted.
+///      The keyIndex specifies which encryption key the user used, allowing the prover
+///      to look up the correct key for decryption even after key rotations.
 struct EncryptedDeposit {
     address sender;              // Depositor (public, for refunds)
     uint128 amount;              // Amount (public, for accounting)
-    uint64 tempoBlockNumber;     // Tempo block when deposit was made (for key lookup)
+    uint256 keyIndex;            // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
 
@@ -289,13 +290,16 @@ interface IZonePortal {
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
 
     /// @notice Deposit with encrypted recipient and memo
-    /// @dev The encrypted payload contains (to, memo) encrypted to sequencerEncryptionKey.
-    ///      Only the sequencer can decrypt and credit the correct recipient on the zone.
+    /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key
+    ///      at the specified keyIndex. The user must specify which key they encrypted to,
+    ///      ensuring correct decryption even if the key rotates before inclusion.
     /// @param amount Amount to deposit
+    /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
     /// @param encrypted The encrypted payload (recipient and memo)
     /// @return newCurrentDepositQueueHash The new deposit queue hash
     function depositEncrypted(
         uint128 amount,
+        uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted
     ) external returns (bytes32 newCurrentDepositQueueHash);
 

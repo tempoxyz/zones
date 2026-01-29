@@ -1014,7 +1014,7 @@ struct EncryptedDeposit {
 
 **Encryption key history:**
 
-To support key rotation, the portal stores all historical encryption keys with their activation blocks:
+To support key rotation, the portal stores all historical encryption keys. Users explicitly specify which key index they encrypted to, solving the race condition where a key might rotate between transaction signing and block inclusion.
 
 ```solidity
 /// @notice Historical record of an encryption key with its activation block
@@ -1024,13 +1024,20 @@ struct EncryptionKeyEntry {
     uint64 activationBlock; // Tempo block number when this key became active
 }
 
-/// @notice Encrypted deposit includes the block number for key lookup
+/// @notice Encrypted deposit includes the key index used for encryption
 struct EncryptedDeposit {
     address sender;              // Depositor (public, for refunds)
     uint128 amount;              // Amount (public, for accounting)
-    uint64 tempoBlockNumber;     // Tempo block when deposit was made (for key lookup)
+    uint256 keyIndex;            // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
+
+/// @notice Deposit function requires explicit key index
+function depositEncrypted(
+    uint128 amount,
+    uint256 keyIndex,                      // User specifies which key they encrypted to
+    EncryptedDepositPayload calldata encrypted
+) external returns (bytes32 newCurrentDepositQueueHash);
 ```
 
 Key management functions:
@@ -1038,12 +1045,19 @@ Key management functions:
 - `setSequencerEncryptionKey(x, yParity)` - Appends a new key to history, active from current Tempo block
 - `encryptionKeyCount()` - Returns total number of keys in history
 - `encryptionKeyAt(index)` - Returns a historical key entry by index
-- `encryptionKeyAtBlock(tempoBlockNumber)` - Returns the key that was active at a specific block (binary search)
+- `encryptionKeyAtBlock(tempoBlockNumber)` - Returns the key that was active at a specific block
+
+**Why keyIndex instead of block number:**
+
+The user specifies `keyIndex` at signing time (when they know which key they're encrypting to). This avoids race conditions:
+- If key rotates *after* signing but *before* inclusion, the deposit still references the correct key
+- The portal can validate that `keyIndex` is a valid historical key
+- The prover looks up `encryptionKeyAt(keyIndex)` to get the decryption key
 
 This allows:
-1. Users to verify they're encrypting to the current key
-2. The prover to determine which key was valid for any deposit based on `tempoBlockNumber`
-3. Seamless key rotation without losing ability to decrypt in-flight deposits
+1. Users to verify they're encrypting to the current key before signing
+2. The prover to determine which key to use for any deposit via explicit `keyIndex`
+3. Seamless key rotation without invalidating in-flight transactions
 
 ## Bridging out (zone to Tempo)
 
