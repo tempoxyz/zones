@@ -1046,6 +1046,7 @@ Key management functions:
 - `encryptionKeyCount()` - Returns total number of keys in history
 - `encryptionKeyAt(index)` - Returns a historical key entry by index
 - `encryptionKeyAtBlock(tempoBlockNumber)` - Returns the key that was active at a specific block
+- `isEncryptionKeyValid(keyIndex)` - Check if a key can still be used for new deposits
 
 **Why keyIndex instead of block number:**
 
@@ -1054,10 +1055,33 @@ The user specifies `keyIndex` at signing time (when they know which key they're 
 - The portal can validate that `keyIndex` is a valid historical key
 - The prover looks up `encryptionKeyAt(keyIndex)` to get the decryption key
 
+**Key expiration:**
+
+Old encryption keys expire after a grace period to limit how long the sequencer must retain old private keys:
+
+```solidity
+/// 1 day at 1 second block time = 86400 blocks
+uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86400;
+
+error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
+```
+
+- When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_PERIOD` blocks
+- After that, deposits using the old key are rejected with `EncryptionKeyExpired`
+- Users should call `isEncryptionKeyValid(keyIndex)` before signing to check if their key is still valid
+- The current (latest) key never expires
+
+Example timeline:
+1. Block 1000: Key 0 is set (current)
+2. Block 5000: Key 1 is set (current), Key 0 expires at block 5000 + 86400 = 91400
+3. Block 91400: Deposits with Key 0 start being rejected
+4. Sequencer can delete Key 0's private key after block 91400
+
 This allows:
 1. Users to verify they're encrypting to the current key before signing
 2. The prover to determine which key to use for any deposit via explicit `keyIndex`
-3. Seamless key rotation without invalidating in-flight transactions
+3. Seamless key rotation with a grace period for in-flight transactions
+4. Sequencer to safely delete old private keys after expiration
 
 ## Bridging out (zone to Tempo)
 

@@ -70,14 +70,25 @@ interface IEncryptedDeposits {
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         uint128 amount,
+        uint256 keyIndex,
         bytes32 ephemeralPubkeyX,
         uint8 ephemeralPubkeyYParity
     );
+
+    /// @notice Thrown when trying to use an expired encryption key
+    /// @param keyIndex The expired key index
+    /// @param activationBlock When the key became active
+    /// @param supersededAtBlock When the next key was activated (key expired at this + grace period)
+    error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
+
+    /// @notice Thrown when keyIndex doesn't exist
+    error InvalidEncryptionKeyIndex(uint256 keyIndex);
 
     /// @notice Deposit with encrypted recipient and memo
     /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key
     ///      at the specified keyIndex. The user must specify which key they encrypted to,
     ///      ensuring correct decryption even if the key rotates before inclusion.
+    ///      Reverts if the key has expired (superseded for longer than ENCRYPTION_KEY_GRACE_PERIOD).
     ///      If the sequencer cannot decrypt (malformed), they may reject or refund.
     /// @param amount Amount to deposit
     /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
@@ -88,6 +99,12 @@ interface IEncryptedDeposits {
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted
     ) external returns (bytes32 newCurrentDepositQueueHash);
+
+    /// @notice Check if an encryption key is still valid for new deposits
+    /// @param keyIndex The key index to check
+    /// @return valid True if the key can be used for new deposits
+    /// @return expiresAtBlock Block number when this key expires (0 if current key)
+    function isEncryptionKeyValid(uint256 keyIndex) external view returns (bool valid, uint64 expiresAtBlock);
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -148,6 +165,11 @@ struct EncryptionKeyEntry {
     uint8 yParity;          // Y coordinate parity (0x02 or 0x03)
     uint64 activationBlock; // Tempo block number when this key became active
 }
+
+/// Grace period after key rotation during which old keys are still accepted
+/// After this period, deposits using the old key are rejected.
+/// 1 day at 1 second block time = 86400 blocks
+uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86400;
 
 /// @title ISequencerEncryptionKey
 /// @notice Interface for managing sequencer encryption keys with history
