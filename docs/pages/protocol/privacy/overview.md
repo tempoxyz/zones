@@ -1009,8 +1009,41 @@ struct EncryptedDeposit {
 
 - **Sequencer trust**: Users trust the sequencer to decrypt correctly and credit the right recipient. A malicious sequencer could steal encrypted deposits.
 - **Decryption proof**: For ZK-based verification, the proof must validate that the sequencer's decryption is correct. For TEE-based verification, the TEE performs decryption.
-- **Key rotation**: If the sequencer rotates their encryption key, in-flight encrypted deposits using the old key must still be decryptable (sequencer should retain old keys).
+- **Key rotation**: The portal maintains a history of encryption keys with their activation block numbers. Each encrypted deposit records the `tempoBlockNumber` when it was made, allowing the prover to determine which key was valid at that time. See "Encryption key history" below.
 - **Malformed ciphertext**: If decryption fails, the sequencer may refund to `sender` or hold funds pending resolution.
+
+**Encryption key history:**
+
+To support key rotation, the portal stores all historical encryption keys with their activation blocks:
+
+```solidity
+/// @notice Historical record of an encryption key with its activation block
+struct EncryptionKeyEntry {
+    bytes32 x;              // X coordinate of the public key
+    uint8 yParity;          // Y coordinate parity (0x02 or 0x03)
+    uint64 activationBlock; // Tempo block number when this key became active
+}
+
+/// @notice Encrypted deposit includes the block number for key lookup
+struct EncryptedDeposit {
+    address sender;              // Depositor (public, for refunds)
+    uint128 amount;              // Amount (public, for accounting)
+    uint64 tempoBlockNumber;     // Tempo block when deposit was made (for key lookup)
+    EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+}
+```
+
+Key management functions:
+
+- `setSequencerEncryptionKey(x, yParity)` - Appends a new key to history, active from current Tempo block
+- `encryptionKeyCount()` - Returns total number of keys in history
+- `encryptionKeyAt(index)` - Returns a historical key entry by index
+- `encryptionKeyAtBlock(tempoBlockNumber)` - Returns the key that was active at a specific block (binary search)
+
+This allows:
+1. Users to verify they're encrypting to the current key
+2. The prover to determine which key was valid for any deposit based on `tempoBlockNumber`
+3. Seamless key rotation without losing ability to decrypt in-flight deposits
 
 ## Bridging out (zone to Tempo)
 

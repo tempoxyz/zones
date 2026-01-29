@@ -76,11 +76,22 @@ struct EncryptedDepositPayload {
 }
 
 /// @notice Encrypted deposit stored in the queue
-/// @dev Sender and amount are public; recipient and memo are encrypted
+/// @dev Sender, amount, and deposit block are public; recipient and memo are encrypted.
+///      The tempoBlockNumber is recorded so the prover knows which encryption key was valid.
 struct EncryptedDeposit {
     address sender;              // Depositor (public, for refunds)
     uint128 amount;              // Amount (public, for accounting)
+    uint64 tempoBlockNumber;     // Tempo block when deposit was made (for key lookup)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+}
+
+/// @notice Historical record of an encryption key with its activation block
+/// @dev Used to track key rotations so the prover can determine which key
+///      was valid when a deposit was made
+struct EncryptionKeyEntry {
+    bytes32 x;              // X coordinate of the public key
+    uint8 yParity;          // Y coordinate parity (0x02 or 0x03)
+    uint64 activationBlock; // Tempo block number when this key became active
 }
 
 struct Withdrawal {
@@ -202,7 +213,16 @@ interface IZonePortal {
     );
 
     /// @notice Emitted when sequencer updates their encryption key
-    event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity);
+    /// @param x The X coordinate of the new key
+    /// @param yParity The Y coordinate parity (0x02 or 0x03)
+    /// @param keyIndex The index of this key in the history array
+    /// @param activationBlock The Tempo block when this key becomes active
+    event SequencerEncryptionKeyUpdated(
+        bytes32 x, 
+        uint8 yParity, 
+        uint256 keyIndex,
+        uint64 activationBlock
+    );
 
     error NotSequencer();
     error NotPendingSequencer();
@@ -237,15 +257,34 @@ interface IZonePortal {
 
     function setSequencerPubkey(bytes32 pubkey) external;
 
-    /// @notice Get the sequencer's encryption public key for encrypted deposits
+    /// @notice Get the sequencer's current encryption public key for encrypted deposits
     /// @return x The X coordinate of the secp256k1 public key
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
     /// @notice Set the sequencer's encryption public key. Only callable by sequencer.
+    /// @dev Appends to key history. The new key becomes active at the current Tempo block.
     /// @param x The X coordinate of the secp256k1 public key
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity) external;
+
+    /// @notice Get the number of encryption keys in the history
+    /// @return The total count of keys (including current)
+    function encryptionKeyCount() external view returns (uint256);
+
+    /// @notice Get a historical encryption key by index
+    /// @param index The index in the key history (0 = first key)
+    /// @return entry The key entry with activation block
+    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry);
+
+    /// @notice Get the encryption key that was active at a specific Tempo block
+    /// @dev Binary search through key history to find the correct key
+    /// @param tempoBlockNumber The Tempo block number to query
+    /// @return x The X coordinate of the active key
+    /// @return yParity The Y coordinate parity
+    /// @return keyIndex The index of this key in history
+    function encryptionKeyAtBlock(uint64 tempoBlockNumber) 
+        external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
 
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
 

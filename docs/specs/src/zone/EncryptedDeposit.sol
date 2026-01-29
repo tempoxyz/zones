@@ -27,10 +27,12 @@ struct EncryptedDepositPayload {
 }
 
 /// @notice Encrypted deposit stored in the queue
-/// @dev The sender and amount are public; recipient and memo are encrypted
+/// @dev The sender, amount, and deposit block are public; recipient and memo are encrypted.
+///      The tempoBlockNumber is recorded so the prover knows which encryption key was valid.
 struct EncryptedDeposit {
     address sender;             // Depositor (public, needed for refunds)
     uint128 amount;             // Deposit amount (public, needed for accounting)
+    uint64 tempoBlockNumber;    // Tempo block when deposit was made (for key lookup)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
 
@@ -134,11 +136,33 @@ struct SequencerEncryptionKey {
     uint8 yParity;  // 0x02 for even Y, 0x03 for odd Y
 }
 
+/// @notice Historical record of an encryption key with its activation block
+/// @dev Used to track key rotations so the prover can determine which key
+///      was valid when a deposit was made
+struct EncryptionKeyEntry {
+    bytes32 x;              // X coordinate of the public key
+    uint8 yParity;          // Y coordinate parity (0x02 or 0x03)
+    uint64 activationBlock; // Tempo block number when this key became active
+}
+
 /// @title ISequencerEncryptionKey
-/// @notice Interface for managing sequencer encryption keys
+/// @notice Interface for managing sequencer encryption keys with history
+/// @dev Key history is maintained so that:
+///      1. Users can verify they're encrypting to the current key
+///      2. The prover can determine which key was valid for any deposit
+///      3. Deposits made with old keys (during rotation) can still be decrypted
 interface ISequencerEncryptionKey {
     /// @notice Emitted when sequencer updates their encryption key
-    event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity);
+    /// @param x The X coordinate of the new key
+    /// @param yParity The Y coordinate parity (0x02 or 0x03)
+    /// @param keyIndex The index of this key in the history array
+    /// @param activationBlock The Tempo block when this key becomes active
+    event SequencerEncryptionKeyUpdated(
+        bytes32 x, 
+        uint8 yParity, 
+        uint256 keyIndex,
+        uint64 activationBlock
+    );
 
     /// @notice Get the sequencer's current encryption public key
     /// @return x The X coordinate
@@ -146,10 +170,29 @@ interface ISequencerEncryptionKey {
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
     /// @notice Set the sequencer's encryption public key
-    /// @dev Only callable by the sequencer
+    /// @dev Only callable by the sequencer. Appends to key history.
+    ///      The new key becomes active at the current Tempo block.
     /// @param x The X coordinate
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity) external;
+
+    /// @notice Get the number of keys in the history
+    /// @return The total count of keys (including current)
+    function encryptionKeyCount() external view returns (uint256);
+
+    /// @notice Get a historical encryption key by index
+    /// @param index The index in the key history (0 = first key)
+    /// @return entry The key entry with activation block
+    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry);
+
+    /// @notice Get the encryption key that was active at a specific Tempo block
+    /// @dev Binary search through key history to find the correct key
+    /// @param tempoBlockNumber The Tempo block number to query
+    /// @return x The X coordinate of the active key
+    /// @return yParity The Y coordinate parity
+    /// @return keyIndex The index of this key in history
+    function encryptionKeyAtBlock(uint64 tempoBlockNumber) 
+        external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
 }
 
 /*//////////////////////////////////////////////////////////////
