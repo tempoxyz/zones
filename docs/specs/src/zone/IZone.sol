@@ -61,6 +61,28 @@ struct Deposit {
     bytes32 memo;
 }
 
+/*//////////////////////////////////////////////////////////////
+                        ENCRYPTED DEPOSITS
+//////////////////////////////////////////////////////////////*/
+
+/// @notice Encrypted deposit payload (recipient and memo encrypted to sequencer)
+/// @dev Uses ECIES with secp256k1: ephemeral ECDH + AES-256-GCM
+struct EncryptedDepositPayload {
+    bytes32 ephemeralPubkeyX;     // Ephemeral public key X coordinate (for ECDH)
+    uint8 ephemeralPubkeyYParity; // Y coordinate parity (0x02 or 0x03)
+    bytes ciphertext;             // AES-256-GCM encrypted (to || memo || padding)
+    bytes12 nonce;                // GCM nonce
+    bytes16 tag;                  // GCM authentication tag
+}
+
+/// @notice Encrypted deposit stored in the queue
+/// @dev Sender and amount are public; recipient and memo are encrypted
+struct EncryptedDeposit {
+    address sender;              // Depositor (public, for refunds)
+    uint128 amount;              // Amount (public, for accounting)
+    EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+}
+
 struct Withdrawal {
     address sender;             // who initiated the withdrawal on the zone
     address to;                 // Tempo recipient
@@ -169,6 +191,18 @@ interface IZonePortal {
 
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+    
+    /// @notice Emitted when an encrypted deposit is made (recipient/memo not revealed)
+    event EncryptedDepositMade(
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed sender,
+        uint128 amount,
+        bytes32 ephemeralPubkeyX,
+        uint8 ephemeralPubkeyYParity
+    );
+
+    /// @notice Emitted when sequencer updates their encryption key
+    event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity);
 
     error NotSequencer();
     error NotPendingSequencer();
@@ -202,7 +236,30 @@ interface IZonePortal {
     function acceptSequencer() external;
 
     function setSequencerPubkey(bytes32 pubkey) external;
+
+    /// @notice Get the sequencer's encryption public key for encrypted deposits
+    /// @return x The X coordinate of the secp256k1 public key
+    /// @return yParity The Y coordinate parity (0x02 or 0x03)
+    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+
+    /// @notice Set the sequencer's encryption public key. Only callable by sequencer.
+    /// @param x The X coordinate of the secp256k1 public key
+    /// @param yParity The Y coordinate parity (0x02 or 0x03)
+    function setSequencerEncryptionKey(bytes32 x, uint8 yParity) external;
+
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
+
+    /// @notice Deposit with encrypted recipient and memo
+    /// @dev The encrypted payload contains (to, memo) encrypted to sequencerEncryptionKey.
+    ///      Only the sequencer can decrypt and credit the correct recipient on the zone.
+    /// @param amount Amount to deposit
+    /// @param encrypted The encrypted payload (recipient and memo)
+    /// @return newCurrentDepositQueueHash The new deposit queue hash
+    function depositEncrypted(
+        uint128 amount,
+        EncryptedDepositPayload calldata encrypted
+    ) external returns (bytes32 newCurrentDepositQueueHash);
+
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
         uint64 tempoBlockNumber,
