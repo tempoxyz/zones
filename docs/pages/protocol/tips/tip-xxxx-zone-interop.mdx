@@ -18,7 +18,7 @@ This TIP defines the zone interoperability protocol that enables seamless token 
 
 ## Motivation
 
-With multiple zones in the Tempo ecosystem, users need a simple way to send tokens to any address without manually managing deposits and withdrawals. A user should be able to paste a Tempo address (e.g., `tz1...` for zone 1) and have their wallet automatically:
+With multiple zones in the Tempo ecosystem, users need a simple way to send tokens to any address without manually managing deposits and withdrawals. A user should be able to paste a Tempo address (e.g., `tz...` for a zone address) and have their wallet automatically:
 
 1. Determine where the recipient is (mainnet or which zone)
 2. Determine where the sender's funds are
@@ -111,24 +111,31 @@ The withdrawal is batched and processed on mainnet by the sequencer.
 
 If user is on zone N and destination is zone M (different zone):
 
-This requires two steps:
-1. **Withdraw from Zone N to Mainnet**
-2. **Deposit from Mainnet to Zone M**
-
-The wallet presents this as a multi-step flow:
+The user signs a **single withdrawal transaction** with a callback that deposits to the target zone:
 
 ```
-Step 1 (on Zone N):
-  User signs: ZoneOutbox.requestWithdrawal(userMainnetAddress, amount, fee, ...)
-
-Step 2 (on Mainnet, after withdrawal processed):
-  User signs: ZonePortal[M].deposit(destinationAddress, amount, memo)
+User signs: ZoneOutbox.requestWithdrawal(
+  to: ZonePortal[M],           // Target zone's portal on mainnet
+  amount: amount,
+  fee: withdrawalFee,
+  memo: 0,
+  gasLimit: DEPOSIT_CALLBACK_GAS,
+  fallbackRecipient: userZoneNAddress,  // Bounce back to user on Zone N if deposit fails
+  callbackData: abi.encodeCall(IZonePortal.deposit, (destinationAddress, amount - fees, memo))
+)
 ```
+
+When processed on mainnet:
+1. Withdrawal releases tokens to `ZonePortal[M]`
+2. Callback executes `ZonePortal[M].deposit(destinationAddress, ...)`
+3. Deposit queues on Zone M for the final recipient
+
+If the callback fails (e.g., Zone M portal issue), tokens bounce back to the user's `fallbackRecipient` on Zone N.
 
 **Important**: The wallet must:
-- Clearly show this is a 2-step process
-- Estimate total time (withdrawal finality + deposit processing)
-- Show total fees (withdrawal fee + deposit fee)
+- Calculate sufficient `gasLimit` for the deposit callback
+- Include both withdrawal fee and deposit fee in total cost
+- Set appropriate `fallbackRecipient` for safety
 
 ## Wallet Flow
 
@@ -213,18 +220,27 @@ function computeRoute(
     };
   }
   
-  // Zone N → Zone M: cross-zone (2 steps)
+  // Zone N → Zone M: cross-zone (single withdrawal with deposit callback)
   const outbox = getZoneOutbox(srcZone);
-  const portal = getZonePortal(dstZone);
-  const withdrawalFee = outbox.calculateWithdrawalFee(SIMPLE_TRANSFER_GAS);
-  const depositFee = portal.calculateDepositFee();
+  const dstPortal = getZonePortal(dstZone);
+  const depositCallbackGas = DEPOSIT_CALLBACK_GAS; // ~100k gas for deposit call
+  const withdrawalFee = outbox.calculateWithdrawalFee(depositCallbackGas);
+  const depositFee = dstPortal.calculateDepositFee();
+  
+  const callbackData = encodeDepositCall(destination.rawAddress, amount - withdrawalFee - depositFee, memo);
   
   return {
     type: 'cross-zone',
-    steps: [
-      { action: 'withdrawal', outbox, to: source.mainnetAddress, amount, fee: withdrawalFee },
-      { action: 'deposit', portal, to: destination.rawAddress, amount: amount - withdrawalFee, fee: depositFee }
-    ],
+    steps: [{
+      action: 'withdrawal-with-callback',
+      outbox,
+      to: dstPortal.address,  // Withdraw to target zone's portal
+      amount,
+      fee: withdrawalFee,
+      gasLimit: depositCallbackGas,
+      fallbackRecipient: source.address,  // Bounce back on failure
+      callbackData
+    }],
     estimatedTime: '~batch finality + deposit processing',
     totalFees: withdrawalFee + depositFee
   };
@@ -255,34 +271,38 @@ Example UI for cross-zone transfer:
 │       tz2RecipientAddress...                        │
 ├─────────────────────────────────────────────────────┤
 │ Route: Zone 1 → Tempo Mainnet → Zone 2              │
+│        (automatic via withdrawal callback)          │
 │                                                     │
-│ Step 1: Withdraw to Mainnet         ~5 min         │
-│         Fee: 0.02 USDC                              │
-│                                                     │
-│ Step 2: Deposit to Zone 2           ~30 sec        │
-│         Fee: 0.01 USDC                              │
+│ Withdrawal fee: 0.02 USDC                           │
+│ Deposit fee:    0.01 USDC                           │
 ├─────────────────────────────────────────────────────┤
 │ Total fees: 0.03 USDC                               │
 │ Recipient receives: 99.97 USDC                      │
 │ Estimated time: ~6 minutes                          │
+│                                                     │
+│ ℹ️ If deposit fails, funds return to your Zone 1    │
+│    address automatically.                           │
 ├─────────────────────────────────────────────────────┤
-│            [Cancel]    [Start Transfer]             │
+│            [Cancel]    [Send]                       │
 └─────────────────────────────────────────────────────┘
 ```
 
-### 4. Execute Steps
+This is a **single transaction** on Zone 1. The withdrawal callback automatically deposits to Zone 2.
 
-For multi-step transfers, the wallet:
+### 4. Execute Transfer
 
-1. Signs and submits step 1
-2. Monitors for completion (withdrawal processed on mainnet)
-3. Prompts user to sign step 2
-4. Monitors for final completion
+All transfer types require only a **single transaction signature** from the user:
 
-The wallet SHOULD persist transfer state to handle:
-- App closure/restart
-- Network interruptions
-- User returning later to complete step 2
+1. User reviews and signs the transaction
+2. Wallet submits to the appropriate network (source zone or mainnet)
+3. Wallet monitors for completion
+
+For cross-zone transfers, the wallet SHOULD track:
+- Withdrawal processing on mainnet
+- Callback execution (deposit to target zone)
+- Final deposit processing on target zone
+
+The wallet SHOULD persist transfer state to handle app closure and show progress on return.
 
 ## Token Compatibility
 
@@ -314,9 +334,10 @@ The wallet MUST verify token compatibility before presenting the route. If a tok
 
 # Invariants
 
-1. **Deterministic routing**: Given source and destination, the route MUST be deterministic
-2. **Fee accuracy**: Displayed fees MUST match actual transaction costs (within gas estimation variance)
-3. **No hidden steps**: All required transactions MUST be shown to the user before signing
+1. **Single signature**: Any transfer MUST require only one transaction signature from the user
+2. **Deterministic routing**: Given source and destination, the route MUST be deterministic
+3. **Fee accuracy**: Displayed fees MUST match actual transaction costs (within gas estimation variance)
 4. **Atomic display**: Amount sent + fees MUST equal amount deducted from user
-5. **Zone validation**: Wallet MUST verify zone exists before presenting deposit option
-6. **Token verification**: Wallet MUST verify token is transferable to destination before proceeding
+5. **Safe fallback**: Cross-zone transfers MUST specify a fallback recipient for failed callbacks
+6. **Zone validation**: Wallet MUST verify zone exists before presenting deposit option
+7. **Token verification**: Wallet MUST verify token is transferable to destination before proceeding
