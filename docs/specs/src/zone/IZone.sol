@@ -109,6 +109,25 @@ struct EncryptionKeyEntry {
 /// 1 day at 1 second block time = 86400 blocks
 uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86400;
 
+/*//////////////////////////////////////////////////////////////
+                    UNIFIED DEPOSIT QUEUE TYPES
+//////////////////////////////////////////////////////////////*/
+
+/// @notice A deposit entry in the unified queue (for zone-side processing)
+/// @dev Used by the sequencer when calling advanceTempo with mixed deposit types.
+///      The depositData is ABI-encoded Deposit or EncryptedDeposit depending on type.
+struct QueuedDeposit {
+    DepositType depositType;
+    bytes depositData;  // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+}
+
+/// @notice Decryption data provided by sequencer for encrypted deposits
+/// @dev Must match 1:1 with encrypted deposits in the queue (in order of appearance)
+struct DecryptionData {
+    address to;      // Decrypted recipient
+    bytes32 memo;    // Decrypted memo
+}
+
 struct Withdrawal {
     address sender; // who initiated the withdrawal on the zone
     address to; // Tempo recipient
@@ -518,6 +537,14 @@ interface IZoneInbox {
         bytes32 memo
     );
 
+    /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
+    event EncryptedDepositProcessed(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        address indexed to,      // Revealed after decryption
+        uint128 amount,
+        bytes32 memo             // Revealed after decryption
+    );
     error OnlySequencer();
     error InvalidDepositQueueHash();
 
@@ -539,12 +566,20 @@ interface IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
     /// @dev This is the main entry point for the sequencer at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the deposit queue
+    ///      2. Processes deposits from the unified queue (regular and encrypted)
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    ///
+    ///      For encrypted deposits, the sequencer provides DecryptionData with the
+    ///      decrypted (to, memo) values. The proof/TEE validates correctness.
+    ///
     /// @param header RLP-encoded Tempo block header
-    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;
-
+    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param decryptions Decryption data for encrypted deposits (1:1 with encrypted deposits, in order)
+    function advanceTempo(
+        bytes calldata header,
+        QueuedDeposit[] calldata deposits,
+        DecryptionData[] calldata decryptions
+    ) external;
 }
 
 /// @title IZoneOutbox

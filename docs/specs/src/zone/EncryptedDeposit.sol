@@ -79,7 +79,6 @@ library EncryptedDepositLib {
                     UNIFIED DEPOSIT QUEUE PROCESSING
 //////////////////////////////////////////////////////////////*/
 
-/// @notice Wrapper for processing deposits from the unified queue
 /// @dev The deposit queue on Tempo contains both regular and encrypted deposits
 ///      in a single ordered sequence. The sequencer must provide decryption data
 ///      for encrypted deposits when processing the queue on the zone.
@@ -91,21 +90,5 @@ library EncryptedDepositLib {
 ///      The zone's advanceTempo() processes deposits in order. For encrypted deposits,
 ///      the sequencer provides the decrypted (to, memo) alongside the encrypted data.
 ///      The proof/TEE validates that decryptions are correct.
-
-/// @notice A deposit entry in the unified queue (for zone-side processing)
-/// @dev Used by the sequencer when calling advanceTempo with mixed deposit types
-struct QueuedDeposit {
-    DepositType depositType;
-    // For Regular: decode as Deposit
-    // For Encrypted: decode as EncryptedDeposit + decrypted values provided separately
-    bytes depositData;
-}
-
-/// @notice Decryption data provided by sequencer for encrypted deposits
-/// @dev Must match 1:1 with encrypted deposits in the queue (in order)
-struct DecryptionData {
-    address to;      // Decrypted recipient
-    bytes32 memo;    // Decrypted memo
-}
-
-import {DepositType} from "./IZone.sol";
+///
+///      Types QueuedDeposit and DecryptionData are defined in IZone.sol.
