@@ -200,6 +200,7 @@ interface IZoneFactory {
     function zoneCount() external view returns (uint64);
     function zones(uint64 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
+    function isZoneMessenger(address messenger) external view returns (bool);
 }
 
 /// @title IZonePortal
@@ -234,6 +235,16 @@ interface IZonePortal {
 
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    /// @notice Emitted when a cross-zone deposit is received via withdrawal callback
+    event CrossZoneDepositReceived(
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed sourceMessenger,
+        address indexed originalSender,
+        address to,
+        uint128 amount,
+        bytes32 memo
+    );
     
     /// @notice Emitted when an encrypted deposit is made (recipient/memo not revealed)
     event EncryptedDepositMade(
@@ -264,8 +275,10 @@ interface IZonePortal {
     error CallbackRejected();
     error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
+    error UnauthorizedMessenger();
 
     function zoneId() external view returns (uint64);
+    function factory() external view returns (address);
     function token() external view returns (address);
     function messenger() external view returns (address);
     function sequencer() external view returns (address);

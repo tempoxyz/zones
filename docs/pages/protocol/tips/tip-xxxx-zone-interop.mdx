@@ -111,7 +111,7 @@ The withdrawal is batched and processed on mainnet by the sequencer.
 
 If user is on zone N and destination is zone M (different zone):
 
-The user signs a **single withdrawal transaction** with a callback that deposits to the target zone:
+The user signs a **single withdrawal transaction** with a callback that deposits to the target zone. The target zone's `ZonePortal` implements `IWithdrawalReceiver` to accept cross-zone deposits.
 
 ```
 User signs: ZoneOutbox.requestWithdrawal(
@@ -121,19 +121,39 @@ User signs: ZoneOutbox.requestWithdrawal(
   memo: 0,
   gasLimit: DEPOSIT_CALLBACK_GAS,
   fallbackRecipient: userZoneNAddress,  // Bounce back to user on Zone N if deposit fails
-  callbackData: abi.encodeCall(IZonePortal.deposit, (destinationAddress, amount - fees, memo))
+  callbackData: abi.encode(destinationAddress, memo)  // Decoded by onWithdrawalReceived
 )
 ```
 
 When processed on mainnet:
-1. Withdrawal releases tokens to `ZonePortal[M]`
-2. Callback executes `ZonePortal[M].deposit(destinationAddress, ...)`
-3. Deposit queues on Zone M for the final recipient
+1. Sequencer calls `ZonePortal[N].processWithdrawal()`
+2. Withdrawal transfers tokens to `ZonePortal[M]` via `ZoneMessenger[N]`
+3. Messenger calls `ZonePortal[M].onWithdrawalReceived(sender, amount, callbackData)`
+4. Target portal verifies messenger is registered and queues the deposit
+5. Deposit is processed on Zone M for the final recipient
+
+```solidity
+// ZonePortal implements IWithdrawalReceiver:
+function onWithdrawalReceived(
+    address sender,      // Original sender on Zone N
+    uint128 amount,
+    bytes calldata callbackData
+) external returns (bytes4) {
+    // Verify caller is a registered zone messenger
+    require(IZoneFactory(factory).isZoneMessenger(msg.sender));
+    
+    // Decode deposit params and queue deposit
+    (address to, bytes32 memo) = abi.decode(callbackData, (address, bytes32));
+    _enqueueDeposit(sender, to, amount, memo);
+    
+    return IWithdrawalReceiver.onWithdrawalReceived.selector;
+}
+```
 
 If the callback fails (e.g., Zone M portal issue), tokens bounce back to the user's `fallbackRecipient` on Zone N.
 
 **Important**: The wallet must:
-- Calculate sufficient `gasLimit` for the deposit callback
+- Calculate sufficient `gasLimit` for the deposit callback (~100k gas)
 - Include both withdrawal fee and deposit fee in total cost
 - Set appropriate `fallbackRecipient` for safety
 

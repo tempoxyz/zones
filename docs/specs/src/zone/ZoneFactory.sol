@@ -19,6 +19,7 @@ contract ZoneFactory is IZoneFactory {
 
     mapping(uint64 => ZoneInfo) internal _zones;
     mapping(address => bool) internal _isZonePortal;
+    mapping(address => bool) internal _isZoneMessenger;
 
     /// @notice Tracks deployment count for CREATE address prediction
     /// @dev Contracts start with nonce 1, not 0
@@ -59,9 +60,10 @@ contract ZoneFactory is IZoneFactory {
         );
         address messengerAddress = address(messengerContract);
 
-        // Deploy portal with messenger address
+        // Deploy portal with messenger address and factory reference
         ZonePortal portalContract = new ZonePortal(
             zoneId,
+            address(this),  // factory
             params.token,
             messengerAddress,
             params.sequencer,
@@ -88,6 +90,7 @@ contract ZoneFactory is IZoneFactory {
         });
 
         _isZonePortal[portal] = true;
+        _isZoneMessenger[messengerAddress] = true;
 
         emit ZoneCreated(
             zoneId,
@@ -137,5 +140,9 @@ contract ZoneFactory is IZoneFactory {
 
     function isZonePortal(address portal) external view returns (bool) {
         return _isZonePortal[portal];
+    }
+
+    function isZoneMessenger(address messenger) external view returns (bool) {
+        return _isZoneMessenger[messenger];
     }
 }

@@ -5,12 +5,15 @@ import { ITIP20 } from "../interfaces/ITIP20.sol";
 import {
     IZonePortal,
     IZoneMessenger,
+    IZoneFactory,
+    IWithdrawalReceiver,
     IVerifier,
     Deposit,
     Withdrawal,
     BlockTransition,
     DepositQueueTransition,
-    WithdrawalQueueTransition
+    WithdrawalQueueTransition,
+    DepositType
 } from "./IZone.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
@@ -18,7 +21,8 @@ import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows gas tokens on Tempo and manages deposits/withdrawals
-contract ZonePortal is IZonePortal {
+/// @dev Implements IWithdrawalReceiver to accept cross-zone deposits via withdrawal callbacks
+contract ZonePortal is IZonePortal, IWithdrawalReceiver {
     using WithdrawalQueueLib for WithdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
@@ -26,6 +30,7 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     uint64 public immutable zoneId;
+    address public immutable factory;
     address public immutable token;
     address public immutable messenger;
     address public immutable verifier;
@@ -56,6 +61,7 @@ contract ZonePortal is IZonePortal {
 
     constructor(
         uint64 _zoneId,
+        address _factory,
         address _token,
         address _messenger,
         address _sequencer,
@@ -64,6 +70,7 @@ contract ZonePortal is IZonePortal {
         uint64 _genesisTempoBlockNumber
     ) {
         zoneId = _zoneId;
+        factory = _factory;
         token = _token;
         messenger = _messenger;
         sequencer = _sequencer;
@@ -156,6 +163,55 @@ contract ZonePortal is IZonePortal {
             amount,
             memo
         );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         CROSS-ZONE DEPOSITS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Receive a cross-zone deposit via withdrawal callback from another zone
+    /// @dev Implements IWithdrawalReceiver. Only callable by registered zone messengers.
+    ///      The messenger has already transferred tokens to this portal.
+    ///      The callbackData encodes (to, memo) for the deposit.
+    /// @param sender The original sender on the source zone
+    /// @param amount The amount of tokens transferred
+    /// @param callbackData ABI-encoded (address to, bytes32 memo)
+    /// @return selector The function selector to confirm successful handling
+    function onWithdrawalReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata callbackData
+    ) external returns (bytes4) {
+        // Verify caller is a registered zone messenger
+        if (!IZoneFactory(factory).isZoneMessenger(msg.sender)) {
+            revert UnauthorizedMessenger();
+        }
+
+        // Decode the deposit parameters
+        (address to, bytes32 memo) = abi.decode(callbackData, (address, bytes32));
+
+        // Build deposit struct - sender is the cross-zone origin
+        Deposit memory depositData = Deposit({
+            sender: sender,
+            to: to,
+            amount: amount,
+            memo: memo
+        });
+
+        // Insert deposit into queue
+        bytes32 newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
+        currentDepositQueueHash = newCurrentDepositQueueHash;
+
+        emit CrossZoneDepositReceived(
+            newCurrentDepositQueueHash,
+            msg.sender,  // source messenger
+            sender,      // original sender on source zone
+            to,
+            amount,
+            memo
+        );
+
+        return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }
 
     /*//////////////////////////////////////////////////////////////
