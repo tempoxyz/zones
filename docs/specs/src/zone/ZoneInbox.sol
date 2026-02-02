@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, ITempoState, IZoneInbox, IZoneToken } from "./IZone.sol";
+import { Deposit, IZoneToken, IZoneInbox, ITempoState } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
-/// @dev Called by the sequencer as a privileged transaction. Can be invoked at any time
-///      (including multiple times per block). Combines Tempo header advancement with
-///      deposit queue processing in a single atomic operation.
+/// @dev Called by sequencer as a system transaction. Combines Tempo header advancement
+///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
-
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -89,15 +87,18 @@ contract ZoneInbox is IZoneInbox {
                          SYSTEM TRANSACTION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Advance Tempo state and process deposits in a single sequencer-only transaction
-    /// @dev This is the main entry point for the sequencer's Tempo sync + deposit processing.
+    /// @notice Advance Tempo state and process deposits in a single system transaction
+    /// @dev This is the main entry point for the sequencer's system transaction.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the deposit queue
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
-    ///      May be called zero or more times per block and can be interleaved with user txs.
+    ///      Protocol and proof enforce this runs at the start of each block.
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external {
+    function advanceTempo(
+        bytes calldata header,
+        Deposit[] calldata deposits
+    ) external {
         if (msg.sender != sequencer) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
@@ -120,8 +121,10 @@ contract ZoneInbox is IZoneInbox {
 
         // Step 3: Validate against Tempo state
         // Read currentDepositQueueHash from the portal's storage using the new Tempo state
-        bytes32 tempoCurrentHash =
-            _tempoState.readTempoStorageSlot(tempoPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
+        bytes32 tempoCurrentHash = _tempoState.readTempoStorageSlot(
+            tempoPortal,
+            CURRENT_DEPOSIT_QUEUE_HASH_SLOT
+        );
 
         // Our processed hash must match Tempo's current hash for now.
         // TODO: Implement recursive ancestor check in proof or on-chain as a fallback.
@@ -139,5 +142,4 @@ contract ZoneInbox is IZoneInbox {
             currentHash
         );
     }
-
 }

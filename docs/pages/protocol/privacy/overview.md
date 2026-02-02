@@ -6,7 +6,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 - Create a Tempo-native validium called a zone.
 - Each zone has exactly one permissioned sequencer.
-- Each zone bridges exactly one TIP-20 token, which is also the zone gas token.
+- Each zone bridges exactly one TIP-20 token, which is also the zone zone token.
 - Settlement uses fast validity proofs or TEE attestations (ZK or TEE). Data availability is fully trusted to the sequencer.
 - Cross-chain operations are Tempo-centric: bridge in (simple deposit), bridge out (with optional callback to receiver contracts for Tempo composability).
 - Verifier is abstracted behind a minimal `IVerifier` interface.
@@ -22,8 +22,8 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 - Tempo: the base chain.
 - Zone: the validium chain anchored to Tempo.
-- Gas token: the zone's only TIP-20, bridged from Tempo.
-- Portal: the Tempo-side contract that escrows the gas token and finalizes exits.
+- Zone token: the zone's only TIP-20, bridged from Tempo.
+- Portal: the Tempo-side contract that escrows the zone token and finalizes exits.
 - Batch: a sequencer-produced commitment covering one or more zone blocks. The batch **must** end with a single `finalizeWithdrawalBatch()` call in the final block, and intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The sequencer controls batch frequency.
 
 ## System overview
@@ -37,7 +37,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 ### Tempo contracts
 
 - `ZoneFactory`: creates zones and registers parameters.
-- `ZonePortal`: per-zone portal that escrows the gas token on Tempo and finalizes exits.
+- `ZonePortal`: per-zone portal that escrows the zone token on Tempo and finalizes exits.
 
 ### Zone components (off-chain or zone-side)
 
@@ -49,12 +49,12 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 A zone is created via `ZoneFactory.createZone(...)` with:
 
-- `token`: the Tempo TIP-20 address to bridge. This is the only bridged token and the gas token.
+- `token`: the Tempo TIP-20 address to bridge. This is the only bridged token and the zone token.
 - `sequencer`: permissioned sequencer address.
 - `verifier`: `IVerifier` implementation for proof or attestation.
 - `zoneParams`: initial configuration (genesis block hash, genesis Tempo block hash/number).
 
-The factory deploys a `ZonePortal` that escrows the gas token on Tempo. The zone genesis includes the portal address and the gas token configuration.
+The factory deploys a `ZonePortal` that escrows the zone token on Tempo. The zone genesis includes the portal address and the zone token configuration.
 
 ### Sequencer transfer
 
@@ -68,31 +68,22 @@ This applies to all zone contracts: `ZonePortal` (Tempo-side), `ZoneInbox`, `Zon
 ## Execution and fees
 
 - The zone reuses Tempo's fee units and accounting model.
-- The fee token is always the gas token. There is no fee token selection.
-- Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit. The fee token field is fixed to the gas token.
+- The fee token is always the zone token. There is no fee token selection.
+- Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit. The fee token field is fixed to the zone token.
 
 ### Deposit fees
 
-Deposits incur a processing fee to compensate the sequencer for zone-side gas costs:
-
-- **Zone gas rate**: Sequencer publishes `zoneGasRate` (gas token units per gas unit)
-- **Gas estimate**: Fixed `DEPOSIT_GAS_ESTIMATE` constant (e.g., 50,000 gas for minting)
-- **Total fee**: `DEPOSIT_GAS_ESTIMATE * zoneGasRate`
-
-The sequencer configures `zoneGasRate` via `ZonePortal.setZoneGasRate()` and takes the risk on zone gas price fluctuations. If actual zone gas is higher, the sequencer covers the difference; if lower, they keep the surplus.
-
-The fee is deducted from the deposit amount and paid to the sequencer immediately on Tempo. The deposit queue stores the net amount (`amount - fee`) which is minted on the zone.
+> **TODO**: Deposit fee mechanism is undecided. Options include: minimum deposit amount (spam prevention), fixed fee deducted from deposit, or no fee (sequencer absorbs zone-side gas costs). Zone gas should be cheap due to no data availability costs.
 
 ### Withdrawal processing fees
 
 Withdrawals incur a processing fee to compensate the sequencer for Tempo-side gas costs:
 
-- **Tempo gas rate**: Sequencer publishes `tempoGasRate` (gas token units per gas unit)
-- **Base gas**: Fixed `WITHDRAWAL_BASE_GAS` constant (e.g., 50,000 gas for `processWithdrawal` overhead)
-- **Callback gas**: User-specified `gasLimit` for callback execution
-- **Total fee**: `(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate`
+- **Base fee**: Fixed cost per withdrawal (covers `processWithdrawal` overhead)
+- **Gas fee**: Proportional to `gasLimit` (covers callback execution)
+- **Total fee**: `baseFee + gasLimit * gasFeeRate`
 
-The sequencer configures `tempoGasRate` via `ZoneOutbox.setTempoGasRate()` and takes the risk on Tempo gas price fluctuations. If actual Tempo gas is higher, the sequencer covers the difference; if lower, they keep the surplus.
+The sequencer configures these parameters via `ZoneOutbox.setWithdrawalFees(baseFee, gasFeeRate)`. The fee is calculated and locked in at request time, stored in the `Withdrawal.fee` field, and paid to the sequencer when the withdrawal is processed on Tempo (regardless of success or failure).
 
 Users burn `amount + fee` when requesting a withdrawal. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`; the sequencer keeps the fee.
 
@@ -314,7 +305,7 @@ This section defines the functions and interfaces used by the design. The signat
 ### Common types
 
 ```solidity
-/// @notice Interface for the zone's gas token (TIP-20 with mint/burn for system)
+/// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneGasToken {
     function mint(address to, uint256 amount) external;
     function burn(address from, uint256 amount) external;
@@ -480,8 +471,7 @@ interface IZonePortal {
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address to,
-        uint128 netAmount,
-        uint128 fee,
+        uint128 amount,
         bytes32 memo
     );
 
@@ -506,10 +496,6 @@ interface IZonePortal {
 
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
-    event ZoneGasRateUpdated(uint128 zoneGasRate);
-
-    /// @notice Estimated gas cost for processing a deposit on the zone.
-    function DEPOSIT_GAS_ESTIMATE() external view returns (uint64);
 
     function zoneId() external view returns (uint64);
     function token() external view returns (address);
@@ -517,7 +503,6 @@ interface IZonePortal {
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
-    function zoneGasRate() external view returns (uint128);
     function verifier() external view returns (address);
     function genesisTempoBlockNumber() external view returns (uint64);
     function withdrawalBatchIndex() external view returns (uint64);
@@ -538,14 +523,7 @@ interface IZonePortal {
     /// @notice Set the sequencer's public key. Only callable by the sequencer.
     function setSequencerPubkey(bytes32 pubkey) external;
 
-    /// @notice Set zone gas rate. Only callable by sequencer.
-    function setZoneGasRate(uint128 _zoneGasRate) external;
-
-    /// @notice Calculate the fee for a deposit.
-    function calculateDepositFee() external view returns (uint128 fee);
-
-    /// @notice Deposit gas token into the zone. Fee is deducted from amount.
-    /// @dev Returns the new current deposit queue hash.
+    /// @notice Deposit zone token into the zone. Returns the new current deposit queue hash.
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
 
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
@@ -571,14 +549,14 @@ interface IZonePortal {
 
 #### Zone messenger (Tempo)
 
-Each zone has a dedicated messenger contract on Tempo. The portal gives the messenger max approval for the gas token. Withdrawal callbacks originate from this contract, not the portal.
+Each zone has a dedicated messenger contract on Tempo. The portal gives the messenger max approval for the zone token. Withdrawal callbacks originate from this contract, not the portal.
 
 ```solidity
 interface IZoneMessenger {
     /// @notice Returns the zone's portal address
     function portal() external view returns (address);
 
-    /// @notice Returns the gas token address
+    /// @notice Returns the zone token address
     function token() external view returns (address);
 
     /// @notice Returns the L2 sender during callback execution
@@ -628,9 +606,9 @@ The receiver must return `IWithdrawalReceiver.onWithdrawalReceived.selector` to 
 
 ### Zone predeploys
 
-#### Zone gas token
+#### Zone zone token
 
-The zone's gas token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
+The zone's zone token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
 
 #### TempoState predeploy
 
@@ -735,7 +713,7 @@ interface IZoneInbox {
     /// @notice The TempoState predeploy address.
     function tempoState() external view returns (TempoState);
 
-    /// @notice The gas token (TIP-20 at same address as Tempo).
+    /// @notice The zone token (TIP-20 at same address as Tempo).
     function gasToken() external view returns (IZoneGasToken);
 
     /// @notice Current sequencer address.
@@ -767,7 +745,7 @@ interface IZoneInbox {
 The sequencer observes `DepositMade` events on the Tempo portal and relays them to the zone via `advanceTempo`. This function:
 
 1. Calls `TempoState.finalizeTempo(header)` to advance the zone's view of Tempo
-2. Processes deposits in order, building the hash chain and minting gas tokens
+2. Processes deposits in order, building the hash chain and minting zone tokens
 3. Reads `currentDepositQueueHash` from the Tempo portal's storage via `TempoState.readTempoStorageSlot()`
 4. Validates the resulting hash matches Tempo's current state
 
@@ -775,7 +753,7 @@ This combined approach ensures Tempo state advancement and deposit processing ar
 
 #### Zone outbox
 
-The zone outbox handles withdrawal requests. Users approve the outbox to spend their gas tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a **batch**, it calls `finalizeWithdrawalBatch(count)` as a system transaction at the end of the **final block** in that batch. This constructs the withdrawal queue hash on-chain and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to storage. Intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The call is required even if there are zero withdrawals (use `count = 0`) so the withdrawal batch index advances. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
+The zone outbox handles withdrawal requests. Users approve the outbox to spend their zone tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a **batch**, it calls `finalizeWithdrawalBatch(count)` as a system transaction at the end of the **final block** in that batch. This constructs the withdrawal queue hash on-chain and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to storage. Intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The call is required even if there are zero withdrawals (use `count = 0`) so the withdrawal batch index advances. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
 
 ```solidity
 /// @notice Withdrawal batch parameters stored in state for proof access
@@ -800,7 +778,7 @@ interface IZoneOutbox {
         bytes data
     );
 
-    event TempoGasRateUpdated(uint128 tempoGasRate);
+    event WithdrawalFeesUpdated(uint128 baseFee, uint128 gasFeeRate);
 
     /// @notice Emitted when sequencer finalizes a batch at end of block.
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
@@ -812,7 +790,7 @@ interface IZoneOutbox {
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
-    /// @notice The gas token (same as Tempo portal's token).
+    /// @notice The zone token (same as Tempo portal's token).
     function gasToken() external view returns (IZoneGasToken);
 
     /// @notice Current sequencer address.
@@ -821,11 +799,11 @@ interface IZoneOutbox {
     /// @notice Pending sequencer for two-step transfer.
     function pendingSequencer() external view returns (address);
 
-    /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback).
-    function WITHDRAWAL_BASE_GAS() external view returns (uint64);
+    /// @notice Base fee for withdrawal processing.
+    function withdrawalBaseFee() external view returns (uint128);
 
-    /// @notice Tempo gas rate (gas token units per gas unit on Tempo).
-    function tempoGasRate() external view returns (uint128);
+    /// @notice Fee per unit of gasLimit.
+    function withdrawalGasFeeRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing).
     function nextWithdrawalIndex() external view returns (uint64);
@@ -845,15 +823,14 @@ interface IZoneOutbox {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    /// @notice Set Tempo gas rate. Only callable by sequencer.
-    function setTempoGasRate(uint128 _tempoGasRate) external;
+    /// @notice Set withdrawal fee parameters. Only callable by sequencer.
+    function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit.
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo.
-    /// @dev Caller must have approved the outbox to spend `amount + fee` of gas tokens.
+    /// @dev Caller must have approved the outbox to spend `amount + fee` of zone tokens.
     ///      Tokens are burned immediately and withdrawal is stored in pending array.
     /// @param to The Tempo recipient address.
     /// @param amount Amount to send to recipient (fee is additional).
@@ -994,8 +971,8 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 ## Bridging in (Tempo to zone)
 
 1. User calls `ZonePortal.deposit(to, amount, memo)` on Tempo.
-2. `ZonePortal` transfers `amount` of the gas token into escrow and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))`.
-3. The sequencer observes `DepositMade` events and processes deposits in order via `ZoneInbox.advanceTempo()`, crediting `to` with `amount` of the gas token (TIP-20 balance). Deposits always succeed—there is no callback or bounce mechanism.
+2. `ZonePortal` transfers `amount` of the zone token into escrow and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))`.
+3. The sequencer observes `DepositMade` events and processes deposits in order via `ZoneInbox.advanceTempo()`, crediting `to` with `amount` of the zone token (TIP-20 balance). Deposits always succeed—there is no callback or bounce mechanism.
 4. A batch proof/attestation must prove the zone correctly processed deposits by validating the Tempo state read inside the proof.
 5. After the batch is accepted, `lastSyncedTempoBlockNumber` is updated to record how far Tempo state was synced.
 
@@ -1097,7 +1074,7 @@ Withdrawals can fail for various reasons. The system handles failures gracefully
 Withdrawals can fail due to:
 - **Transfer failure**: `transfer` or `transferFrom` reverts (includes gasLimit = 0 cases)
 - **TIP-403 policy**: Recipient not authorized under the token's transfer policy
-- **Token paused**: The gas token is globally paused
+- **Token paused**: The zone token is globally paused
 - **Callback revert**: The receiver contract reverts (out of gas, logic error, etc.)
 - **Callback rejection**: Receiver returns wrong selector
 
@@ -1115,7 +1092,7 @@ Tempo TIP-20 tokens use TIP-403 for transfer authorization:
 - Policy types: WHITELIST (must be in set) or BLACKLIST (must not be in set)
 - Policy ID 1 is "always-allow" (default for most tokens)
 
-Zone creators SHOULD choose gas tokens with `transferPolicyId == 1` to avoid complexity. If using restricted policies:
+Zone creators SHOULD choose zone tokens with `transferPolicyId == 1` to avoid complexity. If using restricted policies:
 - The portal address MUST be whitelisted
 - Users should set `fallbackRecipient` to an address they control
 
@@ -1126,8 +1103,8 @@ Zone creators SHOULD choose gas tokens with `transferPolicyId == 1` to avoid com
 - Withdrawals with callbacks go through the zone messenger with a user-specified gas limit. The messenger does `transferFrom` + callback atomically; any transfer or callback failure triggers a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
 - **Bounce-back guarantees**: Failed withdrawals bounce back to zone `fallbackRecipient`. Users always retain their funds.
-- **TIP-403 policy changes**: If the gas token's policy restricts the portal, withdrawals will fail and bounce back.
-- **Token pause**: If the gas token is paused, withdrawals bounce back to zone.
+- **TIP-403 policy changes**: If the zone token's policy restricts the portal, withdrawals will fail and bounce back.
+- **Token pause**: If the zone token is paused, withdrawals bounce back to zone.
 
 ## Implementation architecture
 

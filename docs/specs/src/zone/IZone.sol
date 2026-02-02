@@ -250,7 +250,7 @@ interface IZoneMessenger {
     /// @notice Returns the zone's portal address
     function portal() external view returns (address);
 
-    /// @notice Returns the gas token address
+    /// @notice Returns the zone token address
     function token() external view returns (address);
 
     /// @notice Returns the L2 sender during callback execution
@@ -390,8 +390,8 @@ interface IZoneInbox {
     /// @notice The TempoState predeploy address
     function tempoState() external view returns (ITempoState);
 
-    /// @notice The gas token (TIP-20 at same address as Tempo)
-    function gasToken() external view returns (IZoneGasToken);
+    /// @notice The zone token (TIP-20 at same address as Tempo)
+    function gasToken() external view returns (IZoneToken);
 
     /// @notice Current sequencer address
     function sequencer() external view returns (address);
@@ -451,8 +451,8 @@ interface IZoneOutbox {
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
-    /// @notice The gas token (same as Tempo portal's token)
-    function gasToken() external view returns (IZoneGasToken);
+    /// @notice The zone token (same as Tempo portal's token)
+    function gasToken() external view returns (IZoneToken);
 
     /// @notice Current sequencer address
     function sequencer() external view returns (address);
