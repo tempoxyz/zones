@@ -14,7 +14,7 @@ This document specifies how wallets and applications route token transfers acros
 
 ## Abstract
 
-This TIP defines the zone interoperability protocol that enables seamless token transfers between any two addresses in the Tempo ecosystem—whether on mainnet or any zone. Wallets decode the destination Tempo address to determine the target zone, compute the optimal path (direct transfer, deposit, withdrawal, or bridge), and construct the appropriate transaction(s) for the user to sign.
+This TIP defines the zone interoperability protocol that enables seamless token transfers between any two addresses in the Tempo ecosystem—whether on mainnet or any zone. Wallets decode the destination Tempo address to determine the target zone, compute the optimal path (direct transfer, deposit, withdrawal, cross-zone transfer, or cross-zone swap for different tokens), and construct a single transaction for the user to sign.
 
 ## Motivation
 
@@ -56,17 +56,16 @@ Based on source and destination, the wallet determines the transfer type:
 | Mainnet | Zone N | Deposit to zone |
 | Zone N | Zone N | Direct transfer (same zone) |
 | Zone N | Mainnet | Withdrawal from zone |
-| Zone N | Zone M | Cross-zone transfer (N→Mainnet→M) |
+| Zone N | Zone M (same token) | Cross-zone transfer (N→Mainnet→M) |
+| Zone N | Zone M (different token) | Cross-zone swap (N→Mainnet swap→M) |
+
+Transfer routing fails and the transaction should be rejected if the value of `is_testnet` is unequal between decoded source and destination addresses.
 
 ### Case 1: Direct Transfer (Same Network)
 
 If source and destination are on the same network (both mainnet, or both same zone):
 
-```
-User signs: transfer(to, amount)
-```
-
-Single transaction, immediate execution.
+User signs: `transferWithMemo(to, amount, memo)`
 
 ### Case 2: Deposit (Mainnet → Zone)
 
@@ -84,44 +83,42 @@ Where:
 The deposit is processed by the zone sequencer in subsequent blocks.
 
 **For encrypted deposits** (privacy-preserving):
-```
-User signs: ZonePortal.depositEncrypted(amount, keyIndex, encryptedPayload)
-```
 
-Where wallet encrypts `(to, memo)` using the sequencer's current encryption key.
+User signs: `ZonePortal.depositEncrypted(amount, keyIndex, encryptedPayload)`
+
+
+Where wallet encrypts `(to, memo)` using the sequencer's current encryption key. By default, the wallet should use encrypted deposits if the sequencer encryption key in the target zone is available.
 
 ### Case 3: Withdrawal (Zone → Mainnet)
 
 If user is on a zone and destination is mainnet:
 
-```
-User signs: ZoneOutbox.requestWithdrawal(to, amount, fee, memo, gasLimit, fallback, callbackData)
-```
+User signs: `ZoneOutbox.requestWithdrawal(to, amount, memo, gasLimit=0, fallbackRecipient, data=b"")`
 
 Where:
 - `to` = decoded raw address from destination
-- `fee` = calculated using `ZoneOutbox.calculateWithdrawalFee(gasLimit)`
-- `gasLimit` = 0 for simple transfers, >0 if callback needed
-- `fallback` = user's zone address (for bounce-back if callback fails)
-- `callbackData` = empty for simple transfers
+- `amount` = amount to send to recipient (user must approve `amount + fee`)
+- `memo` = optional user-provided memo (or zero)
+- `gasLimit` = 0 for simple transfers (no callback)
+- `fallbackRecipient` = user's zone address (for bounce-back if transfer fails)
+- `data` = empty for simple transfers
 
-The withdrawal is batched and processed on mainnet by the sequencer.
+The fee is calculated via `ZoneOutbox.calculateWithdrawalFee(gasLimit)` and burned along with `amount`.
 
 ### Case 4: Cross-Zone Transfer (Zone N → Zone M)
 
-If user is on zone N and destination is zone M (different zone):
+If user is on zone N and destination is zone M for `N != M` (different zones):
 
 The user signs a **single withdrawal transaction** with a callback that deposits to the target zone. The target zone's `ZonePortal` implements `IWithdrawalReceiver` to accept cross-zone deposits.
 
 ```
 User signs: ZoneOutbox.requestWithdrawal(
   to: ZonePortal[M],           // Target zone's portal on mainnet
-  amount: amount,
-  fee: withdrawalFee,
-  memo: 0,
+  amount: amount,              // User approves amount + withdrawalFee
+  memo: bytes32(0),            // Not used for cross-zone (memo is in callbackData)
   gasLimit: DEPOSIT_CALLBACK_GAS,
   fallbackRecipient: userZoneNAddress,  // Bounce back to user on Zone N if deposit fails
-  callbackData: abi.encode(destinationAddress, memo)  // Decoded by onWithdrawalReceived
+  data: abi.encode(destinationAddress, memo)  // Decoded by onWithdrawalReceived
 )
 ```
 
@@ -154,8 +151,90 @@ If the callback fails (e.g., Zone M portal issue), tokens bounce back to the use
 
 **Important**: The wallet must:
 - Calculate sufficient `gasLimit` for the deposit callback (~100k gas)
-- Include both withdrawal fee and deposit fee in total cost
+- Include the withdrawal fee in total cost (covers mainnet gas including callback)
 - Set appropriate `fallbackRecipient` for safety
+
+### Case 5: Cross-Zone Transfer with Token Swap (Zone N/Token A → Zone M/Token B)
+
+If user is on zone N with Token A and destination is zone M which uses Token B (different tokens):
+
+The transfer requires a swap on mainnet. The user signs a **single withdrawal transaction** with a callback to a `SwapAndDeposit` router contract that:
+1. Receives Token A from the withdrawal
+2. Swaps Token A → Token B via the StablecoinDEX
+3. Deposits Token B to the destination zone
+
+```
+User signs: ZoneOutbox.requestWithdrawal(
+  to: SwapAndDepositRouter,    // Router contract on mainnet
+  amount: amount,              // Amount of Token A
+  memo: bytes32(0),
+  gasLimit: SWAP_AND_DEPOSIT_GAS,  // ~200k gas for swap + deposit
+  fallbackRecipient: userZoneNAddress,
+  data: abi.encode(
+    tokenB,                    // Target token (Zone M's gas token)
+    zonePortalM,               // Target zone's portal
+    destinationAddress,        // Final recipient on Zone M
+    memo,                      // Memo for the deposit
+    minAmountOut               // Slippage protection
+  )
+)
+```
+
+The `SwapAndDepositRouter` contract implements `IWithdrawalReceiver`:
+
+```solidity
+contract SwapAndDepositRouter is IWithdrawalReceiver {
+    IStablecoinDEX public immutable stablecoinDEX;
+    IZoneFactory public immutable zoneFactory;
+    
+    function onWithdrawalReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata data
+    ) external returns (bytes4) {
+        // Verify caller is a registered zone messenger
+        require(zoneFactory.isZoneMessenger(msg.sender), "unauthorized");
+        
+        // Decode parameters
+        (
+            address tokenOut,
+            address targetPortal,
+            address recipient,
+            bytes32 memo,
+            uint128 minAmountOut
+        ) = abi.decode(data, (address, address, address, bytes32, uint128));
+        
+        // Get input token from the messenger
+        address tokenIn = IZoneMessenger(msg.sender).token();
+
+        // Approve and swap via StablecoinDEX
+        IERC20(tokenIn).approve(address(stablecoinDEX), amount);
+        uint128 amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amount, minAmountOut);
+        
+        // Approve and deposit to target zone
+        IERC20(tokenOut).approve(targetPortal, amountOut);
+        IZonePortal(targetPortal).deposit(recipient, amountOut, memo);
+        
+        return IWithdrawalReceiver.onWithdrawalReceived.selector;
+    }
+}
+```
+
+**Fee breakdown for cross-token transfers:**
+- **Withdrawal fee**: Covers mainnet gas for withdrawal processing + callback execution
+- **Swap fee**: StablecoinDEX trading fee (taken from swap amount)
+- **Slippage**: Difference between expected and actual swap rate (expected and max)
+
+**Important**: The wallet must:
+- Query the StablecoinDEX for expected output amount and price impact
+- Set appropriate `minAmountOut` for slippage protection
+- Calculate sufficient `gasLimit` for swap + deposit (~200k gas)
+- Warn users about swap fees and potential slippage
+- Handle the case where the swap fails (tokens bounce back as Token A to Zone N)
+
+**Failure modes:**
+- If swap fails (e.g., slippage exceeded): Entire callback reverts, Token A bounces back to `fallbackRecipient` on Zone N
+- If deposit fails after swap: More complex - the router should handle this gracefully (e.g., send Token B to a fallback address on mainnet, or use a try/catch pattern)
 
 ## Wallet Flow
 
@@ -179,10 +258,17 @@ function parseDestination(tempoAddress: string): ParsedDestination {
 
 ```typescript
 interface TransferRoute {
-  type: 'direct' | 'deposit' | 'withdrawal' | 'cross-zone';
+  type: 'direct' | 'deposit' | 'withdrawal' | 'cross-zone' | 'cross-zone-swap';
   steps: TransferStep[];
-  estimatedTime: Duration;
   totalFees: TokenAmount;
+  swapDetails?: {              // Present for cross-zone-swap
+    tokenIn: TokenAddress;
+    tokenOut: TokenAddress;
+    amountIn: TokenAmount;
+    expectedAmountOut: TokenAmount;
+    minAmountOut: TokenAmount;
+    priceImpact: number;       // e.g., 0.005 = 0.5%
+  };
 }
 
 function computeRoute(
@@ -200,25 +286,22 @@ function computeRoute(
       type: 'direct',
       steps: [{ action: 'transfer', to: destination.rawAddress, amount }],
       estimatedTime: '~1 block',
-      totalFees: gasEstimate
     };
   }
   
   if (srcZone === null && dstZone !== null) {
     // Mainnet → Zone: deposit
     const portal = getZonePortal(dstZone);
-    const depositFee = portal.calculateDepositFee();
+    // Note: deposit fees are TBD (see Zone Validium spec)
     return {
       type: 'deposit',
       steps: [{ 
         action: 'deposit', 
         portal, 
         to: destination.rawAddress, 
-        amount,
-        fee: depositFee
+        amount
       }],
-      estimatedTime: '~2-10 blocks',
-      totalFees: depositFee + gasEstimate
+      totalFees: gasEstimate  // mainnet gas only; deposit fee TBD
     };
   }
   
@@ -235,34 +318,74 @@ function computeRoute(
         amount,
         fee: withdrawalFee
       }],
-      estimatedTime: '~batch finality + processing',
       totalFees: withdrawalFee
     };
   }
   
-  // Zone N → Zone M: cross-zone (single withdrawal with deposit callback)
+  // Zone N → Zone M: check if same token or different tokens
   const outbox = getZoneOutbox(srcZone);
   const dstPortal = getZonePortal(dstZone);
-  const depositCallbackGas = DEPOSIT_CALLBACK_GAS; // ~100k gas for deposit call
-  const withdrawalFee = outbox.calculateWithdrawalFee(depositCallbackGas);
-  const depositFee = dstPortal.calculateDepositFee();
+  const srcToken = getZoneToken(srcZone);
+  const dstToken = getZoneToken(dstZone);
   
-  const callbackData = encodeDepositCall(destination.rawAddress, amount - withdrawalFee - depositFee, memo);
+  if (srcToken === dstToken) {
+    // Same token: direct cross-zone deposit
+    const depositCallbackGas = DEPOSIT_CALLBACK_GAS; // ~100k gas
+    const withdrawalFee = outbox.calculateWithdrawalFee(depositCallbackGas);
+    const callbackData = abi.encode(destination.rawAddress, memo);
+    
+    return {
+      type: 'cross-zone',
+      steps: [{
+        action: 'withdrawal-with-callback',
+        outbox,
+        to: dstPortal.address,
+        amount,
+        gasLimit: depositCallbackGas,
+        fallbackRecipient: source.address,
+        data: callbackData
+      }],
+      totalFees: withdrawalFee
+    };
+  }
+  
+  // Different tokens: need swap via StablecoinDEX
+  const swapAndDepositGas = SWAP_AND_DEPOSIT_GAS; // ~200k gas
+  const withdrawalFee = outbox.calculateWithdrawalFee(swapAndDepositGas);
+
+  // Get swap quote from StablecoinDEX
+  const amountOut = stablecoinDEX.quoteSwapExactAmountIn(srcToken, dstToken, amount);
+  const priceImpact = calculatePriceImpact(amount, amountOut, srcToken, dstToken);
+  const minAmountOut = applySlippageTolerance(amountOut, SLIPPAGE_TOLERANCE);
+  
+  const callbackData = abi.encode(
+    dstToken,                    // Token to receive
+    dstPortal.address,           // Target zone portal
+    destination.rawAddress,      // Final recipient
+    memo,
+    minAmountOut                 // Slippage protection
+  );
   
   return {
-    type: 'cross-zone',
+    type: 'cross-zone-swap',
     steps: [{
-      action: 'withdrawal-with-callback',
+      action: 'withdrawal-with-swap',
       outbox,
-      to: dstPortal.address,  // Withdraw to target zone's portal
+      to: SWAP_AND_DEPOSIT_ROUTER,
       amount,
-      fee: withdrawalFee,
-      gasLimit: depositCallbackGas,
-      fallbackRecipient: source.address,  // Bounce back on failure
-      callbackData
+      gasLimit: swapAndDepositGas,
+      fallbackRecipient: source.address,
+      data: callbackData
     }],
-    estimatedTime: '~batch finality + deposit processing',
-    totalFees: withdrawalFee + depositFee
+    totalFees: withdrawalFee,
+    swapDetails: {
+      tokenIn: srcToken,
+      tokenOut: dstToken,
+      amountIn: amount,
+      expectedAmountOut: amountOut,
+      minAmountOut,
+      priceImpact
+    }
   };
 }
 ```
@@ -271,43 +394,17 @@ function computeRoute(
 
 The wallet MUST clearly present:
 
-1. **Source**: Where funds are coming from
-2. **Destination**: Decoded address with zone name/ID
-3. **Route**: Visual representation of the path
-4. **Steps**: Each transaction that needs signing
-5. **Fees**: Breakdown of all fees
-6. **Time estimate**: Expected completion time
+1. **Source**: Tempo format source address
+2. **Destination**: Tempo format destination address
+3. **Privacy level**: What information is visible on mainnet; who provides privacy for hidden information
+4. **Fees**: Breakdown of all fees: Mainnet gas, source zone gas, deposit and withdrawal fees
 
-Example UI for cross-zone transfer:
+For cross-zone-swap transfers, additionally show:
+5. **Swap details**: Input token, output token, expected output amount
+6. **Price impact**: Warning if > 1%
+7. **Minimum received**: After slippage tolerance
 
-```
-┌─────────────────────────────────────────────────────┐
-│ Send 100 USDC                                       │
-├─────────────────────────────────────────────────────┤
-│ From: Zone 1 (Privacy Zone)                         │
-│       tz1YourAddress...                             │
-│                                                     │
-│ To:   Zone 2 (Gaming Zone)                          │
-│       tz2RecipientAddress...                        │
-├─────────────────────────────────────────────────────┤
-│ Route: Zone 1 → Tempo Mainnet → Zone 2              │
-│        (automatic via withdrawal callback)          │
-│                                                     │
-│ Withdrawal fee: 0.02 USDC                           │
-│ Deposit fee:    0.01 USDC                           │
-├─────────────────────────────────────────────────────┤
-│ Total fees: 0.03 USDC                               │
-│ Recipient receives: 99.97 USDC                      │
-│ Estimated time: ~6 minutes                          │
-│                                                     │
-│ ℹ️ If deposit fails, funds return to your Zone 1    │
-│    address automatically.                           │
-├─────────────────────────────────────────────────────┤
-│            [Cancel]    [Send]                       │
-└─────────────────────────────────────────────────────┘
-```
-
-This is a **single transaction** on Zone 1. The withdrawal callback automatically deposits to Zone 2.
+This is a **single transaction** on the source zone. The withdrawal callback handles swap and deposit automatically.
 
 ### 4. Execute Transfer
 
@@ -326,29 +423,40 @@ The wallet SHOULD persist transfer state to handle app closure and show progress
 
 ## Token Compatibility
 
-Cross-zone transfers require the token to be:
-1. The zone's gas token (for that zone's portal), OR
-2. A bridged token with liquidity on both sides
+**Same-token cross-zone transfers** require both zones to use the same gas token.
 
-The wallet MUST verify token compatibility before presenting the route. If a token cannot be transferred to the destination zone, show an error explaining why.
+**Cross-token transfers** (zones with different gas tokens) require:
+1. A StablecoinDEX orderbook with liquidity for the token pair
+2. A deployed `SwapAndDepositRouter` contract
+
+The wallet MUST:
+- Check if source and destination zones use the same token
+- If different, verify StablecoinDEX liquidity exists for the pair
+- Query and display the expected swap rate and price impact
+- Warn users if price impact exceeds a threshold (e.g., > 1%)
+- Reject transfers if no swap route exists
 
 ## Error Handling
 
 | Error | User Message |
 |-------|-------------|
 | Invalid address format | "This doesn't look like a valid Tempo address" |
-| Unknown zone ID | "Zone {id} doesn't exist" |
 | Token not supported | "{token} cannot be sent to {zone}" |
 | Insufficient balance | "You need {amount} but only have {balance}" |
-| Withdrawal pending | "You have a pending withdrawal. Complete it first or wait." |
+| No swap route | "No liquidity to swap {tokenA} → {tokenB}" |
+| High price impact | "Price impact is {x}%. Consider reducing amount." |
+| Slippage exceeded | "Swap failed: price moved beyond your slippage tolerance" |
 
 ## Security Considerations
 
-1. **Address verification**: Always show the decoded zone and raw address for user verification
-2. **Phishing prevention**: Warn if destination zone is unfamiliar or newly created
-3. **Fee transparency**: Never hide fees; show exact amounts deducted
-4. **Step confirmation**: For multi-step transfers, confirm each step separately
-5. **Timeout handling**: Set reasonable timeouts and allow cancellation where possible
+1. **Address verification**: Always show full Tempo addresses to the user for verification
+2. **Fee transparency**: Never hide fees; show exact amounts deducted
+3. **Swap risks**: For cross-token transfers, clearly communicate:
+   - The swap is executed on mainnet, not on the source zone
+   - Price impact and slippage tolerance
+   - If swap fails, tokens return to source zone (not converted)
+4. **Slippage protection**: Always set a reasonable `minAmountOut` to prevent sandwich attacks
+5. **Router trust**: The `SwapAndDepositRouter` must be a trusted, audited contract
 
 ---
 
@@ -361,3 +469,4 @@ The wallet MUST verify token compatibility before presenting the route. If a tok
 5. **Safe fallback**: Cross-zone transfers MUST specify a fallback recipient for failed callbacks
 6. **Zone validation**: Wallet MUST verify zone exists before presenting deposit option
 7. **Token verification**: Wallet MUST verify token is transferable to destination before proceeding
+8. **Slippage bounds**: Cross-token transfers MUST enforce a `minAmountOut` set by the user/wallet
