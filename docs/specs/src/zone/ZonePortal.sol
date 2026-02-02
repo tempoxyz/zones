@@ -173,6 +173,7 @@ contract ZonePortal is IZonePortal, IWithdrawalReceiver {
     /// @dev Implements IWithdrawalReceiver. Only callable by registered zone messengers.
     ///      The messenger has already transferred tokens to this portal.
     ///      The callbackData encodes (to, memo) for the deposit.
+    ///      Note: For cross-zone transfers with swap or encryption, use SwapAndDepositRouter instead.
     /// @param sender The original sender on the source zone
     /// @param amount The amount of tokens transferred
     /// @param callbackData ABI-encoded (address to, bytes32 memo)

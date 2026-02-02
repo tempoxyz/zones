@@ -105,60 +105,72 @@ Where:
 
 The fee is calculated via `ZoneOutbox.calculateWithdrawalFee(gasLimit)` and burned along with `amount`.
 
-### Case 4: Cross-Zone Transfer (Zone N → Zone M)
+### Case 4: Cross-Zone Transfer (Zone N → Zone M, Same Token)
 
-If user is on zone N and destination is zone M for `N != M` (different zones):
+If user is on zone N and destination is zone M for `N != M` (different zones) using the same gas token:
 
-The user signs a **single withdrawal transaction** with a callback that deposits to the target zone. The target zone's `ZonePortal` implements `IWithdrawalReceiver` to accept cross-zone deposits.
+The user signs a **single withdrawal transaction** with a callback to `SwapAndDepositRouter` that deposits to the target zone. The router handles both same-token and different-token transfers.
 
 ```
 User signs: ZoneOutbox.requestWithdrawal(
-  to: ZonePortal[M],           // Target zone's portal on mainnet
+  to: SwapAndDepositRouter,    // Router contract on mainnet
   amount: amount,              // User approves amount + withdrawalFee
   memo: bytes32(0),            // Not used for cross-zone (memo is in callbackData)
-  gasLimit: DEPOSIT_CALLBACK_GAS,
+  gasLimit: DEPOSIT_CALLBACK_GAS,  // ~100k gas for deposit
   fallbackRecipient: userZoneNAddress,  // Bounce back to user on Zone N if deposit fails
-  data: abi.encode(destinationAddress, memo)  // Decoded by onWithdrawalReceived
+  data: abi.encode(
+    false,                     // Plaintext deposit
+    tokenB,                    // Target token (same as tokenA)
+    zonePortalM,               // Target zone's portal
+    destinationAddress,        // Final recipient on Zone M
+    memo,                      // Memo for the deposit
+    0                          // minAmountOut (ignored for same-token)
+  )
+)
+```
+
+For encrypted cross-zone deposits:
+```
+data: abi.encode(
+  true,                        // Encrypted deposit
+  tokenB,                      // Target token
+  zonePortalM,                 // Target zone's portal
+  keyIndex,                    // Encryption key index
+  encryptedPayload,            // Encrypted (recipient, memo)
+  0                            // minAmountOut (ignored for same-token)
 )
 ```
 
 When processed on mainnet:
 1. Sequencer calls `ZonePortal[N].processWithdrawal()`
-2. Withdrawal transfers tokens to `ZonePortal[M]` via `ZoneMessenger[N]`
-3. Messenger calls `ZonePortal[M].onWithdrawalReceived(sender, amount, callbackData)`
-4. Target portal verifies messenger is registered and queues the deposit
+2. Withdrawal transfers tokens to `SwapAndDepositRouter` via `ZoneMessenger[N]`
+3. Messenger calls `SwapAndDepositRouter.onWithdrawalReceived(sender, amount, callbackData)`
+4. Router detects tokenIn == tokenOut (no swap needed) and deposits directly
 5. Deposit is processed on Zone M for the final recipient
 
-```solidity
-// ZonePortal implements IWithdrawalReceiver:
-function onWithdrawalReceived(
-    address sender,      // Original sender on Zone N
-    uint128 amount,
-    bytes calldata callbackData
-) external returns (bytes4) {
-    // Verify caller is a registered zone messenger
-    require(IZoneFactory(factory).isZoneMessenger(msg.sender));
-    
-    // Decode deposit params and queue deposit
-    (address to, bytes32 memo) = abi.decode(callbackData, (address, bytes32));
-    _enqueueDeposit(sender, to, amount, memo);
-    
-    return IWithdrawalReceiver.onWithdrawalReceived.selector;
-}
-```
+If the callback fails, tokens bounce back to the user's `fallbackRecipient` on Zone N.
 
-If the callback fails (e.g., Zone M portal issue), tokens bounce back to the user's `fallbackRecipient` on Zone N.
+**For encrypted cross-zone deposits** (privacy-preserving):
+
+The wallet encrypts `(recipient, memo)` using the destination zone's sequencer encryption key. This hides the final recipient and memo from mainnet observers.
 
 **Important**: The wallet must:
-- Calculate sufficient `gasLimit` for the deposit callback (~100k gas)
+- Calculate sufficient `gasLimit` for the deposit callback (~100k gas, +5-7k for encrypted)
 - Include the withdrawal fee in total cost (covers mainnet gas including callback)
 - Set appropriate `fallbackRecipient` for safety
+- For privacy: encrypt to destination zone's current sequencer key
+
+**Gas overhead for encrypted deposits** comes from:
+- Memory allocation for bytes array: ~1-2k gas
+- Larger struct encoding for hash: ~1k gas
+- Larger event emission: ~1-2k gas
+- Additional decoding: ~1-2k gas
 
 ### Case 5: Cross-Zone Transfer with Token Swap (Zone N/Token A → Zone M/Token B)
 
 If user is on zone N with Token A and destination is zone M which uses Token B (different tokens):
 
-The transfer requires a swap on mainnet. The user signs a **single withdrawal transaction** with a callback to a `SwapAndDeposit` router contract that:
+The transfer requires a swap on mainnet. The user signs a **single withdrawal transaction** with a callback to the same `SwapAndDepositRouter` contract (used in Case 4) that:
 1. Receives Token A from the withdrawal
 2. Swaps Token A → Token B via the StablecoinDEX
 3. Deposits Token B to the destination zone
@@ -171,6 +183,7 @@ User signs: ZoneOutbox.requestWithdrawal(
   gasLimit: SWAP_AND_DEPOSIT_GAS,  // ~200k gas for swap + deposit
   fallbackRecipient: userZoneNAddress,
   data: abi.encode(
+    false,                     // Plaintext deposit
     tokenB,                    // Target token (Zone M's gas token)
     zonePortalM,               // Target zone's portal
     destinationAddress,        // Final recipient on Zone M
@@ -180,13 +193,25 @@ User signs: ZoneOutbox.requestWithdrawal(
 )
 ```
 
-The `SwapAndDepositRouter` contract implements `IWithdrawalReceiver`:
+For encrypted cross-zone swaps:
+```
+data: abi.encode(
+  true,                        // Encrypted deposit
+  tokenB,                      // Target token
+  zonePortalM,                 // Target zone's portal
+  keyIndex,                    // Encryption key index
+  encryptedPayload,            // Encrypted (recipient, memo)
+  minAmountOut                 // Slippage protection
+)
+```
+
+The `SwapAndDepositRouter` contract implements `IWithdrawalReceiver` and handles both same-token and different-token transfers:
 
 ```solidity
 contract SwapAndDepositRouter is IWithdrawalReceiver {
     IStablecoinDEX public immutable stablecoinDEX;
     IZoneFactory public immutable zoneFactory;
-    
+
     function onWithdrawalReceived(
         address sender,
         uint128 amount,
@@ -194,27 +219,48 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     ) external returns (bytes4) {
         // Verify caller is a registered zone messenger
         require(zoneFactory.isZoneMessenger(msg.sender), "unauthorized");
-        
-        // Decode parameters
-        (
-            address tokenOut,
-            address targetPortal,
-            address recipient,
-            bytes32 memo,
-            uint128 minAmountOut
-        ) = abi.decode(data, (address, address, address, bytes32, uint128));
-        
-        // Get input token from the messenger
-        address tokenIn = IZoneMessenger(msg.sender).token();
 
-        // Approve and swap via StablecoinDEX
-        IERC20(tokenIn).approve(address(stablecoinDEX), amount);
-        uint128 amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amount, minAmountOut);
-        
-        // Approve and deposit to target zone
-        IERC20(tokenOut).approve(targetPortal, amountOut);
-        IZonePortal(targetPortal).deposit(recipient, amountOut, memo);
-        
+        address tokenIn = IZoneMessenger(msg.sender).token();
+        bool isEncrypted = abi.decode(data, (bool));
+
+        if (isEncrypted) {
+            // Encrypted: decode (bool, tokenOut, targetPortal, keyIndex, encryptedPayload, minAmountOut)
+            (, address tokenOut, address targetPortal, uint256 keyIndex,
+             EncryptedDepositPayload memory encrypted, uint128 minAmountOut) =
+                abi.decode(data, (bool, address, address, uint256, EncryptedDepositPayload, uint128));
+
+            uint128 amountOut;
+            if (tokenIn == tokenOut) {
+                // Same token: no swap needed
+                amountOut = amount;
+            } else {
+                // Different tokens: swap via StablecoinDEX
+                IERC20(tokenIn).approve(address(stablecoinDEX), amount);
+                amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amount, minAmountOut);
+            }
+
+            IERC20(tokenOut).approve(targetPortal, amountOut);
+            IZonePortal(targetPortal).depositEncrypted(amountOut, keyIndex, encrypted);
+        } else {
+            // Plaintext: decode (bool, tokenOut, targetPortal, recipient, memo, minAmountOut)
+            (, address tokenOut, address targetPortal, address recipient,
+             bytes32 memo, uint128 minAmountOut) =
+                abi.decode(data, (bool, address, address, address, bytes32, uint128));
+
+            uint128 amountOut;
+            if (tokenIn == tokenOut) {
+                // Same token: no swap needed
+                amountOut = amount;
+            } else {
+                // Different tokens: swap via StablecoinDEX
+                IERC20(tokenIn).approve(address(stablecoinDEX), amount);
+                amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amount, minAmountOut);
+            }
+
+            IERC20(tokenOut).approve(targetPortal, amountOut);
+            IZonePortal(targetPortal).deposit(recipient, amountOut, memo);
+        }
+
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }
 }
@@ -231,6 +277,10 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 - Calculate sufficient `gasLimit` for swap + deposit (~200k gas)
 - Warn users about swap fees and potential slippage
 - Handle the case where the swap fails (tokens bounce back as Token A to Zone N)
+
+**For encrypted cross-zone swaps** (privacy-preserving):
+
+Same as Case 4, the wallet encrypts `(recipient, memo)` using the destination zone's sequencer key. The `SwapAndDepositRouter` detects the encryption flag and uses `depositEncrypted()` instead of `deposit()`. This hides the final recipient from both mainnet and swap observers.
 
 **Failure modes:**
 - If swap fails (e.g., slippage exceeded): Entire callback reverts, Token A bounces back to `fallbackRecipient` on Zone N
@@ -322,24 +372,32 @@ function computeRoute(
     };
   }
   
-  // Zone N → Zone M: check if same token or different tokens
+  // Zone N → Zone M: use SwapAndDepositRouter for all cross-zone transfers
   const outbox = getZoneOutbox(srcZone);
   const dstPortal = getZonePortal(dstZone);
   const srcToken = getZoneToken(srcZone);
   const dstToken = getZoneToken(dstZone);
-  
+
   if (srcToken === dstToken) {
-    // Same token: direct cross-zone deposit
+    // Same token: SwapAndDepositRouter will skip the swap
     const depositCallbackGas = DEPOSIT_CALLBACK_GAS; // ~100k gas
     const withdrawalFee = outbox.calculateWithdrawalFee(depositCallbackGas);
-    const callbackData = abi.encode(destination.rawAddress, memo);
-    
+
+    const callbackData = abi.encode(
+      false,                     // Plaintext (or true for encrypted)
+      dstToken,                  // Target token (same as source)
+      dstPortal.address,         // Target zone portal
+      destination.rawAddress,    // Final recipient
+      memo,
+      0                          // minAmountOut (ignored for same token)
+    );
+
     return {
       type: 'cross-zone',
       steps: [{
         action: 'withdrawal-with-callback',
         outbox,
-        to: dstPortal.address,
+        to: SWAP_AND_DEPOSIT_ROUTER,
         amount,
         gasLimit: depositCallbackGas,
         fallbackRecipient: source.address,
@@ -348,8 +406,8 @@ function computeRoute(
       totalFees: withdrawalFee
     };
   }
-  
-  // Different tokens: need swap via StablecoinDEX
+
+  // Different tokens: SwapAndDepositRouter will swap via StablecoinDEX
   const swapAndDepositGas = SWAP_AND_DEPOSIT_GAS; // ~200k gas
   const withdrawalFee = outbox.calculateWithdrawalFee(swapAndDepositGas);
 
@@ -357,9 +415,10 @@ function computeRoute(
   const amountOut = stablecoinDEX.quoteSwapExactAmountIn(srcToken, dstToken, amount);
   const priceImpact = calculatePriceImpact(amount, amountOut, srcToken, dstToken);
   const minAmountOut = applySlippageTolerance(amountOut, SLIPPAGE_TOLERANCE);
-  
+
   const callbackData = abi.encode(
-    dstToken,                    // Token to receive
+    false,                       // Plaintext (or true for encrypted)
+    dstToken,                    // Target token (different from source)
     dstPortal.address,           // Target zone portal
     destination.rawAddress,      // Final recipient
     memo,
