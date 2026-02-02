@@ -60,10 +60,9 @@ contract ZoneFactory is IZoneFactory {
         );
         address messengerAddress = address(messengerContract);
 
-        // Deploy portal with messenger address and factory reference
+        // Deploy portal with messenger address
         ZonePortal portalContract = new ZonePortal(
             zoneId,
-            address(this),  // factory
             params.token,
             messengerAddress,
             params.sequencer,
