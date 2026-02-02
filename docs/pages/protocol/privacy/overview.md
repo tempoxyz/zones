@@ -748,6 +748,55 @@ Transactions that read Tempo state require coordination between the user's walle
 
 If Tempo state changes between steps 3 and 5, the sequencer will reject the transaction as invalid (declared values don't match). The wallet can retry from step 3.
 
+**TIP-20 transfer inference (simplified workflow):**
+
+For TIP-20 `transfer` and `transferFrom` transactions, the sequencer can **automatically infer** the required state declarations, allowing wallets to sign regular Ethereum/Tempo transactions (type 0 or 2) without explicit state declarations:
+
+1. **Detect TIP-20 transfer**: Sequencer identifies `transfer(to, amount)` or `transferFrom(from, to, amount)` calls to TIP-20 contracts
+2. **Read token policy**: Sequencer reads the token's `transferPolicyId` from Tempo L1
+3. **Read policy type**: Sequencer reads the policy data to determine if it's a WHITELIST or BLACKLIST
+4. **Infer authorization assumptions**:
+   - For WHITELIST policies: Assume both `from` and `to` are IN the policy set (whitelisted)
+   - For BLACKLIST policies: Assume both `from` and `to` are NOT IN the policy set (not blacklisted)
+5. **Add inferred declarations**: Sequencer adds the required Tempo state slots with the assumed values to the transaction's state declaration
+6. **Validate execution**: Transaction executes. If assumptions are wrong, transaction is invalid (which is acceptable—it wouldn't have succeeded anyway)
+
+**Required state declarations for inferred transfers:**
+
+For a transfer from address `from` to address `to` on token with `transferPolicyId`:
+
+```solidity
+// 1. Policy data: _policyData[transferPolicyId]
+bytes32 policyDataSlot = keccak256(abi.encode(transferPolicyId, uint256(1)));
+
+// 2. Policy set for sender: policySet[transferPolicyId][from]
+bytes32 innerSlotFrom = keccak256(abi.encode(transferPolicyId, uint256(2)));
+bytes32 senderSetSlot = keccak256(abi.encode(from, innerSlotFrom));
+
+// 3. Policy set for recipient: policySet[transferPolicyId][to]
+bytes32 recipientSetSlot = keccak256(abi.encode(to, innerSlotFrom));
+```
+
+**Values to declare:**
+- `policyDataSlot`: The policy data (contains type: WHITELIST or BLACKLIST)
+- `senderSetSlot`:
+  - `1` (true) if WHITELIST policy (assume sender is whitelisted)
+  - `0` (false) if BLACKLIST policy (assume sender is not blacklisted)
+- `recipientSetSlot`:
+  - `1` (true) if WHITELIST policy (assume recipient is whitelisted)
+  - `0` (false) if BLACKLIST policy (assume recipient is not blacklisted)
+
+**Benefits:**
+- ✅ Wallets can sign normal Ethereum transactions without modifications
+- ✅ No need for wallet support for transaction type `0x7A`
+- ✅ No need for `eth_getTempoStateDeclaration` RPC call
+- ✅ Transactions are automatically valid for authorized users
+- ✅ Invalid assumptions simply make the transaction invalid (no security risk)
+
+**Special cases:**
+- Policy ID 0 (always-reject) and 1 (always-allow) don't need state declarations (hardcoded behavior)
+- For policy ID ≥ 2, the sequencer reads Tempo state to infer the declarations
+
 #### TIP-403 registry
 
 The zone has a `ZoneTIP403Registry` contract deployed at the **same address** as Tempo's `TIP403Registry`. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the `TempoState` precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.
