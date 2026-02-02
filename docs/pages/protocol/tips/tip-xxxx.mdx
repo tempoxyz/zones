@@ -226,5 +226,5 @@ Result: `tzAJ7XcvK8mJ3xGdQN5rY4kHvL2nP6wT9ab` (~36 chars)
 2. **Checksum coverage**: The checksum MUST include the prefix, preventing prefix swaps
 3. **Unique decoding**: Any valid address string MUST decode to exactly one (raw_address, zone_id, network) tuple
 4. **Round-trip**: `decode(encode(addr, zone, net)) == (addr, zone, net)` for all valid inputs
-5. **Checksum strength**: Any single-character error MUST be detected by the checksum
+5. **Checksum strength**: Single-character errors are detected with probability >= 1 - 2**(-32) (the 4-byte checksum provides ~32 bits of error detection)
 6. **Zone 0 reserved**: Zone ID 0 MUST NOT be assigned by ZoneFactory
