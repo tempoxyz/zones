@@ -786,16 +786,8 @@ bytes32 recipientSetSlot = keccak256(abi.encode(to, innerSlotFrom));
   - `1` (true) if WHITELIST policy (assume recipient is whitelisted)
   - `0` (false) if BLACKLIST policy (assume recipient is not blacklisted)
 
-**Benefits:**
-- ✅ Wallets can sign normal Ethereum transactions without modifications
-- ✅ No need for wallet support for transaction type `0x7A`
-- ✅ No need for `eth_getTempoStateDeclaration` RPC call
-- ✅ Transactions are automatically valid for authorized users
-- ✅ Invalid assumptions simply make the transaction invalid (no security risk)
-
 **Special cases:**
 - Policy ID 0 (always-reject) and 1 (always-allow) don't need state declarations (hardcoded behavior)
-- For policy ID ≥ 2, the sequencer reads Tempo state to infer the declarations
 
 #### TIP-403 registry
 
