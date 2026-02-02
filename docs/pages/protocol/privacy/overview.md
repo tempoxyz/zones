@@ -22,7 +22,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 - Tempo: the base chain.
 - Zone: the validium chain anchored to Tempo.
-- Gas token: the zone's only TIP-20, bridged from Tempo.
+- Zone token: the zone's only TIP-20, bridged from Tempo.
 - Portal: the Tempo-side contract that escrows the zone token and finalizes exits.
 - Batch: a sequencer-produced commitment covering one or more zone blocks. The batch **must** end with a single `finalizeWithdrawalBatch()` call in the final block, and intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The sequencer controls batch frequency.
 
