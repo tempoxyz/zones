@@ -17,7 +17,7 @@ import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
 import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 
 /// @title ZonePortal
-/// @notice Per-zone portal that escrows gas tokens on Tempo and manages deposits/withdrawals
+/// @notice Per-zone portal that escrows zone tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
     using WithdrawalQueueLib for WithdrawalQueue;
 
@@ -49,7 +49,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Future functionality: allows users to encrypt data only the sequencer can read
     bytes32 public sequencerPubkey;
 
-    /// @notice Zone gas rate (gas token units per gas unit on the zone)
+    /// @notice Zone gas rate (zone token units per gas unit on the zone)
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
     ///      Deposit fee = DEPOSIT_GAS_ESTIMATE * zoneGasRate
     uint128 public zoneGasRate;
@@ -87,7 +87,7 @@ contract ZonePortal is IZonePortal {
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
 
-        // Give messenger max approval for the gas token
+        // Give messenger max approval for the zone token
         ITIP20(_token).approve(_messenger, type(uint256).max);
     }
 
@@ -160,12 +160,12 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Calculate the fee for a deposit
     /// @dev Fee = DEPOSIT_GAS_ESTIMATE * zoneGasRate
-    /// @return fee The deposit fee in gas token units
+    /// @return fee The deposit fee in zone token units
     function calculateDepositFee() public view returns (uint128 fee) {
         fee = uint128(DEPOSIT_GAS_ESTIMATE) * zoneGasRate;
     }
 
-    /// @notice Deposit gas token into the zone. Returns the new current deposit queue hash.
+    /// @notice Deposit zone token into the zone. Returns the new current deposit queue hash.
     /// @dev Fee is deducted from amount and paid to sequencer. Net amount is credited on zone.
     /// @param to Recipient address on the zone
     /// @param amount Total amount to deposit (fee will be deducted)

@@ -6,7 +6,7 @@ import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
-/// @dev Burns gas tokens and stores pending withdrawals. Sequencer calls finalizeWithdrawalBatch()
+/// @dev Burns zone tokens and stores pending withdrawals. Sequencer calls finalizeWithdrawalBatch()
 ///      at the end of a block to construct withdrawal queue hash on-chain.
 contract ZoneOutbox is IZoneOutbox {
     /*//////////////////////////////////////////////////////////////
@@ -21,7 +21,7 @@ contract ZoneOutbox is IZoneOutbox {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The gas token (TIP-20 at same address as Tempo)
+    /// @notice The zone token (TIP-20 at same address as Tempo)
     IZoneGasToken public immutable gasToken;
 
     /// @notice Current sequencer address
@@ -30,7 +30,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
 
-    /// @notice Tempo gas rate (gas token units per gas unit)
+    /// @notice Tempo gas rate (zone token units per gas unit)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
     ///      Fee = gasLimit * tempoGasRate. User must include all gas costs in gasLimit.
     uint128 public tempoGasRate;
@@ -110,7 +110,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
     /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
     /// @param gasLimit Total gas limit (must cover processWithdrawal + any callback)
-    /// @return fee The total fee in gas token units
+    /// @return fee The total fee in zone token units
     function calculateWithdrawalFee(uint64 gasLimit) public view returns (uint128 fee) {
         fee = uint128(gasLimit) * tempoGasRate;
     }
@@ -120,7 +120,7 @@ contract ZoneOutbox is IZoneOutbox {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Request a withdrawal from the zone back to Tempo
-    /// @dev Caller must have approved the outbox to spend `amount + fee` of gas tokens.
+    /// @dev Caller must have approved the outbox to spend `amount + fee` of zone tokens.
     ///      The outbox burns the tokens and stores the withdrawal. The sequencer
     ///      calls finalizeWithdrawalBatch() to construct the withdrawal queue hash.
     /// @param to The Tempo recipient address
