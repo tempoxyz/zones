@@ -74,7 +74,7 @@ struct L1StateAccessLog {
 
 1. User approves L1StateSubscriptionManager to spend zone tokens
 2. User calls `subscriptionManager.subscribe(account, slot, months)`
-3. Contract burns `monthlySubscriptionFee * months` zone tokens
+3. Contract transfers `monthlySubscriptionFee * months` zone tokens to sequencer
 4. Subscription becomes active immediately
 5. User can now call contracts that read `(account, slot)` via TempoState
 
@@ -157,12 +157,12 @@ Where `riskMultiplier` accounts for:
 - Volatility of the slot (frequent updates = higher risk)
 - Number of subscribers (amortization)
 
-### Fee burns
+### Fee distribution
 
-All subscription fees are **burned** (removed from circulation):
-- Reduces zone token supply
-- Creates deflationary pressure
-- Sequencer compensated via withdrawal processing fees
+All subscription fees are **transferred to the sequencer**:
+- Direct compensation for L1 state sync infrastructure costs
+- Aligns incentives: sequencer earns more as zone usage grows
+- Complements withdrawal processing fees for sequencer revenue
 
 ## Implementation Notes
 

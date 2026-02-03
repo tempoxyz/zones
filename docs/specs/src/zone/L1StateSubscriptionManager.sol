@@ -133,7 +133,7 @@ contract L1StateSubscriptionManager {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Subscribe to an L1 state slot for N months
-    /// @dev Burns zone tokens equal to monthlySubscriptionFee * months
+    /// @dev Transfers zone tokens equal to monthlySubscriptionFee * months to sequencer
     ///      Extends existing subscription if already subscribed
     /// @param account The L1 contract address
     /// @param slot The storage slot
@@ -152,11 +152,10 @@ contract L1StateSubscriptionManager {
         uint128 payment = monthlySubscriptionFee * uint128(months);
         if (payment < monthlySubscriptionFee) revert("Overflow"); // Basic overflow check
 
-        // Burn tokens from sender
-        if (!zoneToken.transferFrom(msg.sender, address(this), payment)) {
+        // Transfer tokens to sequencer
+        if (!zoneToken.transferFrom(msg.sender, sequencer, payment)) {
             revert InsufficientPayment();
         }
-        zoneToken.burn(address(this), payment);
 
         // Calculate new expiry
         uint64 currentExpiry = subscriptionExpiry[subKey];
