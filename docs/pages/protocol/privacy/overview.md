@@ -6,7 +6,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 - Create a Tempo-native validium called a zone.
 - Each zone has exactly one permissioned sequencer.
-- Each zone bridges exactly one TIP-20 token, which is also the zone zone token.
+- Each zone bridges exactly one TIP-20 token, which is called its *zone token*. The zone token also serves as the gas token for the chain.
 - Settlement uses fast validity proofs or TEE attestations (ZK or TEE). Data availability is fully trusted to the sequencer.
 - Cross-chain operations are Tempo-centric: bridge in (simple deposit), bridge out (with optional callback to receiver contracts for Tempo composability).
 - Verifier is abstracted behind a minimal `IVerifier` interface.
