@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, IZoneGasToken, IZoneInbox, ITempoState } from "./IZone.sol";
+import { Deposit, IZoneToken, IZoneInbox, ITempoState } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
@@ -19,8 +19,8 @@ contract ZoneInbox is IZoneInbox {
     /// @notice The TempoState predeploy address (stored as concrete type for internal use)
     TempoState internal immutable _tempoState;
 
-    /// @notice The gas token (TIP-20 at same address as Tempo)
-    IZoneGasToken public immutable gasToken;
+    /// @notice The zone token (TIP-20 at same address as Tempo)
+    IZoneToken public immutable gasToken;
 
     /// @notice Current sequencer address
     address public sequencer;
@@ -54,7 +54,7 @@ contract ZoneInbox is IZoneInbox {
     ) {
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
-        gasToken = IZoneGasToken(_gasToken);
+        gasToken = IZoneToken(_gasToken);
         sequencer = _sequencer;
     }
 
@@ -113,7 +113,7 @@ contract ZoneInbox is IZoneInbox {
             // Advance the hash chain (matches Tempo's deposit queue structure)
             currentHash = keccak256(abi.encode(d, currentHash));
 
-            // Mint gas tokens to the recipient
+            // Mint zone tokens to the recipient
             gasToken.mint(d.to, d.amount);
 
             emit DepositProcessed(currentHash, d.sender, d.to, d.amount, d.memo);
