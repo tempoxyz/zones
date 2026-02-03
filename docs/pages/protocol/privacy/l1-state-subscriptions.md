@@ -6,7 +6,7 @@ This document describes the L1 state subscription model for Tempo Zones, an alte
 
 Instead of requiring users to declare L1 state in each transaction, the subscription model allows:
 
-1. **Upfront subscription** to specific L1 state slots (account, slot) pairs
+1. **Upfront subscription** to specific L1 state slots, i.e. (account, slot) pairs
 2. **Automatic subscription** for TIP-403 policy state (zone token transfers)
 3. **Monthly subscription fees** paid to the sequencer
 4. **Real-time state sync** by the sequencer
@@ -58,7 +58,7 @@ uint128 public dailySubscriptionFee;                   // Set by sequencer
 **Automatic TIP-403 subscriptions:**
 - Zone token's `transferPolicyId` (permanent)
 - TIP-403 `_policyData[transferPolicyId]` (permanent, added by sequencer)
-- Dynamic: `policySet[transferPolicyId][address]` entries (added by sequencer as needed)
+- Dynamic: `policySet[transferPolicyId][address]` entries (the sequencer has to provide all accesses of this type, meaning they have to maintain a full list of all nonzero values in the policy set)
 
 #### 2. TempoState (Predeploy at 0x1c00000000000000000000000000000000000000)
 
@@ -107,8 +107,6 @@ struct L1StateAccessLog {
 1. At genesis: Zone token's `transferPolicyId` slot is auto-subscribed (permanent)
 2. After genesis: Sequencer reads `transferPolicyId` from L1 and calls `autoSubscribePolicyState(transferPolicyId)`
 3. Policy data subscription becomes permanent
-4. When sequencer sees new addresses in TIP-20 transfers, it auto-subscribes their policy set entries
-5. Users can make TIP-20 transfers without manual subscription
 
 ### Sequencer's L1 sync responsibilities
 
@@ -151,10 +149,8 @@ Anyone can reconstruct zone state from genesis:
 
 ### Sequencer trust assumptions
 
-- Sequencer must honestly sync L1 state
-- Sequencer could censor by not subscribing policy set entries
-- Validity proofs verify all reads are subscribed and logged correctly
-- L1StateAccessLog provides complete audit trail
+- The correct handling of L1 state subscription is part of the proof system
+- An address subscribed through the contract or part of the permanent subscription set MUST be provided by the sequencer 
 
 ### Replay attacks
 
@@ -183,10 +179,7 @@ Where `riskMultiplier` accounts for:
 
 ### Fee distribution
 
-All subscription fees are **transferred to the sequencer**:
-- Direct compensation for L1 state sync infrastructure costs
-- Aligns incentives: sequencer earns more as zone usage grows
-- Complements withdrawal processing fees for sequencer revenue
+All subscription fees are transferred to the sequencer.
 
 ## Implementation Notes
 
@@ -222,60 +215,11 @@ fn read_tempo_storage_slot(account: Address, slot: H256) -> Result<H256, Error> 
 Batch proofs must verify:
 1. All L1 state accesses are for subscribed slots
 2. `L1StateAccessLog` matches actual reads during execution
-3. Values in log match L1 state at `finalizeTempo()` Tempo block
+3. Values in log match L1 state defined by `tempoStateRoot`
 4. Log hash is committed in batch submission
 
-### TIP-403 dynamic subscription
+### TIP-403 subscriptions
 
-Sequencer watches for TIP-20 transfers involving new addresses:
+All accesses to `TIP403Registry.policySet[policyId][address]` by `TIP403Registry` are considered to be subscribed addresses. Note that this cannot be cleanly mapped to `(account, slot)` pairs because the slot is hashed. Instead, the sequencer has to look at the actual call path in the `TIP403Registry` contract to determine that it is a subscribed address.
 
-```solidity
-function onTIP20Transfer(address from, address to) external {
-    // Read transferPolicyId from L1
-    uint256 policyId = readTempoStorageSlot(l1ZoneToken, TRANSFER_POLICY_SLOT);
-
-    // Calculate policy set slots
-    bytes32 innerSlot = keccak256(abi.encode(policyId, uint256(2)));
-    bytes32 fromSlot = keccak256(abi.encode(from, innerSlot));
-    bytes32 toSlot = keccak256(abi.encode(to, innerSlot));
-
-    // Subscribe if not already subscribed
-    if (!subscriptionManager.isSubscribed(tip403Registry, fromSlot)) {
-        subscriptionManager.autoSubscribePolicySet(policyId, from);
-    }
-    if (!subscriptionManager.isSubscribed(tip403Registry, toSlot)) {
-        subscriptionManager.autoSubscribePolicySet(policyId, to);
-    }
-}
-```
-
-## Migration Path
-
-Zones can start with subscriptions and later add state declarations if needed:
-
-1. **Phase 1**: Subscription-only model (simpler UX, suitable for TIP-20 focused zones)
-2. **Phase 2**: Add type 0x7A declarations (for advanced use cases, one-time reads)
-3. **Hybrid**: Allow both - users choose based on usage pattern
-
-## Future Enhancements
-
-### Subscription pools
-
-Allow multiple users to share subscription costs:
-- User A subscribes for 365 days
-- User B extends the same slot for 180 days
-- Expiry becomes max(A's expiry, B's expiry)
-
-### Dynamic fee adjustment
-
-Sequencer adjusts `dailySubscriptionFee` based on:
-- Total number of subscribed slots
-- L1 gas prices (affects monitoring cost)
-- Zone token price (denominated in stablecoin equivalent)
-
-### Subscription NFTs
-
-Issue transferable NFTs representing active subscriptions:
-- Trade subscription rights on secondary markets
-- Use as collateral in DeFi
-- Simplify subscription management for DAOs
+This also means that: If another contract loads any `TIP403Registry` address that is not explicitly subscribed, it is considered NOT subscribed. This is because the sequencer cannot reliably determine what the origin of the call is (without doing code introspection hacks that would lead to nondeterminism)
