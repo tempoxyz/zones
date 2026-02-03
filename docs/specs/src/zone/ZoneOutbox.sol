@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneOutbox, IZoneGasToken, Withdrawal, LastBatch } from "./IZone.sol";
+import { IZoneOutbox, IZoneToken, Withdrawal, LastBatch } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
-/// @dev Burns gas tokens and stores pending withdrawals. Sequencer calls finalizeWithdrawalBatch()
+/// @dev Burns zone tokens and stores pending withdrawals. Sequencer calls finalizeWithdrawalBatch()
 ///      at the end of a block to construct withdrawal queue hash on-chain.
 contract ZoneOutbox is IZoneOutbox {
     /*//////////////////////////////////////////////////////////////
@@ -26,8 +26,8 @@ contract ZoneOutbox is IZoneOutbox {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The gas token (TIP-20 at same address as Tempo)
-    IZoneGasToken public immutable gasToken;
+    /// @notice The zone token (TIP-20 at same address as Tempo)
+    IZoneToken public immutable gasToken;
 
     /// @notice Current sequencer address
     address public sequencer;
@@ -35,11 +35,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
 
-    /// @notice Base fee for withdrawal processing (in gas token units)
+    /// @notice Base fee for withdrawal processing (in zone token units)
     /// @dev Covers fixed costs of processWithdrawal on Tempo
     uint128 public withdrawalBaseFee;
 
-    /// @notice Fee per unit of gasLimit (in gas token units)
+    /// @notice Fee per unit of gasLimit (in zone token units)
     /// @dev Covers callback execution costs on Tempo: fee = baseFee + gasLimit * gasFeeRate
     uint128 public withdrawalGasFeeRate;
 
@@ -77,7 +77,7 @@ contract ZoneOutbox is IZoneOutbox {
         address _gasToken,
         address _sequencer
     ) {
-        gasToken = IZoneGasToken(_gasToken);
+        gasToken = IZoneToken(_gasToken);
         sequencer = _sequencer;
     }
 
@@ -128,7 +128,7 @@ contract ZoneOutbox is IZoneOutbox {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Request a withdrawal from the zone back to Tempo
-    /// @dev Caller must have approved the outbox to spend `amount + fee` of gas tokens.
+    /// @dev Caller must have approved the outbox to spend `amount + fee` of zone tokens.
     ///      The outbox burns the tokens and stores the withdrawal. The sequencer
     ///      calls finalizeWithdrawalBatch() to construct the withdrawal queue hash.
     /// @param to The Tempo recipient address

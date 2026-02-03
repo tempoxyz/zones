@@ -7,7 +7,7 @@ import { IZoneMessenger, IWithdrawalReceiver } from "./IZone.sol";
 /// @title ZoneMessenger
 /// @notice Per-zone messenger that handles withdrawal callbacks
 /// @dev Deployed by ZoneFactory for each zone. The portal gives the messenger max approval
-///      for the gas token. Withdrawal callbacks originate from this contract, not the portal.
+///      for the zone token. Withdrawal callbacks originate from this contract, not the portal.
 contract ZoneMessenger is IZoneMessenger {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -16,7 +16,7 @@ contract ZoneMessenger is IZoneMessenger {
     /// @notice The zone's portal address
     address public immutable portal;
 
-    /// @notice The gas token address
+    /// @notice The zone token address
     address public immutable token;
 
     /// @notice The L2 sender during callback execution (only valid within a callback)

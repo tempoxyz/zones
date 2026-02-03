@@ -17,7 +17,7 @@ import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
 import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 
 /// @title ZonePortal
-/// @notice Per-zone portal that escrows gas tokens on Tempo and manages deposits/withdrawals
+/// @notice Per-zone portal that escrows zone tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
     using WithdrawalQueueLib for WithdrawalQueue;
 
@@ -73,7 +73,7 @@ contract ZonePortal is IZonePortal {
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
 
-        // Give messenger max approval for the gas token
+        // Give messenger max approval for the zone token
         ITIP20(_token).approve(_messenger, type(uint256).max);
     }
 
@@ -134,7 +134,7 @@ contract ZonePortal is IZonePortal {
                                DEPOSITS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Deposit gas token into the zone. Returns the new current deposit queue hash.
+    /// @notice Deposit zone token into the zone. Returns the new current deposit queue hash.
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash) {
         // TIP-20 transfers revert on failure, so no boolean check is needed here.
         ITIP20(token).transferFrom(msg.sender, address(this), amount);
