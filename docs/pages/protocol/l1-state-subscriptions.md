@@ -16,6 +16,30 @@ Instead of requiring users to declare L1 state in each transaction, the subscrip
 
 ### Components
 
+#### 0. ZoneConfig (Predeploy at 0x1c00000000000000000000000000000000000002)
+
+**Central zone metadata and L1 state references:**
+
+- **Single source of truth**: All zone metadata stored in one place
+- **L1 sequencer reads**: Sequencer address read from L1 ZonePortal (not replicated on L2)
+- **Auto-subscribed slots**: Portal sequencer slots permanently subscribed at genesis
+- **Referenced by all contracts**: Other L2 contracts use ZoneConfig instead of duplicating metadata
+
+**Key functions:**
+```solidity
+function sequencer() external view returns (address);        // Read from L1
+function pendingSequencer() external view returns (address); // Read from L1
+function isSequencer(address) external view returns (bool);  // Convenience check
+function zoneToken() external view returns (address);        // Zone token address
+function l1Portal() external view returns (address);         // L1 ZonePortal address
+```
+
+**Benefits:**
+- Eliminates 100+ lines of duplicate sequencer transfer logic per contract
+- L1 ZonePortal is single source of truth for sequencer
+- Sequencer changes on L1 automatically visible on L2 (after Tempo block finalization)
+- Smaller, simpler contracts
+
 #### 1. L1StateSubscriptionManager (Predeploy at 0x1c00000000000000000000000000000000000001)
 
 Manages subscriptions to L1 state slots:

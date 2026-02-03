@@ -347,18 +347,51 @@ interface ITempoState {
     function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
 }
 
+/// @title IZoneConfig
+/// @notice Interface for central zone configuration and L1 state references
+/// @dev Deployed at 0x1c00000000000000000000000000000000000002
+///      Provides single source of truth for zone metadata and sequencer state (read from L1).
+interface IZoneConfig {
+    error NotSequencer();
+
+    /// @notice Zone token address (same on L1 and L2)
+    function zoneToken() external view returns (address);
+
+    /// @notice L1 ZonePortal address
+    function l1Portal() external view returns (address);
+
+    /// @notice L1 TIP-403 registry address
+    function l1TIP403Registry() external view returns (address);
+
+    /// @notice TempoState predeploy for L1 reads
+    function tempoState() external view returns (ITempoState);
+
+    /// @notice L1StateSubscriptionManager for subscription checks
+    function subscriptionManager() external view returns (IL1StateSubscriptionManager);
+
+    /// @notice Get current sequencer by reading from L1 ZonePortal
+    function sequencer() external view returns (address);
+
+    /// @notice Get pending sequencer by reading from L1 ZonePortal
+    function pendingSequencer() external view returns (address);
+
+    /// @notice Check if an address is the current sequencer
+    function isSequencer(address account) external view returns (bool);
+
+    /// @notice Get zone token as IZoneToken interface
+    function getZoneToken() external view returns (IZoneToken);
+}
+
 /// @title IL1StateSubscriptionManager
 /// @notice Interface for L1 state subscription management on the zone
 /// @dev Deployed at 0x1c00000000000000000000000000000000000001
+///      Sequencer is read from L1 via ZoneConfig (not stored locally).
 interface IL1StateSubscriptionManager {
     event SubscriptionCreated(address indexed account, bytes32 indexed slot, uint64 expiryTimestamp);
     event SubscriptionExtended(address indexed account, bytes32 indexed slot, uint64 newExpiryTimestamp);
     event DailyFeeUpdated(uint128 newFee);
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     error OnlySequencer();
-    error NotPendingSequencer();
     error SubscriptionExpired();
     error InsufficientPayment();
     error PermanentSubscription();
@@ -387,13 +420,7 @@ interface IL1StateSubscriptionManager {
     /// @notice Zone token address on L1
     function l1ZoneToken() external view returns (address);
 
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external;
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external;
-
-    /// @notice Set daily subscription fee. Only callable by sequencer.
+    /// @notice Set daily subscription fee. Only callable by sequencer (read from L1 via ZoneConfig).
     function setDailyFee(uint128 newFee) external;
 
     /// @notice Subscribe to an L1 state slot for N days

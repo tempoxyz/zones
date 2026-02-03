@@ -2,26 +2,21 @@
 pragma solidity ^0.8.13;
 
 import { IZoneToken } from "./IZone.sol";
+import { ZoneConfig } from "./ZoneConfig.sol";
 
 /// @title L1StateSubscriptionManager
 /// @notice Zone-side predeploy for managing L1 state subscriptions
 /// @dev Deployed at 0x1c00000000000000000000000000000000000001
 ///      Users subscribe to specific L1 (account, slot) pairs to enable reading that state.
 ///      TIP-403 policy state for the zone token is automatically subscribed at genesis.
-///      Sequencer sets subscription fees and can update them.
+///      Sequencer (read from L1 via ZoneConfig) sets subscription fees and can update them.
 contract L1StateSubscriptionManager {
     /*//////////////////////////////////////////////////////////////
                                STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice The zone token used to pay subscription fees
-    IZoneToken public immutable zoneToken;
-
-    /// @notice Current sequencer address
-    address public sequencer;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
+    /// @notice Zone configuration (central source of truth)
+    ZoneConfig public immutable config;
 
     /// @notice Daily subscription fee per (account, slot) pair in zone token units
     /// @dev Set by sequencer to cover costs of maintaining L1 state sync
@@ -32,12 +27,6 @@ contract L1StateSubscriptionManager {
     ///      0 means never subscribed, type(uint64).max means permanent (auto-subscribed)
     mapping(bytes32 => uint64) public subscriptionExpiry;
 
-    /// @notice TIP-403 registry address on L1 (for auto-subscription)
-    address public immutable tip403Registry;
-
-    /// @notice Zone token address on L1 (same as zoneToken address)
-    address public immutable l1ZoneToken;
-
     /*//////////////////////////////////////////////////////////////
                                EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -45,15 +34,12 @@ contract L1StateSubscriptionManager {
     event SubscriptionCreated(address indexed account, bytes32 indexed slot, uint64 expiryTimestamp);
     event SubscriptionExtended(address indexed account, bytes32 indexed slot, uint64 newExpiryTimestamp);
     event DailyFeeUpdated(uint128 newFee);
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     /*//////////////////////////////////////////////////////////////
                                ERRORS
     //////////////////////////////////////////////////////////////*/
 
     error OnlySequencer();
-    error NotPendingSequencer();
     error SubscriptionExpired();
     error InsufficientPayment();
     error PermanentSubscription();
@@ -62,21 +48,21 @@ contract L1StateSubscriptionManager {
                             CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Initialize with sequencer and auto-subscribe TIP-403 policy state
-    /// @param _zoneToken The zone token address
-    /// @param _sequencer The sequencer address
-    /// @param _tip403Registry TIP-403 registry address on L1
-    /// @param _l1ZoneToken Zone token address on L1 (for reading transferPolicyId)
-    constructor(
-        address _zoneToken,
-        address _sequencer,
-        address _tip403Registry,
-        address _l1ZoneToken
-    ) {
-        zoneToken = IZoneToken(_zoneToken);
-        sequencer = _sequencer;
-        tip403Registry = _tip403Registry;
-        l1ZoneToken = _l1ZoneToken;
+    /// @notice Initialize with zone config and auto-subscribe TIP-403 policy state
+    /// @param _config ZoneConfig predeploy address
+    constructor(address _config) {
+        config = ZoneConfig(_config);
+
+        // Auto-subscribe to ZonePortal sequencer slot (permanent subscription)
+        // This is required for ZoneConfig.sequencer() to work
+        bytes32 subKey0 = keccak256(abi.encode(config.l1Portal(), bytes32(uint256(0))));
+        subscriptionExpiry[subKey0] = type(uint64).max;
+        emit SubscriptionCreated(config.l1Portal(), bytes32(uint256(0)), type(uint64).max);
+
+        // Auto-subscribe to ZonePortal pendingSequencer slot (permanent subscription)
+        bytes32 subKey1 = keccak256(abi.encode(config.l1Portal(), bytes32(uint256(1))));
+        subscriptionExpiry[subKey1] = type(uint64).max;
+        emit SubscriptionCreated(config.l1Portal(), bytes32(uint256(1)), type(uint64).max);
 
         // Auto-subscribe to TIP-403 policy state (permanent subscriptions)
         // These are required for TIP-20 transfer inference to work
@@ -84,9 +70,9 @@ contract L1StateSubscriptionManager {
         // 1. Subscribe to zone token's transferPolicyId: _transferPolicyId slot in TIP-20
         //    Storage layout: slot 0
         bytes32 transferPolicySlot = bytes32(uint256(0));
-        bytes32 subKey1 = keccak256(abi.encode(_l1ZoneToken, transferPolicySlot));
-        subscriptionExpiry[subKey1] = type(uint64).max;
-        emit SubscriptionCreated(_l1ZoneToken, transferPolicySlot, type(uint64).max);
+        bytes32 subKey2 = keccak256(abi.encode(config.zoneToken(), transferPolicySlot));
+        subscriptionExpiry[subKey2] = type(uint64).max;
+        emit SubscriptionCreated(config.zoneToken(), transferPolicySlot, type(uint64).max);
 
         // 2. Subscribe to TIP-403 policy data: _policyData[transferPolicyId]
         //    Note: We can't subscribe to specific policy ID at construction since we don't know it yet.
@@ -97,33 +83,14 @@ contract L1StateSubscriptionManager {
     }
 
     /*//////////////////////////////////////////////////////////////
-                       SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
-    }
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
-    }
-
-    /*//////////////////////////////////////////////////////////////
                           FEE MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Set daily subscription fee. Only callable by sequencer.
+    /// @dev Sequencer address is read from L1 via ZoneConfig
     /// @param newFee New daily fee in zone token units
     function setDailyFee(uint128 newFee) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        if (!config.isSequencer(msg.sender)) revert OnlySequencer();
         dailySubscriptionFee = newFee;
         emit DailyFeeUpdated(newFee);
     }
@@ -152,8 +119,9 @@ contract L1StateSubscriptionManager {
         uint128 payment = dailySubscriptionFee * uint128(days);
         if (payment < dailySubscriptionFee) revert("Overflow"); // Basic overflow check
 
-        // Transfer tokens to sequencer
-        if (!zoneToken.transferFrom(msg.sender, sequencer, payment)) {
+        // Transfer tokens to sequencer (read from L1)
+        address currentSequencer = config.sequencer();
+        if (!config.getZoneToken().transferFrom(msg.sender, currentSequencer, payment)) {
             revert InsufficientPayment();
         }
 
@@ -177,16 +145,16 @@ contract L1StateSubscriptionManager {
     ///      Subscribes to policy data and creates a permanent subscription template for policy sets.
     /// @param transferPolicyId The zone token's transfer policy ID from L1
     function autoSubscribePolicyState(uint256 transferPolicyId) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        if (!config.isSequencer(msg.sender)) revert OnlySequencer();
 
         // Subscribe to policy data: _policyData[transferPolicyId] in TIP403Registry
         // Storage slot = keccak256(abi.encode(transferPolicyId, uint256(1)))
         bytes32 policyDataSlot = keccak256(abi.encode(transferPolicyId, uint256(1)));
-        bytes32 subKey = keccak256(abi.encode(tip403Registry, policyDataSlot));
+        bytes32 subKey = keccak256(abi.encode(config.l1TIP403Registry(), policyDataSlot));
 
         if (subscriptionExpiry[subKey] == 0) {
             subscriptionExpiry[subKey] = type(uint64).max;
-            emit SubscriptionCreated(tip403Registry, policyDataSlot, type(uint64).max);
+            emit SubscriptionCreated(config.l1TIP403Registry(), policyDataSlot, type(uint64).max);
         }
 
         // Note: Policy set subscriptions policySet[transferPolicyId][address] are handled
@@ -216,5 +184,29 @@ contract L1StateSubscriptionManager {
     function getSubscriptionExpiry(address account, bytes32 slot) external view returns (uint64 expiry) {
         bytes32 subKey = keccak256(abi.encode(account, slot));
         return subscriptionExpiry[subKey];
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          CONVENIENCE GETTERS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Get zone token address
+    function zoneToken() external view returns (address) {
+        return config.zoneToken();
+    }
+
+    /// @notice Get current sequencer (read from L1)
+    function sequencer() external view returns (address) {
+        return config.sequencer();
+    }
+
+    /// @notice Get L1 TIP-403 registry address
+    function tip403Registry() external view returns (address) {
+        return config.l1TIP403Registry();
+    }
+
+    /// @notice Get L1 zone token address (same as L2)
+    function l1ZoneToken() external view returns (address) {
+        return config.zoneToken();
     }
 }

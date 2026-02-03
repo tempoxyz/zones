@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { ITempoState, IL1StateSubscriptionManager, L1StateAccessEntry } from "./IZone.sol";
+import { ZoneConfig } from "./ZoneConfig.sol";
 
 /// @title TempoState (Subscription-based variant)
 /// @notice Zone-side predeploy for Tempo state verification with L1 state subscriptions
@@ -14,22 +15,18 @@ import { ITempoState, IL1StateSubscriptionManager, L1StateAccessEntry } from "./
 ///      - readTempoStorageSlot/readTempoStorageSlots validate subscriptions and read from
 ///        the sequencer's synced L1 state cache (via precompile)
 ///      - All reads are logged to the current block's L1StateAccessLog for replay
+///
+///      Sequencer is read from L1 via ZoneConfig (single source of truth)
 contract TempoState is ITempoState {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Current sequencer address
-    address public sequencer;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
+    /// @notice Zone configuration (central source of truth)
+    ZoneConfig public immutable config;
 
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     bytes32 public tempoBlockHash;
-
-    /// @notice L1 state subscription manager address
-    IL1StateSubscriptionManager public immutable subscriptionManager;
 
     /*//////////////////////////////////////////////////////////////
                           TEMPO WRAPPER FIELDS
@@ -82,36 +79,14 @@ contract TempoState is ITempoState {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Initialize with genesis Tempo block and subscription manager
-    /// @param _sequencer The sequencer address
+    /// @notice Initialize with genesis Tempo block and zone config
+    /// @param _config ZoneConfig predeploy address
     /// @param _genesisHeader RLP-encoded genesis Tempo header
-    /// @param _subscriptionManager L1 state subscription manager address
-    constructor(address _sequencer, bytes memory _genesisHeader, address _subscriptionManager) {
-        sequencer = _sequencer;
-        subscriptionManager = IL1StateSubscriptionManager(_subscriptionManager);
+    constructor(address _config, bytes memory _genesisHeader) {
+        config = ZoneConfig(_config);
 
         // Decode and store genesis header
         _decodeAndStoreHeader(_genesisHeader);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
-    }
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -122,9 +97,10 @@ contract TempoState is ITempoState {
     /// @dev Validates chain continuity (parent hash must match stored hash, number must be +1)
     ///      The header is RLP-encoded as: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
     ///      where inner is a standard Ethereum header.
+    ///      Only callable by sequencer (read from L1 via ZoneConfig).
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        if (!config.isSequencer(msg.sender)) revert OnlySequencer();
 
         // Store previous values for validation
         bytes32 prevBlockHash = tempoBlockHash;
@@ -138,6 +114,20 @@ contract TempoState is ITempoState {
         if (tempoBlockNumber != prevBlockNumber + 1) revert InvalidBlockNumber();
 
         emit TempoBlockFinalized(tempoBlockHash, tempoBlockNumber, tempoStateRoot);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          CONVENIENCE GETTERS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Get current sequencer (read from L1)
+    function sequencer() external view returns (address) {
+        return config.sequencer();
+    }
+
+    /// @notice Get pending sequencer (read from L1)
+    function pendingSequencer() external view returns (address) {
+        return config.pendingSequencer();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -158,7 +148,7 @@ contract TempoState is ITempoState {
     /// @return value The storage value from synced L1 state
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32) {
         // Validate subscription
-        if (!subscriptionManager.isSubscribed(account, slot)) {
+        if (!config.subscriptionManager().isSubscribed(account, slot)) {
             revert("TempoState: slot not subscribed");
         }
 
@@ -186,7 +176,7 @@ contract TempoState is ITempoState {
     function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory) {
         // Validate all subscriptions
         for (uint256 i = 0; i < slots.length; i++) {
-            if (!subscriptionManager.isSubscribed(account, slots[i])) {
+            if (!config.subscriptionManager().isSubscribed(account, slots[i])) {
                 revert("TempoState: slot not subscribed");
             }
         }
