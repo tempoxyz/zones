@@ -638,7 +638,7 @@ Zones have four system contract predeploys at fixed addresses:
 
 #### Zone token
 
-The zone's zone token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
+The zone token is the only bridged TIP-20 from Tempo allowed on the zone. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
 
 #### ZoneConfig predeploy
 
