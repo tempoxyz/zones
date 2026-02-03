@@ -107,7 +107,7 @@ The fee is calculated via `ZoneOutbox.calculateWithdrawalFee(gasLimit)` and burn
 
 ### Case 4: Cross-Zone Transfer (Zone N → Zone M, Same Token)
 
-If user is on zone N and destination is zone M for `N != M` (different zones) using the same gas token:
+If user is on zone N and destination is zone M for `N != M` (different zones) using the same zone token:
 
 The user signs a **single withdrawal transaction** with a callback to `SwapAndDepositRouter` that deposits to the target zone. The router handles both same-token and different-token transfers.
 
@@ -184,7 +184,7 @@ User signs: ZoneOutbox.requestWithdrawal(
   fallbackRecipient: userZoneNAddress,
   data: abi.encode(
     false,                     // Plaintext deposit
-    tokenB,                    // Target token (Zone M's gas token)
+    tokenB,                    // Target token (Zone M's zone token)
     zonePortalM,               // Target zone's portal
     destinationAddress,        // Final recipient on Zone M
     memo,                      // Memo for the deposit
@@ -482,9 +482,9 @@ The wallet SHOULD persist transfer state to handle app closure and show progress
 
 ## Token Compatibility
 
-**Same-token cross-zone transfers** require both zones to use the same gas token.
+**Same-token cross-zone transfers** require both zones to use the same zone token.
 
-**Cross-token transfers** (zones with different gas tokens) require:
+**Cross-token transfers** (zones with different zone tokens) require:
 1. A StablecoinDEX orderbook with liquidity for the token pair
 2. A deployed `SwapAndDepositRouter` contract
 
