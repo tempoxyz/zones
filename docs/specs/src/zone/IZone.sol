@@ -353,7 +353,7 @@ interface ITempoState {
 interface IL1StateSubscriptionManager {
     event SubscriptionCreated(address indexed account, bytes32 indexed slot, uint64 expiryTimestamp);
     event SubscriptionExtended(address indexed account, bytes32 indexed slot, uint64 newExpiryTimestamp);
-    event MonthlyFeeUpdated(uint128 newFee);
+    event DailyFeeUpdated(uint128 newFee);
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
@@ -372,8 +372,8 @@ interface IL1StateSubscriptionManager {
     /// @notice Pending sequencer for two-step transfer
     function pendingSequencer() external view returns (address);
 
-    /// @notice Monthly subscription fee per (account, slot) pair
-    function monthlySubscriptionFee() external view returns (uint128);
+    /// @notice Daily subscription fee per (account, slot) pair
+    function dailySubscriptionFee() external view returns (uint128);
 
     /// @notice Get subscription expiry timestamp
     /// @param account The L1 contract address
@@ -393,15 +393,15 @@ interface IL1StateSubscriptionManager {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    /// @notice Set monthly subscription fee. Only callable by sequencer.
-    function setMonthlyFee(uint128 newFee) external;
+    /// @notice Set daily subscription fee. Only callable by sequencer.
+    function setDailyFee(uint128 newFee) external;
 
-    /// @notice Subscribe to an L1 state slot for N months
-    /// @dev Burns zone tokens equal to monthlySubscriptionFee * months
+    /// @notice Subscribe to an L1 state slot for N days
+    /// @dev Transfers zone tokens equal to dailySubscriptionFee * days to sequencer
     /// @param account The L1 contract address
     /// @param slot The storage slot
-    /// @param months Number of months to subscribe (1-120)
-    function subscribe(address account, bytes32 slot, uint8 months) external;
+    /// @param days Number of days to subscribe (1-3650, ~10 years max)
+    function subscribe(address account, bytes32 slot, uint16 days) external;
 
     /// @notice Auto-subscribe to TIP-403 policy state for the zone token
     /// @dev Called by sequencer after reading transferPolicyId from L1

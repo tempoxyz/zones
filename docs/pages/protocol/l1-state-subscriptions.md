@@ -20,15 +20,15 @@ Instead of requiring users to declare L1 state in each transaction, the subscrip
 
 Manages subscriptions to L1 state slots:
 
-- **Subscribe**: Users call `subscribe(account, slot, months)` and pay `monthlySubscriptionFee * months` in zone tokens
+- **Subscribe**: Users call `subscribe(account, slot, days)` and pay `dailySubscriptionFee * days` in zone tokens
 - **Auto-subscription**: TIP-403 policy state for the zone token is automatically subscribed at genesis (permanent)
-- **Fee management**: Sequencer sets `monthlySubscriptionFee` to cover L1 sync costs
+- **Fee management**: Sequencer sets `dailySubscriptionFee` to cover L1 sync costs
 - **Expiry tracking**: Subscriptions expire after the paid period unless extended
 
 **Key storage:**
 ```solidity
 mapping(bytes32 => uint64) public subscriptionExpiry;  // keccak256(abi.encode(account, slot)) => expiryTimestamp
-uint128 public monthlySubscriptionFee;                 // Set by sequencer
+uint128 public dailySubscriptionFee;                   // Set by sequencer
 ```
 
 **Automatic TIP-403 subscriptions:**
@@ -73,8 +73,8 @@ struct L1StateAccessLog {
 ### User subscribing to custom L1 state
 
 1. User approves L1StateSubscriptionManager to spend zone tokens
-2. User calls `subscriptionManager.subscribe(account, slot, months)`
-3. Contract transfers `monthlySubscriptionFee * months` zone tokens to sequencer
+2. User calls `subscriptionManager.subscribe(account, slot, days)`
+3. Contract transfers `dailySubscriptionFee * days` zone tokens to sequencer
 4. Subscription becomes active immediately
 5. User can now call contracts that read `(account, slot)` via TempoState
 
@@ -115,7 +115,7 @@ Anyone can reconstruct zone state from genesis:
 | **Sequencer cost** | Low - just validate | Higher - maintain sync |
 | **Replay** | Embedded in tx | Separate access log |
 | **Flexibility** | Any slot, any time | Only subscribed slots |
-| **Economics** | Gas per declaration | Monthly subscription fee |
+| **Economics** | Gas per declaration | Daily subscription fee |
 
 ## Security Considerations
 
@@ -142,14 +142,14 @@ Anyone can reconstruct zone state from genesis:
 
 ### Subscription pricing
 
-Sequencer sets `monthlySubscriptionFee` to cover:
+Sequencer sets `dailySubscriptionFee` to cover:
 - L1 monitoring costs (events, state polling)
 - Storage costs for cache
 - Proof generation overhead for access logs
 
 Suggested model:
 ```
-baseFee = cost to monitor one slot for 30 days
+baseFee = cost to monitor one slot for 1 day
 fee per slot = baseFee * riskMultiplier
 ```
 
@@ -238,13 +238,13 @@ Zones can start with subscriptions and later add state declarations if needed:
 ### Subscription pools
 
 Allow multiple users to share subscription costs:
-- User A subscribes for 12 months
-- User B extends the same slot for 6 months
+- User A subscribes for 365 days
+- User B extends the same slot for 180 days
 - Expiry becomes max(A's expiry, B's expiry)
 
 ### Dynamic fee adjustment
 
-Sequencer adjusts `monthlySubscriptionFee` based on:
+Sequencer adjusts `dailySubscriptionFee` based on:
 - Total number of subscribed slots
 - L1 gas prices (affects monitoring cost)
 - Zone token price (denominated in stablecoin equivalent)

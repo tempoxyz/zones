@@ -23,9 +23,9 @@ contract L1StateSubscriptionManager {
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
 
-    /// @notice Monthly subscription fee per (account, slot) pair in zone token units
+    /// @notice Daily subscription fee per (account, slot) pair in zone token units
     /// @dev Set by sequencer to cover costs of maintaining L1 state sync
-    uint128 public monthlySubscriptionFee;
+    uint128 public dailySubscriptionFee;
 
     /// @notice Subscription expiry per (account, slot) pair
     /// @dev Mapping: keccak256(abi.encode(account, slot)) => expiryTimestamp
@@ -44,7 +44,7 @@ contract L1StateSubscriptionManager {
 
     event SubscriptionCreated(address indexed account, bytes32 indexed slot, uint64 expiryTimestamp);
     event SubscriptionExtended(address indexed account, bytes32 indexed slot, uint64 newExpiryTimestamp);
-    event MonthlyFeeUpdated(uint128 newFee);
+    event DailyFeeUpdated(uint128 newFee);
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
@@ -120,26 +120,26 @@ contract L1StateSubscriptionManager {
                           FEE MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Set monthly subscription fee. Only callable by sequencer.
-    /// @param newFee New monthly fee in zone token units
-    function setMonthlyFee(uint128 newFee) external {
+    /// @notice Set daily subscription fee. Only callable by sequencer.
+    /// @param newFee New daily fee in zone token units
+    function setDailyFee(uint128 newFee) external {
         if (msg.sender != sequencer) revert OnlySequencer();
-        monthlySubscriptionFee = newFee;
-        emit MonthlyFeeUpdated(newFee);
+        dailySubscriptionFee = newFee;
+        emit DailyFeeUpdated(newFee);
     }
 
     /*//////////////////////////////////////////////////////////////
                         SUBSCRIPTION MANAGEMENT
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Subscribe to an L1 state slot for N months
-    /// @dev Transfers zone tokens equal to monthlySubscriptionFee * months to sequencer
+    /// @notice Subscribe to an L1 state slot for N days
+    /// @dev Transfers zone tokens equal to dailySubscriptionFee * days to sequencer
     ///      Extends existing subscription if already subscribed
     /// @param account The L1 contract address
     /// @param slot The storage slot
-    /// @param months Number of months to subscribe (1-120)
-    function subscribe(address account, bytes32 slot, uint8 months) external {
-        if (months == 0 || months > 120) revert("Invalid months");
+    /// @param days Number of days to subscribe (1-3650, ~10 years max)
+    function subscribe(address account, bytes32 slot, uint16 days) external {
+        if (days == 0 || days > 3650) revert("Invalid days");
 
         bytes32 subKey = keccak256(abi.encode(account, slot));
 
@@ -149,8 +149,8 @@ contract L1StateSubscriptionManager {
         }
 
         // Calculate payment
-        uint128 payment = monthlySubscriptionFee * uint128(months);
-        if (payment < monthlySubscriptionFee) revert("Overflow"); // Basic overflow check
+        uint128 payment = dailySubscriptionFee * uint128(days);
+        if (payment < dailySubscriptionFee) revert("Overflow"); // Basic overflow check
 
         // Transfer tokens to sequencer
         if (!zoneToken.transferFrom(msg.sender, sequencer, payment)) {
@@ -160,7 +160,7 @@ contract L1StateSubscriptionManager {
         // Calculate new expiry
         uint64 currentExpiry = subscriptionExpiry[subKey];
         uint64 baseTime = currentExpiry > block.timestamp ? currentExpiry : uint64(block.timestamp);
-        uint64 extension = uint64(months) * 30 days;
+        uint64 extension = uint64(days) * 1 days;
         uint64 newExpiry = baseTime + extension;
 
         subscriptionExpiry[subKey] = newExpiry;
