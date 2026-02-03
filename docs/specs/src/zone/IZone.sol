@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-/// @title IZoneGasToken
-/// @notice Interface for the zone's gas token (TIP-20 with mint/burn for system)
-interface IZoneGasToken {
+/// @title IZoneToken
+/// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
+interface IZoneToken {
     function mint(address to, uint256 amount) external;
     function burn(address from, uint256 amount) external;
     function transfer(address to, uint256 amount) external returns (bool);
@@ -70,6 +70,21 @@ struct Withdrawal {
     uint64 gasLimit;            // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
     bytes callbackData;         // calldata for IWithdrawalReceiver (if gasLimit > 0)
+}
+
+/// @notice L1 state access entry for replay and reconstruction
+/// @dev Records a single L1 storage slot read during zone block execution
+struct L1StateAccessEntry {
+    address account;  // L1 contract address
+    bytes32 slot;     // Storage slot
+    bytes32 value;    // Storage value at the time of access
+}
+
+/// @notice L1 state access log for a zone block
+/// @dev Includes all L1 state reads from genesis, enabling full replay/reconstruction
+///      Sequencer commits to this log in the batch proof
+struct L1StateAccessLog {
+    L1StateAccessEntry[] accesses;  // All L1 state accesses in this block
 }
 
 /// @title IVerifier
@@ -314,10 +329,90 @@ interface ITempoState {
     function finalizeTempo(bytes calldata header) external;
 
     /// @notice Read a storage slot from a Tempo contract
+    /// @dev The slot must be subscribed via L1StateSubscriptionManager.
+    ///      Reads from the sequencer's synced L1 state cache.
+    ///      Logs the access to the current block's L1StateAccessLog for replay.
+    /// @param account The Tempo contract address
+    /// @param slot The storage slot to read
+    /// @return value The storage value from synced L1 state
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
+    /// @dev All slots must be subscribed via L1StateSubscriptionManager.
+    ///      Reads from the sequencer's synced L1 state cache.
+    ///      Logs all accesses to the current block's L1StateAccessLog for replay.
+    /// @param account The Tempo contract address
+    /// @param slots The storage slots to read
+    /// @return values The storage values from synced L1 state
     function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
+}
+
+/// @title IL1StateSubscriptionManager
+/// @notice Interface for L1 state subscription management on the zone
+/// @dev Deployed at 0x1c00000000000000000000000000000000000001
+interface IL1StateSubscriptionManager {
+    event SubscriptionCreated(address indexed account, bytes32 indexed slot, uint64 expiryTimestamp);
+    event SubscriptionExtended(address indexed account, bytes32 indexed slot, uint64 newExpiryTimestamp);
+    event MonthlyFeeUpdated(uint128 newFee);
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    error OnlySequencer();
+    error NotPendingSequencer();
+    error SubscriptionExpired();
+    error InsufficientPayment();
+    error PermanentSubscription();
+
+    /// @notice The zone token used to pay subscription fees
+    function zoneToken() external view returns (IZoneToken);
+
+    /// @notice Current sequencer address
+    function sequencer() external view returns (address);
+
+    /// @notice Pending sequencer for two-step transfer
+    function pendingSequencer() external view returns (address);
+
+    /// @notice Monthly subscription fee per (account, slot) pair
+    function monthlySubscriptionFee() external view returns (uint128);
+
+    /// @notice Get subscription expiry timestamp
+    /// @param account The L1 contract address
+    /// @param slot The storage slot
+    /// @return expiry Expiry timestamp (0 if never subscribed, max uint64 if permanent)
+    function getSubscriptionExpiry(address account, bytes32 slot) external view returns (uint64 expiry);
+
+    /// @notice TIP-403 registry address on L1
+    function tip403Registry() external view returns (address);
+
+    /// @notice Zone token address on L1
+    function l1ZoneToken() external view returns (address);
+
+    /// @notice Start a sequencer transfer. Only callable by current sequencer.
+    function transferSequencer(address newSequencer) external;
+
+    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    function acceptSequencer() external;
+
+    /// @notice Set monthly subscription fee. Only callable by sequencer.
+    function setMonthlyFee(uint128 newFee) external;
+
+    /// @notice Subscribe to an L1 state slot for N months
+    /// @dev Burns zone tokens equal to monthlySubscriptionFee * months
+    /// @param account The L1 contract address
+    /// @param slot The storage slot
+    /// @param months Number of months to subscribe (1-120)
+    function subscribe(address account, bytes32 slot, uint8 months) external;
+
+    /// @notice Auto-subscribe to TIP-403 policy state for the zone token
+    /// @dev Called by sequencer after reading transferPolicyId from L1
+    /// @param transferPolicyId The zone token's transfer policy ID from L1
+    function autoSubscribePolicyState(uint256 transferPolicyId) external;
+
+    /// @notice Check if a subscription is active
+    /// @param account The L1 contract address
+    /// @param slot The storage slot
+    /// @return active True if subscription is active (not expired)
+    function isSubscribed(address account, bytes32 slot) external view returns (bool active);
 }
 
 /// @title IZoneInbox
@@ -351,8 +446,8 @@ interface IZoneInbox {
     /// @notice The TempoState predeploy address
     function tempoState() external view returns (ITempoState);
 
-    /// @notice The gas token (TIP-20 at same address as Tempo)
-    function gasToken() external view returns (IZoneGasToken);
+    /// @notice The zone token (TIP-20 at same address as Tempo)
+    function gasToken() external view returns (IZoneToken);
 
     /// @notice Current sequencer address
     function sequencer() external view returns (address);
@@ -409,8 +504,8 @@ interface IZoneOutbox {
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
-    /// @notice The gas token (same as Tempo portal's token)
-    function gasToken() external view returns (IZoneGasToken);
+    /// @notice The zone token (same as Tempo portal's token)
+    function gasToken() external view returns (IZoneToken);
 
     /// @notice Current sequencer address
     function sequencer() external view returns (address);
