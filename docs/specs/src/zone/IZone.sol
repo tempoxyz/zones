@@ -330,7 +330,8 @@ struct LastBatch {
 /// @title ITempoState
 /// @notice Interface for zone-side Tempo state verification predeploy
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
-///      System-only contract. Executor must enforce that only ZoneInbox can call finalizeTempo.
+///      System-only contract. Only ZoneInbox can call finalizeTempo().
+///      Only ZoneInbox, ZoneOutbox, and ZoneConfig can call readTempoStorageSlot(s).
 interface ITempoState {
     event TempoBlockFinalized(
         bytes32 indexed blockHash,

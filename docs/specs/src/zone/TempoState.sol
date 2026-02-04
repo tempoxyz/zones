@@ -122,7 +122,7 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Read a storage slot from a Tempo contract
-    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox).
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
     ///      In production, this is a precompile that reads from proven Tempo state.
     ///      Used to read ZonePortal state (deposit queue, encryption keys) and TIP-403
     ///      policy state for the zone token.
@@ -138,7 +138,7 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Read multiple storage slots from a Tempo contract
-    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox).
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
     ///      In production, this is a precompile that reads from proven Tempo state.
     ///      This stub reverts - actual implementation is in the zone node.
     /// @param account The Tempo contract address (ZonePortal or TIP-403)

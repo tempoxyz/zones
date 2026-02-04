@@ -692,9 +692,9 @@ interface ITempoState {
     function tempoTimestampMillis() external view returns (uint64);
     function tempoPrevRandao() external view returns (bytes32);
 
-    /// @notice Finalize a Tempo block header. System transaction only.
+    /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
     /// @dev Validates chain continuity (parent hash must match, number must be +1).
-    ///      Called by ZoneInbox.advanceTempo(). Executor enforces system-only access.
+    ///      Called by ZoneInbox.advanceTempo(). Protocol enforces advanceTempo() runs as system transaction.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external;
 
