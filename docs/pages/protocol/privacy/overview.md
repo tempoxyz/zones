@@ -6,7 +6,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 - Create a Tempo-native validium called a zone.
 - Each zone has exactly one permissioned sequencer.
-- Each zone bridges exactly one TIP-20 token, which is called its *zone token*. The zone token also serves as the gas token for the chain.
+- Each zone bridges exactly one TIP-20 token, which is called its *zone token*. The zone token is used to pay transaction fees on the zone.
 - Settlement uses fast validity proofs or TEE attestations (ZK or TEE). Data availability is fully trusted to the sequencer.
 - Cross-chain operations are Tempo-centric: bridge in (simple deposit), bridge out (with optional callback to receiver contracts for Tempo composability).
 - Verifier is abstracted behind a minimal `IVerifier` interface.
@@ -73,17 +73,25 @@ This applies to all zone contracts: `ZonePortal` (Tempo-side), `ZoneInbox`, `Zon
 
 ### Deposit fees
 
-> **TODO**: Deposit fee mechanism is undecided. Options include: minimum deposit amount (spam prevention), fixed fee deducted from deposit, or no fee (sequencer absorbs zone-side gas costs). Zone gas should be cheap due to no data availability costs.
+Deposits incur a processing fee to compensate the sequencer for zone-side processing costs:
+
+- **Zone gas rate**: Sequencer publishes `zoneGasRate` (zone token units per gas unit)
+- **Fixed gas value**: `FIXED_DEPOSIT_GAS` is fixed at 100,000 gas
+- **Total fee**: `FIXED_DEPOSIT_GAS * zoneGasRate` = `100,000 * zoneGasRate`
+
+The sequencer configures `zoneGasRate` via `ZonePortal.setZoneGasRate()`. The fixed gas value of 100,000 provides a stable pricing basis for deposits while allowing the sequencer flexibility to adjust the rate based on operational costs and future deposit mechanism variations.
+
+The fee is deducted from the deposit amount and paid to the sequencer immediately on Tempo. The deposit queue stores the net amount (`amount - fee`) which is minted on the zone.
 
 ### Withdrawal processing fees
 
 Withdrawals incur a processing fee to compensate the sequencer for Tempo-side gas costs:
 
-- **Base fee**: Fixed cost per withdrawal (covers `processWithdrawal` overhead)
-- **Gas fee**: Proportional to `gasLimit` (covers callback execution)
-- **Total fee**: `baseFee + gasLimit * gasFeeRate`
+- **Tempo gas rate**: Sequencer publishes `tempoGasRate` (zone token units per gas unit)
+- **Gas limit**: User specifies `gasLimit` covering all execution costs (processing + callback)
+- **Total fee**: `gasLimit * tempoGasRate`
 
-The sequencer configures these parameters via `ZoneOutbox.setWithdrawalFees(baseFee, gasFeeRate)`. The fee is calculated and locked in at request time, stored in the `Withdrawal.fee` field, and paid to the sequencer when the withdrawal is processed on Tempo (regardless of success or failure).
+The user must estimate total gas needed for their withdrawal, including `processWithdrawal` overhead and any callback. The sequencer configures `tempoGasRate` via `ZoneOutbox.setTempoGasRate()` and takes the risk on Tempo gas price fluctuations. If actual Tempo gas is higher, the sequencer covers the difference; if lower, they keep the surplus.
 
 Users burn `amount + fee` when requesting a withdrawal. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`; the sequencer keeps the fee.
 
@@ -445,7 +453,8 @@ interface IZonePortal {
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
         address to,
-        uint128 amount,
+        uint128 netAmount,
+        uint128 fee,
         bytes32 memo
     );
 
@@ -470,6 +479,10 @@ interface IZonePortal {
 
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+    event ZoneGasRateUpdated(uint128 zoneGasRate);
+
+    /// @notice Fixed gas value for deposit fee calculation (100,000 gas).
+    function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
     function zoneId() external view returns (uint64);
     function token() external view returns (address);
@@ -477,6 +490,7 @@ interface IZonePortal {
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
     function sequencerPubkey() external view returns (bytes32);
+    function zoneGasRate() external view returns (uint128);
     function verifier() external view returns (address);
     function genesisTempoBlockNumber() external view returns (uint64);
     function withdrawalBatchIndex() external view returns (uint64);
@@ -497,7 +511,14 @@ interface IZonePortal {
     /// @notice Set the sequencer's public key. Only callable by the sequencer.
     function setSequencerPubkey(bytes32 pubkey) external;
 
-    /// @notice Deposit zone token into the zone. Returns the new current deposit queue hash.
+    /// @notice Set zone gas rate. Only callable by sequencer.
+    function setZoneGasRate(uint128 _zoneGasRate) external;
+
+    /// @notice Calculate the fee for a deposit.
+    function calculateDepositFee() external view returns (uint128 fee);
+
+    /// @notice Deposit zone token into the zone. Fee is deducted from amount.
+    /// @dev Returns the new current deposit queue hash.
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
 
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
@@ -708,11 +729,16 @@ interface IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single system transaction.
     /// @dev This is the main entry point for the sequencer's system transaction.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the deposit queue
+    ///      2. Processes deposits from the unified deposit queue (regular + encrypted)
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
     /// @param header RLP-encoded Tempo block header
-    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;
+    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param decryptions Decryption data for encrypted deposits (1:1 with encrypted deposits, in order)
+    function advanceTempo(
+        bytes calldata header,
+        QueuedDeposit[] calldata deposits,
+        DecryptionData[] calldata decryptions
+    ) external;
 }
 ```
 
@@ -752,7 +778,7 @@ interface IZoneOutbox {
         bytes data
     );
 
-    event WithdrawalFeesUpdated(uint128 baseFee, uint128 gasFeeRate);
+    event TempoGasRateUpdated(uint128 tempoGasRate);
 
     /// @notice Emitted when sequencer finalizes a batch at end of block.
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
@@ -773,11 +799,9 @@ interface IZoneOutbox {
     /// @notice Pending sequencer for two-step transfer.
     function pendingSequencer() external view returns (address);
 
-    /// @notice Base fee for withdrawal processing.
-    function withdrawalBaseFee() external view returns (uint128);
-
-    /// @notice Fee per unit of gasLimit.
-    function withdrawalGasFeeRate() external view returns (uint128);
+    /// @notice Tempo gas rate (zone token units per gas unit on Tempo).
+    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
+    function tempoGasRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing).
     function nextWithdrawalIndex() external view returns (uint64);
@@ -797,10 +821,11 @@ interface IZoneOutbox {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    /// @notice Set withdrawal fee parameters. Only callable by sequencer.
-    function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external;
+    /// @notice Set Tempo gas rate. Only callable by sequencer.
+    function setTempoGasRate(uint128 _tempoGasRate) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit.
+    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo.
@@ -1025,9 +1050,73 @@ This ensures deposits are processed in the exact order they were made, regardles
 **Security considerations:**
 
 - **Sequencer trust**: Users trust the sequencer to decrypt correctly and credit the right recipient. A malicious sequencer could steal encrypted deposits.
-- **Decryption proof**: For ZK-based verification, the proof must validate that the sequencer's decryption is correct. For TEE-based verification, the TEE performs decryption.
+- **On-chain verification**: The sequencer provides the ECDH shared secret, which enables on-chain decryption verification via GCM tag validation without revealing the private key. See "On-chain decryption verification" below.
 - **Key rotation**: The portal maintains a history of encryption keys. Each encrypted deposit includes the `keyIndex` the user encrypted to, allowing the prover to look up the correct key for decryption. See "Encryption key history" below.
 - **Malformed ciphertext**: If decryption fails, the sequencer may refund to `sender` or hold funds pending resolution.
+
+**On-chain decryption verification:**
+
+The zone can verify encrypted deposit decryption on-chain without the sequencer revealing their private key. The sequencer provides the ECDH shared secret alongside the decrypted data:
+
+```solidity
+struct DecryptionData {
+    bytes32 sharedSecret;  // ECDH shared secret (sequencerPriv * ephemeralPub)
+    address to;            // Decrypted recipient
+    bytes32 memo;          // Decrypted memo
+}
+```
+
+Verification works by leveraging the AES-GCM authentication tag:
+
+1. Sequencer computes: `sharedSecret = ECDH(sequencerPriv, ephemeralPub)`
+2. On-chain, derive AES key from `sharedSecret` using HKDF-SHA256
+3. Attempt to decrypt the ciphertext with AES-256-GCM
+4. **The GCM tag will only validate if the shared secret is correct**
+5. If tag validates, the decrypted `(to, memo)` are cryptographically proven authentic
+
+This is implemented via the ECIES verification precompile at `0x1c00000000000000000000000000000000000100`:
+
+```solidity
+interface IEciesVerify {
+    /// @notice Verify that sharedSecret correctly decrypts the encrypted payload to plaintext
+    /// @dev Uses HKDF-SHA256 to derive AES key from sharedSecret, then verifies GCM tag.
+    ///      The GCM tag proves the shared secret is correct without revealing private keys.
+    /// @param sharedSecret The ECDH shared secret (sequencerPriv * ephemeralPub)
+    /// @param encrypted The encrypted payload (ephemeralPub, ciphertext, nonce, tag)
+    /// @param plaintext The claimed decrypted data to verify
+    /// @return valid True if the shared secret correctly decrypts to the plaintext
+    function verifyDecryption(
+        bytes32 sharedSecret,
+        EncryptedDepositPayload calldata encrypted,
+        bytes calldata plaintext
+    ) external view returns (bool valid);
+}
+```
+
+Usage in `ZoneInbox.advanceTempo()`:
+
+```solidity
+// Verify decryption on-chain using ECIES precompile
+bytes memory plaintext = abi.encode(dec.to, dec.memo);
+bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(
+    dec.sharedSecret,
+    ed.encrypted,
+    plaintext
+);
+if (!valid) revert InvalidDecryption();
+```
+
+**Key properties:**
+- **No private key exposure**: Sequencer only reveals the shared secret, not their private key
+- **Cryptographic proof**: GCM tag validation proves decryption correctness
+- **On-chain verification**: No reliance on proof/TEE for this specific check
+- **Standard crypto**: Uses well-established ECIES, ECDH, HKDF-SHA256, and AES-256-GCM
+
+**Precompile implementation notes:**
+- Derive AES key: `aesKey = HKDF-SHA256(sharedSecret, salt="ecies-aes-key", info="")`
+- Decrypt: `plaintext = AES-256-GCM-Decrypt(aesKey, nonce, ciphertext, aad="", tag)`
+- Return `true` if tag validates and decryption succeeds, `false` otherwise
+- Gas cost: ~5000 gas for HKDF + ~1000 per 32 bytes of ciphertext for AES-GCM
 
 **Encryption key history:**
 

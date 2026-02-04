@@ -30,13 +30,10 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
 
-    /// @notice Base fee for withdrawal processing (in zone token units)
-    /// @dev Covers fixed costs of processWithdrawal on Tempo
-    uint128 public withdrawalBaseFee;
-
-    /// @notice Fee per unit of gasLimit (in zone token units)
-    /// @dev Covers callback execution costs on Tempo: fee = baseFee + gasLimit * gasFeeRate
-    uint128 public withdrawalGasFeeRate;
+    /// @notice Tempo gas rate (zone token units per gas unit)
+    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
+    ///      Fee = gasLimit * tempoGasRate. User must include all gas costs in gasLimit.
+    uint128 public tempoGasRate;
 
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
@@ -99,21 +96,23 @@ contract ZoneOutbox is IZoneOutbox {
                             FEE CONFIGURATION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Set withdrawal fee parameters. Only callable by sequencer.
-    /// @param baseFee Base fee for each withdrawal (covers processWithdrawal overhead)
-    /// @param gasFeeRate Fee per unit of gasLimit (covers callback execution)
-    function setWithdrawalFees(uint128 baseFee, uint128 gasFeeRate) external {
+    /// @notice Set Tempo gas rate. Only callable by sequencer.
+    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
+    ///      If actual Tempo gas is higher, sequencer covers the difference.
+    ///      If actual Tempo gas is lower, sequencer keeps the surplus.
+    /// @param _tempoGasRate Gas token units per gas unit on Tempo
+    function setTempoGasRate(uint128 _tempoGasRate) external {
         if (msg.sender != sequencer) revert OnlySequencer();
-        withdrawalBaseFee = baseFee;
-        withdrawalGasFeeRate = gasFeeRate;
-        emit WithdrawalFeesUpdated(baseFee, gasFeeRate);
+        tempoGasRate = _tempoGasRate;
+        emit TempoGasRateUpdated(_tempoGasRate);
     }
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @param gasLimit The gas limit for the callback (0 if no callback)
-    /// @return fee The total fee (baseFee + gasLimit * gasFeeRate)
+    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
+    /// @param gasLimit Total gas limit (must cover processWithdrawal + any callback)
+    /// @return fee The total fee in zone token units
     function calculateWithdrawalFee(uint64 gasLimit) public view returns (uint128 fee) {
-        fee = withdrawalBaseFee + uint128(gasLimit) * withdrawalGasFeeRate;
+        fee = uint128(gasLimit) * tempoGasRate;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -149,6 +148,7 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         // Calculate processing fee (locked in at request time)
+        // Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
         uint128 fee = calculateWithdrawalFee(gasLimit);
         uint128 totalBurn = amount + fee;
 
