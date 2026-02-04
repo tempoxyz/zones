@@ -120,6 +120,11 @@ contract ZoneInbox is IZoneInbox {
 
                 // Verify decryption on-chain using ECIES precompile
                 // The GCM tag proves the shared secret is correct without revealing private key
+                //
+                // ALTERNATIVE: Instead of this precompile, we could hash the encrypted data
+                // and include that hash in the EncryptedDepositPayload. The sequencer would
+                // provide the hash during decryption, allowing verification that the correct
+                // data was encrypted without the cost of the precompile.
                 bytes memory plaintext = abi.encode(dec.to, dec.memo);
                 bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(
                     dec.sharedSecret,
