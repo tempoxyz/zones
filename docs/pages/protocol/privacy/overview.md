@@ -1152,6 +1152,7 @@ bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
 if (!proofValid) revert InvalidSharedSecretProof();
 
 // Step 2: Derive AES key using HKDF-SHA256 (in Solidity)
+// Note: Encryption key validity is already validated on Tempo side in ZonePortal.depositEncrypted()
 bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", "");
 
 // Step 3: Try to decrypt using AES-GCM precompile

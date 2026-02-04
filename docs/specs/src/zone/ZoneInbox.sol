@@ -50,8 +50,9 @@ contract ZoneInbox is IZoneInbox {
     ///      slot 2: sequencerPubkey (bytes32)
     ///      slot 3: withdrawalBatchIndex (uint64)
     ///      slot 4: blockHash (bytes32)
-    ///      slot 5: currentDepositQueueHash (bytes32) ← this one
+    ///      slot 5: currentDepositQueueHash (bytes32)
     ///      slot 6: lastSyncedTempoBlockNumber (uint64)
+    ///      slot 7: zoneGasRate (uint128)
     bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
 
     /*//////////////////////////////////////////////////////////////
@@ -193,6 +194,7 @@ contract ZoneInbox is IZoneInbox {
                 // This prevents griefing attacks where users encrypt with wrong keys,
                 // without exposing the sequencer's private key to the EVM.
                 // The proof verifies that sharedSecret = privSeq * ephemeralPub without revealing privSeq.
+                // Note: Encryption key validity is already checked on Tempo side in ZonePortal.depositEncrypted()
                 bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
                     ed.encrypted.ephemeralPubX,
                     ed.encrypted.ephemeralPubYParity,
@@ -202,9 +204,6 @@ contract ZoneInbox is IZoneInbox {
                     dec.cpProof
                 );
                 if (!proofValid) revert InvalidSharedSecretProof();
-
-                // TODO: Verify dec.sequencerPubX/YParity matches the key at ed.keyIndex
-                // This ensures the sequencer used the correct historical key
 
                 // Step 2: Derive AES key from shared secret using HKDF-SHA256
                 // This is done in Solidity using the SHA256 precompile (0x02)

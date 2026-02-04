@@ -6,12 +6,18 @@ import { ITIP20 } from "../interfaces/ITIP20.sol";
 import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import {
+    IZonePortal,
+    IZoneMessenger,
+    IVerifier,
     BlockTransition,
     Deposit,
+    EncryptedDeposit,
+    EncryptedDepositPayload,
+    DepositType,
+    QueuedDeposit,
+    EncryptionKeyEntry,
+    ENCRYPTION_KEY_GRACE_PERIOD,
     DepositQueueTransition,
-    IVerifier,
-    IZoneMessenger,
-    IZonePortal,
     Withdrawal,
     WithdrawalQueueTransition
 } from "./IZone.sol";
@@ -49,9 +55,10 @@ contract ZonePortal is IZonePortal {
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
 
-    /// @notice Sequencer's public key for encrypting messages (e.g., deposit memos)
-    /// @dev Future functionality: allows users to encrypt data only the sequencer can read
-    bytes32 public sequencerPubkey;
+    /// @notice Historical encryption keys with activation blocks
+    /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
+    ///      This is stored at slot 8 in the storage layout.
+    EncryptionKeyEntry[] internal _encryptionKeys;
 
     /// @notice Zone gas rate (zone token units per gas unit on the zone)
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
@@ -158,6 +165,68 @@ contract ZonePortal is IZonePortal {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        ENCRYPTION KEY MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Get the sequencer's current encryption public key
+    /// @return x The X coordinate
+    /// @return yParity The Y coordinate parity (0x02 or 0x03)
+    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity) {
+        if (_encryptionKeys.length == 0) return (bytes32(0), 0);
+        EncryptionKeyEntry storage current = _encryptionKeys[_encryptionKeys.length - 1];
+        return (current.x, current.yParity);
+    }
+
+    /// @notice Set the sequencer's encryption public key
+    /// @dev Only callable by the sequencer. Appends to key history.
+    /// @param x The X coordinate
+    /// @param yParity The Y coordinate parity (0x02 or 0x03)
+    function setSequencerEncryptionKey(bytes32 x, uint8 yParity) external onlySequencer {
+        uint64 activationBlock = uint64(block.number);
+        _encryptionKeys.push(EncryptionKeyEntry({
+            x: x,
+            yParity: yParity,
+            activationBlock: activationBlock
+        }));
+        emit SequencerEncryptionKeyUpdated(x, yParity, _encryptionKeys.length - 1, activationBlock);
+    }
+
+    /// @notice Get the number of keys in the history
+    function encryptionKeyCount() external view returns (uint256) {
+        return _encryptionKeys.length;
+    }
+
+    /// @notice Get a historical encryption key by index
+    /// @param index The index in the key history (0 = first key)
+    /// @return entry The key entry with activation block
+    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry) {
+        if (index >= _encryptionKeys.length) revert InvalidEncryptionKeyIndex(index);
+        return _encryptionKeys[index];
+    }
+
+    /// @notice Check if an encryption key is still valid for new deposits
+    /// @param keyIndex The key index to check
+    /// @return valid True if the key can be used for new deposits
+    /// @return expiresAtBlock Block number when this key expires (0 if current key)
+    function isEncryptionKeyValid(uint256 keyIndex) public view returns (bool valid, uint64 expiresAtBlock) {
+        if (keyIndex >= _encryptionKeys.length) {
+            return (false, 0);
+        }
+
+        // Current key (latest) never expires
+        if (keyIndex == _encryptionKeys.length - 1) {
+            return (true, 0);
+        }
+
+        // Old keys are valid during grace period after supersession
+        EncryptionKeyEntry storage nextKey = _encryptionKeys[keyIndex + 1];
+        uint64 expiration = nextKey.activationBlock + ENCRYPTION_KEY_GRACE_PERIOD;
+
+        valid = block.number < expiration;
+        expiresAtBlock = expiration;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                DEPOSITS
     //////////////////////////////////////////////////////////////*/
 
@@ -205,6 +274,59 @@ contract ZonePortal is IZonePortal {
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
         emit DepositMade(newCurrentDepositQueueHash, msg.sender, to, netAmount, fee, memo);
+    }
+
+    /// @notice Deposit with encrypted recipient and memo
+    /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key.
+    ///      Validates that keyIndex is valid (exists and not expired).
+    ///      Fee is NOT charged for encrypted deposits (no amount deduction).
+    /// @param amount Amount to deposit (full amount, no fee deducted)
+    /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
+    /// @param encrypted The encrypted payload (recipient and memo)
+    /// @return newCurrentDepositQueueHash The new deposit queue hash
+    function depositEncrypted(
+        uint128 amount,
+        uint256 keyIndex,
+        EncryptedDepositPayload calldata encrypted
+    ) external returns (bytes32 newCurrentDepositQueueHash) {
+        // Validate encryption key
+        (bool valid, uint64 expiresAtBlock) = isEncryptionKeyValid(keyIndex);
+        if (!valid) {
+            if (keyIndex >= _encryptionKeys.length) {
+                revert InvalidEncryptionKeyIndex(keyIndex);
+            }
+            EncryptionKeyEntry storage key = _encryptionKeys[keyIndex];
+            EncryptionKeyEntry storage nextKey = _encryptionKeys[keyIndex + 1];
+            revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
+        }
+
+        // Transfer full amount from sender to this contract (no fee for encrypted deposits)
+        ITIP20(token).transferFrom(msg.sender, address(this), amount);
+
+        // Build encrypted deposit struct
+        EncryptedDeposit memory depositData = EncryptedDeposit({
+            sender: msg.sender,
+            amount: amount,
+            keyIndex: keyIndex,
+            encrypted: encrypted
+        });
+
+        // Insert encrypted deposit into queue with type discriminator
+        newCurrentDepositQueueHash = keccak256(abi.encode(
+            DepositType.Encrypted,
+            depositData,
+            currentDepositQueueHash
+        ));
+        currentDepositQueueHash = newCurrentDepositQueueHash;
+
+        emit EncryptedDepositMade(
+            newCurrentDepositQueueHash,
+            msg.sender,
+            amount,
+            keyIndex,
+            encrypted.ephemeralPubkeyX,
+            encrypted.ephemeralPubkeyYParity
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
