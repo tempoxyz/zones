@@ -495,6 +495,8 @@ interface IZoneInbox {
     error OnlySequencer();
     error NotPendingSequencer();
     error InvalidDepositQueueHash();
+    error MissingDecryptionData();
+    error ExtraDecryptionData();
 
     /// @notice The Tempo portal address (for reading deposit queue hash)
     function tempoPortal() external view returns (address);
