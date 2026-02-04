@@ -152,9 +152,13 @@ struct DecryptionData {
 /// @dev Predeploy at 0x1c00000000000000000000000000000000000100
 address constant CHAUM_PEDERSEN_VERIFY = 0x1c00000000000000000000000000000000000100;
 
-/// @notice Precompile address for ECIES decryption verification
+/// @notice Precompile address for AES-256-GCM decryption
 /// @dev Predeploy at 0x1c00000000000000000000000000000000000101
-address constant ECIES_VERIFY = 0x1c00000000000000000000000000000000000101;
+address constant AES_GCM_DECRYPT = 0x1c00000000000000000000000000000000000101;
+
+/// @notice Precompile address for SHA256 (standard Ethereum precompile)
+/// @dev Used for HKDF-SHA256 implementation in Solidity
+address constant SHA256 = 0x0000000000000000000000000000000000000002;
 
 /// @title IChaumPedersenVerify
 /// @notice Precompile for verifying Chaum-Pedersen proofs of ECDH shared secret derivation
@@ -186,23 +190,28 @@ interface IChaumPedersenVerify {
     ) external view returns (bool valid);
 }
 
-/// @title IEciesVerify
-/// @notice Precompile for verifying ECIES (secp256k1 + AES-256-GCM) decryption
-/// @dev Validates that a given shared secret correctly decrypts a ciphertext by checking
-///      the GCM authentication tag. Does not require the sequencer's private key.
-interface IEciesVerify {
-    /// @notice Verify that sharedSecret correctly decrypts the encrypted payload to plaintext
-    /// @dev Uses HKDF-SHA256 to derive AES key from sharedSecret, then verifies GCM tag.
-    ///      The GCM tag proves the shared secret is correct without revealing private keys.
-    /// @param sharedSecret The ECDH shared secret (sequencerPriv * ephemeralPub)
-    /// @param encrypted The encrypted payload (ephemeralPub, ciphertext, nonce, tag)
-    /// @param plaintext The claimed decrypted data to verify
-    /// @return valid True if the shared secret correctly decrypts to the plaintext
-    function verifyDecryption(
-        bytes32 sharedSecret,
-        EncryptedDepositPayload calldata encrypted,
-        bytes calldata plaintext
-    ) external view returns (bool valid);
+/// @title IAesGcmDecrypt
+/// @notice Minimal precompile for AES-256-GCM decryption with authentication
+/// @dev Decrypts ciphertext and verifies the GCM authentication tag.
+///      HKDF-SHA256 key derivation is done in Solidity using the SHA256 precompile.
+interface IAesGcmDecrypt {
+    /// @notice Decrypt AES-256-GCM ciphertext and verify authentication tag
+    /// @dev Returns empty bytes and false if tag verification fails.
+    ///      AAD (Additional Authenticated Data) is typically empty for ECIES.
+    /// @param key AES-256 key (32 bytes)
+    /// @param nonce GCM nonce (12 bytes)
+    /// @param ciphertext The encrypted data
+    /// @param aad Additional authenticated data (use empty bytes if none)
+    /// @param tag GCM authentication tag (16 bytes)
+    /// @return plaintext The decrypted data (empty if verification fails)
+    /// @return valid True if the tag verifies and decryption succeeds
+    function decrypt(
+        bytes32 key,
+        bytes12 nonce,
+        bytes calldata ciphertext,
+        bytes calldata aad,
+        bytes16 tag
+    ) external view returns (bytes memory plaintext, bool valid);
 }
 
 struct Withdrawal {

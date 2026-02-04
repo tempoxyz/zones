@@ -1151,10 +1151,13 @@ bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
 );
 if (!proofValid) revert InvalidSharedSecretProof();
 
-// Step 2: Try to decrypt
-bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(...);
+// Step 2: Derive AES key using HKDF-SHA256 (in Solidity)
+bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", "");
 
-// Step 3: If decryption fails, return funds to sender (don't block chain)
+// Step 3: Try to decrypt using AES-GCM precompile
+(bytes memory plaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(...);
+
+// Step 4: If decryption fails, return funds to sender (don't block chain)
 if (!valid) {
     gasToken.mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(...);
@@ -1194,22 +1197,28 @@ interface IChaumPedersenVerify {
 }
 ```
 
-**ECIES verification precompile** (at `0x1c00000000000000000000000000000000000101`):
+**AES-GCM decryption precompile** (at `0x1c00000000000000000000000000000000000101`):
+
+This is a minimal precompile that only performs AES-256-GCM decryption. HKDF-SHA256 key derivation is implemented in Solidity using the existing SHA256 precompile (0x02), making the precompile simpler and more auditable.
 
 ```solidity
-interface IEciesVerify {
-    /// @notice Verify that sharedSecret correctly decrypts the encrypted payload to plaintext
-    /// @dev Uses HKDF-SHA256 to derive AES key from sharedSecret, then verifies GCM tag.
-    ///      The GCM tag proves the shared secret is correct without revealing private keys.
-    /// @param sharedSecret The ECDH shared secret (sequencerPriv * ephemeralPub)
-    /// @param encrypted The encrypted payload (ephemeralPub, ciphertext, nonce, tag)
-    /// @param plaintext The claimed decrypted data to verify
-    /// @return valid True if the shared secret correctly decrypts to the plaintext
-    function verifyDecryption(
-        bytes32 sharedSecret,
-        EncryptedDepositPayload calldata encrypted,
-        bytes calldata plaintext
-    ) external view returns (bool valid);
+interface IAesGcmDecrypt {
+    /// @notice Decrypt AES-256-GCM ciphertext and verify authentication tag
+    /// @dev Returns empty bytes and false if tag verification fails.
+    /// @param key AES-256 key (32 bytes)
+    /// @param nonce GCM nonce (12 bytes)
+    /// @param ciphertext The encrypted data
+    /// @param aad Additional authenticated data (empty for ECIES)
+    /// @param tag GCM authentication tag (16 bytes)
+    /// @return plaintext The decrypted data (empty if verification fails)
+    /// @return valid True if the tag verifies and decryption succeeds
+    function decrypt(
+        bytes32 key,
+        bytes12 nonce,
+        bytes calldata ciphertext,
+        bytes calldata aad,
+        bytes16 tag
+    ) external view returns (bytes memory plaintext, bool valid);
 }
 ```
 
@@ -1227,15 +1236,31 @@ bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
 );
 if (!proofValid) revert InvalidSharedSecretProof();
 
-// Step 2: Verify the decryption using ECIES precompile
-bytes memory plaintext = abi.encode(dec.to, dec.memo);
-bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(
+// Step 2: Derive AES key from shared secret using HKDF-SHA256 (in Solidity)
+bytes32 aesKey = _hkdfSha256(
     dec.sharedSecret,
-    ed.encrypted,
-    plaintext
+    "ecies-aes-key",  // salt
+    ""                // info (empty)
 );
 
-// Step 3: Handle success or failure
+// Step 3: Decrypt using AES-256-GCM precompile
+(bytes memory decryptedPlaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(
+    aesKey,
+    ed.encrypted.nonce,
+    ed.encrypted.ciphertext,
+    "",  // empty AAD
+    ed.encrypted.tag
+);
+
+// Step 4: Verify decrypted plaintext matches claimed (to, memo)
+if (valid && decryptedPlaintext.length >= 52) {
+    (address decryptedTo, bytes32 decryptedMemo) = abi.decode(decryptedPlaintext, (address, bytes32));
+    valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);
+} else {
+    valid = false;
+}
+
+// Step 5: Handle success or failure
 if (!valid) {
     // Decryption failed - return funds to sender
     gasToken.mint(ed.sender, ed.amount);
@@ -1265,11 +1290,20 @@ if (!valid) {
 - Verify: `c == c'`
 - Gas cost: ~8000 gas (2 point multiplications + 2 point additions + hash)
 
-*ECIES Verify (`0x1c00000000000000000000000000000000000101`):*
-- Derive AES key: `aesKey = HKDF-SHA256(sharedSecret, salt="ecies-aes-key", info="")`
-- Decrypt: `plaintext = AES-256-GCM-Decrypt(aesKey, nonce, ciphertext, aad="", tag)`
-- Return `true` if tag validates and decryption succeeds, `false` otherwise
-- Gas cost: ~5000 gas for HKDF + ~1000 per 32 bytes of ciphertext for AES-GCM
+*AES-GCM Decrypt (`0x1c00000000000000000000000000000000000101`):*
+- Input: AES key (32 bytes), nonce (12 bytes), ciphertext, AAD, tag (16 bytes)
+- Decrypt: `plaintext = AES-256-GCM-Decrypt(key, nonce, ciphertext, aad, tag)`
+- Return decrypted plaintext and `true` if tag validates, or empty bytes and `false` otherwise
+- Gas cost: ~1000 gas base + ~500 per 32 bytes of ciphertext
+- Much simpler than full ECIES precompile - only handles symmetric encryption
+
+*HKDF-SHA256 (implemented in Solidity):*
+- Uses existing SHA256 precompile (0x02) to implement HMAC-SHA256 and HKDF
+- HMAC-SHA256: `HMAC(key, msg) = SHA256((key ⊕ opad) || SHA256((key ⊕ ipad) || msg))`
+- HKDF-Extract: `PRK = HMAC-SHA256(salt, IKM)`
+- HKDF-Expand: `OKM = HMAC-SHA256(PRK, info || 0x01)`
+- Gas cost: ~5-10k gas for full HKDF (depends on message sizes, dominated by SHA256 calls)
+- Tradeoff: Higher gas cost than native implementation, but keeps precompile minimal and auditable
 
 **Encryption key history:**
 
