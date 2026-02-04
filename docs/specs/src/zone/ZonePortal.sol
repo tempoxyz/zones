@@ -25,9 +25,11 @@ contract ZonePortal is IZonePortal {
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Estimated gas cost for processing a deposit on the zone
-    /// @dev Covers ZoneInbox.advanceTempo processing: hash computation, token minting, event emission
-    uint64 public constant DEPOSIT_GAS_ESTIMATE = 50000;
+    /// @notice Fixed gas value for deposit fee calculation
+    /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
+    ///      This provides a stable pricing basis for deposits while allowing sequencer
+    ///      flexibility to adjust the zoneGasRate based on operational costs.
+    uint64 public constant FIXED_DEPOSIT_GAS = 100000;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -159,10 +161,10 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Calculate the fee for a deposit
-    /// @dev Fee = DEPOSIT_GAS_ESTIMATE * zoneGasRate
+    /// @dev Fee = FIXED_DEPOSIT_GAS * zoneGasRate
     /// @return fee The deposit fee in zone token units
     function calculateDepositFee() public view returns (uint128 fee) {
-        fee = uint128(DEPOSIT_GAS_ESTIMATE) * zoneGasRate;
+        fee = uint128(FIXED_DEPOSIT_GAS) * zoneGasRate;
     }
 
     /// @notice Deposit zone token into the zone. Returns the new current deposit queue hash.

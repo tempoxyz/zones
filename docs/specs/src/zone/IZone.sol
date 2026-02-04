@@ -179,8 +179,8 @@ interface IZonePortal {
     error CallbackRejected();
     error DepositTooSmall();
 
-    /// @notice Estimated gas cost for processing a deposit on the zone
-    function DEPOSIT_GAS_ESTIMATE() external view returns (uint64);
+    /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
+    function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
     function zoneId() external view returns (uint64);
     function token() external view returns (address);

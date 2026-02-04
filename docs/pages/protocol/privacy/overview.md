@@ -73,13 +73,13 @@ This applies to all zone contracts: `ZonePortal` (Tempo-side), `ZoneInbox`, `Zon
 
 ### Deposit fees
 
-Deposits incur a processing fee to compensate the sequencer for zone-side gas costs:
+Deposits incur a processing fee to compensate the sequencer for zone-side processing costs:
 
 - **Zone gas rate**: Sequencer publishes `zoneGasRate` (zone token units per gas unit)
-- **Gas estimate**: Fixed `DEPOSIT_GAS_ESTIMATE` constant (e.g., 50,000 gas for minting)
-- **Total fee**: `DEPOSIT_GAS_ESTIMATE * zoneGasRate`
+- **Fixed gas value**: `FIXED_DEPOSIT_GAS` is fixed at 100,000 gas
+- **Total fee**: `FIXED_DEPOSIT_GAS * zoneGasRate` = `100,000 * zoneGasRate`
 
-The sequencer configures `zoneGasRate` via `ZonePortal.setZoneGasRate()` and takes the risk on zone gas price fluctuations. If actual zone gas is higher, the sequencer covers the difference; if lower, they keep the surplus.
+The sequencer configures `zoneGasRate` via `ZonePortal.setZoneGasRate()`. The fixed gas value of 100,000 provides a stable pricing basis for deposits while allowing the sequencer flexibility to adjust the rate based on operational costs and future deposit mechanism variations.
 
 The fee is deducted from the deposit amount and paid to the sequencer immediately on Tempo. The deposit queue stores the net amount (`amount - fee`) which is minted on the zone.
 
@@ -481,8 +481,8 @@ interface IZonePortal {
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
-    /// @notice Estimated gas cost for processing a deposit on the zone.
-    function DEPOSIT_GAS_ESTIMATE() external view returns (uint64);
+    /// @notice Fixed gas value for deposit fee calculation (100,000 gas).
+    function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
     function zoneId() external view returns (uint64);
     function token() external view returns (address);
