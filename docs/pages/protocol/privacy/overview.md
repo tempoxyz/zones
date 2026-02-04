@@ -1100,9 +1100,73 @@ This ensures deposits are processed in the exact order they were made, regardles
 **Security considerations:**
 
 - **Sequencer trust**: Users trust the sequencer to decrypt correctly and credit the right recipient. A malicious sequencer could steal encrypted deposits.
-- **Decryption proof**: For ZK-based verification, the proof must validate that the sequencer's decryption is correct. For TEE-based verification, the TEE performs decryption.
+- **On-chain verification**: The sequencer provides the ECDH shared secret, which enables on-chain decryption verification via GCM tag validation without revealing the private key. See "On-chain decryption verification" below.
 - **Key rotation**: The portal maintains a history of encryption keys. Each encrypted deposit includes the `keyIndex` the user encrypted to, allowing the prover to look up the correct key for decryption. See "Encryption key history" below.
 - **Malformed ciphertext**: If decryption fails, the sequencer may refund to `sender` or hold funds pending resolution.
+
+**On-chain decryption verification:**
+
+The zone can verify encrypted deposit decryption on-chain without the sequencer revealing their private key. The sequencer provides the ECDH shared secret alongside the decrypted data:
+
+```solidity
+struct DecryptionData {
+    bytes32 sharedSecret;  // ECDH shared secret (sequencerPriv * ephemeralPub)
+    address to;            // Decrypted recipient
+    bytes32 memo;          // Decrypted memo
+}
+```
+
+Verification works by leveraging the AES-GCM authentication tag:
+
+1. Sequencer computes: `sharedSecret = ECDH(sequencerPriv, ephemeralPub)`
+2. On-chain, derive AES key from `sharedSecret` using HKDF-SHA256
+3. Attempt to decrypt the ciphertext with AES-256-GCM
+4. **The GCM tag will only validate if the shared secret is correct**
+5. If tag validates, the decrypted `(to, memo)` are cryptographically proven authentic
+
+This is implemented via the ECIES verification precompile at `0x1c00000000000000000000000000000000000100`:
+
+```solidity
+interface IEciesVerify {
+    /// @notice Verify that sharedSecret correctly decrypts the encrypted payload to plaintext
+    /// @dev Uses HKDF-SHA256 to derive AES key from sharedSecret, then verifies GCM tag.
+    ///      The GCM tag proves the shared secret is correct without revealing private keys.
+    /// @param sharedSecret The ECDH shared secret (sequencerPriv * ephemeralPub)
+    /// @param encrypted The encrypted payload (ephemeralPub, ciphertext, nonce, tag)
+    /// @param plaintext The claimed decrypted data to verify
+    /// @return valid True if the shared secret correctly decrypts to the plaintext
+    function verifyDecryption(
+        bytes32 sharedSecret,
+        EncryptedDepositPayload calldata encrypted,
+        bytes calldata plaintext
+    ) external view returns (bool valid);
+}
+```
+
+Usage in `ZoneInbox.advanceTempo()`:
+
+```solidity
+// Verify decryption on-chain using ECIES precompile
+bytes memory plaintext = abi.encode(dec.to, dec.memo);
+bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(
+    dec.sharedSecret,
+    ed.encrypted,
+    plaintext
+);
+if (!valid) revert InvalidDecryption();
+```
+
+**Key properties:**
+- **No private key exposure**: Sequencer only reveals the shared secret, not their private key
+- **Cryptographic proof**: GCM tag validation proves decryption correctness
+- **On-chain verification**: No reliance on proof/TEE for this specific check
+- **Standard crypto**: Uses well-established ECIES, ECDH, HKDF-SHA256, and AES-256-GCM
+
+**Precompile implementation notes:**
+- Derive AES key: `aesKey = HKDF-SHA256(sharedSecret, salt="ecies-aes-key", info="")`
+- Decrypt: `plaintext = AES-256-GCM-Decrypt(aesKey, nonce, ciphertext, aad="", tag)`
+- Return `true` if tag validates and decryption succeeds, `false` otherwise
+- Gas cost: ~5000 gas for HKDF + ~1000 per 32 bytes of ciphertext for AES-GCM
 
 **Encryption key history:**
 
