@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, ITempoState, IZoneConfig, IZoneInbox, IZoneToken } from "./IZone.sol";
+import {
+    Deposit,
+    EncryptedDeposit,
+    DepositType,
+    QueuedDeposit,
+    DecryptionData,
+    ITempoState,
+    IZoneConfig,
+    IZoneInbox,
+    IZoneToken
+} from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
@@ -64,12 +74,17 @@ contract ZoneInbox is IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call
     /// @dev This is the main entry point for the sequencer at block start when Tempo is advanced.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the deposit queue
+    ///      2. Processes deposits from the unified queue (regular + encrypted)
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
     /// @param header RLP-encoded Tempo block header
-    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external {
+    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param decryptions Decryption data for encrypted deposits (1:1 with encrypted deposits, in order)
+    function advanceTempo(
+        bytes calldata header,
+        QueuedDeposit[] calldata deposits,
+        DecryptionData[] calldata decryptions
+    ) external {
         if (msg.sender != config.sequencer()) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
@@ -77,18 +92,43 @@ contract ZoneInbox is IZoneInbox {
 
         // Step 2: Process deposits and build hash chain
         bytes32 currentHash = processedDepositQueueHash;
+        uint256 decryptionIndex = 0;
 
         for (uint256 i = 0; i < deposits.length; i++) {
-            Deposit calldata d = deposits[i];
+            QueuedDeposit calldata qd = deposits[i];
 
-            // Advance the hash chain (matches Tempo's deposit queue structure)
-            currentHash = keccak256(abi.encode(d, currentHash));
+            if (qd.depositType == DepositType.Regular) {
+                // Decode regular deposit
+                Deposit memory d = abi.decode(qd.depositData, (Deposit));
 
-            // Mint zone tokens to the recipient
-            gasToken.mint(d.to, d.amount);
+                // Advance the hash chain with type discriminator
+                currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
-            emit DepositProcessed(currentHash, d.sender, d.to, d.amount, d.memo);
+                // Mint zone tokens to the recipient
+                gasToken.mint(d.to, d.amount);
+
+                emit DepositProcessed(currentHash, d.sender, d.to, d.amount, d.memo);
+            } else {
+                // Decode encrypted deposit
+                EncryptedDeposit memory ed = abi.decode(qd.depositData, (EncryptedDeposit));
+
+                // Sequencer must provide decryption for this encrypted deposit
+                if (decryptionIndex >= decryptions.length) revert MissingDecryptionData();
+                DecryptionData calldata dec = decryptions[decryptionIndex++];
+
+                // Advance the hash chain with type discriminator
+                currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
+
+                // Mint zone tokens to the decrypted recipient
+                // Note: Proof/TEE validates the decryption is correct
+                gasToken.mint(dec.to, ed.amount);
+
+                emit EncryptedDepositProcessed(currentHash, ed.sender, dec.to, ed.amount, dec.memo);
+            }
         }
+
+        // Verify all decryption data was consumed
+        if (decryptionIndex != decryptions.length) revert ExtraDecryptionData();
 
         // Step 3: Validate against Tempo state
         // Read currentDepositQueueHash from the portal's storage using the new Tempo state

@@ -547,6 +547,8 @@ interface IZoneInbox {
     );
     error OnlySequencer();
     error InvalidDepositQueueHash();
+    error MissingDecryptionData();
+    error ExtraDecryptionData();
 
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);
