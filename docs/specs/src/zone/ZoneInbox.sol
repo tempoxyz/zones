@@ -11,6 +11,8 @@ import {
     IZoneConfig,
     IZoneInbox,
     IZoneToken,
+    CHAUM_PEDERSEN_VERIFY,
+    IChaumPedersenVerify,
     ECIES_VERIFY,
     IEciesVerify
 } from "./IZone.sol";
@@ -118,28 +120,45 @@ contract ZoneInbox is IZoneInbox {
                 if (decryptionIndex >= decryptions.length) revert MissingDecryptionData();
                 DecryptionData calldata dec = decryptions[decryptionIndex++];
 
-                // Verify decryption on-chain using ECIES precompile
-                // The GCM tag proves the shared secret is correct without revealing private key
-                //
-                // ALTERNATIVE: Instead of this precompile, we could hash the encrypted data
-                // and include that hash in the EncryptedDepositPayload. The sequencer would
-                // provide the hash during decryption, allowing verification that the correct
-                // data was encrypted without the cost of the precompile.
+                // Step 1: Verify Chaum-Pedersen proof of correct shared secret derivation
+                // This prevents griefing attacks where users encrypt with wrong keys,
+                // without exposing the sequencer's private key to the EVM.
+                // The proof verifies that sharedSecret = privSeq * ephemeralPub without revealing privSeq.
+                bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
+                    ed.encrypted.ephemeralPubX,
+                    ed.encrypted.ephemeralPubYParity,
+                    dec.sharedSecret,
+                    dec.sequencerPubX,
+                    dec.sequencerPubYParity,
+                    dec.cpProof
+                );
+                if (!proofValid) revert InvalidSharedSecretProof();
+
+                // TODO: Verify dec.sequencerPubX/YParity matches the key at ed.keyIndex
+                // This ensures the sequencer used the correct historical key
+
+                // Step 3: Verify the decryption using ECIES precompile
+                // The GCM tag proves the plaintext matches the ciphertext for this shared secret
                 bytes memory plaintext = abi.encode(dec.to, dec.memo);
                 bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(
                     dec.sharedSecret,
                     ed.encrypted,
                     plaintext
                 );
-                if (!valid) revert InvalidDecryption();
 
                 // Advance the hash chain with type discriminator
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
-                // Mint zone tokens to the decrypted recipient
-                gasToken.mint(dec.to, ed.amount);
-
-                emit EncryptedDepositProcessed(currentHash, ed.sender, dec.to, ed.amount, dec.memo);
+                if (!valid) {
+                    // Decryption failed (user encrypted garbage or corrupted data)
+                    // Return funds to sender instead of blocking chain progress
+                    gasToken.mint(ed.sender, ed.amount);
+                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.amount);
+                } else {
+                    // Decryption succeeded - mint to the decrypted recipient
+                    gasToken.mint(dec.to, ed.amount);
+                    emit EncryptedDepositProcessed(currentHash, ed.sender, dec.to, ed.amount, dec.memo);
+                }
             }
         }
 

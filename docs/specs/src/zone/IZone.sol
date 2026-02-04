@@ -121,23 +121,70 @@ struct QueuedDeposit {
     bytes depositData;  // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
 }
 
+/// @notice Chaum-Pedersen proof for ECDH shared secret derivation
+/// @dev Proves knowledge of privSeq such that:
+///      - pubSeq = privSeq * G (sequencer's key pair)
+///      - sharedSecretPoint = privSeq * ephemeralPub (ECDH computation)
+///      Uses Fiat-Shamir heuristic for non-interactive proof.
+struct ChaumPedersenProof {
+    bytes32 s;  // Response: s = r + c * privSeq (mod n)
+    bytes32 c;  // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
+}
+
 /// @notice Decryption data provided by sequencer for encrypted deposits
 /// @dev Must match 1:1 with encrypted deposits in the queue (in order of appearance).
-///      The sharedSecret enables on-chain verification via GCM tag validation without
-///      revealing the sequencer's private key.
+///      Includes a Chaum-Pedersen proof to verify the shared secret was correctly derived
+///      without exposing the sequencer's private key.
 struct DecryptionData {
-    bytes32 sharedSecret;  // ECDH shared secret (sequencerPriv * ephemeralPub)
-    address to;            // Decrypted recipient
-    bytes32 memo;          // Decrypted memo
+    bytes32 sharedSecret;        // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
+    address to;                  // Decrypted recipient
+    bytes32 memo;                // Decrypted memo
+    bytes32 sequencerPubX;       // Sequencer's public key X (must match keyIndex from deposit)
+    uint8 sequencerPubYParity;   // Sequencer's public key Y parity
+    ChaumPedersenProof cpProof;  // Proof of correct shared secret derivation
 }
 
 /*//////////////////////////////////////////////////////////////
-                    ECIES VERIFICATION PRECOMPILE
+                    CRYPTOGRAPHIC PRECOMPILES
 //////////////////////////////////////////////////////////////*/
 
-/// @notice Precompile address for ECIES decryption verification
+/// @notice Precompile address for Chaum-Pedersen proof verification
 /// @dev Predeploy at 0x1c00000000000000000000000000000000000100
-address constant ECIES_VERIFY = 0x1c00000000000000000000000000000000000100;
+address constant CHAUM_PEDERSEN_VERIFY = 0x1c00000000000000000000000000000000000100;
+
+/// @notice Precompile address for ECIES decryption verification
+/// @dev Predeploy at 0x1c00000000000000000000000000000000000101
+address constant ECIES_VERIFY = 0x1c00000000000000000000000000000000000101;
+
+/// @title IChaumPedersenVerify
+/// @notice Precompile for verifying Chaum-Pedersen proofs of ECDH shared secret derivation
+/// @dev Verifies that the sequencer knows privSeq such that:
+///      - pubSeq = privSeq * G (their public key)
+///      - sharedSecretPoint = privSeq * ephemeralPub (the ECDH computation)
+///      This proves correct derivation without revealing the private key.
+interface IChaumPedersenVerify {
+    /// @notice Verify a Chaum-Pedersen proof for ECDH shared secret derivation
+    /// @dev Verification equations:
+    ///      - R1 = s*G - c*pubSeq
+    ///      - R2 = s*ephemeralPub - c*sharedSecretPoint
+    ///      - c' = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
+    ///      - Check: c == c'
+    /// @param ephemeralPubX The X coordinate of the ephemeral public key
+    /// @param ephemeralPubYParity The Y coordinate parity (0x02 or 0x03)
+    /// @param sharedSecret The claimed shared secret (x-coordinate)
+    /// @param sequencerPubX The sequencer's public key X coordinate
+    /// @param sequencerPubYParity The sequencer's public key Y parity
+    /// @param proof The Chaum-Pedersen proof (s, c)
+    /// @return valid True if the proof verifies correctly
+    function verifyProof(
+        bytes32 ephemeralPubX,
+        uint8 ephemeralPubYParity,
+        bytes32 sharedSecret,
+        bytes32 sequencerPubX,
+        uint8 sequencerPubYParity,
+        ChaumPedersenProof calldata proof
+    ) external view returns (bool valid);
+}
 
 /// @title IEciesVerify
 /// @notice Precompile for verifying ECIES (secp256k1 + AES-256-GCM) decryption
@@ -575,10 +622,18 @@ interface IZoneInbox {
         uint128 amount,
         bytes32 memo             // Revealed after decryption
     );
+
+    /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
+    event EncryptedDepositFailed(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        uint128 amount
+    );
     error OnlySequencer();
     error InvalidDepositQueueHash();
     error MissingDecryptionData();
     error ExtraDecryptionData();
+    error InvalidSharedSecretProof();
     error InvalidDecryption();
 
     /// @notice Zone configuration (reads sequencer from L1)

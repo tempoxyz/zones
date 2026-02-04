@@ -1129,7 +1129,72 @@ Verification works by leveraging the AES-GCM authentication tag:
 4. **The GCM tag will only validate if the shared secret is correct**
 5. If tag validates, the decrypted `(to, memo)` are cryptographically proven authentic
 
-This is implemented via the ECIES verification precompile at `0x1c00000000000000000000000000000000000100`:
+**Griefing attack prevention:**
+
+Without additional checks, a malicious user could submit an encrypted deposit with invalid ciphertext (garbage data or encrypted to the wrong key). The sequencer wouldn't be able to decrypt it, but also couldn't prove it's invalid, blocking chain progress.
+
+**Solution**: Use a **Chaum-Pedersen zero-knowledge proof** to prove the shared secret was correctly derived, without exposing the sequencer's private key to the EVM.
+
+The sequencer provides a Chaum-Pedersen proof that proves: "I know `privSeq` such that `pubSeq = privSeq * G` AND `sharedSecretPoint = privSeq * ephemeralPub`"
+
+This proof allows on-chain verification without revealing the private key:
+
+```solidity
+// Step 1: Verify Chaum-Pedersen proof of correct shared secret derivation
+bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
+    ed.encrypted.ephemeralPubX,
+    ed.encrypted.ephemeralPubYParity,
+    dec.sharedSecret,
+    dec.sequencerPubX,
+    dec.sequencerPubYParity,
+    dec.cpProof
+);
+if (!proofValid) revert InvalidSharedSecretProof();
+
+// Step 2: Try to decrypt
+bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(...);
+
+// Step 3: If decryption fails, return funds to sender (don't block chain)
+if (!valid) {
+    gasToken.mint(ed.sender, ed.amount);
+    emit EncryptedDepositFailed(...);
+}
+```
+
+This prevents griefing: users can't block the chain with invalid encryptions, and the sequencer's private key never touches the EVM.
+
+**Chaum-Pedersen proof protocol:**
+
+1. **Prover (sequencer) computes off-chain:**
+   - Pick random `r`
+   - `R1 = r * G`
+   - `R2 = r * ephemeralPub`
+   - `c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)` (Fiat-Shamir challenge)
+   - `s = r + c * privSeq (mod n)`
+   - Proof is `(s, c)`
+
+2. **Verifier (on-chain) checks:**
+   - Reconstruct: `R1 = s*G - c*pubSeq`
+   - Reconstruct: `R2 = s*ephemeralPub - c*sharedSecretPoint`
+   - Recompute: `c' = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`
+   - Verify: `c == c'`
+
+**Chaum-Pedersen verification precompile** (at `0x1c00000000000000000000000000000000000100`):
+
+```solidity
+interface IChaumPedersenVerify {
+    function verifyProof(
+        bytes32 ephemeralPubX,
+        uint8 ephemeralPubYParity,
+        bytes32 sharedSecret,
+        bytes32 sequencerPubX,
+        uint8 sequencerPubYParity,
+        ChaumPedersenProof calldata proof
+    ) external view returns (bool valid);
+}
+```
+
+**ECIES verification precompile** (at `0x1c00000000000000000000000000000000000101`):
 
 ```solidity
 interface IEciesVerify {
@@ -1151,23 +1216,56 @@ interface IEciesVerify {
 Usage in `ZoneInbox.advanceTempo()`:
 
 ```solidity
-// Verify decryption on-chain using ECIES precompile
+// Step 1: Verify Chaum-Pedersen proof of correct shared secret derivation
+bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
+    ed.encrypted.ephemeralPubX,
+    ed.encrypted.ephemeralPubYParity,
+    dec.sharedSecret,
+    dec.sequencerPubX,
+    dec.sequencerPubYParity,
+    dec.cpProof
+);
+if (!proofValid) revert InvalidSharedSecretProof();
+
+// Step 2: Verify the decryption using ECIES precompile
 bytes memory plaintext = abi.encode(dec.to, dec.memo);
 bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(
     dec.sharedSecret,
     ed.encrypted,
     plaintext
 );
-if (!valid) revert InvalidDecryption();
+
+// Step 3: Handle success or failure
+if (!valid) {
+    // Decryption failed - return funds to sender
+    gasToken.mint(ed.sender, ed.amount);
+    emit EncryptedDepositFailed(currentHash, ed.sender, ed.amount);
+} else {
+    // Decryption succeeded - mint to decrypted recipient
+    gasToken.mint(dec.to, ed.amount);
+    emit DepositProcessed(currentHash, ed.sender, dec.to, ed.amount, dec.memo);
+}
 ```
 
 **Key properties:**
-- **No private key exposure**: Sequencer only reveals the shared secret, not their private key
+- **Zero-knowledge security**: Chaum-Pedersen proof verifies shared secret without exposing sequencer's private key to EVM
+- **Griefing resistance**: Invalid encryptions can be detected and rejected, preventing chain blockage
+- **Graceful failure**: Invalid encrypted deposits return funds to sender instead of reverting
 - **Cryptographic proof**: GCM tag validation proves decryption correctness
-- **On-chain verification**: No reliance on proof/TEE for this specific check
-- **Standard crypto**: Uses well-established ECIES, ECDH, HKDF-SHA256, and AES-256-GCM
+- **On-chain verification**: All verification happens on-chain via precompiles
+- **Standard crypto**: Uses well-established ECIES, ECDH, Chaum-Pedersen, HKDF-SHA256, and AES-256-GCM
 
 **Precompile implementation notes:**
+
+*Chaum-Pedersen Verify (`0x1c00000000000000000000000000000000000100`):*
+- Input: ephemeralPub, sharedSecret, sequencerPub, proof (s, c)
+- Reconstruct commitments: `R1 = s*G - c*pubSeq`, `R2 = s*ephemeralPub - c*sharedSecretPoint`
+- where `sharedSecretPoint` is derived by lifting sharedSecret to curve (requires Y-coordinate recovery)
+- Recompute challenge: `c' = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`
+- Verify: `c == c'`
+- Gas cost: ~8000 gas (2 point multiplications + 2 point additions + hash)
+
+*ECIES Verify (`0x1c00000000000000000000000000000000000101`):*
 - Derive AES key: `aesKey = HKDF-SHA256(sharedSecret, salt="ecies-aes-key", info="")`
 - Decrypt: `plaintext = AES-256-GCM-Decrypt(aesKey, nonce, ciphertext, aad="", tag)`
 - Return `true` if tag validates and decryption succeeds, `false` otherwise
