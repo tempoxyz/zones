@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, EncryptedDeposit, DepositType, QueuedDeposit, DecryptionData, IZoneToken, IZoneInbox, ITempoState } from "./IZone.sol";
+import { Deposit, EncryptedDeposit, DepositType, QueuedDeposit, DecryptionData, IZoneToken, IZoneInbox, ITempoState, ECIES_VERIFY, IEciesVerify } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
@@ -132,11 +132,20 @@ contract ZoneInbox is IZoneInbox {
                 if (decryptionIndex >= decryptions.length) revert MissingDecryptionData();
                 DecryptionData calldata dec = decryptions[decryptionIndex++];
 
+                // Verify decryption on-chain using ECIES precompile
+                // The GCM tag proves the shared secret is correct without revealing private key
+                bytes memory plaintext = abi.encode(dec.to, dec.memo);
+                bool valid = IEciesVerify(ECIES_VERIFY).verifyDecryption(
+                    dec.sharedSecret,
+                    ed.encrypted,
+                    plaintext
+                );
+                if (!valid) revert InvalidDecryption();
+
                 // Advance the hash chain with type discriminator
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
                 // Mint zone tokens to the decrypted recipient
-                // Note: Proof/TEE validates the decryption is correct
                 gasToken.mint(dec.to, ed.amount);
 
                 emit DepositProcessed(currentHash, ed.sender, dec.to, ed.amount, dec.memo);

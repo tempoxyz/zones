@@ -120,10 +120,40 @@ struct QueuedDeposit {
 }
 
 /// @notice Decryption data provided by sequencer for encrypted deposits
-/// @dev Must match 1:1 with encrypted deposits in the queue (in order of appearance)
+/// @dev Must match 1:1 with encrypted deposits in the queue (in order of appearance).
+///      The sharedSecret enables on-chain verification via GCM tag validation without
+///      revealing the sequencer's private key.
 struct DecryptionData {
-    address to;      // Decrypted recipient
-    bytes32 memo;    // Decrypted memo
+    bytes32 sharedSecret;  // ECDH shared secret (sequencerPriv * ephemeralPub)
+    address to;            // Decrypted recipient
+    bytes32 memo;          // Decrypted memo
+}
+
+/*//////////////////////////////////////////////////////////////
+                    ECIES VERIFICATION PRECOMPILE
+//////////////////////////////////////////////////////////////*/
+
+/// @notice Precompile address for ECIES decryption verification
+/// @dev Predeploy at 0x1c00000000000000000000000000000000000100
+address constant ECIES_VERIFY = 0x1c00000000000000000000000000000000000100;
+
+/// @title IEciesVerify
+/// @notice Precompile for verifying ECIES (secp256k1 + AES-256-GCM) decryption
+/// @dev Validates that a given shared secret correctly decrypts a ciphertext by checking
+///      the GCM authentication tag. Does not require the sequencer's private key.
+interface IEciesVerify {
+    /// @notice Verify that sharedSecret correctly decrypts the encrypted payload to plaintext
+    /// @dev Uses HKDF-SHA256 to derive AES key from sharedSecret, then verifies GCM tag.
+    ///      The GCM tag proves the shared secret is correct without revealing private keys.
+    /// @param sharedSecret The ECDH shared secret (sequencerPriv * ephemeralPub)
+    /// @param encrypted The encrypted payload (ephemeralPub, ciphertext, nonce, tag)
+    /// @param plaintext The claimed decrypted data to verify
+    /// @return valid True if the shared secret correctly decrypts to the plaintext
+    function verifyDecryption(
+        bytes32 sharedSecret,
+        EncryptedDepositPayload calldata encrypted,
+        bytes calldata plaintext
+    ) external view returns (bool valid);
 }
 
 struct Withdrawal {
@@ -497,6 +527,7 @@ interface IZoneInbox {
     error InvalidDepositQueueHash();
     error MissingDecryptionData();
     error ExtraDecryptionData();
+    error InvalidDecryption();
 
     /// @notice The Tempo portal address (for reading deposit queue hash)
     function tempoPortal() external view returns (address);
