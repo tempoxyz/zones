@@ -118,8 +118,13 @@ pub struct ZoneBlock {
     /// If None, the block does not advance Tempo and the binding carries over.
     pub tempo_header_rlp: Option<Vec<u8>>,
 
-    /// Deposits processed by the call (oldest first). Must be empty if tempo_header_rlp is None.
-    pub deposits: Vec<Deposit>,
+    /// Deposits processed by the system tx (oldest first, unified queue).
+    /// Must be empty if tempo_header_rlp is None.
+    pub deposits: Vec<QueuedDeposit>,
+
+    /// Decryption data for encrypted deposits in the system tx.
+    /// Must be empty if tempo_header_rlp is None.
+    pub decryptions: Vec<DecryptionData>,
 
     /// Sequencer-only: finalize a batch (only in final block, must be last)
     /// Required for the final block in a batch; must be absent in intermediate blocks.
@@ -130,10 +135,11 @@ pub struct ZoneBlock {
 }
 ```
 
-Each zone block contains an ordered list of user transactions executed using `revm`. The sequencer
-may call `ZoneInbox.advanceTempo` at the start of the block to advance Tempo state and process deposits,
-and (only in the final block of a batch) calls `ZoneOutbox.finalizeWithdrawalBatch` at the end. If
-`advanceTempo` is omitted for a block, the Tempo binding carries over from the previous block.
+Each zone block contains the required system transactions plus user transactions that will be executed using `revm`.
+The system transactions must mirror the Solidity reference implementation:
+- `ZoneInbox.advanceTempo(tempo_header_rlp, deposits, decryptions)` at the start of the block
+- `ZoneOutbox.finalizeWithdrawalBatch(count)` at the end of the block **only if this is the final block of the batch**
+If `advanceTempo` is omitted for a block, the Tempo binding carries over from the previous block.
 
 The executor must enforce at most one `advanceTempo` at the start of each block
 (or zero, for blocks that do not advance Tempo), and enforce `finalizeWithdrawalBatch` only in the
@@ -430,13 +436,14 @@ fn execute_zone_block(
         )
         .build();
 
-    // Sequencer may call advanceTempo at the start of the block.
-    // The TempoState precompile must bind reads during this call to the newly
-    // finalized Tempo header, and reject any unbound reads.
+    // System tx: advance Tempo and process deposits.
+    // The TempoState precompile must bind reads during this call to the newly finalized
+    // Tempo header, and reject any unbound reads.
     if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
-        evm.transact_commit(sequencer_tx_advance_tempo(
+        evm.transact_commit(system_tx_advance_tempo(
             tempo_header_rlp,
             &block.deposits,
+            &block.decryptions,
         ))
         .map_err(|e| Error::ExecutionError(e.to_string()))?;
 
@@ -449,7 +456,7 @@ fn execute_zone_block(
         if expected_tempo_hash != keccak256(tempo_header_rlp) {
             return Err(Error::InconsistentState);
         }
-    } else if !block.deposits.is_empty() {
+    } else if !block.deposits.is_empty() || !block.decryptions.is_empty() {
         return Err(Error::InconsistentState);
     }
 
