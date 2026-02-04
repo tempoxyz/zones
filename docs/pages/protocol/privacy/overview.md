@@ -708,11 +708,16 @@ interface IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single system transaction.
     /// @dev This is the main entry point for the sequencer's system transaction.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the deposit queue
+    ///      2. Processes deposits from the unified deposit queue (regular + encrypted)
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
     /// @param header RLP-encoded Tempo block header
-    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;
+    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param decryptions Decryption data for encrypted deposits (1:1 with encrypted deposits, in order)
+    function advanceTempo(
+        bytes calldata header,
+        QueuedDeposit[] calldata deposits,
+        DecryptionData[] calldata decryptions
+    ) external;
 }
 ```
 

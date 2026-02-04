@@ -110,8 +110,11 @@ pub struct ZoneBlock {
     /// Tempo header RLP used by the system tx (ZoneInbox.advanceTempo)
     pub tempo_header_rlp: Vec<u8>,
 
-    /// Deposits processed by the system tx (oldest first)
-    pub deposits: Vec<Deposit>,
+    /// Deposits processed by the system tx (oldest first, unified queue)
+    pub deposits: Vec<QueuedDeposit>,
+
+    /// Decryption data for encrypted deposits in the system tx
+    pub decryptions: Vec<DecryptionData>,
 
     /// System tx at end of block (ZoneOutbox.finalizeWithdrawalBatch)
     /// Required for the final block in a batch; must be absent in intermediate blocks.
@@ -124,7 +127,7 @@ pub struct ZoneBlock {
 
 Each zone block contains the required system transactions plus user transactions that will be executed using `revm`.
 The system transactions must mirror the Solidity reference implementation:
-- `ZoneInbox.advanceTempo(tempo_header_rlp, deposits)` at the start of the block
+- `ZoneInbox.advanceTempo(tempo_header_rlp, deposits, decryptions)` at the start of the block
 - `ZoneOutbox.finalizeWithdrawalBatch(count)` at the end of the block **only if this is the final block of the batch**
 
 User transactions may call the `TempoState` precompile to read Tempo state. User transactions
@@ -421,6 +424,7 @@ fn execute_zone_block(
     evm.transact_commit(system_tx_advance_tempo(
         &block.tempo_header_rlp,
         &block.deposits,
+        &block.decryptions,
     ))
     .map_err(|e| Error::ExecutionError(e.to_string()))?;
 
@@ -444,7 +448,7 @@ fn execute_zone_block(
 
     // Compute roots for block hash commitment
     let tx_root = compute_transactions_root(
-        &system_tx_advance_tempo(&block.tempo_header_rlp, &block.deposits),
+        &system_tx_advance_tempo(&block.tempo_header_rlp, &block.deposits, &block.decryptions),
         &block.transactions,
         finalize_tx.as_ref(),
     );
