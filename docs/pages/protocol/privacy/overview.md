@@ -559,6 +559,7 @@ interface IZonePortal {
     ///      and adds withdrawals to the queue.
     function submitBatch(
         uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,

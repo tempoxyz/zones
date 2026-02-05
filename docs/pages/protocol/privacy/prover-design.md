@@ -26,8 +26,11 @@ pub struct PublicInputs {
     /// Tempo block number for the batch (must equal portal's tempoBlockNumber)
     pub tempo_block_number: u64,
 
-    /// Tempo block hash for the batch (must equal portal's EIP-2935 lookup)
-    pub tempo_block_hash: B256,
+    /// Anchor Tempo block number (tempo_block_number or recent block in EIP-2935 window)
+    pub anchor_block_number: u64,
+
+    /// Anchor Tempo block hash (must equal portal's EIP-2935 lookup)
+    pub anchor_block_hash: B256,
 
     /// Expected withdrawal batch index (passed by portal as withdrawalBatchIndex + 1)
     pub expected_withdrawal_batch_index: u64,
@@ -51,6 +54,10 @@ pub struct BatchWitness {
 
     /// Tempo state proofs for Tempo reads
     pub tempo_state_proofs: BatchStateProof,
+
+    /// Tempo headers for ancestry verification (only in ancestry mode)
+    /// Ordered from tempo_block_number + 1 to anchor_block_number.
+    pub tempo_ancestry_headers: Vec<Vec<u8>>,
 }
 
 pub struct BatchOutput {
@@ -359,11 +366,25 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
     let tempo_hash = tempo_state
         .block_hash(tempo_number)
         .ok_or(Error::InvalidProof)?;
-    if tempo_hash != witness.public_inputs.tempo_block_hash {
-        return Err(Error::InconsistentState);
-    }
     if tempo_number != witness.public_inputs.tempo_block_number {
         return Err(Error::InconsistentState);
+    }
+
+    // Anchor validation:
+    // - Direct mode: anchor_block_number == tempo_block_number and hashes match
+    // - Ancestry mode: verify parent-hash chain from tempo_block_number to anchor_block_number
+    if witness.public_inputs.anchor_block_number == tempo_number {
+        if tempo_hash != witness.public_inputs.anchor_block_hash {
+            return Err(Error::InconsistentState);
+        }
+    } else {
+        verify_tempo_ancestry_chain(
+            tempo_hash,
+            tempo_number,
+            witness.public_inputs.anchor_block_number,
+            witness.public_inputs.anchor_block_hash,
+            &witness.tempo_ancestry_headers,
+        )?;
     }
 
     Ok(BatchOutput {
@@ -497,12 +518,14 @@ pub extern "C" fn ecall_prove_batch(
 ## On-Chain Verification
 
 The portal contract receives:
-- `tempoBlockNumber` - validates against EIP-2935 block hash history and passes to the verifier
+- `tempoBlockNumber` - block zone committed to (from zone's TempoState)
+- `recentTempoBlockNumber` - optional recent block for ancestry proofs (0 = direct lookup)
 - `blockTransition` - from `BatchOutput` (block hash based)
 - `proof` - ZKVM proof or TEE attestation
 
 The portal passes the following to the verifier:
-- `tempoBlockNumber` and `tempoBlockHash` (from EIP-2935)
+- `tempoBlockNumber`
+- `anchorBlockNumber` and `anchorBlockHash` (from EIP-2935)
 - `expectedWithdrawalBatchIndex` (portal's `withdrawalBatchIndex + 1`)
 - `sequencer` (the registered sequencer address)
 - `blockTransition`, `depositQueueTransition`, `withdrawalQueueTransition`
@@ -510,8 +533,9 @@ The portal passes the following to the verifier:
 
 The verifier validates that the prover correctly executed the state transition and produced the output commitments.
 In particular, the proof must enforce:
-- `TempoState.tempoBlockHash == tempoBlockHash` from the portal (EIP-2935) for `tempoBlockNumber`
 - `TempoState.tempoBlockNumber == tempoBlockNumber`
+- **Direct mode** (`anchorBlockNumber == tempoBlockNumber`): `TempoState.tempoBlockHash == anchorBlockHash`
+- **Ancestry mode** (`anchorBlockNumber > tempoBlockNumber`): parent-hash chain from `tempoBlockNumber` to `anchorBlockNumber`, ending at `anchorBlockHash`
 - `ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex` (passed by portal)
 - `ZoneOutbox.lastBatch().withdrawalQueueHash == withdrawalQueueTransition.withdrawalQueueHash`
 - Zone block `beneficiary` equals `sequencer` (passed by portal)
