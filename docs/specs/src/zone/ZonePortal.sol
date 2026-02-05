@@ -305,9 +305,6 @@ contract ZonePortal is IZonePortal {
             revert InvalidProof();
         }
 
-        // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
-        if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
-
         // Determine anchor block: either tempoBlockNumber (direct) or recentTempoBlockNumber (ancestry)
         uint64 anchorBlockNumber;
         bytes32 anchorBlockHash;
@@ -315,6 +312,7 @@ contract ZonePortal is IZonePortal {
         if (recentTempoBlockNumber == 0) {
             // Direct mode: read tempoBlockNumber hash from EIP-2935
             anchorBlockNumber = tempoBlockNumber;
+            if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
             if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
 
             anchorBlockHash = IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(tempoBlockNumber);
