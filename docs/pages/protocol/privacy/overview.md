@@ -365,7 +365,8 @@ struct Withdrawal {
 interface IVerifier {
     function verify(
         uint64 tempoBlockNumber,
-        bytes32 tempoBlockHash,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
         address sequencer,
         BlockTransition calldata blockTransition,
@@ -377,7 +378,7 @@ interface IVerifier {
 }
 ```
 
-The verifier receives the `tempoBlockNumber` and `tempoBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), `expectedWithdrawalBatchIndex` (portal's current batch index + 1), `sequencer` (the registered sequencer address), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash` for `tempoBlockNumber`, that the state transition is valid, that `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`, that the zone block `beneficiary` matches `sequencer`, and that `ZoneOutbox.lastBatch().withdrawalQueueHash` matches `withdrawalQueueTransition.withdrawalQueueHash` (read from state root, not events).
+The verifier receives `tempoBlockNumber`, `anchorBlockNumber`, and `anchorBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), `expectedWithdrawalBatchIndex` (portal's current batch index + 1), `sequencer` (the registered sequencer address), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone committed to `tempoBlockNumber` via TempoState, that the anchor hash is correct (direct or ancestry mode), that the state transition is valid, that `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`, that the zone block `beneficiary` matches `sequencer`, and that `ZoneOutbox.lastBatch().withdrawalQueueHash` matches `withdrawalQueueTransition.withdrawalQueueHash` (read from state root, not events).
 
 ### Queue libraries
 
@@ -1160,7 +1161,7 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo node. There 
 - **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo, user txs..., finalizeWithdrawalBatch?]`.
 - **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
 - **Receipts root**: Committed in the block hash but not proven on-chain. Batch parameters are read from `lastBatch` state storage instead of event logs.
-- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from the EIP-2935 history precompile.
+- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber` and an `anchorBlockNumber`; the proof must demonstrate the zone committed to `tempoBlockNumber` and that the anchor hash matches either the same block (direct mode) or a verified ancestry chain (ancestry mode) ending at `anchorBlockHash` from the EIP-2935 history precompile.
 
 #### Block header field coverage
 
