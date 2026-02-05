@@ -67,12 +67,14 @@ jobs:
         working-directory: tempo-foundry
         run: |
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          REPO_URL="https://github.com/${{ github.repository }}"
           echo "Updating tempo dependencies to commit: $COMMIT_SHA"
+          echo "Using git source repository: $REPO_URL"
 
           # Update all tempo dependencies to point to the current commit
           # Using # as delimiter since URLs contain /
           sed -i -E \
-            "s#(tempo-[a-z-]+) = \{ git = \"https://github.com/tempoxyz/tempo\", rev = \"[^\"]+\" \}#\1 = { git = \"https://github.com/tempoxyz/tempo\", rev = \"$COMMIT_SHA\" }#g" \
+            "s#(tempo-[a-z-]+) = \{ git = \"https://github.com/[^\"]+\", rev = \"[^\"]+\" \}#\1 = { git = \"$REPO_URL\", rev = \"$COMMIT_SHA\" }#g" \
             Cargo.toml
 
           echo "Updated Cargo.toml:"
