@@ -1,17 +1,6 @@
 name: Docs
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - ".github/workflows/docs.yml"
-  merge_group:
-  pull_request:
-    branches: [main]
-    paths:
-      - "docs/**"
-      - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 jobs:
