@@ -277,6 +277,7 @@ contract ZoneBridgeTest is BaseTest {
         // Submit to Tempo
         l1Portal.submitBatch(
             uint64(block.number - 1),
+            0,
             BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: l2BlockHash }),
             DepositQueueTransition({
                 prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash
