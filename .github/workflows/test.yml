@@ -1,7 +1,20 @@
 name: Test
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/specs/src/zone/**"
+      - "docs/specs/test/zone/**"
+      - "crates/tempo-zone/**"
+      - ".github/workflows/docs-specs.yml"
+  pull_request:
+    paths-ignore:
+      - "docs/specs/src/zone/**"
+      - "docs/specs/test/zone/**"
+      - "crates/tempo-zone/**"
+      - ".github/workflows/docs-specs.yml"
+  merge_group:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}

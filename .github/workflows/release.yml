@@ -3,6 +3,9 @@ name: Release
 # https://github.com/paradigmxyz/reth/blob/main/.github/workflows/release.yml
 
 on:
+  push:
+    tags:
+      - "v*.*.*"
   workflow_dispatch:
     inputs:
       tag:

@@ -1,12 +1,22 @@
 name: Docker Build
 
 on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*.*.*"
+  merge_group:
   workflow_dispatch:
     inputs:
       nightly:
         description: "Tag nightly"
         type: boolean
         default: false
+  workflow_call:
+  schedule:
+    - cron: "5 9 * * *"
+    - cron: "30 20 * * *"
 
 env:
   REGISTRY: ghcr.io/tempoxyz
