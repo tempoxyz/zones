@@ -64,10 +64,11 @@ jobs:
           workspaces: tempo-foundry
 
       - name: Update tempo-foundry to use current commit
+        if: github.repository == 'tempoxyz/tempo'
         working-directory: tempo-foundry
         run: |
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
-          REPO_URL="https://github.com/${{ github.repository }}"
+          REPO_URL="https://github.com/tempoxyz/tempo"
           echo "Updating tempo dependencies to commit: $COMMIT_SHA"
           echo "Using git source repository: $REPO_URL"
 
