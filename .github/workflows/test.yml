@@ -96,7 +96,9 @@ jobs:
       - name: Get latest filename from API
         id: latest
         run: |
-          FILENAME=$(curl -s https://snapshots.tempoxyz.dev/42431/latest.txt)
+          FILENAME=$(curl --fail --show-error --silent \
+            --retry 5 --retry-delay 2 --retry-all-errors --http1.1 \
+            https://snapshots.tempoxyz.dev/42431/latest.txt)
           echo "Latest filename: $FILENAME"
           echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
 
@@ -113,7 +115,9 @@ jobs:
           mkdir -p .cache/snapshots
 
           FILE_NAME='${{ steps.latest.outputs.filename }}'
-          curl -L "https://snapshots.tempoxyz.dev/42431/$FILE_NAME" \
+          curl --fail --show-error \
+            --retry 5 --retry-delay 2 --retry-all-errors --http1.1 \
+            -L "https://snapshots.tempoxyz.dev/42431/$FILE_NAME" \
             -o ".cache/snapshots/$FILE_NAME"
 
           ls -l .cache/snapshots

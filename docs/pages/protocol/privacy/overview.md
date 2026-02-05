@@ -1,6 +1,6 @@
 # Tempo Zones Overview
 
-Tempo Zones are non-custodial sidechains that extend Tempo with scaleable, private settlement. Each zone operates as a Tempo-compatible execution environment with its own sequencer, with the ability to synchronously read from the rest of Tempo state and asynchronously withdraw.
+Tempo Zones are non-custodial sidechains that extend Tempo with scalable, private settlement. Each zone operates as a Tempo-compatible execution environment with its own sequencer, with the ability to synchronously read from the rest of Tempo state and asynchronously withdraw.
 
 Tempo zones offer some unique advantages:
 
