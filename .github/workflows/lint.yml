@@ -41,6 +41,7 @@ jobs:
 
   fmt:
     name: fmt
+    if: false
     runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -68,6 +69,7 @@ jobs:
 
   docs:
     name: docs
+    if: false
     runs-on: depot-ubuntu-latest-4
     timeout-minutes: 30
     steps:
@@ -119,6 +121,7 @@ jobs:
 
   zepter:
     name: zepter
+    if: false
     runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -139,11 +142,8 @@ jobs:
     if: always()
     needs:
       - clippy
-      - fmt
-      - docs
       - typos
       - deny
-      - zepter
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed

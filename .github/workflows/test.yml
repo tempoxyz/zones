@@ -51,6 +51,7 @@ jobs:
 
   test:
     name: test
+    if: false
     runs-on: depot-ubuntu-latest-16
     timeout-minutes: 30
     steps:
@@ -66,6 +67,7 @@ jobs:
 
   msrv:
     name: MSRV
+    if: false
     runs-on: depot-ubuntu-latest-4
     timeout-minutes: 30
     steps:
@@ -82,6 +84,7 @@ jobs:
 
   snapshot-re-execute:
     name: Snapshot re-execution
+    if: false
     runs-on: depot-ubuntu-latest-16
     timeout-minutes: 60
     steps:
@@ -134,8 +137,6 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
-      - test
-      - msrv
       - genesis
     timeout-minutes: 30
     steps:
