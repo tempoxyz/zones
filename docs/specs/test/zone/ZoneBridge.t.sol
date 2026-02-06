@@ -20,7 +20,6 @@ import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
-
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";

@@ -8,7 +8,6 @@ import { StablecoinDEX } from "../src/StablecoinDEX.sol";
 import { TIP20 } from "../src/TIP20.sol";
 import { TIP20Factory } from "../src/TIP20Factory.sol";
 import { TIP403Registry } from "../src/TIP403Registry.sol";
-
 import { IAccountKeychain } from "../src/interfaces/IAccountKeychain.sol";
 import { INonce } from "../src/interfaces/INonce.sol";
 import { ITIP20 } from "../src/interfaces/ITIP20.sol";
@@ -111,6 +110,12 @@ contract BaseTest is Test {
             }
             if (_VALIDATOR_CONFIG.code.length == 0) {
                 revert MissingPrecompile("ValidatorConfig", _VALIDATOR_CONFIG);
+            }
+            // tempo-foundry may not expose EIP-2935 BlockHashHistory at 0x100 yet.
+            // Install the existing deterministic mock only when absent so zone tests
+            // can still run against Rust precompiles.
+            if (_BLOCKHASH_HISTORY.code.length == 0) {
+                deployCodeTo("BlockHashHistory", _BLOCKHASH_HISTORY);
             }
             if (_BLOCKHASH_HISTORY.code.length == 0) {
                 revert MissingPrecompile("BlockHashHistory", _BLOCKHASH_HISTORY);

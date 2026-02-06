@@ -3,7 +3,6 @@ pragma solidity ^0.8.13;
 
 import { TIP20 } from "../../src/TIP20.sol";
 import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
-
 import { BLOCKHASH_HISTORY_WINDOW } from "../../src/zone/BlockHashHistory.sol";
 import {
     BlockTransition,
@@ -23,7 +22,6 @@ import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
-
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 
 /// @notice Mock withdrawal receiver that accepts funds

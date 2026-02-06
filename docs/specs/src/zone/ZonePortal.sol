@@ -2,7 +2,6 @@
 pragma solidity ^0.8.13;
 
 import { ITIP20 } from "../interfaces/ITIP20.sol";
-
 import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import {
@@ -285,8 +284,11 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
+    /// @param tempoBlockNumber Block number zone committed to (from zone's TempoState)
+    /// @param recentTempoBlockNumber Optional recent block for ancestry proof (0 = use direct lookup)
     function submitBatch(
         uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -296,22 +298,40 @@ contract ZonePortal is IZonePortal {
         external
         onlySequencer
     {
-        if (blockTransition.prevBlockHash != blockHash) revert InvalidProof();
+        if (blockTransition.prevBlockHash != blockHash) {
+            revert InvalidProof();
+        }
 
-        // Validate tempoBlockNumber is within valid range for history lookup
+        // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
         if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
-        if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
 
-        // Look up the actual Tempo block hash via EIP-2935 history precompile
-        bytes32 tempoBlockHash = IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(tempoBlockNumber);
-        if (tempoBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
+        // Determine anchor block: either tempoBlockNumber (direct) or recentTempoBlockNumber (ancestry)
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
 
-        // Call verifier with tempoBlockHash
-        // The proof reads currentDepositQueueHash from Tempo state to validate ancestry
+        if (recentTempoBlockNumber == 0) {
+            // Direct mode: read tempoBlockNumber hash from EIP-2935
+            anchorBlockNumber = tempoBlockNumber;
+            if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
+
+            anchorBlockHash = IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(tempoBlockNumber);
+            if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
+        } else {
+            // Ancestry mode: read recentTempoBlockNumber hash, proof verifies ancestry chain
+            if (recentTempoBlockNumber <= tempoBlockNumber) revert InvalidTempoBlockNumber();
+            if (recentTempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
+
+            anchorBlockNumber = recentTempoBlockNumber;
+            anchorBlockHash = IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(recentTempoBlockNumber);
+            if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
+        }
+
+        // Verify proof (handles both direct and ancestry modes)
         bool valid = IVerifier(verifier)
             .verify(
                 tempoBlockNumber,
-                tempoBlockHash,
+                anchorBlockNumber,
+                anchorBlockHash,
                 withdrawalBatchIndex + 1, // expected batch index after this batch
                 sequencer,
                 blockTransition,

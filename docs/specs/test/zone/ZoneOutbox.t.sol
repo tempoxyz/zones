@@ -5,7 +5,6 @@ import { IZoneOutbox, LastBatch, Withdrawal } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
-
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
 import { Test } from "forge-std/Test.sol";

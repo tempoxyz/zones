@@ -81,23 +81,27 @@ interface IVerifier {
     /// @notice Verify a batch proof
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
-    ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash for tempoBlockNumber
-    ///      3. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
-    ///      4. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
-    ///      5. Zone block beneficiary matches sequencer
-    ///      6. Deposit processing is correct (validated via Tempo state read inside proof)
-    /// @param tempoBlockNumber The Tempo block number for EIP-2935 lookup
-    /// @param tempoBlockHash The Tempo block hash (from EIP-2935)
-    /// @param expectedWithdrawalBatchIndex The expected batch index (portal.withdrawalBatchIndex + 1)
-    /// @param sequencer The registered sequencer address (zone block beneficiary must match)
-    /// @param blockTransition The zone block hash transition
-    /// @param depositQueueTransition The deposit queue processing transition
-    /// @param withdrawalQueueTransition The withdrawal queue hash for this batch
+    ///      2. Zone committed to tempoBlockNumber (via TempoState)
+    ///      3. If anchorBlockNumber == tempoBlockNumber: zone's hash matches anchorBlockHash
+    ///      4. If anchorBlockNumber > tempoBlockNumber: ancestry chain from tempoBlockNumber to anchorBlockNumber
+    ///      5. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
+    ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
+    ///      7. Zone block beneficiary matches sequencer
+    ///      8. Deposit processing is correct (validated via Tempo state read inside proof)
+    /// @param tempoBlockNumber Block zone committed to (from TempoState)
+    /// @param anchorBlockNumber Block whose hash is verified (tempoBlockNumber or recent block)
+    /// @param anchorBlockHash Hash of anchorBlockNumber (from EIP-2935)
+    /// @param expectedWithdrawalBatchIndex Expected batch index (portal.withdrawalBatchIndex + 1)
+    /// @param sequencer Sequencer address (zone block beneficiary must match)
+    /// @param blockTransition Zone block hash transition
+    /// @param depositQueueTransition Deposit queue processing transition
+    /// @param withdrawalQueueTransition Withdrawal queue hash for this batch
     /// @param verifierConfig Opaque payload for verifier (TEE attestation envelope, etc.)
-    /// @param proof The validity proof or TEE attestation
+    /// @param proof Validity proof or TEE attestation
     function verify(
         uint64 tempoBlockNumber,
-        bytes32 tempoBlockHash,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
         address sequencer,
         BlockTransition calldata blockTransition,
@@ -237,6 +241,7 @@ interface IZonePortal {
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
         uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
