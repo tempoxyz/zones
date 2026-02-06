@@ -3,17 +3,32 @@ name: Lint
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "docs/specs/src/zone/**"
-      - "docs/specs/test/zone/**"
-      - "crates/tempo-zone/**"
-      - ".github/workflows/docs-specs.yml"
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - "rustfmt.toml"
+      - "typos.toml"
+      - "bin/**"
+      - "crates/**"
+      - "scripts/**"
+      - "xtask/**"
+      - ".github/workflows/lint.yml"
+      - "!crates/tempo-zone/**"
   pull_request:
-    paths-ignore:
-      - "docs/specs/src/zone/**"
-      - "docs/specs/test/zone/**"
-      - "crates/tempo-zone/**"
-      - ".github/workflows/docs-specs.yml"
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "deny.toml"
+      - "rustfmt.toml"
+      - "typos.toml"
+      - "bin/**"
+      - "crates/**"
+      - "scripts/**"
+      - "xtask/**"
+      - ".github/workflows/lint.yml"
+      - "!crates/tempo-zone/**"
   merge_group:
 
 concurrency:
