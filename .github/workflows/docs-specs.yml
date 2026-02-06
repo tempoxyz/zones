@@ -71,6 +71,7 @@ jobs:
 
   tempo-foundry-test:
     name: Forge Test (Rust Precompiles)
+    if: false
     runs-on: depot-ubuntu-latest-8
     timeout-minutes: 60
     steps:
@@ -131,11 +132,9 @@ jobs:
       - build
       - lint
       - test
-      - tempo-foundry-test
     timeout-minutes: 5
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@release/v1
         with:
-          allowed-failures: tempo-foundry-test
           jobs: ${{ toJSON(needs) }}

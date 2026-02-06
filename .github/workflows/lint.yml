@@ -5,9 +5,11 @@ on:
     branches: [main]
     paths-ignore:
       - "docs/specs/**"
+      - ".github/workflows/docs-specs.yml"
   pull_request:
     paths-ignore:
       - "docs/specs/**"
+      - ".github/workflows/docs-specs.yml"
   merge_group:
 
 concurrency:
