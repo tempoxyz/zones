@@ -112,6 +112,12 @@ contract BaseTest is Test {
             if (_VALIDATOR_CONFIG.code.length == 0) {
                 revert MissingPrecompile("ValidatorConfig", _VALIDATOR_CONFIG);
             }
+            // tempo-foundry may not expose EIP-2935 BlockHashHistory at 0x100 yet.
+            // Install the existing deterministic mock only when absent so zone tests
+            // can still run against Rust precompiles.
+            if (_BLOCKHASH_HISTORY.code.length == 0) {
+                deployCodeTo("BlockHashHistory", _BLOCKHASH_HISTORY);
+            }
             if (_BLOCKHASH_HISTORY.code.length == 0) {
                 revert MissingPrecompile("BlockHashHistory", _BLOCKHASH_HISTORY);
             }
