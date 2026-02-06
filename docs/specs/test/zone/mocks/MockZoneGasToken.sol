@@ -7,6 +7,7 @@ import { IZoneGasToken } from "../../../src/zone/ZoneInbox.sol";
 /// @notice Mock TIP-20 for zone testing with mint/burn for system operations
 /// @dev In production, this would be the actual TIP-20 at the same address as L1
 contract MockZoneGasToken is IZoneGasToken {
+
     string public name;
     string public symbol;
     uint8 public constant decimals = 6;
@@ -85,4 +86,5 @@ contract MockZoneGasToken is IZoneGasToken {
         emit Transfer(from, to, amount);
         return true;
     }
+
 }

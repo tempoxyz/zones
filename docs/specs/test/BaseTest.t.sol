@@ -8,11 +8,11 @@ import { StablecoinDEX } from "../src/StablecoinDEX.sol";
 import { TIP20 } from "../src/TIP20.sol";
 import { TIP20Factory } from "../src/TIP20Factory.sol";
 import { TIP403Registry } from "../src/TIP403Registry.sol";
-import { BLOCKHASH_HISTORY } from "../src/zone/BlockHashHistory.sol";
 import { IAccountKeychain } from "../src/interfaces/IAccountKeychain.sol";
 import { INonce } from "../src/interfaces/INonce.sol";
 import { ITIP20 } from "../src/interfaces/ITIP20.sol";
 import { IValidatorConfig } from "../src/interfaces/IValidatorConfig.sol";
+import { BLOCKHASH_HISTORY } from "../src/zone/BlockHashHistory.sol";
 import { Test, console } from "forge-std/Test.sol";
 
 /// @notice Base test framework for all spec tests

@@ -4,15 +4,18 @@ on:
   push:
     branches: [main]
     paths:
-      - "docs/specs/src/zone/**"
-      - "docs/specs/test/zone/**"
+      - "docs/specs/src/**"
+      - "docs/specs/test/**"
+      - "docs/specs/foundry.toml"
       - "crates/tempo-zone/**"
       - ".github/workflows/docs-specs.yml"
+  merge_group:
   pull_request:
     branches: [main]
     paths:
-      - "docs/specs/src/zone/**"
-      - "docs/specs/test/zone/**"
+      - "docs/specs/src/**"
+      - "docs/specs/test/**"
+      - "docs/specs/foundry.toml"
       - "crates/tempo-zone/**"
       - ".github/workflows/docs-specs.yml"
 
@@ -22,6 +25,39 @@ env:
   RUSTC_WRAPPER: "sccache"
 
 jobs:
+  build:
+    name: Forge Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Show Forge version
+        run: forge --version
+
+      - name: Run Forge build
+        working-directory: docs/specs
+        run: forge build --sizes
+
+  lint:
+    name: Forge Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run Forge fmt check
+        working-directory: docs/specs
+        run: forge fmt --check
+
   test:
     name: Forge Test (Solidity)
     runs-on: ubuntu-latest
@@ -35,7 +71,7 @@ jobs:
 
       - name: Run Forge tests
         working-directory: docs/specs
-        run: forge test -vvv --match-path test/zone/.*\\.t\\.sol$
+        run: forge test -vvv --match-path "test/zone/**/*.t.sol"
 
   tempo-foundry-test:
     name: Forge Test (Rust Precompiles)
@@ -92,13 +128,15 @@ jobs:
         working-directory: tempo/docs/specs
         run: |
           echo "Running forge test with tempo-foundry (isTempo=true)"
-          ../../../tempo-foundry/target/release/forge test -vvv --match-path test/zone/.*\\.t\\.sol$
+          ../../../tempo-foundry/target/release/forge test -vvv --match-path "test/zone/**/*.t.sol"
 
   docs-specs-success:
     name: docs-specs success
     runs-on: ubuntu-latest
     if: always()
     needs:
+      - build
+      - lint
       - test
       - tempo-foundry-test
     timeout-minutes: 5
