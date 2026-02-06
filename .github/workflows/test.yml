@@ -3,7 +3,11 @@ name: Test
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/specs/**"
   pull_request:
+    paths-ignore:
+      - "docs/specs/**"
   merge_group:
 
 concurrency:
