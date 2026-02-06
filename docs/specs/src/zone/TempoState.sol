@@ -9,6 +9,7 @@ import { ITempoState } from "./IZone.sol";
 ///      Stores the latest finalized Tempo block info. Sequencer submits Tempo headers
 ///      which are validated for chain continuity and decoded to update state.
 contract TempoState is ITempoState {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -141,7 +142,8 @@ contract TempoState is ITempoState {
     /// @return value The storage value (stub always reverts)
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32) {
         // Silence unused variable warnings
-        account; slot;
+        account;
+        slot;
         revert("TempoState: readTempoStorageSlot is a precompile stub");
     }
 
@@ -151,9 +153,17 @@ contract TempoState is ITempoState {
     /// @param account The Tempo contract address
     /// @param slots The storage slots to read
     /// @return values The storage values (stub always reverts)
-    function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory) {
+    function readTempoStorageSlots(
+        address account,
+        bytes32[] calldata slots
+    )
+        external
+        view
+        returns (bytes32[] memory)
+    {
         // Silence unused variable warnings
-        account; slots;
+        account;
+        slots;
         revert("TempoState: readTempoStorageSlots is a precompile stub");
     }
 
@@ -265,7 +275,14 @@ contract TempoState is ITempoState {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Decode an RLP list header from memory
-    function _decodeListHeaderMem(bytes memory data, uint256 ptr) internal pure returns (uint256 listLen, uint256 offset) {
+    function _decodeListHeaderMem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (uint256 listLen, uint256 offset)
+    {
         if (ptr >= data.length) return (0, 0);
 
         uint8 prefix = uint8(data[ptr]);
@@ -291,7 +308,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Skip an RLP item in memory and return next position
-    function _skipRlpItemMem(bytes memory data, uint256 ptr) internal pure returns (uint256 itemLen, uint256 nextPtr) {
+    function _skipRlpItemMem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (uint256 itemLen, uint256 nextPtr)
+    {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -322,7 +346,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode a bytes32 from RLP in memory
-    function _decodeBytes32Mem(bytes memory data, uint256 ptr) internal pure returns (bytes32 value) {
+    function _decodeBytes32Mem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (bytes32 value)
+    {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -378,7 +409,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode a uint256 from RLP in memory
-    function _decodeUint256Mem(bytes memory data, uint256 ptr) internal pure returns (uint256 value) {
+    function _decodeUint256Mem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (uint256 value)
+    {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -401,7 +439,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode an address from RLP in memory
-    function _decodeAddressMem(bytes memory data, uint256 ptr) internal pure returns (address value) {
+    function _decodeAddressMem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (address value)
+    {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -419,4 +464,5 @@ contract TempoState is ITempoState {
             revert InvalidRlpData();
         }
     }
+
 }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, IZoneToken, IZoneInbox, ITempoState } from "./IZone.sol";
+import { Deposit, ITempoState, IZoneInbox, IZoneToken } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
@@ -9,6 +9,7 @@ import { TempoState } from "./TempoState.sol";
 /// @dev Called by sequencer as a system transaction. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -95,10 +96,7 @@ contract ZoneInbox is IZoneInbox {
     ///      Protocol and proof enforce this runs at the start of each block.
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(
-        bytes calldata header,
-        Deposit[] calldata deposits
-    ) external {
+    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external {
         if (msg.sender != sequencer) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
@@ -121,10 +119,8 @@ contract ZoneInbox is IZoneInbox {
 
         // Step 3: Validate against Tempo state
         // Read currentDepositQueueHash from the portal's storage using the new Tempo state
-        bytes32 tempoCurrentHash = _tempoState.readTempoStorageSlot(
-            tempoPortal,
-            CURRENT_DEPOSIT_QUEUE_HASH_SLOT
-        );
+        bytes32 tempoCurrentHash =
+            _tempoState.readTempoStorageSlot(tempoPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
 
         // Our processed hash must match Tempo's current hash for now.
         // TODO: Implement recursive ancestor check in proof or on-chain as a fallback.
@@ -142,4 +138,5 @@ contract ZoneInbox is IZoneInbox {
             currentHash
         );
     }
+
 }

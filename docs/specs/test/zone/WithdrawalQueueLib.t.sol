@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Test } from "forge-std/Test.sol";
-import {
-    WithdrawalQueue,
-    WithdrawalQueueLib,
-    EMPTY_SENTINEL
-} from "../../src/zone/WithdrawalQueueLib.sol";
 import { Withdrawal, WithdrawalQueueTransition } from "../../src/zone/IZone.sol";
+import {
+    EMPTY_SENTINEL,
+    WithdrawalQueue,
+    WithdrawalQueueLib
+} from "../../src/zone/WithdrawalQueueLib.sol";
+import { Test } from "forge-std/Test.sol";
 
 /// @title WithdrawalQueueHarness
 /// @notice Test harness that wraps the library to convert memory to calldata
 contract WithdrawalQueueHarness {
+
     using WithdrawalQueueLib for WithdrawalQueue;
 
     WithdrawalQueue internal queue;
@@ -47,11 +48,13 @@ contract WithdrawalQueueHarness {
     function slots(uint256 index) external view returns (bytes32) {
         return queue.slots[index];
     }
+
 }
 
 /// @title WithdrawalQueueLibTest
 /// @notice Direct tests for WithdrawalQueueLib functionality
 contract WithdrawalQueueLibTest is Test {
+
     WithdrawalQueueHarness internal harness;
 
     address public alice = address(0x200);
@@ -290,7 +293,11 @@ contract WithdrawalQueueLibTest is Test {
         address sender,
         address to,
         uint128 amount
-    ) internal pure returns (Withdrawal memory) {
+    )
+        internal
+        pure
+        returns (Withdrawal memory)
+    {
         return Withdrawal({
             sender: sender,
             to: to,
@@ -302,4 +309,5 @@ contract WithdrawalQueueLibTest is Test {
             callbackData: ""
         });
     }
+
 }
