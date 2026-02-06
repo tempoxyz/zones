@@ -9,6 +9,7 @@ import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 /// @dev Burns zone tokens and stores pending withdrawals. Sequencer calls finalizeWithdrawalBatch()
 ///      at the end of a block to construct withdrawal queue hash on-chain.
 contract ZoneOutbox is IZoneOutbox {
+
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -19,7 +20,7 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
     /// @dev Covers processWithdrawal overhead: queue dequeue, transfer, event emission
-    uint64 public constant WITHDRAWAL_BASE_GAS = 50000;
+    uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -34,7 +35,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
 
-    /// @notice Tempo gas rate (zone token units per gas unit)
+    /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
     ///      Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     uint128 public tempoGasRate;
@@ -165,30 +166,24 @@ contract ZoneOutbox is IZoneOutbox {
         gasToken.burn(address(this), totalBurn);
 
         // Store withdrawal in pending array
-        _pendingWithdrawals.push(Withdrawal({
-            sender: msg.sender,
-            to: to,
-            amount: amount,
-            fee: fee,
-            memo: memo,
-            gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
-            callbackData: data
-        }));
+        _pendingWithdrawals.push(
+            Withdrawal({
+                sender: msg.sender,
+                to: to,
+                amount: amount,
+                fee: fee,
+                memo: memo,
+                gasLimit: gasLimit,
+                fallbackRecipient: fallbackRecipient,
+                callbackData: data
+            })
+        );
 
         // Emit event for observability
         uint64 index = nextWithdrawalIndex++;
 
         emit WithdrawalRequested(
-            index,
-            msg.sender,
-            to,
-            amount,
-            fee,
-            memo,
-            gasLimit,
-            fallbackRecipient,
-            data
+            index, msg.sender, to, amount, fee, memo, gasLimit, fallbackRecipient, data
         );
     }
 
@@ -204,7 +199,10 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Emits BatchFinalized for observability (proof reads from state).
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
+    function finalizeWithdrawalBatch(uint256 count)
+        external
+        returns (bytes32 withdrawalQueueHash)
+    {
         if (msg.sender != sequencer) revert OnlySequencer();
 
         uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
@@ -223,12 +221,14 @@ contract ZoneOutbox is IZoneOutbox {
             uint256 start = _pendingWithdrawalsHead;
             uint256 end = start + count;
 
-            for (uint256 i = end; i > start; ) {
+            for (uint256 i = end; i > start;) {
                 uint256 index = i - 1;
                 Withdrawal memory w = _pendingWithdrawals[index];
                 withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
                 delete _pendingWithdrawals[index];
-                unchecked { i--; }
+                unchecked {
+                    i--;
+                }
             }
 
             _pendingWithdrawalsHead = end;
@@ -250,10 +250,7 @@ contract ZoneOutbox is IZoneOutbox {
         });
 
         // Emit event for observability (proof reads from state, not events)
-        emit BatchFinalized(
-            withdrawalQueueHash,
-            currentWithdrawalBatchIndex
-        );
+        emit BatchFinalized(withdrawalQueueHash, currentWithdrawalBatchIndex);
     }
 
     /// @notice Number of pending withdrawals
@@ -268,4 +265,5 @@ contract ZoneOutbox is IZoneOutbox {
     function lastBatch() external view returns (LastBatch memory) {
         return _lastBatch;
     }
+
 }

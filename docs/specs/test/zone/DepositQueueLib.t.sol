@@ -18,7 +18,10 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_singleDeposit() public pure {
         Deposit memory d = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("memo")
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("memo")
         });
 
         bytes32 newHash = DepositQueueLib.enqueue(bytes32(0), d);
@@ -29,13 +32,22 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_multipleDeposits() public pure {
         Deposit memory d1 = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("d1")
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("d1")
         });
         Deposit memory d2 = Deposit({
-            sender: address(0x300), to: address(0x200), amount: 200e6, memo: bytes32("d2")
+            sender: address(0x300),
+            to: address(0x200),
+            amount: 200e6,
+            memo: bytes32("d2")
         });
         Deposit memory d3 = Deposit({
-            sender: address(0x200), to: address(0x200), amount: 300e6, memo: bytes32("d3")
+            sender: address(0x200),
+            to: address(0x200),
+            amount: 300e6,
+            memo: bytes32("d3")
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -55,10 +67,16 @@ contract DepositQueueLibTest is Test {
     function test_enqueue_hashChainStructure() public pure {
         // Verify that newer deposits wrap older ones
         Deposit memory d1 = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("first")
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("first")
         });
         Deposit memory d2 = Deposit({
-            sender: address(0x300), to: address(0x200), amount: 200e6, memo: bytes32("second")
+            sender: address(0x300),
+            to: address(0x200),
+            amount: 200e6,
+            memo: bytes32("second")
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -81,14 +99,17 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_differentInputsProduceDifferentHashes() public pure {
         Deposit memory d1 = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("memo1")
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("memo1")
         });
         Deposit memory d2 = Deposit({
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
             memo: bytes32("memo2") // Only memo differs
-        });
+         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
         bytes32 h2 = DepositQueueLib.enqueue(bytes32(0), d2);
@@ -98,7 +119,10 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_sameDepositDifferentPrevHashProducesDifferentResult() public pure {
         Deposit memory d = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("memo")
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("memo")
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d);
