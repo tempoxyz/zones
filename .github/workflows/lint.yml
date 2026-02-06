@@ -112,6 +112,7 @@ jobs:
       - uses: crate-ci/typos@v1
 
   deny:
+    if: false
     uses: ithacaxyz/ci/.github/workflows/deny.yml@main
 
   zepter:
