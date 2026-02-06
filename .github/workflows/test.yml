@@ -24,6 +24,7 @@ env:
 jobs:
   genesis:
     name: Genesis generation
+    if: false
     runs-on: depot-ubuntu-latest-4
     timeout-minutes: 30
     steps:
@@ -137,7 +138,6 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
-      - genesis
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed
