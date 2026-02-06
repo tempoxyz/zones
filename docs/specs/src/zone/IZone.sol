@@ -4,11 +4,13 @@ pragma solidity ^0.8.13;
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneToken {
+
     function mint(address to, uint256 amount) external;
     function burn(address from, uint256 amount) external;
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
+
 }
 
 /// @notice Common types for the Zone protocol
@@ -43,15 +45,15 @@ struct BlockTransition {
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
 ///      that nextProcessedHash matches currentDepositQueueHash for now. TODO: allow ancestor checks.
 struct DepositQueueTransition {
-    bytes32 prevProcessedHash;     // where proof starts (verified against zone state)
-    bytes32 nextProcessedHash;     // where zone processed up to (proof output)
+    bytes32 prevProcessedHash; // where proof starts (verified against zone state)
+    bytes32 nextProcessedHash; // where zone processed up to (proof output)
 }
 
 /// @notice Withdrawal queue transition for batch proofs
 /// @dev Each batch gets its own slot in an unbounded buffer.
 ///      The withdrawalQueueHash is the hash chain of withdrawals for this batch.
 struct WithdrawalQueueTransition {
-    bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
+    bytes32 withdrawalQueueHash; // hash chain of withdrawals for this batch (0 if none)
 }
 
 struct Deposit {
@@ -62,19 +64,20 @@ struct Deposit {
 }
 
 struct Withdrawal {
-    address sender;             // who initiated the withdrawal on the zone
-    address to;                 // Tempo recipient
-    uint128 amount;             // amount to send to recipient (excludes fee)
-    uint128 fee;                // processing fee for sequencer (calculated at request time)
-    bytes32 memo;               // user-provided context
-    uint64 gasLimit;            // max gas for IWithdrawalReceiver callback (0 = no callback)
-    address fallbackRecipient;  // zone address for bounce-back if call fails
-    bytes callbackData;         // calldata for IWithdrawalReceiver (if gasLimit > 0)
+    address sender; // who initiated the withdrawal on the zone
+    address to; // Tempo recipient
+    uint128 amount; // amount to send to recipient (excludes fee)
+    uint128 fee; // processing fee for sequencer (calculated at request time)
+    bytes32 memo; // user-provided context
+    uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
+    address fallbackRecipient; // zone address for bounce-back if call fails
+    bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
 }
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
+
     /// @notice Verify a batch proof
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
@@ -103,11 +106,13 @@ interface IVerifier {
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external view returns (bool);
+
 }
 
 /// @title IZoneFactory
 /// @notice Interface for creating zones
 interface IZoneFactory {
+
     struct CreateZoneParams {
         address token;
         address sequencer;
@@ -131,15 +136,19 @@ interface IZoneFactory {
     error InvalidSequencer();
     error InvalidVerifier();
 
-    function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
+    function createZone(CreateZoneParams calldata params)
+        external
+        returns (uint64 zoneId, address portal);
     function zoneCount() external view returns (uint64);
     function zones(uint64 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
+
 }
 
 /// @title IZonePortal
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
+
     event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
@@ -156,11 +165,7 @@ interface IZonePortal {
         bytes32 withdrawalQueueHash
     );
 
-    event WithdrawalProcessed(
-        address indexed to,
-        uint128 amount,
-        bool callbackSuccess
-    );
+    event WithdrawalProcessed(address indexed to, uint128 amount, bool callbackSuccess);
 
     event BounceBack(
         bytes32 indexed newCurrentDepositQueueHash,
@@ -168,7 +173,9 @@ interface IZonePortal {
         uint128 amount
     );
 
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferStarted(
+        address indexed currentSequencer, address indexed pendingSequencer
+    );
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
@@ -217,7 +224,9 @@ interface IZonePortal {
     /// @notice Calculate the fee for a deposit
     function calculateDepositFee() external view returns (uint128 fee);
 
-    function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
+    function deposit(address to, uint128 amount, bytes32 memo)
+        external
+        returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
         uint64 tempoBlockNumber,
@@ -227,11 +236,13 @@ interface IZonePortal {
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external;
+
 }
 
 /// @title IZoneMessenger
 /// @notice Interface for zone messenger on Tempo (handles withdrawal callbacks)
 interface IZoneMessenger {
+
     /// @notice Returns the zone's portal address
     function portal() external view returns (address);
 
@@ -257,16 +268,17 @@ interface IZoneMessenger {
         uint64 gasLimit,
         bytes calldata data
     ) external;
+
 }
 
 /// @title IWithdrawalReceiver
 /// @notice Interface for contracts that receive withdrawals with callbacks
 interface IWithdrawalReceiver {
-    function onWithdrawalReceived(
-        address sender,
-        uint128 amount,
-        bytes calldata callbackData
-    ) external returns (bytes4);
+
+    function onWithdrawalReceived(address sender, uint128 amount, bytes calldata callbackData)
+        external
+        returns (bytes4);
+
 }
 
 /// @notice Withdrawal batch parameters stored in state for proof access
@@ -281,8 +293,13 @@ struct LastBatch {
 /// @notice Interface for zone-side Tempo state verification predeploy
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
 interface ITempoState {
-    event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+
+    event TempoBlockFinalized(
+        bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot
+    );
+    event SequencerTransferStarted(
+        address indexed currentSequencer, address indexed pendingSequencer
+    );
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     error OnlySequencer();
@@ -332,12 +349,17 @@ interface ITempoState {
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
-    function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
+    function readTempoStorageSlots(address account, bytes32[] calldata slots)
+        external
+        view
+        returns (bytes32[] memory);
+
 }
 
 /// @title IZoneInbox
 /// @notice Interface for zone-side system contract that advances Tempo state and processes deposits
 interface IZoneInbox {
+
     event TempoAdvanced(
         bytes32 indexed tempoBlockHash,
         uint64 indexed tempoBlockNumber,
@@ -353,7 +375,9 @@ interface IZoneInbox {
         bytes32 memo
     );
 
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferStarted(
+        address indexed currentSequencer, address indexed pendingSequencer
+    );
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     error OnlySequencer();
@@ -392,11 +416,13 @@ interface IZoneInbox {
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
     function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;
+
 }
 
 /// @title IZoneOutbox
 /// @notice Interface for zone outbox on the zone
 interface IZoneOutbox {
+
     /// @notice Maximum callback data size (1KB)
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
 
@@ -416,12 +442,11 @@ interface IZoneOutbox {
 
     /// @notice Emitted when sequencer finalizes a batch at end of block
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
-    event BatchFinalized(
-        bytes32 indexed withdrawalQueueHash,
-        uint64 withdrawalBatchIndex
-    );
+    event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
 
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferStarted(
+        address indexed currentSequencer, address indexed pendingSequencer
+    );
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     /// @notice The zone token (same as Tempo portal's token)
@@ -480,5 +505,8 @@ interface IZoneOutbox {
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+    function finalizeWithdrawalBatch(uint256 count)
+        external
+        returns (bytes32 withdrawalQueueHash);
+
 }

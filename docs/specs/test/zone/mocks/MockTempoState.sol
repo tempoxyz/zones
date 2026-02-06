@@ -5,6 +5,7 @@ pragma solidity ^0.8.13;
 /// @notice Mock TempoState for testing ZoneInbox
 /// @dev Allows setting storage slot values and simulates finalizeTempo
 contract MockTempoState {
+
     address public immutable sequencer;
 
     // Core fields (matching real TempoState)
@@ -45,7 +46,7 @@ contract MockTempoState {
 
     /// @notice Mock finalizeTempo - just advances block number
     /// @dev No sequencer check here - ZoneInbox already validates the caller
-    function finalizeTempo(bytes calldata /* header */) external {
+    function finalizeTempo(bytes calldata /* header */ ) external {
         tempoBlockNumber++;
         tempoBlockHash = keccak256(abi.encode(tempoBlockHash, tempoBlockNumber));
     }
@@ -54,4 +55,5 @@ contract MockTempoState {
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32) {
         return mockStorageValues[account][slot];
     }
+
 }

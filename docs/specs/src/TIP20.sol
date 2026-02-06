@@ -187,7 +187,10 @@ contract TIP20 is ITIP20, TIP20RolesAuth {
         emit BurnBlocked(from, amount);
     }
 
-    function mintWithMemo(address to, uint256 amount, bytes32 memo) external onlyRole(ISSUER_ROLE) {
+    function mintWithMemo(address to, uint256 amount, bytes32 memo)
+        external
+        onlyRole(ISSUER_ROLE)
+    {
         _mint(to, amount);
         emit TransferWithMemo(address(0), to, amount, memo);
         emit Mint(to, amount);
@@ -536,4 +539,4 @@ contract TIP20 is ITIP20, TIP20RolesAuth {
         }
     }
 
-    }
+}

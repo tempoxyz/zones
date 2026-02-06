@@ -2,23 +2,25 @@
 pragma solidity ^0.8.13;
 
 import { ITIP20 } from "../interfaces/ITIP20.sol";
+
+import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
+import { DepositQueueLib } from "./DepositQueueLib.sol";
 import {
-    IZonePortal,
-    IZoneMessenger,
-    IVerifier,
-    Deposit,
-    Withdrawal,
     BlockTransition,
+    Deposit,
     DepositQueueTransition,
+    IVerifier,
+    IZoneMessenger,
+    IZonePortal,
+    Withdrawal,
     WithdrawalQueueTransition
 } from "./IZone.sol";
-import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
-import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows zone tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
+
     using WithdrawalQueueLib for WithdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
@@ -29,7 +31,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
     ///      This provides a stable pricing basis for deposits while allowing sequencer
     ///      flexibility to adjust the zoneGasRate based on operational costs.
-    uint64 public constant FIXED_DEPOSIT_GAS = 100000;
+    uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -173,7 +175,10 @@ contract ZonePortal is IZonePortal {
     /// @param amount Total amount to deposit (fee will be deducted)
     /// @param memo User-provided context
     /// @return newCurrentDepositQueueHash The new deposit queue hash after this deposit
-    function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash) {
+    function deposit(address to, uint128 amount, bytes32 memo)
+        external
+        returns (bytes32 newCurrentDepositQueueHash)
+    {
         // Calculate deposit fee
         uint128 fee = calculateDepositFee();
         if (amount <= fee) revert DepositTooSmall();
@@ -189,25 +194,14 @@ contract ZonePortal is IZonePortal {
         }
 
         // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
-        Deposit memory depositData = Deposit({
-            sender: msg.sender,
-            to: to,
-            amount: netAmount,
-            memo: memo
-        });
+        Deposit memory depositData =
+            Deposit({ sender: msg.sender, to: to, amount: netAmount, memo: memo });
 
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
-        emit DepositMade(
-            newCurrentDepositQueueHash,
-            msg.sender,
-            to,
-            netAmount,
-            fee,
-            memo
-        );
+        emit DepositMade(newCurrentDepositQueueHash, msg.sender, to, netAmount, fee, memo);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -217,7 +211,10 @@ contract ZonePortal is IZonePortal {
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
     /// @dev Fee is always paid to sequencer regardless of success/failure.
     ///      On failure, only the amount (not fee) is bounced back.
-    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external onlySequencer {
+    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue)
+        external
+        onlySequencer
+    {
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
@@ -271,7 +268,8 @@ contract ZonePortal is IZonePortal {
             memo: bytes32(0)
         });
 
-        bytes32 newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
+        bytes32 newCurrentDepositQueueHash =
+            DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
         emit BounceBack(newCurrentDepositQueueHash, fallbackRecipient, amount);
@@ -305,7 +303,7 @@ contract ZonePortal is IZonePortal {
         bool valid = IVerifier(verifier).verify(
             tempoBlockNumber,
             tempoBlockHash,
-            withdrawalBatchIndex + 1,  // expected batch index after this batch
+            withdrawalBatchIndex + 1, // expected batch index after this batch
             sequencer,
             blockTransition,
             depositQueueTransition,
@@ -332,4 +330,5 @@ contract ZonePortal is IZonePortal {
             withdrawalQueueTransition.withdrawalQueueHash
         );
     }
+
 }

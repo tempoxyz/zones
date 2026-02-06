@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { BaseTest } from "../BaseTest.t.sol";
-import { Vm } from "forge-std/Vm.sol";
-import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
-import { ZonePortal } from "../../src/zone/ZonePortal.sol";
-import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
-import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { TIP20 } from "../../src/TIP20.sol";
 import { IZoneFactory, ZoneInfo, ZoneParams } from "../../src/zone/IZone.sol";
+import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
+import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
+import { ZonePortal } from "../../src/zone/ZonePortal.sol";
+import { BaseTest } from "../BaseTest.t.sol";
+
+import { MockVerifier } from "./mocks/MockVerifier.sol";
+import { Vm } from "forge-std/Vm.sol";
 
 /// @title ZoneFactoryTest
 /// @notice Comprehensive tests for ZoneFactory validation and zone creation
 contract ZoneFactoryTest is BaseTest {
+
     ZoneFactory public zoneFactory;
     MockVerifier public verifier;
 
@@ -147,7 +149,12 @@ contract ZoneFactoryTest is BaseTest {
         bool found = false;
         for (uint256 i = 0; i < logs.length; i++) {
             // New event signature includes messenger: ZoneCreated(uint64,address,address,address,address,address,bytes32,bytes32,uint64)
-            if (logs[i].topics[0] == keccak256("ZoneCreated(uint64,address,address,address,address,address,bytes32,bytes32,uint64)")) {
+            if (
+                logs[i].topics[0]
+                    == keccak256(
+                        "ZoneCreated(uint64,address,address,address,address,address,bytes32,bytes32,uint64)"
+                    )
+            ) {
                 found = true;
                 // Verify the indexed zoneId (topic[1])
                 assertEq(uint256(logs[i].topics[1]), uint256(zoneId));
@@ -278,11 +285,14 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.messenger, address(0));
         assertEq(info.token, address(0));
     }
+
 }
 
 /// @notice A minimal contract that is NOT a TIP-20
 contract NotATIP20 {
+
     function notATIP20Function() external pure returns (bool) {
         return true;
     }
+
 }

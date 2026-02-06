@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Test } from "forge-std/Test.sol";
 import { DepositQueueLib } from "../../src/zone/DepositQueueLib.sol";
 import { Deposit } from "../../src/zone/IZone.sol";
+import { Test } from "forge-std/Test.sol";
 
 /// @title DepositQueueLibTest
 /// @notice Direct tests for DepositQueueLib functionality
 contract DepositQueueLibTest is Test {
+
     address public alice = address(0x200);
     address public bob = address(0x300);
 
@@ -87,12 +88,8 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_emptyToEmpty() public pure {
         // An empty deposit struct should still produce a valid hash
-        Deposit memory d = Deposit({
-            sender: address(0),
-            to: address(0),
-            amount: 0,
-            memo: bytes32(0)
-        });
+        Deposit memory d =
+            Deposit({ sender: address(0), to: address(0), amount: 0, memo: bytes32(0) });
 
         bytes32 h = DepositQueueLib.enqueue(bytes32(0), d);
         bytes32 expected = keccak256(abi.encode(d, bytes32(0)));
@@ -112,7 +109,7 @@ contract DepositQueueLibTest is Test {
             to: address(0x300),
             amount: 100e6,
             memo: bytes32("memo2") // Only memo differs
-        });
+         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
         bytes32 h2 = DepositQueueLib.enqueue(bytes32(0), d2);
@@ -133,4 +130,5 @@ contract DepositQueueLibTest is Test {
 
         assertTrue(h1 != h2);
     }
+
 }
