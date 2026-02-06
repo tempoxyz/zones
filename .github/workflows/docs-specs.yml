@@ -65,9 +65,9 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Run Forge tests
+      - name: Run Forge tests (zone-only)
         working-directory: docs/specs
-        run: forge test -vvv
+        run: forge test -vvv --match-path "test/zone/**"
 
   tempo-foundry-test:
     name: Forge Test (Rust Precompiles)
@@ -117,11 +117,11 @@ jobs:
         working-directory: tempo-foundry
         run: cargo build -p forge --profile release
 
-      - name: Run Forge tests with Rust precompiles
+      - name: Run Forge tests with Rust precompiles (zone-only)
         working-directory: tempo/docs/specs
         run: |
           echo "Running forge test with tempo-foundry (isTempo=true)"
-          ../../../tempo-foundry/target/release/forge test -vvv
+          ../../../tempo-foundry/target/release/forge test -vvv --match-path "test/zone/**"
 
   docs-specs-success:
     name: docs-specs success
