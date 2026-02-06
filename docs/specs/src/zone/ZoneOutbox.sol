@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneGasToken, IZoneOutbox, LastBatch, Withdrawal } from "./IZone.sol";
+import { IZoneOutbox, IZoneToken, LastBatch, Withdrawal } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
@@ -23,7 +23,7 @@ contract ZoneOutbox is IZoneOutbox {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice The zone token (TIP-20 at same address as Tempo)
-    IZoneGasToken public immutable gasToken;
+    IZoneToken public immutable gasToken;
 
     /// @notice Current sequencer address
     address public sequencer;
@@ -66,7 +66,7 @@ contract ZoneOutbox is IZoneOutbox {
     //////////////////////////////////////////////////////////////*/
 
     constructor(address _gasToken, address _sequencer) {
-        gasToken = IZoneGasToken(_gasToken);
+        gasToken = IZoneToken(_gasToken);
         sequencer = _sequencer;
     }
 
@@ -196,10 +196,7 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Emits BatchFinalized for observability (proof reads from state).
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count)
-        external
-        returns (bytes32 withdrawalQueueHash)
-    {
+    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
         if (msg.sender != sequencer) revert OnlySequencer();
 
         uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;

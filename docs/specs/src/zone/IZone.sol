@@ -522,8 +522,6 @@ interface IZoneOutbox {
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count)
-        external
-        returns (bytes32 withdrawalQueueHash);
+    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
 
 }

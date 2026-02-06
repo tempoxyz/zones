@@ -251,13 +251,14 @@ contract ZonePortal is IZonePortal {
         }
 
         // Try callback via messenger; revert is treated as failure
-        try IZoneMessenger(messenger).relayMessage(
-            withdrawal.sender,
-            withdrawal.to,
-            withdrawal.amount,
-            withdrawal.gasLimit,
-            withdrawal.callbackData
-        ) {
+        try IZoneMessenger(messenger)
+            .relayMessage(
+                withdrawal.sender,
+                withdrawal.to,
+                withdrawal.amount,
+                withdrawal.gasLimit,
+                withdrawal.callbackData
+            ) {
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
         } catch {
             // Callback failed: bounce back to zone (only amount, not fee)
@@ -269,10 +270,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Enqueue a bounce-back deposit for failed callback
     function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
         Deposit memory depositData = Deposit({
-            sender: address(this),
-            to: fallbackRecipient,
-            amount: amount,
-            memo: bytes32(0)
+            sender: address(this), to: fallbackRecipient, amount: amount, memo: bytes32(0)
         });
 
         bytes32 newCurrentDepositQueueHash =
@@ -310,17 +308,18 @@ contract ZonePortal is IZonePortal {
 
         // Call verifier with tempoBlockHash
         // The proof reads currentDepositQueueHash from Tempo state to validate ancestry
-        bool valid = IVerifier(verifier).verify(
-            tempoBlockNumber,
-            tempoBlockHash,
-            withdrawalBatchIndex + 1, // expected batch index after this batch
-            sequencer,
-            blockTransition,
-            depositQueueTransition,
-            withdrawalQueueTransition,
-            verifierConfig,
-            proof
-        );
+        bool valid = IVerifier(verifier)
+            .verify(
+                tempoBlockNumber,
+                tempoBlockHash,
+                withdrawalBatchIndex + 1, // expected batch index after this batch
+                sequencer,
+                blockTransition,
+                depositQueueTransition,
+                withdrawalQueueTransition,
+                verifierConfig,
+                proof
+            );
         if (!valid) revert InvalidProof();
 
         // Update state

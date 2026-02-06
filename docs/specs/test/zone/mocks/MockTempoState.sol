@@ -46,7 +46,11 @@ contract MockTempoState {
 
     /// @notice Mock finalizeTempo - just advances block number
     /// @dev No sequencer check here - ZoneInbox already validates the caller
-    function finalizeTempo(bytes calldata /* header */ ) external {
+    function finalizeTempo(
+        bytes calldata /* header */
+    )
+        external
+    {
         tempoBlockNumber++;
         tempoBlockHash = keccak256(abi.encode(tempoBlockHash, tempoBlockNumber));
     }

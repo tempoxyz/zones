@@ -386,14 +386,7 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode a uint64 from RLP in memory
-    function _decodeUint64Mem(
-        bytes memory data,
-        uint256 ptr
-    )
-        internal
-        pure
-        returns (uint64 value)
-    {
+    function _decodeUint64Mem(bytes memory data, uint256 ptr) internal pure returns (uint64 value) {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
