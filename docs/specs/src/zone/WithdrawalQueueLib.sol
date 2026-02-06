@@ -18,10 +18,10 @@ bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
 ///      exceeds its previous maximum. This allows the queue to shrink and regrow
 ///      without repeated storage charges.
 struct WithdrawalQueue {
-    uint256 head;     // slot index of oldest unprocessed batch
-    uint256 tail;     // slot index where next batch will write
-    uint256 maxSize;  // maximum queue length ever reached (for gas accounting)
-    mapping(uint256 => bytes32) slots;  // hash chains per batch (EMPTY_SENTINEL = empty)
+    uint256 head; // slot index of oldest unprocessed batch
+    uint256 tail; // slot index where next batch will write
+    uint256 maxSize; // maximum queue length ever reached (for gas accounting)
+    mapping(uint256 => bytes32) slots; // hash chains per batch (EMPTY_SENTINEL = empty)
 }
 
 /// @title WithdrawalQueueLib
@@ -35,6 +35,7 @@ struct WithdrawalQueue {
 ///      - If head == tail, the queue is empty
 ///      - Slots at head contain EMPTY_SENTINEL only after being fully processed
 library WithdrawalQueueLib {
+
     error NoWithdrawalsInQueue();
     error InvalidWithdrawalHash();
 
@@ -43,10 +44,9 @@ library WithdrawalQueueLib {
     ///      the slot at tail, then tail advances.
     /// @param queue The withdrawal queue
     /// @param transition The withdrawal queue transition containing the hash chain
-    function enqueue(
-        WithdrawalQueue storage queue,
-        WithdrawalQueueTransition memory transition
-    ) internal {
+    function enqueue(WithdrawalQueue storage queue, WithdrawalQueueTransition memory transition)
+        internal
+    {
         // If no withdrawals in this batch, nothing to do
         if (transition.withdrawalQueueHash == bytes32(0)) {
             return;
@@ -93,7 +93,8 @@ library WithdrawalQueueLib {
         // Verify this is the head of the current slot
         // Queue structure: oldest withdrawal at outermost layer for O(1) removal
         // The remainingQueue for the last item should be EMPTY_SENTINEL, not 0
-        bytes32 expectedRemainingQueue = remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
+        bytes32 expectedRemainingQueue =
+            remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
         if (keccak256(abi.encode(withdrawal, expectedRemainingQueue)) != currentSlot) {
             revert InvalidWithdrawalHash();
         }
@@ -122,4 +123,5 @@ library WithdrawalQueueLib {
     function length(WithdrawalQueue storage queue) internal view returns (uint256) {
         return queue.tail - queue.head;
     }
+
 }

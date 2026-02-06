@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneOutbox, IZoneGasToken, Withdrawal, LastBatch } from "./IZone.sol";
+import { IZoneGasToken, IZoneOutbox, LastBatch, Withdrawal } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
@@ -9,6 +9,7 @@ import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 /// @dev Burns gas tokens and stores pending withdrawals. Sequencer calls finalizeWithdrawalBatch()
 ///      at the end of a block to construct withdrawal queue hash on-chain.
 contract ZoneOutbox is IZoneOutbox {
+
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -67,10 +68,7 @@ contract ZoneOutbox is IZoneOutbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(
-        address _gasToken,
-        address _sequencer
-    ) {
+    constructor(address _gasToken, address _sequencer) {
         gasToken = IZoneGasToken(_gasToken);
         sequencer = _sequencer;
     }
@@ -163,30 +161,24 @@ contract ZoneOutbox is IZoneOutbox {
         gasToken.burn(address(this), totalBurn);
 
         // Store withdrawal in pending array
-        _pendingWithdrawals.push(Withdrawal({
-            sender: msg.sender,
-            to: to,
-            amount: amount,
-            fee: fee,
-            memo: memo,
-            gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
-            callbackData: data
-        }));
+        _pendingWithdrawals.push(
+            Withdrawal({
+                sender: msg.sender,
+                to: to,
+                amount: amount,
+                fee: fee,
+                memo: memo,
+                gasLimit: gasLimit,
+                fallbackRecipient: fallbackRecipient,
+                callbackData: data
+            })
+        );
 
         // Emit event for observability
         uint64 index = nextWithdrawalIndex++;
 
         emit WithdrawalRequested(
-            index,
-            msg.sender,
-            to,
-            amount,
-            fee,
-            memo,
-            gasLimit,
-            fallbackRecipient,
-            data
+            index, msg.sender, to, amount, fee, memo, gasLimit, fallbackRecipient, data
         );
     }
 
@@ -221,12 +213,14 @@ contract ZoneOutbox is IZoneOutbox {
             uint256 start = _pendingWithdrawalsHead;
             uint256 end = start + count;
 
-            for (uint256 i = end; i > start; ) {
+            for (uint256 i = end; i > start;) {
                 uint256 index = i - 1;
                 Withdrawal memory w = _pendingWithdrawals[index];
                 withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
                 delete _pendingWithdrawals[index];
-                unchecked { i--; }
+                unchecked {
+                    i--;
+                }
             }
 
             _pendingWithdrawalsHead = end;
@@ -248,10 +242,7 @@ contract ZoneOutbox is IZoneOutbox {
         });
 
         // Emit event for observability (proof reads from state, not events)
-        emit BatchFinalized(
-            withdrawalQueueHash,
-            currentWithdrawalBatchIndex
-        );
+        emit BatchFinalized(withdrawalQueueHash, currentWithdrawalBatchIndex);
     }
 
     /// @notice Number of pending withdrawals
@@ -266,4 +257,5 @@ contract ZoneOutbox is IZoneOutbox {
     function lastBatch() external view returns (LastBatch memory) {
         return _lastBatch;
     }
+
 }
