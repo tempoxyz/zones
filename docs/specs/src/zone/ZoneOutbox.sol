@@ -134,7 +134,9 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 gasLimit,
         address fallbackRecipient,
         bytes calldata data
-    ) external {
+    )
+        external
+    {
         // Always require a valid fallback recipient
         if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();

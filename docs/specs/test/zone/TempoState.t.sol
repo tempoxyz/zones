@@ -249,7 +249,11 @@ contract TempoStateTest is Test {
         address beneficiary,
         uint64 number,
         uint64 timestamp
-    ) internal pure returns (bytes memory) {
+    )
+        internal
+        pure
+        returns (bytes memory)
+    {
         // Build inner Ethereum header RLP
         bytes memory innerHeader = _encodeEthereumHeader(
             parentHash, stateRoot, receiptsRoot, transactionsRoot, beneficiary, number, timestamp
@@ -275,7 +279,11 @@ contract TempoStateTest is Test {
         address beneficiary,
         uint64 number,
         uint64 timestamp
-    ) internal pure returns (bytes memory) {
+    )
+        internal
+        pure
+        returns (bytes memory)
+    {
         // Standard Ethereum header fields (in order):
         // 0: parentHash, 1: ommersHash, 2: beneficiary, 3: stateRoot,
         // 4: transactionsRoot, 5: receiptsRoot, 6: logsBloom, 7: difficulty,

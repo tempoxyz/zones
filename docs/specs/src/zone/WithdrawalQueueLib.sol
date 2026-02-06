@@ -44,7 +44,10 @@ library WithdrawalQueueLib {
     ///      the slot at tail, then tail advances.
     /// @param queue The withdrawal queue
     /// @param transition The withdrawal queue transition containing the hash chain
-    function enqueue(WithdrawalQueue storage queue, WithdrawalQueueTransition memory transition)
+    function enqueue(
+        WithdrawalQueue storage queue,
+        WithdrawalQueueTransition memory transition
+    )
         internal
     {
         // If no withdrawals in this batch, nothing to do
@@ -79,7 +82,9 @@ library WithdrawalQueueLib {
         WithdrawalQueue storage queue,
         Withdrawal calldata withdrawal,
         bytes32 remainingQueue
-    ) internal {
+    )
+        internal
+    {
         uint256 head = queue.head;
 
         // Check if queue is empty

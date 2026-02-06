@@ -289,7 +289,11 @@ contract WithdrawalQueueLibTest is Test {
                             HELPER FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    function _makeWithdrawal(address sender, address to, uint128 amount)
+    function _makeWithdrawal(
+        address sender,
+        address to,
+        uint128 amount
+    )
         internal
         pure
         returns (Withdrawal memory)

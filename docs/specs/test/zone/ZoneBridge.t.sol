@@ -37,7 +37,11 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         shouldAccept = _accept;
     }
 
-    function onWithdrawalReceived(address sender, uint128 amount, bytes calldata callbackData)
+    function onWithdrawalReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata callbackData
+    )
         external
         returns (bytes4)
     {
@@ -164,7 +168,12 @@ contract ZoneBridgeTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Simulate sequencer observing a deposit event on Tempo
-    function _sequencerObserveDeposit(address sender, address to, uint128 amount, bytes32 memo)
+    function _sequencerObserveDeposit(
+        address sender,
+        address to,
+        uint128 amount,
+        bytes32 memo
+    )
         internal
         returns (bytes32 newHash)
     {
@@ -221,7 +230,9 @@ contract ZoneBridgeTest is BaseTest {
         uint64 gasLimit,
         address fallbackRecipient,
         bytes memory data
-    ) internal {
+    )
+        internal
+    {
         pendingWithdrawals.push(
             ObservedWithdrawal({
                 index: index,

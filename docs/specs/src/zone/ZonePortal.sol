@@ -175,7 +175,11 @@ contract ZonePortal is IZonePortal {
     /// @param amount Total amount to deposit (fee will be deducted)
     /// @param memo User-provided context
     /// @return newCurrentDepositQueueHash The new deposit queue hash after this deposit
-    function deposit(address to, uint128 amount, bytes32 memo)
+    function deposit(
+        address to,
+        uint128 amount,
+        bytes32 memo
+    )
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
@@ -211,7 +215,10 @@ contract ZonePortal is IZonePortal {
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
     /// @dev Fee is always paid to sequencer regardless of success/failure.
     ///      On failure, only the amount (not fee) is bounced back.
-    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue)
+    function processWithdrawal(
+        Withdrawal calldata withdrawal,
+        bytes32 remainingQueue
+    )
         external
         onlySequencer
     {
@@ -287,7 +294,10 @@ contract ZonePortal is IZonePortal {
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
-    ) external onlySequencer {
+    )
+        external
+        onlySequencer
+    {
         if (blockTransition.prevBlockHash != blockHash) revert InvalidProof();
 
         // Validate tempoBlockNumber is within valid range for history lookup

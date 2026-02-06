@@ -49,7 +49,11 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         shouldRevert = _shouldRevert;
     }
 
-    function onWithdrawalReceived(address sender, uint128 amount, bytes calldata callbackData)
+    function onWithdrawalReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata callbackData
+    )
         external
         returns (bytes4)
     {

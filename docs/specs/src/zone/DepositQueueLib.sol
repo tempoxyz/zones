@@ -15,7 +15,10 @@ library DepositQueueLib {
     /// @param currentHash The current head of the deposit queue
     /// @param depositData The deposit to enqueue
     /// @return newHash The new head of the deposit queue
-    function enqueue(bytes32 currentHash, Deposit memory depositData)
+    function enqueue(
+        bytes32 currentHash,
+        Deposit memory depositData
+    )
         internal
         pure
         returns (bytes32 newHash)

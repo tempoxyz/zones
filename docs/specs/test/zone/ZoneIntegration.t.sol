@@ -30,7 +30,11 @@ contract TrackingReceiver is IWithdrawalReceiver {
     uint256 public totalReceived;
     uint256 public callCount;
 
-    function onWithdrawalReceived(address, uint128 amount, bytes calldata)
+    function onWithdrawalReceived(
+        address,
+        uint128 amount,
+        bytes calldata
+    )
         external
         returns (bytes4)
     {

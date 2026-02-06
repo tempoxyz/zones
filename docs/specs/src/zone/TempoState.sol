@@ -153,7 +153,10 @@ contract TempoState is ITempoState {
     /// @param account The Tempo contract address
     /// @param slots The storage slots to read
     /// @return values The storage values (stub always reverts)
-    function readTempoStorageSlots(address account, bytes32[] calldata slots)
+    function readTempoStorageSlots(
+        address account,
+        bytes32[] calldata slots
+    )
         external
         view
         returns (bytes32[] memory)
@@ -272,7 +275,10 @@ contract TempoState is ITempoState {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Decode an RLP list header from memory
-    function _decodeListHeaderMem(bytes memory data, uint256 ptr)
+    function _decodeListHeaderMem(
+        bytes memory data,
+        uint256 ptr
+    )
         internal
         pure
         returns (uint256 listLen, uint256 offset)
@@ -302,7 +308,10 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Skip an RLP item in memory and return next position
-    function _skipRlpItemMem(bytes memory data, uint256 ptr)
+    function _skipRlpItemMem(
+        bytes memory data,
+        uint256 ptr
+    )
         internal
         pure
         returns (uint256 itemLen, uint256 nextPtr)
@@ -337,7 +346,10 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode a bytes32 from RLP in memory
-    function _decodeBytes32Mem(bytes memory data, uint256 ptr)
+    function _decodeBytes32Mem(
+        bytes memory data,
+        uint256 ptr
+    )
         internal
         pure
         returns (bytes32 value)
@@ -374,7 +386,10 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode a uint64 from RLP in memory
-    function _decodeUint64Mem(bytes memory data, uint256 ptr)
+    function _decodeUint64Mem(
+        bytes memory data,
+        uint256 ptr
+    )
         internal
         pure
         returns (uint64 value)
@@ -401,7 +416,10 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode a uint256 from RLP in memory
-    function _decodeUint256Mem(bytes memory data, uint256 ptr)
+    function _decodeUint256Mem(
+        bytes memory data,
+        uint256 ptr
+    )
         internal
         pure
         returns (uint256 value)
@@ -428,7 +446,10 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode an address from RLP in memory
-    function _decodeAddressMem(bytes memory data, uint256 ptr)
+    function _decodeAddressMem(
+        bytes memory data,
+        uint256 ptr
+    )
         internal
         pure
         returns (address value)

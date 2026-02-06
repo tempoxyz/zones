@@ -102,7 +102,10 @@ contract ZoneFactory is IZoneFactory {
 
     /// @notice Compute the address of a contract deployed with CREATE
     /// @dev address = keccak256(rlp([sender, nonce]))[12:]
-    function _computeCreateAddress(address deployer, uint256 nonce)
+    function _computeCreateAddress(
+        address deployer,
+        uint256 nonce
+    )
         internal
         pure
         returns (address)

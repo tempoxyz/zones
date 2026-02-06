@@ -76,7 +76,10 @@ contract ZoneMessenger is IZoneMessenger {
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    ) external onlyPortal {
+    )
+        external
+        onlyPortal
+    {
         // Atomic transfer + callback via self-call
         this._executeRelay(sender, target, amount, gasLimit, data);
     }
@@ -89,7 +92,9 @@ contract ZoneMessenger is IZoneMessenger {
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    ) external {
+    )
+        external
+    {
         // Only callable via self-call from relayMessage
         if (msg.sender != address(this)) revert OnlyPortal();
 

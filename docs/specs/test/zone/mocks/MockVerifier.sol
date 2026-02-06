@@ -28,7 +28,11 @@ contract MockVerifier is IVerifier {
         WithdrawalQueueTransition calldata,
         bytes calldata, // verifierConfig
         bytes calldata // proof
-    ) external view returns (bool) {
+    )
+        external
+        view
+        returns (bool)
+    {
         return shouldAccept;
     }
 

@@ -105,7 +105,10 @@ interface IVerifier {
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
-    ) external view returns (bool);
+    )
+        external
+        view
+        returns (bool);
 
 }
 
@@ -224,7 +227,11 @@ interface IZonePortal {
     /// @notice Calculate the fee for a deposit
     function calculateDepositFee() external view returns (uint128 fee);
 
-    function deposit(address to, uint128 amount, bytes32 memo)
+    function deposit(
+        address to,
+        uint128 amount,
+        bytes32 memo
+    )
         external
         returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
@@ -235,7 +242,8 @@ interface IZonePortal {
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
-    ) external;
+    )
+        external;
 
 }
 
@@ -267,7 +275,8 @@ interface IZoneMessenger {
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    ) external;
+    )
+        external;
 
 }
 
@@ -275,7 +284,11 @@ interface IZoneMessenger {
 /// @notice Interface for contracts that receive withdrawals with callbacks
 interface IWithdrawalReceiver {
 
-    function onWithdrawalReceived(address sender, uint128 amount, bytes calldata callbackData)
+    function onWithdrawalReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata callbackData
+    )
         external
         returns (bytes4);
 
@@ -349,7 +362,10 @@ interface ITempoState {
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
-    function readTempoStorageSlots(address account, bytes32[] calldata slots)
+    function readTempoStorageSlots(
+        address account,
+        bytes32[] calldata slots
+    )
         external
         view
         returns (bytes32[] memory);
@@ -498,7 +514,8 @@ interface IZoneOutbox {
         uint64 gasLimit,
         address fallbackRecipient,
         bytes calldata data
-    ) external;
+    )
+        external;
 
     /// @notice Finalize batch at end of block - build withdrawal hash and write to state
     /// @dev Only callable by sequencer as system transaction. Required per batch (count may be 0).
