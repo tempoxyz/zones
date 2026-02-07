@@ -109,7 +109,11 @@ interface IVerifier {
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
-    ) external view returns (bool);
+    )
+        external
+        view
+        returns (bool);
+
 }
 
 /// @title IZoneFactory
@@ -227,7 +231,11 @@ interface IZonePortal {
     /// @notice Calculate the fee for a deposit
     function calculateDepositFee() external view returns (uint128 fee);
 
-    function deposit(address to, uint128 amount, bytes32 memo)
+    function deposit(
+        address to,
+        uint128 amount,
+        bytes32 memo
+    )
         external
         returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
@@ -239,7 +247,9 @@ interface IZonePortal {
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
         bytes calldata verifierConfig,
         bytes calldata proof
-    ) external;
+    )
+        external;
+
 }
 
 /// @title IZoneMessenger
@@ -270,15 +280,23 @@ interface IZoneMessenger {
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    ) external;
+    )
+        external;
+
 }
 
 /// @title IWithdrawalReceiver
 /// @notice Interface for contracts that receive withdrawals with callbacks
 interface IWithdrawalReceiver {
-    function onWithdrawalReceived(address sender, uint128 amount, bytes calldata callbackData)
+
+    function onWithdrawalReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata callbackData
+    )
         external
         returns (bytes4);
+
 }
 
 /// @notice Withdrawal batch parameters stored in state for proof access
@@ -349,10 +367,14 @@ interface ITempoState {
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
-    function readTempoStorageSlots(address account, bytes32[] calldata slots)
+    function readTempoStorageSlots(
+        address account,
+        bytes32[] calldata slots
+    )
         external
         view
         returns (bytes32[] memory);
+
 }
 
 /// @title IZoneInbox
@@ -508,8 +530,6 @@ interface IZoneOutbox {
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count)
-        external
-        returns (bytes32 withdrawalQueueHash);
+    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
 
 }

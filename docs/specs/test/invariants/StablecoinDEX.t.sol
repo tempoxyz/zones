@@ -126,7 +126,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint256 tokenRnd,
         bool isBid,
         bool cancel
-    ) public {
+    )
+        public
+    {
         int16 tick = _ticks[tickRnd % _ticks.length];
         address actor = _actors[actorRnd % _actors.length];
         address token = address(_tokens[tokenRnd % _tokens.length]);
@@ -174,7 +176,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint256 tickRnd,
         uint256 tokenRnd,
         bool isBid
-    ) external {
+    )
+        external
+    {
         placeOrder(actorRnd, amount, tickRnd, tokenRnd, isBid, false);
     }
 
@@ -184,7 +188,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint256 tickRnd,
         uint256 tokenRnd,
         bool isBid
-    ) external {
+    )
+        external
+    {
         placeOrder(actorRnd, amount, tickRnd, tokenRnd, isBid, false);
     }
 
@@ -195,7 +201,10 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint128 amount,
         int16 tick,
         bool isBid
-    ) internal view {
+    )
+        internal
+        view
+    {
         IStablecoinDEX.Order memory order = exchange.getOrder(orderId);
         assertEq(order.maker, actor, "TEMPO-DEX2: order maker mismatch");
         assertEq(order.amount, amount, "TEMPO-DEX2: order amount mismatch");
@@ -252,7 +261,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         int16 tick,
         bool isBid,
         uint256 actorBalanceBeforePlace
-    ) internal {
+    )
+        internal
+    {
         if (isBid) {
             _cancelAndVerifyBidRefund(orderId, actor, token, amount, tick, actorBalanceBeforePlace);
         } else {
@@ -279,7 +290,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint128 amount,
         int16 tick,
         uint256 actorBalanceBeforePlace
-    ) internal {
+    )
+        internal
+    {
         uint128 balanceBefore = exchange.balanceOf(actor, address(pathUSD));
         uint256 dexBalanceBefore = pathUSD.balanceOf(address(exchange));
         uint256 actorExternalBefore = pathUSD.balanceOf(actor);
@@ -327,7 +340,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         address token,
         uint128 amount,
         uint256 actorBalanceBeforePlace
-    ) internal {
+    )
+        internal
+    {
         uint128 balanceBefore = exchange.balanceOf(actor, token);
         uint256 dexBalanceBefore = TIP20(token).balanceOf(address(exchange));
         uint256 actorExternalBefore = TIP20(token).balanceOf(actor);
@@ -373,7 +388,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint256 tickRnd,
         uint256 tokenRnd,
         bool isBid
-    ) external {
+    )
+        external
+    {
         int16 tick = _ticks[tickRnd % _ticks.length];
         address actor = _actors[actorRnd % _actors.length];
         TIP20 token = _tokens[tokenRnd % _tokens.length];
@@ -429,7 +446,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         int16 tick,
         int16 flipTick,
         bool isBid
-    ) internal {
+    )
+        internal
+    {
         string memory escrowToken = isBid ? "pathUSD" : tokenSymbol;
         string memory receiveToken = isBid ? tokenSymbol : "pathUSD";
         _log(
@@ -479,7 +498,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint256 tokenInRnd,
         uint256 tokenOutRnd,
         bool amtIn
-    ) external {
+    )
+        external
+    {
         address swapper = _actors[swapperRnd % _actors.length];
         amount = uint128(bound(amount, 100_000_000, 1_000_000_000));
 
@@ -530,7 +551,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint256 blacklistActorRnd,
         uint256 cancellerActorRnd,
         bool forBids
-    ) external {
+    )
+        external
+    {
         address blacklistedActor = _actors[blacklistActorRnd % _actors.length];
         address canceller = _actors[cancellerActorRnd % _actors.length];
 
@@ -827,9 +850,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
                 orderCount++;
                 if (order.isBid) {
                     uint32 price = exchange.tickToPrice(order.tick);
-                    uint256 escrow = (
-                        uint256(order.remaining) * uint256(price) + exchange.PRICE_SCALE() - 1
-                    ) / exchange.PRICE_SCALE();
+                    uint256 escrow =
+                        (uint256(order.remaining) * uint256(price) + exchange.PRICE_SCALE() - 1)
+                            / exchange.PRICE_SCALE();
                     pathUsdEscrowed += escrow;
                 } else {
                     // Find which token this order is for
@@ -857,7 +880,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint128 amount,
         SwapBalanceSnapshot memory before,
         bool skipBalanceCheck
-    ) internal {
+    )
+        internal
+    {
         // TEMPO-DEX16: Quote should match execution TODO: enable when fixed
         uint128 quotedOut;
         try exchange.quoteSwapExactAmountIn(before.tokenIn, before.tokenOut, amount) returns (
@@ -869,8 +894,11 @@ contract StablecoinDEXInvariantTest is BaseTest {
         }
 
         vm.recordLogs();
-        try exchange.swapExactAmountIn(before.tokenIn, before.tokenOut, amount, amount - 100)
-        returns (uint128 amountOut) {
+        try exchange.swapExactAmountIn(
+            before.tokenIn, before.tokenOut, amount, amount - 100
+        ) returns (
+            uint128 amountOut
+        ) {
             _maxDust += _countOrderFilledEvents();
             // TEMPO-DEX4: amountOut >= minAmountOut
             assertTrue(
@@ -913,7 +941,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         uint128 amount,
         SwapBalanceSnapshot memory before,
         bool skipBalanceCheck
-    ) internal {
+    )
+        internal
+    {
         // TEMPO-DEX16: Quote should match execution
         uint128 quotedIn;
         try exchange.quoteSwapExactAmountOut(before.tokenIn, before.tokenOut, amount) returns (
@@ -925,8 +955,11 @@ contract StablecoinDEXInvariantTest is BaseTest {
         }
 
         vm.recordLogs();
-        try exchange.swapExactAmountOut(before.tokenIn, before.tokenOut, amount, amount + 100)
-        returns (uint128 amountIn) {
+        try exchange.swapExactAmountOut(
+            before.tokenIn, before.tokenOut, amount, amount + 100
+        ) returns (
+            uint128 amountIn
+        ) {
             _maxDust += _countOrderFilledEvents();
             // TEMPO-DEX5: amountIn <= maxAmountIn
             assertTrue(
@@ -974,15 +1007,18 @@ contract StablecoinDEXInvariantTest is BaseTest {
         SwapBalanceSnapshot memory before,
         uint128 tokenInSpent,
         uint128 tokenOutReceived
-    ) internal view {
+    )
+        internal
+        view
+    {
         // Calculate total balances (external + internal) after swap
         uint256 tokenInTotalBefore = before.tokenInExternal + before.tokenInInternal;
         uint256 tokenOutTotalBefore = before.tokenOutExternal + before.tokenOutInternal;
 
         uint256 tokenInTotalAfter =
             TIP20(before.tokenIn).balanceOf(swapper) + exchange.balanceOf(swapper, before.tokenIn);
-        uint256 tokenOutTotalAfter =
-            TIP20(before.tokenOut).balanceOf(swapper) + exchange.balanceOf(swapper, before.tokenOut);
+        uint256 tokenOutTotalAfter = TIP20(before.tokenOut).balanceOf(swapper)
+            + exchange.balanceOf(swapper, before.tokenOut);
 
         // Swapper's total tokenIn should decrease by tokenInSpent
         assertEq(
@@ -1075,7 +1111,10 @@ contract StablecoinDEXInvariantTest is BaseTest {
     /// @dev Tests TEMPO-DEX10: prev.next == current and next.prev == current
     /// @param orderId The order ID to verify
     /// @param order The order data
-    function _assertOrderLinkedListConsistency(uint128 orderId, IStablecoinDEX.Order memory order)
+    function _assertOrderLinkedListConsistency(
+        uint128 orderId,
+        IStablecoinDEX.Order memory order
+    )
         internal
         view
     {
@@ -1261,7 +1300,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
         string memory tokenSymbol,
         int16 tick,
         bool isBid
-    ) internal {
+    )
+        internal
+    {
         string memory escrowToken = isBid ? "pathUSD" : tokenSymbol;
         string memory receiveToken = isBid ? tokenSymbol : "pathUSD";
         _log(
@@ -1287,7 +1328,12 @@ contract StablecoinDEXInvariantTest is BaseTest {
     }
 
     /// @dev Helper to log order cancellation to avoid stack too deep
-    function _logCancelOrder(address actor, uint128 orderId, bool isBid, string memory tokenSymbol)
+    function _logCancelOrder(
+        address actor,
+        uint128 orderId,
+        bool isBid,
+        string memory tokenSymbol
+    )
         internal
     {
         string memory refundToken = isBid ? "pathUSD" : tokenSymbol;

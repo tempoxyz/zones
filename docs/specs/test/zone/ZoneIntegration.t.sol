@@ -30,7 +30,11 @@ contract TrackingReceiver is IWithdrawalReceiver {
     uint256 public totalReceived;
     uint256 public callCount;
 
-    function onWithdrawalReceived(address, uint128 amount, bytes calldata)
+    function onWithdrawalReceived(
+        address,
+        uint128 amount,
+        bytes calldata
+    )
         external
         returns (bytes4)
     {
@@ -182,7 +186,9 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            BlockTransition({
+                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
+            }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: d1 }),
             WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
@@ -247,10 +253,11 @@ contract ZoneIntegrationTest is BaseTest {
             uint64(block.number - 1),
             0,
             BlockTransition({
-                prevBlockHash: l1Portal.blockHash(),
-                nextBlockHash: keccak256("state")
+                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("state")
             }),
-            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+                }),
             WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalHash }),
             "",
             ""
@@ -309,8 +316,12 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1") }),
-            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
+            BlockTransition({
+                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+                }),
             WithdrawalQueueTransition({ withdrawalQueueHash: wHash1 }),
             "",
             ""
@@ -328,8 +339,12 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s2") }),
-            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
+            BlockTransition({
+                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s2")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+                }),
             WithdrawalQueueTransition({ withdrawalQueueHash: wHash2 }),
             "",
             ""
@@ -347,8 +362,12 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s3") }),
-            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: depositHash }),
+            BlockTransition({
+                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s3")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+                }),
             WithdrawalQueueTransition({ withdrawalQueueHash: wHash3 }),
             "",
             ""
@@ -458,7 +477,9 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            BlockTransition({
+                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
+            }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: d2 }),
             WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",

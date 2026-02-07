@@ -174,7 +174,11 @@ contract ZonePortal is IZonePortal {
     /// @param amount Total amount to deposit (fee will be deducted)
     /// @param memo User-provided context
     /// @return newCurrentDepositQueueHash The new deposit queue hash after this deposit
-    function deposit(address to, uint128 amount, bytes32 memo)
+    function deposit(
+        address to,
+        uint128 amount,
+        bytes32 memo
+    )
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
@@ -210,7 +214,10 @@ contract ZonePortal is IZonePortal {
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
     /// @dev Fee is always paid to sequencer regardless of success/failure.
     ///      On failure, only the amount (not fee) is bounced back.
-    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue)
+    function processWithdrawal(
+        Withdrawal calldata withdrawal,
+        bytes32 remainingQueue
+    )
         external
         onlySequencer
     {
@@ -243,13 +250,14 @@ contract ZonePortal is IZonePortal {
         }
 
         // Try callback via messenger; revert is treated as failure
-        try IZoneMessenger(messenger).relayMessage(
-            withdrawal.sender,
-            withdrawal.to,
-            withdrawal.amount,
-            withdrawal.gasLimit,
-            withdrawal.callbackData
-        ) {
+        try IZoneMessenger(messenger)
+            .relayMessage(
+                withdrawal.sender,
+                withdrawal.to,
+                withdrawal.amount,
+                withdrawal.gasLimit,
+                withdrawal.callbackData
+            ) {
             emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
         } catch {
             // Callback failed: bounce back to zone (only amount, not fee)
@@ -261,10 +269,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Enqueue a bounce-back deposit for failed callback
     function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
         Deposit memory depositData = Deposit({
-            sender: address(this),
-            to: fallbackRecipient,
-            amount: amount,
-            memo: bytes32(0)
+            sender: address(this), to: fallbackRecipient, amount: amount, memo: bytes32(0)
         });
 
         bytes32 newCurrentDepositQueueHash =
@@ -323,18 +328,19 @@ contract ZonePortal is IZonePortal {
         }
 
         // Verify proof (handles both direct and ancestry modes)
-        bool valid = IVerifier(verifier).verify(
-            tempoBlockNumber,
-            anchorBlockNumber,
-            anchorBlockHash,
-            withdrawalBatchIndex + 1,
-            sequencer,
-            blockTransition,
-            depositQueueTransition,
-            withdrawalQueueTransition,
-            verifierConfig,
-            proof
-        );
+        bool valid = IVerifier(verifier)
+            .verify(
+                tempoBlockNumber,
+                anchorBlockNumber,
+                anchorBlockHash,
+                withdrawalBatchIndex + 1,
+                sequencer,
+                blockTransition,
+                depositQueueTransition,
+                withdrawalQueueTransition,
+                verifierConfig,
+                proof
+            );
         if (!valid) revert InvalidProof();
 
         // Update state

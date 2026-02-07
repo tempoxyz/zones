@@ -199,10 +199,7 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Emits BatchFinalized for observability (proof reads from state).
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count)
-        external
-        returns (bytes32 withdrawalQueueHash)
-    {
+    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
         if (msg.sender != sequencer) revert OnlySequencer();
 
         uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
