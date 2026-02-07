@@ -321,8 +321,8 @@ contract ZonePortal is IZonePortal {
     /// @notice Deposit with encrypted recipient and memo
     /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key.
     ///      Validates that keyIndex is valid (exists and not expired).
-    ///      Fee is NOT charged for encrypted deposits (no amount deduction).
-    /// @param amount Amount to deposit (full amount, no fee deducted)
+    ///      Charges the same deposit fee as regular deposits.
+    /// @param amount Amount to deposit (fee deducted from this amount)
     /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
     /// @param encrypted The encrypted payload (recipient and memo)
     /// @return newCurrentDepositQueueHash The new deposit queue hash
@@ -345,12 +345,19 @@ contract ZonePortal is IZonePortal {
             revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
         }
 
-        // Transfer full amount from sender to this contract (no fee for encrypted deposits)
+        uint128 fee = calculateDepositFee();
+        if (amount <= fee) revert DepositTooSmall();
+        uint128 netAmount = amount - fee;
+
+        // Transfer full amount from sender to this contract
         ITIP20(token).transferFrom(msg.sender, address(this), amount);
+        if (fee > 0) {
+            ITIP20(token).transfer(sequencer, fee);
+        }
 
         // Build encrypted deposit struct
         EncryptedDeposit memory depositData = EncryptedDeposit({
-            sender: msg.sender, amount: amount, keyIndex: keyIndex, encrypted: encrypted
+            sender: msg.sender, amount: netAmount, keyIndex: keyIndex, encrypted: encrypted
         });
 
         // Insert encrypted deposit into queue with type discriminator
@@ -361,7 +368,7 @@ contract ZonePortal is IZonePortal {
         emit EncryptedDepositMade(
             newCurrentDepositQueueHash,
             msg.sender,
-            amount,
+            netAmount,
             keyIndex,
             encrypted.ephemeralPubkeyX,
             encrypted.ephemeralPubkeyYParity

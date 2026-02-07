@@ -53,7 +53,9 @@ contract ZoneInbox is IZoneInbox {
     ///      slot 5: currentDepositQueueHash (bytes32)
     ///      slot 6: lastSyncedTempoBlockNumber (uint64)
     ///      slot 7: zoneGasRate (uint128)
+    ///      slot 8: _encryptionKeys (EncryptionKeyEntry[])
     bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
+    bytes32 internal constant ENCRYPTION_KEYS_SLOT = bytes32(uint256(8));
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -152,6 +154,16 @@ contract ZoneInbox is IZoneInbox {
         okm = _hmacSha256(abi.encodePacked(prk), expandInput);
     }
 
+    function _readEncryptionKey(uint256 keyIndex) internal view returns (bytes32 x, uint8 yParity) {
+        uint256 base = uint256(keccak256(abi.encode(uint256(ENCRYPTION_KEYS_SLOT))));
+        uint256 slotX = base + (keyIndex * 2);
+        uint256 slotMeta = slotX + 1;
+        bytes32 xSlot = _tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotX));
+        if (xSlot == bytes32(0)) revert InvalidSharedSecretProof();
+        bytes32 metaSlot = _tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotMeta));
+        return (xSlot, uint8(uint256(metaSlot) & 0xff));
+    }
+
     /*//////////////////////////////////////////////////////////////
                          SYSTEM TRANSACTION
     //////////////////////////////////////////////////////////////*/
@@ -207,7 +219,11 @@ contract ZoneInbox is IZoneInbox {
                 // This prevents griefing attacks where users encrypt with wrong keys,
                 // without exposing the sequencer's private key to the EVM.
                 // The proof verifies that sharedSecret = privSeq * ephemeralPub without revealing privSeq.
-                // Note: Encryption key validity is already checked on Tempo side in ZonePortal.depositEncrypted()
+                (bytes32 expectedPubX, uint8 expectedYParity) = _readEncryptionKey(ed.keyIndex);
+                if (dec.sequencerPubX != expectedPubX || dec.sequencerPubYParity != expectedYParity)
+                {
+                    revert InvalidSharedSecretProof();
+                }
                 bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY)
                     .verifyProof(
                         ed.encrypted.ephemeralPubkeyX,
