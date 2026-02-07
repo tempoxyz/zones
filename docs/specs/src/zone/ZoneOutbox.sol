@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneOutbox, IZoneToken, LastBatch, Withdrawal } from "./IZone.sol";
+import { IZoneConfig, IZoneOutbox, IZoneToken, LastBatch, Withdrawal } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
@@ -26,14 +26,11 @@ contract ZoneOutbox is IZoneOutbox {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Zone configuration (reads sequencer from L1)
+    IZoneConfig public immutable config;
+
     /// @notice The zone token (TIP-20 at same address as Tempo)
     IZoneToken public immutable gasToken;
-
-    /// @notice Current sequencer address
-    address public sequencer;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
 
     /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
@@ -63,35 +60,17 @@ contract ZoneOutbox is IZoneOutbox {
     error CallbackDataTooLarge();
     error TransferFailed();
     error OnlySequencer();
-    error NotPendingSequencer();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _gasToken, address _sequencer) {
+    constructor(
+        address _config,
+        address _gasToken
+    ) {
+        config = IZoneConfig(_config);
         gasToken = IZoneToken(_gasToken);
-        sequencer = _sequencer;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
-    }
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -104,7 +83,7 @@ contract ZoneOutbox is IZoneOutbox {
     ///      If actual Tempo gas is lower, sequencer keeps the surplus.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        if (msg.sender != config.sequencer()) revert OnlySequencer();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
     }
@@ -200,7 +179,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        if (msg.sender != config.sequencer()) revert OnlySequencer();
 
         uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
 

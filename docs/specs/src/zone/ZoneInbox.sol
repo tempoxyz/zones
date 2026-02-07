@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, ITempoState, IZoneInbox, IZoneToken } from "./IZone.sol";
+import { Deposit, IZoneConfig, IZoneInbox, IZoneToken, ITempoState } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
@@ -14,6 +14,9 @@ contract ZoneInbox is IZoneInbox {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Zone configuration (reads sequencer from L1)
+    IZoneConfig public immutable config;
+
     /// @notice The Tempo portal address (for reading deposit queue hash)
     address public immutable tempoPortal;
 
@@ -22,12 +25,6 @@ contract ZoneInbox is IZoneInbox {
 
     /// @notice The zone token (TIP-20 at same address as Tempo)
     IZoneToken public immutable gasToken;
-
-    /// @notice Current sequencer address
-    address public sequencer;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
 
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
@@ -48,45 +45,21 @@ contract ZoneInbox is IZoneInbox {
     //////////////////////////////////////////////////////////////*/
 
     constructor(
+        address _config,
         address _tempoPortalAddr,
         address _tempoStateAddr,
-        address _gasToken,
-        address _sequencer
+        address _gasToken
     ) {
+        config = IZoneConfig(_config);
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
         gasToken = IZoneToken(_gasToken);
-        sequencer = _sequencer;
     }
 
     /// @notice The TempoState predeploy address
     function tempoState() external view returns (ITempoState) {
         return _tempoState;
     }
-
-    /*//////////////////////////////////////////////////////////////
-                         SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
-    }
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         SYSTEM TRANSACTION
-    //////////////////////////////////////////////////////////////*/
 
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call
     /// @dev This is the main entry point for the sequencer at block start.
@@ -96,8 +69,11 @@ contract ZoneInbox is IZoneInbox {
     ///      Protocol and proof enforce this runs at the start of each block.
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
+    function advanceTempo(
+        bytes calldata header,
+        Deposit[] calldata deposits
+    ) external {
+        if (msg.sender != config.sequencer()) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
         _tempoState.finalizeTempo(header);

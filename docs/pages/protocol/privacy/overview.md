@@ -58,12 +58,12 @@ The factory deploys a `ZonePortal` that escrows the zone token on Tempo. The zon
 
 ### Sequencer transfer
 
-The sequencer can transfer control to a new address via a two-step process:
+The sequencer can transfer control to a new address via a two-step process on **Tempo L1 only**:
 
-1. Current sequencer calls `transferSequencer(newSequencer)` to nominate a new sequencer
-2. New sequencer calls `acceptSequencer()` to accept the transfer
+1. Current sequencer calls `ZonePortal.transferSequencer(newSequencer)` to nominate a new sequencer
+2. New sequencer calls `ZonePortal.acceptSequencer()` to accept the transfer
 
-This applies to all zone contracts: `ZonePortal` (Tempo-side), `ZoneInbox`, `ZoneOutbox`, and `TempoState` (zone-side). The two-step pattern prevents accidental transfers to incorrect addresses.
+**Sequencer management is centralized on L1 (Tempo).** Zone-side system contracts (`ZoneInbox`, `ZoneOutbox`) read the sequencer from L1 via `ZoneConfig`, which queries `TempoState` to get the sequencer address from the finalized `ZonePortal` storage. This eliminates duplicate sequencer management logic and ensures L1 is the single source of truth. The two-step pattern prevents accidental transfers to incorrect addresses.
 
 ## Execution and fees
 
@@ -633,22 +633,44 @@ The receiver must return `IWithdrawalReceiver.onWithdrawalReceived.selector` to 
 
 The zone's zone token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
 
-#### TempoState predeploy
+#### ZoneConfig predeploy
 
-The TempoState predeploy allows zones to verify they have a correct view of Tempo state. It stores the Tempo wrapper fields and selected inner Ethereum header fields, and provides storage reading functionality.
+ZoneConfig is the central zone configuration contract that provides access to zone metadata and reads the sequencer from L1. It is deployed at **0x1c00000000000000000000000000000000000003**.
 
 ```solidity
-// Predeploy address: 0x1c00000000000000000000000000000000000000
-interface ITempoState {
-    event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+interface IZoneConfig {
+    /// @notice Zone token address (TIP-20 at same address as Tempo)
+    function zoneToken() external view returns (address);
 
-    /// @notice Current sequencer address
+    /// @notice L1 ZonePortal address
+    function tempoPortal() external view returns (address);
+
+    /// @notice TempoState predeploy for L1 reads
+    function tempoState() external view returns (ITempoState);
+
+    /// @notice Get current sequencer by reading from L1 ZonePortal
     function sequencer() external view returns (address);
 
-    /// @notice Pending sequencer for two-step transfer
+    /// @notice Get pending sequencer by reading from L1 ZonePortal
     function pendingSequencer() external view returns (address);
+
+    /// @notice Check if an address is the current sequencer
+    function isSequencer(address account) external view returns (bool);
+
+    /// @notice Get zone token as IZoneToken interface
+    function getZoneToken() external view returns (IZoneToken);
+}
+```
+
+ZoneConfig reads the sequencer address from the finalized L1 `ZonePortal` storage via `TempoState.readTempoStorageSlot()`. This makes L1 the **single source of truth** for sequencer management, eliminating duplicate sequencer logic on zone-side contracts. Zone system contracts (`ZoneInbox`, `ZoneOutbox`) reference `ZoneConfig` for sequencer checks.
+
+#### TempoState predeploy
+
+The TempoState predeploy allows zones to verify they have a correct view of Tempo state. It stores the Tempo wrapper fields and selected inner Ethereum header fields, and provides storage reading functionality for system contracts. Deployed at **0x1c00000000000000000000000000000000000000**.
+
+```solidity
+interface ITempoState {
+    event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
 
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     function tempoBlockHash() external view returns (bytes32);
@@ -670,24 +692,19 @@ interface ITempoState {
     function tempoTimestampMillis() external view returns (uint64);
     function tempoPrevRandao() external view returns (bytes32);
 
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external;
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external;
-
-    /// @notice Finalize a Tempo block header. Only callable by sequencer.
-    /// @dev Validates chain continuity (parent hash must match, number must be +1)
+    /// @notice Finalize a Tempo block header. System transaction only.
+    /// @dev Validates chain continuity (parent hash must match, number must be +1).
+    ///      Called by ZoneInbox.advanceTempo(). Executor enforces system-only access.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external;
 
     /// @notice Read a storage slot from a Tempo contract
-    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox).
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
     ///      Used to read ZonePortal and TIP-403 policy state from Tempo.
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
-    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox).
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
     function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
 }
 ```
@@ -698,21 +715,22 @@ The TempoState stores the Tempo wrapper fields and the inner fields needed by th
 
 **How it works:**
 
-1. The sequencer submits Tempo block headers via `finalizeTempo()`, which decodes the RLP header, validates chain continuity, and stores the wrapper fields and selected inner fields.
+1. ZoneInbox calls `finalizeTempo()` at the start of each block, which decodes the RLP header, validates chain continuity, and stores the wrapper fields and selected inner fields.
 2. When submitting a batch, the prover specifies a `tempoBlockNumber` and optionally a `recentTempoBlockNumber`. The portal reads the hash for `anchorBlockNumber` via the EIP-2935 block hash history precompile.
 3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the portal's `anchorBlockHash` in direct mode, or that the parent-hash chain from `tempoBlockNumber` reaches `anchorBlockHash` in ancestry mode.
-4. The `readTempoStorageSlot` functions are **precompile stubs restricted to system contracts only** - actual implementation is in the zone node, validated against `tempoStateRoot`. Only ZoneInbox (0x1c00...0001) and ZoneOutbox (0x1c00...0002) can call these functions. User transactions cannot directly read Tempo state.
+4. The `readTempoStorageSlot` functions are **precompile stubs restricted to system contracts only** - actual implementation is in the zone node, validated against `tempoStateRoot`. Only ZoneInbox (0x1c00...0001), ZoneOutbox (0x1c00...0002), and ZoneConfig (0x1c00...0003) can call these functions. User transactions cannot directly read Tempo state.
 
 **Access restrictions:**
 
-Tempo state reads are restricted to zone system contracts (ZoneInbox, ZoneOutbox) to maintain simplicity and security:
-- **ZoneInbox** reads ZonePortal storage for deposit queue hash and encryption keys
+Tempo state reads are restricted to zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig) to maintain simplicity and security:
+- **ZoneConfig** reads ZonePortal storage for sequencer address (L1 is single source of truth)
+- **ZoneInbox** reads ZonePortal storage for deposit queue hash
 - **ZoneOutbox** may read ZonePortal storage for withdrawal processing
 - **TIP-403 enforcement** is handled by TIP-20 transfers reading policy state indirectly through system contracts
 
 User transactions **cannot** directly read Tempo state. This eliminates the complexity of state subscriptions and per-transaction state declarations while still allowing the zone to maintain its view of critical Tempo state for system operations.
 
-Tempo state staleness depends on how frequently the sequencer calls `finalizeTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
+Tempo state staleness depends on how frequently ZoneInbox calls `finalizeTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
 
 #### TIP-403 registry
 

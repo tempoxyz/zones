@@ -14,12 +14,6 @@ contract TempoState is ITempoState {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Current sequencer address
-    address public sequencer;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
-
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     bytes32 public tempoBlockHash;
 
@@ -75,33 +69,10 @@ contract TempoState is ITempoState {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Initialize with genesis Tempo block
-    /// @param _sequencer The sequencer address
     /// @param _genesisHeader RLP-encoded genesis Tempo header
-    constructor(address _sequencer, bytes memory _genesisHeader) {
-        sequencer = _sequencer;
-
+    constructor(bytes memory _genesisHeader) {
         // Decode and store genesis header
         _decodeAndStoreHeader(_genesisHeader);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
-    }
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -109,12 +80,12 @@ contract TempoState is ITempoState {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Finalize a Tempo block header
-    /// @dev Validates chain continuity (parent hash must match stored hash, number must be +1)
+    /// @dev Validates chain continuity (parent hash must match stored hash, number must be +1).
     ///      The header is RLP-encoded as: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
     ///      where inner is a standard Ethereum header.
+    ///      Called by ZoneInbox.advanceTempo() as a system transaction. Executor enforces system-only access.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
 
         // Store previous values for validation
         bytes32 prevBlockHash = tempoBlockHash;
@@ -138,10 +109,11 @@ contract TempoState is ITempoState {
     /// @dev These contracts need access to read from ZonePortal and TIP-403 on Tempo
     address private constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
     address private constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
+    address private constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
 
     /// @notice Check if caller is a zone system contract
     modifier onlySystemContract() {
-        if (msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX) {
+        if (msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX && msg.sender != ZONE_CONFIG) {
             revert("TempoState: only zone system contracts can read Tempo state");
         }
         _;
