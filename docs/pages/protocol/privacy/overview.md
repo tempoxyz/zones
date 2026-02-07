@@ -1048,7 +1048,7 @@ For privacy-sensitive use cases, users can make **encrypted deposits** where the
 1. Sequencer publishes a secp256k1 encryption public key via `setSequencerEncryptionKey(x, yParity)`
 2. User generates an ephemeral keypair and derives a shared secret via ECDH
 3. User encrypts `(to || memo)` with AES-256-GCM using the derived key
-4. User calls `depositEncrypted(amount, encryptedPayload)` on the portal
+4. User calls `depositEncrypted(amount, keyIndex, encryptedPayload)` on the portal
 
 ```solidity
 /// @notice Encrypted deposit payload
