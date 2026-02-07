@@ -50,6 +50,7 @@ struct DepositQueueTransition {
 /// @notice Withdrawal queue transition for batch proofs
 /// @dev Each batch gets its own slot in an unbounded buffer.
 ///      The withdrawalQueueHash is the hash chain of withdrawals for this batch.
+// **REVIEWTODO: This really doesn't require its own data structure, can just be a bytes32**
 struct WithdrawalQueueTransition {
     bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
 }

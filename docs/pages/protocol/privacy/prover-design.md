@@ -204,7 +204,9 @@ The `BatchStateProof` structure enables efficient proving of potentially thousan
 - Tempo headers are validated by executing `TempoState.finalizeTempo` during the system tx
   in each zone block. The resulting `tempoBlockNumber`, `tempoBlockHash`, and
   `tempoStateRoot` are part of the proven zone state.
+**REVIEWTODO: This says finalizeTempo is called in the system TX. That seems in contradiction to the idea that it is just a transaction by the sequencer, called through advanceTempo**
 - `TempoState.tempoBlockNumber()` at end of batch must equal `public_inputs.tempo_block_number`.
+**REVIEWTODO: It only has to match at the end of the batch. So another way to solve the past batch problem is simply to prove a long enough batch to get back in EIP-2935 range**
 - Each Tempo read is verified against the `tempoStateRoot` currently bound in `TempoState`
   at the time of the read. The precompile must reject reads if the block is not yet bound.
 - For a given zone block, all Tempo reads must use the Tempo block number finalized by that
@@ -311,6 +313,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
             return Err(Error::InconsistentState);
         }
         if !is_last_block && block.finalize_withdrawal_batch_count.is_some() {
+            //**REVIEWTODO: what does this mean, is_some()**
             return Err(Error::InconsistentState);
         }
 
@@ -332,6 +335,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
         prev_header = header;
 
         // Bind the block's Tempo header to the finalized Tempo state number
+        // **REVIEWTODO: What does this mean**
         let expected_tempo_hash = tempo_state
             .block_hash(finalized_tempo_number)
             .ok_or(Error::InvalidProof)?;
@@ -355,6 +359,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
     if tempo_number != witness.public_inputs.tempo_block_number {
         return Err(Error::InconsistentState);
     }
+
 
     Ok(BatchOutput {
         block_transition: BlockTransition {
@@ -418,6 +423,7 @@ fn execute_zone_block(
     // System tx: advance Tempo and process deposits.
     // The TempoState precompile must bind reads during this call to the newly finalized
     // Tempo header, and reject any unbound reads.
+    // **REVIEWTODO: Seems that the current system is built with advanceTempo only being called from here in mind**
     evm.transact_commit(system_tx_advance_tempo(
         &block.tempo_header_rlp,
         &block.deposits,

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+// **REVIEWTODO: This interface is not defined in ZoneInbox.sol**
 import { IZoneGasToken } from "../../../src/zone/ZoneInbox.sol";
 
 /// @title MockZoneGasToken

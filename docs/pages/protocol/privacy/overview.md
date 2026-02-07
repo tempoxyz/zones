@@ -6,7 +6,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 - Create a Tempo-native validium called a zone.
 - Each zone has exactly one permissioned sequencer.
-- Each zone bridges exactly one TIP-20 token, which is also the zone zone token.
+- Each zone bridges exactly one TIP-20 token, which is called the zone token and also serves as the zone's gas token.
 - Settlement uses fast validity proofs or TEE attestations (ZK or TEE). Data availability is fully trusted to the sequencer.
 - Cross-chain operations are Tempo-centric: bridge in (simple deposit), bridge out (with optional callback to receiver contracts for Tempo composability).
 - Verifier is abstracted behind a minimal `IVerifier` interface.
@@ -22,7 +22,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 
 - Tempo: the base chain.
 - Zone: the validium chain anchored to Tempo.
-- Gas token: the zone's only TIP-20, bridged from Tempo.
+- Zone token: the zone's only TIP-20, bridged from Tempo.
 - Portal: the Tempo-side contract that escrows the zone token and finalizes exits.
 - Batch: a sequencer-produced commitment covering one or more zone blocks. The batch **must** end with a single `finalizeWithdrawalBatch()` call in the final block, and intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The sequencer controls batch frequency.
 
@@ -211,6 +211,7 @@ The portal tracks:
 
 ### Hash chain structure
 
+**REVIEWTODO: I think we actually want EMPTY_SENTINEL to be 0x0 so as to clear the storage, since otherwise the queue occupies more and more storage rather than just tail-head slots**
 Each slot contains a hash chain with the **oldest withdrawal at the outermost layer**, making FIFO processing efficient. The innermost element wraps `EMPTY_SENTINEL` (0xffffffff...fff) instead of 0x00 to avoid clearing storage:
 
 ```
@@ -287,7 +288,8 @@ This section defines the functions and interfaces used by the design. The signat
 ### Common types
 
 ```solidity
-/// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
+/// @notice Interface for the zone token (TIP-20 with mint/burn for system)
+// **REVIEWTODO: Interface is not defined in solidity files, this seems incomplete**
 interface IZoneGasToken {
     function mint(address to, uint256 amount) external;
     function burn(address from, uint256 amount) external;
@@ -576,6 +578,7 @@ interface IZoneMessenger {
 }
 ```
 
+**REVIEWTODO: Why do we need to do both? Why is msg.sender == zoneMessenger not enough to verify that it's sent from the L2?**
 The messenger does `token.transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` and call `zoneMessenger.xDomainMessageSender()` to authenticate the L2 origin.
 
 #### Withdrawal receiver
@@ -601,9 +604,9 @@ The receiver must return `IWithdrawalReceiver.onWithdrawalReceived.selector` to 
 
 ### Zone predeploys
 
-#### Zone zone token
+#### Zone token
 
-The zone's zone token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
+The zone token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
 
 #### TempoState predeploy
 
