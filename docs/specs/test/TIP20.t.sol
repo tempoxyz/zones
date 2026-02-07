@@ -333,7 +333,9 @@ contract TIP20Test is BaseTest {
         uint256 allowanceAmount,
         uint256 transferAmount,
         bytes32 memo
-    ) public {
+    )
+        public
+    {
         // Avoid invalid addresses
         vm.assume(spender != address(0) && to != address(0));
         vm.assume((uint160(to) >> 64) != 0x20C000000000000000000000);
@@ -481,8 +483,9 @@ contract TIP20Test is BaseTest {
         // Create a policy that blocks alice
         address[] memory accounts = new address[](1);
         accounts[0] = alice;
-        uint64 blockingPolicy =
-            registry.createPolicyWithAccounts(admin, ITIP403Registry.PolicyType.BLACKLIST, accounts);
+        uint64 blockingPolicy = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, accounts
+        );
 
         vm.prank(admin);
         token.changeTransferPolicyId(blockingPolicy);
@@ -851,8 +854,9 @@ contract TIP20Test is BaseTest {
         // Create a policy that blocks alice
         address[] memory accounts = new address[](1);
         accounts[0] = alice;
-        uint64 blockingPolicy =
-            registry.createPolicyWithAccounts(admin, ITIP403Registry.PolicyType.BLACKLIST, accounts);
+        uint64 blockingPolicy = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, accounts
+        );
 
         // Change to a policy where alice is blocked
         vm.startPrank(admin);
@@ -876,8 +880,9 @@ contract TIP20Test is BaseTest {
         // Create a policy that blocks alice
         address[] memory accounts = new address[](1);
         accounts[0] = alice;
-        uint64 blockingPolicy =
-            registry.createPolicyWithAccounts(admin, ITIP403Registry.PolicyType.BLACKLIST, accounts);
+        uint64 blockingPolicy = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, accounts
+        );
 
         vm.prank(admin);
         token.changeTransferPolicyId(blockingPolicy);
@@ -1049,8 +1054,9 @@ contract TIP20Test is BaseTest {
     }
 
     function testCompleteQuoteTokenUpdateCannotCreateIndirectLoop() public {
-        TIP20 newToken =
-            TIP20(factory.createToken("New Token", "NEW", "USD", token, admin, bytes32("newtoken")));
+        TIP20 newToken = TIP20(
+            factory.createToken("New Token", "NEW", "USD", token, admin, bytes32("newtoken"))
+        );
 
         // Try to set token's quote token to newToken (which would create a loop)
         vm.startPrank(admin);
@@ -1549,7 +1555,9 @@ contract TIP20Test is BaseTest {
         uint256 aliceBalance,
         uint256 bobBalance,
         uint256 rewardAmount
-    ) public {
+    )
+        public
+    {
         // Bound inputs
         aliceBalance = bound(aliceBalance, 1e18, 1000e18);
         bobBalance = bound(bobBalance, 1e18, 1000e18);
@@ -1687,7 +1695,9 @@ contract TIP20Test is BaseTest {
         address to,
         uint256 allowanceAmount,
         uint256 transferAmount
-    ) public {
+    )
+        public
+    {
         vm.assume(spender != address(0) && to != address(0));
         vm.assume((uint160(to) >> 64) != 0x20C000000000000000000000);
         vm.assume(spender != 0x1559c00000000000000000000000000000000000);
@@ -1732,7 +1742,9 @@ contract TIP20Test is BaseTest {
         uint256 amount1,
         uint256 amount2,
         uint256 amount3
-    ) public {
+    )
+        public
+    {
         vm.assume(spender != address(0));
         amount1 = bound(amount1, 0, type(uint128).max);
         amount2 = bound(amount2, 0, type(uint128).max);
@@ -1788,7 +1800,12 @@ contract TIP20Test is BaseTest {
         vm.stopPrank();
     }
 
-    function testFuzz_mintBurnSequence(uint256 mint1, uint256 mint2, uint256 burn1, uint256 mint3)
+    function testFuzz_mintBurnSequence(
+        uint256 mint1,
+        uint256 mint2,
+        uint256 burn1,
+        uint256 mint3
+    )
         public
     {
         mint1 = bound(mint1, 1e18, type(uint128).max / 5);
@@ -1860,7 +1877,9 @@ contract TIP20Test is BaseTest {
         uint256 aliceBalance,
         uint256 bobBalance,
         uint256 rewardAmount
-    ) public {
+    )
+        public
+    {
         aliceBalance = bound(aliceBalance, 1e18, 1000e18);
         bobBalance = bound(bobBalance, 1e18, 1000e18);
         rewardAmount = bound(rewardAmount, 1e18, 500e18);
@@ -1923,7 +1942,9 @@ contract TIP20Test is BaseTest {
         uint256 bobAmount,
         bool aliceOpts,
         bool bobOpts
-    ) public {
+    )
+        public
+    {
         aliceAmount = bound(aliceAmount, 1e18, type(uint128).max / 4);
         bobAmount = bound(bobAmount, 1e18, type(uint128).max / 4);
 
@@ -2249,8 +2270,9 @@ contract TIP20Test is BaseTest {
     function test_ClaimRewards_RevertsIf_UserUnauthorized() public {
         address[] memory accounts = new address[](1);
         accounts[0] = alice;
-        uint64 blacklistPolicy =
-            registry.createPolicyWithAccounts(admin, ITIP403Registry.PolicyType.BLACKLIST, accounts);
+        uint64 blacklistPolicy = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, accounts
+        );
 
         vm.prank(admin);
         token.changeTransferPolicyId(blacklistPolicy);

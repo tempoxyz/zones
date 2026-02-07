@@ -55,9 +55,8 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Zone gas rate (zone token units per gas unit on the zone)
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
-    ///      Deposit fee = DEPOSIT_GAS_ESTIMATE * zoneGasRate
+    ///      Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate
     uint128 public zoneGasRate;
-
     uint64 public withdrawalBatchIndex;
     bytes32 public blockHash;
 
@@ -132,7 +131,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
     ///      If actual zone gas is higher, sequencer covers the difference.
     ///      If actual zone gas is lower, sequencer keeps the surplus.
-    /// @param _zoneGasRate Gas token units per gas unit on the zone
+    /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external onlySequencer {
         zoneGasRate = _zoneGasRate;
         emit ZoneGasRateUpdated(_zoneGasRate);
@@ -285,8 +284,11 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
+    /// @param tempoBlockNumber Block number zone committed to (from zone's TempoState)
+    /// @param recentTempoBlockNumber Optional recent block for ancestry proof (0 = use direct lookup)
     function submitBatch(
         uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -296,23 +298,42 @@ contract ZonePortal is IZonePortal {
         external
         onlySequencer
     {
-        if (blockTransition.prevBlockHash != blockHash) revert InvalidProof();
+        if (blockTransition.prevBlockHash != blockHash) {
+            revert InvalidProof();
+        }
 
-        // Validate tempoBlockNumber is within valid range for history lookup
+        // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
         if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
-        if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
 
-        // Look up the actual Tempo block hash via EIP-2935 history precompile
-        bytes32 tempoBlockHash = IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(tempoBlockNumber);
-        if (tempoBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
+        // Determine anchor block: either tempoBlockNumber (direct) or recentTempoBlockNumber (ancestry)
+        uint64 anchorBlockNumber;
+        bytes32 anchorBlockHash;
 
-        // Call verifier with tempoBlockHash
-        // The proof reads currentDepositQueueHash from Tempo state to validate ancestry
+        if (recentTempoBlockNumber == 0) {
+            // Direct mode: read tempoBlockNumber hash from EIP-2935
+            anchorBlockNumber = tempoBlockNumber;
+            if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
+
+            anchorBlockHash = IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(tempoBlockNumber);
+            if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
+        } else {
+            // Ancestry mode: read recentTempoBlockNumber hash, proof verifies ancestry chain
+            if (recentTempoBlockNumber <= tempoBlockNumber) revert InvalidTempoBlockNumber();
+            if (recentTempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
+
+            anchorBlockNumber = recentTempoBlockNumber;
+            anchorBlockHash =
+                IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(recentTempoBlockNumber);
+            if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
+        }
+
+        // Verify proof (handles both direct and ancestry modes)
         bool valid = IVerifier(verifier)
             .verify(
                 tempoBlockNumber,
-                tempoBlockHash,
-                withdrawalBatchIndex + 1, // expected batch index after this batch
+                anchorBlockNumber,
+                anchorBlockHash,
+                withdrawalBatchIndex + 1,
                 sequencer,
                 blockTransition,
                 depositQueueTransition,

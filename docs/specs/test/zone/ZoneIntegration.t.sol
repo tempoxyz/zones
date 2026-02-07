@@ -185,6 +185,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
+            0,
             BlockTransition({
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
             }),
@@ -250,6 +251,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
+            0,
             BlockTransition({
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("state")
             }),
@@ -313,6 +315,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
+            0,
             BlockTransition({
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
             }),
@@ -335,6 +338,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
+            0,
             BlockTransition({
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s2")
             }),
@@ -357,6 +361,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
+            0,
             BlockTransition({
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s3")
             }),
@@ -471,6 +476,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
             uint64(block.number - 1),
+            0,
             BlockTransition({
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
             }),

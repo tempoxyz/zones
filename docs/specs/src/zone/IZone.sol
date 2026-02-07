@@ -81,23 +81,27 @@ interface IVerifier {
     /// @notice Verify a batch proof
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
-    ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash for tempoBlockNumber
-    ///      3. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
-    ///      4. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
-    ///      5. Zone block beneficiary matches sequencer
-    ///      6. Deposit processing is correct (validated via Tempo state read inside proof)
-    /// @param tempoBlockNumber The Tempo block number for EIP-2935 lookup
-    /// @param tempoBlockHash The Tempo block hash (from EIP-2935)
-    /// @param expectedWithdrawalBatchIndex The expected batch index (portal.withdrawalBatchIndex + 1)
-    /// @param sequencer The registered sequencer address (zone block beneficiary must match)
-    /// @param blockTransition The zone block hash transition
-    /// @param depositQueueTransition The deposit queue processing transition
-    /// @param withdrawalQueueTransition The withdrawal queue hash for this batch
+    ///      2. Zone committed to tempoBlockNumber (via TempoState)
+    ///      3. If anchorBlockNumber == tempoBlockNumber: zone's hash matches anchorBlockHash
+    ///      4. If anchorBlockNumber > tempoBlockNumber: ancestry chain from tempoBlockNumber to anchorBlockNumber
+    ///      5. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
+    ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
+    ///      7. Zone block beneficiary matches sequencer
+    ///      8. Deposit processing is correct (validated via Tempo state read inside proof)
+    /// @param tempoBlockNumber Block zone committed to (from TempoState)
+    /// @param anchorBlockNumber Block whose hash is verified (tempoBlockNumber or recent block)
+    /// @param anchorBlockHash Hash of anchorBlockNumber (from EIP-2935)
+    /// @param expectedWithdrawalBatchIndex Expected batch index (portal.withdrawalBatchIndex + 1)
+    /// @param sequencer Sequencer address (zone block beneficiary must match)
+    /// @param blockTransition Zone block hash transition
+    /// @param depositQueueTransition Deposit queue processing transition
+    /// @param withdrawalQueueTransition Withdrawal queue hash for this batch
     /// @param verifierConfig Opaque payload for verifier (TEE attestation envelope, etc.)
-    /// @param proof The validity proof or TEE attestation
+    /// @param proof Validity proof or TEE attestation
     function verify(
         uint64 tempoBlockNumber,
-        bytes32 tempoBlockHash,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
         address sequencer,
         BlockTransition calldata blockTransition,
@@ -237,6 +241,7 @@ interface IZonePortal {
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
         uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -424,8 +429,8 @@ interface IZoneInbox {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    /// @notice Advance Tempo state and process deposits in a single system transaction.
-    /// @dev This is the main entry point for the sequencer's system transaction.
+    /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
+    /// @dev This is the main entry point for the sequencer at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the deposit queue
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
@@ -441,6 +446,9 @@ interface IZoneOutbox {
 
     /// @notice Maximum callback data size (1KB)
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
+
+    /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
+    function WITHDRAWAL_BASE_GAS() external view returns (uint64);
 
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex,
@@ -475,7 +483,7 @@ interface IZoneOutbox {
     function pendingSequencer() external view returns (address);
 
     /// @notice Tempo gas rate (gas token units per gas unit on Tempo)
-    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
+    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     function tempoGasRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing)
@@ -502,7 +510,7 @@ interface IZoneOutbox {
     function setTempoGasRate(uint128 _tempoGasRate) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
+    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo
@@ -518,7 +526,7 @@ interface IZoneOutbox {
         external;
 
     /// @notice Finalize batch at end of block - build withdrawal hash and write to state
-    /// @dev Only callable by sequencer as system transaction. Required per batch (count may be 0).
+    /// @dev Only callable by sequencer. Required per batch (count may be 0).
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)

@@ -20,7 +20,8 @@ contract MockVerifier is IVerifier {
 
     function verify(
         uint64, // tempoBlockNumber
-        bytes32, // tempoBlockHash
+        uint64, // anchorBlockNumber
+        bytes32, // anchorBlockHash
         uint64, // expectedWithdrawalBatchIndex
         address, // sequencer
         BlockTransition calldata,

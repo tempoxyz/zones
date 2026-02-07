@@ -20,7 +20,6 @@ import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
-
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
@@ -190,7 +189,7 @@ contract ZoneBridgeTest is BaseTest {
         pendingDeposits.push(ObservedDeposit({ deposit: d, newCurrentDepositQueueHash: newHash }));
     }
 
-    /// @notice Simulate sequencer relaying deposits to the zone (system transaction)
+    /// @notice Simulate sequencer relaying deposits to the zone (sequencer-only call)
     function _sequencerRelayDepositsToL2() internal returns (bytes32 newProcessedHash) {
         if (pendingDeposits.length == 0) return l2Inbox.processedDepositQueueHash();
 
@@ -208,7 +207,7 @@ contract ZoneBridgeTest is BaseTest {
             address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, newProcessedHash
         );
 
-        // Process on zone via advanceTempo (sequencer calls as system tx)
+        // Process on zone via advanceTempo (sequencer-only call)
         // Empty header since MockTempoState just advances block number
         vm.prank(admin);
         l2Inbox.advanceTempo("", deposits);
@@ -278,6 +277,7 @@ contract ZoneBridgeTest is BaseTest {
         // Submit to Tempo
         l1Portal.submitBatch(
             uint64(block.number - 1),
+            0,
             BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: l2BlockHash }),
             DepositQueueTransition({
                 prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash
@@ -320,7 +320,7 @@ contract ZoneBridgeTest is BaseTest {
         // === STEP 2: Sequencer observes deposit (simulated event watching) ===
         _sequencerObserveDeposit(alice, alice, depositAmount, bytes32("hello zone"));
 
-        // === STEP 3: Sequencer relays deposit to zone (system transaction) ===
+        // === STEP 3: Sequencer relays deposit to zone (sequencer-only call) ===
         bytes32 newProcessedHash = _sequencerRelayDepositsToL2();
 
         // Verify zone state

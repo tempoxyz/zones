@@ -105,16 +105,17 @@ The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-
 
 Each batch submission includes:
 
-- `tempoBlockNumber` (the Tempo block number for EIP-2935 block hash history verification)
-- `blockTransition` (contains `prevBlockHash` and `nextBlockHash` - the zone block hash transition)
-- `depositQueueTransition` (contains `prevProcessedHash` and `nextProcessedHash` - deposit queue processing)
-- `withdrawalQueueTransition` (contains `withdrawalQueueHash` - hash chain of withdrawals for this batch, or 0 if none)
-- `verifierConfig` (opaque payload forwarded to the verifier for domain separation/attestation needs)
-- `proof` (validity proof or TEE attestation)
+- `tempoBlockNumber` - Block zone committed to (from zone's TempoState)
+- `recentTempoBlockNumber` - Optional recent block for ancestry proof (0 = direct lookup)
+- `blockTransition` - Zone block hash transition (prevBlockHash → nextBlockHash)
+- `depositQueueTransition` - Deposit queue processing (prevProcessedHash → nextProcessedHash)
+- `withdrawalQueueTransition` - Withdrawal queue hash (hash chain for this batch, or 0 if none)
+- `verifierConfig` - Opaque payload for verifier (domain separation/attestation)
+- `proof` - Validity proof or TEE attestation
 
-The portal tracks `withdrawalBatchIndex`, `blockHash` (the last proven batch block), `lastSyncedTempoBlockNumber` (the Tempo block the zone has synced to), `currentDepositQueueHash` (head of deposit queue), and an unbounded buffer for withdrawals with `head`, `tail`, and `maxSize` indices.
+The portal tracks `withdrawalBatchIndex`, `blockHash` (last proven batch block), `lastSyncedTempoBlockNumber` (Tempo block zone synced to), `currentDepositQueueHash` (deposit queue head), and an unbounded buffer for withdrawals.
 
-If `tempoBlockNumber` falls outside the EIP-2935 history window, batch submission must use a recursive proof or checkpointed proof that anchors to a newer block (TODO).
+**Ancestry proofs for historical blocks**: If `tempoBlockNumber` is outside the EIP-2935 window (~8192 blocks), use `recentTempoBlockNumber` to specify a recent block still in EIP-2935. The proof verifies the ancestry chain (via parent hashes) from `tempoBlockNumber` to `recentTempoBlockNumber` inside the ZK proof, avoiding expensive on-chain header verification. This prevents zone bricking after extended downtime.
 
 The portal calls the verifier to validate the batch:
 
@@ -143,14 +144,17 @@ interface IVerifier {
     /// @notice Verify a batch proof
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
-    ///      2. Zone's TempoState.tempoBlockHash() matches tempoBlockHash for tempoBlockNumber
-    ///      3. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
-    ///      4. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
-    ///      5. Zone block beneficiary matches sequencer
-    ///      6. Deposit processing is correct (validated via Tempo state read inside proof)
+    ///      2. Zone committed to tempoBlockNumber (via TempoState)
+    ///      3. If anchorBlockNumber == tempoBlockNumber: zone's hash matches anchorBlockHash
+    ///      4. If anchorBlockNumber > tempoBlockNumber: ancestry chain verified via parent hashes
+    ///      5. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
+    ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
+    ///      7. Zone block beneficiary matches sequencer
+    ///      8. Deposit processing is correct (validated via Tempo state read inside proof)
     function verify(
         uint64 tempoBlockNumber,
-        bytes32 tempoBlockHash,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
         address sequencer,
         BlockTransition calldata blockTransition,
@@ -162,19 +166,41 @@ interface IVerifier {
 }
 ```
 
-The verifier validates that:
-1. The state transition from `prevBlockHash` to `nextBlockHash` is correct (all transactions executed properly).
-2. The zone's `TempoState.tempoBlockHash()` matches the `tempoBlockHash` provided by the portal for `tempoBlockNumber`.
-3. The zone's `TempoState.tempoBlockNumber()` matches `tempoBlockNumber`.
-4. The `ZoneOutbox.lastBatch()` storage contains the correct `withdrawalBatchIndex` and `withdrawalQueueHash`.
-5. Deposit processing is correct: the zone read `currentDepositQueueHash` from Tempo state and processed deposits accordingly.
-6. The zone block `beneficiary` matches the registered sequencer.
+The verifier validates:
+1. State transition from `prevBlockHash` to `nextBlockHash` is correct.
+2. Zone committed to `tempoBlockNumber` via TempoState.
+3. **Direct mode** (`anchorBlockNumber == tempoBlockNumber`): Zone's `tempoBlockHash()` matches `anchorBlockHash`.
+4. **Ancestry mode** (`anchorBlockNumber > tempoBlockNumber`): Proof includes Tempo headers from `tempoBlockNumber + 1` to `anchorBlockNumber` as witness data, verifying the parent hash chain inside the ZK proof. Final hash must equal `anchorBlockHash`.
+5. `ZoneOutbox.lastBatch()` has correct `withdrawalBatchIndex` and `withdrawalQueueHash`.
+6. Deposit processing is correct (zone read `currentDepositQueueHash` from Tempo state).
+7. Zone block `beneficiary` matches sequencer.
 
 The zone has access to Tempo state via the TempoState predeploy, so the proof can read `currentDepositQueueHash` directly from Tempo storage at the proven block. This eliminates the need for an on-chain "ceiling" slot.
 
 `verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
 
 `submitBatch` verifies that `prevBlockHash == blockHash`, then calls the verifier. On success it updates `withdrawalBatchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with `withdrawalBatchIndex`, `nextProcessedDepositQueueHash`, `nextBlockHash`, and `withdrawalQueueHash` for off-chain auditing.
+
+### Ancestry proofs for historical blocks
+
+EIP-2935 provides access to the last ~8192 block hashes. If a zone is inactive for longer than this window, `tempoBlockNumber` rotates out of EIP-2935, preventing batch submission and permanently bricking the zone.
+
+**Solution**: The proof verifies ancestry inside the ZK circuit, avoiding expensive on-chain verification:
+
+1. Portal reads `recentTempoBlockNumber` hash from EIP-2935 (must be recent)
+2. Prover includes Tempo headers from `tempoBlockNumber + 1` to `recentTempoBlockNumber` as witness data
+3. Proof verifies the parent hash chain: each header's parent hash must match the previous header's hash, starting from zone's committed `tempoBlockHash()` and ending at `anchorBlockHash`
+4. Portal verifies the (constant-size) proof against the recent block hash
+
+**Usage constraints**:
+- `recentTempoBlockNumber = 0` → **direct mode**: portal reads `tempoBlockNumber` hash from EIP-2935
+- `recentTempoBlockNumber > tempoBlockNumber` → **ancestry mode**: portal reads `recentTempoBlockNumber` hash, proof verifies parent chain
+- `recentTempoBlockNumber` must be **strictly greater** than `tempoBlockNumber` (passing equal values reverts; use `0` for direct mode)
+- Both `tempoBlockNumber` and `recentTempoBlockNumber` must be `>= genesisTempoBlockNumber`
+
+**Cost**: Proving time increases linearly with the block gap, but verification remains constant. A 15k block gap adds ~15k keccak operations inside the proof but doesn't increase on-chain gas costs beyond the normal verification.
+
+**Note**: This feature changes the `IVerifier.verify()` signature (adds `anchorBlockNumber` parameter). Verifier implementations must be upgraded alongside the portal.
 
 ### Deposit queue
 
@@ -339,7 +365,8 @@ struct Withdrawal {
 interface IVerifier {
     function verify(
         uint64 tempoBlockNumber,
-        bytes32 tempoBlockHash,
+        uint64 anchorBlockNumber,
+        bytes32 anchorBlockHash,
         uint64 expectedWithdrawalBatchIndex,
         address sequencer,
         BlockTransition calldata blockTransition,
@@ -351,7 +378,7 @@ interface IVerifier {
 }
 ```
 
-The verifier receives the `tempoBlockNumber` and `tempoBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), `expectedWithdrawalBatchIndex` (portal's current batch index + 1), `sequencer` (the registered sequencer address), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone's internal Tempo view matches `tempoBlockHash` for `tempoBlockNumber`, that the state transition is valid, that `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`, that the zone block `beneficiary` matches `sequencer`, and that `ZoneOutbox.lastBatch().withdrawalQueueHash` matches `withdrawalQueueTransition.withdrawalQueueHash` (read from state root, not events).
+The verifier receives `tempoBlockNumber`, `anchorBlockNumber`, and `anchorBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), `expectedWithdrawalBatchIndex` (portal's current batch index + 1), `sequencer` (the registered sequencer address), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone committed to `tempoBlockNumber` via TempoState, that the anchor hash is correct (direct or ancestry mode), that the state transition is valid, that `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`, that the zone block `beneficiary` matches `sequencer`, and that `ZoneOutbox.lastBatch().withdrawalQueueHash` matches `withdrawalQueueTransition.withdrawalQueueHash` (read from state root, not events).
 
 ### Queue libraries
 
@@ -533,6 +560,7 @@ interface IZonePortal {
     ///      and adds withdrawals to the queue.
     function submitBatch(
         uint64 tempoBlockNumber,
+        uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
         WithdrawalQueueTransition calldata withdrawalQueueTransition,
@@ -668,8 +696,8 @@ The TempoState stores the Tempo wrapper fields and the inner fields needed by th
 **How it works:**
 
 1. The sequencer submits Tempo block headers via `finalizeTempo()`, which decodes the RLP header, validates chain continuity, and stores the wrapper fields and selected inner fields.
-2. When submitting a batch, the prover specifies a `tempoBlockNumber`. The portal reads the hash via the EIP-2935 block hash history precompile.
-3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the value passed by the portal.
+2. When submitting a batch, the prover specifies a `tempoBlockNumber` and optionally a `recentTempoBlockNumber`. The portal reads the hash for `anchorBlockNumber` via the EIP-2935 block hash history precompile.
+3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the portal's `anchorBlockHash` in direct mode, or that the parent-hash chain from `tempoBlockNumber` reaches `anchorBlockHash` in ancestry mode.
 4. The `readTempoStorageSlot` functions are precompile stubs - actual implementation is in the zone node, validated against `tempoStateRoot`.
 
 Tempo state staleness depends on how frequently the sequencer calls `finalizeTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed during the batch.
@@ -680,7 +708,7 @@ The zone has a `TIP403Registry` contract deployed at the **same address** as Tem
 
 #### Zone inbox
 
-The zone inbox is a system contract that advances Tempo state and processes deposits from Tempo in a single atomic operation. It is called by the sequencer as a **system transaction at the start of each block**.
+The zone inbox is a system contract that advances Tempo state and processes deposits from Tempo in a single atomic operation. It is called by the sequencer at the start of each block.
 
 ```solidity
 interface IZoneInbox {
@@ -726,8 +754,8 @@ interface IZoneInbox {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    /// @notice Advance Tempo state and process deposits in a single system transaction.
-    /// @dev This is the main entry point for the sequencer's system transaction.
+    /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
+    /// @dev This is the main entry point for the sequencer at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the deposit queue
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
@@ -748,7 +776,7 @@ This combined approach ensures Tempo state advancement and deposit processing ar
 
 #### Zone outbox
 
-The zone outbox handles withdrawal requests. Users approve the outbox to spend their zone tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a **batch**, it calls `finalizeWithdrawalBatch(count)` as a system transaction at the end of the **final block** in that batch. This constructs the withdrawal queue hash on-chain and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to storage. Intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The call is required even if there are zero withdrawals (use `count = 0`) so the withdrawal batch index advances. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
+The zone outbox handles withdrawal requests. Users approve the outbox to spend their zone tokens, then call `requestWithdrawal`. The outbox stores pending withdrawals in an array. When the sequencer is ready to finalize a **batch**, it calls `finalizeWithdrawalBatch(count)` at the end of the **final block** in that batch. This constructs the withdrawal queue hash on-chain and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to storage. Intermediate blocks **must not** call `finalizeWithdrawalBatch()`. The call is required even if there are zero withdrawals (use `count = 0`) so the withdrawal batch index advances. The event is emitted for observability, but the proof reads from state (via the `lastBatch` storage) rather than parsing event logs.
 
 ```solidity
 /// @notice Withdrawal batch parameters stored in state for proof access
@@ -842,7 +870,7 @@ interface IZoneOutbox {
     ) external;
 
     /// @notice Finalize batch at end of final block - build withdrawal hash and write to state.
-    /// @dev Only callable by sequencer as a system transaction in the final block of a batch.
+    /// @dev Only callable by sequencer in the final block of a batch.
     ///      Must be called exactly once per batch (count may be 0). Writes `withdrawalQueueHash`
     ///      and `withdrawalBatchIndex` to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process (avoids unbounded loops).
@@ -1133,7 +1161,7 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo node. There 
 - **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo, user txs..., finalizeWithdrawalBatch?]`.
 - **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
 - **Receipts root**: Committed in the block hash but not proven on-chain. Batch parameters are read from `lastBatch` state storage instead of event logs.
-- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a system transaction calling `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber`, and the proof must demonstrate the zone's `tempoBlockHash` matches the actual hash from the EIP-2935 history precompile.
+- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a sequencer-only call to `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber` and an `anchorBlockNumber`; the proof must demonstrate the zone committed to `tempoBlockNumber` and that the anchor hash matches either the same block (direct mode) or a verified ancestry chain (ancestry mode) ending at `anchorBlockHash` from the EIP-2935 history precompile.
 
 #### Block header field coverage
 
@@ -1173,7 +1201,7 @@ The portal provides `blockHash` and `withdrawalBatchIndex` as the previous batch
 ### Deposits and withdrawals
 
 - **Deposit contract**: Tempo portal escrows TIP-20 tokens. The ExEx watches `DepositMade` events and queues deposits for zone processing.
-- **Combined system transaction**: Each zone block starts with a system transaction that calls `ZoneInbox.advanceTempo(header, deposits)`. This atomically advances the zone's Tempo view and processes pending deposits, validating the deposit hash against Tempo state.
+- **Combined sequencer call**: Each zone block starts with a sequencer-only call to `ZoneInbox.advanceTempo(header, deposits)`. This atomically advances the zone's Tempo view and processes pending deposits, validating the deposit hash against Tempo state.
 - **Withdrawal requests**: Users trigger withdrawals on the zone via RPC. The withdrawal is added to the pending exits and included in the next batch's exit list.
 
 ### RPC interface

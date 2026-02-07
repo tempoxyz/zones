@@ -97,7 +97,8 @@ interface IAccountKeychain {
         uint64 expiry,
         bool enforceLimits,
         TokenLimit[] calldata limits
-    ) external;
+    )
+        external;
 
     /**
      * @notice Revoke an authorized key
@@ -136,7 +137,11 @@ interface IAccountKeychain {
      * @param token The token address
      * @return Remaining spending amount
      */
-    function getRemainingLimit(address account, address keyId, address token)
+    function getRemainingLimit(
+        address account,
+        address keyId,
+        address token
+    )
         external
         view
         returns (uint256);

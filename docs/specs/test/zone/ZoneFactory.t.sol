@@ -7,7 +7,6 @@ import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
-
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { Vm } from "forge-std/Vm.sol";
 
