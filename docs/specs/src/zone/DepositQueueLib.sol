@@ -18,6 +18,7 @@ library DepositQueueLib {
         bytes32 currentHash,
         Deposit memory depositData
     ) internal pure returns (bytes32 newHash) {
+        // **REVIEWTODO: It only hashes the deposit but does not store on tempo or emit an event. How does the sequencer get the data?
         newHash = keccak256(abi.encode(depositData, currentHash));
     }
 }
