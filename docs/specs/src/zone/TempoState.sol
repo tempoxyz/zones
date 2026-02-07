@@ -131,16 +131,32 @@ contract TempoState is ITempoState {
     }
 
     /*//////////////////////////////////////////////////////////////
-                          STORAGE READING STUBS
+                    TEMPO STORAGE READING (SYSTEM ONLY)
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Zone system contract addresses that are allowed to read Tempo state
+    /// @dev These contracts need access to read from ZonePortal and TIP-403 on Tempo
+    address private constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
+    address private constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
+
+    /// @notice Check if caller is a zone system contract
+    modifier onlySystemContract() {
+        if (msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX) {
+            revert("TempoState: only zone system contracts can read Tempo state");
+        }
+        _;
+    }
+
     /// @notice Read a storage slot from a Tempo contract
-    /// @dev In production, this is a precompile that reads from proven Tempo state.
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox).
+    ///      In production, this is a precompile that reads from proven Tempo state.
+    ///      Used to read ZonePortal state (deposit queue, encryption keys) and TIP-403
+    ///      policy state for the zone token.
     ///      This stub reverts - actual implementation is in the zone node.
-    /// @param account The Tempo contract address
+    /// @param account The Tempo contract address (ZonePortal or TIP-403)
     /// @param slot The storage slot to read
     /// @return value The storage value (stub always reverts)
-    function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32) {
+    function readTempoStorageSlot(address account, bytes32 slot) external view onlySystemContract returns (bytes32) {
         // Silence unused variable warnings
         account;
         slot;
@@ -148,9 +164,10 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Read multiple storage slots from a Tempo contract
-    /// @dev In production, this is a precompile that reads from proven Tempo state.
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox).
+    ///      In production, this is a precompile that reads from proven Tempo state.
     ///      This stub reverts - actual implementation is in the zone node.
-    /// @param account The Tempo contract address
+    /// @param account The Tempo contract address (ZonePortal or TIP-403)
     /// @param slots The storage slots to read
     /// @return values The storage values (stub always reverts)
     function readTempoStorageSlots(
@@ -159,6 +176,7 @@ contract TempoState is ITempoState {
     )
         external
         view
+        onlySystemContract
         returns (bytes32[] memory)
     {
         // Silence unused variable warnings

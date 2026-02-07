@@ -682,9 +682,12 @@ interface ITempoState {
     function finalizeTempo(bytes calldata header) external;
 
     /// @notice Read a storage slot from a Tempo contract
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox).
+    ///      Used to read ZonePortal and TIP-403 policy state from Tempo.
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox).
     function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
 }
 ```
@@ -698,9 +701,18 @@ The TempoState stores the Tempo wrapper fields and the inner fields needed by th
 1. The sequencer submits Tempo block headers via `finalizeTempo()`, which decodes the RLP header, validates chain continuity, and stores the wrapper fields and selected inner fields.
 2. When submitting a batch, the prover specifies a `tempoBlockNumber` and optionally a `recentTempoBlockNumber`. The portal reads the hash for `anchorBlockNumber` via the EIP-2935 block hash history precompile.
 3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the portal's `anchorBlockHash` in direct mode, or that the parent-hash chain from `tempoBlockNumber` reaches `anchorBlockHash` in ancestry mode.
-4. The `readTempoStorageSlot` functions are precompile stubs - actual implementation is in the zone node, validated against `tempoStateRoot`.
+4. The `readTempoStorageSlot` functions are **precompile stubs restricted to system contracts only** - actual implementation is in the zone node, validated against `tempoStateRoot`. Only ZoneInbox (0x1c00...0001) and ZoneOutbox (0x1c00...0002) can call these functions. User transactions cannot directly read Tempo state.
 
-Tempo state staleness depends on how frequently the sequencer calls `finalizeTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed during the batch.
+**Access restrictions:**
+
+Tempo state reads are restricted to zone system contracts (ZoneInbox, ZoneOutbox) to maintain simplicity and security:
+- **ZoneInbox** reads ZonePortal storage for deposit queue hash and encryption keys
+- **ZoneOutbox** may read ZonePortal storage for withdrawal processing
+- **TIP-403 enforcement** is handled by TIP-20 transfers reading policy state indirectly through system contracts
+
+User transactions **cannot** directly read Tempo state. This eliminates the complexity of state subscriptions and per-transaction state declarations while still allowing the zone to maintain its view of critical Tempo state for system operations.
+
+Tempo state staleness depends on how frequently the sequencer calls `finalizeTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
 
 #### TIP-403 registry
 
