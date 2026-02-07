@@ -269,6 +269,40 @@ contract ZonePortal is IZonePortal {
     }
 
     /*//////////////////////////////////////////////////////////////
+                       EPHEMERAL KEY VALIDATION
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice secp256k1 field prime
+    uint256 internal constant SECP256K1_P =
+        0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
+
+    /// @notice (SECP256K1_P - 1) / 2 for Euler's criterion
+    uint256 internal constant SECP256K1_HALF_PM1 =
+        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7FFFFE17;
+
+    /// @notice Validate that an X coordinate corresponds to a valid secp256k1 point
+    /// @dev Uses Euler's criterion via the MODEXP precompile (0x05):
+    ///      x³ + 7 is a quadratic residue mod p iff (x³+7)^((p-1)/2) ≡ 1 (mod p)
+    function _isValidSecp256k1X(bytes32 x) internal view returns (bool) {
+        uint256 px = uint256(x);
+        if (px == 0 || px >= SECP256K1_P) return false;
+
+        // rhs = x³ + 7 mod p
+        uint256 rhs = addmod(mulmod(mulmod(px, px, SECP256K1_P), px, SECP256K1_P), 7, SECP256K1_P);
+
+        // Call MODEXP precompile: rhs^((p-1)/2) mod p
+        // Input format: Bsize(32) || Esize(32) || Msize(32) || B || E || M
+        bytes memory input = abi.encodePacked(
+            uint256(32), uint256(32), uint256(32), rhs, SECP256K1_HALF_PM1, SECP256K1_P
+        );
+
+        (bool success, bytes memory result) = address(0x05).staticcall(input);
+        if (!success || result.length != 32) return false;
+
+        return uint256(bytes32(result)) == 1;
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                DEPOSITS
     //////////////////////////////////////////////////////////////*/
 
@@ -334,6 +368,16 @@ contract ZonePortal is IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
+        // Validate ephemeral public key is a valid secp256k1 point
+        // Prevents griefing: invalid points make Chaum-Pedersen proofs impossible,
+        // which would block chain progress on the zone side.
+        if (
+            encrypted.ephemeralPubkeyYParity != 0x02 && encrypted.ephemeralPubkeyYParity != 0x03
+        ) {
+            revert InvalidEphemeralPubkey();
+        }
+        if (!_isValidSecp256k1X(encrypted.ephemeralPubkeyX)) revert InvalidEphemeralPubkey();
+
         // Validate encryption key
         (bool valid, uint64 expiresAtBlock) = isEncryptionKeyValid(keyIndex);
         if (!valid) {
