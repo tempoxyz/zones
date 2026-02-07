@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { EncryptedDeposit, EncryptedDepositPayload, EncryptionKeyEntry } from "./IZone.sol";
+import { DepositType, EncryptedDeposit, EncryptedDepositPayload, EncryptionKeyEntry } from "./IZone.sol";
 
 /*
 Encrypted Deposit Helpers
@@ -49,10 +49,18 @@ struct DecryptedDeposit {
 /// @dev These are reference implementations - actual encryption happens off-chain
 library EncryptedDepositLib {
 
-    /// @notice Compute the hash of an encrypted deposit for the queue
-    /// @dev Uses the encrypted form, not the decrypted form
-    function hash(EncryptedDeposit memory deposit) internal pure returns (bytes32) {
-        return keccak256(abi.encode(deposit));
+    /// @notice Compute the queue hash for an encrypted deposit
+    /// @dev Matches the queue hash chain format used in DepositQueueLib:
+    ///      keccak256(abi.encode(DepositType.Encrypted, deposit, prevHash))
+    function queueHash(
+        EncryptedDeposit memory deposit,
+        bytes32 prevHash
+    )
+        internal
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode(DepositType.Encrypted, deposit, prevHash));
     }
 
     /// @notice Encode plaintext for encryption
