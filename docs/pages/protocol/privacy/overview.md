@@ -727,17 +727,7 @@ The TempoState stores the Tempo wrapper fields and the inner fields needed by th
 3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the portal's `anchorBlockHash` in direct mode, or that the parent-hash chain from `tempoBlockNumber` reaches `anchorBlockHash` in ancestry mode.
 4. The `readTempoStorageSlot` functions are **precompile stubs restricted to system contracts only** - actual implementation is in the zone node, validated against `tempoStateRoot`. Only ZoneInbox (0x1c00...0001), ZoneOutbox (0x1c00...0002), and ZoneConfig (0x1c00...0003) can call these functions. User transactions cannot directly read Tempo state.
 
-**Access restrictions:**
-
-Tempo state reads are restricted to zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig) to maintain simplicity and security:
-- **ZoneConfig** reads ZonePortal storage for sequencer address (L1 is single source of truth)
-- **ZoneInbox** reads ZonePortal storage for deposit queue hash
-- **ZoneOutbox** may read ZonePortal storage for withdrawal processing
-- **TIP-403 enforcement** is handled by TIP-20 transfers reading policy state indirectly through system contracts
-
-User transactions **cannot** directly read Tempo state. This eliminates the complexity of state subscriptions and per-transaction state declarations while still allowing the zone to maintain its view of critical Tempo state for system operations.
-
-Tempo state staleness depends on how frequently ZoneInbox calls `finalizeTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
+Tempo state staleness depends on how frequently the sequencer updates tempo state using `advanceTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
 
 #### TIP-403 registry
 
