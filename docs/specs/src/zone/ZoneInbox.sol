@@ -6,7 +6,7 @@ import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
-/// @dev Called by sequencer as a system transaction. Combines Tempo header advancement
+/// @dev Called by sequencer. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
 
@@ -88,8 +88,8 @@ contract ZoneInbox is IZoneInbox {
                          SYSTEM TRANSACTION
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Advance Tempo state and process deposits in a single system transaction
-    /// @dev This is the main entry point for the sequencer's system transaction.
+    /// @notice Advance Tempo state and process deposits in a single sequencer-only call
+    /// @dev This is the main entry point for the sequencer at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the deposit queue
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
