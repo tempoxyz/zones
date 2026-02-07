@@ -83,9 +83,11 @@ contract TempoState is ITempoState {
     /// @dev Validates chain continuity (parent hash must match stored hash, number must be +1).
     ///      The header is RLP-encoded as: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
     ///      where inner is a standard Ethereum header.
-    ///      Called by ZoneInbox.advanceTempo() as a system transaction. Executor enforces system-only access.
+    ///      Only callable by ZoneInbox. Protocol enforces ZoneInbox.advanceTempo() runs as system transaction.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external {
+        // Only ZoneInbox can call this function
+        if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
 
         // Store previous values for validation
         bytes32 prevBlockHash = tempoBlockHash;

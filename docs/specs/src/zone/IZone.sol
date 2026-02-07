@@ -78,6 +78,10 @@ struct Withdrawal {
                     ZONE SYSTEM CONTRACTS
 //////////////////////////////////////////////////////////////*/
 
+/// @notice TempoState predeploy address
+/// @dev Predeploy at 0x1c00000000000000000000000000000000000000
+address constant TEMPO_STATE = 0x1c00000000000000000000000000000000000000;
+
 /// @notice ZoneInbox system contract address
 /// @dev Predeploy at 0x1c00000000000000000000000000000000000001
 address constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
@@ -337,6 +341,7 @@ interface ITempoState {
     error InvalidParentHash();
     error InvalidBlockNumber();
     error InvalidRlpData();
+    error OnlyZoneInbox();
 
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     function tempoBlockHash() external view returns (bytes32);
@@ -358,7 +363,7 @@ interface ITempoState {
     function tempoTimestampMillis() external view returns (uint64);
     function tempoPrevRandao() external view returns (bytes32);
 
-    /// @notice Finalize a Tempo block header. Sequencer-only call via ZoneInbox.
+    /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
     /// @dev Validates chain continuity (parent hash must match, number must be +1).
     ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
     /// @param header RLP-encoded Tempo header
