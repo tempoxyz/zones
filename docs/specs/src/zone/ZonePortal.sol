@@ -371,9 +371,7 @@ contract ZonePortal is IZonePortal {
         // Validate ephemeral public key is a valid secp256k1 point
         // Prevents griefing: invalid points make Chaum-Pedersen proofs impossible,
         // which would block chain progress on the zone side.
-        if (
-            encrypted.ephemeralPubkeyYParity != 0x02 && encrypted.ephemeralPubkeyYParity != 0x03
-        ) {
+        if (encrypted.ephemeralPubkeyYParity != 0x02 && encrypted.ephemeralPubkeyYParity != 0x03) {
             revert InvalidEphemeralPubkey();
         }
         if (!_isValidSecp256k1X(encrypted.ephemeralPubkeyX)) revert InvalidEphemeralPubkey();

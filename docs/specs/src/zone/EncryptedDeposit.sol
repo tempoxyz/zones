@@ -1,7 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { DepositType, EncryptedDeposit, EncryptedDepositPayload, EncryptionKeyEntry } from "./IZone.sol";
+import {
+    DepositType,
+    EncryptedDeposit,
+    EncryptedDepositPayload,
+    EncryptionKeyEntry
+} from "./IZone.sol";
 
 /*
 Encrypted Deposit Helpers

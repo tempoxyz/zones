@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+import { EncryptedDepositLib } from "./EncryptedDeposit.sol";
 import {
     AES_GCM_DECRYPT,
     CHAUM_PEDERSEN_VERIFY,
@@ -16,7 +17,6 @@ import {
     IZoneToken,
     QueuedDeposit
 } from "./IZone.sol";
-import { EncryptedDepositLib } from "./EncryptedDeposit.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
