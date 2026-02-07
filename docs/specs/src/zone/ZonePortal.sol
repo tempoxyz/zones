@@ -404,9 +404,9 @@ contract ZonePortal is IZonePortal {
             sender: msg.sender, amount: netAmount, keyIndex: keyIndex, encrypted: encrypted
         });
 
-        // Insert encrypted deposit into queue with type discriminator
+        // Insert encrypted deposit into queue
         newCurrentDepositQueueHash =
-            keccak256(abi.encode(DepositType.Encrypted, depositData, currentDepositQueueHash));
+            DepositQueueLib.enqueueEncrypted(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
         emit EncryptedDepositMade(
