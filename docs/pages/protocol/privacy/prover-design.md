@@ -133,10 +133,11 @@ Each zone block contains an ordered list of user transactions executed using `re
 calls `ZoneInbox.advanceTempo` at the start of the block to advance Tempo state and process deposits,
 and (only in the final block of a batch) calls `ZoneOutbox.finalizeWithdrawalBatch` at the end.
 
-User transactions may call the `TempoState` precompile to read Tempo state. User transactions
-**must not** call `ZoneInbox` or `ZoneOutbox`; those are sequencer-only predeploys. The executor
-must reject any non-sequencer call to these addresses and enforce that `finalize_withdrawal_batch_count`
-is set at most once, only in the final block, and only after all user transactions.
+User transactions **must not** call the system contract predeploys
+(`TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`). The executor must reject any
+non-sequencer call to these addresses, enforce one `advanceTempo` at the start of each block,
+and enforce `finalizeWithdrawalBatch` only in the final block of the batch. Tempo state reads
+via `TempoState` are restricted to system contracts only.
 The block hash is computed from the simplified zone header:
 `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`.
 The transactions and receipts roots are computed over the full ordered list of zone transactions.

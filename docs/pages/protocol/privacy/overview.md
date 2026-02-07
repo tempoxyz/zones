@@ -629,6 +629,13 @@ The receiver must return `IWithdrawalReceiver.onWithdrawalReceived.selector` to 
 
 ### Zone predeploys
 
+Zones have four system contract predeploys at fixed addresses:
+
+- **TempoState** (0x1c00000000000000000000000000000000000000) - Stores finalized Tempo state and provides storage read access
+- **ZoneInbox** (0x1c00000000000000000000000000000000000001) - Advances Tempo state and processes deposits
+- **ZoneOutbox** (0x1c00000000000000000000000000000000000002) - Handles withdrawal requests back to Tempo
+- **ZoneConfig** (0x1c00000000000000000000000000000000000003) - Central configuration that reads sequencer from L1
+
 #### Zone zone token
 
 The zone's zone token is the bridged TIP-20 from Tempo. It is deployed at the **same address** on the zone as on Tempo. Users interact with it via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints tokens when processing deposits and burns them when withdrawals are requested.
