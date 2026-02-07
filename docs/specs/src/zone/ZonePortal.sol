@@ -6,18 +6,18 @@ import { ITIP20 } from "../interfaces/ITIP20.sol";
 import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import {
-    IZonePortal,
-    IZoneMessenger,
-    IVerifier,
     BlockTransition,
     Deposit,
+    DepositQueueTransition,
+    DepositType,
+    ENCRYPTION_KEY_GRACE_PERIOD,
     EncryptedDeposit,
     EncryptedDepositPayload,
-    DepositType,
-    QueuedDeposit,
     EncryptionKeyEntry,
-    ENCRYPTION_KEY_GRACE_PERIOD,
-    DepositQueueTransition,
+    IVerifier,
+    IZoneMessenger,
+    IZonePortal,
+    QueuedDeposit,
     Withdrawal,
     WithdrawalQueueTransition
 } from "./IZone.sol";
@@ -54,6 +54,9 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
+
+    /// @notice Sequencer public key (legacy field for compatibility)
+    bytes32 public sequencerPubkey;
 
     /// @notice Historical encryption keys with activation blocks
     /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
@@ -183,11 +186,9 @@ contract ZonePortal is IZonePortal {
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity) external onlySequencer {
         uint64 activationBlock = uint64(block.number);
-        _encryptionKeys.push(EncryptionKeyEntry({
-            x: x,
-            yParity: yParity,
-            activationBlock: activationBlock
-        }));
+        _encryptionKeys.push(
+            EncryptionKeyEntry({ x: x, yParity: yParity, activationBlock: activationBlock })
+        );
         emit SequencerEncryptionKeyUpdated(x, yParity, _encryptionKeys.length - 1, activationBlock);
     }
 
@@ -199,16 +200,57 @@ contract ZonePortal is IZonePortal {
     /// @notice Get a historical encryption key by index
     /// @param index The index in the key history (0 = first key)
     /// @return entry The key entry with activation block
-    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry) {
-        if (index >= _encryptionKeys.length) revert InvalidEncryptionKeyIndex(index);
+    function encryptionKeyAt(uint256 index)
+        external
+        view
+        returns (EncryptionKeyEntry memory entry)
+    {
+        if (index >= _encryptionKeys.length) {
+            revert InvalidEncryptionKeyIndex(index);
+        }
         return _encryptionKeys[index];
+    }
+
+    /// @notice Get the encryption key that was active at a specific Tempo block
+    /// @dev Binary search through key history to find the correct key
+    /// @param tempoBlockNumber The Tempo block number to query
+    /// @return x The X coordinate of the active key
+    /// @return yParity The Y coordinate parity
+    /// @return keyIndex The index of this key in history
+    function encryptionKeyAtBlock(uint64 tempoBlockNumber)
+        external
+        view
+        returns (bytes32 x, uint8 yParity, uint256 keyIndex)
+    {
+        uint256 len = _encryptionKeys.length;
+        if (len == 0 || tempoBlockNumber < _encryptionKeys[0].activationBlock) {
+            revert InvalidEncryptionKeyIndex(0);
+        }
+
+        uint256 low = 0;
+        uint256 high = len - 1;
+        while (low < high) {
+            uint256 mid = (low + high + 1) / 2;
+            if (_encryptionKeys[mid].activationBlock <= tempoBlockNumber) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+
+        EncryptionKeyEntry storage entry = _encryptionKeys[low];
+        return (entry.x, entry.yParity, low);
     }
 
     /// @notice Check if an encryption key is still valid for new deposits
     /// @param keyIndex The key index to check
     /// @return valid True if the key can be used for new deposits
     /// @return expiresAtBlock Block number when this key expires (0 if current key)
-    function isEncryptionKeyValid(uint256 keyIndex) public view returns (bool valid, uint64 expiresAtBlock) {
+    function isEncryptionKeyValid(uint256 keyIndex)
+        public
+        view
+        returns (bool valid, uint64 expiresAtBlock)
+    {
         if (keyIndex >= _encryptionKeys.length) {
             return (false, 0);
         }
@@ -288,7 +330,10 @@ contract ZonePortal is IZonePortal {
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted
-    ) external returns (bytes32 newCurrentDepositQueueHash) {
+    )
+        external
+        returns (bytes32 newCurrentDepositQueueHash)
+    {
         // Validate encryption key
         (bool valid, uint64 expiresAtBlock) = isEncryptionKeyValid(keyIndex);
         if (!valid) {
@@ -305,18 +350,12 @@ contract ZonePortal is IZonePortal {
 
         // Build encrypted deposit struct
         EncryptedDeposit memory depositData = EncryptedDeposit({
-            sender: msg.sender,
-            amount: amount,
-            keyIndex: keyIndex,
-            encrypted: encrypted
+            sender: msg.sender, amount: amount, keyIndex: keyIndex, encrypted: encrypted
         });
 
         // Insert encrypted deposit into queue with type discriminator
-        newCurrentDepositQueueHash = keccak256(abi.encode(
-            DepositType.Encrypted,
-            depositData,
-            currentDepositQueueHash
-        ));
+        newCurrentDepositQueueHash =
+            keccak256(abi.encode(DepositType.Encrypted, depositData, currentDepositQueueHash));
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
         emit EncryptedDepositMade(

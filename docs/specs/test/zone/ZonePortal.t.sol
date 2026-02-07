@@ -9,6 +9,7 @@ import {
     BlockTransition,
     Deposit,
     DepositQueueTransition,
+    DepositType,
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneMessenger,
@@ -1615,7 +1616,8 @@ contract ZonePortalTest is BaseTest {
         // Deposit { sender: portal, to: bob, amount: 500e6, fee: 0, memo: 0 }
         Deposit memory expectedBounceBack =
             Deposit({ sender: address(portal), to: bob, amount: 500e6, memo: bytes32(0) });
-        bytes32 expectedHash = keccak256(abi.encode(expectedBounceBack, depositHashBefore));
+        bytes32 expectedHash =
+            keccak256(abi.encode(DepositType.Regular, expectedBounceBack, depositHashBefore));
         assertEq(newDepositHash, expectedHash);
     }
 
@@ -1689,6 +1691,7 @@ contract ZonePortalTest is BaseTest {
         uint128 netAmount = 500e6 - fee;
         bytes32 expectedHash = keccak256(
             abi.encode(
+                DepositType.Regular,
                 Deposit({ sender: alice, to: bob, amount: netAmount, memo: bytes32("test") }),
                 bytes32(0)
             )

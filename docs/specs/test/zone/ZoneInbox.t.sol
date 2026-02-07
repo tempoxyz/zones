@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, IZoneInbox } from "../../src/zone/IZone.sol";
+import {
+    DecryptionData,
+    Deposit,
+    DepositType,
+    IZoneInbox,
+    QueuedDeposit
+} from "../../src/zone/IZone.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
@@ -42,6 +48,23 @@ contract ZoneInboxTest is Test {
         gasToken.setMinter(address(inbox), true);
     }
 
+    function _wrapDeposits(Deposit[] memory deposits)
+        internal
+        pure
+        returns (QueuedDeposit[] memory queued)
+    {
+        queued = new QueuedDeposit[](deposits.length);
+        for (uint256 i = 0; i < deposits.length; i++) {
+            queued[i] = QueuedDeposit({
+                depositType: DepositType.Regular, depositData: abi.encode(deposits[i])
+            });
+        }
+    }
+
+    function _advanceTempo(Deposit[] memory deposits) internal {
+        inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
+    }
+
     /*//////////////////////////////////////////////////////////////
                           EMPTY DEPOSITS TESTS
     //////////////////////////////////////////////////////////////*/
@@ -53,7 +76,7 @@ contract ZoneInboxTest is Test {
         Deposit[] memory deposits = new Deposit[](0);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         // State should remain at bytes32(0)
         assertEq(inbox.processedDepositQueueHash(), bytes32(0));
@@ -64,12 +87,12 @@ contract ZoneInboxTest is Test {
         deposits[0] = Deposit({ sender: alice, to: bob, amount: 1000e6, memo: bytes32("payment") });
 
         // Calculate expected hash
-        bytes32 expectedHash = keccak256(abi.encode(deposits[0], bytes32(0)));
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         assertEq(inbox.processedDepositQueueHash(), expectedHash);
         assertEq(gasToken.balanceOf(bob), 1000e6);
@@ -83,14 +106,14 @@ contract ZoneInboxTest is Test {
 
         // Calculate expected hash chain
         bytes32 h0 = bytes32(0);
-        bytes32 h1 = keccak256(abi.encode(deposits[0], h0));
-        bytes32 h2 = keccak256(abi.encode(deposits[1], h1));
-        bytes32 h3 = keccak256(abi.encode(deposits[2], h2));
+        bytes32 h1 = keccak256(abi.encode(DepositType.Regular, deposits[0], h0));
+        bytes32 h2 = keccak256(abi.encode(DepositType.Regular, deposits[1], h1));
+        bytes32 h3 = keccak256(abi.encode(DepositType.Regular, deposits[2], h2));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h3);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         assertEq(inbox.processedDepositQueueHash(), h3);
         assertEq(gasToken.balanceOf(alice), 100e6);
@@ -112,7 +135,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
     }
 
     function test_advanceTempo_revertsOnPartialMismatch() public {
@@ -123,8 +146,8 @@ contract ZoneInboxTest is Test {
 
         // Set hash to be for both deposits
         bytes32 h0 = bytes32(0);
-        bytes32 h1 = keccak256(abi.encode(allDeposits[0], h0));
-        bytes32 h2 = keccak256(abi.encode(allDeposits[1], h1));
+        bytes32 h1 = keccak256(abi.encode(DepositType.Regular, allDeposits[0], h0));
+        bytes32 h2 = keccak256(abi.encode(DepositType.Regular, allDeposits[1], h1));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h2);
 
@@ -134,7 +157,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
-        inbox.advanceTempo("", oneDeposit);
+        _advanceTempo(oneDeposit);
     }
 
     function test_advanceTempo_revertsOnWrongOrder() public {
@@ -149,15 +172,15 @@ contract ZoneInboxTest is Test {
         Deposit memory d2 = Deposit({ sender: bob, to: bob, amount: 200e6, memo: bytes32("d2") });
 
         bytes32 h0 = bytes32(0);
-        bytes32 h1 = keccak256(abi.encode(d1, h0));
-        bytes32 h2 = keccak256(abi.encode(d2, h1));
+        bytes32 h1 = keccak256(abi.encode(DepositType.Regular, d1, h0));
+        bytes32 h2 = keccak256(abi.encode(DepositType.Regular, d2, h1));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h2);
 
         // Processing in wrong order should fail
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -172,11 +195,11 @@ contract ZoneInboxTest is Test {
         // Random user should fail
         vm.prank(alice);
         vm.expectRevert(IZoneInbox.OnlySequencer.selector);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         // Sequencer should succeed
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -190,13 +213,13 @@ contract ZoneInboxTest is Test {
         batch1[1] = Deposit({ sender: bob, to: bob, amount: 200e6, memo: bytes32("d2") });
 
         bytes32 h0 = bytes32(0);
-        bytes32 h1 = keccak256(abi.encode(batch1[0], h0));
-        bytes32 h2 = keccak256(abi.encode(batch1[1], h1));
+        bytes32 h1 = keccak256(abi.encode(DepositType.Regular, batch1[0], h0));
+        bytes32 h2 = keccak256(abi.encode(DepositType.Regular, batch1[1], h1));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h2);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", batch1);
+        _advanceTempo(batch1);
 
         assertEq(inbox.processedDepositQueueHash(), h2);
 
@@ -204,12 +227,12 @@ contract ZoneInboxTest is Test {
         Deposit[] memory batch2 = new Deposit[](1);
         batch2[0] = Deposit({ sender: alice, to: bob, amount: 500e6, memo: bytes32("d3") });
 
-        bytes32 h3 = keccak256(abi.encode(batch2[0], h2));
+        bytes32 h3 = keccak256(abi.encode(DepositType.Regular, batch2[0], h2));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h3);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", batch2);
+        _advanceTempo(batch2);
 
         assertEq(inbox.processedDepositQueueHash(), h3);
         assertEq(gasToken.balanceOf(alice), 100e6);
@@ -224,7 +247,7 @@ contract ZoneInboxTest is Test {
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = Deposit({ sender: alice, to: bob, amount: 1000e6, memo: bytes32("payment") });
 
-        bytes32 expectedHash = keccak256(abi.encode(deposits[0], bytes32(0)));
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
@@ -237,21 +260,21 @@ contract ZoneInboxTest is Test {
             1,
             expectedHash
         );
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
     }
 
     function test_advanceTempo_emitsDepositProcessedEvent() public {
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = Deposit({ sender: alice, to: bob, amount: 1000e6, memo: bytes32("payment") });
 
-        bytes32 expectedHash = keccak256(abi.encode(deposits[0], bytes32(0)));
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         vm.prank(sequencer);
         vm.expectEmit(true, true, true, true);
         emit IZoneInbox.DepositProcessed(expectedHash, alice, bob, 1000e6, bytes32("payment"));
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -262,12 +285,12 @@ contract ZoneInboxTest is Test {
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = Deposit({ sender: alice, to: bob, amount: 0, memo: bytes32("empty") });
 
-        bytes32 expectedHash = keccak256(abi.encode(deposits[0], bytes32(0)));
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         assertEq(inbox.processedDepositQueueHash(), expectedHash);
         assertEq(gasToken.balanceOf(bob), 0);
@@ -296,13 +319,13 @@ contract ZoneInboxTest is Test {
         for (uint256 i = 0; i < numDeposits; i++) {
             deposits[i] =
                 Deposit({ sender: alice, to: bob, amount: uint128(i + 1) * 1e6, memo: bytes32(i) });
-            currentHash = keccak256(abi.encode(deposits[i], currentHash));
+            currentHash = keccak256(abi.encode(DepositType.Regular, deposits[i], currentHash));
         }
 
         tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, currentHash);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         assertEq(inbox.processedDepositQueueHash(), currentHash);
 

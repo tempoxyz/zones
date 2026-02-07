@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { DepositQueueLib } from "../../src/zone/DepositQueueLib.sol";
-import { Deposit } from "../../src/zone/IZone.sol";
+import { Deposit, DepositType } from "../../src/zone/IZone.sol";
 import { Test } from "forge-std/Test.sol";
 
 /// @title DepositQueueLibTest
@@ -23,7 +23,7 @@ contract DepositQueueLibTest is Test {
 
         bytes32 newHash = DepositQueueLib.enqueue(bytes32(0), d);
 
-        bytes32 expectedHash = keccak256(abi.encode(d, bytes32(0)));
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, d, bytes32(0)));
         assertEq(newHash, expectedHash);
     }
 
@@ -43,9 +43,9 @@ contract DepositQueueLibTest is Test {
         bytes32 h3 = DepositQueueLib.enqueue(h2, d3);
 
         // Verify hash chain structure
-        bytes32 expected1 = keccak256(abi.encode(d1, bytes32(0)));
-        bytes32 expected2 = keccak256(abi.encode(d2, expected1));
-        bytes32 expected3 = keccak256(abi.encode(d3, expected2));
+        bytes32 expected1 = keccak256(abi.encode(DepositType.Regular, d1, bytes32(0)));
+        bytes32 expected2 = keccak256(abi.encode(DepositType.Regular, d2, expected1));
+        bytes32 expected3 = keccak256(abi.encode(DepositType.Regular, d3, expected2));
 
         assertEq(h1, expected1);
         assertEq(h2, expected2);
@@ -65,7 +65,7 @@ contract DepositQueueLibTest is Test {
         bytes32 h2 = DepositQueueLib.enqueue(h1, d2);
 
         // h2 should wrap h1
-        assertEq(h2, keccak256(abi.encode(d2, h1)));
+        assertEq(h2, keccak256(abi.encode(DepositType.Regular, d2, h1)));
     }
 
     function test_enqueue_emptyToEmpty() public pure {
@@ -74,7 +74,7 @@ contract DepositQueueLibTest is Test {
             Deposit({ sender: address(0), to: address(0), amount: 0, memo: bytes32(0) });
 
         bytes32 h = DepositQueueLib.enqueue(bytes32(0), d);
-        bytes32 expected = keccak256(abi.encode(d, bytes32(0)));
+        bytes32 expected = keccak256(abi.encode(DepositType.Regular, d, bytes32(0)));
         assertEq(h, expected);
         assertTrue(h != bytes32(0)); // Hash of something is non-zero
     }

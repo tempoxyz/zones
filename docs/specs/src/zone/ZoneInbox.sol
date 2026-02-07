@@ -2,19 +2,19 @@
 pragma solidity ^0.8.13;
 
 import {
-    Deposit,
-    EncryptedDeposit,
-    DepositType,
-    QueuedDeposit,
+    AES_GCM_DECRYPT,
+    CHAUM_PEDERSEN_VERIFY,
     DecryptionData,
+    Deposit,
+    DepositType,
+    EncryptedDeposit,
+    IAesGcmDecrypt,
+    IChaumPedersenVerify,
     ITempoState,
     IZoneConfig,
     IZoneInbox,
     IZoneToken,
-    CHAUM_PEDERSEN_VERIFY,
-    IChaumPedersenVerify,
-    AES_GCM_DECRYPT,
-    IAesGcmDecrypt
+    QueuedDeposit
 } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
@@ -86,7 +86,14 @@ contract ZoneInbox is IZoneInbox {
     /// @param key The HMAC key (will be padded/hashed if longer than 64 bytes)
     /// @param message The message to authenticate
     /// @return result The 32-byte HMAC-SHA256 output
-    function _hmacSha256(bytes memory key, bytes memory message) internal view returns (bytes32 result) {
+    function _hmacSha256(
+        bytes memory key,
+        bytes memory message
+    )
+        internal
+        view
+        returns (bytes32 result)
+    {
         // SHA256 block size is 64 bytes
         bytes memory paddedKey = new bytes(64);
 
@@ -131,7 +138,11 @@ contract ZoneInbox is IZoneInbox {
         bytes32 ikm,
         bytes memory salt,
         bytes memory info
-    ) internal view returns (bytes32 okm) {
+    )
+        internal
+        view
+        returns (bytes32 okm)
+    {
         // HKDF-Extract: PRK = HMAC-SHA256(salt, IKM)
         bytes32 prk = _hmacSha256(salt, abi.encodePacked(ikm));
 
@@ -158,7 +169,9 @@ contract ZoneInbox is IZoneInbox {
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions
-    ) external {
+    )
+        external
+    {
         if (msg.sender != config.sequencer()) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
@@ -195,38 +208,41 @@ contract ZoneInbox is IZoneInbox {
                 // without exposing the sequencer's private key to the EVM.
                 // The proof verifies that sharedSecret = privSeq * ephemeralPub without revealing privSeq.
                 // Note: Encryption key validity is already checked on Tempo side in ZonePortal.depositEncrypted()
-                bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
-                    ed.encrypted.ephemeralPubX,
-                    ed.encrypted.ephemeralPubYParity,
-                    dec.sharedSecret,
-                    dec.sequencerPubX,
-                    dec.sequencerPubYParity,
-                    dec.cpProof
-                );
+                bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY)
+                    .verifyProof(
+                        ed.encrypted.ephemeralPubkeyX,
+                        ed.encrypted.ephemeralPubkeyYParity,
+                        dec.sharedSecret,
+                        dec.sequencerPubX,
+                        dec.sequencerPubYParity,
+                        dec.cpProof
+                    );
                 if (!proofValid) revert InvalidSharedSecretProof();
 
                 // Step 2: Derive AES key from shared secret using HKDF-SHA256
                 // This is done in Solidity using the SHA256 precompile (0x02)
                 bytes32 aesKey = _hkdfSha256(
                     dec.sharedSecret,
-                    "ecies-aes-key",  // salt
-                    ""                // info (empty)
+                    "ecies-aes-key", // salt
+                    "" // info (empty)
                 );
 
                 // Step 3: Decrypt using AES-256-GCM precompile
                 // The GCM tag proves the plaintext matches the ciphertext for this shared secret
-                (bytes memory decryptedPlaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(
-                    aesKey,
-                    ed.encrypted.nonce,
-                    ed.encrypted.ciphertext,
-                    "",  // empty AAD
-                    ed.encrypted.tag
-                );
+                (bytes memory decryptedPlaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT)
+                    .decrypt(
+                        aesKey,
+                        ed.encrypted.nonce,
+                        ed.encrypted.ciphertext,
+                        "", // empty AAD
+                        ed.encrypted.tag
+                    );
 
                 // Step 4: Verify decrypted plaintext matches claimed (to, memo)
                 if (valid && decryptedPlaintext.length >= 52) {
                     // Decode decrypted plaintext and compare
-                    (address decryptedTo, bytes32 decryptedMemo) = abi.decode(decryptedPlaintext, (address, bytes32));
+                    (address decryptedTo, bytes32 decryptedMemo) =
+                        abi.decode(decryptedPlaintext, (address, bytes32));
                     valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);
                 } else {
                     valid = false;
@@ -243,7 +259,9 @@ contract ZoneInbox is IZoneInbox {
                 } else {
                     // Decryption succeeded - mint to the decrypted recipient
                     gasToken.mint(dec.to, ed.amount);
-                    emit EncryptedDepositProcessed(currentHash, ed.sender, dec.to, ed.amount, dec.memo);
+                    emit EncryptedDepositProcessed(
+                        currentHash, ed.sender, dec.to, ed.amount, dec.memo
+                    );
                 }
             }
         }

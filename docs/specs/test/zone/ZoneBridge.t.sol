@@ -4,12 +4,15 @@ pragma solidity ^0.8.13;
 import { TIP20 } from "../../src/TIP20.sol";
 import {
     BlockTransition,
+    DecryptionData,
     Deposit,
     DepositQueueTransition,
+    DepositType,
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneInbox,
     IZonePortal,
+    QueuedDeposit,
     Withdrawal,
     WithdrawalQueueTransition,
     ZoneParams
@@ -194,7 +197,7 @@ contract ZoneBridgeTest is BaseTest {
             ? pendingDeposits[pendingDeposits.length - 1].newCurrentDepositQueueHash
             : l2Inbox.processedDepositQueueHash();
 
-        newHash = keccak256(abi.encode(d, prevHash));
+        newHash = keccak256(abi.encode(DepositType.Regular, d, prevHash));
 
         pendingDeposits.push(ObservedDeposit({ deposit: d, newCurrentDepositQueueHash: newHash }));
     }
@@ -220,13 +223,26 @@ contract ZoneBridgeTest is BaseTest {
         // Process on zone via advanceTempo (sequencer-only call)
         // Empty header since MockTempoState just advances block number
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        l2Inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
 
         // Clear pending
         delete pendingDeposits;
 
         // Update zone block hash (simulated)
         l2BlockHash = keccak256(abi.encode(l2BlockHash, "deposits", newProcessedHash));
+    }
+
+    function _wrapDeposits(Deposit[] memory deposits)
+        internal
+        pure
+        returns (QueuedDeposit[] memory queued)
+    {
+        queued = new QueuedDeposit[](deposits.length);
+        for (uint256 i = 0; i < deposits.length; i++) {
+            queued[i] = QueuedDeposit({
+                depositType: DepositType.Regular, depositData: abi.encode(deposits[i])
+            });
+        }
     }
 
     /// @notice Simulate sequencer observing a withdrawal event on the zone
@@ -675,7 +691,7 @@ contract ZoneBridgeTest is BaseTest {
         // Should revert because hash doesn't match
         vm.prank(admin);
         vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
-        l2Inbox.advanceTempo("", deposits);
+        l2Inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
     }
 
     function test_l2_callbackRequiresFallbackRecipient() public {
@@ -722,7 +738,7 @@ contract ZoneBridgeTest is BaseTest {
         // Non-sequencer tries to advance
         vm.prank(alice);
         vm.expectRevert(IZoneInbox.OnlySequencer.selector);
-        l2Inbox.advanceTempo("", deposits);
+        l2Inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
     }
 
 }

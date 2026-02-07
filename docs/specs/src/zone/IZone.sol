@@ -1,4 +1,4 @@
-                                                                                                                                                                                // SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
 /// @title IZoneToken
@@ -59,8 +59,8 @@ struct WithdrawalQueueTransition {
 /// @notice Deposit type discriminator for the unified deposit queue
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
-    Regular,    // Standard deposit with plaintext recipient and memo
-    Encrypted   // Encrypted deposit with hidden recipient and memo
+    Regular, // Standard deposit with plaintext recipient and memo
+    Encrypted // Encrypted deposit with hidden recipient and memo
 }
 
 struct Deposit {
@@ -77,11 +77,11 @@ struct Deposit {
 /// @notice Encrypted deposit payload (recipient and memo encrypted to sequencer)
 /// @dev Uses ECIES with secp256k1: ephemeral ECDH + AES-256-GCM
 struct EncryptedDepositPayload {
-    bytes32 ephemeralPubkeyX;     // Ephemeral public key X coordinate (for ECDH)
+    bytes32 ephemeralPubkeyX; // Ephemeral public key X coordinate (for ECDH)
     uint8 ephemeralPubkeyYParity; // Y coordinate parity (0x02 or 0x03)
-    bytes ciphertext;             // AES-256-GCM encrypted (to || memo || padding)
-    bytes12 nonce;                // GCM nonce
-    bytes16 tag;                  // GCM authentication tag
+    bytes ciphertext; // AES-256-GCM encrypted (to || memo || padding)
+    bytes12 nonce; // GCM nonce
+    bytes16 tag; // GCM authentication tag
 }
 
 /// @notice Encrypted deposit stored in the queue
@@ -89,9 +89,9 @@ struct EncryptedDepositPayload {
 ///      The keyIndex specifies which encryption key the user used, allowing the prover
 ///      to look up the correct key for decryption even after key rotations.
 struct EncryptedDeposit {
-    address sender;              // Depositor (public, for refunds)
-    uint128 amount;              // Amount (public, for accounting)
-    uint256 keyIndex;            // Index of encryption key used (specified by depositor)
+    address sender; // Depositor (public, for refunds)
+    uint128 amount; // Amount (public, for accounting)
+    uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
 
@@ -99,15 +99,15 @@ struct EncryptedDeposit {
 /// @dev Used to track key rotations so the prover can determine which key
 ///      was valid when a deposit was made
 struct EncryptionKeyEntry {
-    bytes32 x;              // X coordinate of the public key
-    uint8 yParity;          // Y coordinate parity (0x02 or 0x03)
+    bytes32 x; // X coordinate of the public key
+    uint8 yParity; // Y coordinate parity (0x02 or 0x03)
     uint64 activationBlock; // Tempo block number when this key became active
 }
 
-/// Grace period after key rotation during which old keys are still accepted.
-/// After this period, deposits using the old key are rejected.
-/// 1 day at 1 second block time = 86400 blocks
-uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86400;
+// Grace period after key rotation during which old keys are still accepted.
+// After this period, deposits using the old key are rejected.
+// 1 day at 1 second block time = 86400 blocks
+uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86_400;
 
 /*//////////////////////////////////////////////////////////////
                     UNIFIED DEPOSIT QUEUE TYPES
@@ -118,7 +118,7 @@ uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86400;
 ///      The depositData is ABI-encoded Deposit or EncryptedDeposit depending on type.
 struct QueuedDeposit {
     DepositType depositType;
-    bytes depositData;  // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
 }
 
 /// @notice Chaum-Pedersen proof for ECDH shared secret derivation
@@ -127,8 +127,8 @@ struct QueuedDeposit {
 ///      - sharedSecretPoint = privSeq * ephemeralPub (ECDH computation)
 ///      Uses Fiat-Shamir heuristic for non-interactive proof.
 struct ChaumPedersenProof {
-    bytes32 s;  // Response: s = r + c * privSeq (mod n)
-    bytes32 c;  // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
+    bytes32 s; // Response: s = r + c * privSeq (mod n)
+    bytes32 c; // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
 }
 
 /// @notice Decryption data provided by sequencer for encrypted deposits
@@ -136,28 +136,28 @@ struct ChaumPedersenProof {
 ///      Includes a Chaum-Pedersen proof to verify the shared secret was correctly derived
 ///      without exposing the sequencer's private key.
 struct DecryptionData {
-    bytes32 sharedSecret;        // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
-    address to;                  // Decrypted recipient
-    bytes32 memo;                // Decrypted memo
-    bytes32 sequencerPubX;       // Sequencer's public key X (must match keyIndex from deposit)
-    uint8 sequencerPubYParity;   // Sequencer's public key Y parity
-    ChaumPedersenProof cpProof;  // Proof of correct shared secret derivation
+    bytes32 sharedSecret; // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
+    address to; // Decrypted recipient
+    bytes32 memo; // Decrypted memo
+    bytes32 sequencerPubX; // Sequencer's public key X (must match keyIndex from deposit)
+    uint8 sequencerPubYParity; // Sequencer's public key Y parity
+    ChaumPedersenProof cpProof; // Proof of correct shared secret derivation
 }
 
 /*//////////////////////////////////////////////////////////////
                     CRYPTOGRAPHIC PRECOMPILES
 //////////////////////////////////////////////////////////////*/
 
-/// @notice Precompile address for Chaum-Pedersen proof verification
-/// @dev Predeploy at 0x1c00000000000000000000000000000000000100
-address constant CHAUM_PEDERSEN_VERIFY = 0x1c00000000000000000000000000000000000100;
+// Precompile address for Chaum-Pedersen proof verification
+// Predeploy at 0x1c00000000000000000000000000000000000100
+address constant CHAUM_PEDERSEN_VERIFY = 0x1C00000000000000000000000000000000000100;
 
-/// @notice Precompile address for AES-256-GCM decryption
-/// @dev Predeploy at 0x1c00000000000000000000000000000000000101
-address constant AES_GCM_DECRYPT = 0x1c00000000000000000000000000000000000101;
+// Precompile address for AES-256-GCM decryption
+// Predeploy at 0x1c00000000000000000000000000000000000101
+address constant AES_GCM_DECRYPT = 0x1C00000000000000000000000000000000000101;
 
-/// @notice Precompile address for SHA256 (standard Ethereum precompile)
-/// @dev Used for HKDF-SHA256 implementation in Solidity
+// Precompile address for SHA256 (standard Ethereum precompile)
+// Used for HKDF-SHA256 implementation in Solidity
 address constant SHA256 = 0x0000000000000000000000000000000000000002;
 
 /// @title IChaumPedersenVerify
@@ -167,6 +167,7 @@ address constant SHA256 = 0x0000000000000000000000000000000000000002;
 ///      - sharedSecretPoint = privSeq * ephemeralPub (the ECDH computation)
 ///      This proves correct derivation without revealing the private key.
 interface IChaumPedersenVerify {
+
     /// @notice Verify a Chaum-Pedersen proof for ECDH shared secret derivation
     /// @dev Verification equations:
     ///      - R1 = s*G - c*pubSeq
@@ -187,7 +188,11 @@ interface IChaumPedersenVerify {
         bytes32 sequencerPubX,
         uint8 sequencerPubYParity,
         ChaumPedersenProof calldata proof
-    ) external view returns (bool valid);
+    )
+        external
+        view
+        returns (bool valid);
+
 }
 
 /// @title IAesGcmDecrypt
@@ -195,6 +200,7 @@ interface IChaumPedersenVerify {
 /// @dev Decrypts ciphertext and verifies the GCM authentication tag.
 ///      HKDF-SHA256 key derivation is done in Solidity using the SHA256 precompile.
 interface IAesGcmDecrypt {
+
     /// @notice Decrypt AES-256-GCM ciphertext and verify authentication tag
     /// @dev Returns empty bytes and false if tag verification fails.
     ///      AAD (Additional Authenticated Data) is typically empty for ECIES.
@@ -211,7 +217,11 @@ interface IAesGcmDecrypt {
         bytes calldata ciphertext,
         bytes calldata aad,
         bytes16 tag
-    ) external view returns (bytes memory plaintext, bool valid);
+    )
+        external
+        view
+        returns (bytes memory plaintext, bool valid);
+
 }
 
 struct Withdrawal {
@@ -368,10 +378,7 @@ interface IZonePortal {
     /// @param keyIndex The index of this key in the history array
     /// @param activationBlock The Tempo block when this key becomes active
     event SequencerEncryptionKeyUpdated(
-        bytes32 x,
-        uint8 yParity,
-        uint256 keyIndex,
-        uint64 activationBlock
+        bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
@@ -442,7 +449,9 @@ interface IZonePortal {
     /// @return yParity The Y coordinate parity
     /// @return keyIndex The index of this key in history
     function encryptionKeyAtBlock(uint64 tempoBlockNumber)
-        external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
+        external
+        view
+        returns (bytes32 x, uint8 yParity, uint256 keyIndex);
 
     /// @notice Set zone gas rate. Only callable by sequencer.
     /// @param _zoneGasRate Gas token units per gas unit on the zone
@@ -462,7 +471,11 @@ interface IZonePortal {
         view
         returns (bool valid, uint64 expiresAtBlock);
 
-    function deposit(address to, uint128 amount, bytes32 memo)
+    function deposit(
+        address to,
+        uint128 amount,
+        bytes32 memo
+    )
         external
         returns (bytes32 newCurrentDepositQueueHash);
 
@@ -478,7 +491,9 @@ interface IZonePortal {
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted
-    ) external returns (bytes32 newCurrentDepositQueueHash);
+    )
+        external
+        returns (bytes32 newCurrentDepositQueueHash);
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
         uint64 tempoBlockNumber,
@@ -627,16 +642,14 @@ interface IZoneInbox {
     event EncryptedDepositProcessed(
         bytes32 indexed depositHash,
         address indexed sender,
-        address indexed to,      // Revealed after decryption
+        address indexed to, // Revealed after decryption
         uint128 amount,
-        bytes32 memo             // Revealed after decryption
+        bytes32 memo // Revealed after decryption
     );
 
     /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
     event EncryptedDepositFailed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        uint128 amount
+        bytes32 indexed depositHash, address indexed sender, uint128 amount
     );
     error OnlySequencer();
     error InvalidDepositQueueHash();
@@ -676,7 +689,9 @@ interface IZoneInbox {
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions
-    ) external;
+    )
+        external;
+
 }
 
 /// @title IZoneOutbox

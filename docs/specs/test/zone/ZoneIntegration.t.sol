@@ -4,11 +4,14 @@ pragma solidity ^0.8.13;
 import { TIP20 } from "../../src/TIP20.sol";
 import {
     BlockTransition,
+    DecryptionData,
     Deposit,
     DepositQueueTransition,
+    DepositType,
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
+    QueuedDeposit,
     Withdrawal,
     WithdrawalQueueTransition,
     ZoneParams
@@ -122,6 +125,23 @@ contract ZoneIntegrationTest is BaseTest {
         l2GasToken.setBurner(address(l2Outbox), true);
     }
 
+    function _wrapDeposits(Deposit[] memory deposits)
+        internal
+        pure
+        returns (QueuedDeposit[] memory queued)
+    {
+        queued = new QueuedDeposit[](deposits.length);
+        for (uint256 i = 0; i < deposits.length; i++) {
+            queued[i] = QueuedDeposit({
+                depositType: DepositType.Regular, depositData: abi.encode(deposits[i])
+            });
+        }
+    }
+
+    function _advanceTempo(Deposit[] memory deposits) internal {
+        l2Inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
+    }
+
     /*//////////////////////////////////////////////////////////////
                    MULTI-USER DEPOSIT FLOW TESTS
     //////////////////////////////////////////////////////////////*/
@@ -157,7 +177,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Process on L2
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         // Verify L2 balances
         assertEq(l2GasToken.balanceOf(alice), 3000e6);
@@ -184,7 +204,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1);
         vm.prank(admin);
-        l2Inbox.advanceTempo("", batch1);
+        _advanceTempo(batch1);
 
         assertEq(l2GasToken.balanceOf(alice), 1000e6);
         assertEq(l2Inbox.processedDepositQueueHash(), d1);
@@ -217,7 +237,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3);
         vm.prank(admin);
-        l2Inbox.advanceTempo("", batch2);
+        _advanceTempo(batch2);
 
         assertEq(l2GasToken.balanceOf(alice), 6000e6);
     }
@@ -241,7 +261,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
         );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         // Alice requests withdrawal with callback
         vm.startPrank(alice);
@@ -309,7 +329,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
         );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         // First batch: Alice withdraws to Bob
         vm.startPrank(alice);
@@ -458,7 +478,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d2);
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits1);
+        _advanceTempo(deposits1);
 
         // Phase 2: Withdrawals
         vm.startPrank(alice);
@@ -501,7 +521,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3);
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits2);
+        _advanceTempo(deposits2);
 
         // Verify all L2 balances
         assertEq(l2GasToken.balanceOf(alice), 10_000e6 - 2000e6);
@@ -554,7 +574,7 @@ contract ZoneIntegrationTest is BaseTest {
         deposits[0] = Deposit({ sender: alice, to: alice, amount: 10_000e6, memo: bytes32("d1") });
         l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1);
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         assertEq(l2GasToken.totalSupply(), 10_000e6);
 
