@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, IZoneConfig, IZoneInbox, IZoneToken, ITempoState } from "./IZone.sol";
+import { Deposit, ITempoState, IZoneConfig, IZoneInbox, IZoneToken } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
@@ -69,10 +69,7 @@ contract ZoneInbox is IZoneInbox {
     ///      Protocol and proof enforce this runs at the start of each block.
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(
-        bytes calldata header,
-        Deposit[] calldata deposits
-    ) external {
+    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external {
         if (msg.sender != config.sequencer()) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)

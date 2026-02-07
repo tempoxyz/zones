@@ -130,7 +130,15 @@ contract TempoState is ITempoState {
     /// @param account The Tempo contract address (ZonePortal or TIP-403)
     /// @param slot The storage slot to read
     /// @return value The storage value (stub always reverts)
-    function readTempoStorageSlot(address account, bytes32 slot) external view onlySystemContract returns (bytes32) {
+    function readTempoStorageSlot(
+        address account,
+        bytes32 slot
+    )
+        external
+        view
+        onlySystemContract
+        returns (bytes32)
+    {
         // Silence unused variable warnings
         account;
         slot;

@@ -78,20 +78,16 @@ struct Withdrawal {
                     ZONE SYSTEM CONTRACTS
 //////////////////////////////////////////////////////////////*/
 
-/// @notice TempoState predeploy address
-/// @dev Predeploy at 0x1c00000000000000000000000000000000000000
-address constant TEMPO_STATE = 0x1c00000000000000000000000000000000000000;
+// TempoState predeploy address (0x1c00...0000)
+address constant TEMPO_STATE = 0x1C00000000000000000000000000000000000000;
 
-/// @notice ZoneInbox system contract address
-/// @dev Predeploy at 0x1c00000000000000000000000000000000000001
+// ZoneInbox system contract address (0x1c00...0001)
 address constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
 
-/// @notice ZoneOutbox system contract address
-/// @dev Predeploy at 0x1c00000000000000000000000000000000000002
+// ZoneOutbox system contract address (0x1c00...0002)
 address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 
-/// @notice ZoneConfig system contract address
-/// @dev Predeploy at 0x1c00000000000000000000000000000000000003
+// ZoneConfig system contract address (0x1c00...0003)
 address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
 
 /// @title IVerifier
@@ -333,10 +329,9 @@ struct LastBatch {
 ///      System-only contract. Only ZoneInbox can call finalizeTempo().
 ///      Only ZoneInbox, ZoneOutbox, and ZoneConfig can call readTempoStorageSlot(s).
 interface ITempoState {
+
     event TempoBlockFinalized(
-        bytes32 indexed blockHash,
-        uint64 indexed blockNumber,
-        bytes32 stateRoot
+        bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot
     );
 
     error InvalidParentHash();
@@ -517,6 +512,7 @@ interface IZoneOutbox {
 /// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
 ///      Provides centralized access to zone metadata and reads sequencer from L1.
 interface IZoneConfig {
+
     error NotSequencer();
 
     /// @notice Zone token address (TIP-20 at same address as Tempo)
@@ -544,4 +540,5 @@ interface IZoneConfig {
 
     /// @notice Get zone token as IZoneToken interface
     function getZoneToken() external view returns (IZoneToken);
+
 }

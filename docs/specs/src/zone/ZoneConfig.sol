@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneToken, ITempoState } from "./IZone.sol";
+import { ITempoState, IZoneToken } from "./IZone.sol";
 
 /// @title ZoneConfig
 /// @notice Central zone metadata and L1 state references
@@ -9,6 +9,7 @@ import { IZoneToken, ITempoState } from "./IZone.sol";
 ///      Provides single source of truth for zone configuration.
 ///      Reads sequencer from L1 ZonePortal, eliminating duplicate sequencer management.
 contract ZoneConfig {
+
     /*//////////////////////////////////////////////////////////////
                                IMMUTABLES
     //////////////////////////////////////////////////////////////*/
@@ -50,11 +51,7 @@ contract ZoneConfig {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(
-        address _zoneToken,
-        address _tempoPortal,
-        address _tempoState
-    ) {
+    constructor(address _zoneToken, address _tempoPortal, address _tempoState) {
         zoneToken = _zoneToken;
         tempoPortal = _tempoPortal;
         tempoState = ITempoState(_tempoState);
@@ -122,4 +119,5 @@ contract ZoneConfig {
     function getZoneToken() external view returns (IZoneToken) {
         return IZoneToken(zoneToken);
     }
+
 }

@@ -14,6 +14,7 @@ import {
     ZoneParams
 } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
+import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
@@ -57,6 +58,7 @@ contract ZoneIntegrationTest is BaseTest {
     // L2 contracts
     MockZoneGasToken public l2GasToken;
     MockTempoState public l2TempoState;
+    ZoneConfig public l2Config;
     ZoneInbox public l2Inbox;
     ZoneOutbox public l2Outbox;
 
@@ -107,8 +109,14 @@ contract ZoneIntegrationTest is BaseTest {
         // L2 setup
         l2GasToken = new MockZoneGasToken("Zone USD", "zUSD");
         l2TempoState = new MockTempoState(admin, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
-        l2Inbox = new ZoneInbox(portalAddr, address(l2TempoState), address(l2GasToken), admin);
-        l2Outbox = new ZoneOutbox(address(l2GasToken), admin);
+        l2Config = new ZoneConfig(address(l2GasToken), portalAddr, address(l2TempoState));
+        l2TempoState.setMockStorageValue(
+            portalAddr, bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
+        );
+        l2Inbox = new ZoneInbox(
+            address(l2Config), portalAddr, address(l2TempoState), address(l2GasToken)
+        );
+        l2Outbox = new ZoneOutbox(address(l2Config), address(l2GasToken));
 
         l2GasToken.setMinter(address(l2Inbox), true);
         l2GasToken.setBurner(address(l2Outbox), true);

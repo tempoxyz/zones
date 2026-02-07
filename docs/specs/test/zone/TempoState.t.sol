@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITempoState } from "../../src/zone/IZone.sol";
+import { ITempoState, ZONE_INBOX } from "../../src/zone/IZone.sol";
 import { TempoState } from "../../src/zone/TempoState.sol";
 import { Test } from "forge-std/Test.sol";
 
@@ -11,8 +11,8 @@ contract TempoStateTest is Test {
 
     TempoState public tempoState;
 
-    address public sequencer = address(0x1);
-    address public notSequencer = address(0x2);
+    address public zoneInbox = ZONE_INBOX;
+    address public notZoneInbox = address(0x2);
 
     // Genesis values - we'll use a real encoded header
     uint64 constant GENESIS_BLOCK_NUMBER = 100;
@@ -39,7 +39,7 @@ contract TempoStateTest is Test {
         );
         genesisBlockHash = keccak256(genesisHeader);
 
-        tempoState = new TempoState(sequencer, genesisHeader);
+        tempoState = new TempoState(genesisHeader);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -47,7 +47,6 @@ contract TempoStateTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_constructor_initializesState() public view {
-        assertEq(tempoState.sequencer(), sequencer);
         assertEq(tempoState.tempoBlockHash(), genesisBlockHash);
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER);
         assertEq(tempoState.tempoTimestamp(), GENESIS_TIMESTAMP);
@@ -79,7 +78,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         tempoState.finalizeTempo(header);
 
         // Verify state was updated
@@ -105,7 +104,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         tempoState.finalizeTempo(header1);
 
         bytes32 block101Hash = keccak256(header1);
@@ -123,7 +122,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 24
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         tempoState.finalizeTempo(header2);
 
         bytes32 block102Hash = keccak256(header2);
@@ -143,7 +142,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidParentHash.selector);
         tempoState.finalizeTempo(header);
     }
@@ -159,7 +158,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
         tempoState.finalizeTempo(header);
     }
@@ -175,12 +174,12 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
         tempoState.finalizeTempo(header);
     }
 
-    function test_finalizeTempo_revertsIfNotSequencer() public {
+    function test_finalizeTempo_revertsIfNotZoneInbox() public {
         bytes memory header = _buildTempoHeader(
             genesisBlockHash,
             keccak256("stateRoot"),
@@ -191,8 +190,8 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(notSequencer);
-        vm.expectRevert(ITempoState.OnlySequencer.selector);
+        vm.prank(notZoneInbox);
+        vm.expectRevert(ITempoState.OnlyZoneInbox.selector);
         tempoState.finalizeTempo(header);
     }
 
@@ -208,7 +207,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         vm.expectEmit(true, true, false, true);
         emit ITempoState.TempoBlockFinalized(
             keccak256(header), GENESIS_BLOCK_NUMBER + 1, newStateRoot
@@ -221,6 +220,7 @@ contract TempoStateTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_readTempoStorageSlot_revertsAsStub() public {
+        vm.prank(zoneInbox);
         vm.expectRevert("TempoState: readTempoStorageSlot is a precompile stub");
         tempoState.readTempoStorageSlot(address(0x1234), bytes32(0));
     }
@@ -230,6 +230,7 @@ contract TempoStateTest is Test {
         slots[0] = bytes32(uint256(1));
         slots[1] = bytes32(uint256(2));
 
+        vm.prank(zoneInbox);
         vm.expectRevert("TempoState: readTempoStorageSlots is a precompile stub");
         tempoState.readTempoStorageSlots(address(0x1234), slots);
     }

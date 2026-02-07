@@ -65,10 +65,7 @@ contract ZoneOutbox is IZoneOutbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(
-        address _config,
-        address _gasToken
-    ) {
+    constructor(address _config, address _gasToken) {
         config = IZoneConfig(_config);
         gasToken = IZoneToken(_gasToken);
     }
