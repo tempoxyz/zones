@@ -16,6 +16,7 @@ import {
     IZoneToken,
     QueuedDeposit
 } from "./IZone.sol";
+import { EncryptedDepositLib } from "./EncryptedDeposit.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
@@ -254,10 +255,11 @@ contract ZoneInbox is IZoneInbox {
                     );
 
                 // Step 4: Verify decrypted plaintext matches claimed (to, memo)
+                // Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
+                // Must use packed decoding (not abi.decode which expects 32-byte padded fields)
                 if (valid && decryptedPlaintext.length >= 52) {
-                    // Decode decrypted plaintext and compare
                     (address decryptedTo, bytes32 decryptedMemo) =
-                        abi.decode(decryptedPlaintext, (address, bytes32));
+                        EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
                     valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);
                 } else {
                     valid = false;

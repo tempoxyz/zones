@@ -1254,8 +1254,9 @@ bytes32 aesKey = _hkdfSha256(
 );
 
 // Step 4: Verify decrypted plaintext matches claimed (to, memo)
+// Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
 if (valid && decryptedPlaintext.length >= 52) {
-    (address decryptedTo, bytes32 decryptedMemo) = abi.decode(decryptedPlaintext, (address, bytes32));
+    (address decryptedTo, bytes32 decryptedMemo) = EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
     valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);
 } else {
     valid = false;
