@@ -58,11 +58,6 @@ contract ZonePortal is IZonePortal {
     /// @notice Sequencer public key (legacy field for compatibility)
     bytes32 public sequencerPubkey;
 
-    /// @notice Historical encryption keys with activation blocks
-    /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
-    ///      This is stored at slot 8 in the storage layout.
-    EncryptionKeyEntry[] internal _encryptionKeys;
-
     /// @notice Zone gas rate (zone token units per gas unit on the zone)
     /// @dev Sequencer publishes this rate and takes the risk on zone gas costs.
     ///      Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate
@@ -75,6 +70,11 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Last Tempo block number the zone has synced to
     uint64 public lastSyncedTempoBlockNumber;
+
+    /// @notice Historical encryption keys with activation blocks
+    /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
+    ///      Stored at slot 7 in the ZonePortal storage layout.
+    EncryptionKeyEntry[] internal _encryptionKeys;
 
     /// @notice Withdrawal queue (zone→Tempo): unbounded buffer
     WithdrawalQueue internal _withdrawalQueue;

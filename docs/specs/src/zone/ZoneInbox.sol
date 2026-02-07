@@ -48,14 +48,13 @@ contract ZoneInbox is IZoneInbox {
     ///      slot 0: sequencer (address)
     ///      slot 1: pendingSequencer (address)
     ///      slot 2: sequencerPubkey (bytes32)
-    ///      slot 3: withdrawalBatchIndex (uint64)
+    ///      slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
     ///      slot 4: blockHash (bytes32)
     ///      slot 5: currentDepositQueueHash (bytes32)
     ///      slot 6: lastSyncedTempoBlockNumber (uint64)
-    ///      slot 7: zoneGasRate (uint128)
-    ///      slot 8: _encryptionKeys (EncryptionKeyEntry[])
+    ///      slot 7: _encryptionKeys (EncryptionKeyEntry[])
     bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
-    bytes32 internal constant ENCRYPTION_KEYS_SLOT = bytes32(uint256(8));
+    bytes32 internal constant ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
