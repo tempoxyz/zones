@@ -74,6 +74,22 @@ struct Withdrawal {
     bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
 }
 
+/*//////////////////////////////////////////////////////////////
+                    ZONE SYSTEM CONTRACTS
+//////////////////////////////////////////////////////////////*/
+
+// TempoState predeploy address (0x1c00...0000)
+address constant TEMPO_STATE = 0x1C00000000000000000000000000000000000000;
+
+// ZoneInbox system contract address (0x1c00...0001)
+address constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
+
+// ZoneOutbox system contract address (0x1c00...0002)
+address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
+
+// ZoneConfig system contract address (0x1c00...0003)
+address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
+
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
@@ -310,27 +326,18 @@ struct LastBatch {
 /// @title ITempoState
 /// @notice Interface for zone-side Tempo state verification predeploy
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
+///      System-only contract. Only ZoneInbox can call finalizeTempo().
+///      Only ZoneInbox, ZoneOutbox, and ZoneConfig can call readTempoStorageSlot(s).
 interface ITempoState {
 
     event TempoBlockFinalized(
         bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot
     );
-    event SequencerTransferStarted(
-        address indexed currentSequencer, address indexed pendingSequencer
-    );
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
-    error OnlySequencer();
-    error NotPendingSequencer();
     error InvalidParentHash();
     error InvalidBlockNumber();
     error InvalidRlpData();
-
-    /// @notice Current sequencer address
-    function sequencer() external view returns (address);
-
-    /// @notice Pending sequencer for two-step transfer
-    function pendingSequencer() external view returns (address);
+    error OnlyZoneInbox();
 
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     function tempoBlockHash() external view returns (bytes32);
@@ -352,14 +359,9 @@ interface ITempoState {
     function tempoTimestampMillis() external view returns (uint64);
     function tempoPrevRandao() external view returns (bytes32);
 
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external;
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external;
-
-    /// @notice Finalize a Tempo block header. Only callable by sequencer.
-    /// @dev Validates chain continuity (parent hash must match, number must be +1)
+    /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
+    /// @dev Validates chain continuity (parent hash must match, number must be +1).
+    ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external;
 
@@ -396,14 +398,11 @@ interface IZoneInbox {
         bytes32 memo
     );
 
-    event SequencerTransferStarted(
-        address indexed currentSequencer, address indexed pendingSequencer
-    );
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
-
     error OnlySequencer();
-    error NotPendingSequencer();
     error InvalidDepositQueueHash();
+
+    /// @notice Zone configuration (reads sequencer from L1)
+    function config() external view returns (IZoneConfig);
 
     /// @notice The Tempo portal address (for reading deposit queue hash)
     function tempoPortal() external view returns (address);
@@ -414,20 +413,8 @@ interface IZoneInbox {
     /// @notice The zone token (TIP-20 at same address as Tempo)
     function gasToken() external view returns (IZoneToken);
 
-    /// @notice Current sequencer address
-    function sequencer() external view returns (address);
-
-    /// @notice Pending sequencer for two-step transfer
-    function pendingSequencer() external view returns (address);
-
     /// @notice The zone's last processed deposit queue hash
     function processedDepositQueueHash() external view returns (bytes32);
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external;
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external;
 
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
     /// @dev This is the main entry point for the sequencer at block start.
@@ -468,19 +455,11 @@ interface IZoneOutbox {
     /// @dev Kept for observability. Proof reads from lastBatch storage instead.
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
 
-    event SequencerTransferStarted(
-        address indexed currentSequencer, address indexed pendingSequencer
-    );
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+    /// @notice Zone configuration (reads sequencer from L1)
+    function config() external view returns (IZoneConfig);
 
     /// @notice The zone token (same as Tempo portal's token)
     function gasToken() external view returns (IZoneToken);
-
-    /// @notice Current sequencer address
-    function sequencer() external view returns (address);
-
-    /// @notice Pending sequencer for two-step transfer
-    function pendingSequencer() external view returns (address);
 
     /// @notice Tempo gas rate (gas token units per gas unit on Tempo)
     /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
@@ -497,12 +476,6 @@ interface IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256);
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external;
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external;
 
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
@@ -531,5 +504,41 @@ interface IZoneOutbox {
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+
+}
+
+/// @title IZoneConfig
+/// @notice Interface for zone configuration and L1 state access
+/// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
+///      Provides centralized access to zone metadata and reads sequencer from L1.
+interface IZoneConfig {
+
+    error NotSequencer();
+
+    /// @notice Zone token address (TIP-20 at same address as Tempo)
+    function zoneToken() external view returns (address);
+
+    /// @notice L1 ZonePortal address
+    function tempoPortal() external view returns (address);
+
+    /// @notice TempoState predeploy for L1 reads
+    function tempoState() external view returns (ITempoState);
+
+    /// @notice Get current sequencer by reading from L1 ZonePortal
+    /// @dev Reads from finalized Tempo state. L1 is single source of truth.
+    function sequencer() external view returns (address);
+
+    /// @notice Get pending sequencer by reading from L1 ZonePortal
+    function pendingSequencer() external view returns (address);
+
+    /// @notice Get sequencer's encryption public key by reading from L1 ZonePortal
+    /// @dev Used for encrypted deposits (ECIES).
+    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+
+    /// @notice Check if an address is the current sequencer
+    function isSequencer(address account) external view returns (bool);
+
+    /// @notice Get zone token as IZoneToken interface
+    function getZoneToken() external view returns (IZoneToken);
 
 }

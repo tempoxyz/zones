@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { Deposit, IZoneInbox } from "../../src/zone/IZone.sol";
+import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
@@ -11,6 +12,7 @@ import { Test } from "forge-std/Test.sol";
 /// @notice Tests for ZoneInbox covering edge cases
 contract ZoneInboxTest is Test {
 
+    ZoneConfig public config;
     ZoneInbox public inbox;
     MockZoneGasToken public gasToken;
     MockTempoState public tempoState;
@@ -31,7 +33,11 @@ contract ZoneInboxTest is Test {
         gasToken = new MockZoneGasToken("Zone USD", "zUSD");
         tempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
-        inbox = new ZoneInbox(mockPortal, address(tempoState), address(gasToken), sequencer);
+        config = new ZoneConfig(address(gasToken), mockPortal, address(tempoState));
+        tempoState.setMockStorageValue(
+            mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
+        );
+        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState), address(gasToken));
 
         gasToken.setMinter(address(inbox), true);
     }
@@ -272,10 +278,10 @@ contract ZoneInboxTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_immutableGetters() public view {
+        assertEq(address(inbox.config()), address(config));
         assertEq(inbox.tempoPortal(), mockPortal);
         assertEq(address(inbox.tempoState()), address(tempoState));
         assertEq(address(inbox.gasToken()), address(gasToken));
-        assertEq(inbox.sequencer(), sequencer);
     }
 
     /*//////////////////////////////////////////////////////////////

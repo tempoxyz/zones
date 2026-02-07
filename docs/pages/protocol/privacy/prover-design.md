@@ -114,10 +114,11 @@ pub struct ZoneBlock {
     /// Beneficiary (must match registered sequencer)
     pub beneficiary: Address,
 
-    /// Tempo header RLP used by the call (ZoneInbox.advanceTempo)
-    pub tempo_header_rlp: Vec<u8>,
+    /// Tempo header RLP used by the call (ZoneInbox.advanceTempo).
+    /// If None, the block does not advance Tempo and the binding carries over.
+    pub tempo_header_rlp: Option<Vec<u8>>,
 
-    /// Deposits processed by the call (oldest first)
+    /// Deposits processed by the call (oldest first). Must be empty if tempo_header_rlp is None.
     pub deposits: Vec<Deposit>,
 
     /// Sequencer-only: finalize a batch (only in final block, must be last)
@@ -130,14 +131,13 @@ pub struct ZoneBlock {
 ```
 
 Each zone block contains an ordered list of user transactions executed using `revm`. The sequencer
-calls `ZoneInbox.advanceTempo` at the start of the block to advance Tempo state and process deposits,
-and (only in the final block of a batch) calls `ZoneOutbox.finalizeWithdrawalBatch` at the end.
+may call `ZoneInbox.advanceTempo` at the start of the block to advance Tempo state and process deposits,
+and (only in the final block of a batch) calls `ZoneOutbox.finalizeWithdrawalBatch` at the end. If
+`advanceTempo` is omitted for a block, the Tempo binding carries over from the previous block.
 
-User transactions may call the `TempoState` precompile to read Tempo state. User transactions
-**must not** call `ZoneInbox` or `ZoneOutbox`; those are sequencer-only predeploys. The executor
-must reject any non-sequencer call to these addresses and enforce that `finalize_withdrawal_batch_count`
-is set at most once, only in the final block, and only after all user transactions.
-The block hash is computed from the simplified zone header:
+The executor must enforce at most one `advanceTempo` at the start of each block
+(or zero, for blocks that do not advance Tempo), and enforce `finalizeWithdrawalBatch` only in the
+final block of the batch. The block hash is computed from the simplified zone header:
 `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`.
 The transactions and receipts roots are computed over the full ordered list of zone transactions.
 
@@ -186,7 +186,7 @@ pub struct BatchStateProof {
 
 pub struct L1StateRead {
     /// Which zone block performed this read
-    pub zone_block_index: u32,
+    pub zone_block_index: u64,
 
     /// Which Tempo block to read from (must match TempoState for this block)
     pub tempo_block_number: u64,
@@ -430,22 +430,26 @@ fn execute_zone_block(
         )
         .build();
 
-    // Sequencer calls advanceTempo at the start of the block.
+    // Sequencer may call advanceTempo at the start of the block.
     // The TempoState precompile must bind reads during this call to the newly
     // finalized Tempo header, and reject any unbound reads.
-    evm.transact_commit(sequencer_tx_advance_tempo(
-        &block.tempo_header_rlp,
-        &block.deposits,
-    ))
-    .map_err(|e| Error::ExecutionError(e.to_string()))?;
+    if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
+        evm.transact_commit(sequencer_tx_advance_tempo(
+            tempo_header_rlp,
+            &block.deposits,
+        ))
+        .map_err(|e| Error::ExecutionError(e.to_string()))?;
 
-    let tempo_number = zone_state.tempo_state_block_number()?;
-    tempo_state.bind_block(block_index, tempo_number)?;
+        let tempo_number = zone_state.tempo_state_block_number()?;
+        tempo_state.bind_block(block_index, tempo_number)?;
 
-    let expected_tempo_hash = tempo_state
-        .block_hash(tempo_number)
-        .ok_or(Error::InvalidProof)?;
-    if expected_tempo_hash != keccak256(&block.tempo_header_rlp) {
+        let expected_tempo_hash = tempo_state
+            .block_hash(tempo_number)
+            .ok_or(Error::InvalidProof)?;
+        if expected_tempo_hash != keccak256(tempo_header_rlp) {
+            return Err(Error::InconsistentState);
+        }
+    } else if !block.deposits.is_empty() {
         return Err(Error::InconsistentState);
     }
 

@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import { IZoneOutbox, LastBatch, Withdrawal } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
+import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
@@ -13,6 +14,7 @@ import { Test } from "forge-std/Test.sol";
 /// @notice Tests for ZoneOutbox finalizeWithdrawalBatch() functionality and withdrawal storage
 contract ZoneOutboxTest is Test {
 
+    ZoneConfig public config;
     ZoneOutbox public outbox;
     ZoneInbox public inbox;
     MockZoneGasToken public gasToken;
@@ -31,8 +33,12 @@ contract ZoneOutboxTest is Test {
         gasToken = new MockZoneGasToken("Zone USD", "zUSD");
         tempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
-        inbox = new ZoneInbox(mockPortal, address(tempoState), address(gasToken), sequencer);
-        outbox = new ZoneOutbox(address(gasToken), sequencer);
+        config = new ZoneConfig(address(gasToken), mockPortal, address(tempoState));
+        tempoState.setMockStorageValue(
+            mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
+        );
+        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState), address(gasToken));
+        outbox = new ZoneOutbox(address(config), address(gasToken));
 
         // Grant minter role to inbox and burner role to outbox
         gasToken.setMinter(address(inbox), true);
@@ -784,7 +790,8 @@ contract ZoneOutboxTest is Test {
 
     function test_immutableGetters() public view {
         assertEq(address(outbox.gasToken()), address(gasToken));
-        assertEq(outbox.sequencer(), sequencer);
+        assertEq(address(outbox.config()), address(config));
+        assertEq(config.sequencer(), sequencer);
     }
 
     /*//////////////////////////////////////////////////////////////
