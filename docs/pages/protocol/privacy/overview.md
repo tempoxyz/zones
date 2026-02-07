@@ -1115,9 +1115,10 @@ The zone can verify encrypted deposit decryption on-chain without the sequencer 
 
 ```solidity
 struct DecryptionData {
-    bytes32 sharedSecret;  // ECDH shared secret (sequencerPriv * ephemeralPub)
-    address to;            // Decrypted recipient
-    bytes32 memo;          // Decrypted memo
+    bytes32 sharedSecret;       // ECDH shared secret (sequencerPriv * ephemeralPub)
+    address to;                 // Decrypted recipient
+    bytes32 memo;               // Decrypted memo
+    ChaumPedersenProof cpProof; // Proof of correct shared secret derivation
 }
 ```
 
@@ -1140,25 +1141,28 @@ The sequencer provides a Chaum-Pedersen proof that proves: "I know `privSeq` suc
 This proof allows on-chain verification without revealing the private key:
 
 ```solidity
-// Step 1: Verify Chaum-Pedersen proof of correct shared secret derivation
+// Step 1: Look up sequencer's public key from on-chain key history
+(bytes32 seqPubX, uint8 seqPubYParity) = _readEncryptionKey(ed.keyIndex);
+
+// Step 2: Verify Chaum-Pedersen proof of correct shared secret derivation
 bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
     ed.encrypted.ephemeralPubX,
     ed.encrypted.ephemeralPubYParity,
     dec.sharedSecret,
-    dec.sequencerPubX,
-    dec.sequencerPubYParity,
+    seqPubX,          // looked up on-chain, not from dec
+    seqPubYParity,    // looked up on-chain, not from dec
     dec.cpProof
 );
 if (!proofValid) revert InvalidSharedSecretProof();
 
-// Step 2: Derive AES key using HKDF-SHA256 (in Solidity)
+// Step 3: Derive AES key using HKDF-SHA256 (in Solidity)
 // Note: Encryption key validity is already validated on Tempo side in ZonePortal.depositEncrypted()
 bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", "");
 
-// Step 3: Try to decrypt using AES-GCM precompile
+// Step 4: Try to decrypt using AES-GCM precompile
 (bytes memory plaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(...);
 
-// Step 4: If decryption fails, return funds to sender (don't block chain)
+// Step 5: If decryption fails, return funds to sender (don't block chain)
 if (!valid) {
     gasToken.mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(...);
@@ -1226,25 +1230,28 @@ interface IAesGcmDecrypt {
 Usage in `ZoneInbox.advanceTempo()`:
 
 ```solidity
-// Step 1: Verify Chaum-Pedersen proof of correct shared secret derivation
+// Step 1: Look up sequencer's public key from on-chain key history
+(bytes32 seqPubX, uint8 seqPubYParity) = _readEncryptionKey(ed.keyIndex);
+
+// Step 2: Verify Chaum-Pedersen proof of correct shared secret derivation
 bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
     ed.encrypted.ephemeralPubX,
     ed.encrypted.ephemeralPubYParity,
     dec.sharedSecret,
-    dec.sequencerPubX,
-    dec.sequencerPubYParity,
+    seqPubX,          // looked up on-chain, not from dec
+    seqPubYParity,    // looked up on-chain, not from dec
     dec.cpProof
 );
 if (!proofValid) revert InvalidSharedSecretProof();
 
-// Step 2: Derive AES key from shared secret using HKDF-SHA256 (in Solidity)
+// Step 3: Derive AES key from shared secret using HKDF-SHA256 (in Solidity)
 bytes32 aesKey = _hkdfSha256(
     dec.sharedSecret,
     "ecies-aes-key",  // salt
     ""                // info (empty)
 );
 
-// Step 3: Decrypt using AES-256-GCM precompile
+// Step 4: Decrypt using AES-256-GCM precompile
 (bytes memory decryptedPlaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(
     aesKey,
     ed.encrypted.nonce,
@@ -1253,7 +1260,7 @@ bytes32 aesKey = _hkdfSha256(
     ed.encrypted.tag
 );
 
-// Step 4: Verify decrypted plaintext matches claimed (to, memo)
+// Step 5: Verify decrypted plaintext matches claimed (to, memo)
 // Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
 if (valid && decryptedPlaintext.length >= 52) {
     (address decryptedTo, bytes32 decryptedMemo) = EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
@@ -1262,7 +1269,7 @@ if (valid && decryptedPlaintext.length >= 52) {
     valid = false;
 }
 
-// Step 5: Handle success or failure
+// Step 6: Handle success or failure
 if (!valid) {
     // Decryption failed - return funds to sender
     gasToken.mint(ed.sender, ed.amount);

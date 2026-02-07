@@ -135,12 +135,12 @@ struct ChaumPedersenProof {
 /// @dev Must match 1:1 with encrypted deposits in the queue (in order of appearance).
 ///      Includes a Chaum-Pedersen proof to verify the shared secret was correctly derived
 ///      without exposing the sequencer's private key.
+///      The sequencer's public key is looked up from the deposit's keyIndex on-chain,
+///      so it does not need to be included here.
 struct DecryptionData {
     bytes32 sharedSecret; // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
     address to; // Decrypted recipient
     bytes32 memo; // Decrypted memo
-    bytes32 sequencerPubX; // Sequencer's public key X (must match keyIndex from deposit)
-    uint8 sequencerPubYParity; // Sequencer's public key Y parity
     ChaumPedersenProof cpProof; // Proof of correct shared secret derivation
 }
 

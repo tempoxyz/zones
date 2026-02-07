@@ -219,18 +219,16 @@ contract ZoneInbox is IZoneInbox {
                 // This prevents griefing attacks where users encrypt with wrong keys,
                 // without exposing the sequencer's private key to the EVM.
                 // The proof verifies that sharedSecret = privSeq * ephemeralPub without revealing privSeq.
-                (bytes32 expectedPubX, uint8 expectedYParity) = _readEncryptionKey(ed.keyIndex);
-                if (dec.sequencerPubX != expectedPubX || dec.sequencerPubYParity != expectedYParity)
-                {
-                    revert InvalidSharedSecretProof();
-                }
+                // The sequencer's public key is looked up on-chain from the deposit's keyIndex,
+                // so it doesn't need to be in DecryptionData (saves calldata).
+                (bytes32 seqPubX, uint8 seqPubYParity) = _readEncryptionKey(ed.keyIndex);
                 bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY)
                     .verifyProof(
                         ed.encrypted.ephemeralPubkeyX,
                         ed.encrypted.ephemeralPubkeyYParity,
                         dec.sharedSecret,
-                        dec.sequencerPubX,
-                        dec.sequencerPubYParity,
+                        seqPubX,
+                        seqPubYParity,
                         dec.cpProof
                     );
                 if (!proofValid) revert InvalidSharedSecretProof();
