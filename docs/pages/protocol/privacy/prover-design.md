@@ -135,13 +135,9 @@ may call `ZoneInbox.advanceTempo` at the start of the block to advance Tempo sta
 and (only in the final block of a batch) calls `ZoneOutbox.finalizeWithdrawalBatch` at the end. If
 `advanceTempo` is omitted for a block, the Tempo binding carries over from the previous block.
 
-User transactions **must not** call the system contract predeploys
-(`TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`). The executor must reject any
-non-sequencer call to these addresses, enforce at most one `advanceTempo` at the start of each block
+The executor must enforce at most one `advanceTempo` at the start of each block
 (or zero, for blocks that do not advance Tempo), and enforce `finalizeWithdrawalBatch` only in the
-final block of the batch. Tempo state reads
-via `TempoState` are restricted to system contracts only.
-The block hash is computed from the simplified zone header:
+final block of the batch. The block hash is computed from the simplified zone header:
 `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`.
 The transactions and receipts roots are computed over the full ordered list of zone transactions.
 
