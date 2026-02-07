@@ -701,7 +701,7 @@ interface ITempoState {
 
     /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
     /// @dev Validates chain continuity (parent hash must match, number must be +1).
-    ///      Called by ZoneInbox.advanceTempo(). Protocol enforces advanceTempo() runs as system transaction.
+    ///      Called by ZoneInbox.advanceTempo(). Executor enforces ZoneInbox-only access.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external;
 
