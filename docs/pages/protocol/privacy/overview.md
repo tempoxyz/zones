@@ -722,7 +722,7 @@ The TempoState stores the Tempo wrapper fields and the inner fields needed by th
 
 **How it works:**
 
-1. ZoneInbox calls `finalizeTempo()` at the start of each block, which decodes the RLP header, validates chain continuity, and stores the wrapper fields and selected inner fields.
+1. ZoneInbox calls `finalizeTempo()` when the sequencer chooses to advance Tempo for a block, which decodes the RLP header, validates chain continuity, and stores the wrapper fields and selected inner fields. If a block omits `advanceTempo`, the Tempo binding carries over from the previous block.
 2. When submitting a batch, the prover specifies a `tempoBlockNumber` and optionally a `recentTempoBlockNumber`. The portal reads the hash for `anchorBlockNumber` via the EIP-2935 block hash history precompile.
 3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the portal's `anchorBlockHash` in direct mode, or that the parent-hash chain from `tempoBlockNumber` reaches `anchorBlockHash` in ancestry mode.
 4. The `readTempoStorageSlot` functions are **precompile stubs restricted to system contracts only** - actual implementation is in the zone node, validated against `tempoStateRoot`. Only ZoneInbox (0x1c00...0001), ZoneOutbox (0x1c00...0002), and ZoneConfig (0x1c00...0003) can call these functions. User transactions cannot directly read Tempo state.
@@ -745,7 +745,7 @@ The zone has a `TIP403Registry` contract deployed at the **same address** as Tem
 
 #### Zone inbox
 
-The zone inbox is a system contract that advances Tempo state and processes deposits from Tempo in a single atomic operation. It is called by the sequencer at the start of each block.
+The zone inbox is a system contract that advances Tempo state and processes deposits from Tempo in a single atomic operation. It is called by the sequencer at the start of a block when Tempo is advanced; blocks may omit this call and carry forward the existing Tempo binding.
 
 ```solidity
 interface IZoneInbox {
@@ -1195,10 +1195,10 @@ Each zone runs as an ExEx (Execution Extension) attached to a Tempo node. There 
 - **Zone block hash**: Computed from the zone block header after execution. The zone block header is a simplified Ethereum header that includes:
   - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`
   - **Omitted fields**: `gasLimit`, `gasUsed` (zones have no hard gas limit), `logsBloom`, `extraData` (not needed for proofs)
-- **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo, user txs..., finalizeWithdrawalBatch?]`.
+- **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo?, user txs..., finalizeWithdrawalBatch?]`.
 - **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
 - **Receipts root**: Committed in the block hash but not proven on-chain. Batch parameters are read from `lastBatch` state storage instead of event logs.
-- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. Each zone block starts with a sequencer-only call to `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header. When submitting a batch, the prover specifies a `tempoBlockNumber` and an `anchorBlockNumber`; the proof must demonstrate the zone committed to `tempoBlockNumber` and that the anchor hash matches either the same block (direct mode) or a verified ancestry chain (ancestry mode) ending at `anchorBlockHash` from the EIP-2935 history precompile.
+- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. A zone block may start with a sequencer-only call to `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header; if omitted, the binding carries over from the previous block. When submitting a batch, the prover specifies a `tempoBlockNumber` and an `anchorBlockNumber`; the proof must demonstrate the zone committed to `tempoBlockNumber` and that the anchor hash matches either the same block (direct mode) or a verified ancestry chain (ancestry mode) ending at `anchorBlockHash` from the EIP-2935 history precompile.
 
 #### Block header field coverage
 
@@ -1238,7 +1238,7 @@ The portal provides `blockHash` and `withdrawalBatchIndex` as the previous batch
 ### Deposits and withdrawals
 
 - **Deposit contract**: Tempo portal escrows TIP-20 tokens. The ExEx watches `DepositMade` events and queues deposits for zone processing.
-- **Combined sequencer call**: Each zone block starts with a sequencer-only call to `ZoneInbox.advanceTempo(header, deposits)`. This atomically advances the zone's Tempo view and processes pending deposits, validating the deposit hash against Tempo state.
+- **Combined sequencer call**: A zone block may start with a sequencer-only call to `ZoneInbox.advanceTempo(header, deposits)`. This atomically advances the zone's Tempo view and processes pending deposits, validating the deposit hash against Tempo state. If omitted, no deposits are processed and the Tempo binding is unchanged for that block.
 - **Withdrawal requests**: Users trigger withdrawals on the zone via RPC. The withdrawal is added to the pending exits and included in the next batch's exit list.
 
 ### RPC interface

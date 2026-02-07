@@ -62,11 +62,11 @@ contract ZoneInbox is IZoneInbox {
     }
 
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call
-    /// @dev This is the main entry point for the sequencer at block start.
+    /// @dev This is the main entry point for the sequencer at block start when Tempo is advanced.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the deposit queue
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
-    ///      Protocol and proof enforce this runs at the start of each block.
+    ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
     function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external {
