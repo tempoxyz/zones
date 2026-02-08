@@ -506,7 +506,40 @@ interface IZonePortal {
 
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    /// @notice Emitted when an encrypted deposit is made (recipient/memo not revealed)
+    event EncryptedDepositMade(
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed sender,
+        uint128 netAmount,
+        uint128 fee,
+        uint256 keyIndex,
+        bytes32 ephemeralPubkeyX,
+        uint8 ephemeralPubkeyYParity,
+        bytes ciphertext,
+        bytes12 nonce,
+        bytes16 tag
+    );
+
+    /// @notice Emitted when sequencer updates their encryption key
+    event SequencerEncryptionKeyUpdated(
+        bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
+    );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+
+    error NotSequencer();
+    error NotPendingSequencer();
+    error InvalidProof();
+    error InvalidTempoBlockNumber();
+    error CallbackRejected();
+    error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
+    error InvalidEncryptionKeyIndex(uint256 keyIndex);
+    error NoEncryptionKeySet();
+    error NoEncryptionKeyAtBlock(uint64 blockNumber);
+    error InvalidEphemeralPubkey();
+    error InvalidCiphertextLength(uint256 actual, uint256 expected);
+    error InvalidProofOfPossession();
+    error DepositTooSmall();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas).
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
@@ -541,19 +574,44 @@ interface IZonePortal {
     function calculateDepositFee() external view returns (uint128 fee);
 
     /// @notice Deposit zone token into the zone. Fee is deducted from amount.
-    /// @dev Returns the new current deposit queue hash.
     function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
 
+    /// @notice Deposit with encrypted recipient and memo. Fee is deducted from amount.
+    function depositEncrypted(
+        uint128 amount,
+        uint256 keyIndex,
+        EncryptedDepositPayload calldata encrypted
+    ) external returns (bytes32 newCurrentDepositQueueHash);
+
+    /// @notice Get the current sequencer encryption key.
+    /// @dev Reverts with NoEncryptionKeySet() if no key has been set.
+    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+
+    /// @notice Set sequencer encryption key with proof of possession.
+    /// @dev Requires ECDSA signature proving control of the corresponding private key.
+    function setSequencerEncryptionKey(
+        bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS
+    ) external;
+
+    /// @notice Number of encryption keys in history.
+    function encryptionKeyCount() external view returns (uint256);
+
+    /// @notice Get a historical encryption key entry by index.
+    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory);
+
+    /// @notice Get the encryption key active at a specific block.
+    /// @dev Reverts with NoEncryptionKeyAtBlock() if no key was active at that block.
+    function encryptionKeyAtBlock(uint64 tempoBlockNumber)
+        external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
+
+    /// @notice Check if an encryption key is still valid for new deposits.
+    function isEncryptionKeyValid(uint256 keyIndex)
+        external view returns (bool valid, uint64 expiresAtBlock);
+
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
-    /// @dev Fee is paid to sequencer regardless of success/failure.
-    /// @param withdrawal The withdrawal to process (must be at the head of the current slot).
-    /// @param remainingQueue The hash of the remaining withdrawals in this slot (0 if last).
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
-    /// @dev Verifies prevBlockHash == blockHash, then calls the verifier.
-    ///      On success updates withdrawalBatchIndex, blockHash, lastSyncedTempoBlockNumber,
-    ///      and adds withdrawals to the queue.
     function submitBatch(
         uint64 tempoBlockNumber,
         uint64 recentTempoBlockNumber,
@@ -642,6 +700,9 @@ ZoneConfig is the central zone configuration contract that provides access to zo
 
 ```solidity
 interface IZoneConfig {
+    error NotSequencer();
+    error NoEncryptionKeySet();
+
     /// @notice Zone token address (TIP-20 at same address as Tempo)
     function zoneToken() external view returns (address);
 
@@ -656,6 +717,10 @@ interface IZoneConfig {
 
     /// @notice Get pending sequencer by reading from L1 ZonePortal
     function pendingSequencer() external view returns (address);
+
+    /// @notice Get sequencer's encryption public key by reading from L1 ZonePortal
+    /// @dev Reverts with NoEncryptionKeySet() if no key has been set.
+    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
     /// @notice Check if an address is the current sequencer
     function isSequencer(address account) external view returns (bool);
@@ -750,32 +815,40 @@ interface IZoneInbox {
         bytes32 memo
     );
 
-    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
-    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+    /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
+    event EncryptedDepositProcessed(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        address indexed to,
+        uint128 amount,
+        bytes32 memo
+    );
+
+    /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
+    event EncryptedDepositFailed(
+        bytes32 indexed depositHash, address indexed sender, uint128 amount
+    );
+
+    error OnlySequencer();
+    error InvalidDepositQueueHash();
+    error MissingDecryptionData();
+    error ExtraDecryptionData();
+    error InvalidSharedSecretProof();
+
+    /// @notice Zone configuration (reads sequencer from L1)
+    function config() external view returns (IZoneConfig);
 
     /// @notice The Tempo portal address (for reading deposit queue hash).
     function tempoPortal() external view returns (address);
 
     /// @notice The TempoState predeploy address.
-    function tempoState() external view returns (TempoState);
+    function tempoState() external view returns (ITempoState);
 
     /// @notice The zone token (TIP-20 at same address as Tempo).
     function gasToken() external view returns (IZoneGasToken);
 
-    /// @notice Current sequencer address.
-    function sequencer() external view returns (address);
-
-    /// @notice Pending sequencer for two-step transfer.
-    function pendingSequencer() external view returns (address);
-
     /// @notice The zone's last processed deposit queue hash.
     function processedDepositQueueHash() external view returns (bytes32);
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external;
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external;
 
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
     /// @dev This is the main entry point for the sequencer at block start.
@@ -1257,8 +1330,8 @@ bytes32 aesKey = _hkdfSha256(
 );
 
 // Step 5: Verify decrypted plaintext matches claimed (to, memo)
-// Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
-if (valid && decryptedPlaintext.length >= 52) {
+// Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)] = 64 bytes
+if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
     (address decryptedTo, bytes32 decryptedMemo) = EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
     valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);
 } else {

@@ -78,6 +78,14 @@ pub struct LastBatchCommitment {
     pub withdrawal_batch_index: u64,
 }
 
+/// Mirrors the Solidity `LastBatch` struct from ZoneOutbox.
+/// Used internally when reading from zone state; fields are split across
+/// `WithdrawalQueueTransition` (hash) and `LastBatchCommitment` (index) in output.
+pub struct LastBatch {
+    pub withdrawal_queue_hash: B256,
+    pub withdrawal_batch_index: u64,
+}
+
 pub struct ZoneHeader {
     pub parent_hash: B256,
     pub beneficiary: Address,
@@ -128,10 +136,40 @@ pub struct ZoneBlock {
 
     /// Sequencer-only: finalize a batch (only in final block, must be last)
     /// Required for the final block in a batch; must be absent in intermediate blocks.
-    pub finalize_withdrawal_batch_count: Option<u64>,
+    /// Uses U256 to match Solidity `finalizeWithdrawalBatch(uint256 count)`.
+    pub finalize_withdrawal_batch_count: Option<U256>,
 
     /// Transactions to execute
     pub transactions: Vec<Transaction>,
+}
+```
+
+### Deposit and Decryption Types
+
+```rust
+/// Mirrors the Solidity `QueuedDeposit` struct from IZone.sol
+pub struct QueuedDeposit {
+    pub deposit_type: DepositType,
+    pub deposit_data: Vec<u8>, // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+}
+
+pub enum DepositType {
+    Plain,
+    Encrypted,
+}
+
+/// Mirrors the Solidity `DecryptionData` struct from IZone.sol
+/// Provided by the sequencer for each encrypted deposit
+pub struct DecryptionData {
+    pub shared_secret: B256,  // ECDH shared secret (x-coordinate)
+    pub to: Address,          // Decrypted recipient
+    pub memo: B256,           // Decrypted memo
+    pub cp_proof: ChaumPedersenProof, // Proof of correct shared secret derivation
+}
+
+pub struct ChaumPedersenProof {
+    pub s: B256, // Response: s = r + c * privSeq (mod n)
+    pub c: B256, // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
 }
 ```
 
@@ -312,6 +350,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
         if block.number != prev_header.number + 1 {
             return Err(Error::InconsistentState);
         }
+        // Timestamps must be non-decreasing (equal is allowed, matching EVM rules)
         if block.timestamp < prev_header.timestamp {
             return Err(Error::InconsistentState);
         }
