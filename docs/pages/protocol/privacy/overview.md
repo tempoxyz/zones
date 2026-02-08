@@ -792,7 +792,7 @@ Tempo state staleness depends on how frequently the sequencer updates tempo stat
 
 #### TIP-403 registry
 
-The zone has a `TIP403Registry` contract deployed at the **same address** as Tempo. This contract is read-only—it does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the Tempo state reader precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.
+The zone has a `TIP403Registry` contract deployed at the **same address** as Tempo. This contract is read-only—it and does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via the Tempo state reader precompile, so zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically.
 
 #### Zone inbox
 
