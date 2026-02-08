@@ -57,6 +57,7 @@ use tempo_precompiles::{
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
     validator_config::ValidatorConfig,
+    verifier::Verifier,
 };
 
 /// Generate genesis allocation file for testing
@@ -370,6 +371,9 @@ impl GenesisArgs {
 
         println!("Initializing account keychain");
         initialize_account_keychain(&mut evm)?;
+
+        println!("Initializing verifier");
+        initialize_verifier(&mut evm)?;
 
         if !self.no_pairwise_liquidity {
             if let (Some(alpha), Some(beta), Some(theta)) =
@@ -770,6 +774,15 @@ fn initialize_account_keychain(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Re
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, || {
         AccountKeychain::new().initialize()
+    })?;
+
+    Ok(())
+}
+
+fn initialize_verifier(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, || {
+        Verifier::new().initialize()
     })?;
 
     Ok(())

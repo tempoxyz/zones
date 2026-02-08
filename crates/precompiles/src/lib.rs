@@ -15,6 +15,7 @@ pub mod tip20_factory;
 pub mod tip403_registry;
 pub mod tip_fee_manager;
 pub mod validator_config;
+pub mod verifier;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_util;
@@ -29,6 +30,7 @@ use crate::{
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
     validator_config::ValidatorConfig,
+    verifier::Verifier,
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 
@@ -48,7 +50,7 @@ use revm::{
 pub use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, DEFAULT_FEE_TOKEN, NONCE_PRECOMPILE_ADDRESS, PATH_USD_ADDRESS,
     STABLECOIN_DEX_ADDRESS, TIP_FEE_MANAGER_ADDRESS, TIP20_FACTORY_ADDRESS,
-    TIP403_REGISTRY_ADDRESS, VALIDATOR_CONFIG_ADDRESS,
+    TIP403_REGISTRY_ADDRESS, VALIDATOR_CONFIG_ADDRESS, VERIFIER_ADDRESS,
 };
 
 // Re-export storage layout helpers for read-only contexts (e.g., pool validation)
@@ -88,6 +90,8 @@ pub fn extend_tempo_precompiles(precompiles: &mut PrecompilesMap, cfg: &CfgEnv<T
             Some(ValidatorConfigPrecompile::create(chain_id, spec))
         } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
             Some(AccountKeychainPrecompile::create(chain_id, spec))
+        } else if *address == VERIFIER_ADDRESS {
+            Some(VerifierPrecompile::create(chain_id, spec))
         } else {
             None
         }
@@ -190,6 +194,15 @@ impl ValidatorConfigPrecompile {
     pub fn create(chain_id: u64, spec: TempoHardfork) -> DynPrecompile {
         tempo_precompile!("ValidatorConfig", chain_id, spec, |input| {
             ValidatorConfig::new()
+        })
+    }
+}
+
+pub struct VerifierPrecompile;
+impl VerifierPrecompile {
+    pub fn create(chain_id: u64, spec: TempoHardfork) -> DynPrecompile {
+        tempo_precompile!("Verifier", chain_id, spec, |input| {
+            Verifier::new()
         })
     }
 }
