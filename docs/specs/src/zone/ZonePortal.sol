@@ -174,11 +174,38 @@ contract ZonePortal is IZonePortal {
         return (current.x, current.yParity);
     }
 
-    /// @notice Set the sequencer's encryption public key
+    /// @notice Set the sequencer's encryption public key with proof of possession
     /// @dev Only callable by the sequencer. Appends to key history.
-    /// @param x The X coordinate
+    ///      Requires a valid ECDSA signature over keccak256(abi.encode(address(this), x, yParity))
+    ///      produced by the private key corresponding to (x, yParity). This prevents accidental
+    ///      registration of keys the sequencer cannot decrypt with.
+    /// @param x The X coordinate (must be valid secp256k1 point)
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
-    function setSequencerEncryptionKey(bytes32 x, uint8 yParity) external onlySequencer {
+    /// @param popV Recovery id of the proof-of-possession signature
+    /// @param popR R component of the proof-of-possession signature
+    /// @param popS S component of the proof-of-possession signature
+    function setSequencerEncryptionKey(
+        bytes32 x,
+        uint8 yParity,
+        uint8 popV,
+        bytes32 popR,
+        bytes32 popS
+    )
+        external
+        onlySequencer
+    {
+        // Validate yParity
+        if (yParity != 0x02 && yParity != 0x03) revert InvalidEphemeralPubkey();
+
+        // Validate x is on the secp256k1 curve
+        if (!_isValidSecp256k1X(x)) revert InvalidEphemeralPubkey();
+
+        // Verify proof of possession: the sequencer must sign with the encryption key's private key
+        bytes32 message = keccak256(abi.encode(address(this), x, yParity));
+        address recovered = ecrecover(message, popV, popR, popS);
+        address expected = _deriveAddressFromPubKey(x, yParity);
+        if (recovered == address(0) || recovered != expected) revert InvalidProofOfPossession();
+
         uint64 activationBlock = uint64(block.number);
         _encryptionKeys.push(
             EncryptionKeyEntry({ x: x, yParity: yParity, activationBlock: activationBlock })
@@ -274,6 +301,10 @@ contract ZonePortal is IZonePortal {
     uint256 internal constant SECP256K1_HALF_PM1 =
         0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7FFFFE17;
 
+    /// @notice (SECP256K1_P + 1) / 4 for modular square root (p ≡ 3 mod 4)
+    uint256 internal constant SECP256K1_SQRT_EXP =
+        0x3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFFFF0C;
+
     /// @notice Validate that an X coordinate corresponds to a valid secp256k1 point
     /// @dev Uses Euler's criterion via the MODEXP precompile (0x05):
     ///      x³ + 7 is a quadratic residue mod p iff (x³+7)^((p-1)/2) ≡ 1 (mod p)
@@ -294,6 +325,41 @@ contract ZonePortal is IZonePortal {
         if (!success || result.length != 32) return false;
 
         return uint256(bytes32(result)) == 1;
+    }
+
+    /// @notice Derive the Ethereum address corresponding to a compressed secp256k1 public key
+    /// @dev Computes y from x using modular square root, then keccak256(x || y)
+    /// @param x The X coordinate (must be a valid secp256k1 x-coordinate)
+    /// @param yParity 0x02 (even y) or 0x03 (odd y)
+    /// @return addr The derived Ethereum address
+    function _deriveAddressFromPubKey(
+        bytes32 x,
+        uint8 yParity
+    )
+        internal
+        view
+        returns (address addr)
+    {
+        uint256 px = uint256(x);
+
+        // Compute y² = x³ + 7 mod p
+        uint256 rhs = addmod(mulmod(mulmod(px, px, SECP256K1_P), px, SECP256K1_P), 7, SECP256K1_P);
+
+        // Compute y = rhs^((p+1)/4) mod p (valid because p ≡ 3 mod 4)
+        bytes memory modexpInput = abi.encodePacked(
+            uint256(32), uint256(32), uint256(32), rhs, SECP256K1_SQRT_EXP, SECP256K1_P
+        );
+        (bool success, bytes memory modexpResult) = address(0x05).staticcall(modexpInput);
+        require(success && modexpResult.length == 32, "modexp failed");
+        uint256 y = uint256(bytes32(modexpResult));
+
+        // Select correct y based on parity: 0x02 = even, 0x03 = odd
+        if ((y % 2 == 0) != (yParity == 0x02)) {
+            y = SECP256K1_P - y;
+        }
+
+        // Address = last 20 bytes of keccak256(uncompressed public key)
+        addr = address(uint160(uint256(keccak256(abi.encodePacked(px, y)))));
     }
 
     /*//////////////////////////////////////////////////////////////

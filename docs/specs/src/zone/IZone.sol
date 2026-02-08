@@ -413,6 +413,7 @@ interface IZonePortal {
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
+    error InvalidProofOfPossession();
     error DepositTooSmall();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
@@ -452,7 +453,17 @@ interface IZonePortal {
     /// @dev Appends to key history. The new key becomes active at the current Tempo block.
     /// @param x The X coordinate of the secp256k1 public key
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
-    function setSequencerEncryptionKey(bytes32 x, uint8 yParity) external;
+    /// @param popV Recovery id of the proof-of-possession signature
+    /// @param popR R component of the proof-of-possession signature
+    /// @param popS S component of the proof-of-possession signature
+    function setSequencerEncryptionKey(
+        bytes32 x,
+        uint8 yParity,
+        uint8 popV,
+        bytes32 popR,
+        bytes32 popS
+    )
+        external;
 
     /// @notice Get the number of encryption keys in the history
     /// @return The total count of keys (including current)

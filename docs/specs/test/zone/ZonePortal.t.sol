@@ -32,6 +32,7 @@ import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { Vm } from "forge-std/Vm.sol";
 
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 
@@ -1775,6 +1776,21 @@ contract ZonePortalTest is BaseTest {
     bytes32 internal constant VALID_SECP256K1_X =
         0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
 
+    // Well-known test private keys for secp256k1 PoP signatures
+    uint256 internal constant ENC_KEY_1 = 1; // pubkey = G (generator point)
+    uint256 internal constant ENC_KEY_2 = 2;
+    uint256 internal constant ENC_KEY_3 = 3;
+
+    /// @notice Helper: set encryption key with proof of possession using vm.createWallet + vm.sign
+    function _setEncKeyWithPoP(uint256 privateKey) internal returns (bytes32 x, uint8 yParity) {
+        Vm.Wallet memory w = vm.createWallet(privateKey);
+        x = bytes32(w.publicKeyX);
+        yParity = w.publicKeyY % 2 == 0 ? 0x02 : 0x03;
+        bytes32 message = keccak256(abi.encode(address(portal), x, yParity));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(w.privateKey, message);
+        portal.setSequencerEncryptionKey(x, yParity, v, r, s);
+    }
+
     function test_sequencerEncryptionKey_emptyReturnsZero() public view {
         (bytes32 x, uint8 yParity) = portal.sequencerEncryptionKey();
         assertEq(x, bytes32(0));
@@ -1782,10 +1798,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_setSequencerEncryptionKey_success() public {
-        bytes32 x = keccak256("key1");
-        uint8 yParity = 0x02;
-
-        portal.setSequencerEncryptionKey(x, yParity);
+        (bytes32 x, uint8 yParity) = _setEncKeyWithPoP(ENC_KEY_1);
 
         (bytes32 storedX, uint8 storedYParity) = portal.sequencerEncryptionKey();
         assertEq(storedX, x);
@@ -1796,49 +1809,47 @@ contract ZonePortalTest is BaseTest {
     function test_setSequencerEncryptionKey_onlySequencer() public {
         vm.prank(alice);
         vm.expectRevert(IZonePortal.NotSequencer.selector);
-        portal.setSequencerEncryptionKey(keccak256("key"), 0x02);
+        portal.setSequencerEncryptionKey(bytes32(uint256(1)), 0x02, 27, bytes32(0), bytes32(0));
     }
 
     function test_setSequencerEncryptionKey_multipleKeys() public {
-        bytes32 x1 = keccak256("key1");
-        bytes32 x2 = keccak256("key2");
-
-        portal.setSequencerEncryptionKey(x1, 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
         vm.roll(block.number + 100);
-        portal.setSequencerEncryptionKey(x2, 0x03);
+        (bytes32 x2, uint8 yParity2) = _setEncKeyWithPoP(ENC_KEY_2);
 
         assertEq(portal.encryptionKeyCount(), 2);
 
         // sequencerEncryptionKey returns the latest key
         (bytes32 storedX, uint8 storedYParity) = portal.sequencerEncryptionKey();
         assertEq(storedX, x2);
-        assertEq(storedYParity, 0x03);
+        assertEq(storedYParity, yParity2);
     }
 
     function test_setSequencerEncryptionKey_emitsEvent() public {
-        bytes32 x = keccak256("key1");
-        uint8 yParity = 0x02;
-
+        Vm.Wallet memory w = vm.createWallet(ENC_KEY_1);
+        bytes32 x = bytes32(w.publicKeyX);
+        uint8 yParity = w.publicKeyY % 2 == 0 ? 0x02 : 0x03;
         vm.expectEmit(true, true, true, true);
         emit IZonePortal.SequencerEncryptionKeyUpdated(x, yParity, 0, uint64(block.number));
-        portal.setSequencerEncryptionKey(x, yParity);
+        // can't use helper since expectEmit must come before the call
+        bytes32 message = keccak256(abi.encode(address(portal), x, yParity));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(w.privateKey, message);
+        portal.setSequencerEncryptionKey(x, yParity, v, r, s);
     }
 
     function test_encryptionKeyAt_success() public {
-        bytes32 x1 = keccak256("key1");
-        portal.setSequencerEncryptionKey(x1, 0x02);
+        (bytes32 x1, uint8 yParity1) = _setEncKeyWithPoP(ENC_KEY_1);
 
         vm.roll(block.number + 50);
-        bytes32 x2 = keccak256("key2");
-        portal.setSequencerEncryptionKey(x2, 0x03);
+        (bytes32 x2, uint8 yParity2) = _setEncKeyWithPoP(ENC_KEY_2);
 
         EncryptionKeyEntry memory entry0 = portal.encryptionKeyAt(0);
         assertEq(entry0.x, x1);
-        assertEq(entry0.yParity, 0x02);
+        assertEq(entry0.yParity, yParity1);
 
         EncryptionKeyEntry memory entry1 = portal.encryptionKeyAt(1);
         assertEq(entry1.x, x2);
-        assertEq(entry1.yParity, 0x03);
+        assertEq(entry1.yParity, yParity2);
     }
 
     function test_encryptionKeyAt_revertsOnInvalidIndex() public {
@@ -1849,23 +1860,20 @@ contract ZonePortalTest is BaseTest {
     function test_encryptionKeyAtBlock_binarySearch() public {
         // Set key1 at block 10
         vm.roll(10);
-        bytes32 x1 = keccak256("key1");
-        portal.setSequencerEncryptionKey(x1, 0x02);
+        (bytes32 x1, uint8 yParity1) = _setEncKeyWithPoP(ENC_KEY_1);
 
         // Set key2 at block 100
         vm.roll(100);
-        bytes32 x2 = keccak256("key2");
-        portal.setSequencerEncryptionKey(x2, 0x03);
+        (bytes32 x2,) = _setEncKeyWithPoP(ENC_KEY_2);
 
         // Set key3 at block 200
         vm.roll(200);
-        bytes32 x3 = keccak256("key3");
-        portal.setSequencerEncryptionKey(x3, 0x02);
+        (bytes32 x3,) = _setEncKeyWithPoP(ENC_KEY_3);
 
         // Query at block 10 -> key1
         (bytes32 rx, uint8 ry, uint256 ri) = portal.encryptionKeyAtBlock(10);
         assertEq(rx, x1);
-        assertEq(ry, 0x02);
+        assertEq(ry, yParity1);
         assertEq(ri, 0);
 
         // Query at block 50 -> key1 (still active)
@@ -1895,7 +1903,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_isEncryptionKeyValid_currentKeyNeverExpires() public {
-        portal.setSequencerEncryptionKey(keccak256("key"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         (bool valid, uint64 expiresAt) = portal.isEncryptionKeyValid(0);
         assertTrue(valid);
@@ -1909,11 +1917,11 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_isEncryptionKeyValid_oldKeyValidDuringGrace() public {
-        portal.setSequencerEncryptionKey(keccak256("key1"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint256 key2Block = block.number + 100;
         vm.roll(key2Block);
-        portal.setSequencerEncryptionKey(keccak256("key2"), 0x03);
+        _setEncKeyWithPoP(ENC_KEY_2);
 
         // Key 0 should be valid during grace period
         vm.roll(key2Block + ENCRYPTION_KEY_GRACE_PERIOD - 1);
@@ -1922,11 +1930,11 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_isEncryptionKeyValid_oldKeyExpiredAfterGrace() public {
-        portal.setSequencerEncryptionKey(keccak256("key1"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint256 key2Block = block.number + 100;
         vm.roll(key2Block);
-        portal.setSequencerEncryptionKey(keccak256("key2"), 0x03);
+        _setEncKeyWithPoP(ENC_KEY_2);
 
         // Key 0 should be expired after grace period
         vm.roll(key2Block + ENCRYPTION_KEY_GRACE_PERIOD);
@@ -1939,6 +1947,33 @@ contract ZonePortalTest is BaseTest {
         assertFalse(valid);
         (valid,) = portal.isEncryptionKeyValid(999);
         assertFalse(valid);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    PROOF-OF-POSSESSION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_setSequencerEncryptionKey_revertsOnInvalidPoP() public {
+        Vm.Wallet memory w = vm.createWallet(ENC_KEY_1);
+        bytes32 x = bytes32(w.publicKeyX);
+        uint8 yParity = w.publicKeyY % 2 == 0 ? 0x02 : 0x03;
+
+        // Sign with a DIFFERENT private key (wrong PoP)
+        bytes32 message = keccak256(abi.encode(address(portal), x, yParity));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(ENC_KEY_2, message);
+
+        vm.expectRevert(IZonePortal.InvalidProofOfPossession.selector);
+        portal.setSequencerEncryptionKey(x, yParity, v, r, s);
+    }
+
+    function test_setSequencerEncryptionKey_revertsOnInvalidYParity() public {
+        vm.expectRevert(IZonePortal.InvalidEphemeralPubkey.selector);
+        portal.setSequencerEncryptionKey(bytes32(uint256(1)), 0x04, 27, bytes32(0), bytes32(0));
+    }
+
+    function test_setSequencerEncryptionKey_revertsOnInvalidX() public {
+        vm.expectRevert(IZonePortal.InvalidEphemeralPubkey.selector);
+        portal.setSequencerEncryptionKey(bytes32(0), 0x02, 27, bytes32(0), bytes32(0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -1956,7 +1991,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_success() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
@@ -1969,7 +2004,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_hashChainMatchesLibrary() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
         uint128 fee = portal.calculateDepositFee();
@@ -1991,7 +2026,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_mixedQueue() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 amount = 1000e6;
 
@@ -2012,7 +2047,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_depositEncrypted_deductsFee() public {
         portal.setZoneGasRate(1); // 1 token per gas -> fee = 100_000
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
         uint128 expectedFee = uint128(100_000) * 1; // FIXED_DEPOSIT_GAS * zoneGasRate
@@ -2031,7 +2066,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_emitsEvent() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
         uint128 fee = portal.calculateDepositFee();
@@ -2057,12 +2092,12 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnExpiredKey() public {
-        portal.setSequencerEncryptionKey(keccak256("key1"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         // Rotate to key2
         uint256 key2Block = block.number + 100;
         vm.roll(key2Block);
-        portal.setSequencerEncryptionKey(keccak256("key2"), 0x03);
+        _setEncKeyWithPoP(ENC_KEY_2);
 
         // Move past grace period for key1
         vm.roll(key2Block + ENCRYPTION_KEY_GRACE_PERIOD);
@@ -2089,7 +2124,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnInvalidYParity() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
@@ -2109,7 +2144,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnInvalidEphemeralX() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
@@ -2130,7 +2165,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_depositEncrypted_revertsOnDepositTooSmall() public {
         portal.setZoneGasRate(1); // fee = 100_000
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 100_000);
@@ -2141,7 +2176,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnCiphertextTooShort() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
         payload.ciphertext = new bytes(63); // one byte too short
@@ -2157,7 +2192,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnCiphertextTooLong() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
         payload.ciphertext = new bytes(65); // one byte too long
@@ -2173,7 +2208,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnEmptyCiphertext() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
         payload.ciphertext = new bytes(0);
@@ -2187,7 +2222,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnOversizedCiphertext() public {
-        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+        _setEncKeyWithPoP(ENC_KEY_1);
 
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
         payload.ciphertext = new bytes(1024); // large ciphertext (DoS vector)
@@ -2282,16 +2317,11 @@ contract ZonePortalTest is BaseTest {
     ///            base + (index * 2):     x (bytes32)
     ///            base + (index * 2) + 1: yParity (uint8) + activationBlock (uint64) [packed]
     function test_storageLayout_encryptionKeysArray() public {
-        bytes32 keyX1 = keccak256("encryption-key-1");
-        uint8 keyYParity1 = 0x02;
-        bytes32 keyX2 = keccak256("encryption-key-2");
-        uint8 keyYParity2 = 0x03;
-
         // Add two keys at different blocks
-        portal.setSequencerEncryptionKey(keyX1, keyYParity1);
+        (bytes32 keyX1, uint8 keyYParity1) = _setEncKeyWithPoP(ENC_KEY_1);
 
         vm.roll(block.number + 100);
-        portal.setSequencerEncryptionKey(keyX2, keyYParity2);
+        (bytes32 keyX2, uint8 keyYParity2) = _setEncKeyWithPoP(ENC_KEY_2);
 
         // Verify array length at slot 6
         uint256 arraySlot = 6;
@@ -2337,10 +2367,7 @@ contract ZonePortalTest is BaseTest {
     ///      slot computation logic used by ZoneInbox._readEncryptionKey() and
     ///      ZoneConfig.sequencerEncryptionKey() to ensure they both read the correct data.
     function test_storageLayout_crossContractConsistency() public {
-        bytes32 keyX = keccak256("cross-contract-key");
-        uint8 keyYParity = 0x03;
-
-        portal.setSequencerEncryptionKey(keyX, keyYParity);
+        (bytes32 keyX, uint8 keyYParity) = _setEncKeyWithPoP(ENC_KEY_1);
 
         // Use the shared constants from IZone.sol (single source of truth)
 

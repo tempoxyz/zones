@@ -1041,7 +1041,7 @@ For privacy-sensitive use cases, users can make **encrypted deposits** where the
 
 **Encryption scheme**: ECIES with secp256k1
 
-1. Sequencer publishes a secp256k1 encryption public key via `setSequencerEncryptionKey(x, yParity)`
+1. Sequencer publishes a secp256k1 encryption public key via `setSequencerEncryptionKey(x, yParity, popV, popR, popS)` with a proof of possession
 2. User generates an ephemeral keypair and derives a shared secret via ECDH
 3. User encrypts `(to || memo)` with AES-256-GCM using the derived key
 4. User calls `depositEncrypted(amount, keyIndex, encryptedPayload)` on the portal
@@ -1340,7 +1340,7 @@ function depositEncrypted(
 
 Key management functions:
 
-- `setSequencerEncryptionKey(x, yParity)` - Appends a new key to history, active from current Tempo block
+- `setSequencerEncryptionKey(x, yParity, popV, popR, popS)` - Appends a new key to history, active from current Tempo block. Requires a proof of possession (ECDSA signature over `keccak256(abi.encode(portalAddress, x, yParity))` by the corresponding private key)
 - `encryptionKeyCount()` - Returns total number of keys in history
 - `encryptionKeyAt(index)` - Returns a historical key entry by index
 - `encryptionKeyAtBlock(tempoBlockNumber)` - Returns the key that was active at a specific block
