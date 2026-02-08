@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {
-    BlockTransition,
-    DepositQueueTransition,
-    IVerifier,
-    WithdrawalQueueTransition
-} from "../../../src/zone/IZone.sol";
+import { BlockTransition, DepositQueueTransition, IVerifier } from "../../../src/zone/IZone.sol";
 
 /// @title MockVerifier
 /// @notice Mock verifier for testing that always accepts proofs (configurable)
@@ -26,7 +21,7 @@ contract MockVerifier is IVerifier {
         address, // sequencer
         BlockTransition calldata,
         DepositQueueTransition calldata,
-        WithdrawalQueueTransition calldata,
+        bytes32, // withdrawalQueueHash
         bytes calldata, // verifierConfig
         bytes calldata // proof
     )
