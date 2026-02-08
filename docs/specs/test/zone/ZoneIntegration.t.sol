@@ -4,11 +4,15 @@ pragma solidity ^0.8.13;
 import { TIP20 } from "../../src/TIP20.sol";
 import {
     BlockTransition,
+    DecryptionData,
     Deposit,
     DepositQueueTransition,
+    DepositType,
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
+    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    QueuedDeposit,
     Withdrawal,
     WithdrawalQueueTransition,
     ZoneParams
@@ -70,10 +74,6 @@ contract ZoneIntegrationTest is BaseTest {
     bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
     uint64 public genesisTempoBlockNumber;
 
-    /// @notice Storage slot for currentDepositQueueHash in ZonePortal
-    /// @dev Layout: sequencerPubkey(0), withdrawalBatchIndex(1), blockHash(2), currentDepositQueueHash(3)
-    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
-
     function setUp() public override {
         super.setUp();
 
@@ -122,6 +122,23 @@ contract ZoneIntegrationTest is BaseTest {
         l2GasToken.setBurner(address(l2Outbox), true);
     }
 
+    function _wrapDeposits(Deposit[] memory deposits)
+        internal
+        pure
+        returns (QueuedDeposit[] memory queued)
+    {
+        queued = new QueuedDeposit[](deposits.length);
+        for (uint256 i = 0; i < deposits.length; i++) {
+            queued[i] = QueuedDeposit({
+                depositType: DepositType.Regular, depositData: abi.encode(deposits[i])
+            });
+        }
+    }
+
+    function _advanceTempo(Deposit[] memory deposits) internal {
+        l2Inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
+    }
+
     /*//////////////////////////////////////////////////////////////
                    MULTI-USER DEPOSIT FLOW TESTS
     //////////////////////////////////////////////////////////////*/
@@ -153,11 +170,13 @@ contract ZoneIntegrationTest is BaseTest {
             Deposit({ sender: charlie, to: charlie, amount: 500e6, memo: bytes32("charlie1") });
 
         // Set up L2 mock
-        l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h4);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h4
+        );
 
         // Process on L2
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         // Verify L2 balances
         assertEq(l2GasToken.balanceOf(alice), 3000e6);
@@ -182,9 +201,11 @@ contract ZoneIntegrationTest is BaseTest {
         Deposit[] memory batch1 = new Deposit[](1);
         batch1[0] = Deposit({ sender: alice, to: alice, amount: 1000e6, memo: bytes32("d1") });
 
-        l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1
+        );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", batch1);
+        _advanceTempo(batch1);
 
         assertEq(l2GasToken.balanceOf(alice), 1000e6);
         assertEq(l2Inbox.processedDepositQueueHash(), d1);
@@ -215,9 +236,11 @@ contract ZoneIntegrationTest is BaseTest {
         batch2[0] = Deposit({ sender: alice, to: alice, amount: 2000e6, memo: bytes32("d2") });
         batch2[1] = Deposit({ sender: alice, to: alice, amount: 3000e6, memo: bytes32("d3") });
 
-        l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3
+        );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", batch2);
+        _advanceTempo(batch2);
 
         assertEq(l2GasToken.balanceOf(alice), 6000e6);
     }
@@ -238,10 +261,10 @@ contract ZoneIntegrationTest is BaseTest {
         deposits[0] =
             Deposit({ sender: alice, to: alice, amount: 5000e6, memo: bytes32("deposit") });
         l2TempoState.setMockStorageValue(
-            address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
         );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         // Alice requests withdrawal with callback
         vm.startPrank(alice);
@@ -306,10 +329,10 @@ contract ZoneIntegrationTest is BaseTest {
         deposits[0] =
             Deposit({ sender: alice, to: alice, amount: 50_000e6, memo: bytes32("big deposit") });
         l2TempoState.setMockStorageValue(
-            address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
         );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         // First batch: Alice withdraws to Bob
         vm.startPrank(alice);
@@ -456,9 +479,11 @@ contract ZoneIntegrationTest is BaseTest {
         deposits1[0] = Deposit({ sender: alice, to: alice, amount: 10_000e6, memo: bytes32("d1") });
         deposits1[1] = Deposit({ sender: bob, to: bob, amount: 5000e6, memo: bytes32("d2") });
 
-        l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d2);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d2
+        );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits1);
+        _advanceTempo(deposits1);
 
         // Phase 2: Withdrawals
         vm.startPrank(alice);
@@ -499,9 +524,11 @@ contract ZoneIntegrationTest is BaseTest {
         deposits2[0] =
             Deposit({ sender: charlie, to: charlie, amount: 7500e6, memo: bytes32("d3") });
 
-        l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3
+        );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits2);
+        _advanceTempo(deposits2);
 
         // Verify all L2 balances
         assertEq(l2GasToken.balanceOf(alice), 10_000e6 - 2000e6);
@@ -552,9 +579,11 @@ contract ZoneIntegrationTest is BaseTest {
 
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = Deposit({ sender: alice, to: alice, amount: 10_000e6, memo: bytes32("d1") });
-        l2TempoState.setMockStorageValue(address(l1Portal), CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1
+        );
         vm.prank(admin);
-        l2Inbox.advanceTempo("", deposits);
+        _advanceTempo(deposits);
 
         assertEq(l2GasToken.totalSupply(), 10_000e6);
 
@@ -571,6 +600,33 @@ contract ZoneIntegrationTest is BaseTest {
         l2GasToken.transfer(bob, 2000e6);
 
         assertEq(l2GasToken.totalSupply(), 7000e6);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    STORAGE LAYOUT VERIFICATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Verify PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT matches the actual ZonePortal storage layout.
+    /// @dev If ZonePortal's storage layout changes, this test will fail.
+    function test_storageLayout_currentDepositQueueHashSlot() public {
+        // Make a deposit to get a non-zero currentDepositQueueHash
+        vm.startPrank(alice);
+        pathUSD.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(alice, 1000e6, bytes32("layout-test"));
+        vm.stopPrank();
+
+        // Read via vm.load using our constant
+        bytes32 fromSlot = vm.load(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
+
+        // Compare against the public getter
+        assertEq(
+            fromSlot,
+            l1Portal.currentDepositQueueHash(),
+            "PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT does not match actual storage position"
+        );
+
+        // Sanity: value should be non-zero after deposit
+        assertTrue(fromSlot != bytes32(0), "deposit queue hash should be non-zero after deposit");
     }
 
 }

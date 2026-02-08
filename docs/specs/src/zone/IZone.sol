@@ -56,11 +56,172 @@ struct WithdrawalQueueTransition {
     bytes32 withdrawalQueueHash; // hash chain of withdrawals for this batch (0 if none)
 }
 
+/// @notice Deposit type discriminator for the unified deposit queue
+/// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
+enum DepositType {
+    Regular, // Standard deposit with plaintext recipient and memo
+    Encrypted // Encrypted deposit with hidden recipient and memo
+}
+
 struct Deposit {
     address sender;
     address to;
     uint128 amount;
     bytes32 memo;
+}
+
+/*//////////////////////////////////////////////////////////////
+                        ENCRYPTED DEPOSITS
+//////////////////////////////////////////////////////////////*/
+
+/// @notice Encrypted deposit payload (recipient and memo encrypted to sequencer)
+/// @dev Uses ECIES with secp256k1: ephemeral ECDH + AES-256-GCM
+struct EncryptedDepositPayload {
+    bytes32 ephemeralPubkeyX; // Ephemeral public key X coordinate (for ECDH)
+    uint8 ephemeralPubkeyYParity; // Y coordinate parity (0x02 or 0x03)
+    bytes ciphertext; // AES-256-GCM encrypted (to || memo || padding)
+    bytes12 nonce; // GCM nonce
+    bytes16 tag; // GCM authentication tag
+}
+
+/// @notice Encrypted deposit stored in the queue
+/// @dev Sender, amount, and key index are public; recipient and memo are encrypted.
+///      The keyIndex specifies which encryption key the user used, allowing the prover
+///      to look up the correct key for decryption even after key rotations.
+struct EncryptedDeposit {
+    address sender; // Depositor (public, for refunds)
+    uint128 amount; // Amount (public, for accounting)
+    uint256 keyIndex; // Index of encryption key used (specified by depositor)
+    EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+}
+
+/// @notice Historical record of an encryption key with its activation block
+/// @dev Used to track key rotations so the prover can determine which key
+///      was valid when a deposit was made
+struct EncryptionKeyEntry {
+    bytes32 x; // X coordinate of the public key
+    uint8 yParity; // Y coordinate parity (0x02 or 0x03)
+    uint64 activationBlock; // Tempo block number when this key became active
+}
+
+// Grace period after key rotation during which old keys are still accepted.
+// After this period, deposits using the old key are rejected.
+// 1 day at 1 second block time = 86400 blocks
+uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86_400;
+
+/*//////////////////////////////////////////////////////////////
+                    UNIFIED DEPOSIT QUEUE TYPES
+//////////////////////////////////////////////////////////////*/
+
+/// @notice A deposit entry in the unified queue (for zone-side processing)
+/// @dev Used by the sequencer when calling advanceTempo with mixed deposit types.
+///      The depositData is ABI-encoded Deposit or EncryptedDeposit depending on type.
+struct QueuedDeposit {
+    DepositType depositType;
+    bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+}
+
+/// @notice Chaum-Pedersen proof for ECDH shared secret derivation
+/// @dev Proves knowledge of privSeq such that:
+///      - pubSeq = privSeq * G (sequencer's key pair)
+///      - sharedSecretPoint = privSeq * ephemeralPub (ECDH computation)
+///      Uses Fiat-Shamir heuristic for non-interactive proof.
+struct ChaumPedersenProof {
+    bytes32 s; // Response: s = r + c * privSeq (mod n)
+    bytes32 c; // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
+}
+
+/// @notice Decryption data provided by sequencer for encrypted deposits
+/// @dev Must match 1:1 with encrypted deposits in the queue (in order of appearance).
+///      Includes a Chaum-Pedersen proof to verify the shared secret was correctly derived
+///      without exposing the sequencer's private key.
+///      The sequencer's public key is looked up from the deposit's keyIndex on-chain,
+///      so it does not need to be included here.
+struct DecryptionData {
+    bytes32 sharedSecret; // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
+    address to; // Decrypted recipient
+    bytes32 memo; // Decrypted memo
+    ChaumPedersenProof cpProof; // Proof of correct shared secret derivation
+}
+
+/*//////////////////////////////////////////////////////////////
+                    CRYPTOGRAPHIC PRECOMPILES
+//////////////////////////////////////////////////////////////*/
+
+// Precompile address for Chaum-Pedersen proof verification
+// Predeploy at 0x1c00000000000000000000000000000000000100
+address constant CHAUM_PEDERSEN_VERIFY = 0x1C00000000000000000000000000000000000100;
+
+// Precompile address for AES-256-GCM decryption
+// Predeploy at 0x1c00000000000000000000000000000000000101
+address constant AES_GCM_DECRYPT = 0x1C00000000000000000000000000000000000101;
+
+// Precompile address for SHA256 (standard Ethereum precompile)
+// Used for HKDF-SHA256 implementation in Solidity
+address constant SHA256 = 0x0000000000000000000000000000000000000002;
+
+/// @title IChaumPedersenVerify
+/// @notice Precompile for verifying Chaum-Pedersen proofs of ECDH shared secret derivation
+/// @dev Verifies that the sequencer knows privSeq such that:
+///      - pubSeq = privSeq * G (their public key)
+///      - sharedSecretPoint = privSeq * ephemeralPub (the ECDH computation)
+///      This proves correct derivation without revealing the private key.
+interface IChaumPedersenVerify {
+
+    /// @notice Verify a Chaum-Pedersen proof for ECDH shared secret derivation
+    /// @dev Verification equations:
+    ///      - R1 = s*G - c*pubSeq
+    ///      - R2 = s*ephemeralPub - c*sharedSecretPoint
+    ///      - c' = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
+    ///      - Check: c == c'
+    /// @param ephemeralPubX The X coordinate of the ephemeral public key
+    /// @param ephemeralPubYParity The Y coordinate parity (0x02 or 0x03)
+    /// @param sharedSecret The claimed shared secret (x-coordinate)
+    /// @param sequencerPubX The sequencer's public key X coordinate
+    /// @param sequencerPubYParity The sequencer's public key Y parity
+    /// @param proof The Chaum-Pedersen proof (s, c)
+    /// @return valid True if the proof verifies correctly
+    function verifyProof(
+        bytes32 ephemeralPubX,
+        uint8 ephemeralPubYParity,
+        bytes32 sharedSecret,
+        bytes32 sequencerPubX,
+        uint8 sequencerPubYParity,
+        ChaumPedersenProof calldata proof
+    )
+        external
+        view
+        returns (bool valid);
+
+}
+
+/// @title IAesGcmDecrypt
+/// @notice Minimal precompile for AES-256-GCM decryption with authentication
+/// @dev Decrypts ciphertext and verifies the GCM authentication tag.
+///      HKDF-SHA256 key derivation is done in Solidity using the SHA256 precompile.
+interface IAesGcmDecrypt {
+
+    /// @notice Decrypt AES-256-GCM ciphertext and verify authentication tag
+    /// @dev Returns empty bytes and false if tag verification fails.
+    ///      AAD (Additional Authenticated Data) is typically empty for ECIES.
+    /// @param key AES-256 key (32 bytes)
+    /// @param nonce GCM nonce (12 bytes)
+    /// @param ciphertext The encrypted data
+    /// @param aad Additional authenticated data (use empty bytes if none)
+    /// @param tag GCM authentication tag (16 bytes)
+    /// @return plaintext The decrypted data (empty if verification fails)
+    /// @return valid True if the tag verifies and decryption succeeds
+    function decrypt(
+        bytes32 key,
+        bytes12 nonce,
+        bytes calldata ciphertext,
+        bytes calldata aad,
+        bytes16 tag
+    )
+        external
+        view
+        returns (bytes memory plaintext, bool valid);
+
 }
 
 struct Withdrawal {
@@ -89,6 +250,28 @@ address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 
 // ZoneConfig system contract address (0x1c00...0003)
 address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
+
+/*//////////////////////////////////////////////////////////////
+                ZONE PORTAL STORAGE SLOT CONSTANTS
+//////////////////////////////////////////////////////////////*/
+
+// ZonePortal storage layout (non-immutable variables only):
+//   slot 0: sequencer (address)
+//   slot 1: pendingSequencer (address)
+//   slot 2: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+//   slot 3: blockHash (bytes32)
+//   slot 4: currentDepositQueueHash (bytes32)
+//   slot 5: lastSyncedTempoBlockNumber (uint64)
+//   slot 6: _encryptionKeys (EncryptionKeyEntry[])
+//
+// These constants are the single source of truth for cross-domain reads.
+// ZoneConfig and ZoneInbox use them to read portal state via
+// TempoState.readTempoStorageSlot(). If the portal layout changes,
+// update these constants and the vm.load regression tests will catch mismatches.
+bytes32 constant PORTAL_SEQUENCER_SLOT = bytes32(uint256(0));
+bytes32 constant PORTAL_PENDING_SEQUENCER_SLOT = bytes32(uint256(1));
+bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
+bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(6));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -200,6 +383,29 @@ interface IZonePortal {
         address indexed currentSequencer, address indexed pendingSequencer
     );
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    /// @notice Emitted when an encrypted deposit is made (recipient/memo not revealed)
+    event EncryptedDepositMade(
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed sender,
+        uint128 netAmount,
+        uint128 fee,
+        uint256 keyIndex,
+        bytes32 ephemeralPubkeyX,
+        uint8 ephemeralPubkeyYParity,
+        bytes ciphertext,
+        bytes12 nonce,
+        bytes16 tag
+    );
+
+    /// @notice Emitted when sequencer updates their encryption key
+    /// @param x The X coordinate of the new key
+    /// @param yParity The Y coordinate parity (0x02 or 0x03)
+    /// @param keyIndex The index of this key in the history array
+    /// @param activationBlock The Tempo block when this key becomes active
+    event SequencerEncryptionKeyUpdated(
+        bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
+    );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
     error NotSequencer();
@@ -207,6 +413,13 @@ interface IZonePortal {
     error InvalidProof();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
+    error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
+    error InvalidEncryptionKeyIndex(uint256 keyIndex);
+    error NoEncryptionKeySet();
+    error NoEncryptionKeyAtBlock(uint64 blockNumber);
+    error InvalidEphemeralPubkey();
+    error InvalidCiphertextLength(uint256 actual, uint256 expected);
+    error InvalidProofOfPossession();
     error DepositTooSmall();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
@@ -217,7 +430,6 @@ interface IZonePortal {
     function messenger() external view returns (address);
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
-    function sequencerPubkey() external view returns (bytes32);
     function zoneGasRate() external view returns (uint128);
     function verifier() external view returns (address);
     function withdrawalBatchIndex() external view returns (uint64);
@@ -238,7 +450,46 @@ interface IZonePortal {
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
 
-    function setSequencerPubkey(bytes32 pubkey) external;
+    /// @notice Get the sequencer's current encryption public key for encrypted deposits
+    /// @return x The X coordinate of the secp256k1 public key
+    /// @return yParity The Y coordinate parity (0x02 or 0x03)
+    function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+
+    /// @notice Set the sequencer's encryption public key. Only callable by sequencer.
+    /// @dev Appends to key history. The new key becomes active at the current Tempo block.
+    /// @param x The X coordinate of the secp256k1 public key
+    /// @param yParity The Y coordinate parity (0x02 or 0x03)
+    /// @param popV Recovery id of the proof-of-possession signature
+    /// @param popR R component of the proof-of-possession signature
+    /// @param popS S component of the proof-of-possession signature
+    function setSequencerEncryptionKey(
+        bytes32 x,
+        uint8 yParity,
+        uint8 popV,
+        bytes32 popR,
+        bytes32 popS
+    )
+        external;
+
+    /// @notice Get the number of encryption keys in the history
+    /// @return The total count of keys (including current)
+    function encryptionKeyCount() external view returns (uint256);
+
+    /// @notice Get a historical encryption key by index
+    /// @param index The index in the key history (0 = first key)
+    /// @return entry The key entry with activation block
+    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry);
+
+    /// @notice Get the encryption key that was active at a specific Tempo block
+    /// @dev Binary search through key history to find the correct key
+    /// @param tempoBlockNumber The Tempo block number to query
+    /// @return x The X coordinate of the active key
+    /// @return yParity The Y coordinate parity
+    /// @return keyIndex The index of this key in history
+    function encryptionKeyAtBlock(uint64 tempoBlockNumber)
+        external
+        view
+        returns (bytes32 x, uint8 yParity, uint256 keyIndex);
 
     /// @notice Set zone gas rate. Only callable by sequencer.
     /// @param _zoneGasRate Gas token units per gas unit on the zone
@@ -247,10 +498,37 @@ interface IZonePortal {
     /// @notice Calculate the fee for a deposit
     function calculateDepositFee() external view returns (uint128 fee);
 
+    /// @notice Check if an encryption key is still valid for new deposits
+    /// @dev A key is valid if it's the current key OR if it was superseded less than
+    ///      ENCRYPTION_KEY_GRACE_PERIOD blocks ago
+    /// @param keyIndex The key index to check
+    /// @return valid True if the key can be used for new deposits
+    /// @return expiresAtBlock Block number when this key expires (0 if current key, never expires)
+    function isEncryptionKeyValid(uint256 keyIndex)
+        external
+        view
+        returns (bool valid, uint64 expiresAtBlock);
+
     function deposit(
         address to,
         uint128 amount,
         bytes32 memo
+    )
+        external
+        returns (bytes32 newCurrentDepositQueueHash);
+
+    /// @notice Deposit with encrypted recipient and memo
+    /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key
+    ///      at the specified keyIndex. The user must specify which key they encrypted to,
+    ///      ensuring correct decryption even if the key rotates before inclusion.
+    /// @param amount Amount to deposit
+    /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
+    /// @param encrypted The encrypted payload (recipient and memo)
+    /// @return newCurrentDepositQueueHash The new deposit queue hash
+    function depositEncrypted(
+        uint128 amount,
+        uint256 keyIndex,
+        EncryptedDepositPayload calldata encrypted
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -398,8 +676,24 @@ interface IZoneInbox {
         bytes32 memo
     );
 
+    /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
+    event EncryptedDepositProcessed(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        address indexed to, // Revealed after decryption
+        uint128 amount,
+        bytes32 memo // Revealed after decryption
+    );
+
+    /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
+    event EncryptedDepositFailed(
+        bytes32 indexed depositHash, address indexed sender, uint128 amount
+    );
     error OnlySequencer();
     error InvalidDepositQueueHash();
+    error MissingDecryptionData();
+    error ExtraDecryptionData();
+    error InvalidSharedSecretProof();
 
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);
@@ -419,11 +713,21 @@ interface IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
     /// @dev This is the main entry point for the sequencer at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the deposit queue
+    ///      2. Processes deposits from the unified queue (regular and encrypted)
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    ///
+    ///      For encrypted deposits, the sequencer provides DecryptionData with the
+    ///      decrypted (to, memo) values. The proof/TEE validates correctness.
+    ///
     /// @param header RLP-encoded Tempo block header
-    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
-    function advanceTempo(bytes calldata header, Deposit[] calldata deposits) external;
+    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param decryptions Decryption data for encrypted deposits (1:1 with encrypted deposits, in order)
+    function advanceTempo(
+        bytes calldata header,
+        QueuedDeposit[] calldata deposits,
+        DecryptionData[] calldata decryptions
+    )
+        external;
 
 }
 
@@ -514,6 +818,7 @@ interface IZoneOutbox {
 interface IZoneConfig {
 
     error NotSequencer();
+    error NoEncryptionKeySet();
 
     /// @notice Zone token address (TIP-20 at same address as Tempo)
     function zoneToken() external view returns (address);
