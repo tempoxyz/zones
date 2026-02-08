@@ -2,17 +2,26 @@
 pragma solidity ^0.8.13;
 
 import { TIP20 } from "../../src/TIP20.sol";
+import { EncryptedDepositLib } from "../../src/zone/EncryptedDeposit.sol";
 import {
+    AES_GCM_DECRYPT,
     BlockTransition,
+    CHAUM_PEDERSEN_VERIFY,
+    ChaumPedersenProof,
     DecryptionData,
     Deposit,
     DepositQueueTransition,
     DepositType,
+    EncryptedDeposit,
+    EncryptedDepositPayload,
+    IAesGcmDecrypt,
+    IChaumPedersenVerify,
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneInbox,
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit,
     Withdrawal,
     WithdrawalQueueTransition,
@@ -28,6 +37,7 @@ import { BaseTest } from "../BaseTest.t.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
+import { Vm } from "forge-std/Vm.sol";
 
 /// @notice Mock withdrawal receiver for callback tests
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
@@ -764,6 +774,536 @@ contract ZoneBridgeTest is BaseTest {
 
         // Sanity: value should be non-zero after deposit
         assertTrue(fromSlot != bytes32(0), "deposit queue hash should be non-zero after deposit");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+            ENCRYPTED DEPOSIT INTEGRATION TESTS — HELPERS
+    //////////////////////////////////////////////////////////////*/
+
+    // secp256k1 generator point X (known valid point on curve)
+    bytes32 internal constant VALID_SECP256K1_X =
+        0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
+
+    // Test private keys for encryption key PoP
+    uint256 internal constant ENC_KEY_1 = 1;
+    uint256 internal constant ENC_KEY_2 = 2;
+
+    /// @notice Observed encrypted deposit from L1 (simulating sequencer watching events)
+    struct ObservedEncryptedDeposit {
+        EncryptedDeposit encDeposit;
+        bytes32 newCurrentDepositQueueHash;
+    }
+
+    /// @notice Pending encrypted deposit observations
+    ObservedEncryptedDeposit[] internal pendingEncryptedDeposits;
+
+    /// @notice Helper: set encryption key on L1 portal with proof of possession
+    function _setEncKeyOnL1(uint256 privateKey) internal returns (bytes32 x, uint8 yParity) {
+        Vm.Wallet memory w = vm.createWallet(privateKey);
+        x = bytes32(w.publicKeyX);
+        yParity = w.publicKeyY % 2 == 0 ? 0x02 : 0x03;
+        bytes32 message = keccak256(abi.encode(address(l1Portal), x, yParity));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(w.privateKey, message);
+        l1Portal.setSequencerEncryptionKey(x, yParity, v, r, s);
+    }
+
+    /// @notice Helper: create an encrypted deposit payload
+    function _makeEncryptedPayload() internal pure returns (EncryptedDepositPayload memory) {
+        return EncryptedDepositPayload({
+            ephemeralPubkeyX: VALID_SECP256K1_X,
+            ephemeralPubkeyYParity: 0x02,
+            ciphertext: new bytes(64),
+            nonce: bytes12(0),
+            tag: bytes16(0)
+        });
+    }
+
+    /// @notice Simulate sequencer observing an encrypted deposit event on L1
+    function _sequencerObserveEncryptedDeposit(
+        address sender,
+        uint128 netAmount,
+        uint256 keyIndex,
+        EncryptedDepositPayload memory encrypted
+    )
+        internal
+        returns (bytes32 newHash)
+    {
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            sender: sender, amount: netAmount, keyIndex: keyIndex, encrypted: encrypted
+        });
+
+        // Calculate the new hash (matches what portal computes via DepositQueueLib)
+        bytes32 prevHash;
+        if (pendingDeposits.length > 0) {
+            prevHash = pendingDeposits[pendingDeposits.length - 1].newCurrentDepositQueueHash;
+        } else if (pendingEncryptedDeposits.length > 0) {
+            prevHash =
+            pendingEncryptedDeposits[pendingEncryptedDeposits.length - 1].newCurrentDepositQueueHash;
+        } else {
+            prevHash = l2Inbox.processedDepositQueueHash();
+        }
+
+        newHash = keccak256(abi.encode(DepositType.Encrypted, ed, prevHash));
+        pendingEncryptedDeposits.push(
+            ObservedEncryptedDeposit({ encDeposit: ed, newCurrentDepositQueueHash: newHash })
+        );
+    }
+
+    /// @notice Set up encryption key mock storage on zone side so ZoneInbox._readEncryptionKey works
+    function _setupEncryptionKeyMockOnZone(
+        uint256 keyIndex,
+        bytes32 keyX,
+        uint8 keyYParity
+    )
+        internal
+    {
+        uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
+        uint256 slotX = base + (keyIndex * 2);
+        uint256 slotMeta = slotX + 1;
+        l2TempoState.setMockStorageValue(address(l1Portal), bytes32(slotX), keyX);
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), bytes32(slotMeta), bytes32(uint256(keyYParity))
+        );
+    }
+
+    /// @notice Set up precompile mocks for successful encrypted deposit decryption
+    function _setupPrecompileMocksSuccess(address recipient, bytes32 memo) internal {
+        vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
+        vm.etch(AES_GCM_DECRYPT, hex"00");
+
+        // Mock Chaum-Pedersen to return valid
+        vm.mockCall(
+            CHAUM_PEDERSEN_VERIFY,
+            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
+            abi.encode(true)
+        );
+
+        // Mock AES-GCM to return expected plaintext
+        bytes memory plaintext = EncryptedDepositLib.encodePlaintext(recipient, memo);
+        vm.mockCall(
+            AES_GCM_DECRYPT,
+            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
+            abi.encode(plaintext, true)
+        );
+    }
+
+    /// @notice Set up precompile mocks for failed AES-GCM decryption (bounce)
+    function _setupPrecompileMocksFail() internal {
+        vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
+        vm.etch(AES_GCM_DECRYPT, hex"00");
+
+        // Mock Chaum-Pedersen to return valid (proof is fine, decryption fails)
+        vm.mockCall(
+            CHAUM_PEDERSEN_VERIFY,
+            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
+            abi.encode(true)
+        );
+
+        // Mock AES-GCM to return failure
+        vm.mockCall(
+            AES_GCM_DECRYPT,
+            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
+            abi.encode(new bytes(0), false)
+        );
+    }
+
+    /// @notice Simulate sequencer relaying a single encrypted deposit to the zone
+    /// @dev Handles all the mock setup, builds the unified queue entries, and calls advanceTempo
+    function _sequencerRelayEncryptedDepositsToL2(
+        address decryptedTo,
+        bytes32 decryptedMemo,
+        bool shouldSucceed
+    )
+        internal
+        returns (bytes32 newProcessedHash)
+    {
+        require(pendingEncryptedDeposits.length > 0, "no encrypted deposits to relay");
+        require(
+            pendingDeposits.length == 0, "use _sequencerRelayMixedDepositsToL2 for mixed queues"
+        );
+
+        // Build queued deposits array
+        QueuedDeposit[] memory queued = new QueuedDeposit[](pendingEncryptedDeposits.length);
+        DecryptionData[] memory decs = new DecryptionData[](pendingEncryptedDeposits.length);
+
+        for (uint256 i = 0; i < pendingEncryptedDeposits.length; i++) {
+            queued[i] = QueuedDeposit({
+                depositType: DepositType.Encrypted,
+                depositData: abi.encode(pendingEncryptedDeposits[i].encDeposit)
+            });
+            decs[i] = DecryptionData({
+                sharedSecret: bytes32(uint256(0xDEAD)),
+                to: decryptedTo,
+                memo: decryptedMemo,
+                cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            });
+        }
+
+        // Get expected final hash
+        newProcessedHash =
+        pendingEncryptedDeposits[pendingEncryptedDeposits.length - 1].newCurrentDepositQueueHash;
+
+        // Set up mock: TempoState will return this hash when reading from portal
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, newProcessedHash
+        );
+
+        // Mock precompiles
+        if (shouldSucceed) {
+            _setupPrecompileMocksSuccess(decryptedTo, decryptedMemo);
+        } else {
+            _setupPrecompileMocksFail();
+        }
+
+        // Process on zone via advanceTempo
+        vm.prank(admin);
+        l2Inbox.advanceTempo("", queued, decs);
+
+        // Clear pending
+        delete pendingEncryptedDeposits;
+
+        // Update zone block hash (simulated)
+        l2BlockHash = keccak256(abi.encode(l2BlockHash, "enc-deposits", newProcessedHash));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+            ENCRYPTED DEPOSIT INTEGRATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Full lifecycle: encrypted deposit on L1 → relay to zone → mint to decrypted recipient
+    function test_fullFlow_encryptedDepositAndMint() public {
+        // === STEP 1: Sequencer sets encryption key on L1 ===
+        (bytes32 encKeyX, uint8 encKeyYParity) = _setEncKeyOnL1(ENC_KEY_1);
+
+        // === STEP 2: Alice makes encrypted deposit on L1 ===
+        uint128 depositAmount = 1000e6;
+        uint128 fee = l1Portal.calculateDepositFee();
+        uint128 netAmount = depositAmount - fee;
+        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(l1Portal), depositAmount);
+        bytes32 l1DepositHash = l1Portal.depositEncrypted(depositAmount, 0, payload);
+        vm.stopPrank();
+
+        // Verify L1 state
+        assertEq(l1Portal.currentDepositQueueHash(), l1DepositHash, "L1 queue hash mismatch");
+        assertEq(
+            pathUSD.balanceOf(address(l1Portal)),
+            depositAmount - fee,
+            "Portal should hold net amount"
+        );
+
+        // === STEP 3: Sequencer observes encrypted deposit event ===
+        _sequencerObserveEncryptedDeposit(alice, netAmount, 0, payload);
+
+        // Verify our local hash matches L1
+        assertEq(
+            pendingEncryptedDeposits[0].newCurrentDepositQueueHash,
+            l1DepositHash,
+            "Observed hash must match L1 hash"
+        );
+
+        // === STEP 4: Set up zone-side encryption key mock and relay ===
+        _setupEncryptionKeyMockOnZone(0, encKeyX, encKeyYParity);
+
+        address decryptedRecipient = bob;
+        bytes32 decryptedMemo = bytes32("secret memo");
+        bytes32 newProcessedHash =
+            _sequencerRelayEncryptedDepositsToL2(decryptedRecipient, decryptedMemo, true);
+
+        // Verify zone state — tokens minted to decrypted recipient
+        assertEq(
+            l2GasToken.balanceOf(decryptedRecipient), netAmount, "Recipient should receive tokens"
+        );
+        assertEq(l2GasToken.balanceOf(alice), 0, "Sender should not receive tokens");
+        assertEq(
+            l2Inbox.processedDepositQueueHash(), newProcessedHash, "Zone processed hash mismatch"
+        );
+
+        // === STEP 5: Submit batch to L1 ===
+        _sequencerSubmitBatch(newProcessedHash);
+
+        // Verify L1 batch state updated
+        assertEq(l1Portal.withdrawalBatchIndex(), 1, "Batch index should advance");
+        assertEq(l1Portal.blockHash(), l2BlockHash, "Block hash should update");
+    }
+
+    /// @notice Full lifecycle: encrypted deposit → decryption failure → funds returned to sender
+    function test_fullFlow_encryptedDepositBounce() public {
+        // === STEP 1: Sequencer sets encryption key on L1 ===
+        (bytes32 encKeyX, uint8 encKeyYParity) = _setEncKeyOnL1(ENC_KEY_1);
+
+        // === STEP 2: Alice makes encrypted deposit on L1 ===
+        uint128 depositAmount = 1000e6;
+        uint128 fee = l1Portal.calculateDepositFee();
+        uint128 netAmount = depositAmount - fee;
+        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(l1Portal), depositAmount);
+        l1Portal.depositEncrypted(depositAmount, 0, payload);
+        vm.stopPrank();
+
+        // === STEP 3: Sequencer observes and relays with FAILED decryption ===
+        _sequencerObserveEncryptedDeposit(alice, netAmount, 0, payload);
+        _setupEncryptionKeyMockOnZone(0, encKeyX, encKeyYParity);
+
+        // Even with shouldSucceed=false, we need a to/memo for DecryptionData (values don't matter)
+        bytes32 newProcessedHash =
+            _sequencerRelayEncryptedDepositsToL2(address(0xBEEF), bytes32("wrong"), false);
+
+        // Verify zone state — tokens bounced back to sender (alice), not to any recipient
+        assertEq(l2GasToken.balanceOf(alice), netAmount, "Sender should get bounced tokens");
+        assertEq(l2GasToken.balanceOf(address(0xBEEF)), 0, "Failed recipient should get nothing");
+        assertEq(
+            l2Inbox.processedDepositQueueHash(), newProcessedHash, "Zone processed hash mismatch"
+        );
+
+        // === STEP 4: Submit batch to L1 ===
+        _sequencerSubmitBatch(newProcessedHash);
+        assertEq(l1Portal.withdrawalBatchIndex(), 1, "Batch index should advance");
+    }
+
+    /// @notice Mixed queue: regular deposit + encrypted deposit in single advanceTempo
+    function test_fullFlow_mixedRegularAndEncryptedDeposits() public {
+        // === STEP 1: Set up encryption key ===
+        (bytes32 encKeyX, uint8 encKeyYParity) = _setEncKeyOnL1(ENC_KEY_1);
+
+        uint128 depositAmount = 1000e6;
+        uint128 fee = l1Portal.calculateDepositFee();
+        uint128 netAmount = depositAmount - fee;
+
+        // === STEP 2: Alice makes a regular deposit ===
+        vm.startPrank(alice);
+        pathUSD.approve(address(l1Portal), depositAmount * 2);
+        bytes32 h1 = l1Portal.deposit(alice, depositAmount, bytes32("regular"));
+        vm.stopPrank();
+
+        // === STEP 3: Bob makes an encrypted deposit ===
+        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        vm.startPrank(bob);
+        pathUSD.approve(address(l1Portal), depositAmount);
+        bytes32 h2 = l1Portal.depositEncrypted(depositAmount, 0, payload);
+        vm.stopPrank();
+
+        // === STEP 4: Carol makes another regular deposit ===
+        address carol = address(0x600);
+        vm.prank(pathUSDAdmin);
+        pathUSD.mint(carol, 100_000e6);
+        vm.startPrank(carol);
+        pathUSD.approve(address(l1Portal), depositAmount);
+        bytes32 h3 = l1Portal.deposit(carol, depositAmount, bytes32("carol"));
+        vm.stopPrank();
+
+        assertEq(l1Portal.currentDepositQueueHash(), h3, "L1 hash should be after 3rd deposit");
+
+        // === STEP 5: Sequencer observes all deposits and manually builds the unified queue ===
+        // We need to compute hashes in the same order the portal did
+
+        // Regular deposit from alice
+        Deposit memory d1 =
+            Deposit({ sender: alice, to: alice, amount: depositAmount, memo: bytes32("regular") });
+        bytes32 prevHash = l2Inbox.processedDepositQueueHash();
+        bytes32 hash1 = keccak256(abi.encode(DepositType.Regular, d1, prevHash));
+        assertEq(hash1, h1, "hash1 must match L1");
+
+        // Encrypted deposit from bob
+        EncryptedDeposit memory ed =
+            EncryptedDeposit({ sender: bob, amount: netAmount, keyIndex: 0, encrypted: payload });
+        bytes32 hash2 = keccak256(abi.encode(DepositType.Encrypted, ed, hash1));
+        assertEq(hash2, h2, "hash2 must match L1");
+
+        // Regular deposit from carol
+        Deposit memory d3 =
+            Deposit({ sender: carol, to: carol, amount: depositAmount, memo: bytes32("carol") });
+        bytes32 hash3 = keccak256(abi.encode(DepositType.Regular, d3, hash2));
+        assertEq(hash3, h3, "hash3 must match L1");
+
+        // === STEP 6: Build the mixed queue and relay to zone ===
+        QueuedDeposit[] memory queued = new QueuedDeposit[](3);
+        queued[0] = QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d1) });
+        queued[1] =
+            QueuedDeposit({ depositType: DepositType.Encrypted, depositData: abi.encode(ed) });
+        queued[2] = QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d3) });
+
+        // Decryption data (only 1 encrypted deposit)
+        address decryptedTo = address(0x700);
+        bytes32 decryptedMemo = bytes32("bob-secret");
+        DecryptionData[] memory decs = new DecryptionData[](1);
+        decs[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xDEAD)),
+            to: decryptedTo,
+            memo: decryptedMemo,
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+
+        // Set up zone-side state
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, hash3
+        );
+        _setupEncryptionKeyMockOnZone(0, encKeyX, encKeyYParity);
+        _setupPrecompileMocksSuccess(decryptedTo, decryptedMemo);
+
+        vm.prank(admin);
+        l2Inbox.advanceTempo("", queued, decs);
+
+        // === STEP 7: Verify all balances ===
+        assertEq(l2GasToken.balanceOf(alice), depositAmount, "Alice gets regular deposit");
+        assertEq(
+            l2GasToken.balanceOf(decryptedTo), netAmount, "Bob's encrypted recipient gets tokens"
+        );
+        assertEq(l2GasToken.balanceOf(bob), 0, "Bob (sender) should not receive tokens");
+        assertEq(l2GasToken.balanceOf(carol), depositAmount, "Carol gets regular deposit");
+        assertEq(l2Inbox.processedDepositQueueHash(), hash3, "Zone processed hash matches L1");
+
+        // Total supply = alice_regular + bob_encrypted_net + carol_regular
+        assertEq(
+            l2GasToken.totalSupply(),
+            depositAmount + netAmount + depositAmount,
+            "Total supply should equal all deposits"
+        );
+
+        // === STEP 8: Submit batch to L1 ===
+        l2BlockHash = keccak256(abi.encode(l2BlockHash, "mixed-deposits", hash3));
+        _sequencerSubmitBatch(hash3);
+        assertEq(l1Portal.withdrawalBatchIndex(), 1, "Batch index should advance");
+    }
+
+    /// @notice Key rotation: two encrypted deposits using different encryption keys
+    function test_fullFlow_keyRotationWithPendingDeposits() public {
+        // === STEP 1: Sequencer sets first encryption key ===
+        (bytes32 keyX1, uint8 keyYParity1) = _setEncKeyOnL1(ENC_KEY_1);
+
+        // === STEP 2: Alice deposits with keyIndex=0 ===
+        uint128 depositAmount = 1000e6;
+        uint128 fee = l1Portal.calculateDepositFee();
+        uint128 netAmount = depositAmount - fee;
+        EncryptedDepositPayload memory payload1 = _makeEncryptedPayload();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(l1Portal), depositAmount);
+        bytes32 h1 = l1Portal.depositEncrypted(depositAmount, 0, payload1);
+        vm.stopPrank();
+
+        // === STEP 3: Sequencer rotates to second encryption key ===
+        vm.roll(block.number + 100);
+        (bytes32 keyX2, uint8 keyYParity2) = _setEncKeyOnL1(ENC_KEY_2);
+
+        // === STEP 4: Bob deposits with keyIndex=1 ===
+        EncryptedDepositPayload memory payload2 = _makeEncryptedPayload();
+
+        vm.startPrank(bob);
+        pathUSD.approve(address(l1Portal), depositAmount);
+        bytes32 h2 = l1Portal.depositEncrypted(depositAmount, 1, payload2);
+        vm.stopPrank();
+
+        assertEq(l1Portal.currentDepositQueueHash(), h2, "L1 hash after both deposits");
+
+        // === STEP 5: Compute expected hashes ===
+        bytes32 prevHash = l2Inbox.processedDepositQueueHash();
+        EncryptedDeposit memory ed1 = EncryptedDeposit({
+            sender: alice, amount: netAmount, keyIndex: 0, encrypted: payload1
+        });
+        bytes32 hash1 = keccak256(abi.encode(DepositType.Encrypted, ed1, prevHash));
+        assertEq(hash1, h1, "hash1 must match L1");
+
+        EncryptedDeposit memory ed2 =
+            EncryptedDeposit({ sender: bob, amount: netAmount, keyIndex: 1, encrypted: payload2 });
+        bytes32 hash2 = keccak256(abi.encode(DepositType.Encrypted, ed2, hash1));
+        assertEq(hash2, h2, "hash2 must match L1");
+
+        // === STEP 6: Build queue and relay ===
+        QueuedDeposit[] memory queued = new QueuedDeposit[](2);
+        queued[0] =
+            QueuedDeposit({ depositType: DepositType.Encrypted, depositData: abi.encode(ed1) });
+        queued[1] =
+            QueuedDeposit({ depositType: DepositType.Encrypted, depositData: abi.encode(ed2) });
+
+        address aliceRecipient = address(0x700);
+        bytes32 aliceMemo = bytes32("alice-secret");
+        address bobRecipient = address(0x800);
+        bytes32 bobMemo = bytes32("bob-secret");
+
+        DecryptionData[] memory decs = new DecryptionData[](2);
+        decs[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xDEAD)),
+            to: aliceRecipient,
+            memo: aliceMemo,
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+        decs[1] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xBEEF)),
+            to: bobRecipient,
+            memo: bobMemo,
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(3)), c: bytes32(uint256(4)) })
+        });
+
+        // Set up zone-side mocks: both keys in storage
+        _setupEncryptionKeyMockOnZone(0, keyX1, keyYParity1);
+        _setupEncryptionKeyMockOnZone(1, keyX2, keyYParity2);
+
+        l2TempoState.setMockStorageValue(
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, hash2
+        );
+
+        // Mock precompiles — we use broad mocks since vm.mockCall matches any input
+        // For the success path, we need AES-GCM to return the correct plaintext.
+        // Since vm.mockCall with just the selector matches ALL calls, we mock for the LAST
+        // decryption (bobRecipient). For aliceRecipient we set up mock before advanceTempo,
+        // but vm.mockCall replaces: we need a workaround.
+        //
+        // Since Foundry's vm.mockCall uses last-registered-wins for the same address+selector,
+        // and encrypted deposits are processed sequentially, we can't differentiate two calls
+        // to the same precompile with different expected outputs using selector-only mocking.
+        //
+        // Workaround: mock both precompiles to return bobRecipient's plaintext.
+        // Alice's deposit will fail the plaintext check (dec.to != decryptedTo), causing a bounce.
+        // We test a simpler scenario: mock for aliceRecipient so BOTH succeed with the same plaintext.
+        //
+        // Actually, the cleanest approach: make both deposits decrypt to the same recipient/memo.
+        // This tests key rotation without needing differentiated mocks.
+
+        // Use same recipient/memo for both decryptions
+        address sharedRecipient = address(0x700);
+        bytes32 sharedMemo = bytes32("shared-secret");
+        decs[0].to = sharedRecipient;
+        decs[0].memo = sharedMemo;
+        decs[1].to = sharedRecipient;
+        decs[1].memo = sharedMemo;
+
+        vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
+        vm.etch(AES_GCM_DECRYPT, hex"00");
+        vm.mockCall(
+            CHAUM_PEDERSEN_VERIFY,
+            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
+            abi.encode(true)
+        );
+        bytes memory plaintext = EncryptedDepositLib.encodePlaintext(sharedRecipient, sharedMemo);
+        vm.mockCall(
+            AES_GCM_DECRYPT,
+            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
+            abi.encode(plaintext, true)
+        );
+
+        vm.prank(admin);
+        l2Inbox.advanceTempo("", queued, decs);
+
+        // === STEP 7: Verify ===
+        // Both deposits go to sharedRecipient
+        assertEq(
+            l2GasToken.balanceOf(sharedRecipient),
+            netAmount * 2,
+            "Recipient should receive both deposits"
+        );
+        assertEq(l2GasToken.balanceOf(alice), 0, "Alice (sender) should not receive tokens");
+        assertEq(l2GasToken.balanceOf(bob), 0, "Bob (sender) should not receive tokens");
+        assertEq(l2Inbox.processedDepositQueueHash(), hash2, "Zone processed hash matches L1");
+
+        // === STEP 8: Submit batch ===
+        l2BlockHash = keccak256(abi.encode(l2BlockHash, "key-rotation", hash2));
+        _sequencerSubmitBatch(hash2);
+        assertEq(l1Portal.withdrawalBatchIndex(), 1, "Batch index should advance");
     }
 
 }
