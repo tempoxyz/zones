@@ -309,7 +309,7 @@ This section defines the functions and interfaces used by the design. The signat
 
 ```solidity
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
-interface IZoneGasToken {
+interface IZoneToken {
     function mint(address to, uint256 amount) external;
     function burn(address from, uint256 amount) external;
     function transfer(address to, uint256 amount) external returns (bool);
@@ -840,7 +840,7 @@ interface IZoneInbox {
     function tempoState() external view returns (ITempoState);
 
     /// @notice The zone token (TIP-20 at same address as Tempo).
-    function gasToken() external view returns (IZoneGasToken);
+    function zoneToken() external view returns (IZoneToken);
 
     /// @notice The zone's last processed deposit queue hash.
     function processedDepositQueueHash() external view returns (bytes32);
@@ -910,7 +910,7 @@ interface IZoneOutbox {
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     /// @notice The zone token (same as Tempo portal's token).
-    function gasToken() external view returns (IZoneGasToken);
+    function zoneToken() external view returns (IZoneToken);
 
     /// @notice Current sequencer address.
     function sequencer() external view returns (address);
@@ -1228,7 +1228,7 @@ bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", "");
 
 // Step 5: If decryption fails, return funds to sender (don't block chain)
 if (!valid) {
-    gasToken.mint(ed.sender, ed.amount);
+    zoneToken.mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(...);
 }
 ```
@@ -1336,11 +1336,11 @@ if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
 // Step 6: Handle success or failure
 if (!valid) {
     // Decryption failed - return funds to sender
-    gasToken.mint(ed.sender, ed.amount);
+    zoneToken.mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(currentHash, ed.sender, ed.amount);
 } else {
     // Decryption succeeded - mint to decrypted recipient
-    gasToken.mint(dec.to, ed.amount);
+    zoneToken.mint(dec.to, ed.amount);
     emit DepositProcessed(currentHash, ed.sender, dec.to, ed.amount, dec.memo);
 }
 ```

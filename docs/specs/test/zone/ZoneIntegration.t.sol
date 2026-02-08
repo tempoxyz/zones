@@ -26,7 +26,7 @@ import { BaseTest } from "../BaseTest.t.sol";
 
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockVerifier } from "./mocks/MockVerifier.sol";
-import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
+import { MockZoneToken } from "./mocks/MockZoneToken.sol";
 
 /// @notice Mock receiver that tracks received amounts
 contract TrackingReceiver is IWithdrawalReceiver {
@@ -59,7 +59,7 @@ contract ZoneIntegrationTest is BaseTest {
     MockVerifier public l1Verifier;
 
     // L2 contracts
-    MockZoneGasToken public l2GasToken;
+    MockZoneToken public l2ZoneToken;
     MockTempoState public l2TempoState;
     ZoneConfig public l2Config;
     ZoneInbox public l2Inbox;
@@ -106,19 +106,19 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal = ZonePortal(portalAddr);
 
         // L2 setup
-        l2GasToken = new MockZoneGasToken("Zone USD", "zUSD");
+        l2ZoneToken = new MockZoneToken("Zone USD", "zUSD");
         l2TempoState = new MockTempoState(admin, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
-        l2Config = new ZoneConfig(address(l2GasToken), portalAddr, address(l2TempoState));
+        l2Config = new ZoneConfig(address(l2ZoneToken), portalAddr, address(l2TempoState));
         l2TempoState.setMockStorageValue(
             portalAddr, bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
         );
         l2Inbox = new ZoneInbox(
-            address(l2Config), portalAddr, address(l2TempoState), address(l2GasToken)
+            address(l2Config), portalAddr, address(l2TempoState), address(l2ZoneToken)
         );
-        l2Outbox = new ZoneOutbox(address(l2Config), address(l2GasToken));
+        l2Outbox = new ZoneOutbox(address(l2Config), address(l2ZoneToken));
 
-        l2GasToken.setMinter(address(l2Inbox), true);
-        l2GasToken.setBurner(address(l2Outbox), true);
+        l2ZoneToken.setMinter(address(l2Inbox), true);
+        l2ZoneToken.setBurner(address(l2Outbox), true);
     }
 
     function _wrapDeposits(Deposit[] memory deposits)
@@ -178,10 +178,10 @@ contract ZoneIntegrationTest is BaseTest {
         _advanceTempo(deposits);
 
         // Verify L2 balances
-        assertEq(l2GasToken.balanceOf(alice), 3000e6);
-        assertEq(l2GasToken.balanceOf(bob), 3000e6);
-        assertEq(l2GasToken.balanceOf(charlie), 500e6);
-        assertEq(l2GasToken.totalSupply(), 6500e6);
+        assertEq(l2ZoneToken.balanceOf(alice), 3000e6);
+        assertEq(l2ZoneToken.balanceOf(bob), 3000e6);
+        assertEq(l2ZoneToken.balanceOf(charlie), 500e6);
+        assertEq(l2ZoneToken.totalSupply(), 6500e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -206,7 +206,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.prank(admin);
         _advanceTempo(batch1);
 
-        assertEq(l2GasToken.balanceOf(alice), 1000e6);
+        assertEq(l2ZoneToken.balanceOf(alice), 1000e6);
         assertEq(l2Inbox.processedDepositQueueHash(), d1);
 
         // Submit L1 batch for first deposit
@@ -241,7 +241,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.prank(admin);
         _advanceTempo(batch2);
 
-        assertEq(l2GasToken.balanceOf(alice), 6000e6);
+        assertEq(l2ZoneToken.balanceOf(alice), 6000e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -267,7 +267,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Alice requests withdrawal with callback
         vm.startPrank(alice);
-        l2GasToken.approve(address(l2Outbox), 2000e6);
+        l2ZoneToken.approve(address(l2Outbox), 2000e6);
         l2Outbox.requestWithdrawal(
             address(receiver), 2000e6, bytes32("payment"), 100_000, alice, "callback"
         );
@@ -335,7 +335,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // First batch: Alice withdraws to Bob
         vm.startPrank(alice);
-        l2GasToken.approve(address(l2Outbox), 50_000e6);
+        l2ZoneToken.approve(address(l2Outbox), 50_000e6);
         l2Outbox.requestWithdrawal(bob, 1000e6, bytes32("to bob"), 0, alice, "");
         vm.stopPrank();
 
@@ -486,12 +486,12 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Phase 2: Withdrawals
         vm.startPrank(alice);
-        l2GasToken.approve(address(l2Outbox), 5000e6);
+        l2ZoneToken.approve(address(l2Outbox), 5000e6);
         l2Outbox.requestWithdrawal(charlie, 2000e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
         vm.startPrank(bob);
-        l2GasToken.approve(address(l2Outbox), 3000e6);
+        l2ZoneToken.approve(address(l2Outbox), 3000e6);
         l2Outbox.requestWithdrawal(charlie, 1500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
@@ -530,9 +530,9 @@ contract ZoneIntegrationTest is BaseTest {
         _advanceTempo(deposits2);
 
         // Verify all L2 balances
-        assertEq(l2GasToken.balanceOf(alice), 10_000e6 - 2000e6);
-        assertEq(l2GasToken.balanceOf(bob), 5000e6 - 1500e6);
-        assertEq(l2GasToken.balanceOf(charlie), 7500e6);
+        assertEq(l2ZoneToken.balanceOf(alice), 10_000e6 - 2000e6);
+        assertEq(l2ZoneToken.balanceOf(bob), 5000e6 - 1500e6);
+        assertEq(l2ZoneToken.balanceOf(charlie), 7500e6);
 
         // Process withdrawals
         Withdrawal memory w1 = Withdrawal({
@@ -584,21 +584,21 @@ contract ZoneIntegrationTest is BaseTest {
         vm.prank(admin);
         _advanceTempo(deposits);
 
-        assertEq(l2GasToken.totalSupply(), 10_000e6);
+        assertEq(l2ZoneToken.totalSupply(), 10_000e6);
 
         // Withdraw 3000
         vm.startPrank(alice);
-        l2GasToken.approve(address(l2Outbox), 3000e6);
+        l2ZoneToken.approve(address(l2Outbox), 3000e6);
         l2Outbox.requestWithdrawal(bob, 3000e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        assertEq(l2GasToken.totalSupply(), 7000e6); // Tokens burned on withdrawal request
+        assertEq(l2ZoneToken.totalSupply(), 7000e6); // Tokens burned on withdrawal request
 
         // Transfer on L2 shouldn't change supply
         vm.prank(alice);
-        l2GasToken.transfer(bob, 2000e6);
+        l2ZoneToken.transfer(bob, 2000e6);
 
-        assertEq(l2GasToken.totalSupply(), 7000e6);
+        assertEq(l2ZoneToken.totalSupply(), 7000e6);
     }
 
     /*//////////////////////////////////////////////////////////////

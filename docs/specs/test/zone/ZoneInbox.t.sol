@@ -22,7 +22,7 @@ import {
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { MockZoneGasToken } from "./mocks/MockZoneGasToken.sol";
+import { MockZoneToken } from "./mocks/MockZoneToken.sol";
 import { Test } from "forge-std/Test.sol";
 
 /// @title ZoneInboxTest
@@ -31,7 +31,7 @@ contract ZoneInboxTest is Test {
 
     ZoneConfig public config;
     ZoneInbox public inbox;
-    MockZoneGasToken public gasToken;
+    MockZoneToken public zoneToken;
     MockTempoState public tempoState;
 
     address public sequencer = address(0x1);
@@ -43,16 +43,16 @@ contract ZoneInboxTest is Test {
     uint64 constant GENESIS_TEMPO_BLOCK_NUMBER = 1;
 
     function setUp() public {
-        gasToken = new MockZoneGasToken("Zone USD", "zUSD");
+        zoneToken = new MockZoneToken("Zone USD", "zUSD");
         tempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
-        config = new ZoneConfig(address(gasToken), mockPortal, address(tempoState));
+        config = new ZoneConfig(address(zoneToken), mockPortal, address(tempoState));
         tempoState.setMockStorageValue(
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
-        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState), address(gasToken));
+        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState), address(zoneToken));
 
-        gasToken.setMinter(address(inbox), true);
+        zoneToken.setMinter(address(inbox), true);
     }
 
     function _wrapDeposits(Deposit[] memory deposits)
@@ -106,7 +106,7 @@ contract ZoneInboxTest is Test {
         _advanceTempo(deposits);
 
         assertEq(inbox.processedDepositQueueHash(), expectedHash);
-        assertEq(gasToken.balanceOf(bob), 1000e6);
+        assertEq(zoneToken.balanceOf(bob), 1000e6);
     }
 
     function test_advanceTempo_multipleDeposits() public {
@@ -127,8 +127,8 @@ contract ZoneInboxTest is Test {
         _advanceTempo(deposits);
 
         assertEq(inbox.processedDepositQueueHash(), h3);
-        assertEq(gasToken.balanceOf(alice), 100e6);
-        assertEq(gasToken.balanceOf(bob), 200e6 + 300e6);
+        assertEq(zoneToken.balanceOf(alice), 100e6);
+        assertEq(zoneToken.balanceOf(bob), 200e6 + 300e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -248,8 +248,8 @@ contract ZoneInboxTest is Test {
         _advanceTempo(batch2);
 
         assertEq(inbox.processedDepositQueueHash(), h3);
-        assertEq(gasToken.balanceOf(alice), 100e6);
-        assertEq(gasToken.balanceOf(bob), 200e6 + 500e6);
+        assertEq(zoneToken.balanceOf(alice), 100e6);
+        assertEq(zoneToken.balanceOf(bob), 200e6 + 500e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -312,7 +312,7 @@ contract ZoneInboxTest is Test {
         _advanceTempo(deposits);
 
         assertEq(inbox.processedDepositQueueHash(), expectedHash);
-        assertEq(gasToken.balanceOf(bob), 0);
+        assertEq(zoneToken.balanceOf(bob), 0);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -323,7 +323,7 @@ contract ZoneInboxTest is Test {
         assertEq(address(inbox.config()), address(config));
         assertEq(inbox.tempoPortal(), mockPortal);
         assertEq(address(inbox.tempoState()), address(tempoState));
-        assertEq(address(inbox.gasToken()), address(gasToken));
+        assertEq(address(inbox.zoneToken()), address(zoneToken));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -352,7 +352,7 @@ contract ZoneInboxTest is Test {
 
         // Calculate expected balance: sum of 1 + 2 + ... + 50 = 50 * 51 / 2 = 1275
         uint256 expectedBalance = (numDeposits * (numDeposits + 1) / 2) * 1e6;
-        assertEq(gasToken.balanceOf(bob), expectedBalance);
+        assertEq(zoneToken.balanceOf(bob), expectedBalance);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -454,7 +454,7 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decs);
 
         // Verify minting to the decrypted recipient
-        assertEq(gasToken.balanceOf(recipient), amount);
+        assertEq(zoneToken.balanceOf(recipient), amount);
         assertEq(inbox.processedDepositQueueHash(), expectedHash);
     }
 
@@ -506,8 +506,8 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decs);
 
         // Funds should go to sender (alice), not the decrypted recipient
-        assertEq(gasToken.balanceOf(alice), amount);
-        assertEq(gasToken.balanceOf(address(0x500)), 0);
+        assertEq(zoneToken.balanceOf(alice), amount);
+        assertEq(zoneToken.balanceOf(address(0x500)), 0);
         assertEq(inbox.processedDepositQueueHash(), expectedHash);
     }
 
@@ -551,8 +551,8 @@ contract ZoneInboxTest is Test {
 
         // Regular deposit: bob gets 100e6
         // Encrypted deposit: recipient gets 200e6
-        assertEq(gasToken.balanceOf(bob), 100e6);
-        assertEq(gasToken.balanceOf(recipient), 200e6);
+        assertEq(zoneToken.balanceOf(bob), 100e6);
+        assertEq(zoneToken.balanceOf(recipient), 200e6);
         assertEq(inbox.processedDepositQueueHash(), h2);
     }
 
@@ -812,8 +812,8 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decs);
 
         // Deposit should bounce to sender (alice) because plaintext length != 64
-        assertEq(gasToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
-        assertEq(gasToken.balanceOf(recipient), 0, "recipient should get nothing");
+        assertEq(zoneToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
+        assertEq(zoneToken.balanceOf(recipient), 0, "recipient should get nothing");
     }
 
     /// @notice Verify that a too-long plaintext (65 bytes) causes the deposit to bounce
@@ -835,8 +835,8 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decs);
 
         // Deposit should bounce to sender
-        assertEq(gasToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
-        assertEq(gasToken.balanceOf(recipient), 0, "recipient should get nothing");
+        assertEq(zoneToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
+        assertEq(zoneToken.balanceOf(recipient), 0, "recipient should get nothing");
     }
 
     /// @notice Verify that an empty plaintext (0 bytes) causes the deposit to bounce
@@ -853,8 +853,8 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decs);
 
         // Deposit should bounce to sender
-        assertEq(gasToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
-        assertEq(gasToken.balanceOf(recipient), 0, "recipient should get nothing");
+        assertEq(zoneToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
+        assertEq(zoneToken.balanceOf(recipient), 0, "recipient should get nothing");
     }
 
     /// @notice Verify that exactly 64-byte plaintext with correct data succeeds
@@ -872,8 +872,8 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decs);
 
         // Deposit should succeed — minted to the decrypted recipient
-        assertEq(gasToken.balanceOf(recipient), 1000e6, "recipient should receive funds");
-        assertEq(gasToken.balanceOf(alice), 0, "sender should get nothing (successful deposit)");
+        assertEq(zoneToken.balanceOf(recipient), 1000e6, "recipient should receive funds");
+        assertEq(zoneToken.balanceOf(alice), 0, "sender should get nothing (successful deposit)");
     }
 
 }
