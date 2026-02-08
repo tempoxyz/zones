@@ -71,10 +71,18 @@ contract ZoneInbox is IZoneInbox {
                          CRYPTOGRAPHIC HELPERS
     //////////////////////////////////////////////////////////////*/
 
+    /// @dev HMAC ipad constant (0x36 repeated 32 times)
+    bytes32 private constant _IPAD =
+        0x3636363636363636363636363636363636363636363636363636363636363636;
+    /// @dev HMAC opad constant (0x5c repeated 32 times)
+    bytes32 private constant _OPAD =
+        0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
+
     /// @notice HMAC-SHA256 implementation using the SHA256 precompile
     /// @dev HMAC(key, message) = SHA256((key ⊕ opad) || SHA256((key ⊕ ipad) || message))
-    ///      where ipad = 0x36 repeated, opad = 0x5c repeated
-    /// @param key The HMAC key (will be padded/hashed if longer than 64 bytes)
+    ///      where ipad = 0x36 repeated, opad = 0x5c repeated.
+    ///      Uses word-level XOR instead of byte-by-byte loops for ~95% gas reduction.
+    /// @param key The HMAC key (will be hashed if longer than 64 bytes)
     /// @param message The message to authenticate
     /// @return result The 32-byte HMAC-SHA256 output
     function _hmacSha256(
@@ -85,37 +93,39 @@ contract ZoneInbox is IZoneInbox {
         view
         returns (bytes32 result)
     {
-        // SHA256 block size is 64 bytes
-        bytes memory paddedKey = new bytes(64);
+        // Load key into two 32-byte words (SHA256 block size = 64 bytes = 2 words)
+        bytes32 keyWord0;
+        bytes32 keyWord1;
 
         if (key.length > 64) {
-            // If key is longer than block size, hash it first
-            bytes32 hashedKey = sha256(key);
-            assembly {
-                mstore(add(paddedKey, 32), hashedKey)
-            }
+            // Key longer than block size: hash it first (result goes in first word, second is zero)
+            keyWord0 = sha256(key);
         } else {
-            // Copy key and pad with zeros
-            for (uint256 i = 0; i < key.length; i++) {
-                paddedKey[i] = key[i];
+            assembly {
+                let keyLen := mload(key)
+                keyWord0 := mload(add(key, 32))
+                // Load second word only if key > 32 bytes
+                switch gt(keyLen, 32)
+                case 1 { keyWord1 := mload(add(key, 64)) }
+                default { keyWord1 := 0 }
+                // Zero out bytes beyond key length in first word
+                if lt(keyLen, 32) {
+                    let shift := mul(sub(32, keyLen), 8)
+                    keyWord0 := and(keyWord0, not(sub(shl(shift, 1), 1)))
+                }
+                // Zero out bytes beyond key length in second word
+                if and(gt(keyLen, 32), lt(keyLen, 64)) {
+                    let shift := mul(sub(64, keyLen), 8)
+                    keyWord1 := and(keyWord1, not(sub(shl(shift, 1), 1)))
+                }
             }
-        }
-
-        // Compute inner and outer padded keys
-        bytes memory innerKey = new bytes(64);
-        bytes memory outerKey = new bytes(64);
-        for (uint256 i = 0; i < 64; i++) {
-            innerKey[i] = bytes1(uint8(paddedKey[i]) ^ 0x36);
-            outerKey[i] = bytes1(uint8(paddedKey[i]) ^ 0x5c);
         }
 
         // Inner hash: SHA256((key ⊕ ipad) || message)
-        bytes memory innerData = bytes.concat(innerKey, message);
-        bytes32 innerHash = sha256(innerData);
+        bytes32 innerHash = sha256(abi.encodePacked(keyWord0 ^ _IPAD, keyWord1 ^ _IPAD, message));
 
         // Outer hash: SHA256((key ⊕ opad) || innerHash)
-        bytes memory outerData = bytes.concat(outerKey, abi.encodePacked(innerHash));
-        result = sha256(outerData);
+        result = sha256(abi.encodePacked(keyWord0 ^ _OPAD, keyWord1 ^ _OPAD, innerHash));
     }
 
     /// @notice HKDF-SHA256 key derivation (simplified single-output version)
