@@ -2167,4 +2167,199 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
     }
 
+    /*//////////////////////////////////////////////////////////////
+                    STORAGE LAYOUT VERIFICATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Verify that ZonePortal's storage layout matches the slot constants
+    ///         used by ZoneConfig and ZoneInbox for cross-domain reads.
+    /// @dev This is a critical regression test. If the ZonePortal storage layout changes
+    ///      (e.g. a variable is added/removed/reordered), this test will fail, preventing
+    ///      silent slot mismatches that corrupt zone-side reads.
+    ///
+    ///      The zone-side contracts (ZoneConfig, ZoneInbox) read ZonePortal storage via
+    ///      TempoState.readTempoStorageSlot() using hardcoded slot numbers. If those slot
+    ///      numbers drift from the actual layout, the zone reads garbage data.
+    ///
+    ///      Slot layout (non-immutable variables only):
+    ///        slot 0: sequencer (address)
+    ///        slot 1: pendingSequencer (address)
+    ///        slot 2: sequencerPubkey (bytes32)
+    ///        slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+    ///        slot 4: blockHash (bytes32)
+    ///        slot 5: currentDepositQueueHash (bytes32)
+    ///        slot 6: lastSyncedTempoBlockNumber (uint64)
+    ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
+    function test_storageLayout_slotPositions() public {
+        // --- Slot 0: sequencer ---
+        bytes32 slot0 = vm.load(address(portal), bytes32(uint256(0)));
+        assertEq(address(uint160(uint256(slot0))), portal.sequencer(), "slot 0: sequencer mismatch");
+
+        // --- Slot 1: pendingSequencer ---
+        // Transfer sequencer to get a non-zero pendingSequencer
+        portal.transferSequencer(alice);
+        bytes32 slot1 = vm.load(address(portal), bytes32(uint256(1)));
+        assertEq(
+            address(uint160(uint256(slot1))),
+            portal.pendingSequencer(),
+            "slot 1: pendingSequencer mismatch"
+        );
+
+        // --- Slot 2: sequencerPubkey ---
+        bytes32 testPubkey = keccak256("testPubkey");
+        portal.setSequencerPubkey(testPubkey);
+        bytes32 slot2 = vm.load(address(portal), bytes32(uint256(2)));
+        assertEq(slot2, testPubkey, "slot 2: sequencerPubkey mismatch");
+
+        // --- Slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) packed ---
+        uint128 testRate = 42;
+        portal.setZoneGasRate(testRate);
+        bytes32 slot3 = vm.load(address(portal), bytes32(uint256(3)));
+        // zoneGasRate is at the lowest 128 bits (uint128), withdrawalBatchIndex at bits 128-191
+        uint128 loadedRate = uint128(uint256(slot3));
+        assertEq(loadedRate, testRate, "slot 3: zoneGasRate mismatch");
+
+        // --- Slot 4: blockHash ---
+        bytes32 slot4 = vm.load(address(portal), bytes32(uint256(4)));
+        assertEq(slot4, portal.blockHash(), "slot 4: blockHash mismatch");
+
+        // --- Slot 5: currentDepositQueueHash ---
+        bytes32 slot5 = vm.load(address(portal), bytes32(uint256(5)));
+        assertEq(
+            slot5, portal.currentDepositQueueHash(), "slot 5: currentDepositQueueHash mismatch"
+        );
+
+        // --- Slot 6: lastSyncedTempoBlockNumber ---
+        bytes32 slot6 = vm.load(address(portal), bytes32(uint256(6)));
+        assertEq(
+            uint64(uint256(slot6)),
+            portal.lastSyncedTempoBlockNumber(),
+            "slot 6: lastSyncedTempoBlockNumber mismatch"
+        );
+
+        // --- Slot 7: _encryptionKeys array length ---
+        // Before adding keys, length should be 0
+        bytes32 slot7 = vm.load(address(portal), bytes32(uint256(7)));
+        assertEq(uint256(slot7), 0, "slot 7: _encryptionKeys length should be 0 initially");
+    }
+
+    /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.
+    /// @dev This ensures ZoneConfig and ZoneInbox both compute the correct storage slots
+    ///      when reading encryption keys via readTempoStorageSlot().
+    ///
+    ///      For a dynamic array at slot S:
+    ///        - slot S stores the array length
+    ///        - element data starts at keccak256(abi.encode(S))
+    ///        - each EncryptionKeyEntry occupies 2 slots:
+    ///            base + (index * 2):     x (bytes32)
+    ///            base + (index * 2) + 1: yParity (uint8) + activationBlock (uint64) [packed]
+    function test_storageLayout_encryptionKeysArray() public {
+        bytes32 keyX1 = keccak256("encryption-key-1");
+        uint8 keyYParity1 = 0x02;
+        bytes32 keyX2 = keccak256("encryption-key-2");
+        uint8 keyYParity2 = 0x03;
+
+        // Add two keys at different blocks
+        portal.setSequencerEncryptionKey(keyX1, keyYParity1);
+
+        vm.roll(block.number + 100);
+        portal.setSequencerEncryptionKey(keyX2, keyYParity2);
+
+        // Verify array length at slot 7
+        uint256 arraySlot = 7;
+        bytes32 lengthRaw = vm.load(address(portal), bytes32(arraySlot));
+        assertEq(uint256(lengthRaw), 2, "encryption keys array length should be 2");
+
+        // Compute the base slot for array data
+        uint256 base = uint256(keccak256(abi.encode(arraySlot)));
+
+        // --- Entry 0: verify raw storage matches the public getter ---
+        EncryptionKeyEntry memory entry0 = portal.encryptionKeyAt(0);
+        bytes32 loadedX1 = vm.load(address(portal), bytes32(base + 0));
+        assertEq(loadedX1, keyX1, "entry 0: x mismatch");
+        assertEq(loadedX1, entry0.x, "entry 0: x != getter");
+
+        bytes32 meta1 = vm.load(address(portal), bytes32(base + 1));
+        uint8 loadedYParity1 = uint8(uint256(meta1) & 0xff);
+        uint64 loadedActivation1 = uint64(uint256(meta1) >> 8);
+        assertEq(loadedYParity1, keyYParity1, "entry 0: yParity mismatch");
+        assertEq(loadedActivation1, entry0.activationBlock, "entry 0: activationBlock mismatch");
+
+        // --- Entry 1: verify raw storage matches the public getter ---
+        EncryptionKeyEntry memory entry1 = portal.encryptionKeyAt(1);
+        bytes32 loadedX2 = vm.load(address(portal), bytes32(base + 2));
+        assertEq(loadedX2, keyX2, "entry 1: x mismatch");
+        assertEq(loadedX2, entry1.x, "entry 1: x != getter");
+
+        bytes32 meta2 = vm.load(address(portal), bytes32(base + 3));
+        uint8 loadedYParity2 = uint8(uint256(meta2) & 0xff);
+        uint64 loadedActivation2 = uint64(uint256(meta2) >> 8);
+        assertEq(loadedYParity2, keyYParity2, "entry 1: yParity mismatch");
+        assertEq(loadedActivation2, entry1.activationBlock, "entry 1: activationBlock mismatch");
+
+        // Verify the two keys have different activation blocks (proves vm.roll worked)
+        assertTrue(
+            entry1.activationBlock > entry0.activationBlock, "key2 should be activated later"
+        );
+    }
+
+    /// @notice Verify that the slot constants used by ZoneInbox and ZoneConfig match
+    ///         the actual ZonePortal storage layout.
+    /// @dev This is the cross-contract consistency check. The test replicates the exact
+    ///      slot computation logic used by ZoneInbox._readEncryptionKey() and
+    ///      ZoneConfig.sequencerEncryptionKey() to ensure they both read the correct data.
+    function test_storageLayout_crossContractConsistency() public {
+        bytes32 keyX = keccak256("cross-contract-key");
+        uint8 keyYParity = 0x03;
+
+        portal.setSequencerEncryptionKey(keyX, keyYParity);
+
+        // These are the slot constants defined in ZoneInbox and ZoneConfig:
+        uint256 INBOX_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = 5;
+        uint256 INBOX_ENCRYPTION_KEYS_SLOT = 7;
+        // (ZoneConfig also uses ENCRYPTION_KEYS_SLOT = 7 after the fix)
+
+        // Verify currentDepositQueueHash slot
+        bytes32 queueHashFromSlot =
+            vm.load(address(portal), bytes32(INBOX_CURRENT_DEPOSIT_QUEUE_HASH_SLOT));
+        assertEq(
+            queueHashFromSlot,
+            portal.currentDepositQueueHash(),
+            "ZoneInbox CURRENT_DEPOSIT_QUEUE_HASH_SLOT reads wrong data"
+        );
+
+        // Verify encryption keys array length from slot 7
+        bytes32 arrayLenRaw = vm.load(address(portal), bytes32(INBOX_ENCRYPTION_KEYS_SLOT));
+        assertEq(
+            uint256(arrayLenRaw),
+            portal.encryptionKeyCount(),
+            "ZoneInbox/ZoneConfig ENCRYPTION_KEYS_SLOT reads wrong array length"
+        );
+
+        // Verify the derived slot computation matches actual key data
+        // This replicates the exact logic from ZoneInbox._readEncryptionKey():
+        //   uint256 base = uint256(keccak256(abi.encode(uint256(ENCRYPTION_KEYS_SLOT))));
+        //   uint256 slotX = base + (keyIndex * 2);
+        //   uint256 slotMeta = slotX + 1;
+        uint256 base = uint256(keccak256(abi.encode(INBOX_ENCRYPTION_KEYS_SLOT)));
+        bytes32 loadedX = vm.load(address(portal), bytes32(base + 0));
+        bytes32 loadedMeta = vm.load(address(portal), bytes32(base + 1));
+
+        assertEq(loadedX, keyX, "derived slot for key x does not match actual storage");
+        assertEq(
+            uint8(uint256(loadedMeta) & 0xff),
+            keyYParity,
+            "derived slot for key yParity does not match actual storage"
+        );
+
+        // Also verify via the public getter for full round-trip confidence
+        EncryptionKeyEntry memory entry = portal.encryptionKeyAt(0);
+        assertEq(loadedX, entry.x, "vm.load x != encryptionKeyAt(0).x");
+        assertEq(
+            uint8(uint256(loadedMeta) & 0xff),
+            entry.yParity,
+            "vm.load yParity != encryptionKeyAt(0).yParity"
+        );
+    }
+
 }

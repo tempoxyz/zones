@@ -590,6 +590,92 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decs);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                    ZONE CONFIG ENCRYPTION KEY TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Verify ZoneConfig.sequencerEncryptionKey() reads from the correct storage slot.
+    /// @dev Regression test for the bug where ZoneConfig read slot 2 (legacy sequencerPubkey)
+    ///      instead of the _encryptionKeys dynamic array at slot 7.
+    function test_zoneConfig_sequencerEncryptionKey_readsCorrectSlot() public {
+        bytes32 keyX = keccak256("config-test-key");
+        uint8 keyYParity = 0x03;
+
+        // Simulate the _encryptionKeys array at slot 7:
+        // Set array length = 1 at slot 7
+        uint256 arraySlot = 7;
+        tempoState.setMockStorageValue(mockPortal, bytes32(arraySlot), bytes32(uint256(1)));
+
+        // Set the key entry data at the derived slots
+        uint256 base = uint256(keccak256(abi.encode(arraySlot)));
+        tempoState.setMockStorageValue(mockPortal, bytes32(base), keyX);
+        tempoState.setMockStorageValue(mockPortal, bytes32(base + 1), bytes32(uint256(keyYParity)));
+
+        // Read via ZoneConfig — this should use slot 7, not slot 2
+        (bytes32 readX, uint8 readYParity) = config.sequencerEncryptionKey();
+        assertEq(readX, keyX, "ZoneConfig should read key x from slot 7 array");
+        assertEq(readYParity, keyYParity, "ZoneConfig should read yParity from slot 7 array");
+    }
+
+    /// @notice Verify ZoneConfig.sequencerEncryptionKey() returns the LAST key when multiple exist.
+    function test_zoneConfig_sequencerEncryptionKey_returnsLatestKey() public {
+        bytes32 keyX1 = keccak256("old-key");
+        bytes32 keyX2 = keccak256("new-key");
+        uint8 yParity2 = 0x02;
+
+        // Simulate 2 entries in _encryptionKeys
+        uint256 arraySlot = 7;
+        tempoState.setMockStorageValue(mockPortal, bytes32(arraySlot), bytes32(uint256(2)));
+
+        uint256 base = uint256(keccak256(abi.encode(arraySlot)));
+
+        // Entry 0
+        tempoState.setMockStorageValue(mockPortal, bytes32(base), keyX1);
+        tempoState.setMockStorageValue(mockPortal, bytes32(base + 1), bytes32(uint256(0x03)));
+
+        // Entry 1 (latest)
+        tempoState.setMockStorageValue(mockPortal, bytes32(base + 2), keyX2);
+        tempoState.setMockStorageValue(mockPortal, bytes32(base + 3), bytes32(uint256(yParity2)));
+
+        (bytes32 readX, uint8 readYParity) = config.sequencerEncryptionKey();
+        assertEq(readX, keyX2, "should return the latest key");
+        assertEq(readYParity, yParity2, "should return the latest yParity");
+    }
+
+    /// @notice Verify ZoneConfig.sequencerEncryptionKey() returns zeros when no keys exist.
+    function test_zoneConfig_sequencerEncryptionKey_emptyReturnsZero() public {
+        // Array length = 0 (default)
+        tempoState.setMockStorageValue(mockPortal, bytes32(uint256(7)), bytes32(uint256(0)));
+
+        (bytes32 readX, uint8 readYParity) = config.sequencerEncryptionKey();
+        assertEq(readX, bytes32(0));
+        assertEq(readYParity, 0);
+    }
+
+    /// @notice Verify ZoneConfig and ZoneInbox read from the same encryption key slot.
+    /// @dev Both contracts define ENCRYPTION_KEYS_SLOT = 7 and must agree on derived slot computation.
+    function test_zoneConfig_and_zoneInbox_readSameEncryptionKey() public {
+        bytes32 keyX = keccak256("shared-key-test");
+        uint8 keyYParity = 0x02;
+
+        // Set up encryption key mock (same as _setupEncryptionKeyMock)
+        _setupEncryptionKeyMock(0, keyX, keyYParity);
+
+        // Also set the array length (ZoneConfig needs this, ZoneInbox._readEncryptionKey doesn't)
+        tempoState.setMockStorageValue(mockPortal, bytes32(uint256(7)), bytes32(uint256(1)));
+
+        // Read via ZoneConfig
+        (bytes32 configX, uint8 configYParity) = config.sequencerEncryptionKey();
+
+        // The values read by ZoneConfig must match what ZoneInbox._readEncryptionKey would get
+        assertEq(configX, keyX, "ZoneConfig and ZoneInbox must agree on key X");
+        assertEq(configYParity, keyYParity, "ZoneConfig and ZoneInbox must agree on yParity");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    ENCRYPTED DEPOSIT TESTS (continued)
+    //////////////////////////////////////////////////////////////*/
+
     function test_advanceTempo_encryptedDeposit_invalidProof() public {
         uint128 amount = 1000e6;
 

@@ -31,15 +31,23 @@ contract ZoneConfig {
     /// @dev ZonePortal storage layout (non-immutable variables):
     ///      slot 0: sequencer (address)
     ///      slot 1: pendingSequencer (address)
-    ///      slot 2: sequencerPubkey (bytes32)
-    ///      ...
+    ///      slot 2: sequencerPubkey (bytes32, legacy)
+    ///      slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+    ///      slot 4: blockHash (bytes32)
+    ///      slot 5: currentDepositQueueHash (bytes32)
+    ///      slot 6: lastSyncedTempoBlockNumber (uint64)
+    ///      slot 7: _encryptionKeys (EncryptionKeyEntry[])
     bytes32 internal constant SEQUENCER_SLOT = bytes32(uint256(0));
 
     /// @notice Storage slot for pendingSequencer in ZonePortal
     bytes32 internal constant PENDING_SEQUENCER_SLOT = bytes32(uint256(1));
 
-    /// @notice Storage slot for sequencerPubkey in ZonePortal (X coordinate)
-    bytes32 internal constant SEQUENCER_PUBKEY_SLOT = bytes32(uint256(2));
+    /// @notice Storage slot for _encryptionKeys dynamic array in ZonePortal
+    /// @dev Each EncryptionKeyEntry occupies 2 storage slots:
+    ///      slot base + (index * 2):     x (bytes32)
+    ///      slot base + (index * 2) + 1: yParity (uint8) + activationBlock (uint64) [packed]
+    ///      where base = keccak256(abi.encode(7))
+    bytes32 internal constant ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
 
     /*//////////////////////////////////////////////////////////////
                                ERRORS
@@ -79,16 +87,31 @@ contract ZoneConfig {
         return address(uint160(uint256(value)));
     }
 
-    /// @notice Get sequencer's encryption public key by reading from L1 ZonePortal
-    /// @dev Reads portal's sequencerPubkey slot from finalized Tempo state.
-    ///      Used for encrypted deposits (ECIES).
+    /// @notice Get sequencer's current encryption public key by reading from L1 ZonePortal
+    /// @dev Reads the last entry from the _encryptionKeys dynamic array (slot 7).
+    ///      Each EncryptionKeyEntry occupies 2 storage slots:
+    ///        slot base + (index * 2):     x (bytes32)
+    ///        slot base + (index * 2) + 1: yParity (uint8) + activationBlock (uint64) [packed]
+    ///      where base = keccak256(abi.encode(7))
     /// @return x X-coordinate of sequencer's secp256k1 public key
     /// @return yParity Y-coordinate parity (0 or 1)
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity) {
-        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, SEQUENCER_PUBKEY_SLOT);
-        // Public key is stored as: x (bytes32) with yParity in the first byte
-        yParity = uint8(uint256(value) >> 248);
-        x = bytes32(uint256(value) & ((1 << 248) - 1));
+        // Read the array length from the array's base slot
+        uint256 length = uint256(tempoState.readTempoStorageSlot(tempoPortal, ENCRYPTION_KEYS_SLOT));
+
+        if (length == 0) return (bytes32(0), 0);
+
+        // Compute the storage base for array data: keccak256(abi.encode(slot))
+        uint256 base = uint256(keccak256(abi.encode(uint256(ENCRYPTION_KEYS_SLOT))));
+
+        // Read the last entry (2 slots per EncryptionKeyEntry)
+        uint256 lastIndex = length - 1;
+        uint256 slotX = base + (lastIndex * 2);
+        uint256 slotMeta = slotX + 1;
+
+        x = tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotX));
+        bytes32 metaSlot = tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotMeta));
+        yParity = uint8(uint256(metaSlot) & 0xff);
     }
 
     /*//////////////////////////////////////////////////////////////
