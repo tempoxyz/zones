@@ -146,9 +146,7 @@ contract WithdrawalQueueLibTest is Test {
         assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
 
         vm.expectRevert(WithdrawalQueueLib.WithdrawalQueueFull.selector);
-        harness.enqueue(
-            WithdrawalQueueTransition({ withdrawalQueueHash: keccak256("overflow") })
-        );
+        harness.enqueue(WithdrawalQueueTransition({ withdrawalQueueHash: keccak256("overflow") }));
     }
 
     function test_enqueue_afterDequeueReuseSlots() public {
@@ -326,9 +324,7 @@ contract WithdrawalQueueLibTest is Test {
         for (uint256 i = 2; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
             bytes32 expected = keccak256(abi.encode("fill", i));
             Withdrawal memory dummy = _makeWithdrawal(
-                address(uint160(0x500 + i)),
-                address(uint160(0x600 + i)),
-                uint128(i * 1e6)
+                address(uint160(0x500 + i)), address(uint160(0x600 + i)), uint128(i * 1e6)
             );
             // These slots have hashes that don't match proper withdrawals,
             // so we can't dequeue them with the withdrawal interface.
