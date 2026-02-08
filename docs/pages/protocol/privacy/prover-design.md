@@ -67,8 +67,8 @@ pub struct BatchOutput {
     /// Deposit queue processing
     pub deposit_queue_transition: DepositQueueTransition,
 
-    /// Withdrawal queue updates
-    pub withdrawal_queue_transition: WithdrawalQueueTransition,
+    /// Withdrawal queue hash chain for this batch (0 if no withdrawals)
+    pub withdrawal_queue_hash: B256,
 
     /// Withdrawal batch parameters read from ZoneOutbox.lastBatch
     pub last_batch: LastBatchCommitment,
@@ -80,7 +80,7 @@ pub struct LastBatchCommitment {
 
 /// Mirrors the Solidity `LastBatch` struct from ZoneOutbox.
 /// Used internally when reading from zone state; fields are split across
-/// `WithdrawalQueueTransition` (hash) and `LastBatchCommitment` (index) in output.
+/// `withdrawal_queue_hash` and `LastBatchCommitment` (index) in output.
 pub struct LastBatch {
     pub withdrawal_queue_hash: B256,
     pub withdrawal_batch_index: u64,
@@ -425,9 +425,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
             prev_processed_hash: deposit_prev,
             next_processed_hash: deposit_next,
         },
-        withdrawal_queue_transition: WithdrawalQueueTransition {
-            withdrawal_queue_hash: last_batch.withdrawal_queue_hash,
-        },
+        withdrawal_queue_hash: last_batch.withdrawal_queue_hash,
         last_batch: LastBatchCommitment {
             withdrawal_batch_index: last_batch.withdrawal_batch_index,
         },
