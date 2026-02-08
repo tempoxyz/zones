@@ -150,4 +150,8 @@ contract ZoneFactory is IZoneFactory {
         return _isZonePortal[portal];
     }
 
+    function isZoneMessenger(address messenger) external view returns (bool) {
+        return _isZoneMessenger[messenger];
+    }
+
 }

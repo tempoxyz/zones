@@ -1,4 +1,4 @@
-                                                                                                                                                                                // SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
 /// @title IZoneToken
@@ -341,6 +341,7 @@ interface IZoneFactory {
     function zoneCount() external view returns (uint64);
     function zones(uint64 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
+    function isZoneMessenger(address messenger) external view returns (bool);
 
 }
 
