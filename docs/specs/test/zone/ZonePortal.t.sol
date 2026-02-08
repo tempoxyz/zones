@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {TIP20} from "../../src/TIP20.sol";
-import {ITIP20} from "../../src/interfaces/ITIP20.sol";
+import { TIP20 } from "../../src/TIP20.sol";
+import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
 
-import {BLOCKHASH_HISTORY_WINDOW} from "../../src/zone/BlockHashHistory.sol";
+import { BLOCKHASH_HISTORY_WINDOW } from "../../src/zone/BlockHashHistory.sol";
 import {
     BlockTransition,
     Deposit,
@@ -18,21 +18,26 @@ import {
     IZoneFactory,
     IZoneMessenger,
     IZonePortal,
+    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_PENDING_SEQUENCER_SLOT,
+    PORTAL_SEQUENCER_SLOT,
     Withdrawal,
     WithdrawalQueueTransition,
     ZoneInfo,
     ZoneParams
 } from "../../src/zone/IZone.sol";
-import {EMPTY_SENTINEL, WithdrawalQueueLib} from "../../src/zone/WithdrawalQueueLib.sol";
-import {ZoneFactory} from "../../src/zone/ZoneFactory.sol";
-import {ZoneMessenger} from "../../src/zone/ZoneMessenger.sol";
-import {ZonePortal} from "../../src/zone/ZonePortal.sol";
-import {BaseTest} from "../BaseTest.t.sol";
+import { EMPTY_SENTINEL, WithdrawalQueueLib } from "../../src/zone/WithdrawalQueueLib.sol";
+import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
+import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
+import { ZonePortal } from "../../src/zone/ZonePortal.sol";
+import { BaseTest } from "../BaseTest.t.sol";
 
-import {MockVerifier} from "./mocks/MockVerifier.sol";
+import { MockVerifier } from "./mocks/MockVerifier.sol";
 
 /// @notice Mock withdrawal receiver that accepts funds
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
+
     bool public shouldAccept = true;
     bool public shouldRevert = false;
 
@@ -53,7 +58,11 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         shouldRevert = _shouldRevert;
     }
 
-    function onWithdrawalReceived(address sender, uint128 amount, bytes calldata callbackData)
+    function onWithdrawalReceived(
+        address sender,
+        uint128 amount,
+        bytes calldata callbackData
+    )
         external
         returns (bytes4)
     {
@@ -71,29 +80,35 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
             return bytes4(0xdeadbeef); // Wrong selector
         }
     }
+
 }
 
 /// @notice Mock receiver that consumes all gas
 contract GasConsumingReceiver is IWithdrawalReceiver {
+
     function onWithdrawalReceived(address, uint128, bytes calldata) external returns (bytes4) {
         // Infinite loop to consume all gas
-        while (true) {}
+        while (true) { }
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }
+
 }
 
 /// @notice Mock receiver that succeeds normally
 contract SuccessfulReceiver is IWithdrawalReceiver {
+
     uint256 public callCount;
 
     function onWithdrawalReceived(address, uint128, bytes calldata) external returns (bytes4) {
         callCount++;
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }
+
 }
 
 /// @notice Tests for ZonePortal - simulating L1/zone interface
 contract ZonePortalTest is BaseTest {
+
     ZoneFactory public zoneFactory;
     MockVerifier public mockVerifier;
     ZonePortal public portal;
@@ -274,9 +289,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: newStateRoot}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: newStateRoot }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -295,9 +312,13 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: keccak256("wrong"), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({
+                prevBlockHash: keccak256("wrong"), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -314,9 +335,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: prevBlockHash, nextBlockHash: nextStateRoot}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: nextStateRoot }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -334,9 +357,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: prevBlockHash, nextBlockHash: nextStateRoot}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: nextStateRoot }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -376,11 +401,13 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("stateWithWithdrawal")}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("stateWithWithdrawal")
+            }),
             DepositQueueTransition({
                 prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: withdrawalHash}),
+            WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalHash }),
             "",
             ""
         );
@@ -442,11 +469,14 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")}),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: batchQueueHash}),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash()
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: batchQueueHash }),
             "",
             ""
         );
@@ -497,11 +527,14 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")}),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: w1Hash}),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash()
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: w1Hash }),
             "",
             ""
         );
@@ -523,11 +556,14 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state2")}),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state2")
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: w2Hash}),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash()
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: w2Hash }),
             "",
             ""
         );
@@ -561,11 +597,14 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")}),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}), // No withdrawals
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash()
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }), // No withdrawals
             "",
             ""
         );
@@ -606,11 +645,14 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash()
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -658,9 +700,13 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore}),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -706,9 +752,13 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore}),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -757,9 +807,13 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore}),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -819,11 +873,14 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash()
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -869,11 +926,14 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash()
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -913,9 +973,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: h1}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")
+            }),
+            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: h1 }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -943,9 +1005,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             genesisTempoBlockNumber - 1, // Before genesis
             0,
-            BlockTransition({prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -959,9 +1023,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number + 1), // In future
             0,
-            BlockTransition({prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -976,9 +1042,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             genesisTempoBlockNumber, // Valid but beyond history window
             0,
-            BlockTransition({prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -994,9 +1062,13 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             oldTempoBlockNumber,
             recentTempoBlockNumber,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1013,9 +1085,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             tempoBlockNumber,
             tempoBlockNumber,
-            BlockTransition({prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1032,9 +1106,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             tempoBlockNumber,
             futureTempoBlockNumber,
-            BlockTransition({prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1048,9 +1124,13 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             genesisTempoBlockNumber,
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0), nextProcessedHash: bytes32(0)
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1082,12 +1162,14 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")}),
-            DepositQueueTransition({
-                prevProcessedHash: keccak256("wrongHash"), // This is ignored by implementation
-                nextProcessedHash: depositHash
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state")
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            DepositQueueTransition({
+                    prevProcessedHash: keccak256("wrongHash"), // This is ignored by implementation
+                    nextProcessedHash: depositHash
+                }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1111,9 +1193,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: h1}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")
+            }),
+            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: h1 }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1126,9 +1210,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state2")}),
-            DepositQueueTransition({prevProcessedHash: h1, nextProcessedHash: h2}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state2")
+            }),
+            DepositQueueTransition({ prevProcessedHash: h1, nextProcessedHash: h2 }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1169,9 +1255,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: w1Hash}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: w1Hash }),
             "",
             ""
         );
@@ -1198,9 +1286,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: w2Hash}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: w2Hash }),
             "",
             ""
         );
@@ -1229,9 +1319,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}), // No withdrawals
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }), // No withdrawals
             "",
             ""
         );
@@ -1270,9 +1362,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: w1Hash}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: w1Hash }),
             "",
             ""
         );
@@ -1293,9 +1387,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: w2Hash}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: w2Hash }),
             "",
             ""
         );
@@ -1341,9 +1437,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore}),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -1384,9 +1482,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -1428,9 +1528,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -1472,9 +1574,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore}),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHashBefore
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -1487,8 +1591,10 @@ contract ZonePortalTest is BaseTest {
 
         // The bounce-back deposit should be:
         // Deposit { sender: portal, to: bob, amount: 500e6, fee: 0, memo: 0 }
-        Deposit memory expectedBounceBack = Deposit({sender: address(portal), to: bob, amount: 500e6, memo: bytes32(0)});
-        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, expectedBounceBack, depositHashBefore));
+        Deposit memory expectedBounceBack =
+            Deposit({ sender: address(portal), to: bob, amount: 500e6, memo: bytes32(0) });
+        bytes32 expectedHash =
+            keccak256(abi.encode(DepositType.Regular, expectedBounceBack, depositHashBefore));
         assertEq(newDepositHash, expectedHash);
     }
 
@@ -1510,9 +1616,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1522,9 +1630,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1534,9 +1644,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s3")}),
-            DepositQueueTransition({prevProcessedHash: bytes32(0), nextProcessedHash: depositHash}),
-            WithdrawalQueueTransition({withdrawalQueueHash: bytes32(0)}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s3") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+            }),
+            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
             "",
             ""
         );
@@ -1557,7 +1669,7 @@ contract ZonePortalTest is BaseTest {
         bytes32 expectedHash = keccak256(
             abi.encode(
                 DepositType.Regular,
-                Deposit({sender: alice, to: bob, amount: netAmount, memo: bytes32("test")}),
+                Deposit({ sender: alice, to: bob, amount: netAmount, memo: bytes32("test") }),
                 bytes32(0)
             )
         );
@@ -1590,11 +1702,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
             DepositQueueTransition({
                 prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -1628,11 +1740,11 @@ contract ZonePortalTest is BaseTest {
         portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1")}),
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
             DepositQueueTransition({
                 prevProcessedHash: bytes32(0), nextProcessedHash: portal.currentDepositQueueHash()
             }),
-            WithdrawalQueueTransition({withdrawalQueueHash: wHash}),
+            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
             "",
             ""
         );
@@ -1660,7 +1772,8 @@ contract ZonePortalTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     // secp256k1 generator point X (known valid point on curve)
-    bytes32 internal constant VALID_SECP256K1_X = 0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
+    bytes32 internal constant VALID_SECP256K1_X =
+        0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
 
     function test_sequencerEncryptionKey_emptyReturnsZero() public view {
         (bytes32 x, uint8 yParity) = portal.sequencerEncryptionKey();
@@ -1870,8 +1983,9 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         // Reconstruct expected hash using the same encoding as DepositQueueLib
-        EncryptedDeposit memory ed =
-            EncryptedDeposit({sender: alice, amount: netAmount, keyIndex: 0, encrypted: encrypted});
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            sender: alice, amount: netAmount, keyIndex: 0, encrypted: encrypted
+        });
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
         assertEq(hash, expectedHash);
     }
@@ -1929,12 +2043,15 @@ contract ZonePortalTest is BaseTest {
         pathUSD.approve(address(portal), depositAmount);
 
         // Build expected hash
-        EncryptedDeposit memory ed =
-            EncryptedDeposit({sender: alice, amount: netAmount, keyIndex: 0, encrypted: encrypted});
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            sender: alice, amount: netAmount, keyIndex: 0, encrypted: encrypted
+        });
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
 
         vm.expectEmit(true, true, false, true);
-        emit IZonePortal.EncryptedDepositMade(expectedHash, alice, netAmount, 0, VALID_SECP256K1_X, 0x02);
+        emit IZonePortal.EncryptedDepositMade(
+            expectedHash, alice, netAmount, 0, VALID_SECP256K1_X, 0x02
+        );
         portal.depositEncrypted(depositAmount, 0, encrypted);
         vm.stopPrank();
     }
@@ -2054,7 +2171,11 @@ contract ZonePortalTest is BaseTest {
         // Transfer sequencer to get a non-zero pendingSequencer
         portal.transferSequencer(alice);
         bytes32 slot1 = vm.load(address(portal), bytes32(uint256(1)));
-        assertEq(address(uint160(uint256(slot1))), portal.pendingSequencer(), "slot 1: pendingSequencer mismatch");
+        assertEq(
+            address(uint160(uint256(slot1))),
+            portal.pendingSequencer(),
+            "slot 1: pendingSequencer mismatch"
+        );
 
         // --- Slot 2: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) packed ---
         uint128 testRate = 42;
@@ -2070,12 +2191,16 @@ contract ZonePortalTest is BaseTest {
 
         // --- Slot 4: currentDepositQueueHash ---
         bytes32 slot4 = vm.load(address(portal), bytes32(uint256(4)));
-        assertEq(slot4, portal.currentDepositQueueHash(), "slot 4: currentDepositQueueHash mismatch");
+        assertEq(
+            slot4, portal.currentDepositQueueHash(), "slot 4: currentDepositQueueHash mismatch"
+        );
 
         // --- Slot 5: lastSyncedTempoBlockNumber ---
         bytes32 slot5 = vm.load(address(portal), bytes32(uint256(5)));
         assertEq(
-            uint64(uint256(slot5)), portal.lastSyncedTempoBlockNumber(), "slot 5: lastSyncedTempoBlockNumber mismatch"
+            uint64(uint256(slot5)),
+            portal.lastSyncedTempoBlockNumber(),
+            "slot 5: lastSyncedTempoBlockNumber mismatch"
         );
 
         // --- Slot 6: _encryptionKeys array length ---
@@ -2139,7 +2264,9 @@ contract ZonePortalTest is BaseTest {
         assertEq(loadedActivation2, entry1.activationBlock, "entry 1: activationBlock mismatch");
 
         // Verify the two keys have different activation blocks (proves vm.roll worked)
-        assertTrue(entry1.activationBlock > entry0.activationBlock, "key2 should be activated later");
+        assertTrue(
+            entry1.activationBlock > entry0.activationBlock, "key2 should be activated later"
+        );
     }
 
     /// @notice Verify that the slot constants used by ZoneInbox and ZoneConfig match
@@ -2153,60 +2280,64 @@ contract ZonePortalTest is BaseTest {
 
         portal.setSequencerEncryptionKey(keyX, keyYParity);
 
-        // These are the slot constants defined in ZoneInbox and ZoneConfig:
-        uint256 CONFIG_SEQUENCER_SLOT = 0;
-        uint256 CONFIG_PENDING_SEQUENCER_SLOT = 1;
-        uint256 INBOX_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = 4;
-        uint256 INBOX_ENCRYPTION_KEYS_SLOT = 6;
-        // (ZoneConfig also uses ENCRYPTION_KEYS_SLOT = 6)
+        // Use the shared constants from IZone.sol (single source of truth)
 
         // Verify sequencer slot (used by ZoneConfig)
-        bytes32 seqFromSlot = vm.load(address(portal), bytes32(CONFIG_SEQUENCER_SLOT));
+        bytes32 seqFromSlot = vm.load(address(portal), PORTAL_SEQUENCER_SLOT);
         assertEq(
-            address(uint160(uint256(seqFromSlot))), portal.sequencer(), "ZoneConfig SEQUENCER_SLOT reads wrong data"
+            address(uint160(uint256(seqFromSlot))),
+            portal.sequencer(),
+            "PORTAL_SEQUENCER_SLOT reads wrong data"
         );
 
         // Verify pendingSequencer slot (used by ZoneConfig)
-        bytes32 pendingFromSlot = vm.load(address(portal), bytes32(CONFIG_PENDING_SEQUENCER_SLOT));
+        bytes32 pendingFromSlot = vm.load(address(portal), PORTAL_PENDING_SEQUENCER_SLOT);
         assertEq(
             address(uint160(uint256(pendingFromSlot))),
             portal.pendingSequencer(),
-            "ZoneConfig PENDING_SEQUENCER_SLOT reads wrong data"
+            "PORTAL_PENDING_SEQUENCER_SLOT reads wrong data"
         );
 
         // Verify currentDepositQueueHash slot (used by ZoneInbox)
-        bytes32 queueHashFromSlot = vm.load(address(portal), bytes32(INBOX_CURRENT_DEPOSIT_QUEUE_HASH_SLOT));
+        bytes32 queueHashFromSlot = vm.load(address(portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
         assertEq(
             queueHashFromSlot,
             portal.currentDepositQueueHash(),
-            "ZoneInbox CURRENT_DEPOSIT_QUEUE_HASH_SLOT reads wrong data"
+            "PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT reads wrong data"
         );
 
         // Verify encryption keys array length from slot 6
-        bytes32 arrayLenRaw = vm.load(address(portal), bytes32(INBOX_ENCRYPTION_KEYS_SLOT));
+        bytes32 arrayLenRaw = vm.load(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT);
         assertEq(
             uint256(arrayLenRaw),
             portal.encryptionKeyCount(),
-            "ZoneInbox/ZoneConfig ENCRYPTION_KEYS_SLOT reads wrong array length"
+            "PORTAL_ENCRYPTION_KEYS_SLOT reads wrong array length"
         );
 
         // Verify the derived slot computation matches actual key data
         // This replicates the exact logic from ZoneInbox._readEncryptionKey():
-        //   uint256 base = uint256(keccak256(abi.encode(uint256(ENCRYPTION_KEYS_SLOT))));
+        //   uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
         //   uint256 slotX = base + (keyIndex * 2);
         //   uint256 slotMeta = slotX + 1;
-        uint256 base = uint256(keccak256(abi.encode(INBOX_ENCRYPTION_KEYS_SLOT)));
+        uint256 base = uint256(keccak256(abi.encode(PORTAL_ENCRYPTION_KEYS_SLOT)));
         bytes32 loadedX = vm.load(address(portal), bytes32(base + 0));
         bytes32 loadedMeta = vm.load(address(portal), bytes32(base + 1));
 
         assertEq(loadedX, keyX, "derived slot for key x does not match actual storage");
         assertEq(
-            uint8(uint256(loadedMeta) & 0xff), keyYParity, "derived slot for key yParity does not match actual storage"
+            uint8(uint256(loadedMeta) & 0xff),
+            keyYParity,
+            "derived slot for key yParity does not match actual storage"
         );
 
         // Also verify via the public getter for full round-trip confidence
         EncryptionKeyEntry memory entry = portal.encryptionKeyAt(0);
         assertEq(loadedX, entry.x, "vm.load x != encryptionKeyAt(0).x");
-        assertEq(uint8(uint256(loadedMeta) & 0xff), entry.yParity, "vm.load yParity != encryptionKeyAt(0).yParity");
+        assertEq(
+            uint8(uint256(loadedMeta) & 0xff),
+            entry.yParity,
+            "vm.load yParity != encryptionKeyAt(0).yParity"
+        );
     }
+
 }

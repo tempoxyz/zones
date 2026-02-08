@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {EncryptedDepositLib} from "./EncryptedDeposit.sol";
+import { EncryptedDepositLib } from "./EncryptedDeposit.sol";
 import {
     AES_GCM_DECRYPT,
     CHAUM_PEDERSEN_VERIFY,
@@ -15,15 +15,18 @@ import {
     IZoneConfig,
     IZoneInbox,
     IZoneToken,
+    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit
 } from "./IZone.sol";
-import {TempoState} from "./TempoState.sol";
+import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
 /// @dev Called by sequencer. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -43,23 +46,16 @@ contract ZoneInbox is IZoneInbox {
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
 
-    /// @notice Storage slot for currentDepositQueueHash in ZonePortal
-    /// @dev ZonePortal storage layout (non-immutable variables only):
-    ///      slot 0: sequencer (address)
-    ///      slot 1: pendingSequencer (address)
-    ///      slot 2: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
-    ///      slot 3: blockHash (bytes32)
-    ///      slot 4: currentDepositQueueHash (bytes32)
-    ///      slot 5: lastSyncedTempoBlockNumber (uint64)
-    ///      slot 6: _encryptionKeys (EncryptionKeyEntry[])
-    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
-    bytes32 internal constant ENCRYPTION_KEYS_SLOT = bytes32(uint256(6));
-
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config, address _tempoPortalAddr, address _tempoStateAddr, address _gasToken) {
+    constructor(
+        address _config,
+        address _tempoPortalAddr,
+        address _tempoStateAddr,
+        address _gasToken
+    ) {
         config = IZoneConfig(_config);
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
@@ -81,7 +77,14 @@ contract ZoneInbox is IZoneInbox {
     /// @param key The HMAC key (will be padded/hashed if longer than 64 bytes)
     /// @param message The message to authenticate
     /// @return result The 32-byte HMAC-SHA256 output
-    function _hmacSha256(bytes memory key, bytes memory message) internal view returns (bytes32 result) {
+    function _hmacSha256(
+        bytes memory key,
+        bytes memory message
+    )
+        internal
+        view
+        returns (bytes32 result)
+    {
         // SHA256 block size is 64 bytes
         bytes memory paddedKey = new bytes(64);
 
@@ -122,7 +125,15 @@ contract ZoneInbox is IZoneInbox {
     /// @param salt Salt value (use "ecies-aes-key" for ECIES)
     /// @param info Context-specific info (typically empty for ECIES)
     /// @return okm Output key material (32 bytes for AES-256)
-    function _hkdfSha256(bytes32 ikm, bytes memory salt, bytes memory info) internal view returns (bytes32 okm) {
+    function _hkdfSha256(
+        bytes32 ikm,
+        bytes memory salt,
+        bytes memory info
+    )
+        internal
+        view
+        returns (bytes32 okm)
+    {
         // HKDF-Extract: PRK = HMAC-SHA256(salt, IKM)
         bytes32 prk = _hmacSha256(salt, abi.encodePacked(ikm));
 
@@ -133,7 +144,7 @@ contract ZoneInbox is IZoneInbox {
     }
 
     function _readEncryptionKey(uint256 keyIndex) internal view returns (bytes32 x, uint8 yParity) {
-        uint256 base = uint256(keccak256(abi.encode(uint256(ENCRYPTION_KEYS_SLOT))));
+        uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
         uint256 slotX = base + (keyIndex * 2);
         uint256 slotMeta = slotX + 1;
         bytes32 xSlot = _tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotX));
@@ -159,7 +170,9 @@ contract ZoneInbox is IZoneInbox {
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions
-    ) external {
+    )
+        external
+    {
         if (msg.sender != config.sequencer()) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
@@ -250,7 +263,9 @@ contract ZoneInbox is IZoneInbox {
                 } else {
                     // Decryption succeeded - mint to the decrypted recipient
                     gasToken.mint(dec.to, ed.amount);
-                    emit EncryptedDepositProcessed(currentHash, ed.sender, dec.to, ed.amount, dec.memo);
+                    emit EncryptedDepositProcessed(
+                        currentHash, ed.sender, dec.to, ed.amount, dec.memo
+                    );
                 }
             }
         }
@@ -260,7 +275,8 @@ contract ZoneInbox is IZoneInbox {
 
         // Step 3: Validate against Tempo state
         // Read currentDepositQueueHash from the portal's storage using the new Tempo state
-        bytes32 tempoCurrentHash = _tempoState.readTempoStorageSlot(tempoPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
+        bytes32 tempoCurrentHash =
+            _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
 
         // Our processed hash must match Tempo's current hash for now.
         // TODO: Implement recursive ancestor check in proof or on-chain as a fallback.
@@ -271,6 +287,12 @@ contract ZoneInbox is IZoneInbox {
         // Step 4: Update state
         processedDepositQueueHash = currentHash;
 
-        emit TempoAdvanced(_tempoState.tempoBlockHash(), _tempoState.tempoBlockNumber(), deposits.length, currentHash);
+        emit TempoAdvanced(
+            _tempoState.tempoBlockHash(),
+            _tempoState.tempoBlockNumber(),
+            deposits.length,
+            currentHash
+        );
     }
+
 }
