@@ -50,7 +50,7 @@ struct DepositQueueTransition {
 }
 
 /// @notice Withdrawal queue transition for batch proofs
-/// @dev Each batch gets its own slot in an unbounded buffer.
+/// @dev Each batch gets its own slot in a fixed-size ring buffer.
 ///      The withdrawalQueueHash is the hash chain of withdrawals for this batch.
 struct WithdrawalQueueTransition {
     bytes32 withdrawalQueueHash; // hash chain of withdrawals for this batch (0 if none)
@@ -438,7 +438,6 @@ interface IZonePortal {
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
-    function withdrawalQueueMaxSize() external view returns (uint256);
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);
