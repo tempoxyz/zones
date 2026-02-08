@@ -2085,7 +2085,16 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectEmit(true, true, false, true);
         emit IZonePortal.EncryptedDepositMade(
-            expectedHash, alice, netAmount, 0, VALID_SECP256K1_X, 0x02
+            expectedHash,
+            alice,
+            netAmount,
+            fee,
+            0,
+            VALID_SECP256K1_X,
+            0x02,
+            encrypted.ciphertext,
+            encrypted.nonce,
+            encrypted.tag
         );
         portal.depositEncrypted(depositAmount, 0, encrypted);
         vm.stopPrank();

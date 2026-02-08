@@ -388,10 +388,14 @@ interface IZonePortal {
     event EncryptedDepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
-        uint128 amount,
+        uint128 netAmount,
+        uint128 fee,
         uint256 keyIndex,
         bytes32 ephemeralPubkeyX,
-        uint8 ephemeralPubkeyYParity
+        uint8 ephemeralPubkeyYParity,
+        bytes ciphertext,
+        bytes12 nonce,
+        bytes16 tag
     );
 
     /// @notice Emitted when sequencer updates their encryption key

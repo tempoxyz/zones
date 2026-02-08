@@ -479,9 +479,13 @@ contract ZonePortal is IZonePortal {
             newCurrentDepositQueueHash,
             msg.sender,
             netAmount,
+            fee,
             keyIndex,
             encrypted.ephemeralPubkeyX,
-            encrypted.ephemeralPubkeyYParity
+            encrypted.ephemeralPubkeyYParity,
+            encrypted.ciphertext,
+            encrypted.nonce,
+            encrypted.tag
         );
     }
 
