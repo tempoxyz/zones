@@ -41,7 +41,7 @@ contract ZoneInbox is IZoneInbox {
     TempoState internal immutable _tempoState;
 
     /// @notice The zone token (TIP-20 at same address as Tempo)
-    IZoneToken public immutable gasToken;
+    IZoneToken public immutable zoneToken;
 
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
@@ -54,12 +54,12 @@ contract ZoneInbox is IZoneInbox {
         address _config,
         address _tempoPortalAddr,
         address _tempoStateAddr,
-        address _gasToken
+        address _zoneToken
     ) {
         config = IZoneConfig(_config);
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
-        gasToken = IZoneToken(_gasToken);
+        zoneToken = IZoneToken(_zoneToken);
     }
 
     /// @notice The TempoState predeploy address
@@ -203,7 +203,7 @@ contract ZoneInbox is IZoneInbox {
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
                 // Mint zone tokens to the recipient
-                gasToken.mint(d.to, d.amount);
+                zoneToken.mint(d.to, d.amount);
 
                 emit DepositProcessed(currentHash, d.sender, d.to, d.amount, d.memo);
             } else {
@@ -268,11 +268,11 @@ contract ZoneInbox is IZoneInbox {
                 if (!valid) {
                     // Decryption failed (user encrypted garbage or corrupted data)
                     // Return funds to sender instead of blocking chain progress
-                    gasToken.mint(ed.sender, ed.amount);
+                    zoneToken.mint(ed.sender, ed.amount);
                     emit EncryptedDepositFailed(currentHash, ed.sender, ed.amount);
                 } else {
                     // Decryption succeeded - mint to the decrypted recipient
-                    gasToken.mint(dec.to, ed.amount);
+                    zoneToken.mint(dec.to, ed.amount);
                     emit EncryptedDepositProcessed(
                         currentHash, ed.sender, dec.to, ed.amount, dec.memo
                     );

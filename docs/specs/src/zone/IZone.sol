@@ -492,7 +492,7 @@ interface IZonePortal {
         returns (bytes32 x, uint8 yParity, uint256 keyIndex);
 
     /// @notice Set zone gas rate. Only callable by sequencer.
-    /// @param _zoneGasRate Gas token units per gas unit on the zone
+    /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external;
 
     /// @notice Calculate the fee for a deposit
@@ -705,7 +705,7 @@ interface IZoneInbox {
     function tempoState() external view returns (ITempoState);
 
     /// @notice The zone token (TIP-20 at same address as Tempo)
-    function gasToken() external view returns (IZoneToken);
+    function zoneToken() external view returns (IZoneToken);
 
     /// @notice The zone's last processed deposit queue hash
     function processedDepositQueueHash() external view returns (bytes32);
@@ -763,9 +763,9 @@ interface IZoneOutbox {
     function config() external view returns (IZoneConfig);
 
     /// @notice The zone token (same as Tempo portal's token)
-    function gasToken() external view returns (IZoneToken);
+    function zoneToken() external view returns (IZoneToken);
 
-    /// @notice Tempo gas rate (gas token units per gas unit on Tempo)
+    /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     function tempoGasRate() external view returns (uint128);
 
@@ -783,7 +783,7 @@ interface IZoneOutbox {
 
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
-    /// @param _tempoGasRate Gas token units per gas unit on Tempo
+    /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external;
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit

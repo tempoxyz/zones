@@ -30,7 +30,7 @@ contract ZoneOutbox is IZoneOutbox {
     IZoneConfig public immutable config;
 
     /// @notice The zone token (TIP-20 at same address as Tempo)
-    IZoneToken public immutable gasToken;
+    IZoneToken public immutable zoneToken;
 
     /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
@@ -65,9 +65,9 @@ contract ZoneOutbox is IZoneOutbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config, address _gasToken) {
+    constructor(address _config, address _zoneToken) {
         config = IZoneConfig(_config);
-        gasToken = IZoneToken(_gasToken);
+        zoneToken = IZoneToken(_zoneToken);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -133,13 +133,13 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Transfer tokens from sender to this contract, then burn
         // (Using transferFrom so user must approve first)
-        if (!gasToken.transferFrom(msg.sender, address(this), totalBurn)) {
+        if (!zoneToken.transferFrom(msg.sender, address(this), totalBurn)) {
             revert TransferFailed();
         }
 
         // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
         // Amount goes to recipient, fee goes to sequencer
-        gasToken.burn(address(this), totalBurn);
+        zoneToken.burn(address(this), totalBurn);
 
         // Store withdrawal in pending array
         _pendingWithdrawals.push(
