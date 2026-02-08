@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import {
     ITempoState,
+    IZoneConfig,
     IZoneToken,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
@@ -14,7 +15,7 @@ import {
 /// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
 ///      Provides single source of truth for zone configuration.
 ///      Reads sequencer from L1 ZonePortal, eliminating duplicate sequencer management.
-contract ZoneConfig {
+contract ZoneConfig is IZoneConfig {
 
     /*//////////////////////////////////////////////////////////////
                                IMMUTABLES
@@ -32,8 +33,6 @@ contract ZoneConfig {
     /*//////////////////////////////////////////////////////////////
                                ERRORS
     //////////////////////////////////////////////////////////////*/
-
-    error NotSequencer();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
