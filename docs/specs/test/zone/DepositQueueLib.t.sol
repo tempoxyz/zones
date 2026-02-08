@@ -2,7 +2,12 @@
 pragma solidity ^0.8.13;
 
 import { DepositQueueLib } from "../../src/zone/DepositQueueLib.sol";
-import { Deposit, DepositType } from "../../src/zone/IZone.sol";
+import {
+    Deposit,
+    DepositType,
+    EncryptedDeposit,
+    EncryptedDepositPayload
+} from "../../src/zone/IZone.sol";
 import { Test } from "forge-std/Test.sol";
 
 /// @title DepositQueueLibTest
@@ -105,6 +110,89 @@ contract DepositQueueLibTest is Test {
         bytes32 h2 = DepositQueueLib.enqueue(bytes32(uint256(1)), d);
 
         assertTrue(h1 != h2);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    ENQUEUE ENCRYPTED TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_enqueueEncrypted_singleDeposit() public pure {
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            sender: address(0x200),
+            amount: 100e6,
+            keyIndex: 0,
+            encrypted: EncryptedDepositPayload({
+                ephemeralPubkeyX: bytes32(uint256(1)),
+                ephemeralPubkeyYParity: 0x02,
+                ciphertext: new bytes(64),
+                nonce: bytes12(0),
+                tag: bytes16(0)
+            })
+        });
+
+        bytes32 newHash = DepositQueueLib.enqueueEncrypted(bytes32(0), ed);
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+        assertEq(newHash, expectedHash);
+    }
+
+    function test_enqueueEncrypted_mixedQueue() public pure {
+        Deposit memory d1 = Deposit({
+            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("d1")
+        });
+
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            sender: address(0x300),
+            amount: 200e6,
+            keyIndex: 0,
+            encrypted: EncryptedDepositPayload({
+                ephemeralPubkeyX: bytes32(uint256(1)),
+                ephemeralPubkeyYParity: 0x02,
+                ciphertext: new bytes(64),
+                nonce: bytes12(0),
+                tag: bytes16(0)
+            })
+        });
+
+        Deposit memory d2 = Deposit({
+            sender: address(0x200), to: address(0x200), amount: 300e6, memo: bytes32("d3")
+        });
+
+        bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
+        bytes32 h2 = DepositQueueLib.enqueueEncrypted(h1, ed);
+        bytes32 h3 = DepositQueueLib.enqueue(h2, d2);
+
+        bytes32 expected1 = keccak256(abi.encode(DepositType.Regular, d1, bytes32(0)));
+        bytes32 expected2 = keccak256(abi.encode(DepositType.Encrypted, ed, expected1));
+        bytes32 expected3 = keccak256(abi.encode(DepositType.Regular, d2, expected2));
+
+        assertEq(h1, expected1);
+        assertEq(h2, expected2);
+        assertEq(h3, expected3);
+    }
+
+    function test_enqueue_typeDiscriminatorPreventsCollision() public pure {
+        // Same sender/amount but different type discriminators produce different hashes
+        Deposit memory d = Deposit({
+            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("memo")
+        });
+
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            sender: address(0x200),
+            amount: 100e6,
+            keyIndex: 0,
+            encrypted: EncryptedDepositPayload({
+                ephemeralPubkeyX: bytes32(0),
+                ephemeralPubkeyYParity: 0,
+                ciphertext: "",
+                nonce: bytes12(0),
+                tag: bytes16(0)
+            })
+        });
+
+        bytes32 regularHash = DepositQueueLib.enqueue(bytes32(0), d);
+        bytes32 encryptedHash = DepositQueueLib.enqueueEncrypted(bytes32(0), ed);
+
+        assertTrue(regularHash != encryptedHash);
     }
 
 }

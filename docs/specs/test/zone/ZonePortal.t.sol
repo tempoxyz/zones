@@ -10,6 +10,10 @@ import {
     Deposit,
     DepositQueueTransition,
     DepositType,
+    ENCRYPTION_KEY_GRACE_PERIOD,
+    EncryptedDeposit,
+    EncryptedDepositPayload,
+    EncryptionKeyEntry,
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneMessenger,
@@ -1788,6 +1792,379 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.sequencer(), admin);
         assertEq(portal.verifier(), address(mockVerifier));
         assertEq(portal.genesisTempoBlockNumber(), genesisTempoBlockNumber);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    ENCRYPTION KEY MANAGEMENT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    // secp256k1 generator point X (known valid point on curve)
+    bytes32 internal constant VALID_SECP256K1_X =
+        0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798;
+
+    function test_sequencerEncryptionKey_emptyReturnsZero() public view {
+        (bytes32 x, uint8 yParity) = portal.sequencerEncryptionKey();
+        assertEq(x, bytes32(0));
+        assertEq(yParity, 0);
+    }
+
+    function test_setSequencerEncryptionKey_success() public {
+        bytes32 x = keccak256("key1");
+        uint8 yParity = 0x02;
+
+        portal.setSequencerEncryptionKey(x, yParity);
+
+        (bytes32 storedX, uint8 storedYParity) = portal.sequencerEncryptionKey();
+        assertEq(storedX, x);
+        assertEq(storedYParity, yParity);
+        assertEq(portal.encryptionKeyCount(), 1);
+    }
+
+    function test_setSequencerEncryptionKey_onlySequencer() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setSequencerEncryptionKey(keccak256("key"), 0x02);
+    }
+
+    function test_setSequencerEncryptionKey_multipleKeys() public {
+        bytes32 x1 = keccak256("key1");
+        bytes32 x2 = keccak256("key2");
+
+        portal.setSequencerEncryptionKey(x1, 0x02);
+        vm.roll(block.number + 100);
+        portal.setSequencerEncryptionKey(x2, 0x03);
+
+        assertEq(portal.encryptionKeyCount(), 2);
+
+        // sequencerEncryptionKey returns the latest key
+        (bytes32 storedX, uint8 storedYParity) = portal.sequencerEncryptionKey();
+        assertEq(storedX, x2);
+        assertEq(storedYParity, 0x03);
+    }
+
+    function test_setSequencerEncryptionKey_emitsEvent() public {
+        bytes32 x = keccak256("key1");
+        uint8 yParity = 0x02;
+
+        vm.expectEmit(true, true, true, true);
+        emit IZonePortal.SequencerEncryptionKeyUpdated(x, yParity, 0, uint64(block.number));
+        portal.setSequencerEncryptionKey(x, yParity);
+    }
+
+    function test_encryptionKeyAt_success() public {
+        bytes32 x1 = keccak256("key1");
+        portal.setSequencerEncryptionKey(x1, 0x02);
+
+        vm.roll(block.number + 50);
+        bytes32 x2 = keccak256("key2");
+        portal.setSequencerEncryptionKey(x2, 0x03);
+
+        EncryptionKeyEntry memory entry0 = portal.encryptionKeyAt(0);
+        assertEq(entry0.x, x1);
+        assertEq(entry0.yParity, 0x02);
+
+        EncryptionKeyEntry memory entry1 = portal.encryptionKeyAt(1);
+        assertEq(entry1.x, x2);
+        assertEq(entry1.yParity, 0x03);
+    }
+
+    function test_encryptionKeyAt_revertsOnInvalidIndex() public {
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.InvalidEncryptionKeyIndex.selector, 0));
+        portal.encryptionKeyAt(0);
+    }
+
+    function test_encryptionKeyAtBlock_binarySearch() public {
+        // Set key1 at block 10
+        vm.roll(10);
+        bytes32 x1 = keccak256("key1");
+        portal.setSequencerEncryptionKey(x1, 0x02);
+
+        // Set key2 at block 100
+        vm.roll(100);
+        bytes32 x2 = keccak256("key2");
+        portal.setSequencerEncryptionKey(x2, 0x03);
+
+        // Set key3 at block 200
+        vm.roll(200);
+        bytes32 x3 = keccak256("key3");
+        portal.setSequencerEncryptionKey(x3, 0x02);
+
+        // Query at block 10 -> key1
+        (bytes32 rx, uint8 ry, uint256 ri) = portal.encryptionKeyAtBlock(10);
+        assertEq(rx, x1);
+        assertEq(ry, 0x02);
+        assertEq(ri, 0);
+
+        // Query at block 50 -> key1 (still active)
+        (rx, ry, ri) = portal.encryptionKeyAtBlock(50);
+        assertEq(rx, x1);
+        assertEq(ri, 0);
+
+        // Query at block 100 -> key2
+        (rx, ry, ri) = portal.encryptionKeyAtBlock(100);
+        assertEq(rx, x2);
+        assertEq(ri, 1);
+
+        // Query at block 150 -> key2
+        (rx, ry, ri) = portal.encryptionKeyAtBlock(150);
+        assertEq(rx, x2);
+        assertEq(ri, 1);
+
+        // Query at block 200 -> key3
+        (rx, ry, ri) = portal.encryptionKeyAtBlock(200);
+        assertEq(rx, x3);
+        assertEq(ri, 2);
+
+        // Query at block 500 -> key3
+        (rx, ry, ri) = portal.encryptionKeyAtBlock(500);
+        assertEq(rx, x3);
+        assertEq(ri, 2);
+    }
+
+    function test_isEncryptionKeyValid_currentKeyNeverExpires() public {
+        portal.setSequencerEncryptionKey(keccak256("key"), 0x02);
+
+        (bool valid, uint64 expiresAt) = portal.isEncryptionKeyValid(0);
+        assertTrue(valid);
+        assertEq(expiresAt, 0);
+
+        // Still valid far in the future
+        vm.roll(block.number + 1_000_000);
+        (valid, expiresAt) = portal.isEncryptionKeyValid(0);
+        assertTrue(valid);
+        assertEq(expiresAt, 0);
+    }
+
+    function test_isEncryptionKeyValid_oldKeyValidDuringGrace() public {
+        portal.setSequencerEncryptionKey(keccak256("key1"), 0x02);
+
+        uint256 key2Block = block.number + 100;
+        vm.roll(key2Block);
+        portal.setSequencerEncryptionKey(keccak256("key2"), 0x03);
+
+        // Key 0 should be valid during grace period
+        vm.roll(key2Block + ENCRYPTION_KEY_GRACE_PERIOD - 1);
+        (bool valid,) = portal.isEncryptionKeyValid(0);
+        assertTrue(valid);
+    }
+
+    function test_isEncryptionKeyValid_oldKeyExpiredAfterGrace() public {
+        portal.setSequencerEncryptionKey(keccak256("key1"), 0x02);
+
+        uint256 key2Block = block.number + 100;
+        vm.roll(key2Block);
+        portal.setSequencerEncryptionKey(keccak256("key2"), 0x03);
+
+        // Key 0 should be expired after grace period
+        vm.roll(key2Block + ENCRYPTION_KEY_GRACE_PERIOD);
+        (bool valid,) = portal.isEncryptionKeyValid(0);
+        assertFalse(valid);
+    }
+
+    function test_isEncryptionKeyValid_invalidIndexReturnsFalse() public view {
+        (bool valid,) = portal.isEncryptionKeyValid(0);
+        assertFalse(valid);
+        (valid,) = portal.isEncryptionKeyValid(999);
+        assertFalse(valid);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                       ENCRYPTED DEPOSIT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function _makeEncryptedPayload() internal pure returns (EncryptedDepositPayload memory) {
+        return EncryptedDepositPayload({
+            ephemeralPubkeyX: VALID_SECP256K1_X,
+            ephemeralPubkeyYParity: 0x02,
+            ciphertext: new bytes(64),
+            nonce: bytes12(0),
+            tag: bytes16(0)
+        });
+    }
+
+    function test_depositEncrypted_success() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        bytes32 hash = portal.depositEncrypted(depositAmount, 0, _makeEncryptedPayload());
+        vm.stopPrank();
+
+        assertEq(portal.currentDepositQueueHash(), hash);
+        assertTrue(hash != bytes32(0));
+    }
+
+    function test_depositEncrypted_hashChainMatchesLibrary() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        uint128 depositAmount = 1000e6;
+        uint128 fee = portal.calculateDepositFee();
+        uint128 netAmount = depositAmount - fee;
+
+        EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        bytes32 hash = portal.depositEncrypted(depositAmount, 0, encrypted);
+        vm.stopPrank();
+
+        // Reconstruct expected hash using the same encoding as DepositQueueLib
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            sender: alice, amount: netAmount, keyIndex: 0, encrypted: encrypted
+        });
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+        assertEq(hash, expectedHash);
+    }
+
+    function test_depositEncrypted_mixedQueue() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        uint128 amount = 1000e6;
+
+        // Regular deposit from alice
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), amount * 3);
+        bytes32 h1 = portal.deposit(alice, amount, bytes32("memo"));
+
+        // Encrypted deposit from alice
+        bytes32 h2 = portal.depositEncrypted(amount, 0, _makeEncryptedPayload());
+        vm.stopPrank();
+
+        // Both should update the same queue
+        assertEq(portal.currentDepositQueueHash(), h2);
+        assertTrue(h1 != h2);
+        assertTrue(h2 != bytes32(0));
+    }
+
+    function test_depositEncrypted_deductsFee() public {
+        portal.setZoneGasRate(1); // 1 token per gas -> fee = 100_000
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        uint128 depositAmount = 1000e6;
+        uint128 expectedFee = uint128(100_000) * 1; // FIXED_DEPOSIT_GAS * zoneGasRate
+        uint256 aliceBefore = pathUSD.balanceOf(alice);
+        uint256 seqBefore = pathUSD.balanceOf(admin);
+        uint256 portalBefore = pathUSD.balanceOf(address(portal));
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.depositEncrypted(depositAmount, 0, _makeEncryptedPayload());
+        vm.stopPrank();
+
+        assertEq(pathUSD.balanceOf(alice), aliceBefore - depositAmount);
+        assertEq(pathUSD.balanceOf(admin), seqBefore + expectedFee);
+        assertEq(pathUSD.balanceOf(address(portal)), portalBefore + depositAmount - expectedFee);
+    }
+
+    function test_depositEncrypted_emitsEvent() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        uint128 depositAmount = 1000e6;
+        uint128 fee = portal.calculateDepositFee();
+        uint128 netAmount = depositAmount - fee;
+
+        EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+
+        // Build expected hash
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            sender: alice, amount: netAmount, keyIndex: 0, encrypted: encrypted
+        });
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.EncryptedDepositMade(
+            expectedHash, alice, netAmount, 0, VALID_SECP256K1_X, 0x02
+        );
+        portal.depositEncrypted(depositAmount, 0, encrypted);
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsOnExpiredKey() public {
+        portal.setSequencerEncryptionKey(keccak256("key1"), 0x02);
+
+        // Rotate to key2
+        uint256 key2Block = block.number + 100;
+        vm.roll(key2Block);
+        portal.setSequencerEncryptionKey(keccak256("key2"), 0x03);
+
+        // Move past grace period for key1
+        vm.roll(key2Block + ENCRYPTION_KEY_GRACE_PERIOD);
+
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+
+        // Should revert with EncryptionKeyExpired for key index 0
+        vm.expectRevert();
+        portal.depositEncrypted(depositAmount, 0, _makeEncryptedPayload());
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsOnInvalidKeyIndex() public {
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+
+        // No keys set, index 0 is invalid
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.InvalidEncryptionKeyIndex.selector, 0));
+        portal.depositEncrypted(depositAmount, 0, _makeEncryptedPayload());
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsOnInvalidYParity() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+
+        EncryptedDepositPayload memory encrypted = EncryptedDepositPayload({
+            ephemeralPubkeyX: VALID_SECP256K1_X,
+            ephemeralPubkeyYParity: 0x04, // Invalid
+            ciphertext: new bytes(64),
+            nonce: bytes12(0),
+            tag: bytes16(0)
+        });
+
+        vm.expectRevert(IZonePortal.InvalidEphemeralPubkey.selector);
+        portal.depositEncrypted(depositAmount, 0, encrypted);
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsOnInvalidEphemeralX() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+
+        EncryptedDepositPayload memory encrypted = EncryptedDepositPayload({
+            ephemeralPubkeyX: bytes32(0), // Invalid: zero
+            ephemeralPubkeyYParity: 0x02,
+            ciphertext: new bytes(64),
+            nonce: bytes12(0),
+            tag: bytes16(0)
+        });
+
+        vm.expectRevert(IZonePortal.InvalidEphemeralPubkey.selector);
+        portal.depositEncrypted(depositAmount, 0, encrypted);
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsOnDepositTooSmall() public {
+        portal.setZoneGasRate(1); // fee = 100_000
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 100_000);
+
+        vm.expectRevert(IZonePortal.DepositTooSmall.selector);
+        portal.depositEncrypted(100_000, 0, _makeEncryptedPayload()); // amount == fee
+        vm.stopPrank();
     }
 
 }

@@ -1,10 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+import { EncryptedDepositLib } from "../../src/zone/EncryptedDeposit.sol";
 import {
+    AES_GCM_DECRYPT,
+    CHAUM_PEDERSEN_VERIFY,
+    ChaumPedersenProof,
     DecryptionData,
     Deposit,
     DepositType,
+    EncryptedDeposit,
+    EncryptedDepositPayload,
+    IAesGcmDecrypt,
+    IChaumPedersenVerify,
     IZoneInbox,
     QueuedDeposit
 } from "../../src/zone/IZone.sol";
@@ -332,6 +340,294 @@ contract ZoneInboxTest is Test {
         // Calculate expected balance: sum of 1 + 2 + ... + 50 = 50 * 51 / 2 = 1275
         uint256 expectedBalance = (numDeposits * (numDeposits + 1) / 2) * 1e6;
         assertEq(gasToken.balanceOf(bob), expectedBalance);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    ENCRYPTED DEPOSIT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Storage slot for _encryptionKeys in ZonePortal
+    bytes32 internal constant ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
+
+    /// @notice Set up encryption key mock storage for a given key index
+    function _setupEncryptionKeyMock(uint256 keyIndex, bytes32 keyX, uint8 keyYParity) internal {
+        uint256 base = uint256(keccak256(abi.encode(uint256(7))));
+        uint256 slotX = base + (keyIndex * 2);
+        uint256 slotMeta = slotX + 1;
+        tempoState.setMockStorageValue(mockPortal, bytes32(slotX), keyX);
+        tempoState.setMockStorageValue(mockPortal, bytes32(slotMeta), bytes32(uint256(keyYParity)));
+    }
+
+    /// @notice Build an EncryptedDeposit and its QueuedDeposit wrapper
+    function _makeEncryptedDeposit(
+        address sender,
+        uint128 amount,
+        uint256 keyIndex
+    )
+        internal
+        pure
+        returns (QueuedDeposit memory qd, EncryptedDeposit memory ed)
+    {
+        ed = EncryptedDeposit({
+            sender: sender,
+            amount: amount,
+            keyIndex: keyIndex,
+            encrypted: EncryptedDepositPayload({
+                ephemeralPubkeyX: bytes32(uint256(0x1234)),
+                ephemeralPubkeyYParity: 0x02,
+                ciphertext: new bytes(64),
+                nonce: bytes12(0),
+                tag: bytes16(0)
+            })
+        });
+        qd = QueuedDeposit({ depositType: DepositType.Encrypted, depositData: abi.encode(ed) });
+    }
+
+    /// @notice Set up precompile mocks for successful encrypted deposit processing
+    function _setupPrecompileMocks(address recipient, bytes32 memo) internal {
+        // Deploy dummy code so high-level Solidity calls pass extcodesize check
+        vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
+        vm.etch(AES_GCM_DECRYPT, hex"00");
+
+        // Mock Chaum-Pedersen to return valid
+        vm.mockCall(
+            CHAUM_PEDERSEN_VERIFY,
+            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
+            abi.encode(true)
+        );
+
+        // Mock AES-GCM to return expected plaintext
+        bytes memory plaintext = EncryptedDepositLib.encodePlaintext(recipient, memo);
+        vm.mockCall(
+            AES_GCM_DECRYPT,
+            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
+            abi.encode(plaintext, true)
+        );
+    }
+
+    function test_advanceTempo_encryptedDeposit_success() public {
+        address recipient = address(0x500);
+        bytes32 memo = bytes32("secret memo");
+        uint128 amount = 1000e6;
+
+        // Set up encryption key in mock Tempo storage
+        bytes32 seqKeyX = keccak256("sequencer-key-x");
+        uint8 seqKeyYParity = 0x03;
+        _setupEncryptionKeyMock(0, seqKeyX, seqKeyYParity);
+
+        // Set up precompile mocks
+        _setupPrecompileMocks(recipient, memo);
+
+        // Build encrypted deposit
+        (QueuedDeposit memory qd, EncryptedDeposit memory ed) =
+            _makeEncryptedDeposit(alice, amount, 0);
+
+        // Compute expected hash and set in mock storage
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+        tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
+
+        // Build deposits and decryptions arrays
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = qd;
+
+        DecryptionData[] memory decs = new DecryptionData[](1);
+        decs[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xdeadbeef)),
+            to: recipient,
+            memo: memo,
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs);
+
+        // Verify minting to the decrypted recipient
+        assertEq(gasToken.balanceOf(recipient), amount);
+        assertEq(inbox.processedDepositQueueHash(), expectedHash);
+    }
+
+    function test_advanceTempo_encryptedDeposit_decryptionFails() public {
+        uint128 amount = 1000e6;
+
+        // Set up encryption key
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+
+        // Deploy dummy code at precompile addresses
+        vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
+        vm.etch(AES_GCM_DECRYPT, hex"00");
+
+        // Mock CP to return valid
+        vm.mockCall(
+            CHAUM_PEDERSEN_VERIFY,
+            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
+            abi.encode(true)
+        );
+
+        // Mock AES-GCM to return FAILURE
+        vm.mockCall(
+            AES_GCM_DECRYPT,
+            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
+            abi.encode(new bytes(0), false)
+        );
+
+        // Build encrypted deposit
+        (QueuedDeposit memory qd, EncryptedDeposit memory ed) =
+            _makeEncryptedDeposit(alice, amount, 0);
+
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+        tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = qd;
+
+        DecryptionData[] memory decs = new DecryptionData[](1);
+        decs[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xdeadbeef)),
+            to: address(0x500),
+            memo: bytes32("memo"),
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs);
+
+        // Funds should go to sender (alice), not the decrypted recipient
+        assertEq(gasToken.balanceOf(alice), amount);
+        assertEq(gasToken.balanceOf(address(0x500)), 0);
+        assertEq(inbox.processedDepositQueueHash(), expectedHash);
+    }
+
+    function test_advanceTempo_mixedRegularAndEncryptedDeposits() public {
+        address recipient = address(0x500);
+        bytes32 encMemo = bytes32("encrypted memo");
+
+        // Set up encryption key
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+        _setupPrecompileMocks(recipient, encMemo);
+
+        // Build regular deposit
+        Deposit memory d = Deposit({ sender: alice, to: bob, amount: 100e6, memo: bytes32("d1") });
+        QueuedDeposit memory qdRegular =
+            QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d) });
+
+        // Build encrypted deposit
+        (QueuedDeposit memory qdEnc, EncryptedDeposit memory ed) =
+            _makeEncryptedDeposit(bob, 200e6, 0);
+
+        // Compute expected hash chain: regular first, then encrypted
+        bytes32 h1 = keccak256(abi.encode(DepositType.Regular, d, bytes32(0)));
+        bytes32 h2 = keccak256(abi.encode(DepositType.Encrypted, ed, h1));
+
+        tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h2);
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](2);
+        deposits[0] = qdRegular;
+        deposits[1] = qdEnc;
+
+        DecryptionData[] memory decs = new DecryptionData[](1);
+        decs[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xabcd)),
+            to: recipient,
+            memo: encMemo,
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs);
+
+        // Regular deposit: bob gets 100e6
+        // Encrypted deposit: recipient gets 200e6
+        assertEq(gasToken.balanceOf(bob), 100e6);
+        assertEq(gasToken.balanceOf(recipient), 200e6);
+        assertEq(inbox.processedDepositQueueHash(), h2);
+    }
+
+    function test_advanceTempo_missingDecryptionData() public {
+        // Set up encryption key
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+
+        // Build encrypted deposit but provide NO decryption data
+        (QueuedDeposit memory qd,) = _makeEncryptedDeposit(alice, 1000e6, 0);
+
+        // We need to set the current hash to something - doesn't matter since we expect revert
+        tempoState.setMockStorageValue(
+            mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever")
+        );
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = qd;
+
+        DecryptionData[] memory emptyDecs = new DecryptionData[](0);
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZoneInbox.MissingDecryptionData.selector);
+        inbox.advanceTempo("", deposits, emptyDecs);
+    }
+
+    function test_advanceTempo_extraDecryptionData() public {
+        // Build a regular deposit only (no encrypted deposits)
+        Deposit memory d = Deposit({ sender: alice, to: bob, amount: 100e6, memo: bytes32("d1") });
+        QueuedDeposit memory qd =
+            QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d) });
+
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, d, bytes32(0)));
+        tempoState.setMockStorageValue(mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = qd;
+
+        // Provide decryption data even though there are no encrypted deposits
+        DecryptionData[] memory decs = new DecryptionData[](1);
+        decs[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(1)),
+            to: address(0x500),
+            memo: bytes32("memo"),
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZoneInbox.ExtraDecryptionData.selector);
+        inbox.advanceTempo("", deposits, decs);
+    }
+
+    function test_advanceTempo_encryptedDeposit_invalidProof() public {
+        uint128 amount = 1000e6;
+
+        // Set up encryption key
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+
+        // Deploy dummy code at precompile addresses
+        vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
+        vm.etch(AES_GCM_DECRYPT, hex"00");
+
+        // Mock CP to return INVALID
+        vm.mockCall(
+            CHAUM_PEDERSEN_VERIFY,
+            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
+            abi.encode(false)
+        );
+
+        // Build encrypted deposit
+        (QueuedDeposit memory qd,) = _makeEncryptedDeposit(alice, amount, 0);
+
+        tempoState.setMockStorageValue(
+            mockPortal, CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever")
+        );
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
+        deposits[0] = qd;
+
+        DecryptionData[] memory decs = new DecryptionData[](1);
+        decs[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xbad)),
+            to: address(0x500),
+            memo: bytes32("memo"),
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+
+        vm.prank(sequencer);
+        vm.expectRevert(IZoneInbox.InvalidSharedSecretProof.selector);
+        inbox.advanceTempo("", deposits, decs);
     }
 
 }
