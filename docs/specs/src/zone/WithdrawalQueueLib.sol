@@ -13,8 +13,6 @@ bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
 ///      tail points to where the next batch will write. Slots contain hash chains
 ///      of withdrawals for that batch.
 ///
-// **REVIEWTODO: I don't like this specal gas accounting for the withdrawal queue, it creates some special casing that will be a nightmare later.
-//               Let's try to find a different solution for this.
 ///      Gas note: This is implemented as a precompile on Tempo. Storage gas should
 ///      only be charged when (tail - head) > maxSize, i.e., when the queue length
 ///      exceeds its previous maximum. This allows the queue to shrink and regrow
@@ -100,7 +98,6 @@ library WithdrawalQueueLib {
         // Verify this is the head of the current slot
         // Queue structure: oldest withdrawal at outermost layer for O(1) removal
         // The remainingQueue for the last item should be EMPTY_SENTINEL, not 0
-        // **REVIEWTODO: Why wouldn't we just make remainingQueue = EMPTY_SENTINEL when it's empty?**
         bytes32 expectedRemainingQueue =
             remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
         if (keccak256(abi.encode(withdrawal, expectedRemainingQueue)) != currentSlot) {

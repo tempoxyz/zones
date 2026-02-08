@@ -254,7 +254,6 @@ The `BatchStateProof` structure enables efficient proving of potentially thousan
   `TempoState.finalizeTempo`, updating `tempoBlockNumber`, `tempoBlockHash`, and `tempoStateRoot`
   in the proven zone state.
 - `TempoState.tempoBlockNumber()` at end of batch must equal `public_inputs.tempo_block_number`.
-**REVIEWTODO: It only has to match at the end of the batch. So another way to solve the past batch problem is simply to prove a long enough batch to get back in EIP-2935 range**
 - Each Tempo read is verified against the `tempoStateRoot` currently bound in `TempoState`
   at the time of the read. The precompile must reject reads if the block is not yet bound.
 - For any Tempo read, the `tempo_block_number` must match the value currently bound in

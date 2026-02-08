@@ -237,7 +237,6 @@ The portal tracks:
 
 ### Hash chain structure
 
-**REVIEWTODO: I think we actually want EMPTY_SENTINEL to be 0x0 so as to clear the storage, since otherwise the queue occupies more and more storage rather than just tail-head slots**
 Each slot contains a hash chain with the **oldest withdrawal at the outermost layer**, making FIFO processing efficient. The innermost element wraps `EMPTY_SENTINEL` (0xffffffff...fff) instead of 0x00 to avoid clearing storage:
 
 ```
@@ -659,7 +658,6 @@ interface IZoneMessenger {
 }
 ```
 
-**REVIEWTODO: Why do we need to do both? Why is msg.sender == zoneMessenger not enough to verify that it's sent from the L2?**
 The messenger does `token.transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` and call `zoneMessenger.xDomainMessageSender()` to authenticate the L2 origin.
 
 #### Withdrawal receiver
