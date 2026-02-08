@@ -2,13 +2,14 @@
 pragma solidity ^0.8.13;
 
 import { ITIP20 } from "../interfaces/ITIP20.sol";
-import { IZoneMessenger, IWithdrawalReceiver } from "./IZone.sol";
+import { IWithdrawalReceiver, IZoneMessenger } from "./IZone.sol";
 
 /// @title ZoneMessenger
 /// @notice Per-zone messenger that handles withdrawal callbacks
 /// @dev Deployed by ZoneFactory for each zone. The portal gives the messenger max approval
 ///      for the zone token. Withdrawal callbacks originate from this contract, not the portal.
 contract ZoneMessenger is IZoneMessenger {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -75,7 +76,10 @@ contract ZoneMessenger is IZoneMessenger {
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    ) external onlyPortal {
+    )
+        external
+        onlyPortal
+    {
         // Atomic transfer + callback via self-call
         this._executeRelay(sender, target, amount, gasLimit, data);
     }
@@ -88,7 +92,9 @@ contract ZoneMessenger is IZoneMessenger {
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    ) external {
+    )
+        external
+    {
         // Only callable via self-call from relayMessage
         if (msg.sender != address(this)) revert OnlyPortal();
 
@@ -101,11 +107,8 @@ contract ZoneMessenger is IZoneMessenger {
         _xDomainMessageSender = sender;
 
         // Call the receiver
-        bytes4 selector = IWithdrawalReceiver(target).onWithdrawalReceived{gas: gasLimit}(
-            sender,
-            amount,
-            data
-        );
+        bytes4 selector =
+            IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(sender, amount, data);
 
         // Clear the L2 sender
         _xDomainMessageSender = address(0);
@@ -115,4 +118,5 @@ contract ZoneMessenger is IZoneMessenger {
             revert CallbackRejected();
         }
     }
+
 }

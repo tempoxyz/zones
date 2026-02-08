@@ -1,21 +1,22 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Test } from "forge-std/Test.sol";
+import { ITempoState, ZONE_INBOX } from "../../src/zone/IZone.sol";
 import { TempoState } from "../../src/zone/TempoState.sol";
-import { ITempoState } from "../../src/zone/IZone.sol";
+import { Test } from "forge-std/Test.sol";
 
 /// @title TempoStateTest
 /// @notice Tests for the TempoState predeploy contract
 contract TempoStateTest is Test {
+
     TempoState public tempoState;
 
-    address public sequencer = address(0x1);
-    address public notSequencer = address(0x2);
+    address public zoneInbox = ZONE_INBOX;
+    address public notZoneInbox = address(0x2);
 
     // Genesis values - we'll use a real encoded header
     uint64 constant GENESIS_BLOCK_NUMBER = 100;
-    uint64 constant GENESIS_TIMESTAMP = 1700000000;
+    uint64 constant GENESIS_TIMESTAMP = 1_700_000_000;
     bytes32 constant GENESIS_STATE_ROOT = keccak256("genesisStateRoot");
     bytes32 constant GENESIS_RECEIPTS_ROOT = keccak256("genesisReceiptsRoot");
     bytes32 constant GENESIS_TX_ROOT = keccak256("genesisTxRoot");
@@ -38,7 +39,7 @@ contract TempoStateTest is Test {
         );
         genesisBlockHash = keccak256(genesisHeader);
 
-        tempoState = new TempoState(sequencer, genesisHeader);
+        tempoState = new TempoState(genesisHeader);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -46,7 +47,6 @@ contract TempoStateTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_constructor_initializesState() public view {
-        assertEq(tempoState.sequencer(), sequencer);
         assertEq(tempoState.tempoBlockHash(), genesisBlockHash);
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER);
         assertEq(tempoState.tempoTimestamp(), GENESIS_TIMESTAMP);
@@ -69,7 +69,7 @@ contract TempoStateTest is Test {
 
         // Build a valid Tempo header that references the genesis block
         bytes memory header = _buildTempoHeader(
-            genesisBlockHash,  // parentHash
+            genesisBlockHash, // parentHash
             newStateRoot,
             newReceiptsRoot,
             newTxRoot,
@@ -78,7 +78,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         tempoState.finalizeTempo(header);
 
         // Verify state was updated
@@ -104,7 +104,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         tempoState.finalizeTempo(header1);
 
         bytes32 block101Hash = keccak256(header1);
@@ -113,7 +113,7 @@ contract TempoStateTest is Test {
 
         // Finalize block 102
         bytes memory header2 = _buildTempoHeader(
-            block101Hash,  // parentHash = block 101's hash
+            block101Hash, // parentHash = block 101's hash
             keccak256("stateRoot2"),
             keccak256("receiptsRoot2"),
             keccak256("txRoot2"),
@@ -122,7 +122,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 24
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         tempoState.finalizeTempo(header2);
 
         bytes32 block102Hash = keccak256(header2);
@@ -133,7 +133,7 @@ contract TempoStateTest is Test {
 
     function test_finalizeTempo_revertsOnInvalidParentHash() public {
         bytes memory header = _buildTempoHeader(
-            keccak256("wrongParent"),  // Invalid parent hash
+            keccak256("wrongParent"), // Invalid parent hash
             keccak256("stateRoot"),
             keccak256("receiptsRoot"),
             keccak256("txRoot"),
@@ -142,7 +142,7 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidParentHash.selector);
         tempoState.finalizeTempo(header);
     }
@@ -154,11 +154,11 @@ contract TempoStateTest is Test {
             keccak256("receiptsRoot"),
             keccak256("txRoot"),
             address(0x1),
-            GENESIS_BLOCK_NUMBER + 2,  // Should be +1
+            GENESIS_BLOCK_NUMBER + 2, // Should be +1
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
         tempoState.finalizeTempo(header);
     }
@@ -170,16 +170,16 @@ contract TempoStateTest is Test {
             keccak256("receiptsRoot"),
             keccak256("txRoot"),
             address(0x1),
-            GENESIS_BLOCK_NUMBER,  // Same as current, not +1
+            GENESIS_BLOCK_NUMBER, // Same as current, not +1
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
         tempoState.finalizeTempo(header);
     }
 
-    function test_finalizeTempo_revertsIfNotSequencer() public {
+    function test_finalizeTempo_revertsIfNotZoneInbox() public {
         bytes memory header = _buildTempoHeader(
             genesisBlockHash,
             keccak256("stateRoot"),
@@ -190,8 +190,8 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(notSequencer);
-        vm.expectRevert(ITempoState.OnlySequencer.selector);
+        vm.prank(notZoneInbox);
+        vm.expectRevert(ITempoState.OnlyZoneInbox.selector);
         tempoState.finalizeTempo(header);
     }
 
@@ -207,12 +207,10 @@ contract TempoStateTest is Test {
             GENESIS_TIMESTAMP + 12
         );
 
-        vm.prank(sequencer);
+        vm.prank(zoneInbox);
         vm.expectEmit(true, true, false, true);
         emit ITempoState.TempoBlockFinalized(
-            keccak256(header),
-            GENESIS_BLOCK_NUMBER + 1,
-            newStateRoot
+            keccak256(header), GENESIS_BLOCK_NUMBER + 1, newStateRoot
         );
         tempoState.finalizeTempo(header);
     }
@@ -222,6 +220,7 @@ contract TempoStateTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_readTempoStorageSlot_revertsAsStub() public {
+        vm.prank(zoneInbox);
         vm.expectRevert("TempoState: readTempoStorageSlot is a precompile stub");
         tempoState.readTempoStorageSlot(address(0x1234), bytes32(0));
     }
@@ -231,6 +230,7 @@ contract TempoStateTest is Test {
         slots[0] = bytes32(uint256(1));
         slots[1] = bytes32(uint256(2));
 
+        vm.prank(zoneInbox);
         vm.expectRevert("TempoState: readTempoStorageSlots is a precompile stub");
         tempoState.readTempoStorageSlots(address(0x1234), slots);
     }
@@ -250,23 +250,21 @@ contract TempoStateTest is Test {
         address beneficiary,
         uint64 number,
         uint64 timestamp
-    ) internal pure returns (bytes memory) {
+    )
+        internal
+        pure
+        returns (bytes memory)
+    {
         // Build inner Ethereum header RLP
         bytes memory innerHeader = _encodeEthereumHeader(
-            parentHash,
-            stateRoot,
-            receiptsRoot,
-            transactionsRoot,
-            beneficiary,
-            number,
-            timestamp
+            parentHash, stateRoot, receiptsRoot, transactionsRoot, beneficiary, number, timestamp
         );
 
         // Build outer Tempo header: [general_gas_limit, shared_gas_limit, timestamp_millis_part, inner]
         bytes memory outerContent = abi.encodePacked(
-            _encodeUint64(30000000),   // general_gas_limit
-            _encodeUint64(10000000),   // shared_gas_limit
-            _encodeUint64(0),          // timestamp_millis_part
+            _encodeUint64(30_000_000), // general_gas_limit
+            _encodeUint64(10_000_000), // shared_gas_limit
+            _encodeUint64(0), // timestamp_millis_part
             innerHeader
         );
 
@@ -282,32 +280,36 @@ contract TempoStateTest is Test {
         address beneficiary,
         uint64 number,
         uint64 timestamp
-    ) internal pure returns (bytes memory) {
+    )
+        internal
+        pure
+        returns (bytes memory)
+    {
         // Standard Ethereum header fields (in order):
         // 0: parentHash, 1: ommersHash, 2: beneficiary, 3: stateRoot,
         // 4: transactionsRoot, 5: receiptsRoot, 6: logsBloom, 7: difficulty,
         // 8: number, 9: gasLimit, 10: gasUsed, 11: timestamp, 12+: extra fields
 
         bytes memory content = abi.encodePacked(
-            _encodeBytes32(parentHash),                           // 0: parentHash
-            _encodeBytes32(keccak256("ommersHash")),             // 1: ommersHash
-            _encodeAddress(beneficiary),                         // 2: beneficiary
-            _encodeBytes32(stateRoot),                           // 3: stateRoot
-            _encodeBytes32(transactionsRoot),                    // 4: transactionsRoot
-            _encodeBytes32(receiptsRoot),                        // 5: receiptsRoot
-            _encodeBloom(),                                      // 6: logsBloom (256 bytes)
-            _encodeUint64(0),                                    // 7: difficulty
-            _encodeUint64(number),                               // 8: number
-            _encodeUint64(30000000),                             // 9: gasLimit
-            _encodeUint64(0),                                    // 10: gasUsed
-            _encodeUint64(timestamp),                            // 11: timestamp
-            _encodeBytes(bytes("")),                             // 12: extraData
-            _encodeBytes32(bytes32(0)),                          // 13: mixHash
-            _encodeBytes8(bytes8(0)),                            // 14: nonce
-            _encodeUint64(1000000000),                           // 15: baseFeePerGas
-            _encodeBytes32(bytes32(0)),                          // 16: withdrawalsRoot
-            _encodeUint64(0),                                    // 17: blobGasUsed
-            _encodeUint64(0)                                     // 18: excessBlobGas
+            _encodeBytes32(parentHash), // 0: parentHash
+            _encodeBytes32(keccak256("ommersHash")), // 1: ommersHash
+            _encodeAddress(beneficiary), // 2: beneficiary
+            _encodeBytes32(stateRoot), // 3: stateRoot
+            _encodeBytes32(transactionsRoot), // 4: transactionsRoot
+            _encodeBytes32(receiptsRoot), // 5: receiptsRoot
+            _encodeBloom(), // 6: logsBloom (256 bytes)
+            _encodeUint64(0), // 7: difficulty
+            _encodeUint64(number), // 8: number
+            _encodeUint64(30_000_000), // 9: gasLimit
+            _encodeUint64(0), // 10: gasUsed
+            _encodeUint64(timestamp), // 11: timestamp
+            _encodeBytes(bytes("")), // 12: extraData
+            _encodeBytes32(bytes32(0)), // 13: mixHash
+            _encodeBytes8(bytes8(0)), // 14: nonce
+            _encodeUint64(1_000_000_000), // 15: baseFeePerGas
+            _encodeBytes32(bytes32(0)), // 16: withdrawalsRoot
+            _encodeUint64(0), // 17: blobGasUsed
+            _encodeUint64(0) // 18: excessBlobGas
         );
 
         return _encodeList(content);
@@ -392,4 +394,5 @@ contract TempoStateTest is Test {
         }
         return count == 0 ? 1 : count;
     }
+
 }

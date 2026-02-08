@@ -333,7 +333,11 @@ contract ValidatorConfigTest is BaseTest {
                            FUZZ TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function testFuzz_AddValidator_Success(address validatorAddr, bytes32 pubKey, bool active)
+    function testFuzz_AddValidator_Success(
+        address validatorAddr,
+        bytes32 pubKey,
+        bool active
+    )
         public
     {
         vm.assume(validatorAddr != address(0));

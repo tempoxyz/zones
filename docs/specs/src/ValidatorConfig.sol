@@ -57,7 +57,10 @@ contract ValidatorConfig is IValidatorConfig {
         bool active,
         string calldata inboundAddress,
         string calldata outboundAddress
-    ) external onlyOwner {
+    )
+        external
+        onlyOwner
+    {
         // Reject zero public key - zero is used as sentinel value for non-existence
         if (publicKey == bytes32(0)) {
             revert InvalidPublicKey();
@@ -95,7 +98,9 @@ contract ValidatorConfig is IValidatorConfig {
         bytes32 publicKey,
         string calldata inboundAddress,
         string calldata outboundAddress
-    ) external {
+    )
+        external
+    {
         // Reject zero public key - zero is used as sentinel value for non-existence
         if (publicKey == bytes32(0)) {
             revert InvalidPublicKey();
@@ -199,7 +204,11 @@ contract ValidatorConfig is IValidatorConfig {
     }
 
     /// @notice Validate IPv4:port format (e.g., 192.168.1.1:8080)
-    function _validateIpv4Port(bytes memory b, string memory field, string calldata input)
+    function _validateIpv4Port(
+        bytes memory b,
+        string memory field,
+        string calldata input
+    )
         internal
         pure
     {
@@ -258,7 +267,11 @@ contract ValidatorConfig is IValidatorConfig {
     }
 
     /// @notice Validate [IPv6]:port format (e.g., [2001:db8::1]:8080)
-    function _validateIpv6Port(bytes memory b, string memory field, string calldata input)
+    function _validateIpv6Port(
+        bytes memory b,
+        string memory field,
+        string calldata input
+    )
         internal
         pure
     {
@@ -300,7 +313,10 @@ contract ValidatorConfig is IValidatorConfig {
         uint256 end,
         string memory field,
         string calldata input
-    ) internal pure {
+    )
+        internal
+        pure
+    {
         if (start >= end) {
             revert NotIpPort(field, input, "Empty IPv6 address");
         }
@@ -394,7 +410,10 @@ contract ValidatorConfig is IValidatorConfig {
         uint256 start,
         string memory field,
         string calldata input
-    ) internal pure {
+    )
+        internal
+        pure
+    {
         if (start >= b.length) {
             revert NotIpPort(field, input, "Missing port number");
         }

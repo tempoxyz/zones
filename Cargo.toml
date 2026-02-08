@@ -299,8 +299,8 @@ pyroscope_pprofrs = "0.2.10"
 rayon = "1.10"
 
 # build deps
-vergen = "9"
-vergen-git2 = "1"
+vergen = "9.0.5"
+vergen-git2 = "1.0.7"
 
 # [patch."https://github.com/paradigmxyz/reth"]
 # reth-basic-payload-builder = { path = "../reth/crates/payload/basic" }
@@ -377,6 +377,9 @@ vergen-git2 = "1"
 # reth-trie-sparse-parallel = { path = "../reth/crates/trie/sparse-parallel" }
 
 [patch.crates-io]
+vergen = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
+vergen-git2 = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
+vergen-lib = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
 # Commonware main right after https://github.com/commonwarexyz/monorepo/pull/2740 was merged
 commonware-broadcast = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
 commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }

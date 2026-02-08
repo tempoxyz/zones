@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, EncryptedDeposit, DepositType } from "./IZone.sol";
+import { Deposit, DepositType, EncryptedDeposit } from "./IZone.sol";
 
 /// @title DepositQueueLib
 /// @notice Library for managing the deposit queue hash chain
@@ -14,6 +14,7 @@ import { Deposit, EncryptedDeposit, DepositType } from "./IZone.sol";
 ///      - Regular:   keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
 ///      - Encrypted: keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
 library DepositQueueLib {
+
     /// @notice Enqueue a regular deposit into the queue
     /// @dev Hash chain: newHash = keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
     /// @param currentHash The current head of the deposit queue
@@ -22,7 +23,11 @@ library DepositQueueLib {
     function enqueue(
         bytes32 currentHash,
         Deposit memory depositData
-    ) internal pure returns (bytes32 newHash) {
+    )
+        internal
+        pure
+        returns (bytes32 newHash)
+    {
         newHash = keccak256(abi.encode(DepositType.Regular, depositData, currentHash));
     }
 
@@ -34,7 +39,12 @@ library DepositQueueLib {
     function enqueueEncrypted(
         bytes32 currentHash,
         EncryptedDeposit memory encryptedDepositData
-    ) internal pure returns (bytes32 newHash) {
+    )
+        internal
+        pure
+        returns (bytes32 newHash)
+    {
         newHash = keccak256(abi.encode(DepositType.Encrypted, encryptedDepositData, currentHash));
     }
+
 }
