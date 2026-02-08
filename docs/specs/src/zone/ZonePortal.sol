@@ -74,7 +74,7 @@ contract ZonePortal is IZonePortal {
     ///      Stored at slot 6 in the ZonePortal storage layout.
     EncryptionKeyEntry[] internal _encryptionKeys;
 
-    /// @notice Withdrawal queue (zone→Tempo): unbounded buffer
+    /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
     WithdrawalQueue internal _withdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
@@ -88,7 +88,8 @@ contract ZonePortal is IZonePortal {
         address _sequencer,
         address _verifier,
         bytes32 _genesisBlockHash,
-        uint64 _genesisTempoBlockNumber
+        uint64 _genesisTempoBlockNumber,
+        uint256 _withdrawalQueueCapacity
     ) {
         zoneId = _zoneId;
         token = _token;
@@ -97,6 +98,8 @@ contract ZonePortal is IZonePortal {
         verifier = _verifier;
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
+        if (_withdrawalQueueCapacity == 0) revert InvalidWithdrawalQueueCapacity();
+        _withdrawalQueue.capacity = _withdrawalQueueCapacity;
 
         // Give messenger max approval for the zone token
         ITIP20(_token).approve(_messenger, type(uint256).max);
@@ -153,8 +156,8 @@ contract ZonePortal is IZonePortal {
         return _withdrawalQueue.tail;
     }
 
-    function withdrawalQueueMaxSize() external view returns (uint256) {
-        return _withdrawalQueue.maxSize;
+    function withdrawalQueueCapacity() external view returns (uint256) {
+        return _withdrawalQueue.capacity;
     }
 
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32) {
@@ -630,8 +633,6 @@ contract ZonePortal is IZonePortal {
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
 
-        // Update withdrawal queue - each batch gets its own slot
-        // Gas note: charge new storage only when (tail - head) exceeds maxSize.
         _withdrawalQueue.enqueue(withdrawalQueueTransition);
 
         // Emit event after state updates

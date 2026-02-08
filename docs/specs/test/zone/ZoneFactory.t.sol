@@ -39,7 +39,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         (uint64 zoneId, address portal) = zoneFactory.createZone(params);
@@ -69,7 +70,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         (uint64 zoneId, address portal) = zoneFactory.createZone(params);
@@ -96,7 +98,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         (uint64 zoneId1, address portal1) = zoneFactory.createZone(params1);
@@ -109,7 +112,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: keccak256("genesis2"),
                 genesisTempoBlockHash: keccak256("tempoGenesis2"),
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         (uint64 zoneId2, address portal2) = zoneFactory.createZone(params2);
@@ -136,7 +140,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         // Record logs and verify ZoneCreated event was emitted
@@ -181,7 +186,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -200,7 +206,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -216,7 +223,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -236,7 +244,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         vm.expectRevert(IZoneFactory.InvalidSequencer.selector);
@@ -256,7 +265,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         vm.expectRevert(IZoneFactory.InvalidVerifier.selector);

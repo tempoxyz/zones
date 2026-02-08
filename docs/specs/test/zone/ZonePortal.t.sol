@@ -153,7 +153,8 @@ contract ZonePortalTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: genesisTempoBlockNumber
-            })
+            }),
+            withdrawalQueueCapacity: 256
         });
 
         address portalAddr;
@@ -1224,87 +1225,11 @@ contract ZonePortalTest is BaseTest {
     }
 
     /*//////////////////////////////////////////////////////////////
-                   WITHDRAWAL QUEUE MAX SIZE TESTS
+                   WITHDRAWAL QUEUE CAPACITY TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_withdrawalQueue_maxSizeTracksCorrectly() public {
-        // Fund portal
-        vm.startPrank(alice);
-        pathUSD.approve(address(portal), 10_000e6);
-        portal.deposit(alice, 10_000e6, bytes32(""));
-        vm.stopPrank();
-
-        bytes32 depositHash = portal.currentDepositQueueHash();
-
-        // Initial maxSize should be 0
-        assertEq(portal.withdrawalQueueMaxSize(), 0);
-
-        // Submit batch with withdrawals
-        Withdrawal memory w1 = Withdrawal({
-            sender: alice,
-            to: bob,
-            amount: 100e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
-        bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
-
-        vm.roll(block.number + 1);
-        portal.submitBatch(
-            uint64(block.number - 1),
-            0,
-            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
-            }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: w1Hash }),
-            "",
-            ""
-        );
-
-        // maxSize should be 1
-        assertEq(portal.withdrawalQueueMaxSize(), 1);
-        assertEq(portal.withdrawalQueueTail(), 1);
-        assertEq(portal.withdrawalQueueHead(), 0);
-
-        // Submit another batch with withdrawals
-        Withdrawal memory w2 = Withdrawal({
-            sender: alice,
-            to: charlie,
-            amount: 200e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
-        bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
-
-        vm.roll(block.number + 1);
-        portal.submitBatch(
-            uint64(block.number - 1),
-            0,
-            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s2") }),
-            DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
-            }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: w2Hash }),
-            "",
-            ""
-        );
-
-        // maxSize should be 2
-        assertEq(portal.withdrawalQueueMaxSize(), 2);
-
-        // Process first withdrawal
-        portal.processWithdrawal(w1, bytes32(0));
-
-        // maxSize stays at 2 (historical max)
-        assertEq(portal.withdrawalQueueMaxSize(), 2);
-        assertEq(portal.withdrawalQueueHead(), 1);
+    function test_withdrawalQueue_capacityIsSetCorrectly() public view {
+        assertEq(portal.withdrawalQueueCapacity(), 256);
     }
 
     function test_withdrawalQueue_emptyBatchDoesNotIncreaseTail() public {
