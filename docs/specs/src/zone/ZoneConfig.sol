@@ -79,7 +79,7 @@ contract ZoneConfig is IZoneConfig {
         uint256 length =
             uint256(tempoState.readTempoStorageSlot(tempoPortal, PORTAL_ENCRYPTION_KEYS_SLOT));
 
-        if (length == 0) return (bytes32(0), 0);
+        if (length == 0) revert NoEncryptionKeySet();
 
         // Compute the storage base for array data: keccak256(abi.encode(slot))
         uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));

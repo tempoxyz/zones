@@ -169,7 +169,7 @@ contract ZonePortal is IZonePortal {
     /// @return x The X coordinate
     /// @return yParity The Y coordinate parity (0x02 or 0x03)
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity) {
-        if (_encryptionKeys.length == 0) return (bytes32(0), 0);
+        if (_encryptionKeys.length == 0) revert NoEncryptionKeySet();
         EncryptionKeyEntry storage current = _encryptionKeys[_encryptionKeys.length - 1];
         return (current.x, current.yParity);
     }
@@ -245,7 +245,7 @@ contract ZonePortal is IZonePortal {
     {
         uint256 len = _encryptionKeys.length;
         if (len == 0 || tempoBlockNumber < _encryptionKeys[0].activationBlock) {
-            revert InvalidEncryptionKeyIndex(0);
+            revert NoEncryptionKeyAtBlock(tempoBlockNumber);
         }
 
         uint256 low = 0;

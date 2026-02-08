@@ -1791,10 +1791,9 @@ contract ZonePortalTest is BaseTest {
         portal.setSequencerEncryptionKey(x, yParity, v, r, s);
     }
 
-    function test_sequencerEncryptionKey_emptyReturnsZero() public view {
-        (bytes32 x, uint8 yParity) = portal.sequencerEncryptionKey();
-        assertEq(x, bytes32(0));
-        assertEq(yParity, 0);
+    function test_sequencerEncryptionKey_revertsWhenEmpty() public {
+        vm.expectRevert(IZonePortal.NoEncryptionKeySet.selector);
+        portal.sequencerEncryptionKey();
     }
 
     function test_setSequencerEncryptionKey_success() public {

@@ -13,6 +13,7 @@ import {
     EncryptedDepositPayload,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
+    IZoneConfig,
     IZoneInbox,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
@@ -659,14 +660,13 @@ contract ZoneInboxTest is Test {
         assertEq(readYParity, yParity2, "should return the latest yParity");
     }
 
-    /// @notice Verify ZoneConfig.sequencerEncryptionKey() returns zeros when no keys exist.
-    function test_zoneConfig_sequencerEncryptionKey_emptyReturnsZero() public {
+    /// @notice Verify ZoneConfig.sequencerEncryptionKey() reverts when no keys exist.
+    function test_zoneConfig_sequencerEncryptionKey_revertsWhenEmpty() public {
         // Array length = 0 (default)
         tempoState.setMockStorageValue(mockPortal, PORTAL_ENCRYPTION_KEYS_SLOT, bytes32(uint256(0)));
 
-        (bytes32 readX, uint8 readYParity) = config.sequencerEncryptionKey();
-        assertEq(readX, bytes32(0));
-        assertEq(readYParity, 0);
+        vm.expectRevert(IZoneConfig.NoEncryptionKeySet.selector);
+        config.sequencerEncryptionKey();
     }
 
     /// @notice Verify ZoneConfig and ZoneInbox read from the same encryption key slot.

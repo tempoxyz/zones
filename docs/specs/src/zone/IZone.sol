@@ -415,6 +415,8 @@ interface IZonePortal {
     error CallbackRejected();
     error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
+    error NoEncryptionKeySet();
+    error NoEncryptionKeyAtBlock(uint64 blockNumber);
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
@@ -692,7 +694,6 @@ interface IZoneInbox {
     error MissingDecryptionData();
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
-    error InvalidDecryption();
 
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);
@@ -817,6 +818,7 @@ interface IZoneOutbox {
 interface IZoneConfig {
 
     error NotSequencer();
+    error NoEncryptionKeySet();
 
     /// @notice Zone token address (TIP-20 at same address as Tempo)
     function zoneToken() external view returns (address);
