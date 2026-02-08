@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { EncryptedDepositLib } from "./EncryptedDeposit.sol";
+import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, EncryptedDepositLib } from "./EncryptedDeposit.sol";
 import {
     AES_GCM_DECRYPT,
     CHAUM_PEDERSEN_VERIFY,
@@ -243,8 +243,8 @@ contract ZoneInbox is IZoneInbox {
 
                 // Step 4: Verify decrypted plaintext matches claimed (to, memo)
                 // Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
-                // Must use packed decoding (not abi.decode which expects 32-byte padded fields)
-                if (valid && decryptedPlaintext.length >= 52) {
+                // Must be exactly ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE (64) bytes
+                if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
                     (address decryptedTo, bytes32 decryptedMemo) =
                         EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
                     valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);

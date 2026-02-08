@@ -733,4 +733,147 @@ contract ZoneInboxTest is Test {
         inbox.advanceTempo("", deposits, decs);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                PLAINTEXT LENGTH VALIDATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Helper: set up an encrypted deposit flow where AES-GCM returns a specific plaintext
+    function _setupEncryptedDepositWithPlaintext(
+        bytes memory mockPlaintext,
+        bool aesValid,
+        address recipient,
+        bytes32 memo
+    )
+        internal
+        returns (QueuedDeposit[] memory deposits, DecryptionData[] memory decs)
+    {
+        uint128 amount = 1000e6;
+
+        // Set up encryption key
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+
+        // Deploy dummy code at precompile addresses
+        vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
+        vm.etch(AES_GCM_DECRYPT, hex"00");
+
+        // Mock CP to return valid
+        vm.mockCall(
+            CHAUM_PEDERSEN_VERIFY,
+            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
+            abi.encode(true)
+        );
+
+        // Mock AES-GCM to return the specified plaintext
+        vm.mockCall(
+            AES_GCM_DECRYPT,
+            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
+            abi.encode(mockPlaintext, aesValid)
+        );
+
+        // Build encrypted deposit
+        (QueuedDeposit memory qd, EncryptedDeposit memory ed) =
+            _makeEncryptedDeposit(alice, amount, 0);
+
+        bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
+        );
+
+        deposits = new QueuedDeposit[](1);
+        deposits[0] = qd;
+
+        decs = new DecryptionData[](1);
+        decs[0] = DecryptionData({
+            sharedSecret: bytes32(uint256(0xdeadbeef)),
+            to: recipient,
+            memo: memo,
+            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+        });
+    }
+
+    /// @notice Verify that a too-short plaintext (52 bytes) causes the deposit to bounce
+    /// @dev This was the old boundary that used to pass (>= 52). Now requires exactly 64.
+    function test_advanceTempo_encryptedDeposit_plaintextTooShort_bounces() public {
+        address recipient = address(0x500);
+        bytes32 memo = bytes32("secret memo");
+
+        // Create a 52-byte plaintext (the old minimum that used to be accepted)
+        bytes memory shortPlaintext = new bytes(52);
+        // Write address and memo into the first 52 bytes (same layout as encodePlaintext but truncated)
+        assembly {
+            mstore(add(shortPlaintext, 32), shl(96, recipient))
+            mstore(add(shortPlaintext, 52), memo)
+        }
+
+        (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
+            _setupEncryptedDepositWithPlaintext(shortPlaintext, true, recipient, memo);
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs);
+
+        // Deposit should bounce to sender (alice) because plaintext length != 64
+        assertEq(gasToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
+        assertEq(gasToken.balanceOf(recipient), 0, "recipient should get nothing");
+    }
+
+    /// @notice Verify that a too-long plaintext (65 bytes) causes the deposit to bounce
+    function test_advanceTempo_encryptedDeposit_plaintextTooLong_bounces() public {
+        address recipient = address(0x500);
+        bytes32 memo = bytes32("secret memo");
+
+        // Create a 65-byte plaintext (one byte too many)
+        bytes memory longPlaintext = new bytes(65);
+        assembly {
+            mstore(add(longPlaintext, 32), shl(96, recipient))
+            mstore(add(longPlaintext, 52), memo)
+        }
+
+        (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
+            _setupEncryptedDepositWithPlaintext(longPlaintext, true, recipient, memo);
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs);
+
+        // Deposit should bounce to sender
+        assertEq(gasToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
+        assertEq(gasToken.balanceOf(recipient), 0, "recipient should get nothing");
+    }
+
+    /// @notice Verify that an empty plaintext (0 bytes) causes the deposit to bounce
+    function test_advanceTempo_encryptedDeposit_plaintextEmpty_bounces() public {
+        address recipient = address(0x500);
+        bytes32 memo = bytes32("secret memo");
+
+        bytes memory emptyPlaintext = new bytes(0);
+
+        (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
+            _setupEncryptedDepositWithPlaintext(emptyPlaintext, true, recipient, memo);
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs);
+
+        // Deposit should bounce to sender
+        assertEq(gasToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
+        assertEq(gasToken.balanceOf(recipient), 0, "recipient should get nothing");
+    }
+
+    /// @notice Verify that exactly 64-byte plaintext with correct data succeeds
+    function test_advanceTempo_encryptedDeposit_plaintextExact64_succeeds() public {
+        address recipient = address(0x500);
+        bytes32 memo = bytes32("secret memo");
+
+        // Use the canonical encodePlaintext which produces exactly 64 bytes
+        bytes memory correctPlaintext = EncryptedDepositLib.encodePlaintext(recipient, memo);
+
+        (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
+            _setupEncryptedDepositWithPlaintext(correctPlaintext, true, recipient, memo);
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs);
+
+        // Deposit should succeed — minted to the decrypted recipient
+        assertEq(gasToken.balanceOf(recipient), 1000e6, "recipient should receive funds");
+        assertEq(gasToken.balanceOf(alice), 0, "sender should get nothing (successful deposit)");
+    }
+
 }

@@ -3,12 +3,25 @@ pragma solidity ^0.8.13;
 
 import { DepositQueueLib } from "../../src/zone/DepositQueueLib.sol";
 import {
+    ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE,
+    EncryptedDepositLib
+} from "../../src/zone/EncryptedDeposit.sol";
+import {
     Deposit,
     DepositType,
     EncryptedDeposit,
     EncryptedDepositPayload
 } from "../../src/zone/IZone.sol";
 import { Test } from "forge-std/Test.sol";
+
+/// @notice External wrapper to test EncryptedDepositLib.decodePlaintext (which is internal)
+contract PlaintextDecoder {
+
+    function decode(bytes memory plaintext) external pure returns (address to, bytes32 memo) {
+        return EncryptedDepositLib.decodePlaintext(plaintext);
+    }
+
+}
 
 /// @title DepositQueueLibTest
 /// @notice Direct tests for DepositQueueLib functionality
@@ -193,6 +206,115 @@ contract DepositQueueLibTest is Test {
         bytes32 encryptedHash = DepositQueueLib.enqueueEncrypted(bytes32(0), ed);
 
         assertTrue(regularHash != encryptedHash);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    PLAINTEXT ENCODE / DECODE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    PlaintextDecoder internal decoder;
+
+    function _ensureDecoder() internal {
+        if (address(decoder) == address(0)) {
+            decoder = new PlaintextDecoder();
+        }
+    }
+
+    /// @notice Round-trip: encodePlaintext → decodePlaintext recovers original values
+    function test_plaintext_roundTrip() public {
+        _ensureDecoder();
+        address to = address(0x1234567890AbcdEF1234567890aBcdef12345678);
+        bytes32 memo = bytes32("hello world");
+
+        bytes memory encoded = EncryptedDepositLib.encodePlaintext(to, memo);
+        assertEq(encoded.length, ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, "encoded should be 64 bytes");
+
+        (address decodedTo, bytes32 decodedMemo) = decoder.decode(encoded);
+        assertEq(decodedTo, to, "decoded address mismatch");
+        assertEq(decodedMemo, memo, "decoded memo mismatch");
+    }
+
+    /// @notice decodePlaintext rejects plaintext shorter than 64 bytes (e.g. 52 bytes)
+    /// @dev Previously the check was >= 52, allowing out-of-bounds assembly reads
+    function test_plaintext_rejectsTooShort() public {
+        _ensureDecoder();
+        bytes memory short = new bytes(52);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                uint256(52),
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+            )
+        );
+        decoder.decode(short);
+    }
+
+    /// @notice decodePlaintext rejects empty plaintext
+    function test_plaintext_rejectsEmpty() public {
+        _ensureDecoder();
+        bytes memory empty = new bytes(0);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                uint256(0),
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+            )
+        );
+        decoder.decode(empty);
+    }
+
+    /// @notice decodePlaintext rejects plaintext longer than 64 bytes
+    /// @dev Trailing bytes beyond 64 were previously silently ignored
+    function test_plaintext_rejectsTooLong() public {
+        _ensureDecoder();
+        bytes memory long = new bytes(65);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                uint256(65),
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+            )
+        );
+        decoder.decode(long);
+    }
+
+    /// @notice decodePlaintext rejects 63-byte plaintext (off-by-one boundary)
+    function test_plaintext_rejects63Bytes() public {
+        _ensureDecoder();
+        bytes memory almostRight = new bytes(63);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                uint256(63),
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+            )
+        );
+        decoder.decode(almostRight);
+    }
+
+    /// @notice decodePlaintext accepts exactly 64 bytes (boundary test)
+    function test_plaintext_acceptsExact64Bytes() public {
+        _ensureDecoder();
+        bytes memory exact = new bytes(64);
+        (address to, bytes32 memo) = decoder.decode(exact);
+        assertEq(to, address(0), "zero-filled plaintext should decode to zero address");
+        assertEq(memo, bytes32(0), "zero-filled plaintext should decode to zero memo");
+    }
+
+    /// @notice Fuzz test: decodePlaintext always reverts for length != 64
+    function testFuzz_plaintext_rejectsWrongLength(uint256 len) public {
+        _ensureDecoder();
+        vm.assume(len != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE);
+        vm.assume(len <= 256); // keep allocation reasonable
+        bytes memory data = new bytes(len);
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                len,
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+            )
+        );
+        decoder.decode(data);
     }
 
 }

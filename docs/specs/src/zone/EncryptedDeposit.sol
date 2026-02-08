@@ -54,6 +54,9 @@ struct DecryptedDeposit {
 /// @dev These are reference implementations - actual encryption happens off-chain
 library EncryptedDepositLib {
 
+    /// @notice Thrown when decrypted plaintext does not have the expected length
+    error InvalidPlaintextLength(uint256 actual, uint256 expected);
+
     /// @notice Compute the queue hash for an encrypted deposit
     /// @dev Matches the queue hash chain format used in DepositQueueLib:
     ///      keccak256(abi.encode(DepositType.Encrypted, deposit, prevHash))
@@ -82,13 +85,16 @@ library EncryptedDepositLib {
     }
 
     /// @notice Decode plaintext after decryption
-    /// @dev Unpacks (to, memo) from 64 bytes
+    /// @dev Unpacks (to, memo) from exactly ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE (64) bytes.
+    ///      Layout: [address(20 bytes)][memo(32 bytes)][zero-padding(12 bytes)]
     function decodePlaintext(bytes memory plaintext)
         internal
         pure
         returns (address to, bytes32 memo)
     {
-        require(plaintext.length >= 52, "Invalid plaintext length");
+        if (plaintext.length != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
+            revert InvalidPlaintextLength(plaintext.length, ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE);
+        }
         assembly {
             to := shr(96, mload(add(plaintext, 32)))
             memo := mload(add(plaintext, 52))
