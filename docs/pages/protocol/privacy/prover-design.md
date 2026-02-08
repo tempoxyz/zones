@@ -4,7 +4,7 @@
 
 The zone prover implements a pure state transition function in Rust with `no_std` compatibility, allowing it to run in both ZKVMs like SP1 and TEEs like SGX or TDX.
 
-The function takes a complete witness of zone blocks and their dependencies, executes the EVM state transitions (including required system transactions), and outputs commitments for on-chain verification.
+The function takes a complete witness of zone blocks and their dependencies, executes the EVM state transitions (including sequencer-only protocol transactions), and outputs commitments for on-chain verification.
 The core commitment is the **zone block hash transition** (not the raw state root), matching the privacy zone spec and Solidity reference implementation.
 
 ## Interface
@@ -26,8 +26,11 @@ pub struct PublicInputs {
     /// Tempo block number for the batch (must equal portal's tempoBlockNumber)
     pub tempo_block_number: u64,
 
-    /// Tempo block hash for the batch (must equal portal's EIP-2935 lookup)
-    pub tempo_block_hash: B256,
+    /// Anchor Tempo block number (tempo_block_number or recent block in EIP-2935 window)
+    pub anchor_block_number: u64,
+
+    /// Anchor Tempo block hash (must equal portal's EIP-2935 lookup)
+    pub anchor_block_hash: B256,
 
     /// Expected withdrawal batch index (passed by portal as withdrawalBatchIndex + 1)
     pub expected_withdrawal_batch_index: u64,
@@ -51,6 +54,10 @@ pub struct BatchWitness {
 
     /// Tempo state proofs for Tempo reads
     pub tempo_state_proofs: BatchStateProof,
+
+    /// Tempo headers for ancestry verification (only in ancestry mode)
+    /// Ordered from tempo_block_number + 1 to anchor_block_number.
+    pub tempo_ancestry_headers: Vec<Vec<u8>>,
 }
 
 pub struct BatchOutput {
@@ -68,6 +75,14 @@ pub struct BatchOutput {
 }
 
 pub struct LastBatchCommitment {
+    pub withdrawal_batch_index: u64,
+}
+
+/// Mirrors the Solidity `LastBatch` struct from ZoneOutbox.
+/// Used internally when reading from zone state; fields are split across
+/// `WithdrawalQueueTransition` (hash) and `LastBatchCommitment` (index) in output.
+pub struct LastBatch {
+    pub withdrawal_queue_hash: B256,
     pub withdrawal_batch_index: u64,
 }
 
@@ -107,34 +122,68 @@ pub struct ZoneBlock {
     /// Beneficiary (must match registered sequencer)
     pub beneficiary: Address,
 
-    /// Tempo header RLP used by the system tx (ZoneInbox.advanceTempo)
-    pub tempo_header_rlp: Vec<u8>,
+    /// Tempo header RLP used by the call (ZoneInbox.advanceTempo).
+    /// If None, the block does not advance Tempo and the binding carries over.
+    pub tempo_header_rlp: Option<Vec<u8>>,
 
-    /// Deposits processed by the system tx (oldest first)
-    pub deposits: Vec<Deposit>,
+    /// Deposits processed by the system tx (oldest first, unified queue).
+    /// Must be empty if tempo_header_rlp is None.
+    pub deposits: Vec<QueuedDeposit>,
 
-    /// System tx at end of block (ZoneOutbox.finalizeWithdrawalBatch)
+    /// Decryption data for encrypted deposits in the system tx.
+    /// Must be empty if tempo_header_rlp is None.
+    pub decryptions: Vec<DecryptionData>,
+
+    /// Sequencer-only: finalize a batch (only in final block, must be last)
     /// Required for the final block in a batch; must be absent in intermediate blocks.
-    pub finalize_withdrawal_batch_count: Option<u64>,
+    /// Uses U256 to match Solidity `finalizeWithdrawalBatch(uint256 count)`.
+    pub finalize_withdrawal_batch_count: Option<U256>,
 
     /// Transactions to execute
     pub transactions: Vec<Transaction>,
 }
 ```
 
+### Deposit and Decryption Types
+
+```rust
+/// Mirrors the Solidity `QueuedDeposit` struct from IZone.sol
+pub struct QueuedDeposit {
+    pub deposit_type: DepositType,
+    pub deposit_data: Vec<u8>, // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+}
+
+pub enum DepositType {
+    Plain,
+    Encrypted,
+}
+
+/// Mirrors the Solidity `DecryptionData` struct from IZone.sol
+/// Provided by the sequencer for each encrypted deposit
+pub struct DecryptionData {
+    pub shared_secret: B256,  // ECDH shared secret (x-coordinate)
+    pub to: Address,          // Decrypted recipient
+    pub memo: B256,           // Decrypted memo
+    pub cp_proof: ChaumPedersenProof, // Proof of correct shared secret derivation
+}
+
+pub struct ChaumPedersenProof {
+    pub s: B256, // Response: s = r + c * privSeq (mod n)
+    pub c: B256, // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
+}
+```
+
 Each zone block contains the required system transactions plus user transactions that will be executed using `revm`.
 The system transactions must mirror the Solidity reference implementation:
-- `ZoneInbox.advanceTempo(tempo_header_rlp, deposits)` at the start of the block
+- `ZoneInbox.advanceTempo(tempo_header_rlp, deposits, decryptions)` at the start of the block
 - `ZoneOutbox.finalizeWithdrawalBatch(count)` at the end of the block **only if this is the final block of the batch**
+If `advanceTempo` is omitted for a block, the Tempo binding carries over from the previous block.
 
-User transactions may call the `TempoState` precompile to read Tempo state. User transactions
-**must not** call `ZoneInbox` or `ZoneOutbox`; those are system-only predeploys. The executor
-must reject any non-system call to these addresses and enforce exactly one `advanceTempo`
-at the start of each block and exactly one `finalizeWithdrawalBatch` in the final block of the batch.
-The block hash is computed from the simplified zone header:
+The executor must enforce at most one `advanceTempo` at the start of each block
+(or zero, for blocks that do not advance Tempo), and enforce `finalizeWithdrawalBatch` only in the
+final block of the batch. The block hash is computed from the simplified zone header:
 `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`.
-The transactions and receipts roots are computed over the full ordered list:
-`[advanceTempo, user txs..., finalizeWithdrawalBatch?]`.
+The transactions and receipts roots are computed over the full ordered list of zone transactions.
 
 ### Zone State Witness
 
@@ -181,7 +230,7 @@ pub struct BatchStateProof {
 
 pub struct L1StateRead {
     /// Which zone block performed this read
-    pub zone_block_index: u32,
+    pub zone_block_index: u64,
 
     /// Which Tempo block to read from (must match TempoState for this block)
     pub tempo_block_number: u64,
@@ -201,18 +250,18 @@ pub struct L1StateRead {
 The `BatchStateProof` structure enables efficient proving of potentially thousands of Tempo state reads across multiple zone blocks.
 
 **Binding to Tempo:**
-- Tempo headers are validated by executing `TempoState.finalizeTempo` during the system tx
-  in each zone block. The resulting `tempoBlockNumber`, `tempoBlockHash`, and
-  `tempoStateRoot` are part of the proven zone state.
-**REVIEWTODO: This says finalizeTempo is called in the system TX. That seems in contradiction to the idea that it is just a transaction by the sequencer, called through advanceTempo**
+- Tempo headers are validated whenever `ZoneInbox.advanceTempo` executes. Each call runs
+  `TempoState.finalizeTempo`, updating `tempoBlockNumber`, `tempoBlockHash`, and `tempoStateRoot`
+  in the proven zone state.
 - `TempoState.tempoBlockNumber()` at end of batch must equal `public_inputs.tempo_block_number`.
 **REVIEWTODO: It only has to match at the end of the batch. So another way to solve the past batch problem is simply to prove a long enough batch to get back in EIP-2935 range**
 - Each Tempo read is verified against the `tempoStateRoot` currently bound in `TempoState`
   at the time of the read. The precompile must reject reads if the block is not yet bound.
-- For a given zone block, all Tempo reads must use the Tempo block number finalized by that
-  block's `advanceTempo` system tx (checked against `TempoState.tempoBlockNumber()`).
+- For any Tempo read, the `tempo_block_number` must match the value currently bound in
+  `TempoState` at the time of the read. If a block contains no `advanceTempo` calls, reads
+  use the binding from the previous block.
 - Tempo reads performed inside `advanceTempo` (e.g., deposit queue hash) must be bound to the
-  Tempo header finalized by that call.
+  Tempo header finalized by that specific call.
 
 Inside execution, `TempoState.readTempoStorageSlot` is modeled to read from the current `tempoStateRoot` (derived from the finalized header), so the proof and the precompile agree on the same root.
 
@@ -302,6 +351,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
         if block.number != prev_header.number + 1 {
             return Err(Error::InconsistentState);
         }
+        // Timestamps must be non-decreasing (equal is allowed, matching EVM rules)
         if block.timestamp < prev_header.timestamp {
             return Err(Error::InconsistentState);
         }
@@ -309,16 +359,16 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
             return Err(Error::InconsistentState);
         }
 
-        if is_last_block && block.finalize_withdrawal_batch_count.is_none() {
-            return Err(Error::InconsistentState);
-        }
-        if !is_last_block && block.finalize_withdrawal_batch_count.is_some() {
-            //**REVIEWTODO: what does this mean, is_some()**
+        if is_last_block {
+            if block.finalize_withdrawal_batch_count.is_none() {
+                return Err(Error::InconsistentState);
+            }
+        } else if block.finalize_withdrawal_batch_count.is_some() {
             return Err(Error::InconsistentState);
         }
 
-        // Execute block with system txs + user txs, and Tempo access via tempo_state
-        let (tx_root, receipts_root, finalized_tempo_number) =
+        // Execute block with sequencer calls + user txs, and Tempo access via tempo_state
+        let (tx_root, receipts_root) =
             execute_zone_block(&mut zone_state, block, &tempo_state, idx)?;
 
         // Build the zone block header and compute the block hash
@@ -334,14 +384,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
         prev_block_hash = keccak256(rlp_encode(header));
         prev_header = header;
 
-        // Bind the block's Tempo header to the finalized Tempo state number
-        // **REVIEWTODO: What does this mean**
-        let expected_tempo_hash = tempo_state
-            .block_hash(finalized_tempo_number)
-            .ok_or(Error::InvalidProof)?;
-        if expected_tempo_hash != keccak256(&block.tempo_header_rlp) {
-            return Err(Error::InconsistentState);
-        }
+        // Tempo header binding is validated inside the advanceTempo call.
     }
 
     // Phase 4: Extract output commitments
@@ -353,13 +396,26 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
     let tempo_hash = tempo_state
         .block_hash(tempo_number)
         .ok_or(Error::InvalidProof)?;
-    if tempo_hash != witness.public_inputs.tempo_block_hash {
-        return Err(Error::InconsistentState);
-    }
     if tempo_number != witness.public_inputs.tempo_block_number {
         return Err(Error::InconsistentState);
     }
 
+    // Anchor validation:
+    // - Direct mode: anchor_block_number == tempo_block_number and hashes match
+    // - Ancestry mode: verify parent-hash chain from tempo_block_number to anchor_block_number
+    if witness.public_inputs.anchor_block_number == tempo_number {
+        if tempo_hash != witness.public_inputs.anchor_block_hash {
+            return Err(Error::InconsistentState);
+        }
+    } else {
+        verify_tempo_ancestry_chain(
+            tempo_hash,
+            tempo_number,
+            witness.public_inputs.anchor_block_number,
+            witness.public_inputs.anchor_block_hash,
+            &witness.tempo_ancestry_headers,
+        )?;
+    }
 
     Ok(BatchOutput {
         block_transition: BlockTransition {
@@ -409,7 +465,7 @@ fn execute_zone_block(
     block: &ZoneBlock,
     tempo_state: &TempoStateAccessor,
     block_index: usize,
-) -> Result<(B256, B256, u64), Error> {
+) -> Result<(B256, B256), Error> {
     // Set up revm with TempoState precompile
     let mut evm = revm::EVM::builder()
         .with_db(zone_state)
@@ -423,40 +479,44 @@ fn execute_zone_block(
     // System tx: advance Tempo and process deposits.
     // The TempoState precompile must bind reads during this call to the newly finalized
     // Tempo header, and reject any unbound reads.
-    // **REVIEWTODO: Seems that the current system is built with advanceTempo only being called from here in mind**
-    evm.transact_commit(system_tx_advance_tempo(
-        &block.tempo_header_rlp,
-        &block.deposits,
-    ))
-    .map_err(|e| Error::ExecutionError(e.to_string()))?;
+    if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
+        evm.transact_commit(system_tx_advance_tempo(
+            tempo_header_rlp,
+            &block.deposits,
+            &block.decryptions,
+        ))
+        .map_err(|e| Error::ExecutionError(e.to_string()))?;
 
-    let finalized_tempo_number = zone_state.tempo_state_block_number()?;
-    tempo_state.bind_block(block_index, finalized_tempo_number)?;
+        let tempo_number = zone_state.tempo_state_block_number()?;
+        tempo_state.bind_block(block_index, tempo_number)?;
 
-    // Execute transactions
+        let expected_tempo_hash = tempo_state
+            .block_hash(tempo_number)
+            .ok_or(Error::InvalidProof)?;
+        if expected_tempo_hash != keccak256(tempo_header_rlp) {
+            return Err(Error::InconsistentState);
+        }
+    } else if !block.deposits.is_empty() || !block.decryptions.is_empty() {
+        return Err(Error::InconsistentState);
+    }
+
+    // Execute user transactions in order.
     for tx in &block.transactions {
         evm.transact_commit(tx)
             .map_err(|e| Error::ExecutionError(e.to_string()))?;
     }
 
-    // Optional system tx: finalize batch
-    let finalize_tx = block
-        .finalize_withdrawal_batch_count
-        .map(system_tx_finalize_withdrawal_batch);
-    if let Some(tx) = &finalize_tx {
-        evm.transact_commit(tx)
+    // Sequencer finalizes the batch at the end of the final block.
+    if let Some(count) = block.finalize_withdrawal_batch_count {
+        evm.transact_commit(sequencer_tx_finalize_withdrawal_batch(count))
             .map_err(|e| Error::ExecutionError(e.to_string()))?;
     }
 
     // Compute roots for block hash commitment
-    let tx_root = compute_transactions_root(
-        &system_tx_advance_tempo(&block.tempo_header_rlp, &block.deposits),
-        &block.transactions,
-        finalize_tx.as_ref(),
-    );
+    let tx_root = compute_transactions_root_from_block(block);
     let receipts_root = compute_receipts_root(evm.last_block_receipts());
 
-    Ok((tx_root, receipts_root, finalized_tempo_number))
+    Ok((tx_root, receipts_root))
 }
 ```
 
@@ -490,12 +550,14 @@ pub extern "C" fn ecall_prove_batch(
 ## On-Chain Verification
 
 The portal contract receives:
-- `tempoBlockNumber` - validates against EIP-2935 block hash history and passes to the verifier
+- `tempoBlockNumber` - block zone committed to (from zone's TempoState)
+- `recentTempoBlockNumber` - optional recent block for ancestry proofs (0 = direct lookup)
 - `blockTransition` - from `BatchOutput` (block hash based)
 - `proof` - ZKVM proof or TEE attestation
 
 The portal passes the following to the verifier:
-- `tempoBlockNumber` and `tempoBlockHash` (from EIP-2935)
+- `tempoBlockNumber`
+- `anchorBlockNumber` and `anchorBlockHash` (from EIP-2935)
 - `expectedWithdrawalBatchIndex` (portal's `withdrawalBatchIndex + 1`)
 - `sequencer` (the registered sequencer address)
 - `blockTransition`, `depositQueueTransition`, `withdrawalQueueTransition`
@@ -503,8 +565,9 @@ The portal passes the following to the verifier:
 
 The verifier validates that the prover correctly executed the state transition and produced the output commitments.
 In particular, the proof must enforce:
-- `TempoState.tempoBlockHash == tempoBlockHash` from the portal (EIP-2935) for `tempoBlockNumber`
 - `TempoState.tempoBlockNumber == tempoBlockNumber`
+- **Direct mode** (`anchorBlockNumber == tempoBlockNumber`): `TempoState.tempoBlockHash == anchorBlockHash`
+- **Ancestry mode** (`anchorBlockNumber > tempoBlockNumber`): parent-hash chain from `tempoBlockNumber` to `anchorBlockNumber`, ending at `anchorBlockHash`
 - `ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex` (passed by portal)
 - `ZoneOutbox.lastBatch().withdrawalQueueHash == withdrawalQueueTransition.withdrawalQueueHash`
 - Zone block `beneficiary` equals `sequencer` (passed by portal)

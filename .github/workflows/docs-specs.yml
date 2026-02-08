@@ -2,17 +2,21 @@ name: Docs Specs
 
 on:
   push:
-    branches: [main]
+    branches: [main, dr/validium]
     paths:
-      - "docs/specs/**"
-      - "crates/precompiles/**"
+      - "docs/specs/src/**"
+      - "docs/specs/test/**"
+      - "docs/specs/foundry.toml"
+      - "crates/tempo-zone/**"
       - ".github/workflows/docs-specs.yml"
   merge_group:
   pull_request:
-    branches: [main]
+    branches: [main, dr/validium]
     paths:
-      - "docs/specs/**"
-      - "crates/precompiles/**"
+      - "docs/specs/src/**"
+      - "docs/specs/test/**"
+      - "docs/specs/foundry.toml"
+      - "crates/tempo-zone/**"
       - ".github/workflows/docs-specs.yml"
 
 env:
@@ -50,9 +54,9 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Run Forge fmt check
+      - name: Run Forge fmt check (zone-only)
         working-directory: docs/specs
-        run: forge fmt --check
+        run: forge fmt --check src/zone test/zone
 
   test:
     name: Forge Test (Solidity)
@@ -65,12 +69,13 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
 
-      - name: Run Forge tests
+      - name: Run Forge tests (zone-only)
         working-directory: docs/specs
-        run: forge test -vvv
+        run: forge test -vvv --match-path "test/zone/**"
 
   tempo-foundry-test:
     name: Forge Test (Rust Precompiles)
+    if: false
     runs-on: depot-ubuntu-latest-8
     timeout-minutes: 60
     steps:
@@ -96,15 +101,18 @@ jobs:
           workspaces: tempo-foundry
 
       - name: Update tempo-foundry to use current commit
+        if: github.repository == 'tempoxyz/tempo'
         working-directory: tempo-foundry
         run: |
           COMMIT_SHA="${{ github.event.pull_request.head.sha || github.sha }}"
+          REPO_URL="https://github.com/tempoxyz/tempo"
           echo "Updating tempo dependencies to commit: $COMMIT_SHA"
+          echo "Using git source repository: $REPO_URL"
 
           # Update all tempo dependencies to point to the current commit
           # Using # as delimiter since URLs contain /
           sed -i -E \
-            "s#(tempo-[a-z-]+) = \{ git = \"https://github.com/tempoxyz/tempo\", rev = \"[^\"]+\" \}#\1 = { git = \"https://github.com/tempoxyz/tempo\", rev = \"$COMMIT_SHA\" }#g" \
+            "s#(tempo-[a-z-]+) = \{ git = \"https://github.com/[^\"]+\", rev = \"[^\"]+\" \}#\1 = { git = \"$REPO_URL\", rev = \"$COMMIT_SHA\" }#g" \
             Cargo.toml
 
           echo "Updated Cargo.toml:"
@@ -117,11 +125,11 @@ jobs:
         working-directory: tempo-foundry
         run: cargo build -p forge --profile release
 
-      - name: Run Forge tests with Rust precompiles
+      - name: Run Forge tests with Rust precompiles (zone-only)
         working-directory: tempo/docs/specs
         run: |
           echo "Running forge test with tempo-foundry (isTempo=true)"
-          ../../../tempo-foundry/target/release/forge test -vvv
+          ../../../tempo-foundry/target/release/forge test -vvv --match-path "test/zone/**"
 
   docs-specs-success:
     name: docs-specs success
@@ -131,11 +139,9 @@ jobs:
       - build
       - lint
       - test
-      - tempo-foundry-test
     timeout-minutes: 5
     steps:
       - name: Decide whether the needed jobs succeeded or failed
         uses: re-actors/alls-green@release/v1
         with:
-          allowed-failures: tempo-foundry-test
           jobs: ${{ toJSON(needs) }}

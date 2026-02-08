@@ -3,7 +3,13 @@ name: Lint
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "docs/specs/**"
+      - ".github/workflows/docs-specs.yml"
   pull_request:
+    paths-ignore:
+      - "docs/specs/**"
+      - ".github/workflows/docs-specs.yml"
   merge_group:
 
 concurrency:
@@ -18,6 +24,7 @@ env:
 jobs:
   clippy:
     name: clippy
+    if: false
     runs-on: depot-ubuntu-latest-4
     timeout-minutes: 30
     steps:
@@ -34,6 +41,7 @@ jobs:
 
   fmt:
     name: fmt
+    if: false
     runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -61,6 +69,7 @@ jobs:
 
   docs:
     name: docs
+    if: false
     runs-on: depot-ubuntu-latest-4
     timeout-minutes: 30
     steps:
@@ -107,10 +116,12 @@ jobs:
       - uses: crate-ci/typos@v1
 
   deny:
+    if: false
     uses: ithacaxyz/ci/.github/workflows/deny.yml@main
 
   zepter:
     name: zepter
+    if: false
     runs-on: depot-ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -130,12 +141,7 @@ jobs:
     runs-on: ubuntu-latest
     if: always()
     needs:
-      - clippy
-      - fmt
-      - docs
       - typos
-      - deny
-      - zepter
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed

@@ -9,13 +9,16 @@ uint256 constant BLOCKHASH_HISTORY_WINDOW = 8192;
 
 /// @notice Interface for EIP-2935 block hash history precompile.
 interface IBlockHashHistory {
+
     function getBlockHash(uint256 blockNumber) external view returns (bytes32);
+
 }
 
 /// @notice Mock block hash history contract for spec tests.
 /// @dev Tempo uses a precompile for EIP-2935; this mock returns a deterministic hash
 ///      for blocks within the history window.
 contract BlockHashHistory is IBlockHashHistory {
+
     function getBlockHash(uint256 blockNumber) external view returns (bytes32) {
         if (blockNumber >= block.number) {
             return bytes32(0);
@@ -25,4 +28,5 @@ contract BlockHashHistory is IBlockHashHistory {
         }
         return keccak256(abi.encode(blockNumber));
     }
+
 }

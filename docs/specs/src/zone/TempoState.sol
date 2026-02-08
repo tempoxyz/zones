@@ -9,15 +9,10 @@ import { ITempoState } from "./IZone.sol";
 ///      Stores the latest finalized Tempo block info. Sequencer submits Tempo headers
 ///      which are validated for chain continuity and decoded to update state.
 contract TempoState is ITempoState {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Current sequencer address
-    address public sequencer;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
 
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     bytes32 public tempoBlockHash;
@@ -74,33 +69,10 @@ contract TempoState is ITempoState {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Initialize with genesis Tempo block
-    /// @param _sequencer The sequencer address
     /// @param _genesisHeader RLP-encoded genesis Tempo header
-    constructor(address _sequencer, bytes memory _genesisHeader) {
-        sequencer = _sequencer;
-
+    constructor(bytes memory _genesisHeader) {
         // Decode and store genesis header
         _decodeAndStoreHeader(_genesisHeader);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
-    }
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -108,12 +80,14 @@ contract TempoState is ITempoState {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Finalize a Tempo block header
-    /// @dev Validates chain continuity (parent hash must match stored hash, number must be +1)
+    /// @dev Validates chain continuity (parent hash must match stored hash, number must be +1).
     ///      The header is RLP-encoded as: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
     ///      where inner is a standard Ethereum header.
+    ///      Only callable by ZoneInbox. Executor enforces ZoneInbox-only access.
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        // Only ZoneInbox can call this function
+        if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
 
         // Store previous values for validation
         bytes32 prevBlockHash = tempoBlockHash;
@@ -130,30 +104,66 @@ contract TempoState is ITempoState {
     }
 
     /*//////////////////////////////////////////////////////////////
-                          STORAGE READING STUBS
+                    TEMPO STORAGE READING (SYSTEM ONLY)
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Zone system contract addresses that are allowed to read Tempo state
+    /// @dev These contracts need access to read from ZonePortal and TIP-403 on Tempo
+    address private constant ZONE_INBOX = 0x1c00000000000000000000000000000000000001;
+    address private constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
+    address private constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
+
+    /// @notice Check if caller is a zone system contract
+    modifier onlySystemContract() {
+        if (msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX && msg.sender != ZONE_CONFIG) {
+            revert("TempoState: only zone system contracts can read Tempo state");
+        }
+        _;
+    }
+
     /// @notice Read a storage slot from a Tempo contract
-    /// @dev In production, this is a precompile that reads from proven Tempo state.
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
+    ///      In production, this is a precompile that reads from proven Tempo state.
+    ///      Used to read ZonePortal state (deposit queue, encryption keys) and TIP-403
+    ///      policy state for the zone token.
     ///      This stub reverts - actual implementation is in the zone node.
-    /// @param account The Tempo contract address
+    /// @param account The Tempo contract address (ZonePortal or TIP-403)
     /// @param slot The storage slot to read
     /// @return value The storage value (stub always reverts)
-    function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32) {
+    function readTempoStorageSlot(
+        address account,
+        bytes32 slot
+    )
+        external
+        view
+        onlySystemContract
+        returns (bytes32)
+    {
         // Silence unused variable warnings
-        account; slot;
+        account;
+        slot;
         revert("TempoState: readTempoStorageSlot is a precompile stub");
     }
 
     /// @notice Read multiple storage slots from a Tempo contract
-    /// @dev In production, this is a precompile that reads from proven Tempo state.
+    /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
+    ///      In production, this is a precompile that reads from proven Tempo state.
     ///      This stub reverts - actual implementation is in the zone node.
-    /// @param account The Tempo contract address
+    /// @param account The Tempo contract address (ZonePortal or TIP-403)
     /// @param slots The storage slots to read
     /// @return values The storage values (stub always reverts)
-    function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory) {
+    function readTempoStorageSlots(
+        address account,
+        bytes32[] calldata slots
+    )
+        external
+        view
+        onlySystemContract
+        returns (bytes32[] memory)
+    {
         // Silence unused variable warnings
-        account; slots;
+        account;
+        slots;
         revert("TempoState: readTempoStorageSlots is a precompile stub");
     }
 
@@ -265,7 +275,14 @@ contract TempoState is ITempoState {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Decode an RLP list header from memory
-    function _decodeListHeaderMem(bytes memory data, uint256 ptr) internal pure returns (uint256 listLen, uint256 offset) {
+    function _decodeListHeaderMem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (uint256 listLen, uint256 offset)
+    {
         if (ptr >= data.length) return (0, 0);
 
         uint8 prefix = uint8(data[ptr]);
@@ -291,7 +308,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Skip an RLP item in memory and return next position
-    function _skipRlpItemMem(bytes memory data, uint256 ptr) internal pure returns (uint256 itemLen, uint256 nextPtr) {
+    function _skipRlpItemMem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (uint256 itemLen, uint256 nextPtr)
+    {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -322,7 +346,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode a bytes32 from RLP in memory
-    function _decodeBytes32Mem(bytes memory data, uint256 ptr) internal pure returns (bytes32 value) {
+    function _decodeBytes32Mem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (bytes32 value)
+    {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -378,7 +409,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode a uint256 from RLP in memory
-    function _decodeUint256Mem(bytes memory data, uint256 ptr) internal pure returns (uint256 value) {
+    function _decodeUint256Mem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (uint256 value)
+    {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -401,7 +439,14 @@ contract TempoState is ITempoState {
     }
 
     /// @notice Decode an address from RLP in memory
-    function _decodeAddressMem(bytes memory data, uint256 ptr) internal pure returns (address value) {
+    function _decodeAddressMem(
+        bytes memory data,
+        uint256 ptr
+    )
+        internal
+        pure
+        returns (address value)
+    {
         if (ptr >= data.length) revert InvalidRlpData();
 
         uint8 prefix = uint8(data[ptr]);
@@ -419,4 +464,5 @@ contract TempoState is ITempoState {
             revert InvalidRlpData();
         }
     }
+
 }

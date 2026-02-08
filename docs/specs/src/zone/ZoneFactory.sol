@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneFactory, ZoneInfo, IVerifier } from "./IZone.sol";
-import { ZonePortal } from "./ZonePortal.sol";
-import { ZoneMessenger } from "./ZoneMessenger.sol";
 import { TempoUtilities } from "../TempoUtilities.sol";
+import { IVerifier, IZoneFactory, ZoneInfo } from "./IZone.sol";
+import { ZoneMessenger } from "./ZoneMessenger.sol";
+import { ZonePortal } from "./ZonePortal.sol";
 
 /// @title ZoneFactory
 /// @notice Creates zones and registers parameters
 contract ZoneFactory is IZoneFactory {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -25,7 +26,10 @@ contract ZoneFactory is IZoneFactory {
                             ZONE CREATION
     //////////////////////////////////////////////////////////////*/
 
-    function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal) {
+    function createZone(CreateZoneParams calldata params)
+        external
+        returns (uint64 zoneId, address portal)
+    {
         // Validate token is a TIP-20
         if (!TempoUtilities.isTIP20(params.token)) revert InvalidToken();
         if (params.sequencer == address(0)) revert InvalidSequencer();
@@ -50,10 +54,7 @@ contract ZoneFactory is IZoneFactory {
         address predictedPortal = _computeCreateAddress(address(this), currentNonce + 1);
 
         // Deploy messenger with predicted portal address
-        ZoneMessenger messengerContract = new ZoneMessenger(
-            predictedPortal,
-            params.token
-        );
+        ZoneMessenger messengerContract = new ZoneMessenger(predictedPortal, params.token);
         address messengerAddress = address(messengerContract);
 
         // Deploy portal with messenger address
@@ -101,20 +102,28 @@ contract ZoneFactory is IZoneFactory {
 
     /// @notice Compute the address of a contract deployed with CREATE
     /// @dev address = keccak256(rlp([sender, nonce]))[12:]
-    function _computeCreateAddress(address deployer, uint256 nonce) internal pure returns (address) {
+    function _computeCreateAddress(address deployer, uint256 nonce)
+        internal
+        pure
+        returns (address)
+    {
         bytes memory data;
         if (nonce == 0x00) {
             data = abi.encodePacked(bytes1(0xd6), bytes1(0x94), deployer, bytes1(0x80));
         } else if (nonce <= 0x7f) {
             data = abi.encodePacked(bytes1(0xd6), bytes1(0x94), deployer, uint8(nonce));
         } else if (nonce <= 0xff) {
-            data = abi.encodePacked(bytes1(0xd7), bytes1(0x94), deployer, bytes1(0x81), uint8(nonce));
+            data =
+                abi.encodePacked(bytes1(0xd7), bytes1(0x94), deployer, bytes1(0x81), uint8(nonce));
         } else if (nonce <= 0xffff) {
-            data = abi.encodePacked(bytes1(0xd8), bytes1(0x94), deployer, bytes1(0x82), uint16(nonce));
+            data =
+                abi.encodePacked(bytes1(0xd8), bytes1(0x94), deployer, bytes1(0x82), uint16(nonce));
         } else if (nonce <= 0xffffff) {
-            data = abi.encodePacked(bytes1(0xd9), bytes1(0x94), deployer, bytes1(0x83), uint24(nonce));
+            data =
+                abi.encodePacked(bytes1(0xd9), bytes1(0x94), deployer, bytes1(0x83), uint24(nonce));
         } else {
-            data = abi.encodePacked(bytes1(0xda), bytes1(0x94), deployer, bytes1(0x84), uint32(nonce));
+            data =
+                abi.encodePacked(bytes1(0xda), bytes1(0x94), deployer, bytes1(0x84), uint32(nonce));
         }
         return address(uint160(uint256(keccak256(data))));
     }
@@ -134,4 +143,5 @@ contract ZoneFactory is IZoneFactory {
     function isZonePortal(address portal) external view returns (bool) {
         return _isZonePortal[portal];
     }
+
 }

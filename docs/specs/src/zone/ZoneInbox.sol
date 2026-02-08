@@ -1,17 +1,38 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Deposit, IZoneToken, IZoneInbox, ITempoState } from "./IZone.sol";
+import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, EncryptedDepositLib } from "./EncryptedDeposit.sol";
+import {
+    AES_GCM_DECRYPT,
+    CHAUM_PEDERSEN_VERIFY,
+    DecryptionData,
+    Deposit,
+    DepositType,
+    EncryptedDeposit,
+    IAesGcmDecrypt,
+    IChaumPedersenVerify,
+    ITempoState,
+    IZoneConfig,
+    IZoneInbox,
+    IZoneToken,
+    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_ENCRYPTION_KEYS_SLOT,
+    QueuedDeposit
+} from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
-/// @dev Called by sequencer as a system transaction. Combines Tempo header advancement
+/// @dev Called by sequencer. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice Zone configuration (reads sequencer from L1)
+    IZoneConfig public immutable config;
 
     /// @notice The Tempo portal address (for reading deposit queue hash)
     address public immutable tempoPortal;
@@ -20,42 +41,25 @@ contract ZoneInbox is IZoneInbox {
     TempoState internal immutable _tempoState;
 
     /// @notice The zone token (TIP-20 at same address as Tempo)
-    IZoneToken public immutable gasToken;
-
-    /// @notice Current sequencer address
-    address public sequencer;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
+    IZoneToken public immutable zoneToken;
 
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
-
-    /// @notice Storage slot for currentDepositQueueHash in ZonePortal
-    /// @dev ZonePortal storage layout (non-immutable variables only):
-    ///      slot 0: sequencer (address)
-    ///      slot 1: pendingSequencer (address)
-    ///      slot 2: sequencerPubkey (bytes32)
-    ///      slot 3: withdrawalBatchIndex (uint64)
-    ///      slot 4: blockHash (bytes32)
-    ///      slot 5: currentDepositQueueHash (bytes32) ← this one
-    ///      slot 6: lastSyncedTempoBlockNumber (uint64)
-    bytes32 internal constant CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
     constructor(
+        address _config,
         address _tempoPortalAddr,
         address _tempoStateAddr,
-        address _gasToken,
-        address _sequencer
+        address _zoneToken
     ) {
+        config = IZoneConfig(_config);
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
-        gasToken = IZoneToken(_gasToken);
-        sequencer = _sequencer;
+        zoneToken = IZoneToken(_zoneToken);
     }
 
     /// @notice The TempoState predeploy address
@@ -64,23 +68,99 @@ contract ZoneInbox is IZoneInbox {
     }
 
     /*//////////////////////////////////////////////////////////////
-                         SEQUENCER MANAGEMENT
+                         CRYPTOGRAPHIC HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
+    /// @dev HMAC ipad constant (0x36 repeated 32 times)
+    bytes32 private constant _IPAD =
+        0x3636363636363636363636363636363636363636363636363636363636363636;
+    /// @dev HMAC opad constant (0x5c repeated 32 times)
+    bytes32 private constant _OPAD =
+        0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
+
+    /// @notice HMAC-SHA256 implementation using the SHA256 precompile
+    /// @dev HMAC(key, message) = SHA256((key ⊕ opad) || SHA256((key ⊕ ipad) || message))
+    ///      where ipad = 0x36 repeated, opad = 0x5c repeated.
+    ///      Uses word-level XOR instead of byte-by-byte loops for ~95% gas reduction.
+    /// @param key The HMAC key (will be hashed if longer than 64 bytes)
+    /// @param message The message to authenticate
+    /// @return result The 32-byte HMAC-SHA256 output
+    function _hmacSha256(
+        bytes memory key,
+        bytes memory message
+    )
+        internal
+        view
+        returns (bytes32 result)
+    {
+        // Load key into two 32-byte words (SHA256 block size = 64 bytes = 2 words)
+        bytes32 keyWord0;
+        bytes32 keyWord1;
+
+        if (key.length > 64) {
+            // Key longer than block size: hash it first (result goes in first word, second is zero)
+            keyWord0 = sha256(key);
+        } else {
+            assembly {
+                let keyLen := mload(key)
+                keyWord0 := mload(add(key, 32))
+                // Load second word only if key > 32 bytes
+                switch gt(keyLen, 32)
+                case 1 { keyWord1 := mload(add(key, 64)) }
+                default { keyWord1 := 0 }
+                // Zero out bytes beyond key length in first word
+                if lt(keyLen, 32) {
+                    let shift := mul(sub(32, keyLen), 8)
+                    keyWord0 := and(keyWord0, not(sub(shl(shift, 1), 1)))
+                }
+                // Zero out bytes beyond key length in second word
+                if and(gt(keyLen, 32), lt(keyLen, 64)) {
+                    let shift := mul(sub(64, keyLen), 8)
+                    keyWord1 := and(keyWord1, not(sub(shl(shift, 1), 1)))
+                }
+            }
+        }
+
+        // Inner hash: SHA256((key ⊕ ipad) || message)
+        bytes32 innerHash = sha256(abi.encodePacked(keyWord0 ^ _IPAD, keyWord1 ^ _IPAD, message));
+
+        // Outer hash: SHA256((key ⊕ opad) || innerHash)
+        result = sha256(abi.encodePacked(keyWord0 ^ _OPAD, keyWord1 ^ _OPAD, innerHash));
     }
 
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
+    /// @notice HKDF-SHA256 key derivation (simplified single-output version)
+    /// @dev Implements HKDF-Extract and HKDF-Expand to derive a 32-byte key
+    ///      from the input key material (shared secret).
+    /// @param ikm Input key material (the ECDH shared secret)
+    /// @param salt Salt value (use "ecies-aes-key" for ECIES)
+    /// @param info Context-specific info (typically empty for ECIES)
+    /// @return okm Output key material (32 bytes for AES-256)
+    function _hkdfSha256(
+        bytes32 ikm,
+        bytes memory salt,
+        bytes memory info
+    )
+        internal
+        view
+        returns (bytes32 okm)
+    {
+        // HKDF-Extract: PRK = HMAC-SHA256(salt, IKM)
+        bytes32 prk = _hmacSha256(salt, abi.encodePacked(ikm));
+
+        // HKDF-Expand: OKM = HMAC-SHA256(PRK, info || 0x01)
+        // We only need 32 bytes (one block), so N=1 and we append 0x01
+        bytes memory expandInput = bytes.concat(info, hex"01");
+        okm = _hmacSha256(abi.encodePacked(prk), expandInput);
+    }
+
+    function _readEncryptionKey(uint256 keyIndex) internal view returns (bytes32 x, uint8 yParity) {
+        uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
+        uint256 slotX = base + (keyIndex * 2);
+        uint256 slotMeta = slotX + 1;
+        bytes32 xSlot = _tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotX));
+        if (xSlot == bytes32(0)) revert InvalidSharedSecretProof();
+        bytes32 metaSlot = _tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotMeta));
+        return (xSlot, uint8(uint256(metaSlot) & 0xff));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -90,41 +170,123 @@ contract ZoneInbox is IZoneInbox {
     /// @notice Advance Tempo state and process deposits in a single system transaction
     /// @dev This is the main entry point for the sequencer's system transaction.
     ///      1. Advances the zone's view of Tempo by processing the header
-    ///      2. Processes deposits from the deposit queue
+    ///      2. Processes deposits from the unified queue (regular + encrypted)
     ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
-    ///      Protocol and proof enforce this runs at the start of each block.
+    ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
     /// @param header RLP-encoded Tempo block header
-    /// @param deposits Array of deposits to process (oldest first, must be contiguous from processedDepositQueueHash)
+    /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
+    /// @param decryptions Decryption data for encrypted deposits (1:1 with encrypted deposits, in order)
     function advanceTempo(
         bytes calldata header,
-        Deposit[] calldata deposits
-    ) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        QueuedDeposit[] calldata deposits,
+        DecryptionData[] calldata decryptions
+    )
+        external
+    {
+        if (msg.sender != config.sequencer()) revert OnlySequencer();
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
         _tempoState.finalizeTempo(header);
 
         // Step 2: Process deposits and build hash chain
         bytes32 currentHash = processedDepositQueueHash;
+        uint256 decryptionIndex = 0;
 
         for (uint256 i = 0; i < deposits.length; i++) {
-            Deposit calldata d = deposits[i];
+            QueuedDeposit calldata qd = deposits[i];
 
-            // Advance the hash chain (matches Tempo's deposit queue structure)
-            currentHash = keccak256(abi.encode(d, currentHash));
+            if (qd.depositType == DepositType.Regular) {
+                // Decode regular deposit
+                Deposit memory d = abi.decode(qd.depositData, (Deposit));
 
-            // Mint zone tokens to the recipient
-            gasToken.mint(d.to, d.amount);
+                // Advance the hash chain with type discriminator
+                currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
-            emit DepositProcessed(currentHash, d.sender, d.to, d.amount, d.memo);
+                // Mint zone tokens to the recipient
+                zoneToken.mint(d.to, d.amount);
+
+                emit DepositProcessed(currentHash, d.sender, d.to, d.amount, d.memo);
+            } else {
+                // Decode encrypted deposit
+                EncryptedDeposit memory ed = abi.decode(qd.depositData, (EncryptedDeposit));
+
+                // Sequencer must provide decryption for this encrypted deposit
+                if (decryptionIndex >= decryptions.length) revert MissingDecryptionData();
+                DecryptionData calldata dec = decryptions[decryptionIndex++];
+
+                // Step 1: Verify Chaum-Pedersen proof of correct shared secret derivation
+                // This prevents griefing attacks where users encrypt with wrong keys,
+                // without exposing the sequencer's private key to the EVM.
+                // The proof verifies that sharedSecret = privSeq * ephemeralPub without revealing privSeq.
+                // The sequencer's public key is looked up on-chain from the deposit's keyIndex,
+                // so it doesn't need to be in DecryptionData (saves calldata).
+                (bytes32 seqPubX, uint8 seqPubYParity) = _readEncryptionKey(ed.keyIndex);
+                bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY)
+                    .verifyProof(
+                        ed.encrypted.ephemeralPubkeyX,
+                        ed.encrypted.ephemeralPubkeyYParity,
+                        dec.sharedSecret,
+                        seqPubX,
+                        seqPubYParity,
+                        dec.cpProof
+                    );
+                if (!proofValid) revert InvalidSharedSecretProof();
+
+                // Step 2: Derive AES key from shared secret using HKDF-SHA256
+                // This is done in Solidity using the SHA256 precompile (0x02)
+                bytes32 aesKey = _hkdfSha256(
+                    dec.sharedSecret,
+                    "ecies-aes-key", // salt
+                    "" // info (empty)
+                );
+
+                // Step 3: Decrypt using AES-256-GCM precompile
+                // The GCM tag proves the plaintext matches the ciphertext for this shared secret
+                (bytes memory decryptedPlaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT)
+                    .decrypt(
+                        aesKey,
+                        ed.encrypted.nonce,
+                        ed.encrypted.ciphertext,
+                        "", // empty AAD
+                        ed.encrypted.tag
+                    );
+
+                // Step 4: Verify decrypted plaintext matches claimed (to, memo)
+                // Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
+                // Must be exactly ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE (64) bytes
+                if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
+                    (address decryptedTo, bytes32 decryptedMemo) =
+                        EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
+                    valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);
+                } else {
+                    valid = false;
+                }
+
+                // Advance the hash chain with type discriminator
+                currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
+
+                if (!valid) {
+                    // Decryption failed (user encrypted garbage or corrupted data)
+                    // Return funds to sender instead of blocking chain progress
+                    zoneToken.mint(ed.sender, ed.amount);
+                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.amount);
+                } else {
+                    // Decryption succeeded - mint to the decrypted recipient
+                    zoneToken.mint(dec.to, ed.amount);
+                    emit EncryptedDepositProcessed(
+                        currentHash, ed.sender, dec.to, ed.amount, dec.memo
+                    );
+                }
+            }
         }
+
+        // Verify all decryption data was consumed
+        if (decryptionIndex != decryptions.length) revert ExtraDecryptionData();
 
         // Step 3: Validate against Tempo state
         // Read currentDepositQueueHash from the portal's storage using the new Tempo state
-        bytes32 tempoCurrentHash = _tempoState.readTempoStorageSlot(
-            tempoPortal,
-            CURRENT_DEPOSIT_QUEUE_HASH_SLOT
-        );
+        bytes32 tempoCurrentHash =
+            _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
 
         // Our processed hash must match Tempo's current hash for now.
         // TODO: Implement recursive ancestor check in proof or on-chain as a fallback.
@@ -142,4 +304,5 @@ contract ZoneInbox is IZoneInbox {
             currentHash
         );
     }
+
 }

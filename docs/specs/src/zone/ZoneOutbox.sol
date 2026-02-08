@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneOutbox, IZoneGasToken, Withdrawal, LastBatch } from "./IZone.sol";
+import { IZoneConfig, IZoneOutbox, IZoneToken, LastBatch, Withdrawal } from "./IZone.sol";
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
@@ -9,6 +9,7 @@ import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 /// @dev Burns zone tokens and stores pending withdrawals. Sequencer calls finalizeWithdrawalBatch()
 ///      at the end of a block to construct withdrawal queue hash on-chain.
 contract ZoneOutbox is IZoneOutbox {
+
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -22,22 +23,23 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Any practical fee rate would be orders of magnitude lower.
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
 
+    /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
+    /// @dev Covers processWithdrawal overhead: queue dequeue, transfer, event emission
+    uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Zone configuration (reads sequencer from L1)
+    IZoneConfig public immutable config;
+
     /// @notice The zone token (TIP-20 at same address as Tempo)
-    IZoneGasToken public immutable gasToken;
+    IZoneToken public immutable zoneToken;
 
-    /// @notice Current sequencer address
-    address public sequencer;
-
-    /// @notice Pending sequencer for two-step transfer
-    address public pendingSequencer;
-
-    /// @notice Tempo gas rate (zone token units per gas unit)
+    /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
-    ///      Fee = gasLimit * tempoGasRate. User must include all gas costs in gasLimit.
+    ///      Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     uint128 public tempoGasRate;
 
     /// @notice Next withdrawal index (monotonically increasing)
@@ -64,38 +66,14 @@ contract ZoneOutbox is IZoneOutbox {
     error GasFeeRateTooHigh();
     error TransferFailed();
     error OnlySequencer();
-    error NotPendingSequencer();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(
-        address _gasToken,
-        address _sequencer
-    ) {
-        gasToken = IZoneGasToken(_gasToken);
-        sequencer = _sequencer;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                         SEQUENCER MANAGEMENT
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Start a sequencer transfer. Only callable by current sequencer.
-    function transferSequencer(address newSequencer) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
-        pendingSequencer = newSequencer;
-        emit SequencerTransferStarted(sequencer, newSequencer);
-    }
-
-    /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
-    function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
-        address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
-        pendingSequencer = address(0);
-        emit SequencerTransferred(previousSequencer, sequencer);
+    constructor(address _config, address _zoneToken) {
+        config = IZoneConfig(_config);
+        zoneToken = IZoneToken(_zoneToken);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -106,20 +84,20 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
     ///      If actual Tempo gas is higher, sequencer covers the difference.
     ///      If actual Tempo gas is lower, sequencer keeps the surplus.
-    /// @param _tempoGasRate Gas token units per gas unit on Tempo
+    /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        if (msg.sender != config.sequencer()) revert OnlySequencer();
         if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
     }
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
+    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate. User must estimate total gas needed.
     /// @param gasLimit Total gas limit (must cover processWithdrawal + any callback)
     /// @return fee The total fee in zone token units
     function calculateWithdrawalFee(uint64 gasLimit) public view returns (uint128 fee) {
-        fee = uint128(gasLimit) * tempoGasRate;
+        fee = uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -143,7 +121,9 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 gasLimit,
         address fallbackRecipient,
         bytes calldata data
-    ) external {
+    )
+        external
+    {
         // Always require a valid fallback recipient
         if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
@@ -155,45 +135,38 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         // Calculate processing fee (locked in at request time)
-        // Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
         uint128 fee = calculateWithdrawalFee(gasLimit);
         uint128 totalBurn = amount + fee;
 
         // Transfer tokens from sender to this contract, then burn
         // (Using transferFrom so user must approve first)
-        if (!gasToken.transferFrom(msg.sender, address(this), totalBurn)) {
+        if (!zoneToken.transferFrom(msg.sender, address(this), totalBurn)) {
             revert TransferFailed();
         }
 
         // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
         // Amount goes to recipient, fee goes to sequencer
-        gasToken.burn(address(this), totalBurn);
+        zoneToken.burn(address(this), totalBurn);
 
         // Store withdrawal in pending array
-        _pendingWithdrawals.push(Withdrawal({
-            sender: msg.sender,
-            to: to,
-            amount: amount,
-            fee: fee,
-            memo: memo,
-            gasLimit: gasLimit,
-            fallbackRecipient: fallbackRecipient,
-            callbackData: data
-        }));
+        _pendingWithdrawals.push(
+            Withdrawal({
+                sender: msg.sender,
+                to: to,
+                amount: amount,
+                fee: fee,
+                memo: memo,
+                gasLimit: gasLimit,
+                fallbackRecipient: fallbackRecipient,
+                callbackData: data
+            })
+        );
 
         // Emit event for observability
         uint64 index = nextWithdrawalIndex++;
 
         emit WithdrawalRequested(
-            index,
-            msg.sender,
-            to,
-            amount,
-            fee,
-            memo,
-            gasLimit,
-            fallbackRecipient,
-            data
+            index, msg.sender, to, amount, fee, memo, gasLimit, fallbackRecipient, data
         );
     }
 
@@ -202,7 +175,7 @@ contract ZoneOutbox is IZoneOutbox {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Finalize the batch at end of block - build withdrawal hash and emit proof inputs
-    /// @dev Only callable by sequencer as a system transaction at the end of a block.
+    /// @dev Only callable by sequencer at the end of a block.
     ///      The proof enforces that this is the last call in the block and that a batch
     ///      ends with exactly one finalizeWithdrawalBatch call (use count = 0 if no withdrawals).
     ///      Protocol and proof enforce this runs at the end of the final block in the batch.
@@ -210,7 +183,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
-        if (msg.sender != sequencer) revert OnlySequencer();
+        if (msg.sender != config.sequencer()) revert OnlySequencer();
 
         uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
 
@@ -228,12 +201,14 @@ contract ZoneOutbox is IZoneOutbox {
             uint256 start = _pendingWithdrawalsHead;
             uint256 end = start + count;
 
-            for (uint256 i = end; i > start; ) {
+            for (uint256 i = end; i > start;) {
                 uint256 index = i - 1;
                 Withdrawal memory w = _pendingWithdrawals[index];
                 withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
                 delete _pendingWithdrawals[index];
-                unchecked { i--; }
+                unchecked {
+                    i--;
+                }
             }
 
             _pendingWithdrawalsHead = end;
@@ -255,10 +230,7 @@ contract ZoneOutbox is IZoneOutbox {
         });
 
         // Emit event for observability (proof reads from state, not events)
-        emit BatchFinalized(
-            withdrawalQueueHash,
-            currentWithdrawalBatchIndex
-        );
+        emit BatchFinalized(withdrawalQueueHash, currentWithdrawalBatchIndex);
     }
 
     /// @notice Number of pending withdrawals
@@ -273,4 +245,5 @@ contract ZoneOutbox is IZoneOutbox {
     function lastBatch() external view returns (LastBatch memory) {
         return _lastBatch;
     }
+
 }

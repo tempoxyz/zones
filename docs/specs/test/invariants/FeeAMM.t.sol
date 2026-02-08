@@ -181,7 +181,12 @@ contract FeeAMMInvariantTest is BaseTest {
     /// @param tokenSeed1 Seed for selecting user token
     /// @param tokenSeed2 Seed for selecting validator token
     /// @param amount Amount of validator tokens to deposit
-    function mint(uint256 actorSeed, uint256 tokenSeed1, uint256 tokenSeed2, uint256 amount)
+    function mint(
+        uint256 actorSeed,
+        uint256 tokenSeed1,
+        uint256 tokenSeed2,
+        uint256 amount
+    )
         external
     {
         address actor = _selectActor(actorSeed);
@@ -261,7 +266,12 @@ contract FeeAMMInvariantTest is BaseTest {
     /// @param tokenSeed1 Seed for selecting user token
     /// @param tokenSeed2 Seed for selecting validator token
     /// @param liquidityPct Percentage of actor's liquidity to burn (0-100)
-    function burn(uint256 actorSeed, uint256 tokenSeed1, uint256 tokenSeed2, uint256 liquidityPct)
+    function burn(
+        uint256 actorSeed,
+        uint256 tokenSeed1,
+        uint256 tokenSeed2,
+        uint256 liquidityPct
+    )
         external
     {
         BurnContext memory ctx;
@@ -322,7 +332,10 @@ contract FeeAMMInvariantTest is BaseTest {
         BurnContext memory ctx,
         uint256 amountUserToken,
         uint256 amountValidatorToken
-    ) internal view {
+    )
+        internal
+        view
+    {
         // TEMPO-AMM5: Returned amounts should match pro-rata calculation
         uint256 expectedUserAmount =
             (ctx.liquidityToBurn * ctx.reserveUserBefore) / ctx.totalSupplyBefore;
@@ -385,7 +398,9 @@ contract FeeAMMInvariantTest is BaseTest {
         uint256 tokenSeed1,
         uint256 tokenSeed2,
         uint256 amountOutRaw
-    ) external {
+    )
+        external
+    {
         RebalanceContext memory ctx;
         ctx.actor = _selectActor(actorSeed);
         ctx.userToken = _selectToken(tokenSeed1);
@@ -453,7 +468,10 @@ contract FeeAMMInvariantTest is BaseTest {
     }
 
     /// @dev Verifies rebalance swap invariants
-    function _assertRebalanceInvariants(RebalanceContext memory ctx, uint256 amountIn)
+    function _assertRebalanceInvariants(
+        RebalanceContext memory ctx,
+        uint256 amountIn
+    )
         internal
         view
     {
@@ -557,7 +575,9 @@ contract FeeAMMInvariantTest is BaseTest {
         uint256 tokenSeed1,
         uint256 tokenSeed2,
         uint256 amount
-    ) external {
+    )
+        external
+    {
         address actor = _selectActor(actorSeed);
         address userToken = _selectToken(tokenSeed1);
         address validatorToken = _selectToken(tokenSeed2);
@@ -602,7 +622,11 @@ contract FeeAMMInvariantTest is BaseTest {
     /// @param actorSeed Seed for selecting actor
     /// @param tokenSeed1 Seed for selecting user token
     /// @param tokenSeed2 Seed for selecting validator token
-    function smallRebalanceSwap(uint256 actorSeed, uint256 tokenSeed1, uint256 tokenSeed2)
+    function smallRebalanceSwap(
+        uint256 actorSeed,
+        uint256 tokenSeed1,
+        uint256 tokenSeed2
+    )
         external
     {
         address actor = _selectActor(actorSeed);
@@ -660,7 +684,11 @@ contract FeeAMMInvariantTest is BaseTest {
     /// @param actorSeed Seed for selecting actor
     /// @param tokenSeed Seed for selecting token
     /// @param probabilitySeed Seed for probabilistic decisions
-    function toggleBlacklist(uint256 actorSeed, uint256 tokenSeed, uint256 probabilitySeed)
+    function toggleBlacklist(
+        uint256 actorSeed,
+        uint256 tokenSeed,
+        uint256 probabilitySeed
+    )
         external
     {
         address actor = _selectActor(actorSeed);
@@ -775,7 +803,9 @@ contract FeeAMMInvariantTest is BaseTest {
         uint256 validatorSeed,
         uint256 feeAmountRaw,
         uint256 crossTokenBias
-    ) external {
+    )
+        external
+    {
         address user = _selectActor(userSeed);
         address validator = _selectActor(validatorSeed);
 
@@ -896,7 +926,9 @@ contract FeeAMMInvariantTest is BaseTest {
         uint256 expectedOut,
         address userToken,
         address validatorToken
-    ) internal {
+    )
+        internal
+    {
         _log(
             string.concat(
                 "FEE_COLLECTION: ",
@@ -921,7 +953,9 @@ contract FeeAMMInvariantTest is BaseTest {
         address validator,
         uint256 feeAmount,
         address token
-    ) internal {
+    )
+        internal
+    {
         _log(
             string.concat(
                 "FEE_COLLECTION: ",
@@ -938,7 +972,11 @@ contract FeeAMMInvariantTest is BaseTest {
     }
 
     /// @dev Stores pool reserves directly using vm.store
-    function _storePoolReserves(bytes32 poolId, uint128 reserveUser, uint128 reserveValidator)
+    function _storePoolReserves(
+        bytes32 poolId,
+        uint128 reserveUser,
+        uint128 reserveValidator
+    )
         internal
     {
         // Storage layout differs between Rust and Solidity implementations:
@@ -2031,7 +2069,12 @@ contract FeeAMMInvariantTest is BaseTest {
     }
 
     /// @dev Logs a burn action
-    function _logBurn(address actor, uint256 liquidity, uint256 amountUser, uint256 amountValidator)
+    function _logBurn(
+        address actor,
+        uint256 liquidity,
+        uint256 amountUser,
+        uint256 amountValidator
+    )
         internal
     {
         _log(
