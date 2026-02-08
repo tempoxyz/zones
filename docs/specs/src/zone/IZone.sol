@@ -324,7 +324,6 @@ interface IZoneFactory {
         address sequencer;
         address verifier;
         ZoneParams zoneParams;
-        uint256 withdrawalQueueCapacity;
     }
 
     event ZoneCreated(
@@ -422,7 +421,6 @@ interface IZonePortal {
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
     error DepositTooSmall();
-    error InvalidWithdrawalQueueCapacity();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
@@ -440,7 +438,6 @@ interface IZonePortal {
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
-    function withdrawalQueueCapacity() external view returns (uint256);
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);

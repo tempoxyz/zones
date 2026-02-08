@@ -88,8 +88,7 @@ contract ZonePortal is IZonePortal {
         address _sequencer,
         address _verifier,
         bytes32 _genesisBlockHash,
-        uint64 _genesisTempoBlockNumber,
-        uint256 _withdrawalQueueCapacity
+        uint64 _genesisTempoBlockNumber
     ) {
         zoneId = _zoneId;
         token = _token;
@@ -98,8 +97,6 @@ contract ZonePortal is IZonePortal {
         verifier = _verifier;
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
-        if (_withdrawalQueueCapacity == 0) revert InvalidWithdrawalQueueCapacity();
-        _withdrawalQueue.capacity = _withdrawalQueueCapacity;
 
         // Give messenger max approval for the zone token
         ITIP20(_token).approve(_messenger, type(uint256).max);
@@ -154,10 +151,6 @@ contract ZonePortal is IZonePortal {
 
     function withdrawalQueueTail() external view returns (uint256) {
         return _withdrawalQueue.tail;
-    }
-
-    function withdrawalQueueCapacity() external view returns (uint256) {
-        return _withdrawalQueue.capacity;
     }
 
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32) {

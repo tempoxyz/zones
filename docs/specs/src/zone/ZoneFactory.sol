@@ -65,8 +65,7 @@ contract ZoneFactory is IZoneFactory {
             params.sequencer,
             params.verifier,
             params.zoneParams.genesisBlockHash,
-            params.zoneParams.genesisTempoBlockNumber,
-            params.withdrawalQueueCapacity
+            params.zoneParams.genesisTempoBlockNumber
         );
         portal = address(portalContract);
 

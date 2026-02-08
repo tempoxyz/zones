@@ -149,8 +149,7 @@ contract ZoneBridgeTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: genesisTempoBlockNumber
-            }),
-            withdrawalQueueCapacity: 256
+            })
         });
         address portalAddr;
         (zoneId, portalAddr) = l1Factory.createZone(params);

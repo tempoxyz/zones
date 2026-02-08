@@ -100,8 +100,7 @@ contract ZoneIntegrationTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: genesisTempoBlockNumber
-            }),
-            withdrawalQueueCapacity: 256
+            })
         });
         address portalAddr;
         (zoneId, portalAddr) = l1Factory.createZone(params);
@@ -408,8 +407,6 @@ contract ZoneIntegrationTest is BaseTest {
         // Verify queue state
         assertEq(l1Portal.withdrawalQueueHead(), 0);
         assertEq(l1Portal.withdrawalQueueTail(), 3);
-        assertEq(l1Portal.withdrawalQueueCapacity(), 256);
-
         // Process in order
         uint256 bobBefore = pathUSD.balanceOf(bob);
         uint256 charlieBefore = pathUSD.balanceOf(charlie);

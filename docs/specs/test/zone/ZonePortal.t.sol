@@ -153,8 +153,7 @@ contract ZonePortalTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: genesisTempoBlockNumber
-            }),
-            withdrawalQueueCapacity: 256
+            })
         });
 
         address portalAddr;
@@ -1225,12 +1224,8 @@ contract ZonePortalTest is BaseTest {
     }
 
     /*//////////////////////////////////////////////////////////////
-                   WITHDRAWAL QUEUE CAPACITY TESTS
+                   WITHDRAWAL QUEUE TESTS
     //////////////////////////////////////////////////////////////*/
-
-    function test_withdrawalQueue_capacityIsSetCorrectly() public view {
-        assertEq(portal.withdrawalQueueCapacity(), 256);
-    }
 
     function test_withdrawalQueue_emptyBatchDoesNotIncreaseTail() public {
         vm.startPrank(alice);

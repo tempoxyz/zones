@@ -7,17 +7,19 @@ import { Withdrawal, WithdrawalQueueTransition } from "./IZone.sol";
 ///      clearing storage (which would refund gas and create incentive issues).
 bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
 
+/// @dev Fixed capacity for the withdrawal ring buffer (number of batch slots).
+uint256 constant WITHDRAWAL_QUEUE_CAPACITY = 100;
+
 /// @title WithdrawalQueue
 /// @notice Fixed-size ring buffer for zone→Tempo withdrawals
 /// @dev Each batch gets its own slot. Head points to the oldest unprocessed batch,
 ///      tail points to where the next batch will write. Slots contain hash chains
 ///      of withdrawals for that batch. Head and tail are raw uint256 values that
-///      never wrap; modular arithmetic (head % capacity, tail % capacity) is used
+///      never wrap; modular arithmetic (head % WITHDRAWAL_QUEUE_CAPACITY) is used
 ///      only for slot indexing.
 struct WithdrawalQueue {
     uint256 head; // logical index of oldest unprocessed batch
     uint256 tail; // logical index where next batch will write
-    uint256 capacity; // maximum number of slots in the ring buffer
     mapping(uint256 => bytes32) slots; // hash chains per batch (EMPTY_SENTINEL = empty)
 }
 
@@ -40,7 +42,7 @@ library WithdrawalQueueLib {
 
     /// @notice Add a batch's withdrawals to the queue
     /// @dev Called during submitBatch. The batch's withdrawal hash chain goes into
-    ///      the slot at tail % capacity, then tail advances.
+    ///      the slot at tail % WITHDRAWAL_QUEUE_CAPACITY, then tail advances.
     /// @param queue The withdrawal queue
     /// @param transition The withdrawal queue transition containing the hash chain
     function enqueue(
@@ -49,10 +51,9 @@ library WithdrawalQueueLib {
     )
         internal
     {
-        uint256 cap = queue.capacity;
         uint256 tail = queue.tail;
 
-        if (tail - queue.head >= cap) {
+        if (tail - queue.head >= WITHDRAWAL_QUEUE_CAPACITY) {
             revert WithdrawalQueueFull();
         }
 
@@ -60,7 +61,7 @@ library WithdrawalQueueLib {
             return;
         }
 
-        queue.slots[tail % cap] = transition.withdrawalQueueHash;
+        queue.slots[tail % WITHDRAWAL_QUEUE_CAPACITY] = transition.withdrawalQueueHash;
 
         queue.tail = tail + 1;
     }
@@ -85,7 +86,7 @@ library WithdrawalQueueLib {
             revert NoWithdrawalsInQueue();
         }
 
-        uint256 slotIndex = head % queue.capacity;
+        uint256 slotIndex = head % WITHDRAWAL_QUEUE_CAPACITY;
         bytes32 currentSlot = queue.slots[slotIndex];
 
         bytes32 expectedRemainingQueue =
@@ -118,9 +119,9 @@ library WithdrawalQueueLib {
 
     /// @notice Check if the queue is full
     /// @param queue The withdrawal queue
-    /// @return True if length() == capacity
+    /// @return True if length() == WITHDRAWAL_QUEUE_CAPACITY
     function isFull(WithdrawalQueue storage queue) internal view returns (bool) {
-        return queue.tail - queue.head == queue.capacity;
+        return queue.tail - queue.head == WITHDRAWAL_QUEUE_CAPACITY;
     }
 
 }
