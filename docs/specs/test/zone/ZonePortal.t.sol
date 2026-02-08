@@ -2140,6 +2140,68 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
     }
 
+    function test_depositEncrypted_revertsOnCiphertextTooShort() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        payload.ciphertext = new bytes(63); // one byte too short
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.InvalidCiphertextLength.selector, 63, 64)
+        );
+        portal.depositEncrypted(1000e6, 0, payload);
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsOnCiphertextTooLong() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        payload.ciphertext = new bytes(65); // one byte too long
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.InvalidCiphertextLength.selector, 65, 64)
+        );
+        portal.depositEncrypted(1000e6, 0, payload);
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsOnEmptyCiphertext() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        payload.ciphertext = new bytes(0);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.InvalidCiphertextLength.selector, 0, 64));
+        portal.depositEncrypted(1000e6, 0, payload);
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsOnOversizedCiphertext() public {
+        portal.setSequencerEncryptionKey(keccak256("seqKey"), 0x02);
+
+        EncryptedDepositPayload memory payload = _makeEncryptedPayload();
+        payload.ciphertext = new bytes(1024); // large ciphertext (DoS vector)
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+
+        vm.expectRevert(
+            abi.encodeWithSelector(IZonePortal.InvalidCiphertextLength.selector, 1024, 64)
+        );
+        portal.depositEncrypted(1000e6, 0, payload);
+        vm.stopPrank();
+    }
+
     /*//////////////////////////////////////////////////////////////
                     STORAGE LAYOUT VERIFICATION TESTS
     //////////////////////////////////////////////////////////////*/

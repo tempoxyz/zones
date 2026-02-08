@@ -5,6 +5,7 @@ import { ITIP20 } from "../interfaces/ITIP20.sol";
 
 import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
+import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "./EncryptedDeposit.sol";
 import {
     BlockTransition,
     Deposit,
@@ -368,6 +369,14 @@ contract ZonePortal is IZonePortal {
             revert InvalidEphemeralPubkey();
         }
         if (!_isValidSecp256k1X(encrypted.ephemeralPubkeyX)) revert InvalidEphemeralPubkey();
+
+        // Validate ciphertext length — GCM ciphertext == plaintext length (tag is separate)
+        // Prevents DoS: oversized ciphertexts inflate zone-side AES-GCM processing cost
+        if (encrypted.ciphertext.length != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
+            revert InvalidCiphertextLength(
+                encrypted.ciphertext.length, ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+            );
+        }
 
         // Validate encryption key
         (bool valid, uint64 expiresAtBlock) = isEncryptionKeyValid(keyIndex);

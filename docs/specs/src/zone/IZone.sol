@@ -412,6 +412,7 @@ interface IZonePortal {
     error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
     error InvalidEphemeralPubkey();
+    error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error DepositTooSmall();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
