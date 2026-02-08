@@ -516,7 +516,6 @@ interface IZonePortal {
     function messenger() external view returns (address);
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
-    function sequencerPubkey() external view returns (bytes32);
     function zoneGasRate() external view returns (uint128);
     function verifier() external view returns (address);
     function genesisTempoBlockNumber() external view returns (uint64);
@@ -534,9 +533,6 @@ interface IZonePortal {
 
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
-
-    /// @notice Set the sequencer's public key. Only callable by the sequencer.
-    function setSequencerPubkey(bytes32 pubkey) external;
 
     /// @notice Set zone gas rate. Only callable by sequencer.
     function setZoneGasRate(uint128 _zoneGasRate) external;

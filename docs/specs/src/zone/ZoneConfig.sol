@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITempoState, IZoneToken } from "./IZone.sol";
+import {ITempoState, IZoneToken} from "./IZone.sol";
 
 /// @title ZoneConfig
 /// @notice Central zone metadata and L1 state references
@@ -9,7 +9,6 @@ import { ITempoState, IZoneToken } from "./IZone.sol";
 ///      Provides single source of truth for zone configuration.
 ///      Reads sequencer from L1 ZonePortal, eliminating duplicate sequencer management.
 contract ZoneConfig {
-
     /*//////////////////////////////////////////////////////////////
                                IMMUTABLES
     //////////////////////////////////////////////////////////////*/
@@ -31,12 +30,11 @@ contract ZoneConfig {
     /// @dev ZonePortal storage layout (non-immutable variables):
     ///      slot 0: sequencer (address)
     ///      slot 1: pendingSequencer (address)
-    ///      slot 2: sequencerPubkey (bytes32, legacy)
-    ///      slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
-    ///      slot 4: blockHash (bytes32)
-    ///      slot 5: currentDepositQueueHash (bytes32)
-    ///      slot 6: lastSyncedTempoBlockNumber (uint64)
-    ///      slot 7: _encryptionKeys (EncryptionKeyEntry[])
+    ///      slot 2: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+    ///      slot 3: blockHash (bytes32)
+    ///      slot 4: currentDepositQueueHash (bytes32)
+    ///      slot 5: lastSyncedTempoBlockNumber (uint64)
+    ///      slot 6: _encryptionKeys (EncryptionKeyEntry[])
     bytes32 internal constant SEQUENCER_SLOT = bytes32(uint256(0));
 
     /// @notice Storage slot for pendingSequencer in ZonePortal
@@ -46,8 +44,8 @@ contract ZoneConfig {
     /// @dev Each EncryptionKeyEntry occupies 2 storage slots:
     ///      slot base + (index * 2):     x (bytes32)
     ///      slot base + (index * 2) + 1: yParity (uint8) + activationBlock (uint64) [packed]
-    ///      where base = keccak256(abi.encode(7))
-    bytes32 internal constant ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
+    ///      where base = keccak256(abi.encode(6))
+    bytes32 internal constant ENCRYPTION_KEYS_SLOT = bytes32(uint256(6));
 
     /*//////////////////////////////////////////////////////////////
                                ERRORS
@@ -142,5 +140,4 @@ contract ZoneConfig {
     function getZoneToken() external view returns (IZoneToken) {
         return IZoneToken(zoneToken);
     }
-
 }
