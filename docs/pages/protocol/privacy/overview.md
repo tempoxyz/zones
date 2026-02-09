@@ -1586,17 +1586,7 @@ This section describes the concrete implementation approach for zone nodes.
 
 ### Node architecture
 
-Each zone runs as an ExEx (Execution Extension) attached to a Tempo node. There are separate ExEx instances per zone—for example, one ExEx for a USDC zone and another for a USDT zone.
-
-```
-┌─────────────────────────────────────────────────────┐
-│                  Tempo Node                      │
-│  ┌─────────────┐  ┌─────────────┐                   │
-│  │ USDC Zone   │  │ USDT Zone   │                   │
-│  │   ExEx      │  │   ExEx      │  ...              │
-│  └─────────────┘  └─────────────┘                   │
-└─────────────────────────────────────────────────────┘
-```
+Each zone runs as separate Tempo zone node (based on the Tempo client). It uses chain notifications to subscribe to all finalized updates on contracts that are read from on L1.
 
 ### Execution model
 
