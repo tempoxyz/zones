@@ -146,30 +146,19 @@ pub struct ZoneBlock {
 
 ### Deposit and Decryption Types
 
+These types mirror the Solidity definitions in `IZone.sol`:
+
 ```rust
-/// Mirrors the Solidity `QueuedDeposit` struct from IZone.sol
 pub struct QueuedDeposit {
-    pub deposit_type: DepositType,
-    pub deposit_data: Vec<u8>, // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    pub deposit_type: DepositType,  // Plain or Encrypted
+    pub deposit_data: Vec<u8>,      // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
 }
 
-pub enum DepositType {
-    Plain,
-    Encrypted,
-}
-
-/// Mirrors the Solidity `DecryptionData` struct from IZone.sol
-/// Provided by the sequencer for each encrypted deposit
 pub struct DecryptionData {
-    pub shared_secret: B256,  // ECDH shared secret (x-coordinate)
-    pub to: Address,          // Decrypted recipient
-    pub memo: B256,           // Decrypted memo
-    pub cp_proof: ChaumPedersenProof, // Proof of correct shared secret derivation
-}
-
-pub struct ChaumPedersenProof {
-    pub s: B256, // Response: s = r + c * privSeq (mod n)
-    pub c: B256, // Challenge: c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)
+    pub shared_secret: B256,
+    pub to: Address,
+    pub memo: B256,
+    pub cp_proof: ChaumPedersenProof,  // (s, c) Chaum-Pedersen proof
 }
 ```
 
@@ -266,55 +255,9 @@ Inside execution, `TempoState.readTempoStorageSlot` is modeled to read from the 
 
 #### Deduplication Strategy
 
-The key optimization is the **deduplicated node pool**. Instead of including separate MPT proofs for each Tempo storage read, all proofs share a single pool of verified nodes.
+The key optimization is the **deduplicated node pool**. Instead of including separate MPT proofs for each Tempo storage read, all proofs share a single pool of verified nodes keyed by `keccak256(rlp(node))`. Each `L1StateRead` references nodes in the pool by hash, and each node is verified exactly once.
 
-**Why this matters:**
-- A batch might perform 100,000 Tempo state reads across 100 zone blocks
-- Many reads access the same accounts (shared account trie paths)
-- Many reads access slots in nearby addresses (shared storage trie paths)
-- Across multiple Tempo blocks, unchanged state shares identical nodes
-
-**How it works:**
-
-1. `node_pool` contains every unique MPT node, keyed by `keccak256(rlp(node))`
-2. Each `L1StateRead` has a `node_path` that references nodes in the pool by hash
-3. During proving:
-   - Verify each node in the pool exactly once: `keccak256(node) == hash`
-   - For each read, walk the `node_path` through verified nodes
-   - No node is ever hashed more than once
-
-**Example:**
-
-```
-Zone block 0: Read Account A slot 5 from Tempo block 1000
-Zone block 1: Read Account A slot 6 from Tempo block 1000
-Zone block 2: Read Account A slot 5 from Tempo block 1001
-
-Traditional approach:
-  - 3 separate proofs × 8 nodes each = 24 node verifications
-  - Many nodes overlap but are verified multiple times
-
-Deduplicated approach:
-  node_pool = {
-    0xaaa... -> [branch node],      // shared by all 3 reads
-    0xbbb... -> [branch node],      // shared by all 3 reads
-    0xccc... -> [extension node],   // shared by all 3 reads
-    0xddd... -> [leaf for A[5] in block 1000],
-    0xeee... -> [leaf for A[6] in block 1000],
-    0xfff... -> [leaf for A[5] in block 1001],
-  }
-  Total: ~11 unique nodes verified once each
-```
-
-**Proof size reduction:**
-- Traditional: 100,000 reads × 8 nodes × 32 bytes = 25.6 MB
-- Deduplicated: ~50,000 unique nodes × 32 bytes = 1.6 MB
-- **Compression: ~16x smaller**
-
-**Prover cost reduction:**
-- Traditional: 800,000 keccak operations
-- Deduplicated: 50,000 keccak operations
-- **Speedup: ~16x faster**
+Node pool deduplication typically reduces total proof data by an order of magnitude, since the same intermediate MPT nodes appear across many reads (shared account trie paths, nearby storage slots, and unchanged state across Tempo blocks).
 
 ## Implementation
 
@@ -473,9 +416,7 @@ fn execute_zone_block(
         )
         .build();
 
-    // System tx: advance Tempo and process deposits.
-    // The TempoState precompile must bind reads during this call to the newly finalized
-    // Tempo header, and reject any unbound reads.
+    // System tx: advance Tempo and process deposits
     if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
         evm.transact_commit(system_tx_advance_tempo(
             tempo_header_rlp,
@@ -546,27 +487,4 @@ pub extern "C" fn ecall_prove_batch(
 
 ## On-Chain Verification
 
-The portal contract receives:
-- `tempoBlockNumber` - block zone committed to (from zone's TempoState)
-- `recentTempoBlockNumber` - optional recent block for ancestry proofs (0 = direct lookup)
-- `blockTransition` - from `BatchOutput` (block hash based)
-- `proof` - ZKVM proof or TEE attestation
-
-The portal passes the following to the verifier:
-- `tempoBlockNumber`
-- `anchorBlockNumber` and `anchorBlockHash` (from EIP-2935)
-- `expectedWithdrawalBatchIndex` (portal's `withdrawalBatchIndex + 1`)
-- `sequencer` (the registered sequencer address)
-- `blockTransition`, `depositQueueTransition`, `withdrawalQueueTransition`
-- `verifierConfig` and `proof`
-
-The verifier validates that the prover correctly executed the state transition and produced the output commitments.
-In particular, the proof must enforce:
-- `TempoState.tempoBlockNumber == tempoBlockNumber`
-- **Direct mode** (`anchorBlockNumber == tempoBlockNumber`): `TempoState.tempoBlockHash == anchorBlockHash`
-- **Ancestry mode** (`anchorBlockNumber > tempoBlockNumber`): parent-hash chain from `tempoBlockNumber` to `anchorBlockNumber`, ending at `anchorBlockHash`
-- `ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex` (passed by portal)
-- `ZoneOutbox.lastBatch().withdrawalQueueHash == withdrawalQueueTransition.withdrawalQueueHash`
-- Zone block `beneficiary` equals `sequencer` (passed by portal)
-- `DepositQueueTransition` matches `ZoneInbox.processedDepositQueueHash` changes
-- `BlockTransition` is computed from the zone block header hash (not raw state root)
+The prover output (`BatchOutput`) maps directly to the `IVerifier.verify()` inputs. The portal provides `anchorBlockNumber`, `anchorBlockHash` (from EIP-2935), `expectedWithdrawalBatchIndex`, and `sequencer`. See [overview](./overview.md#batch-submission) and `IZone.sol` for the full verification interface.
