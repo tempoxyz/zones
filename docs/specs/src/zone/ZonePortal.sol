@@ -19,8 +19,7 @@ import {
     IZoneMessenger,
     IZonePortal,
     QueuedDeposit,
-    Withdrawal,
-    WithdrawalQueueTransition
+    Withdrawal
 } from "./IZone.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
 
@@ -569,7 +568,7 @@ contract ZonePortal is IZonePortal {
         uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
-        WithdrawalQueueTransition calldata withdrawalQueueTransition,
+        bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
     )
@@ -615,7 +614,7 @@ contract ZonePortal is IZonePortal {
                 sequencer,
                 blockTransition,
                 depositQueueTransition,
-                withdrawalQueueTransition,
+                withdrawalQueueHash,
                 verifierConfig,
                 proof
             );
@@ -626,14 +625,14 @@ contract ZonePortal is IZonePortal {
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
 
-        _withdrawalQueue.enqueue(withdrawalQueueTransition);
+        _withdrawalQueue.enqueue(withdrawalQueueHash);
 
         // Emit event after state updates
         emit BatchSubmitted(
             withdrawalBatchIndex,
             depositQueueTransition.nextProcessedHash,
             blockHash,
-            withdrawalQueueTransition.withdrawalQueueHash
+            withdrawalQueueHash
         );
     }
 

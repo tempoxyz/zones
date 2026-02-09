@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Withdrawal, WithdrawalQueueTransition } from "./IZone.sol";
+import { Withdrawal } from "./IZone.sol";
 
 /// @dev Sentinel value for empty slots. Using 0xff...ff instead of 0x00 to avoid
 ///      clearing storage (which would refund gas and create incentive issues).
@@ -44,24 +44,19 @@ library WithdrawalQueueLib {
     /// @dev Called during submitBatch. The batch's withdrawal hash chain goes into
     ///      the slot at tail % WITHDRAWAL_QUEUE_CAPACITY, then tail advances.
     /// @param queue The withdrawal queue
-    /// @param transition The withdrawal queue transition containing the hash chain
-    function enqueue(
-        WithdrawalQueue storage queue,
-        WithdrawalQueueTransition memory transition
-    )
-        internal
-    {
+    /// @param withdrawalQueueHash The hash chain of withdrawals for this batch (0 if none)
+    function enqueue(WithdrawalQueue storage queue, bytes32 withdrawalQueueHash) internal {
         uint256 tail = queue.tail;
 
         if (tail - queue.head >= WITHDRAWAL_QUEUE_CAPACITY) {
             revert WithdrawalQueueFull();
         }
 
-        if (transition.withdrawalQueueHash == bytes32(0)) {
+        if (withdrawalQueueHash == bytes32(0)) {
             return;
         }
 
-        queue.slots[tail % WITHDRAWAL_QUEUE_CAPACITY] = transition.withdrawalQueueHash;
+        queue.slots[tail % WITHDRAWAL_QUEUE_CAPACITY] = withdrawalQueueHash;
 
         queue.tail = tail + 1;
     }

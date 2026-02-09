@@ -44,13 +44,13 @@ contract ZoneFactoryTest is BaseTest {
 
         (uint64 zoneId, address portal) = zoneFactory.createZone(params);
 
-        assertEq(zoneId, 0);
+        assertEq(zoneId, 1);
         assertTrue(portal != address(0));
         assertEq(zoneFactory.zoneCount(), 1);
         assertTrue(zoneFactory.isZonePortal(portal));
 
         ZoneInfo memory info = zoneFactory.zones(zoneId);
-        assertEq(info.zoneId, 0);
+        assertEq(info.zoneId, 1);
         assertEq(info.portal, portal);
         assertTrue(info.messenger != address(0));
         assertEq(info.token, address(pathUSD));
@@ -114,8 +114,8 @@ contract ZoneFactoryTest is BaseTest {
 
         (uint64 zoneId2, address portal2) = zoneFactory.createZone(params2);
 
-        assertEq(zoneId1, 0);
-        assertEq(zoneId2, 1);
+        assertEq(zoneId1, 1);
+        assertEq(zoneId2, 2);
         assertTrue(portal1 != portal2);
         assertEq(zoneFactory.zoneCount(), 2);
         assertTrue(zoneFactory.isZonePortal(portal1));

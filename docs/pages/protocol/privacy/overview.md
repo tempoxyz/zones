@@ -135,11 +135,6 @@ struct DepositQueueTransition {
     bytes32 nextProcessedHash;     // where zone processed up to (proof output)
 }
 
-/// @notice Withdrawal queue transition for batch proofs
-struct WithdrawalQueueTransition {
-    bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
-}
-
 interface IVerifier {
     /// @notice Verify a batch proof
     /// @dev The proof validates:
@@ -159,7 +154,7 @@ interface IVerifier {
         address sequencer,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
-        WithdrawalQueueTransition calldata withdrawalQueueTransition,
+        bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external view returns (bool);
@@ -371,7 +366,7 @@ interface IVerifier {
         address sequencer,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
-        WithdrawalQueueTransition calldata withdrawalQueueTransition,
+        bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external view returns (bool);
@@ -418,7 +413,7 @@ struct WithdrawalQueue {
 library WithdrawalQueueLib {
     /// @notice Add a batch's withdrawals to the queue (called during batch submission)
     /// @dev Writes to slot at tail, then advances tail. Updates maxSize if needed.
-    function enqueue(WithdrawalQueue storage q, WithdrawalQueueTransition memory transition) internal;
+    function enqueue(WithdrawalQueue storage q, bytes32 withdrawalQueueHash) internal;
 
     /// @notice Pop the next withdrawal from the queue (on-chain operation)
     /// @dev Verifies the withdrawal is at the head of the current slot and advances.
@@ -617,7 +612,7 @@ interface IZonePortal {
         uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
-        WithdrawalQueueTransition calldata withdrawalQueueTransition,
+        bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
     ) external;

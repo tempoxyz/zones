@@ -14,9 +14,13 @@ contract ZoneFactory is IZoneFactory {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    uint64 internal _zoneCount;
+    /// @notice Next zone ID to be assigned
+    /// @dev Starts at 1, reserving zone ID 0 for potential future use (e.g., mainnet as zone 0)
+    uint64 internal _nextZoneId = 1;
+
     mapping(uint64 => ZoneInfo) internal _zones;
     mapping(address => bool) internal _isZonePortal;
+    mapping(address => bool) internal _isZoneMessenger;
 
     /// @notice Tracks deployment count for CREATE address prediction
     /// @dev Contracts start with nonce 1, not 0
@@ -35,7 +39,7 @@ contract ZoneFactory is IZoneFactory {
         if (params.sequencer == address(0)) revert InvalidSequencer();
         if (params.verifier == address(0)) revert InvalidVerifier();
 
-        zoneId = _zoneCount++;
+        zoneId = _nextZoneId++;
 
         // We deploy messenger first, then portal.
         // Messenger needs portal's address at construction (immutable).
@@ -86,6 +90,7 @@ contract ZoneFactory is IZoneFactory {
         });
 
         _isZonePortal[portal] = true;
+        _isZoneMessenger[messengerAddress] = true;
 
         emit ZoneCreated(
             zoneId,
@@ -132,8 +137,9 @@ contract ZoneFactory is IZoneFactory {
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Returns the number of zones created (not including reserved zone 0)
     function zoneCount() external view returns (uint64) {
-        return _zoneCount;
+        return _nextZoneId - 1;
     }
 
     function zones(uint64 zoneId) external view returns (ZoneInfo memory) {
@@ -142,6 +148,10 @@ contract ZoneFactory is IZoneFactory {
 
     function isZonePortal(address portal) external view returns (bool) {
         return _isZonePortal[portal];
+    }
+
+    function isZoneMessenger(address messenger) external view returns (bool) {
+        return _isZoneMessenger[messenger];
     }
 
 }
