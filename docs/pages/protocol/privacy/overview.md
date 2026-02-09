@@ -129,7 +129,7 @@ struct BlockTransition {
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
-///      that nextProcessedHash matches currentDepositQueueHash for now. TODO: allow ancestor checks.
+///      that nextProcessedHash matches currentDepositQueueHash for now. 
 struct DepositQueueTransition {
     bytes32 prevProcessedHash;     // where proof starts (verified against zone state)
     bytes32 nextProcessedHash;     // where zone processed up to (proof output)
@@ -209,7 +209,7 @@ Where `deposit` is a `Deposit` struct containing the sender, recipient, amount, 
 
 The portal tracks `currentDepositQueueHash` where new deposits land. The zone tracks its own `processedDepositQueueHash` in EVM state.
 
-**Proof requirements**: The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof. The zone's `advanceTempo()` function processes deposits and updates the zone's `processedDepositQueueHash`. The proof ensures this was done correctly by validating the Tempo state read. For now, the on-chain inbox requires an exact match; TODO: implement a recursive ancestor check in the proof or on-chain as a fallback.
+**Proof requirements**: The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof. The zone's `advanceTempo()` function processes deposits and updates the zone's `processedDepositQueueHash`. The proof ensures this was done correctly by validating the Tempo state read. For now, the on-chain inbox requires an exact match.
 
 **After batch accepted**:
 1. `lastSyncedTempoBlockNumber = tempoBlockNumber` (record how far Tempo state was synced)
@@ -1047,7 +1047,7 @@ Adding d4: currentDepositQueueHash = keccak256(abi.encode(deposit4, currentDepos
 ```
 
 - **On-chain addition is O(1)**: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))` — wrap the outside.
-- **Zone processing**: The zone's `advanceTempo()` processes deposits in FIFO order (oldest first, working outward from its `processedDepositQueueHash`), and validates the result matches `currentDepositQueueHash` (read from Tempo state). TODO: implement a recursive ancestor check in the proof or on-chain as a fallback.
+- **Zone processing**: The zone's `advanceTempo()` processes deposits in FIFO order (oldest first, working outward from its `processedDepositQueueHash`), and validates the result matches `currentDepositQueueHash` (read from Tempo state).
 - **After batch**: Tempo updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced.
 
 ### Withdrawal queue: oldest-outermost per slot
@@ -1110,7 +1110,7 @@ Notes:
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
 - The portal only stores `currentDepositQueueHash`, not individual deposits. The sequencer must track deposits off-chain.
 - Tempo state advancement is combined with deposit processing in `ZoneInbox.advanceTempo()`, which calls `TempoState.finalizeTempo()` internally.
-- The proof validates an exact match to `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits. TODO: implement a recursive ancestor check in the proof or on-chain as a fallback.
+- The proof validates an exact match to `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits.
 
 ### Encrypted deposits
 
