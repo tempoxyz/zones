@@ -421,9 +421,13 @@ interface IZonePortal {
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
     error DepositTooSmall();
+    error GasFeeRateTooHigh();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
+
+    /// @notice Maximum allowed gas fee rate (1e18)
+    function MAX_GAS_FEE_RATE() external view returns (uint128);
 
     function zoneId() external view returns (uint64);
     function token() external view returns (address);

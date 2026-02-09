@@ -40,6 +40,9 @@ contract ZonePortal is IZonePortal {
     ///      flexibility to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
+    /// @notice Maximum allowed gas fee rate to prevent deposit disabling
+    uint128 public constant MAX_GAS_FEE_RATE = 1e18;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -137,6 +140,7 @@ contract ZonePortal is IZonePortal {
     ///      If actual zone gas is lower, sequencer keeps the surplus.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external onlySequencer {
+        if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         zoneGasRate = _zoneGasRate;
         emit ZoneGasRateUpdated(_zoneGasRate);
     }
