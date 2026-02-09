@@ -7,7 +7,6 @@ import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
-import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { Vm } from "forge-std/Vm.sol";
 
 /// @title ZoneFactoryTest
@@ -15,7 +14,6 @@ import { Vm } from "forge-std/Vm.sol";
 contract ZoneFactoryTest is BaseTest {
 
     ZoneFactory public zoneFactory;
-    MockVerifier public verifier;
 
     bytes32 constant GENESIS_BLOCK_HASH = keccak256("genesis");
     bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
@@ -23,7 +21,6 @@ contract ZoneFactoryTest is BaseTest {
     function setUp() public override {
         super.setUp();
         zoneFactory = new ZoneFactory();
-        verifier = new MockVerifier();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -34,7 +31,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin,
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -55,7 +52,7 @@ contract ZoneFactoryTest is BaseTest {
         assertTrue(info.messenger != address(0));
         assertEq(info.token, address(pathUSD));
         assertEq(info.sequencer, admin);
-        assertEq(info.verifier, address(verifier));
+        assertEq(info.verifier, zoneFactory.verifier());
         assertEq(info.genesisBlockHash, GENESIS_BLOCK_HASH);
         assertEq(info.genesisTempoBlockHash, GENESIS_TEMPO_BLOCK_HASH);
     }
@@ -64,7 +61,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin,
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -91,7 +88,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params1 = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin,
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -104,7 +101,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params2 = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: alice,
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: keccak256("genesis2"),
                 genesisTempoBlockHash: keccak256("tempoGenesis2"),
@@ -131,7 +128,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin,
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -176,7 +173,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(0),
             sequencer: admin,
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -195,7 +192,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: notTip20,
             sequencer: admin,
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -211,7 +208,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: alice, // EOA, not a contract
             sequencer: admin,
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -231,7 +228,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: address(0),
-            verifier: address(verifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -244,14 +241,14 @@ contract ZoneFactoryTest is BaseTest {
     }
 
     /*//////////////////////////////////////////////////////////////
-                        INVALID VERIFIER TESTS
+                       INVALID VERIFIER TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_createZone_revertsOnInvalidVerifier_zeroAddress() public {
+    function test_createZone_revertsOnInvalidVerifier() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin,
-            verifier: address(0),
+            verifier: address(0xdead),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,

@@ -14,6 +14,7 @@ import {
     EncryptedDeposit,
     EncryptedDepositPayload,
     EncryptionKeyEntry,
+    IVerifier,
     IWithdrawalReceiver,
     IZoneFactory,
     IZoneMessenger,
@@ -32,8 +33,6 @@ import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { Vm } from "forge-std/Vm.sol";
-
-import { MockVerifier } from "./mocks/MockVerifier.sol";
 
 /// @notice Mock withdrawal receiver that accepts funds
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
@@ -110,7 +109,6 @@ contract SuccessfulReceiver is IWithdrawalReceiver {
 contract ZonePortalTest is BaseTest {
 
     ZoneFactory public zoneFactory;
-    MockVerifier public mockVerifier;
     ZonePortal public portal;
     ZoneMessenger public messenger;
     MockWithdrawalReceiver public withdrawalReceiver;
@@ -127,7 +125,6 @@ contract ZonePortalTest is BaseTest {
 
         // Deploy zone infrastructure
         zoneFactory = new ZoneFactory();
-        mockVerifier = new MockVerifier();
         withdrawalReceiver = new MockWithdrawalReceiver();
         gasConsumingReceiver = new GasConsumingReceiver();
         successfulReceiver = new SuccessfulReceiver();
@@ -147,7 +144,7 @@ contract ZonePortalTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin, // admin is the sequencer for tests
-            verifier: address(mockVerifier),
+            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -175,7 +172,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.zoneId(), testZoneId);
         assertEq(portal.token(), address(pathUSD));
         assertEq(portal.sequencer(), admin);
-        assertEq(portal.verifier(), address(mockVerifier));
+        assertEq(portal.verifier(), zoneFactory.verifier());
         assertEq(portal.blockHash(), GENESIS_BLOCK_HASH);
         assertEq(portal.withdrawalBatchIndex(), 0);
         assertEq(portal.messenger(), address(messenger));
@@ -346,7 +343,11 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_submitBatch_revertsOnInvalidProof() public {
-        mockVerifier.setShouldAccept(false);
+        vm.mockCall(
+            zoneFactory.verifier(),
+            abi.encodeWithSelector(IVerifier.verify.selector),
+            abi.encode(false)
+        );
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
@@ -1683,7 +1684,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.zoneId(), testZoneId);
         assertEq(portal.token(), address(pathUSD));
         assertEq(portal.sequencer(), admin);
-        assertEq(portal.verifier(), address(mockVerifier));
+        assertEq(portal.verifier(), zoneFactory.verifier());
         assertEq(portal.genesisTempoBlockNumber(), genesisTempoBlockNumber);
     }
 

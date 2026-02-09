@@ -34,7 +34,6 @@ import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { MockZoneToken } from "./mocks/MockZoneToken.sol";
 import { Vm } from "forge-std/Vm.sol";
 
@@ -77,7 +76,6 @@ contract ZoneBridgeTest is BaseTest {
 
     ZoneFactory public l1Factory;
     ZonePortal public l1Portal;
-    MockVerifier public l1Verifier;
 
     /*//////////////////////////////////////////////////////////////
                              ZONE CONTRACTS
@@ -126,7 +124,6 @@ contract ZoneBridgeTest is BaseTest {
 
         // === Deploy L1 Contracts ===
         l1Factory = new ZoneFactory();
-        l1Verifier = new MockVerifier();
         withdrawalReceiver = new MockWithdrawalReceiver();
 
         // Fund test accounts on L1
@@ -143,7 +140,7 @@ contract ZoneBridgeTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin,
-            verifier: address(l1Verifier),
+            verifier: l1Factory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,

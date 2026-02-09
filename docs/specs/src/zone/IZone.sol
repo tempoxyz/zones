@@ -335,6 +335,7 @@ interface IZoneFactory {
     error InvalidSequencer();
     error InvalidVerifier();
 
+    function isValidVerifier(address verifier) external view returns (bool);
     function createZone(CreateZoneParams calldata params)
         external
         returns (uint64 zoneId, address portal);

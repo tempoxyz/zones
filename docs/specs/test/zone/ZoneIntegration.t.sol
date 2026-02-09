@@ -25,7 +25,6 @@ import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 
 import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { MockVerifier } from "./mocks/MockVerifier.sol";
 import { MockZoneToken } from "./mocks/MockZoneToken.sol";
 
 /// @notice Mock receiver that tracks received amounts
@@ -56,7 +55,6 @@ contract ZoneIntegrationTest is BaseTest {
     // L1 contracts
     ZoneFactory public l1Factory;
     ZonePortal public l1Portal;
-    MockVerifier public l1Verifier;
 
     // L2 contracts
     MockZoneToken public l2ZoneToken;
@@ -78,7 +76,6 @@ contract ZoneIntegrationTest is BaseTest {
 
         // L1 setup
         l1Factory = new ZoneFactory();
-        l1Verifier = new MockVerifier();
         receiver = new TrackingReceiver();
 
         vm.startPrank(pathUSDAdmin);
@@ -94,7 +91,7 @@ contract ZoneIntegrationTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             token: address(pathUSD),
             sequencer: admin,
-            verifier: address(l1Verifier),
+            verifier: l1Factory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,

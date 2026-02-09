@@ -2,7 +2,8 @@
 pragma solidity ^0.8.13;
 
 import { TempoUtilities } from "../TempoUtilities.sol";
-import { IVerifier, IZoneFactory, ZoneInfo } from "./IZone.sol";
+import { IZoneFactory, ZoneInfo } from "./IZone.sol";
+import { Verifier } from "./Verifier.sol";
 import { ZoneMessenger } from "./ZoneMessenger.sol";
 import { ZonePortal } from "./ZonePortal.sol";
 
@@ -21,10 +22,23 @@ contract ZoneFactory is IZoneFactory {
     mapping(uint64 => ZoneInfo) internal _zones;
     mapping(address => bool) internal _isZonePortal;
     mapping(address => bool) internal _isZoneMessenger;
+    mapping(address => bool) internal _validVerifiers;
+    address internal _verifier;
 
     /// @notice Tracks deployment count for CREATE address prediction
-    /// @dev Contracts start with nonce 1, not 0
-    uint256 internal _deploymentNonce = 1;
+    /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment
+    ///      in the constructor, so zone deployments start at nonce 2.
+    uint256 internal _deploymentNonce = 2;
+
+    /*//////////////////////////////////////////////////////////////
+                              CONSTRUCTOR
+    //////////////////////////////////////////////////////////////*/
+
+    constructor() {
+        address v = address(new Verifier());
+        _validVerifiers[v] = true;
+        _verifier = v;
+    }
 
     /*//////////////////////////////////////////////////////////////
                             ZONE CREATION
@@ -37,7 +51,7 @@ contract ZoneFactory is IZoneFactory {
         // Validate token is a TIP-20
         if (!TempoUtilities.isTIP20(params.token)) revert InvalidToken();
         if (params.sequencer == address(0)) revert InvalidSequencer();
-        if (params.verifier == address(0)) revert InvalidVerifier();
+        if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
 
         zoneId = _nextZoneId++;
 
@@ -152,6 +166,14 @@ contract ZoneFactory is IZoneFactory {
 
     function isZoneMessenger(address messenger) external view returns (bool) {
         return _isZoneMessenger[messenger];
+    }
+
+    function isValidVerifier(address v) external view returns (bool) {
+        return _validVerifiers[v];
+    }
+
+    function verifier() external view returns (address) {
+        return _verifier;
     }
 
 }
