@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { EncryptionKeyEntry, PORTAL_ENCRYPTION_KEYS_SLOT } from "../../src/zone/IZone.sol";
-import { Test } from "forge-std/Test.sol";
+import {EncryptionKeyEntry, PORTAL_ENCRYPTION_KEYS_SLOT} from "../../src/zone/IZone.sol";
+import {Test} from "forge-std/Test.sol";
 
 /// @notice Minimal harness that mirrors ZonePortal's _encryptionKeys storage layout.
 /// @dev The array is placed at the same storage slot (6) as in ZonePortal so that
@@ -20,9 +20,7 @@ contract EncryptionKeyLayoutHarness {
     EncryptionKeyEntry[] internal _encryptionKeys;
 
     function push(bytes32 x, uint8 yParity, uint64 activationBlock) external {
-        _encryptionKeys.push(
-            EncryptionKeyEntry({ x: x, yParity: yParity, activationBlock: activationBlock })
-        );
+        _encryptionKeys.push(EncryptionKeyEntry({x: x, yParity: yParity, activationBlock: activationBlock}));
     }
 
     function length() external view returns (uint256) {
@@ -80,15 +78,12 @@ contract EncryptionKeyLayoutTest is Test {
 
         // activationBlock must be in bytes 1-8 (bits 8..71)
         uint64 extractedActivation = uint64((uint256(rawMeta) >> 8) & 0xffffffffffffffff);
-        assertEq(
-            extractedActivation, activationBlock, "activationBlock must be in bytes 1-8 of meta slot"
-        );
+        assertEq(extractedActivation, activationBlock, "activationBlock must be in bytes 1-8 of meta slot");
     }
 
     /// @notice Same check with multiple entries at different indices.
     function test_structPackingMultipleEntries() public {
-        bytes32[3] memory xs =
-            [keccak256("key-0"), keccak256("key-1"), keccak256("key-2")];
+        bytes32[3] memory xs = [keccak256("key-0"), keccak256("key-1"), keccak256("key-2")];
         uint8[3] memory yParities = [uint8(0x02), uint8(0x03), uint8(0x02)];
         uint64[3] memory blocks = [uint64(1), uint64(100_000), uint64(type(uint64).max)];
 
@@ -103,15 +98,9 @@ contract EncryptionKeyLayoutTest is Test {
             bytes32 rawMeta = vm.load(address(harness), bytes32(base + i * 2 + 1));
 
             assertEq(rawX, xs[i], "x mismatch");
+            assertEq(uint8(uint256(rawMeta) & 0xff), yParities[i], "yParity must be in lowest byte");
             assertEq(
-                uint8(uint256(rawMeta) & 0xff),
-                yParities[i],
-                "yParity must be in lowest byte"
-            );
-            assertEq(
-                uint64((uint256(rawMeta) >> 8) & 0xffffffffffffffff),
-                blocks[i],
-                "activationBlock must be in bytes 1-8"
+                uint64((uint256(rawMeta) >> 8) & 0xffffffffffffffff), blocks[i], "activationBlock must be in bytes 1-8"
             );
         }
     }
