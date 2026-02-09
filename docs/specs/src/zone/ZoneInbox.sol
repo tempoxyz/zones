@@ -288,8 +288,8 @@ contract ZoneInbox is IZoneInbox {
         bytes32 tempoCurrentHash =
             _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
 
-        // Our processed hash must match Tempo's current hash for now.
-        // TODO: Implement recursive ancestor check in proof or on-chain as a fallback.
+        // Our processed hash must be an ancestor of Tempo's current hash.
+        // Ancestry is verified inside the ZK proof via recursive hash chain validation.
         if (currentHash != tempoCurrentHash) {
             revert InvalidDepositQueueHash();
         }

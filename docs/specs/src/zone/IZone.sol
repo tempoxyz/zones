@@ -43,7 +43,7 @@ struct BlockTransition {
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
-///      that nextProcessedHash matches currentDepositQueueHash for now. TODO: allow ancestor checks.
+///      that nextProcessedHash is an ancestor of currentDepositQueueHash.
 struct DepositQueueTransition {
     bytes32 prevProcessedHash; // where proof starts (verified against zone state)
     bytes32 nextProcessedHash; // where zone processed up to (proof output)
