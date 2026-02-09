@@ -270,6 +270,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 - **Withdrawal fee**: Covers mainnet gas for withdrawal processing + callback execution
 - **Swap fee**: StablecoinDEX trading fee (taken from swap amount)
 - **Slippage**: Difference between expected and actual swap rate (expected and max)
+- **Deposit fee**: The target zone's portal deducts `FIXED_DEPOSIT_GAS * zoneGasRate` from the deposited amount before minting on the zone. The recipient receives `depositedAmount - depositFee`, not the full amount. Wallets MUST account for this when displaying expected received amounts.
 
 **Important**: The wallet must:
 - Query the StablecoinDEX for expected output amount and price impact
@@ -516,6 +517,7 @@ The wallet MUST:
    - If swap fails, tokens return to source zone (not converted)
 4. **Slippage protection**: Always set a reasonable `minAmountOut` to prevent sandwich attacks
 5. **Router trust**: The `SwapAndDepositRouter` must be a trusted, audited contract
+6. **Encrypted deposit key expiry**: For encrypted cross-zone deposits, there is a liveness risk if the destination zone's sequencer rotates their encryption key. The delay between withdrawal request on the source zone and mainnet processing could exceed the `ENCRYPTION_KEY_GRACE_PERIOD` (86,400 blocks / ~1 day), causing the encrypted deposit to be rejected and the callback to revert (bouncing back to the source zone). Wallets SHOULD prefer plaintext deposits for cross-zone transfers unless the processing delay can be bounded well within the grace period, or SHOULD check `isEncryptionKeyValid(keyIndex)` on the target portal before constructing the withdrawal.
 
 ---
 

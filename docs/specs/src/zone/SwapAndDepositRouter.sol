@@ -10,6 +10,8 @@ import { IZoneFactory, IZonePortal, IZoneMessenger, IWithdrawalReceiver, Encrypt
 /// @dev Receives withdrawal callbacks, swaps tokens if needed via StablecoinDEX, and deposits to target zone.
 ///      Handles both same-token (no swap) and different-token (swap) cross-zone transfers.
 ///      Supports both plaintext and encrypted deposits.
+///      On any failure (swap or deposit), the entire callback reverts, causing the withdrawal
+///      to bounce back to the fallbackRecipient on the source zone.
 contract SwapAndDepositRouter is IWithdrawalReceiver {
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
@@ -23,9 +25,9 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     //////////////////////////////////////////////////////////////*/
 
     error UnauthorizedMessenger();
+    error SenderMismatch();
+    error InvalidTargetPortal();
     error InvalidToken();
-    error SwapFailed();
-    error DepositFailed();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -43,8 +45,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /// @notice Receive a cross-zone withdrawal, optionally swap tokens, and deposit to target zone
     /// @dev Implements IWithdrawalReceiver. Only callable by registered zone messengers.
     ///      The messenger has already transferred tokens to this router.
-    ///      Handles both same-token (no swap) and different-token (swap required) transfers.
-    ///      Supports both plaintext and encrypted deposits.
+    ///      On failure, the entire callback reverts, triggering bounce-back to source zone.
     /// @param sender The original sender on the source zone
     /// @param amount The amount of tokens transferred
     /// @param data ABI-encoded callbackData (see format below)
@@ -59,19 +60,19 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
         uint128 amount,
         bytes calldata data
     ) external returns (bytes4) {
-        // Verify caller is a registered zone messenger
         if (!zoneFactory.isZoneMessenger(msg.sender)) {
             revert UnauthorizedMessenger();
         }
 
-        // Get input token from the messenger
+        if (sender != IZoneMessenger(msg.sender).xDomainMessageSender()) {
+            revert SenderMismatch();
+        }
+
         address tokenIn = IZoneMessenger(msg.sender).token();
 
-        // Decode isEncrypted flag
         bool isEncrypted = abi.decode(data, (bool));
 
         if (isEncrypted) {
-            // Encrypted deposit: decode encrypted payload
             (
                 , // skip isEncrypted
                 address tokenOut,
@@ -81,21 +82,13 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
                 uint128 minAmountOut
             ) = abi.decode(data, (bool, address, address, uint256, EncryptedDepositPayload, uint128));
 
-            uint128 amountOut;
-            if (tokenIn == tokenOut) {
-                // Same token: no swap needed
-                amountOut = amount;
-            } else {
-                // Different tokens: swap via StablecoinDEX
-                IERC20(tokenIn).approve(address(stablecoinDEX), amount);
-                amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amount, minAmountOut);
-            }
+            _validateTarget(targetPortal, tokenOut);
 
-            // Approve and deposit encrypted to target zone
+            uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
+
             IERC20(tokenOut).approve(targetPortal, amountOut);
             IZonePortal(targetPortal).depositEncrypted(amountOut, keyIndex, encrypted);
         } else {
-            // Plaintext deposit: decode recipient and memo
             (
                 , // skip isEncrypted
                 address tokenOut,
@@ -105,21 +98,44 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
                 uint128 minAmountOut
             ) = abi.decode(data, (bool, address, address, address, bytes32, uint128));
 
-            uint128 amountOut;
-            if (tokenIn == tokenOut) {
-                // Same token: no swap needed
-                amountOut = amount;
-            } else {
-                // Different tokens: swap via StablecoinDEX
-                IERC20(tokenIn).approve(address(stablecoinDEX), amount);
-                amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amount, minAmountOut);
-            }
+            _validateTarget(targetPortal, tokenOut);
 
-            // Approve and deposit to target zone
+            uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
+
             IERC20(tokenOut).approve(targetPortal, amountOut);
             IZonePortal(targetPortal).deposit(recipient, amountOut, memo);
         }
 
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           INTERNAL HELPERS
+    //////////////////////////////////////////////////////////////*/
+
+    function _validateTarget(address targetPortal, address tokenOut) internal view {
+        if (!zoneFactory.isZonePortal(targetPortal)) {
+            revert InvalidTargetPortal();
+        }
+        if (IZonePortal(targetPortal).token() != tokenOut) {
+            revert InvalidToken();
+        }
+    }
+
+    function _swapIfNeeded(
+        address tokenIn,
+        address tokenOut,
+        uint128 amountIn,
+        uint128 minAmountOut
+    )
+        internal
+        returns (uint128 amountOut)
+    {
+        if (tokenIn == tokenOut) {
+            return amountIn;
+        }
+
+        IERC20(tokenIn).approve(address(stablecoinDEX), amountIn);
+        amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amountIn, minAmountOut);
     }
 }
