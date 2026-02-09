@@ -57,6 +57,18 @@ contract ZoneOutbox is IZoneOutbox {
     Withdrawal[] internal _pendingWithdrawals;
     uint256 internal _pendingWithdrawalsHead;
 
+    /// @notice Maximum number of withdrawal requests allowed per zone block (0 = unlimited)
+    /// @dev Sequencer-configurable cap to prevent DoS via mass withdrawal requests.
+    ///      This limits the number of requestWithdrawal() calls per block, complementing
+    ///      the gas fee mechanism which already provides economic rate-limiting.
+    uint256 public maxWithdrawalsPerBlock;
+
+    /// @notice Number of withdrawal requests in the current block
+    uint256 internal _withdrawalsThisBlock;
+
+    /// @notice Block number for tracking per-block withdrawal count
+    uint256 internal _currentBlockNumber;
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -66,6 +78,7 @@ contract ZoneOutbox is IZoneOutbox {
     error GasFeeRateTooHigh();
     error TransferFailed();
     error OnlySequencer();
+    error TooManyWithdrawalsThisBlock();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -90,6 +103,15 @@ contract ZoneOutbox is IZoneOutbox {
         if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
+    }
+
+    /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
+    /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
+    /// @param _maxWithdrawalsPerBlock The maximum number of requestWithdrawal() calls per block
+    function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external {
+        if (msg.sender != config.sequencer()) revert OnlySequencer();
+        maxWithdrawalsPerBlock = _maxWithdrawalsPerBlock;
+        emit MaxWithdrawalsPerBlockUpdated(_maxWithdrawalsPerBlock);
     }
 
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
@@ -132,6 +154,18 @@ contract ZoneOutbox is IZoneOutbox {
         // Limit callback data size to prevent storage bloat and hash computation abuse
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
+        }
+
+        // Enforce per-block withdrawal cap (0 = unlimited)
+        if (maxWithdrawalsPerBlock > 0) {
+            if (block.number != _currentBlockNumber) {
+                _currentBlockNumber = block.number;
+                _withdrawalsThisBlock = 0;
+            }
+            if (_withdrawalsThisBlock >= maxWithdrawalsPerBlock) {
+                revert TooManyWithdrawalsThisBlock();
+            }
+            _withdrawalsThisBlock++;
         }
 
         // Calculate processing fee (locked in at request time)

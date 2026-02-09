@@ -818,4 +818,88 @@ contract ZoneOutboxTest is Test {
         assertEq(outbox.pendingWithdrawalsCount(), 0);
     }
 
+    /*//////////////////////////////////////////////////////////////
+                     MAX WITHDRAWALS PER BLOCK TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_setMaxWithdrawalsPerBlock_onlySequencer() public {
+        vm.prank(alice);
+        vm.expectRevert(ZoneOutbox.OnlySequencer.selector);
+        outbox.setMaxWithdrawalsPerBlock(10);
+    }
+
+    function test_setMaxWithdrawalsPerBlock_sequencerCanSet() public {
+        vm.prank(sequencer);
+        outbox.setMaxWithdrawalsPerBlock(5);
+        assertEq(outbox.maxWithdrawalsPerBlock(), 5);
+    }
+
+    function test_setMaxWithdrawalsPerBlock_zeroMeansUnlimited() public {
+        vm.prank(sequencer);
+        outbox.setMaxWithdrawalsPerBlock(0);
+        assertEq(outbox.maxWithdrawalsPerBlock(), 0);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1000e6);
+        for (uint256 i = 0; i < 10; i++) {
+            outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+        }
+        vm.stopPrank();
+        assertEq(outbox.pendingWithdrawalsCount(), 10);
+    }
+
+    function test_maxWithdrawalsPerBlock_enforcesLimit() public {
+        vm.prank(sequencer);
+        outbox.setMaxWithdrawalsPerBlock(3);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1000e6);
+
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+
+        vm.expectRevert(ZoneOutbox.TooManyWithdrawalsThisBlock.selector);
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+        vm.stopPrank();
+    }
+
+    function test_maxWithdrawalsPerBlock_resetsOnNewBlock() public {
+        vm.prank(sequencer);
+        outbox.setMaxWithdrawalsPerBlock(2);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 1000e6);
+
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+
+        vm.expectRevert(ZoneOutbox.TooManyWithdrawalsThisBlock.selector);
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+
+        vm.roll(block.number + 1);
+
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+
+        vm.expectRevert(ZoneOutbox.TooManyWithdrawalsThisBlock.selector);
+        outbox.requestWithdrawal(alice, 10e6, bytes32(0), 0, alice, "");
+        vm.stopPrank();
+
+        assertEq(outbox.pendingWithdrawalsCount(), 4);
+    }
+
+    function test_maxWithdrawalsPerBlock_canBeUpdated() public {
+        vm.startPrank(sequencer);
+        outbox.setMaxWithdrawalsPerBlock(1);
+        assertEq(outbox.maxWithdrawalsPerBlock(), 1);
+
+        outbox.setMaxWithdrawalsPerBlock(100);
+        assertEq(outbox.maxWithdrawalsPerBlock(), 100);
+
+        outbox.setMaxWithdrawalsPerBlock(0);
+        assertEq(outbox.maxWithdrawalsPerBlock(), 0);
+        vm.stopPrank();
+    }
+
 }
