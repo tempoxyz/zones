@@ -160,6 +160,7 @@ contract ZoneInbox is IZoneInbox {
         bytes32 xSlot = _tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotX));
         if (xSlot == bytes32(0)) revert InvalidSharedSecretProof();
         bytes32 metaSlot = _tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotMeta));
+        // yParity is packed in the lowest byte of the meta slot (see EncryptionKeyEntry layout)
         return (xSlot, uint8(uint256(metaSlot) & 0xff));
     }
 
