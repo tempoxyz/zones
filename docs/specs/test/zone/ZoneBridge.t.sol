@@ -674,7 +674,7 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.transfer(bob, 2000e6);
     }
 
-    function test_l2_invalidDepositHashReverts() public {
+    function test_l2_depositHashMismatchAllowed() public {
         // Deposit on L1
         vm.startPrank(alice);
         pathUSD.approve(address(l1Portal), 1000e6);
@@ -683,17 +683,16 @@ contract ZoneBridgeTest is BaseTest {
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
 
-        // Set up mock with wrong hash
+        // Set up mock with different hash (simulating more deposits pending)
         l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, bytes32("wrong hash")
+            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, bytes32("different hash")
         );
 
         Deposit[] memory deposits = new Deposit[](1);
         deposits[0] = pendingDeposits[0].deposit;
 
-        // Should revert because hash doesn't match
+        // Should succeed — proof validates ancestor contiguity, not exact match
         vm.prank(admin);
-        vm.expectRevert(IZoneInbox.InvalidDepositQueueHash.selector);
         l2Inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
     }
 
