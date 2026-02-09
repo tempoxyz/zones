@@ -19,6 +19,10 @@ contract ZoneFactory is IZoneFactory {
     mapping(address => bool) internal _isZonePortal;
 
     /// @notice Tracks deployment count for CREATE address prediction
+    /// @dev WARNING: This counter must be incremented by exactly the number of CREATE operations
+    ///      in each function call. Adding any new `new` statement to this contract without
+    ///      updating the nonce tracking will permanently break createZone().
+    ///      Consider migrating to CREATE2 in production to eliminate this fragility.
     /// @dev Contracts start with nonce 1, not 0
     uint256 internal _deploymentNonce = 1;
 
@@ -48,6 +52,8 @@ contract ZoneFactory is IZoneFactory {
         // We track our own nonce since contract nonce isn't accessible.
 
         uint256 currentNonce = _deploymentNonce;
+        // FRAGILE: Must match exactly the number of CREATE deploys below.
+        // If additional contracts are deployed in this function, update this count.
         _deploymentNonce += 2; // We'll deploy 2 contracts
 
         // Compute portal's address (will be deployed at nonce+1)
