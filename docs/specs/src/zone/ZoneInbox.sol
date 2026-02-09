@@ -15,7 +15,6 @@ import {
     IZoneConfig,
     IZoneInbox,
     IZoneToken,
-    PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit
 } from "./IZone.sol";
@@ -283,18 +282,13 @@ contract ZoneInbox is IZoneInbox {
         // Verify all decryption data was consumed
         if (decryptionIndex != decryptions.length) revert ExtraDecryptionData();
 
-        // Step 3: Validate against Tempo state
-        // Read currentDepositQueueHash from the portal's storage using the new Tempo state
-        bytes32 tempoCurrentHash =
-            _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
+        // Deposit processing validated by proof/TEE:
+        // The proof ensures processedDepositQueueHash is a contiguous prefix
+        // of Tempo's currentDepositQueueHash (ancestor-or-equal check).
+        // This allows processing a bounded subset of deposits per block,
+        // preventing liveness issues from deposit queue spam.
 
-        // Our processed hash must match Tempo's current hash for now.
-        // TODO: Implement recursive ancestor check in proof or on-chain as a fallback.
-        if (currentHash != tempoCurrentHash) {
-            revert InvalidDepositQueueHash();
-        }
-
-        // Step 4: Update state
+        // Update state
         processedDepositQueueHash = currentHash;
 
         emit TempoAdvanced(
