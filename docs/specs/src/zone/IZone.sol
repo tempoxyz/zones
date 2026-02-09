@@ -49,7 +49,6 @@ struct DepositQueueTransition {
     bytes32 nextProcessedHash; // where zone processed up to (proof output)
 }
 
-
 /// @notice Deposit type discriminator for the unified deposit queue
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {

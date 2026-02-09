@@ -3,7 +3,13 @@ pragma solidity ^0.8.13;
 
 import { IERC20 } from "../interfaces/IERC20.sol";
 import { IStablecoinDEX } from "../interfaces/IStablecoinDEX.sol";
-import { IZoneFactory, IZonePortal, IZoneMessenger, IWithdrawalReceiver, EncryptedDepositPayload } from "./IZone.sol";
+import {
+    EncryptedDepositPayload,
+    IWithdrawalReceiver,
+    IZoneFactory,
+    IZoneMessenger,
+    IZonePortal
+} from "./IZone.sol";
 
 /// @title SwapAndDepositRouter
 /// @notice Router contract for cross-zone transfers with optional token swap
@@ -13,6 +19,7 @@ import { IZoneFactory, IZonePortal, IZoneMessenger, IWithdrawalReceiver, Encrypt
 ///      On any failure (swap or deposit), the entire callback reverts, causing the withdrawal
 ///      to bounce back to the fallbackRecipient on the source zone.
 contract SwapAndDepositRouter is IWithdrawalReceiver {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -59,7 +66,10 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
         address sender,
         uint128 amount,
         bytes calldata data
-    ) external returns (bytes4) {
+    )
+        external
+        returns (bytes4)
+    {
         if (!zoneFactory.isZoneMessenger(msg.sender)) {
             revert UnauthorizedMessenger();
         }
@@ -73,14 +83,15 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
         bool isEncrypted = abi.decode(data, (bool));
 
         if (isEncrypted) {
-            (
-                , // skip isEncrypted
+            (, // skip isEncrypted
                 address tokenOut,
                 address targetPortal,
                 uint256 keyIndex,
                 EncryptedDepositPayload memory encrypted,
                 uint128 minAmountOut
-            ) = abi.decode(data, (bool, address, address, uint256, EncryptedDepositPayload, uint128));
+            ) = abi.decode(
+                data, (bool, address, address, uint256, EncryptedDepositPayload, uint128)
+            );
 
             _validateTarget(targetPortal, tokenOut);
 
@@ -89,8 +100,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             IERC20(tokenOut).approve(targetPortal, amountOut);
             IZonePortal(targetPortal).depositEncrypted(amountOut, keyIndex, encrypted);
         } else {
-            (
-                , // skip isEncrypted
+            (, // skip isEncrypted
                 address tokenOut,
                 address targetPortal,
                 address recipient,
@@ -138,4 +148,5 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
         IERC20(tokenIn).approve(address(stablecoinDEX), amountIn);
         amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amountIn, minAmountOut);
     }
+
 }

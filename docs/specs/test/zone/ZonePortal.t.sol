@@ -1226,7 +1226,6 @@ contract ZonePortalTest is BaseTest {
                    WITHDRAWAL QUEUE TESTS
     //////////////////////////////////////////////////////////////*/
 
-
     function test_withdrawalQueue_emptyBatchDoesNotIncreaseTail() public {
         vm.startPrank(alice);
         pathUSD.approve(address(portal), 1000e6);
