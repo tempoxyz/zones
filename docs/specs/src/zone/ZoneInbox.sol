@@ -236,8 +236,8 @@ contract ZoneInbox is IZoneInbox {
                 // This is done in Solidity using the SHA256 precompile (0x02)
                 bytes32 aesKey = _hkdfSha256(
                     dec.sharedSecret,
-                    "ecies-aes-key", // salt
-                    "" // info (empty)
+                    "ecies-aes-key",
+                    abi.encodePacked(tempoPortal, ed.keyIndex, ed.encrypted.ephemeralPubkeyX)
                 );
 
                 // Step 3: Decrypt using AES-256-GCM precompile
