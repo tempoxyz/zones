@@ -402,6 +402,7 @@ Handles L2→Tempo withdrawals where the producer (proof) is slow and the consum
 ///      clearing storage (which would refund gas and create incentive issues).
 bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
 
+
 uint256 constant WITHDRAWAL_QUEUE_CAPACITY = 100;
 
 struct WithdrawalQueue {
@@ -430,6 +431,7 @@ library WithdrawalQueueLib {
 ```
 
 **Gas note**: The ring buffer reuses slots via modular indexing, so storage writes to already-occupied slots cost less gas (warm storage). New storage charges only apply when the queue grows into a slot that has never been used.
+
 
 | Queue | Tempo operation | Zone/Proof operation |
 |-------|--------------|---------------------|
@@ -943,12 +945,20 @@ interface IZoneOutbox {
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     function setTempoGasRate(uint128 _tempoGasRate) external;
 
+    /// @notice Maximum number of withdrawal requests per zone block (0 = unlimited).
+    function maxWithdrawalsPerBlock() external view returns (uint256);
+
+    /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
+    /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee.
+    function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external;
+
     /// @notice Calculate the fee for a withdrawal with the given gasLimit.
     /// @dev Fee = gasLimit * tempoGasRate. User must estimate total gas needed.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo.
     /// @dev Caller must have approved the outbox to spend `amount + fee` of zone tokens.
+    ///      Subject to maxWithdrawalsPerBlock cap if set by the sequencer.
     ///      Tokens are burned immediately and withdrawal is stored in pending array.
     /// @param to The Tempo recipient address.
     /// @param amount Amount to send to recipient (fee is additional).
@@ -969,7 +979,7 @@ interface IZoneOutbox {
     /// @dev Only callable by sequencer in the final block of a batch.
     ///      Must be called exactly once per batch (count may be 0). Writes `withdrawalQueueHash`
     ///      and `withdrawalBatchIndex` to lastBatch storage for proof access.
-    /// @param count Max number of withdrawals to process (avoids unbounded loops).
+    /// @param count Max number of withdrawals to process (limits per-call gas cost).
     /// @return withdrawalQueueHash The hash chain for Tempo batch submission.
     function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
 }
@@ -1470,7 +1480,8 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
         revert NoWithdrawalsInQueue();
     }
 
-    bytes32 currentSlot = _withdrawalQueue.slots[head];
+    uint256 slotIndex = head % WITHDRAWAL_QUEUE_CAPACITY;
+    bytes32 currentSlot = _withdrawalQueue.slots[slotIndex];
 
     // Verify head (remainingQueue of 0 means last item, we check against EMPTY_SENTINEL)
     bytes32 expectedRemainingQueue = remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
@@ -1479,11 +1490,11 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
     // Pop the withdrawal regardless of success/failure
     if (remainingQueue == bytes32(0)) {
         // Slot exhausted, mark as empty and advance head
-        _withdrawalQueue.slots[head] = EMPTY_SENTINEL;
+        _withdrawalQueue.slots[slotIndex] = EMPTY_SENTINEL;
         _withdrawalQueue.head = head + 1;
     } else {
         // More withdrawals in this slot
-        _withdrawalQueue.slots[head] = remainingQueue;
+        _withdrawalQueue.slots[slotIndex] = remainingQueue;
     }
 
     if (w.gasLimit == 0) {
