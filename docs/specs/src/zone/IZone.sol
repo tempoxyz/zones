@@ -43,7 +43,8 @@ struct BlockTransition {
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
-///      that nextProcessedHash matches currentDepositQueueHash for now. TODO: allow ancestor checks.
+///      that nextProcessedHash is an ancestor of (or equal to) currentDepositQueueHash.
+///      This allows partial deposit processing when maxDepositsPerTempoBlock is set.
 struct DepositQueueTransition {
     bytes32 prevProcessedHash; // where proof starts (verified against zone state)
     bytes32 nextProcessedHash; // where zone processed up to (proof output)
@@ -694,11 +695,14 @@ interface IZoneInbox {
     event EncryptedDepositFailed(
         bytes32 indexed depositHash, address indexed sender, uint128 amount
     );
+    event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
+
     error OnlySequencer();
     error InvalidDepositQueueHash();
     error MissingDecryptionData();
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
+    error TooManyDeposits();
 
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);
@@ -715,11 +719,23 @@ interface IZoneInbox {
     /// @notice The zone's last processed deposit queue hash
     function processedDepositQueueHash() external view returns (bytes32);
 
+    /// @notice Maximum number of deposits the sequencer will process per Tempo block (0 = unlimited)
+    function maxDepositsPerTempoBlock() external view returns (uint256);
+
+    /// @notice Set the maximum number of deposits to process per Tempo block. Only callable by sequencer.
+    /// @dev Set to 0 for unlimited. Provides an additional layer of protection against deposit spam.
+    /// @param _maxDepositsPerTempoBlock The maximum number of deposits per Tempo block
+    function setMaxDepositsPerTempoBlock(uint256 _maxDepositsPerTempoBlock) external;
+
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
     /// @dev This is the main entry point for the sequencer at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the unified queue (regular and encrypted)
-    ///      3. Validates the resulting hash against Tempo's currentDepositQueueHash
+    ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
+    ///
+    ///      The sequencer may process a bounded subset of pending deposits (up to
+    ///      maxDepositsPerTempoBlock). The proof validates contiguity: processedDepositQueueHash
+    ///      must be an ancestor of (or equal to) Tempo's currentDepositQueueHash.
     ///
     ///      For encrypted deposits, the sequencer provides DecryptionData with the
     ///      decrypted (to, memo) values. The proof/TEE validates correctness.
