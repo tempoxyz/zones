@@ -8,6 +8,9 @@ import { ITempoState } from "./IZone.sol";
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
 ///      Stores the latest finalized Tempo block info. Sequencer submits Tempo headers
 ///      which are validated for chain continuity and decoded to update state.
+///      TRUST BOUNDARY: On-chain validation only checks chain continuity (parent hash
+///      and block number). The zone node / proof system is responsible for ensuring that
+///      only finalized, canonical Tempo headers are submitted to finalizeTempo().
 contract TempoState is ITempoState {
 
     /*//////////////////////////////////////////////////////////////
@@ -84,6 +87,8 @@ contract TempoState is ITempoState {
     ///      The header is RLP-encoded as: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
     ///      where inner is a standard Ethereum header.
     ///      Only callable by ZoneInbox. Executor enforces ZoneInbox-only access.
+    ///      TRUST ASSUMPTION: The zone node / proof system ensures only finalized canonical Tempo
+    ///      headers are accepted. On-chain validation covers chain continuity only (parent hash, block number).
     /// @param header RLP-encoded Tempo header
     function finalizeTempo(bytes calldata header) external {
         // Only ZoneInbox can call this function
