@@ -91,6 +91,7 @@ contract ZoneConfig is IZoneConfig {
 
         x = tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotX));
         bytes32 metaSlot = tempoState.readTempoStorageSlot(tempoPortal, bytes32(slotMeta));
+        // yParity is packed in the lowest byte of the meta slot (see EncryptionKeyEntry layout)
         yParity = uint8(uint256(metaSlot) & 0xff);
     }
 

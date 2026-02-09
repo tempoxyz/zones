@@ -89,8 +89,11 @@ struct EncryptedDeposit {
 }
 
 /// @notice Historical record of an encryption key with its activation block
-/// @dev Used to track key rotations so the prover can determine which key
-///      was valid when a deposit was made
+/// @dev Storage layout per entry (2 slots):
+///      slot 0: x (bytes32) — full slot
+///      slot 1: yParity (uint8, lowest byte) | activationBlock (uint64, next 8 bytes)
+///      WARNING: Do not reorder fields. ZoneInbox._readEncryptionKey() and
+///      ZoneConfig.sequencerEncryptionKey() read these via raw storage slot access.
 struct EncryptionKeyEntry {
     bytes32 x; // X coordinate of the public key
     uint8 yParity; // Y coordinate parity (0x02 or 0x03)
