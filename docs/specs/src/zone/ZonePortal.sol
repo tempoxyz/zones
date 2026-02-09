@@ -582,6 +582,7 @@ contract ZonePortal is IZonePortal {
 
         // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
         if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
+        if (tempoBlockNumber < lastSyncedTempoBlockNumber) revert InvalidTempoBlockNumber();
 
         // Determine anchor block: either tempoBlockNumber (direct) or recentTempoBlockNumber (ancestry)
         uint64 anchorBlockNumber;
