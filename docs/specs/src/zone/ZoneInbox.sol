@@ -226,6 +226,7 @@ contract ZoneInbox is IZoneInbox {
                         ed.encrypted.ephemeralPubkeyX,
                         ed.encrypted.ephemeralPubkeyYParity,
                         dec.sharedSecret,
+                        dec.sharedSecretYParity,
                         seqPubX,
                         seqPubYParity,
                         dec.cpProof

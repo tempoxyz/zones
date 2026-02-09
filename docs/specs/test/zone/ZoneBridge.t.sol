@@ -933,6 +933,7 @@ contract ZoneBridgeTest is BaseTest {
             });
             decs[i] = DecryptionData({
                 sharedSecret: bytes32(uint256(0xDEAD)),
+                sharedSecretYParity: 0x02,
                 to: decryptedTo,
                 memo: decryptedMemo,
                 cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
@@ -1133,6 +1134,7 @@ contract ZoneBridgeTest is BaseTest {
         DecryptionData[] memory decs = new DecryptionData[](1);
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xDEAD)),
+            sharedSecretYParity: 0x02,
             to: decryptedTo,
             memo: decryptedMemo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
@@ -1228,12 +1230,14 @@ contract ZoneBridgeTest is BaseTest {
         DecryptionData[] memory decs = new DecryptionData[](2);
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xDEAD)),
+            sharedSecretYParity: 0x02,
             to: aliceRecipient,
             memo: aliceMemo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
         decs[1] = DecryptionData({
             sharedSecret: bytes32(uint256(0xBEEF)),
+            sharedSecretYParity: 0x02,
             to: bobRecipient,
             memo: bobMemo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(3)), c: bytes32(uint256(4)) })

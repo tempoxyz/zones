@@ -139,6 +139,7 @@ struct ChaumPedersenProof {
 ///      so it does not need to be included here.
 struct DecryptionData {
     bytes32 sharedSecret; // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
+    uint8 sharedSecretYParity; // Y coordinate parity of the shared secret point (0x02 or 0x03)
     address to; // Decrypted recipient
     bytes32 memo; // Decrypted memo
     ChaumPedersenProof cpProof; // Proof of correct shared secret derivation
@@ -177,6 +178,7 @@ interface IChaumPedersenVerify {
     /// @param ephemeralPubX The X coordinate of the ephemeral public key
     /// @param ephemeralPubYParity The Y coordinate parity (0x02 or 0x03)
     /// @param sharedSecret The claimed shared secret (x-coordinate)
+    /// @param sharedSecretYParity The Y coordinate parity of the shared secret point (0x02 or 0x03)
     /// @param sequencerPubX The sequencer's public key X coordinate
     /// @param sequencerPubYParity The sequencer's public key Y parity
     /// @param proof The Chaum-Pedersen proof (s, c)
@@ -185,6 +187,7 @@ interface IChaumPedersenVerify {
         bytes32 ephemeralPubX,
         uint8 ephemeralPubYParity,
         bytes32 sharedSecret,
+        uint8 sharedSecretYParity,
         bytes32 sequencerPubX,
         uint8 sequencerPubYParity,
         ChaumPedersenProof calldata proof

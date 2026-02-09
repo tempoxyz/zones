@@ -445,6 +445,7 @@ contract ZoneInboxTest is Test {
         DecryptionData[] memory decs = new DecryptionData[](1);
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
+            sharedSecretYParity: 0x02,
             to: recipient,
             memo: memo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
@@ -497,6 +498,7 @@ contract ZoneInboxTest is Test {
         DecryptionData[] memory decs = new DecryptionData[](1);
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
+            sharedSecretYParity: 0x02,
             to: address(0x500),
             memo: bytes32("memo"),
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
@@ -541,6 +543,7 @@ contract ZoneInboxTest is Test {
         DecryptionData[] memory decs = new DecryptionData[](1);
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xabcd)),
+            sharedSecretYParity: 0x02,
             to: recipient,
             memo: encMemo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
@@ -596,6 +599,7 @@ contract ZoneInboxTest is Test {
         DecryptionData[] memory decs = new DecryptionData[](1);
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(1)),
+            sharedSecretYParity: 0x02,
             to: address(0x500),
             memo: bytes32("memo"),
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
@@ -723,6 +727,7 @@ contract ZoneInboxTest is Test {
         DecryptionData[] memory decs = new DecryptionData[](1);
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xbad)),
+            sharedSecretYParity: 0x02,
             to: address(0x500),
             memo: bytes32("memo"),
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
@@ -785,6 +790,7 @@ contract ZoneInboxTest is Test {
         decs = new DecryptionData[](1);
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
+            sharedSecretYParity: 0x02,
             to: recipient,
             memo: memo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
