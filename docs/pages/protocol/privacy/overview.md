@@ -220,14 +220,14 @@ Proofs or attestations are assumed to be fast. No data availability is required 
 
 ## Withdrawal queue
 
-Withdrawals use a fixed-size ring buffer (`WITHDRAWAL_QUEUE_CAPACITY = 100`) that allows the sequencer to process withdrawals independently of proof generation. Each batch gets its own slot, and the sequencer processes withdrawals from the oldest slot while new batches add to the next available slot. If the sequencer does not process withdrawals quickly enough and the buffer fills, batch submission reverts — this is intentional, as it forces the sequencer to keep up with withdrawal processing in order to make batch progress.
+Withdrawals use a fixed-size ring buffer (capacity `WITHDRAWAL_QUEUE_CAPACITY = 100`) that allows the sequencer to process withdrawals independently of proof generation. Each batch gets its own slot, and the sequencer processes withdrawals from the oldest slot while new batches add to the next available slot. Head and tail are raw counters that never wrap; modular arithmetic (`index % WITHDRAWAL_QUEUE_CAPACITY`) is used only for slot indexing.
 
 The portal tracks:
 - `head` - slot index of the oldest unprocessed batch (where sequencer removes)
 - `tail` - slot index where the next batch will write (where proofs add)
 - `slots` - mapping of slot index to hash chain (`EMPTY_SENTINEL` = empty)
 
-The ring buffer uses modular arithmetic for slot indexing (`tail % WITHDRAWAL_QUEUE_CAPACITY`) so head and tail never wrap, keeping the implementation simple. The queue reverts with `WithdrawalQueueFull` if `tail - head >= WITHDRAWAL_QUEUE_CAPACITY`.
+The queue reverts with `WithdrawalQueueFull` if `tail - head >= WITHDRAWAL_QUEUE_CAPACITY` (i.e., all 100 slots are occupied).
 
 ### Hash chain structure
 
@@ -285,12 +285,12 @@ function submitBatch(...) external onlySequencer {
 
     uint256 tail = _withdrawalQueue.tail;
 
-    // Revert if ring buffer is full — sequencer must process withdrawals to make room
+    // Revert if all slots are occupied
     if (tail - _withdrawalQueue.head >= WITHDRAWAL_QUEUE_CAPACITY) {
         revert WithdrawalQueueFull();
     }
 
-    // Write the withdrawal hash chain to this slot (using modular indexing)
+    // Write the withdrawal hash chain to this slot (modular indexing)
     _withdrawalQueue.slots[tail % WITHDRAWAL_QUEUE_CAPACITY] = withdrawalQueueTransition.withdrawalQueueHash;
 
     // Advance tail
@@ -298,7 +298,7 @@ function submitBatch(...) external onlySequencer {
 }
 ```
 
-This design eliminates race conditions entirely — each batch has its own independent slot, and the sequencer processes slots in order. The fixed-size ring buffer ensures the sequencer must keep up with withdrawal processing to continue submitting batches.
+This design eliminates race conditions entirely - each batch has its own independent slot, and the sequencer processes slots in order. The fixed-size ring buffer (capacity 100) bounds storage usage while providing ample room for normal operation.
 
 ## Interfaces and functions
 
@@ -395,14 +395,14 @@ library DepositQueueLib {
 
 #### WithdrawalQueueLib (fixed-size ring buffer)
 
-Handles L2→Tempo withdrawals where the producer (proof) is slow and the consumer (on-chain) is fast. Each batch gets its own slot in a fixed-size ring buffer of `WITHDRAWAL_QUEUE_CAPACITY` slots. If the buffer is full when a new batch is submitted, the transaction reverts — this forces the sequencer to keep up with withdrawal processing.
+Handles L2→Tempo withdrawals where the producer (proof) is slow and the consumer (on-chain) is fast. Each batch gets its own slot in a fixed-size ring buffer with capacity `WITHDRAWAL_QUEUE_CAPACITY = 100`.
 
 ```solidity
 /// @dev Sentinel value for empty slots. Using 0xff...ff instead of 0x00 to avoid
 ///      clearing storage (which would refund gas and create incentive issues).
 bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
 
-/// @dev Fixed capacity for the withdrawal ring buffer (number of batch slots).
+
 uint256 constant WITHDRAWAL_QUEUE_CAPACITY = 100;
 
 struct WithdrawalQueue {
@@ -415,7 +415,7 @@ library WithdrawalQueueLib {
     /// @notice Add a batch's withdrawals to the queue (called during batch submission)
     /// @dev Writes to slot at tail % WITHDRAWAL_QUEUE_CAPACITY, then advances tail.
     ///      Reverts with WithdrawalQueueFull if tail - head >= WITHDRAWAL_QUEUE_CAPACITY.
-    function enqueue(WithdrawalQueue storage q, bytes32 withdrawalQueueHash) internal;
+    function enqueue(WithdrawalQueue storage q, WithdrawalQueueTransition memory transition) internal;
 
     /// @notice Pop the next withdrawal from the queue (on-chain operation)
     /// @dev Verifies the withdrawal is at the head of the current slot and advances.
@@ -429,6 +429,9 @@ library WithdrawalQueueLib {
     function length(WithdrawalQueue storage q) internal view returns (uint256);
 }
 ```
+
+**Gas note**: The ring buffer reuses slots via modular indexing, so storage writes to already-occupied slots cost less gas (warm storage). New storage charges only apply when the queue grows into a slot that has never been used.
+
 
 | Queue | Tempo operation | Zone/Proof operation |
 |-------|--------------|---------------------|
@@ -553,7 +556,6 @@ interface IZonePortal {
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
-    function withdrawalQueueMaxSize() external view returns (uint256);
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     /// @notice Start a sequencer transfer. Only callable by current sequencer.
@@ -1020,7 +1022,7 @@ Both the deposit queue and withdrawal queue are FIFO queues that require constan
 Both use hash chains, but with different models:
 
 - **Deposit queue**: Tempo tracks only `currentDepositQueueHash` (where new deposits land). The zone tracks its own `processedDepositQueueHash` in EVM state. The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof.
-- **Withdrawal queue**: fixed-size ring buffer of `WITHDRAWAL_QUEUE_CAPACITY` slots (each batch gets its own slot, `head` points to oldest unprocessed batch, `tail` points to where next batch writes; reverts if full)
+- **Withdrawal queue**: fixed-size ring buffer with `WITHDRAWAL_QUEUE_CAPACITY = 100` (each batch gets its own slot, `head` points to oldest unprocessed batch, `tail` points to where next batch writes, slots are indexed via `head/tail % WITHDRAWAL_QUEUE_CAPACITY`)
 
 The hash chains are structured differently to optimize for their on-chain operation:
 
@@ -1071,24 +1073,24 @@ When slot exhausted: slots[head] = EMPTY_SENTINEL, head++
 
 - **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
 - **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP), writes to slot at tail.
-- **Fixed-size ring buffer**: Each batch gets its own slot. Sequencer processes from `head`, proofs add at `tail`. Reverts with `WithdrawalQueueFull` if the buffer is full (`tail - head >= WITHDRAWAL_QUEUE_CAPACITY`). This forces the sequencer to keep up with withdrawal processing.
+- **Fixed-size ring buffer**: Each batch gets its own slot (capacity 100). Sequencer processes from `head`, proofs add at `tail`. Reverts with `WithdrawalQueueFull` if all slots are occupied.
 
 ```
-Fixed-size ring buffer (WITHDRAWAL_QUEUE_CAPACITY slots):
+Fixed-size ring buffer (WITHDRAWAL_QUEUE_CAPACITY = 100):
 
      head                              tail
       │                                 │
       ▼                                 ▼
   ┌─────┬─────┬─────┬─────┬─────┬─────┐
-  │ w1  │ w4  │ w6  │EMPTY│EMPTY│EMPTY│  (capacity = WITHDRAWAL_QUEUE_CAPACITY)
+  │ w1  │ w4  │ w6  │EMPTY│EMPTY│     │  ... (100 slots, indexed via % 100)
   │ w2  │ w5  │     │     │     │     │
   │ w3  │     │     │     │     │     │
   └─────┴─────┴─────┴─────┴─────┴─────┘
-  slot 0 slot 1 slot 2 ...  (indexed by tail % capacity)
+  slot 0 slot 1 slot 2 ...        slot 99
 
-- Batches write to slots[tail % capacity], then tail++
-- Sequencer processes from slots[head % capacity], then head++ when slot exhausted
-- Reverts if tail - head >= WITHDRAWAL_QUEUE_CAPACITY (queue full)
+- Batches write to slots[tail % 100], then tail++
+- Sequencer processes from slots[head % 100], then head++ when slot exhausted
+- Reverts with WithdrawalQueueFull if tail - head >= 100
 ```
 
 The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable. Using `EMPTY_SENTINEL` (0xffffffff...fff) instead of 0x00 avoids storage clearing and gas refund incentive issues.
