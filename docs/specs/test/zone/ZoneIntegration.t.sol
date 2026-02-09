@@ -406,8 +406,6 @@ contract ZoneIntegrationTest is BaseTest {
         // Verify queue state
         assertEq(l1Portal.withdrawalQueueHead(), 0);
         assertEq(l1Portal.withdrawalQueueTail(), 3);
-        assertEq(l1Portal.withdrawalQueueMaxSize(), 3);
-
         // Process in order
         uint256 bobBefore = pathUSD.balanceOf(bob);
         uint256 charlieBefore = pathUSD.balanceOf(charlie);

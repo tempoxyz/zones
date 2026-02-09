@@ -49,6 +49,7 @@ struct DepositQueueTransition {
     bytes32 nextProcessedHash; // where zone processed up to (proof output)
 }
 
+
 /// @notice Deposit type discriminator for the unified deposit queue
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
@@ -432,7 +433,6 @@ interface IZonePortal {
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
-    function withdrawalQueueMaxSize() external view returns (uint256);
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);

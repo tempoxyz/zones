@@ -20,7 +20,7 @@ contract ZoneMessenger is IZoneMessenger {
     /// @notice The zone token address
     address public immutable token;
 
-    /// @notice The L2 sender during callback execution (transient)
+    /// @notice The L2 sender during callback execution (only valid within a callback)
     address internal _xDomainMessageSender;
 
     /*//////////////////////////////////////////////////////////////
