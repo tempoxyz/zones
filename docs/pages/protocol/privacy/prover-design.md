@@ -173,17 +173,10 @@ pub struct ChaumPedersenProof {
 }
 ```
 
-Each zone block contains the required system transactions plus user transactions that will be executed using `revm`.
-The system transactions must mirror the Solidity reference implementation:
-- `ZoneInbox.advanceTempo(tempo_header_rlp, deposits, decryptions)` at the start of the block
-- `ZoneOutbox.finalizeWithdrawalBatch(count)` at the end of the block **only if this is the final block of the batch**
-If `advanceTempo` is omitted for a block, the Tempo binding carries over from the previous block.
-
-The executor must enforce at most one `advanceTempo` at the start of each block
-(or zero, for blocks that do not advance Tempo), and enforce `finalizeWithdrawalBatch` only in the
-final block of the batch. The block hash is computed from the simplified zone header:
-`parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`.
-The transactions and receipts roots are computed over the full ordered list of zone transactions.
+**Invariants:**
+- `finalizeWithdrawalBatch` must be present exactly once, in the last block of the batch
+- `beneficiary` must match the registered sequencer
+- Block hash is computed from the simplified header: `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`
 
 ### Zone State Witness
 
@@ -250,71 +243,13 @@ pub struct L1StateRead {
 The `BatchStateProof` structure enables efficient proving of potentially thousands of Tempo state reads across multiple zone blocks.
 
 **Binding to Tempo:**
-- Tempo headers are validated whenever `ZoneInbox.advanceTempo` executes. Each call runs
-  `TempoState.finalizeTempo`, updating `tempoBlockNumber`, `tempoBlockHash`, and `tempoStateRoot`
-  in the proven zone state.
-- `TempoState.tempoBlockNumber()` at end of batch must equal `public_inputs.tempo_block_number`.
-- Each Tempo read is verified against the `tempoStateRoot` currently bound in `TempoState`
-  at the time of the read. The precompile must reject reads if the block is not yet bound.
-- For any Tempo read, the `tempo_block_number` must match the value currently bound in
-  `TempoState` at the time of the read. If a block contains no `advanceTempo` calls, reads
-  use the binding from the previous block.
-- Tempo reads performed inside `advanceTempo` (e.g., deposit queue hash) must be bound to the
-  Tempo header finalized by that specific call.
-
-Inside execution, `TempoState.readTempoStorageSlot` is modeled to read from the current `tempoStateRoot` (derived from the finalized header), so the proof and the precompile agree on the same root.
+- `TempoState.tempoBlockNumber()` at end of batch must equal `public_inputs.tempo_block_number`
+- Each Tempo read is verified against the currently bound `tempoStateRoot`; the precompile rejects reads if the block is not yet bound
+- Reads inside `advanceTempo` bind to the Tempo header finalized by that call; blocks without `advanceTempo` inherit the previous binding
 
 #### Deduplication Strategy
 
-The key optimization is the **deduplicated node pool**. Instead of including separate MPT proofs for each Tempo storage read, all proofs share a single pool of verified nodes.
-
-**Why this matters:**
-- A batch might perform 100,000 Tempo state reads across 100 zone blocks
-- Many reads access the same accounts (shared account trie paths)
-- Many reads access slots in nearby addresses (shared storage trie paths)
-- Across multiple Tempo blocks, unchanged state shares identical nodes
-
-**How it works:**
-
-1. `node_pool` contains every unique MPT node, keyed by `keccak256(rlp(node))`
-2. Each `L1StateRead` has a `node_path` that references nodes in the pool by hash
-3. During proving:
-   - Verify each node in the pool exactly once: `keccak256(node) == hash`
-   - For each read, walk the `node_path` through verified nodes
-   - No node is ever hashed more than once
-
-**Example:**
-
-```
-Zone block 0: Read Account A slot 5 from Tempo block 1000
-Zone block 1: Read Account A slot 6 from Tempo block 1000
-Zone block 2: Read Account A slot 5 from Tempo block 1001
-
-Traditional approach:
-  - 3 separate proofs × 8 nodes each = 24 node verifications
-  - Many nodes overlap but are verified multiple times
-
-Deduplicated approach:
-  node_pool = {
-    0xaaa... -> [branch node],      // shared by all 3 reads
-    0xbbb... -> [branch node],      // shared by all 3 reads
-    0xccc... -> [extension node],   // shared by all 3 reads
-    0xddd... -> [leaf for A[5] in block 1000],
-    0xeee... -> [leaf for A[6] in block 1000],
-    0xfff... -> [leaf for A[5] in block 1001],
-  }
-  Total: ~11 unique nodes verified once each
-```
-
-**Proof size reduction:**
-- Traditional: 100,000 reads × 8 nodes × 32 bytes = 25.6 MB
-- Deduplicated: ~50,000 unique nodes × 32 bytes = 1.6 MB
-- **Compression: ~16x smaller**
-
-**Prover cost reduction:**
-- Traditional: 800,000 keccak operations
-- Deduplicated: 50,000 keccak operations
-- **Speedup: ~16x faster**
+The key optimization is the **deduplicated node pool**. Instead of including separate MPT proofs for each Tempo storage read, all proofs share a single pool of verified nodes keyed by `keccak256(rlp(node))`. Each `L1StateRead` references nodes in the pool by hash, so every node is hashed and verified exactly once regardless of how many reads traverse it. Reads that share account-trie or storage-trie paths (common across blocks and nearby slots) reuse the same verified nodes, yielding roughly **16x reduction** in both proof size and keccak operations for large batches.
 
 ## Implementation
 
@@ -519,54 +454,11 @@ fn execute_zone_block(
 
 ## Deployment Modes
 
-### ZKVM (SP1)
-
-```rust
-#[cfg(target_os = "zkvm")]
-fn main() {
-    let witness: BatchWitness = zkvm::io::read();
-    let output = prove_zone_batch(witness).expect("proof generation failed");
-    zkvm::io::commit(&output);
-}
-```
-
-### TEE (SGX/TDX)
-
-```rust
-#[cfg(target_env = "sgx")]
-#[no_mangle]
-pub extern "C" fn ecall_prove_batch(
-    witness_ptr: *const u8,
-    witness_len: usize,
-) -> BatchOutput {
-    let witness = unsafe { deserialize(witness_ptr, witness_len) };
-    prove_zone_batch(witness).expect("proof generation failed")
-}
-```
+- **ZKVM (SP1):** The guest program reads `BatchWitness` from the host, calls `prove_zone_batch`, and commits `BatchOutput` via `zkvm::io::commit`.
+- **TEE (SGX/TDX):** An enclave entry point deserializes the witness from untrusted memory, calls `prove_zone_batch`, and returns `BatchOutput` with an attestation binding.
 
 ## On-Chain Verification
 
-The portal contract receives:
-- `tempoBlockNumber` - block zone committed to (from zone's TempoState)
-- `recentTempoBlockNumber` - optional recent block for ancestry proofs (0 = direct lookup)
-- `blockTransition` - from `BatchOutput` (block hash based)
-- `proof` - ZKVM proof or TEE attestation
+The portal submits `BatchOutput` fields along with `tempoBlockNumber`, `anchorBlockNumber`/`anchorBlockHash` (from EIP-2935), `expectedWithdrawalBatchIndex`, and the registered `sequencer` to the verifier contract. The verifier confirms the proof binds these public inputs to the prover's state transition — matching block hashes, deposit/withdrawal queue transitions, Tempo binding (direct or ancestry), sequencer identity, and withdrawal batch index.
 
-The portal passes the following to the verifier:
-- `tempoBlockNumber`
-- `anchorBlockNumber` and `anchorBlockHash` (from EIP-2935)
-- `expectedWithdrawalBatchIndex` (portal's `withdrawalBatchIndex + 1`)
-- `sequencer` (the registered sequencer address)
-- `blockTransition`, `depositQueueTransition`, `withdrawalQueueTransition`
-- `verifierConfig` and `proof`
-
-The verifier validates that the prover correctly executed the state transition and produced the output commitments.
-In particular, the proof must enforce:
-- `TempoState.tempoBlockNumber == tempoBlockNumber`
-- **Direct mode** (`anchorBlockNumber == tempoBlockNumber`): `TempoState.tempoBlockHash == anchorBlockHash`
-- **Ancestry mode** (`anchorBlockNumber > tempoBlockNumber`): parent-hash chain from `tempoBlockNumber` to `anchorBlockNumber`, ending at `anchorBlockHash`
-- `ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex` (passed by portal)
-- `ZoneOutbox.lastBatch().withdrawalQueueHash == withdrawalQueueTransition.withdrawalQueueHash`
-- Zone block `beneficiary` equals `sequencer` (passed by portal)
-- `DepositQueueTransition` matches `ZoneInbox.processedDepositQueueHash` changes
-- `BlockTransition` is computed from the zone block header hash (not raw state root)
+See [overview.md](./overview.md) for the full verifier check list and portal interface.

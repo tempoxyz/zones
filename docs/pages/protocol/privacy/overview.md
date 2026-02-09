@@ -176,27 +176,6 @@ The zone has access to Tempo state via the TempoState predeploy, so the proof ca
 
 `submitBatch` verifies that `prevBlockHash == blockHash`, then calls the verifier. On success it updates `withdrawalBatchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with `withdrawalBatchIndex`, `nextProcessedDepositQueueHash`, `nextBlockHash`, and `withdrawalQueueHash` for off-chain auditing.
 
-### Ancestry proofs for historical blocks
-
-EIP-2935 provides access to the last ~8192 block hashes. If a zone is inactive for longer than this window, `tempoBlockNumber` rotates out of EIP-2935, preventing batch submission and permanently bricking the zone.
-
-**Solution**: The proof verifies ancestry inside the ZK circuit, avoiding expensive on-chain verification:
-
-1. Portal reads `recentTempoBlockNumber` hash from EIP-2935 (must be recent)
-2. Prover includes Tempo headers from `tempoBlockNumber + 1` to `recentTempoBlockNumber` as witness data
-3. Proof verifies the parent hash chain: each header's parent hash must match the previous header's hash, starting from zone's committed `tempoBlockHash()` and ending at `anchorBlockHash`
-4. Portal verifies the (constant-size) proof against the recent block hash
-
-**Usage constraints**:
-- `recentTempoBlockNumber = 0` → **direct mode**: portal reads `tempoBlockNumber` hash from EIP-2935
-- `recentTempoBlockNumber > tempoBlockNumber` → **ancestry mode**: portal reads `recentTempoBlockNumber` hash, proof verifies parent chain
-- `recentTempoBlockNumber` must be **strictly greater** than `tempoBlockNumber` (passing equal values reverts; use `0` for direct mode)
-- Both `tempoBlockNumber` and `recentTempoBlockNumber` must be `>= genesisTempoBlockNumber`
-
-**Cost**: Proving time increases linearly with the block gap, but verification remains constant. A 15k block gap adds ~15k keccak operations inside the proof but doesn't increase on-chain gas costs beyond the normal verification.
-
-**Note**: This feature changes the `IVerifier.verify()` signature (adds `anchorBlockNumber` parameter). Verifier implementations must be upgraded alongside the portal.
-
 ### Deposit queue
 
 Tempo to zone communication uses a single `depositQueue` chain. Each deposit is hashed into a chain:
@@ -372,7 +351,7 @@ interface IVerifier {
 }
 ```
 
-The verifier receives `tempoBlockNumber`, `anchorBlockNumber`, and `anchorBlockHash` (looked up on-chain via the EIP-2935 block hash history precompile), `expectedWithdrawalBatchIndex` (portal's current batch index + 1), `sequencer` (the registered sequencer address), block transition, deposit queue transition, withdrawal queue transition, and the proof. The proof must demonstrate that the zone committed to `tempoBlockNumber` via TempoState, that the anchor hash is correct (direct or ancestry mode), that the state transition is valid, that `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`, that the zone block `beneficiary` matches `sequencer`, and that `ZoneOutbox.lastBatch().withdrawalQueueHash` matches `withdrawalQueueTransition.withdrawalQueueHash` (read from state root, not events).
+The verifier validates the batch per the checks listed in the Batch submission section.
 
 ### Queue libraries
 
@@ -774,18 +753,13 @@ interface ITempoState {
 }
 ```
 
-Tempo headers are RLP encoded as `rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])`, where `inner` is a standard Ethereum header. The inner header uses trailing-field semantics for optional fields: `baseFeePerGas` (EIP-1559), `withdrawalsRoot` (EIP-4895), `blobGasUsed`/`excessBlobGas` (EIP-4844), `parentBeaconBlockRoot` (EIP-4788), and `requestsHash` (EIP-7685). TempoState skips these trailing optional fields and does not expose them.
-
-The TempoState stores the Tempo wrapper fields and the inner fields needed by the zone/proof logic; the `tempoBlockHash` is always `keccak256(RLP(TempoHeader))`, so proofs still commit to the complete header contents.
+TempoState stores the Tempo wrapper fields and selected inner header fields; `tempoBlockHash` is always `keccak256(RLP(TempoHeader))`, so proofs commit to the complete header.
 
 **How it works:**
 
-1. ZoneInbox calls `finalizeTempo()` when the sequencer chooses to advance Tempo for a block, which decodes the RLP header, validates chain continuity, and stores the wrapper fields and selected inner fields. If a block omits `advanceTempo`, the Tempo binding carries over from the previous block.
-2. When submitting a batch, the prover specifies a `tempoBlockNumber` and optionally a `recentTempoBlockNumber`. The portal reads the hash for `anchorBlockNumber` via the EIP-2935 block hash history precompile.
-3. The proof must demonstrate that the zone's `tempoBlockHash` (from TempoState) matches the portal's `anchorBlockHash` in direct mode, or that the parent-hash chain from `tempoBlockNumber` reaches `anchorBlockHash` in ancestry mode.
-4. The `readTempoStorageSlot` functions are **precompile stubs restricted to system contracts only** - actual implementation is in the zone node, validated against `tempoStateRoot`. Only ZoneInbox (0x1c00...0001), ZoneOutbox (0x1c00...0002), and ZoneConfig (0x1c00...0003) can call these functions. User transactions cannot directly read Tempo state.
-
-Tempo state staleness depends on how frequently the sequencer updates tempo state using `advanceTempo()`. The zone client must only finalize Tempo headers after finality; proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
+- ZoneInbox calls `finalizeTempo()` to advance Tempo state, which decodes the RLP header, validates chain continuity, and stores selected fields. If omitted, the Tempo binding carries over.
+- The `readTempoStorageSlot` functions are **precompile stubs restricted to system contracts only** (ZoneInbox, ZoneOutbox, ZoneConfig) — actual implementation is in the zone node, validated against `tempoStateRoot`. User transactions cannot directly read Tempo state.
+- Tempo state staleness depends on how frequently the sequencer calls `advanceTempo()`. Proofs should only reference finalized Tempo blocks to avoid reorg risk. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
 
 #### TIP-403 registry
 
@@ -995,19 +969,6 @@ for i from (pendingCount - 1) down to 0:
     pop withdrawal from storage
 ```
 
-### External dependencies
-
-#### TIP-20 (minimal)
-
-```solidity
-interface ITIP20 {
-    function transfer(address to, uint256 amount) external returns (bool);
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-    function approve(address spender, uint256 amount) external returns (bool);
-    function balanceOf(address account) external view returns (uint256);
-}
-```
-
 ## Queue design rationale
 
 Both the deposit queue and withdrawal queue are FIFO queues that require constant on-chain storage. They have symmetric but inverted requirements:
@@ -1019,81 +980,10 @@ Both the deposit queue and withdrawal queue are FIFO queues that require constan
 | Efficient on-chain   | Addition | Removal |
 | Stable proving target| For removals | For additions |
 
-Both use hash chains, but with different models:
+- **Deposit queue**: Newest-outermost hash chain for O(1) on-chain addition; zone processes oldest-first inside the proof.
+- **Withdrawal queue**: Oldest-outermost hash chain per slot for O(1) on-chain removal; proof builds newest-innermost inside the ZKP.
 
-- **Deposit queue**: Tempo tracks only `currentDepositQueueHash` (where new deposits land). The zone tracks its own `processedDepositQueueHash` in EVM state. The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof.
-- **Withdrawal queue**: fixed-size ring buffer with `WITHDRAWAL_QUEUE_CAPACITY = 100` (each batch gets its own slot, `head` points to oldest unprocessed batch, `tail` points to where next batch writes, slots are indexed via `head/tail % WITHDRAWAL_QUEUE_CAPACITY`)
-
-The hash chains are structured differently to optimize for their on-chain operation:
-
-### Deposit queue: newest-outermost
-
-```
-Newest deposit wraps the outside (O(1) addition):
-
-                    ┌─────────────────────────────────────────┐
-                    │ hash(d3, ┌─────────────────────────┐ ) │  ← currentDepositQueueHash
-                    │          │ hash(d2, ┌───────────┐ ) │  │
-                    │          │          │ hash(d1,0) │   │  │
-                    │          │          └───────────┘   │  │
-                    │          └─────────────────────────┘  │
-                    └─────────────────────────────────────────┘
-                      ▲                              ▲
-                      │                              │
-                    newest                        oldest
-                   (outermost)                  (innermost)
-
-Adding d4: currentDepositQueueHash = keccak256(abi.encode(deposit4, currentDepositQueueHash))
-```
-
-- **On-chain addition is O(1)**: `currentDepositQueueHash = keccak256(abi.encode(deposit, currentDepositQueueHash))` — wrap the outside.
-- **Zone processing**: The zone's `advanceTempo()` processes deposits in FIFO order (oldest first, working outward from its `processedDepositQueueHash`), and validates the result matches `currentDepositQueueHash` (read from Tempo state).
-- **After batch**: Tempo updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced.
-
-### Withdrawal queue: oldest-outermost per slot
-
-```
-Oldest withdrawal on the outside (O(1) removal):
-
-                    ┌────────────────────────────────────────────────────┐
-                    │ hash(w1, ┌──────────────────────────────────────┐) │  ← slots[head]
-                    │          │ hash(w2, ┌───────────────────────┐ ) │  │
-                    │          │          │ hash(w3, EMPTY_SENTINEL) │  │  │
-                    │          │          └───────────────────────┘  │  │
-                    │          └──────────────────────────────────────┘  │
-                    └────────────────────────────────────────────────────┘
-                      ▲                                     ▲
-                      │                                     │
-                    oldest                              newest
-                   (outermost)                       (innermost)
-
-Removing w1: verify hash(w1, remainingQueue) == slots[head], then slots[head] = remainingQueue
-When slot exhausted: slots[head] = EMPTY_SENTINEL, head++
-```
-
-- **On-chain removal is O(1)**: Sequencer provides withdrawal + remaining hash, portal verifies and unwraps one layer.
-- **Proving additions**: Proof builds queue with new withdrawals at innermost (O(N) inside ZKP), writes to slot at tail.
-- **Fixed-size ring buffer**: Each batch gets its own slot (capacity 100). Sequencer processes from `head`, proofs add at `tail`. Reverts with `WithdrawalQueueFull` if all slots are occupied.
-
-```
-Fixed-size ring buffer (WITHDRAWAL_QUEUE_CAPACITY = 100):
-
-     head                              tail
-      │                                 │
-      ▼                                 ▼
-  ┌─────┬─────┬─────┬─────┬─────┬─────┐
-  │ w1  │ w4  │ w6  │EMPTY│EMPTY│     │  ... (100 slots, indexed via % 100)
-  │ w2  │ w5  │     │     │     │     │
-  │ w3  │     │     │     │     │     │
-  └─────┴─────┴─────┴─────┴─────┴─────┘
-  slot 0 slot 1 slot 2 ...        slot 99
-
-- Batches write to slots[tail % 100], then tail++
-- Sequencer processes from slots[head % 100], then head++ when slot exhausted
-- Reverts with WithdrawalQueueFull if tail - head >= 100
-```
-
-The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. Additions wrap the outside; removals unwrap from the outside. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable. Using `EMPTY_SENTINEL` (0xffffffff...fff) instead of 0x00 avoids storage clearing and gas refund incentive issues.
+The key insight: structure the hash chain so the **on-chain operation touches the outermost layer**. The expensive operation (processing the full queue) happens inside the ZKP where O(N) is acceptable. Using `EMPTY_SENTINEL` (0xffffffff...fff) instead of 0x00 avoids storage clearing and gas refund incentive issues.
 
 ## Bridging in (Tempo to zone)
 
@@ -1108,9 +998,6 @@ Notes:
 - Deposits are simple token credits. There are no callbacks or failure modes on the zone side.
 - Deposits are finalized for Tempo once the batch is verified.
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
-- The portal only stores `currentDepositQueueHash`, not individual deposits. The sequencer must track deposits off-chain.
-- Tempo state advancement is combined with deposit processing in `ZoneInbox.advanceTempo()`, which calls `TempoState.finalizeTempo()` internally.
-- The proof validates an exact match to `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits.
 
 ### Encrypted deposits
 
@@ -1137,6 +1024,7 @@ struct EncryptedDepositPayload {
 struct EncryptedDeposit {
     address sender;              // Depositor (public, for refunds)
     uint128 amount;              // Amount (public, for accounting)
+    uint256 keyIndex;            // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
 ```
@@ -1149,15 +1037,6 @@ struct EncryptedDeposit {
 | `amount` | Public | Needed for on-chain accounting/escrow |
 | `to` | Encrypted | Privacy - only sequencer knows recipient |
 | `memo` | Encrypted | Privacy - only sequencer knows payment context |
-
-**Processing flow:**
-
-1. User calls `depositEncrypted(amount, keyIndex, encrypted)` on Tempo portal
-2. Portal escrows funds, adds to the **unified deposit queue**, and emits `EncryptedDepositMade`
-3. Sequencer decrypts the payload off-chain using their private key
-4. When processing the zone block, sequencer calls `advanceTempo()` with deposits from the unified queue
-5. For each encrypted deposit, sequencer provides decrypted `(to, memo)` alongside the encrypted data
-6. Zone/proof validates decryption and credits the recipient
 
 **Unified deposit queue:**
 
@@ -1195,70 +1074,9 @@ struct DecryptionData {
 }
 ```
 
-Verification works by leveraging the AES-GCM authentication tag:
-
-1. Sequencer computes: `sharedSecret = ECDH(sequencerPriv, ephemeralPub)`
-2. On-chain, derive AES key from `sharedSecret` using HKDF-SHA256
-3. Attempt to decrypt the ciphertext with AES-256-GCM
-4. **The GCM tag will only validate if the shared secret is correct**
-5. If tag validates, the decrypted `(to, memo)` are cryptographically proven authentic
-
 **Griefing attack prevention:**
 
-Without additional checks, a malicious user could submit an encrypted deposit with invalid ciphertext (garbage data or encrypted to the wrong key). The sequencer wouldn't be able to decrypt it, but also couldn't prove it's invalid, blocking chain progress.
-
-**Solution**: Use a **Chaum-Pedersen zero-knowledge proof** to prove the shared secret was correctly derived, without exposing the sequencer's private key to the EVM.
-
-The sequencer provides a Chaum-Pedersen proof that proves: "I know `privSeq` such that `pubSeq = privSeq * G` AND `sharedSecretPoint = privSeq * ephemeralPub`"
-
-This proof allows on-chain verification without revealing the private key:
-
-```solidity
-// Step 1: Look up sequencer's public key from on-chain key history
-(bytes32 seqPubX, uint8 seqPubYParity) = _readEncryptionKey(ed.keyIndex);
-
-// Step 2: Verify Chaum-Pedersen proof of correct shared secret derivation
-bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
-    ed.encrypted.ephemeralPubX,
-    ed.encrypted.ephemeralPubYParity,
-    dec.sharedSecret,
-    seqPubX,          // looked up on-chain, not from dec
-    seqPubYParity,    // looked up on-chain, not from dec
-    dec.cpProof
-);
-if (!proofValid) revert InvalidSharedSecretProof();
-
-// Step 3: Derive AES key using HKDF-SHA256 (in Solidity)
-// Note: Encryption key validity is already validated on Tempo side in ZonePortal.depositEncrypted()
-bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", "");
-
-// Step 4: Try to decrypt using AES-GCM precompile
-(bytes memory plaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(...);
-
-// Step 5: If decryption fails, return funds to sender (don't block chain)
-if (!valid) {
-    zoneToken.mint(ed.sender, ed.amount);
-    emit EncryptedDepositFailed(...);
-}
-```
-
-This prevents griefing: users can't block the chain with invalid encryptions, and the sequencer's private key never touches the EVM.
-
-**Chaum-Pedersen proof protocol:**
-
-1. **Prover (sequencer) computes off-chain:**
-   - Pick random `r`
-   - `R1 = r * G`
-   - `R2 = r * ephemeralPub`
-   - `c = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)` (Fiat-Shamir challenge)
-   - `s = r + c * privSeq (mod n)`
-   - Proof is `(s, c)`
-
-2. **Verifier (on-chain) checks:**
-   - Reconstruct: `R1 = s*G - c*pubSeq`
-   - Reconstruct: `R2 = s*ephemeralPub - c*sharedSecretPoint`
-   - Recompute: `c' = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`
-   - Verify: `c == c'`
+Without additional checks, a malicious user could submit an encrypted deposit with invalid ciphertext (garbage data or encrypted to the wrong key), blocking chain progress. The solution is a **Chaum-Pedersen zero-knowledge proof** that proves the shared secret was correctly derived from the sequencer's private key and the user's ephemeral public key, without exposing the private key to the EVM. If the GCM tag fails to validate (wrong shared secret or malformed ciphertext), funds are returned to the sender instead of blocking the chain.
 
 **Chaum-Pedersen verification precompile** (at `0x1c00000000000000000000000000000000000100`):
 
@@ -1362,30 +1180,10 @@ if (!valid) {
 - **On-chain verification**: All verification happens on-chain via precompiles
 - **Standard crypto**: Uses well-established ECIES, ECDH, Chaum-Pedersen, HKDF-SHA256, and AES-256-GCM
 
-**Precompile implementation notes:**
-
-*Chaum-Pedersen Verify (`0x1c00000000000000000000000000000000000100`):*
-- Input: ephemeralPub, sharedSecret, sequencerPub, proof (s, c)
-- Reconstruct commitments: `R1 = s*G - c*pubSeq`, `R2 = s*ephemeralPub - c*sharedSecretPoint`
-- where `sharedSecretPoint` is derived by lifting sharedSecret to curve (requires Y-coordinate recovery)
-- Recompute challenge: `c' = hash(G, ephemeralPub, pubSeq, sharedSecretPoint, R1, R2)`
-- Verify: `c == c'`
-- Gas cost: ~8000 gas (2 point multiplications + 2 point additions + hash)
-
-*AES-GCM Decrypt (`0x1c00000000000000000000000000000000000101`):*
-- Input: AES key (32 bytes), nonce (12 bytes), ciphertext, AAD, tag (16 bytes)
-- Decrypt: `plaintext = AES-256-GCM-Decrypt(key, nonce, ciphertext, aad, tag)`
-- Return decrypted plaintext and `true` if tag validates, or empty bytes and `false` otherwise
-- Gas cost: ~1000 gas base + ~500 per 32 bytes of ciphertext
-- Much simpler than full ECIES precompile - only handles symmetric encryption
-
-*HKDF-SHA256 (implemented in Solidity):*
-- Uses existing SHA256 precompile (0x02) to implement HMAC-SHA256 and HKDF
-- HMAC-SHA256: `HMAC(key, msg) = SHA256((key ⊕ opad) || SHA256((key ⊕ ipad) || msg))`
-- HKDF-Extract: `PRK = HMAC-SHA256(salt, IKM)`
-- HKDF-Expand: `OKM = HMAC-SHA256(PRK, info || 0x01)`
-- Gas cost: ~5-10k gas for full HKDF (depends on message sizes, dominated by SHA256 calls)
-- Tradeoff: Higher gas cost than native implementation, but keeps precompile minimal and auditable
+**Precompile gas estimates:**
+- Chaum-Pedersen Verify: ~8000 gas (2 point multiplications + 2 point additions + hash)
+- AES-GCM Decrypt: ~1000 gas base + ~500 per 32 bytes of ciphertext
+- HKDF-SHA256 (in Solidity via SHA256 precompile): ~5-10k gas
 
 **Encryption key history:**
 
@@ -1399,20 +1197,6 @@ struct EncryptionKeyEntry {
     uint64 activationBlock; // Tempo block number when this key became active
 }
 
-/// @notice Encrypted deposit includes the key index used for encryption
-struct EncryptedDeposit {
-    address sender;              // Depositor (public, for refunds)
-    uint128 amount;              // Amount (public, for accounting)
-    uint256 keyIndex;            // Index of encryption key used (specified by depositor)
-    EncryptedDepositPayload encrypted; // Encrypted (to, memo)
-}
-
-/// @notice Deposit function requires explicit key index
-function depositEncrypted(
-    uint128 amount,
-    uint256 keyIndex,                      // User specifies which key they encrypted to
-    EncryptedDepositPayload calldata encrypted
-) external returns (bytes32 newCurrentDepositQueueHash);
 ```
 
 Key management functions:
@@ -1452,11 +1236,7 @@ Example timeline:
 3. Block 91400: Deposits with Key 0 start being rejected
 4. Sequencer can delete Key 0's private key after block 91400
 
-This allows:
-1. Users to verify they're encrypting to the current key before signing
-2. The prover to determine which key to use for any deposit via explicit `keyIndex`
-3. Seamless key rotation with a grace period for in-flight transactions
-4. Sequencer to safely delete old private keys after expiration
+This enables seamless key rotation with a grace period for in-flight transactions, and lets the sequencer safely delete old private keys after expiration.
 
 ## Bridging out (zone to Tempo)
 
@@ -1469,54 +1249,20 @@ The `withdrawalBatchIndex` ensures batches are submitted in order: each batch's 
 
 ### Withdrawal execution
 
-When the sequencer processes a withdrawal via `processWithdrawal`, the withdrawal is **popped unconditionally** (even on failure). If the transfer or messenger call fails, funds are bounced back via a new deposit.
+When the sequencer processes a withdrawal via `processWithdrawal` (see Withdrawal queue section for the full implementation), the withdrawal is **popped unconditionally** (even on failure). If the transfer or messenger call fails, funds are bounced back via a new deposit.
 
-```solidity
-function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) external onlySequencer {
-    uint256 head = _withdrawalQueue.head;
-
-    // Check if queue is empty
-    if (head == _withdrawalQueue.tail) {
-        revert NoWithdrawalsInQueue();
-    }
-
-    uint256 slotIndex = head % WITHDRAWAL_QUEUE_CAPACITY;
-    bytes32 currentSlot = _withdrawalQueue.slots[slotIndex];
-
-    // Verify head (remainingQueue of 0 means last item, we check against EMPTY_SENTINEL)
-    bytes32 expectedRemainingQueue = remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
-    require(keccak256(abi.encode(w, expectedRemainingQueue)) == currentSlot, "invalid");
-
-    // Pop the withdrawal regardless of success/failure
-    if (remainingQueue == bytes32(0)) {
-        // Slot exhausted, mark as empty and advance head
-        _withdrawalQueue.slots[slotIndex] = EMPTY_SENTINEL;
-        _withdrawalQueue.head = head + 1;
-    } else {
-        // More withdrawals in this slot
-        _withdrawalQueue.slots[slotIndex] = remainingQueue;
-    }
-
-    if (w.gasLimit == 0) {
-        ITIP20(token).transfer(w.to, w.amount);
-        return;
-    }
-
-    // Try callback via self-call for atomicity
-    try this._executeWithdrawal(w) {
-        // Success: tokens transferred and callback executed
-    } catch {
-        // Callback failed: bounce back to zone
-        _enqueueBounceBack(w.amount, w.fallbackRecipient);
-    }
-}
-```
-
-The messenger does `token.transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` and call `messenger.xDomainMessageSender()` to authenticate the L2 origin. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
+For simple withdrawals (`gasLimit == 0`), the portal transfers tokens directly. For withdrawals with callbacks, the portal uses a self-call for atomicity: if the callback reverts, the transfer reverts too, and funds are bounced back to the zone's `fallbackRecipient`. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
 
 ## Withdrawal failure and bounce-back
 
-Withdrawals can fail if the token transfer or messenger callback reverts (out of gas, logic error, TIP-403 policy, token pause, etc.). When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
+Withdrawals can fail if the token transfer or messenger callback reverts. Failure reasons include:
+- **Transfer failure**: `transfer` or `transferFrom` reverts
+- **TIP-403 policy**: Recipient not authorized under the token's transfer policy
+- **Token paused**: The zone token is globally paused
+- **Callback revert**: The receiver contract reverts (out of gas, logic error, etc.)
+- **Callback rejection**: Receiver returns wrong selector
+
+When a withdrawal fails, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`:
 
 ```solidity
 function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
@@ -1531,7 +1277,9 @@ function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal 
 }
 ```
 
-The zone processes bounce-back deposits and credits the `fallbackRecipient`. This allows withdrawals to fail gracefully without blocking the queue.
+The zone processes bounce-back deposits and credits the `fallbackRecipient`. This allows withdrawals to fail gracefully without blocking the queue. Users always retain their funds.
+
+**TIP-403 considerations**: Tempo TIP-20 tokens use TIP-403 for transfer authorization. Zone creators SHOULD choose zone tokens with `transferPolicyId == 1` (always-allow) to avoid complexity. If using restricted policies, the portal address MUST be whitelisted and users should set `fallbackRecipient` to an address they control.
 
 ## Data availability and liveness
 
@@ -1539,150 +1287,27 @@ The zone processes bounce-back deposits and credits the `fallbackRecipient`. Thi
 - If the sequencer withholds data or halts, users cannot reconstruct zone state or force exits; batch posting and withdrawal processing are sequencer-only.
 - The design assumes users accept this risk in exchange for low-cost and fast settlement.
 
-## Withdrawal failure details
-
-Withdrawals can fail for various reasons. The system handles failures gracefully via bounce-back:
-
-### Failure reasons
-
-Withdrawals can fail due to:
-- **Transfer failure**: `transfer` or `transferFrom` reverts (includes gasLimit = 0 cases)
-- **TIP-403 policy**: Recipient not authorized under the token's transfer policy
-- **Token paused**: The zone token is globally paused
-- **Callback revert**: The receiver contract reverts (out of gas, logic error, etc.)
-- **Callback rejection**: Receiver returns wrong selector
-
-### Withdrawal failures (Tempo-side)
-
-When a withdrawal fails on Tempo:
-1. The TIP-20 transfer or callback reverts
-2. The portal enqueues a bounce-back deposit to `fallbackRecipient` on the zone
-3. Funds return to zone via the normal deposit flow
-
-### TIP-403 specific considerations
-
-Tempo TIP-20 tokens use TIP-403 for transfer authorization:
-- Every transfer checks `isAuthorized(policyId, from)` AND `isAuthorized(policyId, to)`
-- Policy types: WHITELIST (must be in set) or BLACKLIST (must not be in set)
-- Policy ID 1 is "always-allow" (default for most tokens)
-
-Zone creators SHOULD choose zone tokens with `transferPolicyId == 1` to avoid complexity. If using restricted policies:
-- The portal address MUST be whitelisted
-- Users should set `fallbackRecipient` to an address they control
-
 ## Security considerations
 
 - Sequencer can halt the zone without recourse due to missing data availability.
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
-- Withdrawals with callbacks go through the zone messenger with a user-specified gas limit. The messenger does `transferFrom` + callback atomically; any transfer or callback failure triggers a bounce-back to `fallbackRecipient`.
+- Withdrawals with callbacks go through the zone messenger with a user-specified gas limit. See Withdrawal failure section for failure handling.
 - Deposits are locked on Tempo until a verified batch consumes them.
-- **Bounce-back guarantees**: Failed withdrawals bounce back to zone `fallbackRecipient`. Users always retain their funds.
-- **TIP-403 policy changes**: If the zone token's policy restricts the portal, withdrawals will fail and bounce back.
-- **Token pause**: If the zone token is paused, withdrawals bounce back to zone.
 
 ## Implementation architecture
 
-This section describes the concrete implementation approach for zone nodes.
-
-### Node architecture
-
-Each zone runs as an ExEx (Execution Extension) attached to a Tempo node. There are separate ExEx instances per zone—for example, one ExEx for a USDC zone and another for a USDT zone.
-
-```
-┌─────────────────────────────────────────────────────┐
-│                  Tempo Node                      │
-│  ┌─────────────┐  ┌─────────────┐                   │
-│  │ USDC Zone   │  │ USDT Zone   │                   │
-│  │   ExEx      │  │   ExEx      │  ...              │
-│  └─────────────┘  └─────────────┘                   │
-└─────────────────────────────────────────────────────┘
-```
-
-### Execution model
-
-- **Payloads**: TIP-20 payloads are submitted via a simple RPC interface (not full reth RPC).
-- **TIP-20 precompile**: Payloads are executed through a TIP-20 payments precompile that handles token transfers and fee accounting.
-- **revm**: Execution uses revm with custom precompile injections for TIP-20 and payment logic.
-- **In-memory backstore**: Zone state is held in an in-memory database for fast access. State is persisted to disk for recovery.
+Each zone runs as an ExEx (Execution Extension) attached to a Tempo node, with separate ExEx instances per zone. Execution uses revm with custom precompile injections for TIP-20 and payment logic. Zone state is held in an in-memory database (persisted to disk for recovery).
 
 ### State commitments
 
-- **Zone block hash**: Computed from the zone block header after execution. The zone block header is a simplified Ethereum header that includes:
-  - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`
-  - **Omitted fields**: `gasLimit`, `gasUsed` (zones have no hard gas limit), `logsBloom`, `extraData` (not needed for proofs)
-- **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo?, user txs..., finalizeWithdrawalBatch?]`.
-- **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
-- **Receipts root**: Committed in the block hash but not proven on-chain. Batch parameters are read from `lastBatch` state storage instead of event logs.
-- **Tempo anchoring**: The zone maintains its view of Tempo state via the TempoState predeploy. A zone block may start with a sequencer-only call to `ZoneInbox.advanceTempo()`, which internally calls `TempoState.finalizeTempo()` with the Tempo block header; if omitted, the binding carries over from the previous block. When submitting a batch, the prover specifies a `tempoBlockNumber` and an `anchorBlockNumber`; the proof must demonstrate the zone committed to `tempoBlockNumber` and that the anchor hash matches either the same block (direct mode) or a verified ancestry chain (ancestry mode) ending at `anchorBlockHash` from the EIP-2935 history precompile.
-
-#### Block header field coverage
-
-| Field | In Hash | Proven | How verified |
-|-------|---------|--------|--------------|
-| `parentHash` | ✓ | ✓ | Portal checks `prevBlockHash == blockHash`; proof validates chain continuity |
-| `beneficiary` | ✓ | ✓ | Proof validates beneficiary matches the registered sequencer address |
-| `stateRoot` | ✓ | ✓ | Core of proof; `lastBatch` and other state reads validated against this |
-| `transactionsRoot` | ✓ | ✗ | Committed but not proven on-chain; prevents sequencer revisionism |
-| `receiptsRoot` | ✓ | ✗ | Committed but not proven on-chain; batch params read from state instead |
-| `number` | ✓ | ✓ | Proof validates block number as part of the header transition |
-| `timestamp` | ✓ | ✓ | Proof validates timestamp is monotonically increasing from previous block |
-| `gasLimit` | ✗ | N/A | Omitted — zones have no hard gas limit |
-| `gasUsed` | ✗ | N/A | Omitted — zones have no hard gas limit |
-| `logsBloom` | ✗ | N/A | Omitted — not needed for proofs |
-| `extraData` | ✗ | N/A | Omitted — not needed for proofs |
+- **Zone block hash**: Computed from a simplified Ethereum header (`parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`). Fields like `gasLimit`, `gasUsed`, `logsBloom`, and `extraData` are omitted.
+- **Transactions/receipts roots**: Committed in the block hash but not proven on-chain. Transactions root prevents sequencer revisionism; batch parameters are read from `lastBatch` state storage instead of event logs.
 
 ### Batching and proofs
 
 - **Batch interval**: Batches are produced every 250 milliseconds.
-- **SP1 proofs**: Validity proofs are generated using Succinct's SP1 prover.
-- **Mock proofs**: For development, proofs are mocked but data structures (public inputs, proof envelope) must match the real format.
-- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the Tempo portal. The proof includes block hash and processed deposits.
-
-```solidity
-struct BatchProof {
-    bytes32 nextBlockHash;
-    uint64 withdrawalBatchIndex;            // withdrawal batch index from ZoneOutbox.lastBatch (must equal portal.withdrawalBatchIndex + 1)
-    uint64 tempoBlockNumber;      // Tempo block the zone synced to (must equal TempoState.tempoBlockNumber)
-    bytes32 withdrawalQueueHash;  // hash chain of withdrawals for this batch (0 if none)
-    bytes verifierConfig;         // opaque payload to IVerifier (TEE/ZK envelope)
-    bytes proof;                  // SP1 proof bytes (or TEE attestation)
-}
-```
-The portal provides `blockHash` and `withdrawalBatchIndex` as the previous batch's values. The proof reads `withdrawalBatchIndex` and `withdrawalQueueHash` from `ZoneOutbox.lastBatch()` state storage, and validates that `TempoState.tempoBlockHash()` and `TempoState.tempoBlockNumber()` match the EIP-2935 history precompile value and `tempoBlockNumber`.
-
-### Deposits and withdrawals
-
-- **Deposit contract**: Tempo portal escrows TIP-20 tokens. The ExEx watches `DepositMade` events and queues deposits for zone processing.
-- **Combined sequencer call**: A zone block may start with a sequencer-only call to `ZoneInbox.advanceTempo(header, deposits)`. This atomically advances the zone's Tempo view and processes pending deposits, validating the deposit hash against Tempo state. If omitted, no deposits are processed and the Tempo binding is unchanged for that block.
-- **Withdrawal requests**: Users trigger withdrawals on the zone via RPC. The withdrawal is added to the pending exits and included in the next batch's exit list.
-
-### RPC interface
-
-The zone exposes a minimal RPC (not full reth JSON-RPC):
-
-```
-zone_sendPayload(payload) -> txHash
-zone_requestWithdrawal(recipient, amount) -> withdrawalId
-zone_getState(address) -> balance
-zone_getReceipt(txHash) -> receipt
-```
-
-### Multi-zone ExEx structure
-
-```
-Tempo Node
-├── ExEx: USDC Zone
-│   ├── TIP-20 Precompile (USDC)
-│   ├── Payments Precompile
-│   ├── In-memory State Store
-│   └── SP1 Prover (mock for dev)
-│
-└── ExEx: USDT Zone
-    ├── TIP-20 Precompile (USDT)
-    ├── Payments Precompile
-    ├── In-memory State Store
-    └── SP1 Prover (mock for dev)
-```
+- **SP1 proofs**: Validity proofs are generated using Succinct's SP1 prover. For development, proofs are mocked but data structures must match the real format.
+- **Sequencer posting only**: Only the configured sequencer posts batch proofs to the Tempo portal.
 
 ## Open questions
 
