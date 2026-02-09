@@ -425,6 +425,9 @@ interface IZonePortal {
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
+    /// @notice Fixed gas value for encrypted deposit fee calculation (200,000 gas)
+    function FIXED_ENCRYPTED_DEPOSIT_GAS() external view returns (uint64);
+
     function zoneId() external view returns (uint64);
     function token() external view returns (address);
     function messenger() external view returns (address);
@@ -496,6 +499,9 @@ interface IZonePortal {
 
     /// @notice Calculate the fee for a deposit
     function calculateDepositFee() external view returns (uint128 fee);
+
+    /// @notice Calculate the fee for an encrypted deposit
+    function calculateEncryptedDepositFee() external view returns (uint128 fee);
 
     /// @notice Check if an encryption key is still valid for new deposits
     /// @dev A key is valid if it's the current key OR if it was superseded less than

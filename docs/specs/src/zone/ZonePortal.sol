@@ -40,6 +40,11 @@ contract ZonePortal is IZonePortal {
     ///      flexibility to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
 
+    /// @notice Fixed gas value for encrypted deposit fee calculation
+    /// @dev Set to 200,000 gas. Higher than regular deposits to account for
+    ///      zone-side Chaum-Pedersen verification, HKDF-SHA256, and AES-256-GCM decryption.
+    uint64 public constant FIXED_ENCRYPTED_DEPOSIT_GAS = 200_000;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -369,6 +374,13 @@ contract ZonePortal is IZonePortal {
         fee = uint128(FIXED_DEPOSIT_GAS) * zoneGasRate;
     }
 
+    /// @notice Calculate the fee for an encrypted deposit
+    /// @dev Fee = FIXED_ENCRYPTED_DEPOSIT_GAS * zoneGasRate
+    /// @return fee The encrypted deposit fee in zone token units
+    function calculateEncryptedDepositFee() public view returns (uint128 fee) {
+        fee = uint128(FIXED_ENCRYPTED_DEPOSIT_GAS) * zoneGasRate;
+    }
+
     /// @notice Deposit zone token into the zone. Returns the new current deposit queue hash.
     /// @dev Fee is deducted from amount and paid to sequencer. Net amount is credited on zone.
     /// @param to Recipient address on the zone
@@ -451,7 +463,7 @@ contract ZonePortal is IZonePortal {
             revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
         }
 
-        uint128 fee = calculateDepositFee();
+        uint128 fee = calculateEncryptedDepositFee();
         if (amount <= fee) revert DepositTooSmall();
         uint128 netAmount = amount - fee;
 

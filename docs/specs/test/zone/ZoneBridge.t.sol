@@ -977,7 +977,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // === STEP 2: Alice makes encrypted deposit on L1 ===
         uint128 depositAmount = 1000e6;
-        uint128 fee = l1Portal.calculateDepositFee();
+        uint128 fee = l1Portal.calculateEncryptedDepositFee();
         uint128 netAmount = depositAmount - fee;
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
 
@@ -1036,7 +1036,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // === STEP 2: Alice makes encrypted deposit on L1 ===
         uint128 depositAmount = 1000e6;
-        uint128 fee = l1Portal.calculateDepositFee();
+        uint128 fee = l1Portal.calculateEncryptedDepositFee();
         uint128 netAmount = depositAmount - fee;
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
 
@@ -1071,8 +1071,8 @@ contract ZoneBridgeTest is BaseTest {
         (bytes32 encKeyX, uint8 encKeyYParity) = _setEncKeyOnL1(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
-        uint128 fee = l1Portal.calculateDepositFee();
-        uint128 netAmount = depositAmount - fee;
+        uint128 encFee = l1Portal.calculateEncryptedDepositFee();
+        uint128 encNetAmount = depositAmount - encFee;
 
         // === STEP 2: Alice makes a regular deposit ===
         vm.startPrank(alice);
@@ -1110,7 +1110,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Encrypted deposit from bob
         EncryptedDeposit memory ed =
-            EncryptedDeposit({ sender: bob, amount: netAmount, keyIndex: 0, encrypted: payload });
+            EncryptedDeposit({ sender: bob, amount: encNetAmount, keyIndex: 0, encrypted: payload });
         bytes32 hash2 = keccak256(abi.encode(DepositType.Encrypted, ed, hash1));
         assertEq(hash2, h2, "hash2 must match L1");
 
@@ -1151,7 +1151,7 @@ contract ZoneBridgeTest is BaseTest {
         // === STEP 7: Verify all balances ===
         assertEq(l2ZoneToken.balanceOf(alice), depositAmount, "Alice gets regular deposit");
         assertEq(
-            l2ZoneToken.balanceOf(decryptedTo), netAmount, "Bob's encrypted recipient gets tokens"
+            l2ZoneToken.balanceOf(decryptedTo), encNetAmount, "Bob's encrypted recipient gets tokens"
         );
         assertEq(l2ZoneToken.balanceOf(bob), 0, "Bob (sender) should not receive tokens");
         assertEq(l2ZoneToken.balanceOf(carol), depositAmount, "Carol gets regular deposit");
@@ -1160,7 +1160,7 @@ contract ZoneBridgeTest is BaseTest {
         // Total supply = alice_regular + bob_encrypted_net + carol_regular
         assertEq(
             l2ZoneToken.totalSupply(),
-            depositAmount + netAmount + depositAmount,
+            depositAmount + encNetAmount + depositAmount,
             "Total supply should equal all deposits"
         );
 
@@ -1177,7 +1177,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // === STEP 2: Alice deposits with keyIndex=0 ===
         uint128 depositAmount = 1000e6;
-        uint128 fee = l1Portal.calculateDepositFee();
+        uint128 fee = l1Portal.calculateEncryptedDepositFee();
         uint128 netAmount = depositAmount - fee;
         EncryptedDepositPayload memory payload1 = _makeEncryptedPayload();
 

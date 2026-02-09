@@ -1926,7 +1926,7 @@ contract ZonePortalTest is BaseTest {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
-        uint128 fee = portal.calculateDepositFee();
+        uint128 fee = portal.calculateEncryptedDepositFee();
         uint128 netAmount = depositAmount - fee;
 
         EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
@@ -1969,7 +1969,7 @@ contract ZonePortalTest is BaseTest {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
-        uint128 expectedFee = uint128(100_000) * 1; // FIXED_DEPOSIT_GAS * zoneGasRate
+        uint128 expectedFee = uint128(200_000) * 1; // FIXED_ENCRYPTED_DEPOSIT_GAS * zoneGasRate
         uint256 aliceBefore = pathUSD.balanceOf(alice);
         uint256 seqBefore = pathUSD.balanceOf(admin);
         uint256 portalBefore = pathUSD.balanceOf(address(portal));
@@ -1988,7 +1988,7 @@ contract ZonePortalTest is BaseTest {
         _setEncKeyWithPoP(ENC_KEY_1);
 
         uint128 depositAmount = 1000e6;
-        uint128 fee = portal.calculateDepositFee();
+        uint128 fee = portal.calculateEncryptedDepositFee();
         uint128 netAmount = depositAmount - fee;
 
         EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
@@ -2092,14 +2092,14 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_depositEncrypted_revertsOnDepositTooSmall() public {
-        portal.setZoneGasRate(1); // fee = 100_000
+        portal.setZoneGasRate(1); // fee = 200_000
         _setEncKeyWithPoP(ENC_KEY_1);
 
         vm.startPrank(alice);
-        pathUSD.approve(address(portal), 100_000);
+        pathUSD.approve(address(portal), 200_000);
 
         vm.expectRevert(IZonePortal.DepositTooSmall.selector);
-        portal.depositEncrypted(100_000, 0, _makeEncryptedPayload()); // amount == fee
+        portal.depositEncrypted(200_000, 0, _makeEncryptedPayload()); // amount == fee
         vm.stopPrank();
     }
 
