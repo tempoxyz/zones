@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {EncryptionKeyEntry, PORTAL_ENCRYPTION_KEYS_SLOT} from "../../src/zone/IZone.sol";
-import {Test} from "forge-std/Test.sol";
+import { EncryptionKeyEntry, PORTAL_ENCRYPTION_KEYS_SLOT } from "../../src/zone/IZone.sol";
+import { Test } from "forge-std/Test.sol";
 
 /// @notice Minimal harness that mirrors ZonePortal's _encryptionKeys storage layout.
 /// @dev The array is placed at the same storage slot (6) as in ZonePortal so that
 ///      derived slot arithmetic is identical.
 contract EncryptionKeyLayoutHarness {
+
     // Slots 0-5: padding to match ZonePortal layout
     uint256 private _pad0;
     uint256 private _pad1;
@@ -20,7 +21,9 @@ contract EncryptionKeyLayoutHarness {
     EncryptionKeyEntry[] internal _encryptionKeys;
 
     function push(bytes32 x, uint8 yParity, uint64 activationBlock) external {
-        _encryptionKeys.push(EncryptionKeyEntry({x: x, yParity: yParity, activationBlock: activationBlock}));
+        _encryptionKeys.push(
+            EncryptionKeyEntry({ x: x, yParity: yParity, activationBlock: activationBlock })
+        );
     }
 
     function length() external view returns (uint256) {
@@ -30,6 +33,7 @@ contract EncryptionKeyLayoutHarness {
     function get(uint256 i) external view returns (EncryptionKeyEntry memory) {
         return _encryptionKeys[i];
     }
+
 }
 
 /// @title EncryptionKeyLayoutTest
@@ -38,6 +42,7 @@ contract EncryptionKeyLayoutHarness {
 ///         read raw storage slots and assume yParity is packed in the lowest byte
 ///         of the meta slot. If the struct field order ever changes, these tests fail.
 contract EncryptionKeyLayoutTest is Test {
+
     EncryptionKeyLayoutHarness harness;
 
     function setUp() public {
@@ -78,7 +83,11 @@ contract EncryptionKeyLayoutTest is Test {
 
         // activationBlock must be in bytes 1-8 (bits 8..71)
         uint64 extractedActivation = uint64((uint256(rawMeta) >> 8) & 0xffffffffffffffff);
-        assertEq(extractedActivation, activationBlock, "activationBlock must be in bytes 1-8 of meta slot");
+        assertEq(
+            extractedActivation,
+            activationBlock,
+            "activationBlock must be in bytes 1-8 of meta slot"
+        );
     }
 
     /// @notice Same check with multiple entries at different indices.
@@ -100,7 +109,9 @@ contract EncryptionKeyLayoutTest is Test {
             assertEq(rawX, xs[i], "x mismatch");
             assertEq(uint8(uint256(rawMeta) & 0xff), yParities[i], "yParity must be in lowest byte");
             assertEq(
-                uint64((uint256(rawMeta) >> 8) & 0xffffffffffffffff), blocks[i], "activationBlock must be in bytes 1-8"
+                uint64((uint256(rawMeta) >> 8) & 0xffffffffffffffff),
+                blocks[i],
+                "activationBlock must be in bytes 1-8"
             );
         }
     }
@@ -120,4 +131,5 @@ contract EncryptionKeyLayoutTest is Test {
         bytes32 x1 = vm.load(address(harness), bytes32(base + 2));
         assertEq(x1, keccak256("b"), "entry 1 x at stride 2");
     }
+
 }
