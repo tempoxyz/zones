@@ -24,7 +24,6 @@ import {
     PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit,
     Withdrawal,
-    WithdrawalQueueTransition,
     ZoneParams
 } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
@@ -312,7 +311,7 @@ contract ZoneBridgeTest is BaseTest {
             DepositQueueTransition({
                 prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash
             }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalQueueHash }),
+            withdrawalQueueHash,
             "",
             ""
         );

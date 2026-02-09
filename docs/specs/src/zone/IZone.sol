@@ -49,13 +49,6 @@ struct DepositQueueTransition {
     bytes32 nextProcessedHash; // where zone processed up to (proof output)
 }
 
-/// @notice Withdrawal queue transition for batch proofs
-/// @dev Each batch gets its own slot in an unbounded buffer.
-///      The withdrawalQueueHash is the hash chain of withdrawals for this batch.
-struct WithdrawalQueueTransition {
-    bytes32 withdrawalQueueHash; // hash chain of withdrawals for this batch (0 if none)
-}
-
 /// @notice Deposit type discriminator for the unified deposit queue
 /// @dev Used in hash chain: keccak256(abi.encode(depositType, depositData, prevHash))
 enum DepositType {
@@ -284,7 +277,7 @@ interface IVerifier {
     ///      3. If anchorBlockNumber == tempoBlockNumber: zone's hash matches anchorBlockHash
     ///      4. If anchorBlockNumber > tempoBlockNumber: ancestry chain from tempoBlockNumber to anchorBlockNumber
     ///      5. ZoneOutbox.lastBatch().withdrawalBatchIndex == expectedWithdrawalBatchIndex
-    ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueTransition
+    ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueHash
     ///      7. Zone block beneficiary matches sequencer
     ///      8. Deposit processing is correct (validated via Tempo state read inside proof)
     /// @param tempoBlockNumber Block zone committed to (from TempoState)
@@ -294,7 +287,7 @@ interface IVerifier {
     /// @param sequencer Sequencer address (zone block beneficiary must match)
     /// @param blockTransition Zone block hash transition
     /// @param depositQueueTransition Deposit queue processing transition
-    /// @param withdrawalQueueTransition Withdrawal queue hash for this batch
+    /// @param withdrawalQueueHash Withdrawal queue hash chain for this batch (0 if none)
     /// @param verifierConfig Opaque payload for verifier (TEE attestation envelope, etc.)
     /// @param proof Validity proof or TEE attestation
     function verify(
@@ -305,7 +298,7 @@ interface IVerifier {
         address sequencer,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
-        WithdrawalQueueTransition calldata withdrawalQueueTransition,
+        bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
     )
@@ -349,6 +342,7 @@ interface IZoneFactory {
     function zoneCount() external view returns (uint64);
     function zones(uint64 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
+    function isZoneMessenger(address messenger) external view returns (bool);
 
 }
 
@@ -439,7 +433,6 @@ interface IZonePortal {
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
-    function withdrawalQueueMaxSize() external view returns (uint256);
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);
@@ -533,13 +526,14 @@ interface IZonePortal {
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
+
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
         uint64 tempoBlockNumber,
         uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
         DepositQueueTransition calldata depositQueueTransition,
-        WithdrawalQueueTransition calldata withdrawalQueueTransition,
+        bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
     )

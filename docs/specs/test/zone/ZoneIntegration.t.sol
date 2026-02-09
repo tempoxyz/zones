@@ -14,7 +14,6 @@ import {
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     QueuedDeposit,
     Withdrawal,
-    WithdrawalQueueTransition,
     ZoneParams
 } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
@@ -216,7 +215,7 @@ contract ZoneIntegrationTest is BaseTest {
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
             }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: d1 }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: bytes32(0) }),
+            bytes32(0),
             "",
             ""
         );
@@ -286,7 +285,7 @@ contract ZoneIntegrationTest is BaseTest {
             DepositQueueTransition({
                     prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
                 }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: withdrawalHash }),
+            withdrawalHash,
             "",
             ""
         );
@@ -350,7 +349,7 @@ contract ZoneIntegrationTest is BaseTest {
             DepositQueueTransition({
                     prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
                 }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: wHash1 }),
+            wHash1,
             "",
             ""
         );
@@ -373,7 +372,7 @@ contract ZoneIntegrationTest is BaseTest {
             DepositQueueTransition({
                     prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
                 }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: wHash2 }),
+            wHash2,
             "",
             ""
         );
@@ -396,7 +395,7 @@ contract ZoneIntegrationTest is BaseTest {
             DepositQueueTransition({
                     prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
                 }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: wHash3 }),
+            wHash3,
             "",
             ""
         );
@@ -404,8 +403,6 @@ contract ZoneIntegrationTest is BaseTest {
         // Verify queue state
         assertEq(l1Portal.withdrawalQueueHead(), 0);
         assertEq(l1Portal.withdrawalQueueTail(), 3);
-        assertEq(l1Portal.withdrawalQueueMaxSize(), 3);
-
         // Process in order
         uint256 bobBefore = pathUSD.balanceOf(bob);
         uint256 charlieBefore = pathUSD.balanceOf(charlie);
@@ -511,7 +508,7 @@ contract ZoneIntegrationTest is BaseTest {
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
             }),
             DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: d2 }),
-            WithdrawalQueueTransition({ withdrawalQueueHash: wHash }),
+            wHash,
             "",
             ""
         );

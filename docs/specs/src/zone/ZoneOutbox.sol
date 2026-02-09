@@ -18,6 +18,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Limits storage costs and hash computation overhead
     uint256 public constant MAX_CALLBACK_DATA_SIZE = 1024;
 
+    /// @notice Maximum gas fee rate ($1 per gas for 6-decimal stablecoins)
+    /// @dev Ensures gasLimit (uint64) * gasFeeRate fits in uint128 without overflow.
+    ///      Any practical fee rate would be orders of magnitude lower.
+    uint128 public constant MAX_GAS_FEE_RATE = 1e18;
+
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
     /// @dev Covers processWithdrawal overhead: queue dequeue, transfer, event emission
     uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
@@ -58,6 +63,7 @@ contract ZoneOutbox is IZoneOutbox {
 
     error InvalidFallbackRecipient();
     error CallbackDataTooLarge();
+    error GasFeeRateTooHigh();
     error TransferFailed();
     error OnlySequencer();
 
@@ -81,6 +87,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
         if (msg.sender != config.sequencer()) revert OnlySequencer();
+        if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
     }

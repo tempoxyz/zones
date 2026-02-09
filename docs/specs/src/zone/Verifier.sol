@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {
-    BlockTransition,
-    DepositQueueTransition,
-    IVerifier,
-    WithdrawalQueueTransition
-} from "./IZone.sol";
+import { BlockTransition, DepositQueueTransition, IVerifier } from "./IZone.sol";
 
 /// @title Verifier
 /// @notice Enshrined verifier system contract for zone proof/attestation verification.
@@ -23,7 +18,7 @@ contract Verifier is IVerifier {
         address,
         BlockTransition calldata,
         DepositQueueTransition calldata,
-        WithdrawalQueueTransition calldata,
+        bytes32,
         bytes calldata,
         bytes calldata
     )
