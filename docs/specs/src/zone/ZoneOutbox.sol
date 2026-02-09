@@ -55,7 +55,6 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Pending withdrawals waiting to be batched
     Withdrawal[] internal _pendingWithdrawals;
-    uint256 internal _pendingWithdrawalsHead;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -185,7 +184,7 @@ contract ZoneOutbox is IZoneOutbox {
     function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
         if (msg.sender != config.sequencer()) revert OnlySequencer();
 
-        uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        uint256 pending = _pendingWithdrawals.length;
 
         // Clamp to actual pending count
         if (count > pending) {
@@ -198,24 +197,26 @@ contract ZoneOutbox is IZoneOutbox {
         if (count > 0) {
             withdrawalQueueHash = EMPTY_SENTINEL;
 
-            uint256 start = _pendingWithdrawalsHead;
-            uint256 end = start + count;
-
-            for (uint256 i = end; i > start;) {
+            for (uint256 i = count; i > 0;) {
                 uint256 index = i - 1;
                 Withdrawal memory w = _pendingWithdrawals[index];
                 withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
-                delete _pendingWithdrawals[index];
                 unchecked {
                     i--;
                 }
             }
 
-            _pendingWithdrawalsHead = end;
-
-            if (_pendingWithdrawalsHead == _pendingWithdrawals.length) {
+            // Compact: shift remaining withdrawals to the front and shrink array
+            uint256 remaining = pending - count;
+            if (remaining == 0) {
                 delete _pendingWithdrawals;
-                _pendingWithdrawalsHead = 0;
+            } else {
+                for (uint256 i = 0; i < remaining; i++) {
+                    _pendingWithdrawals[i] = _pendingWithdrawals[count + i];
+                }
+                for (uint256 i = 0; i < count; i++) {
+                    _pendingWithdrawals.pop();
+                }
             }
         }
 
@@ -235,10 +236,7 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
-        if (_pendingWithdrawalsHead >= _pendingWithdrawals.length) {
-            return 0;
-        }
-        return _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        return _pendingWithdrawals.length;
     }
 
     /// @notice Last finalized batch parameters (for proof access via state root)
