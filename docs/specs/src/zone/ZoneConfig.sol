@@ -67,13 +67,13 @@ contract ZoneConfig is IZoneConfig {
     }
 
     /// @notice Get sequencer's current encryption public key by reading from L1 ZonePortal
-    /// @dev Reads the last entry from the _encryptionKeys dynamic array (slot 7).
+    /// @dev Reads the last entry from the _encryptionKeys dynamic array (slot 6).
     ///      Each EncryptionKeyEntry occupies 2 storage slots:
     ///        slot base + (index * 2):     x (bytes32)
     ///        slot base + (index * 2) + 1: yParity (uint8) + activationBlock (uint64) [packed]
-    ///      where base = keccak256(abi.encode(7))
+    ///      where base = keccak256(abi.encode(6))
     /// @return x X-coordinate of sequencer's secp256k1 public key
-    /// @return yParity Y-coordinate parity (0 or 1)
+    /// @return yParity Y-coordinate parity (0x02 or 0x03)
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity) {
         // Read the array length from the array's base slot
         uint256 length =
