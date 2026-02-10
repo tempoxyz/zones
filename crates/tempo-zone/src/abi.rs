@@ -1,0 +1,228 @@
+//! ABI bindings for the Tempo Zone protocol contracts.
+//!
+//! These bindings cover the two main contracts the sequencer interacts with:
+//!
+//! - **ZonePortal** — deployed on Tempo L1. Escrows gas tokens, manages the deposit queue,
+//!   accepts batch proofs, and processes withdrawals back to L1 recipients.
+//!
+//! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
+//!   withdrawal hash chains, and exposes [`LastBatch`] state for proof generation.
+
+use alloy_primitives::{B256, keccak256};
+use alloy_sol_types::{SolValue, sol};
+
+/// Sentinel value for empty withdrawal queue slots.
+/// Using 0xff...ff instead of 0x00 to avoid clearing storage.
+pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
+
+/// TempoState predeploy address on Zone L2.
+pub const TEMPO_STATE_ADDRESS: alloy_primitives::Address =
+    alloy_primitives::address!("0x1c00000000000000000000000000000000000000");
+
+sol! {
+    // ---------------------------------------------------------------
+    //  Shared types
+    // ---------------------------------------------------------------
+
+    #[derive(Debug)]
+    struct Withdrawal {
+        address sender;
+        address to;
+        uint128 amount;
+        uint128 fee;
+        bytes32 memo;
+        uint64 gasLimit;
+        address fallbackRecipient;
+        bytes callbackData;
+    }
+
+    #[derive(Debug)]
+    struct Deposit {
+        address sender;
+        address to;
+        uint128 amount;
+        bytes32 memo;
+    }
+
+    #[derive(Debug)]
+    struct BlockTransition {
+        bytes32 prevBlockHash;
+        bytes32 nextBlockHash;
+    }
+
+    #[derive(Debug)]
+    struct DepositQueueTransition {
+        bytes32 prevProcessedHash;
+        bytes32 nextProcessedHash;
+    }
+
+    #[derive(Debug)]
+    struct WithdrawalQueueTransition {
+        bytes32 withdrawalQueueHash;
+    }
+
+    #[derive(Debug)]
+    struct LastBatch {
+        bytes32 withdrawalQueueHash;
+        uint64 withdrawalBatchIndex;
+    }
+
+    // ---------------------------------------------------------------
+    //  ZonePortal — deployed on Tempo L1
+    // ---------------------------------------------------------------
+
+    #[sol(rpc)]
+    contract ZonePortal {
+        // -- Events --
+
+        #[derive(Debug)]
+        event DepositMade(
+            bytes32 indexed newCurrentDepositQueueHash,
+            address indexed sender,
+            address to,
+            uint128 amount,
+            bytes32 memo
+        );
+
+        #[derive(Debug)]
+        event BatchSubmitted(
+            uint64 indexed withdrawalBatchIndex,
+            bytes32 nextProcessedDepositQueueHash,
+            bytes32 nextBlockHash,
+            bytes32 withdrawalQueueHash
+        );
+
+        #[derive(Debug)]
+        event WithdrawalProcessed(address indexed to, uint128 amount, bool callbackSuccess);
+
+        #[derive(Debug)]
+        event BounceBack(
+            bytes32 indexed newCurrentDepositQueueHash,
+            address indexed fallbackRecipient,
+            uint128 amount
+        );
+
+        // -- Errors --
+
+        error NotSequencer();
+        error InvalidProof();
+        error InvalidTempoBlockNumber();
+
+        // -- View functions --
+
+        function zoneId() external view returns (uint64);
+        function token() external view returns (address);
+        function sequencer() external view returns (address);
+        function verifier() external view returns (address);
+        function sequencerPubkey() external view returns (bytes32);
+        function withdrawalBatchIndex() external view returns (uint64);
+        function blockHash() external view returns (bytes32);
+        function currentDepositQueueHash() external view returns (bytes32);
+        function lastSyncedTempoBlockNumber() external view returns (uint64);
+        function withdrawalQueueHead() external view returns (uint256);
+        function withdrawalQueueTail() external view returns (uint256);
+        function withdrawalQueueMaxSize() external view returns (uint256);
+        function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
+        function genesisTempoBlockNumber() external view returns (uint64);
+
+        // -- State-changing functions --
+
+        function deposit(address to, uint128 amount, bytes32 memo)
+            external
+            returns (bytes32 newCurrentDepositQueueHash);
+
+        function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
+
+        function submitBatch(
+            uint64 tempoBlockNumber,
+            BlockTransition calldata blockTransition,
+            DepositQueueTransition calldata depositQueueTransition,
+            WithdrawalQueueTransition calldata withdrawalQueueTransition,
+            bytes calldata verifierConfig,
+            bytes calldata proof
+        ) external;
+    }
+
+    // ---------------------------------------------------------------
+    //  ZoneOutbox — deployed on Zone L2
+    // ---------------------------------------------------------------
+
+    #[sol(rpc)]
+    contract ZoneOutbox {
+        // -- Events --
+
+        #[derive(Debug)]
+        event WithdrawalRequested(
+            uint64 indexed withdrawalIndex,
+            address indexed sender,
+            address to,
+            uint128 amount,
+            uint128 fee,
+            bytes32 memo,
+            uint64 gasLimit,
+            address fallbackRecipient,
+            bytes data
+        );
+
+        #[derive(Debug)]
+        event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
+
+        // -- Errors --
+
+        error OnlySequencer();
+
+        // -- View functions --
+
+        function lastBatch() external view returns (LastBatch memory);
+        function withdrawalBatchIndex() external view returns (uint64);
+        function nextWithdrawalIndex() external view returns (uint64);
+        function pendingWithdrawalsCount() external view returns (uint256);
+
+        // -- State-changing functions --
+
+        function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+    }
+
+    // ---------------------------------------------------------------
+    //  TempoState — Zone L2 predeploy (0x1c00...0000)
+    // ---------------------------------------------------------------
+
+    #[sol(rpc)]
+    contract TempoState {
+        function tempoBlockHash() external view returns (bytes32);
+        function tempoBlockNumber() external view returns (uint64);
+    }
+
+    // ---------------------------------------------------------------
+    //  ZoneInbox — Zone L2 system contract
+    // ---------------------------------------------------------------
+
+    #[sol(rpc)]
+    contract ZoneInbox {
+        function processedDepositQueueHash() external view returns (bytes32);
+    }
+}
+
+impl Withdrawal {
+    /// Compute the withdrawal queue hash for a slice of withdrawals.
+    ///
+    /// The hash chain has the oldest withdrawal at the outermost layer for efficient FIFO removal:
+    ///
+    /// ```text
+    /// hash = keccak256(encode(w[0], keccak256(encode(w[1], keccak256(encode(w[2], EMPTY_SENTINEL))))))
+    /// ```
+    ///
+    /// Building proceeds from the newest (innermost) to the oldest (outermost).
+    /// Returns `B256::ZERO` if `withdrawals` is empty.
+    pub fn queue_hash(withdrawals: &[Self]) -> B256 {
+        if withdrawals.is_empty() {
+            return B256::ZERO;
+        }
+
+        let mut hash = EMPTY_SENTINEL;
+        for w in withdrawals.iter().rev() {
+            hash = keccak256((w.clone(), hash).abi_encode());
+        }
+        hash
+    }
+}

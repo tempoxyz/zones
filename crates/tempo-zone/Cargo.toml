@@ -45,17 +45,24 @@ reth-transaction-pool.workspace = true
 # alloy
 alloy-consensus.workspace = true
 alloy-contract.workspace = true
+alloy-evm.workspace = true
+alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-eth.workspace = true
+alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true
+
+# revm
+revm.workspace = true
 
 # misc
 url = "2"
 eyre.workspace = true
 futures.workspace = true
+parking_lot.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
