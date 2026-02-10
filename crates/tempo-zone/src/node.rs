@@ -3,13 +3,20 @@
 //! This is a lightweight L2 node built on reth's node builder infrastructure.
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
+use alloy_consensus::{Signed, TxLegacy};
 use alloy_primitives::U256;
+use alloy_sol_types::{SolCall, sol};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
+use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
 use reth_engine_local::LocalPayloadAttributesBuilder;
+use reth_errors::ProviderError;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
-use reth_evm::revm::primitives::Address;
+use reth_evm::{
+    ConfigureEvm, Database, NextBlockEnvAttributes,
+    execute::{BlockBuilder, BlockBuilderOutcome},
+};
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
     NewPayloadError, NodeAddOns, NodeTypes, PayloadAttributesBuilder, PayloadTypes,
@@ -28,28 +35,49 @@ use reth_node_builder::{
     },
 };
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
-use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock, SealedHeader};
-use reth_provider::{ChainSpecProvider, EthStorage};
+use reth_payload_primitives::PayloadBuilderAttributes;
+use reth_primitives_traits::{AlloyBlockHeader as _, Recovered, SealedBlock, SealedHeader};
+use reth_provider::EthStorage;
+use reth_revm::{
+    State,
+    database::StateProviderDatabase,
+};
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
-use reth_storage_api::StateProviderFactory;
-use reth_tracing::tracing::{debug, info};
-use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
-use std::{default::Default, sync::Arc};
+use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_tracing::tracing::{debug, error, info, warn};
+use reth_transaction_pool::{
+    BestTransactions, BestTransactionsAttributes, TransactionPool,
+    TransactionValidationTaskExecutor,
+    blobstore::InMemoryBlobStore,
+    error::InvalidPoolTransactionError,
+};
+use std::{default::Default, sync::Arc, time::Instant};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
-use tempo_evm::{TempoEvmConfig, evm::TempoEvmFactory};
+use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
+use tempo_evm::{TempoEvmConfig, TempoNextBlockEnvAttributes, evm::TempoEvmFactory};
 use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
-use tempo_payload_builder::TempoPayloadBuilder;
 use tempo_payload_types::{
     TempoExecutionData, TempoPayloadAttributes, TempoPayloadBuilderAttributes, TempoPayloadTypes,
 };
-use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
+use tempo_primitives::{
+    Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
+    transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
+};
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool, amm::AmmLiquidityCache,
     validator::TempoTransactionValidator,
 };
+
+sol! {
+    function mint(address to, uint256 amount);
+}
+
+/// TEMPO TIP-20 token address.
+const TEMPO_TOKEN_ADDRESS: alloy_primitives::Address =
+    alloy_primitives::address!("0x20C0000000000000000000000000000000000000");
 
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
@@ -253,7 +281,7 @@ impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
 {
     fn build(&self, parent: &SealedHeader<TempoHeader>) -> TempoPayloadAttributes {
         let mut inner = self.inner.build(parent);
-        inner.suggested_fee_recipient = Address::ZERO;
+        inner.suggested_fee_recipient = alloy_primitives::Address::ZERO;
 
         let timestamp_millis_part = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -407,7 +435,7 @@ where
     }
 }
 
-/// Payload builder builder for Zone - uses Tempo payload builder with deposit injection.
+/// Payload builder builder for Zone.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZonePayloadBuilderBuilder {
@@ -434,20 +462,64 @@ where
         pool: TempoTransactionPool<Node::Provider>,
         evm_config: TempoEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
-        let inner =
-            TempoPayloadBuilder::new(pool, ctx.provider().clone(), evm_config, false, false);
         Ok(ZonePayloadBuilder {
-            inner,
+            pool,
+            provider: ctx.provider().clone(),
+            evm_config,
             deposit_queue: self.deposit_queue,
         })
     }
 }
 
-/// Zone payload builder that wraps Tempo's payload builder and injects deposit transactions.
+/// Simple zone payload builder that executes deposit mint txs + pool txs.
+///
+/// TODO: Integrate with TempoPayloadBuilder for shared metrics, subblock support, etc.
 #[derive(Debug, Clone)]
 pub struct ZonePayloadBuilder<Provider> {
-    inner: TempoPayloadBuilder<Provider>,
+    pool: TempoTransactionPool<Provider>,
+    provider: Provider,
+    evm_config: TempoEvmConfig,
     deposit_queue: crate::DepositQueue,
+}
+
+impl<Provider> ZonePayloadBuilder<Provider>
+where
+    Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec>,
+{
+    /// Build mint system transactions from pending deposits.
+    fn build_deposit_mint_txs(
+        &self,
+        deposits: &[crate::Deposit],
+    ) -> Vec<Recovered<TempoTxEnvelope>> {
+        let chain_id = Some(self.provider.chain_spec().chain().id());
+
+        deposits
+            .iter()
+            .map(|deposit| {
+                let calldata = mintCall {
+                    to: deposit.to,
+                    amount: U256::from(deposit.amount),
+                }
+                .abi_encode();
+
+                Recovered::new_unchecked(
+                    TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                        TxLegacy {
+                            chain_id,
+                            nonce: 0,
+                            gas_price: 0,
+                            gas_limit: 0,
+                            to: TEMPO_TOKEN_ADDRESS.into(),
+                            value: U256::ZERO,
+                            input: calldata.into(),
+                        },
+                        TEMPO_SYSTEM_TX_SIGNATURE,
+                    )),
+                    TEMPO_SYSTEM_TX_SENDER,
+                )
+            })
+            .collect()
+    }
 }
 
 impl<Provider> PayloadBuilder for ZonePayloadBuilder<Provider>
@@ -462,52 +534,199 @@ where
         &self,
         args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
     ) -> Result<BuildOutcome<Self::BuiltPayload>, PayloadBuilderError> {
-        let pending = {
+        let BuildArguments {
+            mut cached_reads,
+            config,
+            cancel,
+            best_payload: _,
+        } = args;
+        let PayloadConfig {
+            parent_header,
+            attributes,
+        } = config;
+
+        let start = Instant::now();
+
+        // Drain pending deposits
+        let pending_deposits = {
             let mut queue = self.deposit_queue.lock().expect("deposit queue poisoned");
             std::mem::take(&mut queue.pending_deposits)
         };
 
-        if !pending.is_empty() {
+        if !pending_deposits.is_empty() {
             info!(
                 target: "zone::payload",
-                "\n\
-                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
-                 ~     DEPOSITS INCOMING  ({count})        \n\
-                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
-                count = pending.len(),
+                count = pending_deposits.len(),
+                "Including deposit mint txs in block"
             );
-            for (i, deposit) in pending.iter().enumerate() {
-                info!(
+            for deposit in &pending_deposits {
+                debug!(
                     target: "zone::payload",
-                    "  ├─ deposit [{i}] sender={sender} to={to} amount={amount} l1_block={l1_block}",
-                    i = i,
-                    sender = deposit.sender,
-                    to = deposit.to,
-                    amount = deposit.amount,
+                    sender = %deposit.sender,
+                    to = %deposit.to,
+                    amount = %deposit.amount,
                     l1_block = deposit.l1_block_number,
+                    "Deposit -> mint"
                 );
             }
         }
 
-        // TODO: Convert deposits into system transactions and inject them into the block.
-        // For now, we just log them and delegate to the inner builder.
-        // Future: build advanceTempo system tx with these deposits.
+        // Set up state
+        let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
+        let state_provider: Box<dyn StateProvider> = state_provider;
+        let state = StateProviderDatabase::new(&state_provider);
+        let mut db = State::builder()
+            .with_database(Box::new(cached_reads.as_db_mut(state))
+                as Box<dyn Database<Error = ProviderError>>)
+            .with_bundle_update()
+            .build();
 
-        self.inner.try_build(args)
+        let chain_spec = self.provider.chain_spec();
+
+        let block_gas_limit = parent_header.gas_limit();
+        let shared_gas_limit = block_gas_limit / TEMPO_SHARED_GAS_DIVISOR;
+        let non_shared_gas_limit = block_gas_limit - shared_gas_limit;
+        let general_gas_limit = non_shared_gas_limit / TEMPO_GENERAL_GAS_DIVISOR;
+
+        let mut cumulative_gas_used = 0u64;
+        let total_fees = U256::ZERO;
+
+        // Build block
+        let mut builder = self
+            .evm_config
+            .builder_for_next_block(
+                &mut db,
+                &parent_header,
+                TempoNextBlockEnvAttributes {
+                    inner: NextBlockEnvAttributes {
+                        timestamp: attributes.timestamp(),
+                        suggested_fee_recipient: attributes.suggested_fee_recipient(),
+                        prev_randao: attributes.prev_randao(),
+                        gas_limit: block_gas_limit,
+                        parent_beacon_block_root: attributes.parent_beacon_block_root(),
+                        withdrawals: Some(attributes.withdrawals().clone()),
+                        extra_data: attributes.extra_data().clone(),
+                    },
+                    general_gas_limit,
+                    shared_gas_limit,
+                    timestamp_millis_part: attributes.timestamp_millis_part(),
+                    subblock_fee_recipients: Default::default(),
+                },
+            )
+            .map_err(PayloadBuilderError::other)?;
+
+        builder.apply_pre_execution_changes().map_err(|err| {
+            warn!(%err, "failed to apply pre-execution changes");
+            PayloadBuilderError::Internal(err.into())
+        })?;
+
+        // Execute deposit mint system transactions
+        let deposit_txs = self.build_deposit_mint_txs(&pending_deposits);
+        for tx in deposit_txs {
+            if let Err(err) = builder.execute_transaction(tx) {
+                error!(?err, "deposit mint system tx failed");
+                return Err(PayloadBuilderError::evm(err));
+            }
+        }
+
+        // Execute pool transactions
+        // TODO: Use gas accounting from TempoPayloadBuilder (payment vs non-payment limits, etc.)
+        let base_fee = builder.evm_mut().block.basefee;
+        let mut best_txs = self.pool.best_transactions_with_attributes(
+            BestTransactionsAttributes::new(base_fee, None),
+        );
+
+        while let Some(pool_tx) = best_txs.next() {
+            if cumulative_gas_used + pool_tx.gas_limit() > non_shared_gas_limit {
+                best_txs.mark_invalid(
+                    &pool_tx,
+                    &InvalidPoolTransactionError::ExceedsGasLimit(
+                        pool_tx.gas_limit(),
+                        non_shared_gas_limit - cumulative_gas_used,
+                    ),
+                );
+                continue;
+            }
+
+            if cancel.is_cancelled() {
+                return Ok(BuildOutcome::Cancelled);
+            }
+
+            let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
+            match builder.execute_transaction(tx_with_env) {
+                Ok(gas_used) => {
+                    cumulative_gas_used += gas_used;
+                }
+                Err(reth_evm::block::BlockExecutionError::Validation(
+                    reth_evm::block::BlockValidationError::InvalidTx { error, .. },
+                )) => {
+                    if !error.is_nonce_too_low() {
+                        best_txs.mark_invalid(
+                            &pool_tx,
+                            &InvalidPoolTransactionError::Consensus(
+                                reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                Err(err) => return Err(PayloadBuilderError::evm(err)),
+            }
+        }
+
+        // Finish block
+        let BlockBuilderOutcome {
+            execution_result,
+            block,
+            ..
+        } = builder.finish(&state_provider)?;
+
+        let requests = chain_spec
+            .is_prague_active_at_timestamp(attributes.timestamp())
+            .then_some(execution_result.requests);
+
+        let sealed_block = Arc::new(block.sealed_block().clone());
+        let elapsed = start.elapsed();
+
+        info!(
+            number = sealed_block.number(),
+            hash = ?sealed_block.hash(),
+            gas_used = sealed_block.gas_used(),
+            deposits = pending_deposits.len(),
+            tx_count = sealed_block.body().transactions.len(),
+            ?elapsed,
+            "Built zone payload"
+        );
+
+        let payload =
+            EthBuiltPayload::new(attributes.payload_id(), sealed_block, total_fees, requests);
+
+        drop(db);
+        Ok(BuildOutcome::Better {
+            payload,
+            cached_reads,
+        })
     }
 
     fn on_missing_payload(
         &self,
-        args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
+        _args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
     ) -> MissingPayloadBehaviour<Self::BuiltPayload> {
-        self.inner.on_missing_payload(args)
+        MissingPayloadBehaviour::AwaitInProgress
     }
 
     fn build_empty_payload(
         &self,
         config: PayloadConfig<Self::Attributes, TempoHeader>,
     ) -> Result<Self::BuiltPayload, PayloadBuilderError> {
-        self.inner.build_empty_payload(config)
+        self.try_build(BuildArguments::new(
+            Default::default(),
+            config,
+            Default::default(),
+            Default::default(),
+        ))?
+        .into_payload()
+        .ok_or_else(|| PayloadBuilderError::MissingPayload)
     }
 }
 

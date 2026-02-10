@@ -13,9 +13,9 @@ workspace = true
 [dependencies]
 # tempo
 tempo-chainspec.workspace = true
+tempo-consensus.workspace = true
 tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-node.workspace = true
-tempo-payload-builder.workspace = true
 tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
@@ -23,15 +23,19 @@ tempo-alloy = { workspace = true, features = ["tempo-compat"] }
 
 # reth
 reth-basic-payload-builder.workspace = true
+reth-chainspec.workspace = true
 reth-engine-local.workspace = true
+reth-errors.workspace = true
 reth-eth-wire-types.workspace = true
 reth-ethereum.workspace = true
 reth-evm.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-payload-builder.workspace = true
+reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
+reth-revm.workspace = true
 reth-rpc.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
@@ -40,6 +44,7 @@ reth-tracing.workspace = true
 reth-transaction-pool.workspace = true
 
 # alloy
+alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
 alloy-rpc-types-eth.workspace = true
