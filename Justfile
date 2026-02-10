@@ -56,6 +56,27 @@ localnet accounts="1000" reset="true" profile="maxperf" features="asm-keccak" ar
                       --faucet.address 0x20c0000000000000000000000000000000000001 \
                       {{args}}
 
+[group('zone')]
+[doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits')]
+zoneup reset="true" args="":
+    #!/bin/bash
+    if [[ "{{reset}}" = "true" ]]; then
+        rm -rf /tmp/tempo-zone || true
+    fi;
+    cargo run --bin tempo-zone -- \
+                      node \
+                      --dev \
+                      --dev.block-time 1sec \
+                      --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
+                      --l1.portal-address 0x1bc99e6a8c4689f1884527152ba542f012316149 \
+                      --http \
+                      --http.addr 0.0.0.0 \
+                      --http.port 8546 \
+                      --http.api all \
+                      --datadir /tmp/tempo-zone \
+                      --log.file.directory /tmp/tempo-zone/logs \
+                      {{args}}
+
 mod scripts
 
 [group('dev')]
