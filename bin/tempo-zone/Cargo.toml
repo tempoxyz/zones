@@ -25,6 +25,9 @@ reth-ethereum = { workspace = true, features = ["cli"] }
 reth-node-builder.workspace = true
 reth-tracing.workspace = true
 
+# alloy
+alloy-primitives.workspace = true
+
 # misc
 clap.workspace = true
 

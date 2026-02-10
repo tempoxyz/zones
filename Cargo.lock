@@ -12175,6 +12175,7 @@ dependencies = [
 name = "tempo-zone"
 version = "1.0.0-rc.5"
 dependencies = [
+ "alloy-primitives",
  "clap",
  "reth-cli-util",
  "reth-consensus",

@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use alloy_primitives::Address;
 use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
@@ -24,7 +25,11 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 struct ZoneArgs {
     /// L1 WebSocket RPC URL for subscribing to deposit events.
     #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
-    pub l1_rpc_url: Option<String>,
+    pub l1_rpc_url: String,
+
+    /// ZonePortal contract address on L1.
+    #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
+    pub portal_address: Address,
 
     /// Block building interval in milliseconds.
     #[arg(
@@ -66,17 +71,14 @@ fn main() {
             // Create shared deposit queue
             let deposits = DepositQueue::default();
 
-            // Spawn L1 subscriber if L1 RPC URL is provided
-            if let Some(l1_rpc_url) = args.l1_rpc_url {
-                let config = L1SubscriberConfig {
-                    l1_rpc_url,
-                    ..Default::default()
-                };
+            let config = L1SubscriberConfig {
+                l1_rpc_url: args.l1_rpc_url,
+                portal_address: args.portal_address,
+            };
 
-                spawn_l1_subscriber(config, deposits.clone(), node.task_executor.clone());
+            spawn_l1_subscriber(config, deposits.clone(), node.task_executor.clone());
 
-                info!(target: "reth::cli", "L1 deposit subscriber started");
-            }
+            info!(target: "reth::cli", portal = %args.portal_address, "L1 deposit subscriber started");
 
             // TODO: Spawn block builder with LocalMiner using args.block_interval_ms
             // The block builder will:
