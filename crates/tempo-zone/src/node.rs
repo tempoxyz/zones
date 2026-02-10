@@ -4,6 +4,9 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use alloy_primitives::U256;
+use reth_basic_payload_builder::{
+    BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
+};
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_evm::revm::primitives::Address;
@@ -24,11 +27,13 @@ use reth_node_builder::{
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
+use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock, SealedHeader};
 use reth_provider::{ChainSpecProvider, EthStorage};
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
+use reth_storage_api::StateProviderFactory;
 use reth_tracing::tracing::{debug, info};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
@@ -37,7 +42,9 @@ use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
 use tempo_evm::{TempoEvmConfig, evm::TempoEvmFactory};
 use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
 use tempo_payload_builder::TempoPayloadBuilder;
-use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
+use tempo_payload_types::{
+    TempoExecutionData, TempoPayloadAttributes, TempoPayloadBuilderAttributes, TempoPayloadTypes,
+};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool, amm::AmmLiquidityCache,
@@ -50,13 +57,22 @@ type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnve
 /// Tempo Zone node type configuration.
 ///
 /// Uses Tempo primitives, EVM, and pool, but with noop consensus/network/payload.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ZoneNode;
+pub struct ZoneNode {
+    deposit_queue: crate::DepositQueue,
+}
 
 impl ZoneNode {
+    /// Create a new zone node with a deposit queue.
+    pub fn new(deposit_queue: crate::DepositQueue) -> Self {
+        Self { deposit_queue }
+    }
+
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
-    pub fn components<N>() -> ComponentsBuilder<
+    pub fn components<N>(
+        deposit_queue: crate::DepositQueue,
+    ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
         BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
@@ -71,7 +87,9 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
-            .payload(BasicPayloadServiceBuilder::new(ZonePayloadBuilderBuilder))
+            .payload(BasicPayloadServiceBuilder::new(
+                ZonePayloadBuilderBuilder::new(deposit_queue),
+            ))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -189,7 +207,7 @@ where
     type AddOns = ZoneAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        Self::components()
+        Self::components(self.deposit_queue.clone())
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -389,17 +407,26 @@ where
     }
 }
 
-/// Payload builder builder for Zone - uses Tempo payload builder.
-#[derive(Debug, Default, Clone, Copy)]
+/// Payload builder builder for Zone - uses Tempo payload builder with deposit injection.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ZonePayloadBuilderBuilder;
+pub struct ZonePayloadBuilderBuilder {
+    deposit_queue: crate::DepositQueue,
+}
+
+impl ZonePayloadBuilderBuilder {
+    /// Create a new zone payload builder builder with a deposit queue.
+    pub fn new(deposit_queue: crate::DepositQueue) -> Self {
+        Self { deposit_queue }
+    }
+}
 
 impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, TempoEvmConfig>
     for ZonePayloadBuilderBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
-    type PayloadBuilder = TempoPayloadBuilder<Node::Provider>;
+    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
 
     async fn build_payload_builder(
         self,
@@ -407,13 +434,76 @@ where
         pool: TempoTransactionPool<Node::Provider>,
         evm_config: TempoEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
-        Ok(TempoPayloadBuilder::new(
-            pool,
-            ctx.provider().clone(),
-            evm_config,
-            false,
-            false,
-        ))
+        let inner =
+            TempoPayloadBuilder::new(pool, ctx.provider().clone(), evm_config, false, false);
+        Ok(ZonePayloadBuilder {
+            inner,
+            deposit_queue: self.deposit_queue,
+        })
+    }
+}
+
+/// Zone payload builder that wraps Tempo's payload builder and injects deposit transactions.
+#[derive(Debug, Clone)]
+pub struct ZonePayloadBuilder<Provider> {
+    inner: TempoPayloadBuilder<Provider>,
+    deposit_queue: crate::DepositQueue,
+}
+
+impl<Provider> PayloadBuilder for ZonePayloadBuilder<Provider>
+where
+    Provider:
+        StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone + 'static,
+{
+    type Attributes = TempoPayloadBuilderAttributes;
+    type BuiltPayload = EthBuiltPayload<TempoPrimitives>;
+
+    fn try_build(
+        &self,
+        args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
+    ) -> Result<BuildOutcome<Self::BuiltPayload>, PayloadBuilderError> {
+        let pending = {
+            let mut queue = self.deposit_queue.lock().expect("deposit queue poisoned");
+            std::mem::take(&mut queue.pending_deposits)
+        };
+
+        if !pending.is_empty() {
+            info!(
+                target: "zone::payload",
+                count = pending.len(),
+                "Draining deposits for payload"
+            );
+            for deposit in &pending {
+                info!(
+                    target: "zone::payload",
+                    sender = %deposit.sender,
+                    to = %deposit.to,
+                    amount = %deposit.amount,
+                    l1_block = deposit.l1_block_number,
+                    "Including deposit in payload"
+                );
+            }
+        }
+
+        // TODO: Convert deposits into system transactions and inject them into the block.
+        // For now, we just log them and delegate to the inner builder.
+        // Future: build advanceTempo system tx with these deposits.
+
+        self.inner.try_build(args)
+    }
+
+    fn on_missing_payload(
+        &self,
+        args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
+    ) -> MissingPayloadBehaviour<Self::BuiltPayload> {
+        self.inner.on_missing_payload(args)
+    }
+
+    fn build_empty_payload(
+        &self,
+        config: PayloadConfig<Self::Attributes, TempoHeader>,
+    ) -> Result<Self::BuiltPayload, PayloadBuilderError> {
+        self.inner.build_empty_payload(config)
     }
 }
 

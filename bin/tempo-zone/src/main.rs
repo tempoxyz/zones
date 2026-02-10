@@ -59,7 +59,8 @@ fn main() {
         .run_with_components::<ZoneNode>(components, async move |builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
-            let node = ZoneNode::default();
+            let deposits = DepositQueue::default();
+            let node = ZoneNode::new(deposits.clone());
 
             let NodeHandle {
                 node_exit_future,
@@ -67,9 +68,6 @@ fn main() {
             } = builder.node(node).launch_with_debug_capabilities().await?;
 
             info!(target: "reth::cli", "Tempo Zone node started");
-
-            // Create shared deposit queue
-            let deposits = DepositQueue::default();
 
             let config = L1SubscriberConfig {
                 l1_rpc_url: args.l1_rpc_url,
@@ -79,17 +77,6 @@ fn main() {
             spawn_l1_subscriber(config, deposits.clone(), node.task_executor.clone());
 
             info!(target: "reth::cli", portal = %args.portal_address, "L1 deposit subscriber started");
-
-            // TODO: Spawn block builder with LocalMiner using args.block_interval_ms
-            // The block builder will:
-            // 1. Drain deposits from the queue
-            // 2. Convert deposits to L2 transactions
-            // 3. Build blocks at the configured interval
-            info!(
-                target: "reth::cli",
-                interval_ms = args.block_interval_ms,
-                "Block builder interval configured (not yet active)"
-            );
 
             node_exit_future.await?;
             Ok(())
