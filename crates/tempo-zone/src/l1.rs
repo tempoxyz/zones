@@ -23,11 +23,6 @@ sol! {
 }
 
 /// A deposit extracted from L1.
-///
-/// Matches the Solidity `Deposit` struct:
-/// ```solidity
-/// struct Deposit { address sender; address to; uint128 amount; bytes32 memo; }
-/// ```
 #[derive(Debug, Clone)]
 pub struct Deposit {
     /// L1 block number where the deposit was included.
@@ -53,7 +48,6 @@ impl Deposit {
             memo: event.memo,
         }
     }
-
 }
 
 /// Deposit queue hash chain state.
@@ -87,8 +81,14 @@ impl DepositQueueState {
 /// The deposit is ABI-encoded as the Solidity struct `Deposit{sender, to, amount, memo}`,
 /// followed by the previous hash.
 pub fn deposit_queue_hash(deposit: &Deposit, prev_hash: B256) -> B256 {
-    let encoded =
-        (deposit.sender, deposit.to, deposit.amount, deposit.memo, prev_hash).abi_encode();
+    let encoded = (
+        deposit.sender,
+        deposit.to,
+        deposit.amount,
+        deposit.memo,
+        prev_hash,
+    )
+        .abi_encode();
     keccak256(&encoded)
 }
 
@@ -323,8 +323,14 @@ mod tests {
 
         // Second batch with no deposits should be a no-op
         let transition2 = process_deposits(transition.next_processed_hash, &[]);
-        assert_eq!(transition2.prev_processed_hash, transition.next_processed_hash);
-        assert_eq!(transition2.next_processed_hash, transition.next_processed_hash);
+        assert_eq!(
+            transition2.prev_processed_hash,
+            transition.next_processed_hash
+        );
+        assert_eq!(
+            transition2.next_processed_hash,
+            transition.next_processed_hash
+        );
     }
 
     #[test]
