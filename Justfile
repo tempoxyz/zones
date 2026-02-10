@@ -57,6 +57,35 @@ localnet accounts="1000" reset="true" profile="maxperf" features="asm-keccak" ar
                       {{args}}
 
 [group('zone')]
+[doc('Approves the ZonePortal to spend max TEMPO. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+max-approve-portal:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    PORTAL="0x1bc99e6a8c4689f1884527152ba542f012316149"
+    TOKEN="0x20C0000000000000000000000000000000000000"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    echo "Approving ZonePortal for max TEMPO..."
+    cast send "$TOKEN" "approve(address,uint256)" "$PORTAL" "$(cast max-uint)" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Approved!"
+
+[group('zone')]
+[doc('Sends a test deposit to the ZonePortal on L1 (moderato). Requires L1_RPC_URL and PRIVATE_KEY env vars. Run max-approve-portal first.')]
+send-deposit to amount="1000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    PORTAL="0x1bc99e6a8c4689f1884527152ba542f012316149"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    echo "Depositing {{amount}} to {{to}}..."
+    cast send "$PORTAL" "deposit(address,uint128,bytes32)" "{{to}}" "{{amount}}" "{{memo}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Deposit sent!"
+
+[group('zone')]
 [doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits')]
 zoneup reset="true" args="":
     #!/bin/bash

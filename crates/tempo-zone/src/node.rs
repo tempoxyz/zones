@@ -470,17 +470,21 @@ where
         if !pending.is_empty() {
             info!(
                 target: "zone::payload",
+                "\n\
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~\n\
+                 ~     DEPOSITS INCOMING  ({count})        \n\
+                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~",
                 count = pending.len(),
-                "Draining deposits for payload"
             );
-            for deposit in &pending {
+            for (i, deposit) in pending.iter().enumerate() {
                 info!(
                     target: "zone::payload",
-                    sender = %deposit.sender,
-                    to = %deposit.to,
-                    amount = %deposit.amount,
+                    "  ├─ deposit [{i}] sender={sender} to={to} amount={amount} l1_block={l1_block}",
+                    i = i,
+                    sender = deposit.sender,
+                    to = deposit.to,
+                    amount = deposit.amount,
                     l1_block = deposit.l1_block_number,
-                    "Including deposit in payload"
                 );
             }
         }

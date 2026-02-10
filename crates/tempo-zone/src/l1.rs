@@ -12,12 +12,14 @@ use reth_tracing::tracing::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
 
 sol! {
-    /// Event emitted by the ZonePortal when a deposit is enqueued.
+    /// Event emitted by the ZonePortal when a deposit is made.
     #[derive(Debug)]
-    event DepositEnqueued(
+    event DepositMade(
+        bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
-        address indexed to,
-        uint128 amount,
+        address to,
+        uint128 netAmount,
+        uint128 fee,
         bytes32 memo
     );
 }
@@ -33,19 +35,25 @@ pub struct Deposit {
     pub to: Address,
     /// Net amount deposited (fee already deducted on L1).
     pub amount: u128,
+    /// Fee paid on L1.
+    pub fee: u128,
     /// User-provided memo.
     pub memo: B256,
+    /// New deposit queue hash after this deposit.
+    pub queue_hash: B256,
 }
 
 impl Deposit {
     /// Create a new deposit from an event and block number.
-    pub fn from_event(event: DepositEnqueued, l1_block_number: u64) -> Self {
+    pub fn from_event(event: DepositMade, l1_block_number: u64) -> Self {
         Self {
             l1_block_number,
             sender: event.sender,
             to: event.to,
-            amount: event.amount,
+            amount: event.netAmount,
+            fee: event.fee,
             memo: event.memo,
+            queue_hash: event.newCurrentDepositQueueHash,
         }
     }
 }
@@ -169,7 +177,7 @@ impl L1Subscriber {
         // Subscribe to DepositEnqueued events from the ZonePortal
         let filter = Filter::new()
             .address(self.config.portal_address)
-            .event_signature(DepositEnqueued::SIGNATURE_HASH);
+            .event_signature(DepositMade::SIGNATURE_HASH);
 
         let sub = provider.subscribe_logs(&filter).await?;
         let mut stream = sub.into_stream();
@@ -193,7 +201,7 @@ impl L1Subscriber {
     fn process_log(&self, log: Log) -> eyre::Result<()> {
         let block_number = log.block_number.unwrap_or(0);
 
-        match DepositEnqueued::decode_log(&log.inner) {
+        match DepositMade::decode_log(&log.inner) {
             Ok(event) => {
                 let deposit = Deposit::from_event(event.data, block_number);
 
@@ -222,7 +230,7 @@ impl L1Subscriber {
             Err(e) => {
                 debug!(
                     error = %e,
-                    "Log from ZonePortal is not a DepositEnqueued event"
+                    "Log from ZonePortal is not a DepositMade event"
                 );
             }
         }
@@ -269,7 +277,9 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000,
+            fee: 0,
             memo: B256::ZERO,
+            queue_hash: B256::ZERO,
         };
 
         queue.enqueue(d1.clone());
@@ -285,7 +295,9 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000003"),
             to: address!("0x0000000000000000000000000000000000000004"),
             amount: 2000,
+            fee: 0,
             memo: B256::ZERO,
+            queue_hash: B256::ZERO,
         };
 
         queue.enqueue(d2.clone());
@@ -305,14 +317,18 @@ mod tests {
                 sender: address!("0x0000000000000000000000000000000000000001"),
                 to: address!("0x0000000000000000000000000000000000000002"),
                 amount: 1000,
+                fee: 0,
                 memo: B256::ZERO,
+                queue_hash: B256::ZERO,
             },
             Deposit {
                 l1_block_number: 2,
                 sender: address!("0x0000000000000000000000000000000000000003"),
                 to: address!("0x0000000000000000000000000000000000000004"),
                 amount: 2000,
+                fee: 0,
                 memo: B256::ZERO,
+                queue_hash: B256::ZERO,
             },
         ];
 
@@ -342,7 +358,9 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 500,
+            fee: 0,
             memo: FixedBytes::from([0xABu8; 32]),
+            queue_hash: B256::ZERO,
         }];
 
         for d in &deposits {
