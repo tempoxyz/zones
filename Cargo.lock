@@ -14185,6 +14185,7 @@ dependencies = [
  "tempo-chainspec",
  "tempo-evm",
  "tempo-node",
+ "tempo-payload-builder",
  "tempo-payload-types",
  "tempo-primitives",
  "tempo-transaction-pool",

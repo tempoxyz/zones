@@ -15,8 +15,9 @@ use reth_node_api::{
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
-        ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder, NoopNetworkBuilder,
-        NoopPayloadBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
+        BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
+        NoopNetworkBuilder, PayloadBuilderBuilder, PoolBuilder, TxPoolBuilder,
+        spawn_maintenance_tasks,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
@@ -35,6 +36,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
 use tempo_evm::{TempoEvmConfig, evm::TempoEvmFactory};
 use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
+use tempo_payload_builder::TempoPayloadBuilder;
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
@@ -57,7 +59,7 @@ impl ZoneNode {
     pub fn components<N>() -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        NoopPayloadBuilder,
+        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -69,7 +71,7 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
-            .noop_payload()
+            .payload(BasicPayloadServiceBuilder::new(ZonePayloadBuilderBuilder))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -179,7 +181,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        NoopPayloadBuilder,
+        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -384,6 +386,34 @@ where
         debug!(target: "reth::cli", "Spawned txpool maintenance task");
 
         Ok(transaction_pool)
+    }
+}
+
+/// Payload builder builder for Zone - uses Tempo payload builder.
+#[derive(Debug, Default, Clone, Copy)]
+#[non_exhaustive]
+pub struct ZonePayloadBuilderBuilder;
+
+impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, TempoEvmConfig>
+    for ZonePayloadBuilderBuilder
+where
+    Node: FullNodeTypes<Types = ZoneNode>,
+{
+    type PayloadBuilder = TempoPayloadBuilder<Node::Provider>;
+
+    async fn build_payload_builder(
+        self,
+        ctx: &BuilderContext<Node>,
+        pool: TempoTransactionPool<Node::Provider>,
+        evm_config: TempoEvmConfig,
+    ) -> eyre::Result<Self::PayloadBuilder> {
+        Ok(TempoPayloadBuilder::new(
+            pool,
+            ctx.provider().clone(),
+            evm_config,
+            false,
+            false,
+        ))
     }
 }
 

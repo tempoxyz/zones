@@ -15,6 +15,7 @@ workspace = true
 tempo-chainspec.workspace = true
 tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-node.workspace = true
+tempo-payload-builder.workspace = true
 tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
