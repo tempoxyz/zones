@@ -47,13 +47,26 @@ pub struct ZoneMonitorConfig {
 /// In the current POC every zone block corresponds to exactly one batch.
 pub struct ZoneMonitor {
     config: ZoneMonitorConfig,
+    /// Read-only HTTP provider pointed at the **Zone L2** RPC node.
     provider: DynProvider<TempoNetwork>,
+    /// ZoneOutbox contract on **Zone L2** — source of `WithdrawalRequested` and
+    /// `BatchFinalized` events.
     outbox: ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    /// ZoneInbox contract on **Zone L2** — queried for the processed deposit queue hash.
     inbox: ZoneInbox::ZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    /// TempoState predeploy on **Zone L2** — provides the latest Tempo L1 block number
+    /// as seen by the zone.
     tempo_state: TempoState::TempoStateInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    /// Shared store for withdrawal data, written here and consumed by the
+    /// [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor) on **Tempo L1**.
     withdrawal_store: SharedWithdrawalStore,
+    /// Channel sender for [`BatchData`], consumed by the
+    /// [`BatchSubmitter`](crate::batch::BatchSubmitter) which posts batches to **Tempo L1**.
     batch_tx: tokio::sync::mpsc::UnboundedSender<BatchData>,
+    /// Last **Zone L2** block number that was fully processed.
     last_processed_block: u64,
+    /// Deposit queue hash from the previous block, used to construct the
+    /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
     prev_processed_deposit_hash: B256,
 }
 
