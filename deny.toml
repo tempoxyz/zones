@@ -61,11 +61,7 @@ allow = [
 
 # Allow 1 or more licenses on a per-crate basis, so that particular licenses
 # aren't accepted for every possible crate as with the normal allow list
-exceptions = [
-  { allow = [
-    "MPL-2.0",
-  ], name = "option-ext" },
-]
+exceptions = [{ allow = ["MPL-2.0"], name = "option-ext" }]
 
 [[licenses.clarify]]
 name = "rustls-webpki"

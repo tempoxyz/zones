@@ -6,7 +6,7 @@ use alloy::{
 };
 use alloy_eips::BlockId;
 use alloy_primitives::{Address, uint};
-use tempo_chainspec::spec::TEMPO_BASE_FEE;
+use tempo_chainspec::spec::TEMPO_T1_BASE_FEE;
 use tempo_contracts::precompiles::{
     IFeeManager,
     ITIP20::{self, ITIP20Instance},
@@ -635,13 +635,13 @@ async fn test_cant_burn_required_liquidity() -> eyre::Result<()> {
             liquidity,
             alice,
         )
-        .max_fee_per_gas(TEMPO_BASE_FEE as u128 * 100)
+        .max_fee_per_gas(TEMPO_T1_BASE_FEE as u128 * 100)
         .gas(1000000)
         .send()
         .await?
         .get_receipt()
         .await?;
-    assert!(burn_receipt.status());
+    assert!(!burn_receipt.status());
 
     Ok(())
 }

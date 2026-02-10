@@ -104,20 +104,20 @@ mod tests {
     use commonware_consensus::types::Epoch;
     use commonware_cryptography::{Signer as _, bls12381::dkg, ed25519::PrivateKey};
     use commonware_math::algebra::Random as _;
-    use commonware_utils::{TryFromIterator as _, ordered};
-    use rand::SeedableRng as _;
+    use commonware_utils::{N3f1, TryFromIterator as _, ordered};
+    use rand_08::SeedableRng as _;
 
     use super::OnchainDkgOutcome;
 
     #[test]
     fn onchain_dkg_outcome_roundtrip() {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        let mut rng = rand_08::rngs::StdRng::seed_from_u64(42);
 
         let mut player_keys = repeat_with(|| PrivateKey::random(&mut rng))
             .take(10)
             .collect::<Vec<_>>();
         player_keys.sort_by_key(|key| key.public_key());
-        let (output, _shares) = dkg::deal(
+        let (output, _shares) = dkg::deal::<_, _, N3f1>(
             &mut rng,
             Default::default(),
             ordered::Set::try_from_iter(player_keys.iter().map(|key| key.public_key())).unwrap(),

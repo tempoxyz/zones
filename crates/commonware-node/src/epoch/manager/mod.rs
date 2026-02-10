@@ -9,19 +9,19 @@ pub(crate) use ingress::Mailbox;
 
 use commonware_consensus::{
     marshal,
-    simplex::scheme::bls12381_threshold::Scheme,
+    simplex::scheme::bls12381_threshold::vrf::Scheme,
     types::{FixedEpocher, ViewDelta},
 };
 use commonware_p2p::Blocker;
-use commonware_runtime::{Clock, Metrics, Network, Spawner, Storage, buffer::PoolRef};
-use rand::{CryptoRng, Rng};
+use commonware_runtime::{Clock, Metrics, Network, Spawner, Storage, buffer::paged::CacheRef};
+use rand_08::{CryptoRng, Rng};
 
 use crate::{consensus::block::Block, epoch::scheme_provider::SchemeProvider, feed, subblocks};
 
 pub(crate) struct Config<TBlocker> {
     pub(crate) application: crate::consensus::application::Mailbox,
     pub(crate) blocker: TBlocker,
-    pub(crate) buffer_pool: PoolRef,
+    pub(crate) page_cache: CacheRef,
     pub(crate) epoch_strategy: FixedEpocher,
     pub(crate) time_for_peer_response: Duration,
     pub(crate) time_to_propose: Duration,
@@ -38,8 +38,8 @@ pub(crate) struct Config<TBlocker> {
 }
 
 pub(crate) fn init<TBlocker, TContext>(
-    config: Config<TBlocker>,
     context: TContext,
+    config: Config<TBlocker>,
 ) -> (Actor<TBlocker, TContext>, Mailbox)
 where
     TBlocker: Blocker<PublicKey = PublicKey>,

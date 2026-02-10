@@ -10,7 +10,7 @@ use alloy_primitives::{Address, TxHash, U256, b256};
 use commonware_macros::test_traced;
 use commonware_runtime::{
     Runner as _,
-    deterministic::{self, Runner},
+    deterministic::{Config, Runner},
 };
 use futures::{StreamExt, future::join_all};
 use reth_ethereum::{
@@ -19,7 +19,7 @@ use reth_ethereum::{
 };
 use reth_node_builder::ConsensusEngineEvent;
 use reth_node_core::primitives::transaction::TxHashRef;
-use tempo_chainspec::spec::{SYSTEM_TX_COUNT, TEMPO_BASE_FEE};
+use tempo_chainspec::spec::{SYSTEM_TX_COUNT, TEMPO_T1_BASE_FEE};
 use tempo_node::primitives::{
     SubBlockMetadata, TempoTransaction, TempoTxEnvelope,
     subblock::{PartialValidatorKey, TEMPO_SUBBLOCK_NONCE_KEY_PREFIX},
@@ -37,7 +37,7 @@ use crate::{Setup, TestingNode, setup_validators};
 fn subblocks_are_included() {
     let _ = tempo_eyre::install();
 
-    Runner::from(deterministic::Config::default().with_seed(0)).start(|context| async move {
+    Runner::from(Config::default().with_seed(0)).start(|mut context| async move {
         let how_many_signers = 4;
 
         let setup = Setup::new()
@@ -45,8 +45,7 @@ fn subblocks_are_included() {
             .epoch_length(10);
 
         // Setup and start all nodes.
-        let (mut nodes, _execution_runtime) =
-            setup_validators(context.clone(), setup.clone()).await;
+        let (mut nodes, _execution_runtime) = setup_validators(&mut context, setup.clone()).await;
 
         let mut fee_recipients = Vec::new();
 
@@ -60,7 +59,7 @@ fn subblocks_are_included() {
             fee_recipients.push(fee_recipient);
         }
 
-        join_all(nodes.iter_mut().map(|node| node.start())).await;
+        join_all(nodes.iter_mut().map(|node| node.start(&context))).await;
 
         let mut stream = nodes[0]
             .execution()
@@ -79,7 +78,7 @@ fn subblocks_are_included() {
                 ConsensusEngineEvent::CanonicalBlockAdded(block, _) => block,
             };
 
-            let receipts = block.execution_outcome().receipts().first().unwrap();
+            let receipts = &block.execution_outcome().receipts()[0];
 
             // Assert that block only contains our subblock transactions and the system transactions
             assert_eq!(
@@ -144,7 +143,7 @@ fn subblocks_are_included() {
 fn subblocks_are_included_with_failing_txs() {
     let _ = tempo_eyre::install();
 
-    Runner::from(deterministic::Config::default().with_seed(0)).start(|context| async move {
+    Runner::from(Config::default().with_seed(0)).start(|mut context| async move {
         let how_many_signers = 5;
 
         let setup = Setup::new()
@@ -152,8 +151,7 @@ fn subblocks_are_included_with_failing_txs() {
             .epoch_length(10);
 
         // Setup and start all nodes.
-        let (mut nodes, _execution_runtime) =
-            setup_validators(context.clone(), setup.clone()).await;
+        let (mut nodes, _execution_runtime) = setup_validators(&mut context, setup.clone()).await;
 
         let mut fee_recipients = Vec::new();
 
@@ -167,7 +165,7 @@ fn subblocks_are_included_with_failing_txs() {
             fee_recipients.push(fee_recipient);
         }
 
-        join_all(nodes.iter_mut().map(|node| node.start())).await;
+        join_all(nodes.iter_mut().map(|node| node.start(&context))).await;
 
         let mut stream = nodes[0]
             .execution()
@@ -186,7 +184,7 @@ fn subblocks_are_included_with_failing_txs() {
                 ConsensusEngineEvent::InvalidBlock(_) => unreachable!("unexpected invalid block"),
                 ConsensusEngineEvent::CanonicalBlockAdded(block, _) => block,
             };
-            let receipts = block.execution_outcome().receipts().first().unwrap();
+            let receipts = &block.execution_outcome().receipts()[0];
 
             // Assert that block only contains our subblock transactions and system transactions
             assert_eq!(
@@ -244,7 +242,7 @@ fn subblocks_are_included_with_failing_txs() {
                 *expected_fees.entry(fee_recipient).or_insert(U256::ZERO) +=
                     calc_gas_balance_spending(
                         receipt.cumulative_gas_used - cumulative_gas_used,
-                        TEMPO_BASE_FEE as u128,
+                        TEMPO_T1_BASE_FEE as u128,
                     );
                 cumulative_gas_used = receipt.cumulative_gas_used;
 
@@ -260,7 +258,8 @@ fn subblocks_are_included_with_failing_txs() {
 
                 let slot = block
                     .execution_outcome()
-                    .account_state(&NONCE_PRECOMPILE_ADDRESS)
+                    .state()
+                    .account(&NONCE_PRECOMPILE_ADDRESS)
                     .unwrap()
                     .storage
                     .get(&nonce_slot)
@@ -297,12 +296,14 @@ fn subblocks_are_included_with_failing_txs() {
             }
 
             // Send subblock transactions to all nodes.
+            // TIP-1000 charges 250k gas for new account creation, so txs from random signers
+            // need ~300k intrinsic gas. With 600k per-validator budget (5 validators), we fit 2 txs.
             for node in nodes.iter() {
                 for _ in 0..5 {
                     // Randomly submit some of the transactions from a new signer that doesn't have any funds
-                    if rand::random::<bool>() {
+                    if rand_08::random::<bool>() {
                         let tx =
-                            submit_subblock_tx_from(node, &PrivateKeySigner::random(), 100_000)
+                            submit_subblock_tx_from(node, &PrivateKeySigner::random(), 1_000_000)
                                 .await;
                         failing_transactions.push(tx);
                         expected_transactions.push(tx);
@@ -322,21 +323,20 @@ fn subblocks_are_included_with_failing_txs() {
 fn oversized_subblock_txs_are_removed() {
     let _ = tempo_eyre::install();
 
-    Runner::from(deterministic::Config::default().with_seed(42)).start(|context| async move {
+    Runner::from(Config::default().with_seed(42)).start(|mut context| async move {
         let how_many_signers = 4;
 
         let setup = Setup::new()
             .how_many_signers(how_many_signers)
             .epoch_length(10);
 
-        let (mut nodes, _execution_runtime) =
-            setup_validators(context.clone(), setup.clone()).await;
+        let (mut nodes, _execution_runtime) = setup_validators(&mut context, setup.clone()).await;
 
         for node in &mut nodes {
             node.consensus_config_mut().new_payload_wait_time = Duration::from_millis(500);
         }
 
-        join_all(nodes.iter_mut().map(|node| node.start())).await;
+        join_all(nodes.iter_mut().map(|node| node.start(&context))).await;
 
         let mut stream = nodes[0]
             .execution()
@@ -395,7 +395,7 @@ async fn submit_subblock_tx<TClock: commonware_runtime::Clock>(
     ))
     .unwrap();
 
-    submit_subblock_tx_from(node, &wallet, 100_000).await
+    submit_subblock_tx_from(node, &wallet, 300_000).await
 }
 
 async fn submit_subblock_tx_from<TClock: commonware_runtime::Clock>(
@@ -403,13 +403,13 @@ async fn submit_subblock_tx_from<TClock: commonware_runtime::Clock>(
     wallet: &PrivateKeySigner,
     gas_limit: u64,
 ) -> TxHash {
-    let mut nonce_bytes = rand::random::<[u8; 32]>();
+    let mut nonce_bytes = rand_08::random::<[u8; 32]>();
     nonce_bytes[0] = TEMPO_SUBBLOCK_NONCE_KEY_PREFIX;
     nonce_bytes[1..16].copy_from_slice(&node.public_key().as_ref()[..15]);
 
     let provider = node.execution_provider();
 
-    let gas_price = TEMPO_BASE_FEE as u128;
+    let gas_price = TEMPO_T1_BASE_FEE as u128;
 
     let mut tx = TempoTransaction {
         chain_id: provider.chain_spec().chain_id(),

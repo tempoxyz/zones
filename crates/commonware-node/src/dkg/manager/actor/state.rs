@@ -21,9 +21,9 @@ use commonware_cryptography::{
 };
 use commonware_p2p::Address;
 use commonware_parallel::Strategy;
-use commonware_runtime::{Metrics, buffer::PoolRef};
+use commonware_runtime::{Clock, Metrics, buffer::paged::CacheRef};
 use commonware_storage::journal::{contiguous, segmented};
-use commonware_utils::{NZU16, NZU32, NZU64, NZUsize, ordered};
+use commonware_utils::{N3f1, NZU16, NZU32, NZU64, NZUsize, ordered};
 use eyre::{OptionExt, WrapErr as _, bail, eyre};
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture};
 use tracing::{debug, info, instrument, warn};
@@ -48,7 +48,7 @@ pub(super) fn builder() -> Builder {
 
 pub(super) struct Storage<TContext>
 where
-    TContext: commonware_runtime::Storage + Metrics,
+    TContext: commonware_runtime::Storage + Clock + Metrics,
 {
     states: contiguous::variable::Journal<TContext, State>,
     events: segmented::variable::Journal<TContext, Event>,
@@ -59,7 +59,7 @@ where
 
 impl<TContext> Storage<TContext>
 where
-    TContext: commonware_runtime::Storage + Metrics,
+    TContext: commonware_runtime::Storage + Clock + Metrics,
 {
     /// Returns all player acknowledgments received during the given epoch.
     fn acks_for_epoch(
@@ -375,7 +375,7 @@ where
             share
         };
 
-        let (mut dealer, pub_msg, priv_msgs) = dkg::Dealer::start(
+        let (mut dealer, pub_msg, priv_msgs) = dkg::Dealer::start::<N3f1>(
             Transcript::resume(seed).noise(b"dealer-rng"),
             round.info.clone(),
             me.clone(),
@@ -512,7 +512,7 @@ impl Builder {
     #[instrument(skip_all, err)]
     pub(super) async fn init<TContext>(self, context: TContext) -> eyre::Result<Storage<TContext>>
     where
-        TContext: commonware_runtime::Storage + Metrics,
+        TContext: commonware_runtime::Storage + Clock + Metrics,
     {
         let Self {
             initial_state,
@@ -521,7 +521,7 @@ impl Builder {
         let partition_prefix =
             partition_prefix.ok_or_eyre("DKG actors state must have its partition prefix set")?;
 
-        let buffer_pool = PoolRef::new(PAGE_SIZE, POOL_CAPACITY);
+        let page_cache = CacheRef::new(PAGE_SIZE, POOL_CAPACITY);
 
         let mut states = contiguous::variable::Journal::init(
             context.with_label("states"),
@@ -532,7 +532,7 @@ impl Builder {
                 // and is effectively the maximum permitted number of players
                 // (and hence validators) that are ever permitted.
                 codec_config: MAXIMUM_VALIDATORS,
-                buffer_pool: buffer_pool.clone(),
+                page_cache: page_cache.clone(),
                 write_buffer: WRITE_BUFFER,
                 items_per_section: NZU64!(1),
             },
@@ -546,7 +546,7 @@ impl Builder {
                 partition: format!("{partition_prefix}_events"),
                 compression: None,
                 codec_config: MAXIMUM_VALIDATORS,
-                buffer_pool,
+                page_cache,
                 write_buffer: WRITE_BUFFER,
             },
         )
@@ -911,7 +911,7 @@ impl Dealer {
         ack: PlayerAck<PublicKey>,
     ) -> eyre::Result<()>
     where
-        TContext: commonware_runtime::Storage + Metrics,
+        TContext: commonware_runtime::Storage + Clock + Metrics,
     {
         if !self.unsent.contains_key(&player) {
             bail!("already received an ack from `{player}`");
@@ -941,7 +941,7 @@ impl Dealer {
         // Even after the finalized_log is taken, we won't attempt to finalize
         // again because the dealer will be None.
         if let Some(dealer) = self.dealer.take() {
-            let log = dealer.finalize();
+            let log = dealer.finalize::<N3f1>();
             self.finalized = Some(log);
         }
     }
@@ -991,7 +991,7 @@ impl Round {
             epoch: state.epoch,
             dealers: state.dealers.keys().clone(),
             players: state.players.keys().clone(),
-            info: Info::new(
+            info: Info::new::<N3f1>(
                 namespace,
                 state.epoch.get(),
                 previous_output,
@@ -1053,7 +1053,7 @@ impl Player {
         priv_msg: DealerPrivMsg,
     ) -> eyre::Result<PlayerAck<PublicKey>>
     where
-        TContext: commonware_runtime::Storage + Metrics,
+        TContext: commonware_runtime::Storage + Clock + Metrics,
     {
         // If we've already generated an ack, return the cached version
         if let Some(ack) = self.acks.get(&dealer) {
@@ -1063,7 +1063,7 @@ impl Player {
         // Otherwise generate a new ack
         let ack = self
             .player
-            .dealer_message(dealer.clone(), pub_msg.clone(), priv_msg.clone())
+            .dealer_message::<N3f1>(dealer.clone(), pub_msg.clone(), priv_msg.clone())
             // FIXME(janis): it would be great to know why exactly that is not the case.
             .ok_or_eyre(
                 "applying dealer message to player instance did not result in a usable ack",
@@ -1088,7 +1088,7 @@ impl Player {
         }
         if let Some(ack) = self
             .player
-            .dealer_message(dealer.clone(), pub_msg, priv_msg)
+            .dealer_message::<N3f1>(dealer.clone(), pub_msg, priv_msg)
         {
             self.acks.insert(dealer, ack);
         }
@@ -1100,7 +1100,7 @@ impl Player {
         logs: BTreeMap<PublicKey, dkg::DealerLog<MinSig, PublicKey>>,
         strategy: &impl Strategy,
     ) -> Result<(Output<MinSig, PublicKey>, Share), dkg::Error> {
-        self.player.finalize(logs, strategy)
+        self.player.finalize::<N3f1>(logs, strategy)
     }
 }
 

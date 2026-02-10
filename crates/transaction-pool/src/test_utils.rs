@@ -5,6 +5,7 @@
 
 use crate::transaction::TempoPooledTransaction;
 use alloy_consensus::{Transaction, TxEip1559};
+use alloy_eips::eip2930::AccessList;
 use alloy_primitives::{Address, B256, Signature, TxKind, U256};
 use reth_primitives_traits::Recovered;
 use reth_provider::test_utils::MockEthProvider;
@@ -14,7 +15,7 @@ use tempo_chainspec::{TempoChainSpec, spec::MODERATO};
 use tempo_primitives::{
     TempoTxEnvelope,
     transaction::{
-        TempoTransaction,
+        TempoSignedAuthorization, TempoTransaction,
         tempo_transaction::Call,
         tt_signature::{PrimitiveSignature, TempoSignature},
         tt_signed::AASigned,
@@ -50,6 +51,16 @@ pub(crate) struct TxBuilder {
     value: U256,
     max_priority_fee_per_gas: u128,
     max_fee_per_gas: u128,
+    fee_token: Option<Address>,
+    valid_after: Option<u64>,
+    valid_before: Option<u64>,
+    chain_id: u64,
+    /// Custom calls for AA transactions. If None, a default call is created from `kind` and `value`.
+    calls: Option<Vec<Call>>,
+    /// Authorization list for AA transactions.
+    authorization_list: Option<Vec<TempoSignedAuthorization>>,
+    /// Access list for AA transactions.
+    access_list: AccessList,
 }
 
 impl Default for TxBuilder {
@@ -59,10 +70,17 @@ impl Default for TxBuilder {
             sender: Address::random(),
             nonce_key: U256::ZERO,
             nonce: 0,
-            gas_limit: 100_000,
+            gas_limit: 1_000_000,
             value: U256::ZERO,
             max_priority_fee_per_gas: 1_000_000_000,
-            max_fee_per_gas: 2_000_000_000,
+            max_fee_per_gas: 20_000_000_000, // 20 gwei, above T1's 20 gwei minimum
+            fee_token: None,
+            valid_after: None,
+            valid_before: None,
+            chain_id: 42431, // MODERATO chain_id
+            calls: None,
+            authorization_list: None,
+            access_list: Default::default(),
         }
     }
 }
@@ -120,26 +138,70 @@ impl TxBuilder {
         self
     }
 
+    /// Set the fee token (AA transactions only).
+    pub(crate) fn fee_token(mut self, fee_token: Address) -> Self {
+        self.fee_token = Some(fee_token);
+        self
+    }
+
+    /// Set the valid_after timestamp (AA transactions only).
+    pub(crate) fn valid_after(mut self, valid_after: u64) -> Self {
+        self.valid_after = Some(valid_after);
+        self
+    }
+
+    /// Set the valid_before timestamp (AA transactions only).
+    pub(crate) fn valid_before(mut self, valid_before: u64) -> Self {
+        self.valid_before = Some(valid_before);
+        self
+    }
+
+    /// Set custom calls for the AA transaction.
+    /// If not set, a default call is created from `kind` and `value`.
+    pub(crate) fn calls(mut self, calls: Vec<Call>) -> Self {
+        self.calls = Some(calls);
+        self
+    }
+
+    /// Set the authorization list for the AA transaction.
+    pub(crate) fn authorization_list(
+        mut self,
+        authorization_list: Vec<TempoSignedAuthorization>,
+    ) -> Self {
+        self.authorization_list = Some(authorization_list);
+        self
+    }
+
+    /// Set the access list for the AA transaction.
+    pub(crate) fn access_list(mut self, access_list: AccessList) -> Self {
+        self.access_list = access_list;
+        self
+    }
+
     /// Build an AA transaction.
     pub(crate) fn build(self) -> TempoPooledTransaction {
+        let calls = self.calls.unwrap_or_else(|| {
+            vec![Call {
+                to: self.kind,
+                value: self.value,
+                input: Default::default(),
+            }]
+        });
+
         let tx = TempoTransaction {
             chain_id: 1,
             max_priority_fee_per_gas: self.max_priority_fee_per_gas,
             max_fee_per_gas: self.max_fee_per_gas,
             gas_limit: self.gas_limit,
-            calls: vec![Call {
-                to: self.kind,
-                value: self.value,
-                input: Default::default(),
-            }],
+            calls,
             nonce_key: self.nonce_key,
             nonce: self.nonce,
-            fee_token: None,
+            fee_token: self.fee_token,
             fee_payer_signature: None,
-            valid_after: None,
-            valid_before: None,
-            access_list: Default::default(),
-            tempo_authorization_list: vec![],
+            valid_after: self.valid_after,
+            valid_before: self.valid_before,
+            access_list: self.access_list,
+            tempo_authorization_list: self.authorization_list.unwrap_or_default(),
             key_authorization: None,
         };
 
@@ -155,6 +217,7 @@ impl TxBuilder {
     /// Build an EIP-1559 transaction.
     pub(crate) fn build_eip1559(self) -> TempoPooledTransaction {
         let tx = TxEip1559 {
+            chain_id: self.chain_id,
             to: self.kind,
             gas_limit: self.gas_limit,
             value: self.value,

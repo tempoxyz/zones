@@ -2,7 +2,7 @@
 
 use reth_metrics::{
     Metrics,
-    metrics::{Counter, Gauge},
+    metrics::{Counter, Gauge, Histogram},
 };
 
 /// AA2D pool metrics
@@ -74,78 +74,37 @@ impl AA2dPoolMetrics {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Metrics for the Tempo pool maintenance task.
+#[derive(Metrics, Clone)]
+#[metrics(scope = "transaction_pool.maintenance")]
+pub struct TempoPoolMaintenanceMetrics {
+    /// Total time spent processing a block update in seconds.
+    pub block_update_duration_seconds: Histogram,
 
-    #[test]
-    fn test_aa2d_pool_metrics_default() {
-        // Ensure we can create the metrics struct (macro-generated)
-        let _metrics = AA2dPoolMetrics::default();
-    }
+    /// Time spent evicting expired AA transactions in seconds.
+    pub expired_eviction_duration_seconds: Histogram,
 
-    #[test]
-    fn test_set_transaction_counts() {
-        let metrics = AA2dPoolMetrics::default();
+    /// Time spent processing fee token pause/unpause events in seconds.
+    pub pause_events_duration_seconds: Histogram,
 
-        // Should not panic
-        metrics.set_transaction_counts(100, 50, 50);
-        metrics.set_transaction_counts(0, 0, 0);
-        metrics.set_transaction_counts(usize::MAX, usize::MAX / 2, usize::MAX / 2);
-    }
+    /// Time spent evicting invalidated transactions (revoked keys, validator tokens, blacklist) in seconds.
+    pub invalidation_eviction_duration_seconds: Histogram,
 
-    #[test]
-    fn test_inc_nonce_key_count() {
-        let metrics = AA2dPoolMetrics::default();
+    /// Time spent updating the AMM liquidity cache in seconds.
+    pub amm_cache_update_duration_seconds: Histogram,
 
-        // Should not panic
-        metrics.inc_nonce_key_count(0);
-        metrics.inc_nonce_key_count(1);
-        metrics.inc_nonce_key_count(100);
-    }
+    /// Time spent updating the 2D nonce pool in seconds.
+    pub nonce_pool_update_duration_seconds: Histogram,
 
-    #[test]
-    fn test_inc_inserted() {
-        let metrics = AA2dPoolMetrics::default();
+    /// Number of expired transactions evicted.
+    pub expired_transactions_evicted: Counter,
 
-        // Should not panic
-        metrics.inc_inserted();
-        metrics.inc_inserted();
-    }
+    /// Number of transactions moved to the paused pool.
+    pub transactions_paused: Counter,
 
-    #[test]
-    fn test_inc_removed() {
-        let metrics = AA2dPoolMetrics::default();
+    /// Number of transactions restored from the paused pool.
+    pub transactions_unpaused: Counter,
 
-        // Should not panic
-        metrics.inc_removed(0);
-        metrics.inc_removed(1);
-        metrics.inc_removed(100);
-    }
-
-    #[test]
-    fn test_inc_promoted() {
-        let metrics = AA2dPoolMetrics::default();
-
-        // Should not panic
-        metrics.inc_promoted(0);
-        metrics.inc_promoted(1);
-        metrics.inc_promoted(100);
-    }
-
-    #[test]
-    fn test_inc_demoted() {
-        let metrics = AA2dPoolMetrics::default();
-
-        // Should not panic
-        metrics.inc_demoted(0);
-        metrics.inc_demoted(1);
-        metrics.inc_demoted(100);
-    }
-
-    #[test]
-    fn test_metrics_clone() {
-        let metrics = AA2dPoolMetrics::default();
-        let _cloned = metrics;
-    }
+    /// Number of transactions evicted due to invalidation events.
+    pub transactions_invalidated: Counter,
 }

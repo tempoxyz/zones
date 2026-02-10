@@ -10,7 +10,7 @@ use std::{
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     Reporters, marshal,
-    simplex::scheme::bls12381_threshold::Scheme,
+    simplex::scheme::bls12381_threshold::vrf::Scheme,
     types::{FixedEpocher, ViewDelta},
 };
 use commonware_cryptography::{
@@ -19,16 +19,17 @@ use commonware_cryptography::{
     certificate::Scheme as _,
     ed25519::{PrivateKey, PublicKey},
 };
-use commonware_p2p::{Address, Blocker, Receiver, Sender};
+use commonware_p2p::{AddressableManager, Blocker, Receiver, Sender};
+use commonware_parallel::Sequential;
 use commonware_runtime::{
-    Clock, ContextCell, Handle, Metrics, Network, Pacer, Spawner, Storage, buffer::PoolRef,
+    Clock, ContextCell, Handle, Metrics, Network, Pacer, Spawner, Storage, buffer::paged::CacheRef,
     spawn_cell,
 };
 use commonware_storage::archive::immutable;
-use commonware_utils::{NZU64, ordered::Map};
+use commonware_utils::NZU64;
 use eyre::{OptionExt as _, WrapErr as _};
 use futures::future::try_join_all;
-use rand::{CryptoRng, Rng};
+use rand_08::{CryptoRng, Rng};
 use tempo_node::TempoFullNode;
 use tracing::info;
 
@@ -65,10 +66,7 @@ const MAX_REPAIR: NonZeroUsize = NonZeroUsize::new(20).expect("value is not zero
 // XXX: Mostly a one-to-one copy of alto for now. We also put the context in here
 // because there doesn't really seem to be a point putting it into an extra initializer.
 #[derive(Clone)]
-pub struct Builder<TBlocker, TContext, TPeerManager> {
-    /// The contextg
-    pub context: TContext,
-
+pub struct Builder<TBlocker, TPeerManager> {
     pub fee_recipient: alloy_primitives::Address,
 
     pub execution_node: Option<TempoFullNode>,
@@ -92,31 +90,36 @@ pub struct Builder<TBlocker, TContext, TPeerManager> {
     pub new_payload_wait_time: Duration,
     pub time_to_build_subblock: Duration,
     pub subblock_broadcast_interval: Duration,
+    pub fcu_heartbeat_interval: Duration,
 
     pub feed_state: crate::feed::FeedStateHandle,
 }
 
-impl<TBlocker, TContext, TPeerManager> Builder<TBlocker, TContext, TPeerManager>
+impl<TBlocker, TPeerManager> Builder<TBlocker, TPeerManager>
 where
     TBlocker: Blocker<PublicKey = PublicKey>,
-    TContext: Clock
-        + governor::clock::Clock
-        + Rng
-        + CryptoRng
-        + Pacer
-        + Spawner
-        + Storage
-        + Metrics
-        + Network,
-    TPeerManager:
-        commonware_p2p::Manager<PublicKey = PublicKey, Peers = Map<PublicKey, Address>> + Sync,
+    TPeerManager: AddressableManager<PublicKey = PublicKey> + Sync,
 {
     pub fn with_execution_node(mut self, execution_node: TempoFullNode) -> Self {
         self.execution_node = Some(execution_node);
         self
     }
 
-    pub async fn try_init(self) -> eyre::Result<Engine<TBlocker, TContext, TPeerManager>> {
+    pub async fn try_init<TContext>(
+        self,
+        context: TContext,
+    ) -> eyre::Result<Engine<TBlocker, TContext, TPeerManager>>
+    where
+        TContext: Clock
+            + governor::clock::Clock
+            + Rng
+            + CryptoRng
+            + Pacer
+            + Spawner
+            + Storage
+            + Metrics
+            + Network,
+    {
         let execution_node = self
             .execution_node
             .clone()
@@ -134,7 +137,7 @@ where
         );
 
         let (broadcast, broadcast_mailbox) = buffered::Engine::new(
-            self.context.with_label("broadcast"),
+            context.with_label("broadcast"),
             buffered::Config {
                 public_key: self.signer.public_key(),
                 mailbox_size: self.mailbox_size,
@@ -144,15 +147,14 @@ where
             },
         );
 
-        // Create the buffer pool
-        let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
+        let page_cache_ref = CacheRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
 
         // XXX: All hard-coded values here are the same as prior to commonware
         // making the resolver configurable in
         // https://github.com/commonwarexyz/monorepo/commit/92870f39b4a9e64a28434b3729ebff5aba67fb4e
         let resolver_config = commonware_consensus::marshal::resolver::p2p::Config {
             public_key: self.signer.public_key(),
-            manager: self.peer_manager.clone(),
+            provider: self.peer_manager.clone(),
             mailbox_size: self.mailbox_size,
             blocker: self.blocker.clone(),
             initial: Duration::from_secs(1),
@@ -166,7 +168,7 @@ where
         const FINALIZATIONS_BY_HEIGHT: &str = "finalizations-by-height";
         let start = Instant::now();
         let finalizations_by_height = immutable::Archive::init(
-            self.context.with_label("finalizations_by_height"),
+            context.with_label("finalizations_by_height"),
             immutable::Config {
                 metadata_partition: format!(
                     "{}-{FINALIZATIONS_BY_HEIGHT}-metadata",
@@ -186,7 +188,7 @@ where
                     "{}-{FINALIZATIONS_BY_HEIGHT}-freezer-key",
                     self.partition_prefix,
                 ),
-                freezer_key_buffer_pool: buffer_pool.clone(),
+                freezer_key_page_cache: page_cache_ref.clone(),
 
                 freezer_value_partition: format!(
                     "{}-{FINALIZATIONS_BY_HEIGHT}-freezer-value",
@@ -216,7 +218,7 @@ where
         const FINALIZED_BLOCKS: &str = "finalized_blocks";
         let start = Instant::now();
         let finalized_blocks = immutable::Archive::init(
-            self.context.with_label("finalized_blocks"),
+            context.with_label("finalized_blocks"),
             immutable::Config {
                 metadata_partition: format!(
                     "{}-{FINALIZED_BLOCKS}-metadata",
@@ -236,7 +238,7 @@ where
                     "{}-{FINALIZED_BLOCKS}-freezer-key",
                     self.partition_prefix,
                 ),
-                freezer_key_buffer_pool: buffer_pool.clone(),
+                freezer_key_page_cache: page_cache_ref.clone(),
 
                 freezer_value_partition: format!(
                     "{}-{FINALIZED_BLOCKS}-freezer-value",
@@ -263,7 +265,7 @@ where
         // TODO(janis): forward `last_finalized_height` to application so it can
         // forward missing blocks to EL.
         let (marshal, marshal_mailbox, last_finalized_height) = marshal::Actor::init(
-            self.context.with_label("marshal"),
+            context.with_label("marshal"),
             finalizations_by_height,
             finalized_blocks,
             marshal::Config {
@@ -277,19 +279,21 @@ where
                 ),
                 prunable_items_per_section: PRUNABLE_ITEMS_PER_SECTION,
 
-                buffer_pool: buffer_pool.clone(),
+                page_cache: page_cache_ref.clone(),
 
                 replay_buffer: REPLAY_BUFFER,
                 key_write_buffer: WRITE_BUFFER,
                 value_write_buffer: WRITE_BUFFER,
                 max_repair: MAX_REPAIR,
                 block_codec_config: (),
+
+                strategy: Sequential,
             },
         )
         .await;
 
         let subblocks = subblocks::Actor::new(subblocks::Config {
-            context: self.context.clone(),
+            context: context.clone(),
             signer: self.signer.clone(),
             scheme_provider: scheme_provider.clone(),
             node: execution_node.clone(),
@@ -300,23 +304,25 @@ where
         });
 
         let (feed, feed_mailbox) = crate::feed::init(
-            self.context.with_label("feed"),
+            context.with_label("feed"),
             marshal_mailbox.clone(),
+            epoch_strategy.clone(),
             self.feed_state,
         );
 
         let (executor, executor_mailbox) = crate::executor::init(
-            self.context.with_label("executor"),
+            context.with_label("executor"),
             crate::executor::Config {
                 execution_node: execution_node.clone(),
                 last_finalized_height,
                 marshal: marshal_mailbox.clone(),
+                fcu_heartbeat_interval: self.fcu_heartbeat_interval,
             },
         )
         .wrap_err("failed initialization executor actor")?;
 
         let (application, application_mailbox) = application::init(super::application::Config {
-            context: self.context.with_label("application"),
+            context: context.with_label("application"),
             fee_recipient: self.fee_recipient,
             mailbox_size: self.mailbox_size,
             marshal: marshal_mailbox.clone(),
@@ -331,10 +337,11 @@ where
         .wrap_err("failed initializing application actor")?;
 
         let (epoch_manager, epoch_manager_mailbox) = epoch::manager::init(
+            context.with_label("epoch_manager"),
             epoch::manager::Config {
                 application: application_mailbox.clone(),
                 blocker: self.blocker.clone(),
-                buffer_pool: buffer_pool.clone(),
+                page_cache: page_cache_ref,
                 epoch_strategy: epoch_strategy.clone(),
                 time_for_peer_response: self.time_for_peer_response,
                 time_to_propose: self.time_to_propose,
@@ -349,11 +356,10 @@ where
                 views_to_track: ViewDelta::new(self.views_to_track),
                 views_until_leader_skip: ViewDelta::new(self.views_until_leader_skip),
             },
-            self.context.with_label("epoch_manager"),
         );
 
         let (dkg_manager, dkg_manager_mailbox) = dkg::manager::init(
-            self.context.with_label("dkg_manager"),
+            context.with_label("dkg_manager"),
             dkg::manager::Config {
                 epoch_manager: epoch_manager_mailbox.clone(),
                 epoch_strategy: epoch_strategy.clone(),
@@ -371,7 +377,7 @@ where
         .wrap_err("failed initializing dkg manager")?;
 
         Ok(Engine {
-            context: ContextCell::new(self.context),
+            context: ContextCell::new(context),
 
             broadcast,
             broadcast_mailbox,
@@ -409,7 +415,7 @@ where
         + Pacer
         + Spawner
         + Storage,
-    TPeerManager: commonware_p2p::Manager<PublicKey = PublicKey, Peers = Map<PublicKey, Address>>,
+    TPeerManager: AddressableManager<PublicKey = PublicKey>,
 {
     context: ContextCell<TContext>,
 
@@ -458,8 +464,7 @@ where
         + Pacer
         + Spawner
         + Storage,
-    TPeerManager:
-        commonware_p2p::Manager<PublicKey = PublicKey, Peers = Map<PublicKey, Address>> + Sync,
+    TPeerManager: AddressableManager<PublicKey = PublicKey> + Sync,
 {
     #[expect(
         clippy::too_many_arguments,
@@ -467,11 +472,11 @@ where
     )]
     pub fn start(
         mut self,
-        pending_network: (
+        votes_network: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        recovered_network: (
+        certificates_network: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
@@ -499,8 +504,8 @@ where
         spawn_cell!(
             self.context,
             self.run(
-                pending_network,
-                recovered_network,
+                votes_network,
+                certificates_network,
                 resolver_network,
                 broadcast_network,
                 marshal_network,
@@ -517,11 +522,11 @@ where
     )]
     async fn run(
         self,
-        pending_channel: (
+        votes_channel: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
-        recovered_channel: (
+        certificates_channel: (
             impl Sender<PublicKey = PublicKey>,
             impl Receiver<PublicKey = PublicKey>,
         ),
@@ -564,7 +569,7 @@ where
 
         let epoch_manager =
             self.epoch_manager
-                .start(pending_channel, recovered_channel, resolver_channel);
+                .start(votes_channel, certificates_channel, resolver_channel);
 
         let feed = self.feed.start();
 

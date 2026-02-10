@@ -35,19 +35,20 @@ use reth_rpc_eth_api::{
 use reth_tracing::tracing::{debug, info};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
-use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
+use tempo_chainspec::spec::TempoChainSpec;
 use tempo_consensus::TempoConsensus;
 use tempo_evm::{TempoEvmConfig, evm::TempoEvmFactory};
 use tempo_payload_builder::TempoPayloadBuilder;
 use tempo_payload_types::TempoPayloadAttributes;
 use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
-    AA2dPool, AA2dPoolConfig, TempoTransactionPool, amm::AmmLiquidityCache,
-    validator::TempoTransactionValidator,
+    AA2dPool, AA2dPoolConfig, TempoTransactionPool,
+    amm::AmmLiquidityCache,
+    validator::{
+        DEFAULT_AA_VALID_AFTER_MAX_SECS, DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
+        TempoTransactionValidator,
+    },
 };
-
-/// Default maximum allowed `valid_after` offset for AA txs (1 hour).
-pub const DEFAULT_AA_VALID_AFTER_MAX_SECS: u64 = 3600;
 
 /// Tempo node CLI arguments.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::Args)]
@@ -55,6 +56,10 @@ pub struct TempoNodeArgs {
     /// Maximum allowed `valid_after` offset for AA txs.
     #[arg(long = "txpool.aa-valid-after-max-secs", default_value_t = DEFAULT_AA_VALID_AFTER_MAX_SECS)]
     pub aa_valid_after_max_secs: u64,
+
+    /// Maximum number of authorizations allowed in an AA transaction.
+    #[arg(long = "txpool.max-tempo-authorizations", default_value_t = DEFAULT_MAX_TEMPO_AUTHORIZATIONS)]
+    pub max_tempo_authorizations: usize,
 
     /// Enable state provider metrics for the payload builder.
     #[arg(long = "builder.state-provider-metrics", default_value_t = false)]
@@ -70,6 +75,7 @@ impl TempoNodeArgs {
     pub fn pool_builder(&self) -> TempoPoolBuilder {
         TempoPoolBuilder {
             aa_valid_after_max_secs: self.aa_valid_after_max_secs,
+            max_tempo_authorizations: self.max_tempo_authorizations,
         }
     }
 
@@ -381,6 +387,8 @@ where
 pub struct TempoPoolBuilder {
     /// Maximum allowed `valid_after` offset for AA txs.
     pub aa_valid_after_max_secs: u64,
+    /// Maximum number of authorizations allowed in an AA transaction.
+    pub max_tempo_authorizations: usize,
 }
 
 impl TempoPoolBuilder {
@@ -389,12 +397,19 @@ impl TempoPoolBuilder {
         self.aa_valid_after_max_secs = secs;
         self
     }
+
+    /// Sets the maximum number of authorizations allowed in an AA transaction.
+    pub const fn with_max_tempo_authorizations(mut self, max: usize) -> Self {
+        self.max_tempo_authorizations = max;
+        self
+    }
 }
 
 impl Default for TempoPoolBuilder {
     fn default() -> Self {
         Self {
             aa_valid_after_max_secs: DEFAULT_AA_VALID_AFTER_MAX_SECS,
+            max_tempo_authorizations: DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
         }
     }
 }
@@ -407,7 +422,6 @@ where
 
     async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
         let mut pool_config = ctx.pool_config();
-        pool_config.minimal_protocol_basefee = TEMPO_BASE_FEE;
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 
         // this store is effectively a noop
@@ -418,6 +432,7 @@ where
             .with_local_transactions_config(pool_config.local_transactions_config.clone())
             .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
             .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+            .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
             .disable_balance_check()
             .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
             .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
@@ -427,8 +442,9 @@ where
 
         let aa_2d_config = AA2dPoolConfig {
             price_bump_config: pool_config.price_bumps,
-            // TODO: configure dedicated limit
-            aa_2d_limit: pool_config.pending_limit,
+            pending_limit: pool_config.pending_limit,
+            queued_limit: pool_config.queued_limit,
+            max_txs_per_sender: pool_config.max_account_slots,
         };
         let aa_2d_pool = AA2dPool::new(aa_2d_config);
         let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;
@@ -437,6 +453,7 @@ where
             TempoTransactionValidator::new(
                 v,
                 self.aa_valid_after_max_secs,
+                self.max_tempo_authorizations,
                 amm_liquidity_cache.clone(),
             )
         });
@@ -449,24 +466,11 @@ where
 
         spawn_maintenance_tasks(ctx, transaction_pool.clone(), &pool_config)?;
 
-        // Spawn (protocol) mempool maintenance tasks
-        let task_pool = transaction_pool.clone();
-        let task_provider = ctx.provider().clone();
+        // Spawn unified Tempo pool maintenance task
+        // This consolidates: expired AA txs, 2D nonce updates, AMM cache, and keychain revocations
         ctx.task_executor().spawn_critical(
-            "txpool maintenance (protocol) - evict expired AA txs",
-            tempo_transaction_pool::maintain::evict_expired_aa_txs(task_pool, task_provider),
-        );
-
-        // Spawn (AA 2d nonce) mempool maintenance tasks
-        ctx.task_executor().spawn_critical(
-            "txpool maintenance - 2d nonce AA txs",
-            tempo_transaction_pool::maintain::maintain_2d_nonce_pool(transaction_pool.clone()),
-        );
-
-        // Spawn AMM liquidity cache maintenance task
-        ctx.task_executor().spawn_critical(
-            "txpool maintenance - amm liquidity cache",
-            tempo_transaction_pool::maintain::maintain_amm_cache(transaction_pool.clone()),
+            "txpool maintenance - tempo pool",
+            tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.clone()),
         );
 
         info!(target: "reth::cli", "Transaction pool initialized");
