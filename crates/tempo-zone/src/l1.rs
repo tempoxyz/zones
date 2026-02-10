@@ -7,6 +7,7 @@ use alloy_primitives::{Address, B256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolValue, sol};
+use alloy_transport::Authorization;
 use futures::StreamExt;
 use reth_tracing::tracing::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
@@ -169,7 +170,17 @@ impl L1Subscriber {
     pub async fn start(self) -> eyre::Result<()> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
-        let ws = WsConnect::new(&self.config.l1_rpc_url);
+        let url: url::Url = self.config.l1_rpc_url.parse()?;
+        let mut ws = WsConnect::new(self.config.l1_rpc_url.clone());
+
+        if !url.username().is_empty() {
+            let auth = Authorization::basic(
+                url.username(),
+                url.password().unwrap_or_default(),
+            );
+            ws = ws.with_auth(auth);
+        }
+
         let provider = ProviderBuilder::new().connect_ws(ws).await?;
 
         info!("Connected to L1 node, subscribing to logs");

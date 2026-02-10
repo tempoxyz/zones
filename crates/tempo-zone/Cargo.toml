@@ -44,8 +44,10 @@ alloy-primitives.workspace = true
 alloy-provider.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
+alloy-transport.workspace = true
 
 # misc
+url = "2"
 eyre.workspace = true
 futures.workspace = true
 tokio.workspace = true

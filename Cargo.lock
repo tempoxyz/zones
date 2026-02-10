@@ -14166,6 +14166,7 @@ dependencies = [
  "alloy-provider",
  "alloy-rpc-types-eth",
  "alloy-sol-types",
+ "alloy-transport",
  "eyre",
  "futures",
  "reth-basic-payload-builder",
@@ -14193,6 +14194,7 @@ dependencies = [
  "tempo-primitives",
  "tempo-transaction-pool",
  "tokio",
+ "url",
 ]
 
 [[package]]
