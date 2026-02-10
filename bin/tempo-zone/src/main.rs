@@ -64,7 +64,7 @@ fn main() {
             let NodeHandle {
                 node_exit_future,
                 node,
-            } = builder.node(node).launch().await?;
+            } = builder.node(node).launch_with_debug_capabilities().await?;
 
             info!(target: "reth::cli", "Tempo Zone node started");
 
