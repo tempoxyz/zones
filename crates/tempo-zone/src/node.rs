@@ -54,17 +54,23 @@ type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnve
 pub struct ZoneNode {
     deposit_queue: crate::DepositQueue,
     token_address: alloy_primitives::Address,
+    l1_config: crate::L1SubscriberConfig,
 }
 
 impl ZoneNode {
-    /// Create a new zone node with a deposit queue and the TIP-20 token address to mint on deposit.
+    /// Create a new zone node with a deposit queue, TIP-20 token address, and L1 subscriber config.
+    ///
+    /// The L1 subscriber is spawned automatically as part of the node lifecycle via
+    /// [`ZoneAddOns::launch_add_ons`], ensuring it cannot be accidentally omitted.
     pub fn new(
         deposit_queue: crate::DepositQueue,
         token_address: alloy_primitives::Address,
+        l1_config: crate::L1SubscriberConfig,
     ) -> Self {
         Self {
             deposit_queue,
             token_address,
+            l1_config,
         }
     }
 
@@ -112,6 +118,8 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConf
         BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>,
         Identity,
     >,
+    deposit_queue: crate::DepositQueue,
+    l1_config: crate::L1SubscriberConfig,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>> std::fmt::Debug
@@ -127,7 +135,7 @@ where
     N: FullNodeTypes<Types = ZoneNode>,
 {
     /// Creates a new instance.
-    pub fn new() -> Self {
+    pub fn new(deposit_queue: crate::DepositQueue, l1_config: crate::L1SubscriberConfig) -> Self {
         Self {
             inner: RpcAddOns::new(
                 ZoneEthApiBuilder::default(),
@@ -136,16 +144,9 @@ where
                 BasicEngineValidatorBuilder::default(),
                 Identity::default(),
             ),
+            deposit_queue,
+            l1_config,
         }
-    }
-}
-
-impl<N> Default for ZoneAddOns<NodeAdapter<N>>
-where
-    N: FullNodeTypes<Types = ZoneNode>,
-{
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -164,6 +165,14 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+        crate::spawn_l1_subscriber(
+            self.l1_config,
+            self.deposit_queue,
+            ctx.node.task_executor().clone(),
+        );
+
+        info!(target: "reth::cli", "L1 deposit subscriber started as part of node lifecycle");
+
         self.inner.launch_add_ons(ctx).await
     }
 }
@@ -211,7 +220,7 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        ZoneAddOns::new()
+        ZoneAddOns::new(self.deposit_queue.clone(), self.l1_config.clone())
     }
 }
 

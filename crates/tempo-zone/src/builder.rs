@@ -33,7 +33,7 @@ use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
 use tempo_evm::{TempoEvmConfig, TempoNextBlockEnvAttributes};
 use tempo_payload_types::TempoPayloadBuilderAttributes;
 use tempo_primitives::{
-    TempoHeader, TempoPrimitives, TempoTxEnvelope,
+    SubBlockMetadata, TempoHeader, TempoPrimitives, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
 use tempo_transaction_pool::TempoTransactionPool;
@@ -281,6 +281,35 @@ where
                 }
                 Err(err) => return Err(PayloadBuilderError::evm(err)),
             }
+        }
+
+        // TODO: Omit this when running a zone node. Currently required because
+        // TempoBlockExecutor::finish() expects an end-of-block subblock metadata
+        // system tx. Zone nodes don't have subblocks, so we emit an empty one.
+        let block_number = builder.evm_mut().block.number;
+        let empty_metadata: Vec<SubBlockMetadata> = Vec::new();
+        let subblock_metadata_input: Vec<u8> = alloy_rlp::encode(&empty_metadata)
+            .into_iter()
+            .chain(block_number.to_be_bytes_vec())
+            .collect();
+        let seal_tx = Recovered::new_unchecked(
+            TempoTxEnvelope::Legacy(Signed::new_unhashed(
+                TxLegacy {
+                    chain_id: Some(self.provider.chain_spec().chain().id()),
+                    nonce: 0,
+                    gas_price: 0,
+                    gas_limit: 0,
+                    to: Address::ZERO.into(),
+                    value: U256::ZERO,
+                    input: subblock_metadata_input.into(),
+                },
+                TEMPO_SYSTEM_TX_SIGNATURE,
+            )),
+            TEMPO_SYSTEM_TX_SENDER,
+        );
+        if let Err(err) = builder.execute_transaction(seal_tx) {
+            error!(?err, "subblock metadata system tx failed");
+            return Err(PayloadBuilderError::evm(err));
         }
 
         let BlockBuilderOutcome {

@@ -15,7 +15,7 @@ use reth_node_builder::NodeHandle;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use zone::{DepositQueue, L1SubscriberConfig, ZoneNode, spawn_l1_subscriber};
+use zone::{DepositQueue, L1SubscriberConfig, ZoneNode};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -64,23 +64,17 @@ fn main() {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
             let deposits = DepositQueue::default();
-            let node = ZoneNode::new(deposits.clone(), args.token_address);
-
-            let NodeHandle {
-                node_exit_future,
-                node,
-            } = builder.node(node).launch_with_debug_capabilities().await?;
-
-            info!(target: "reth::cli", "Tempo Zone node started");
-
-            let config = L1SubscriberConfig {
+            let l1_config = L1SubscriberConfig {
                 l1_rpc_url: args.l1_rpc_url,
                 portal_address: args.portal_address,
             };
+            let node = ZoneNode::new(deposits, args.token_address, l1_config);
 
-            spawn_l1_subscriber(config, deposits.clone(), node.task_executor.clone());
+            let NodeHandle {
+                node_exit_future, ..
+            } = builder.node(node).launch_with_debug_capabilities().await?;
 
-            info!(target: "reth::cli", portal = %args.portal_address, "L1 deposit subscriber started");
+            info!(target: "reth::cli", "Tempo Zone node started");
 
             node_exit_future.await?;
             Ok(())

@@ -47,6 +47,7 @@ reth-transaction-pool.workspace = true
 alloy-consensus.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
+alloy-rlp.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-sol-types.workspace = true
 alloy-transport.workspace = true

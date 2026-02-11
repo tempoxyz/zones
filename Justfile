@@ -107,6 +107,11 @@ zoneup reset="true" args="":
                       --log.file.directory /tmp/tempo-zone/logs \
                       {{args}}
 
+[group('zone')]
+[doc('Checks TIP-20 token balance for an account on the zone (port 8546)')]
+check-balance account token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8546":
+    @printf "Balance of {{account}}: " && cast call "{{token}}" "balanceOf(address)(uint256)" "{{account}}" --rpc-url "{{rpc}}"
+
 mod scripts
 
 [group('dev')]
