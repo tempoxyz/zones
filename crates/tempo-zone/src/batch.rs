@@ -23,7 +23,7 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tracing::{error, info, instrument};
 
-use crate::abi::{BlockTransition, DepositQueueTransition, WithdrawalQueueTransition, ZonePortal};
+use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
 
 /// Configuration for the L1 batch submitter.
 #[derive(Debug, Clone)]
@@ -109,19 +109,16 @@ impl BatchSubmitter {
             nextProcessedHash: batch.next_processed_deposit_hash,
         };
 
-        let withdrawal_transition = WithdrawalQueueTransition {
-            withdrawalQueueHash: batch.withdrawal_queue_hash,
-        };
-
         info!("Submitting batch to ZonePortal on L1");
 
         let tx_hash = self
             .portal
             .submitBatch(
                 batch.tempo_block_number,
+                0u64, // recentTempoBlockNumber: 0 = direct mode (use EIP-2935 lookup)
                 block_transition,
                 deposit_transition,
-                withdrawal_transition,
+                batch.withdrawal_queue_hash,
                 Bytes::new(),
                 Bytes::new(),
             )
