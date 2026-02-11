@@ -77,29 +77,25 @@ pub struct PendingDeposits {
 impl PendingDeposits {
     /// Append a deposit to the queue and update the hash chain.
     ///
-    /// Computes: `currentHash = keccak256(abi.encode(deposit, currentHash))`
+    /// Hash: `keccak256(abi.encode(sender, to, amount, memo, prevHash))`
     pub fn enqueue(&mut self, deposit: Deposit) {
-        self.hash = deposit_queue_hash(&deposit, self.hash);
+        self.hash = keccak256(
+            (deposit.sender, deposit.to, deposit.amount, deposit.memo, self.hash).abi_encode(),
+        );
         self.pending_deposits.push(deposit);
     }
-}
 
-/// Compute the deposit queue hash for a single deposit.
-///
-/// `keccak256(abi.encode(deposit, prevHash))`
-///
-/// The deposit is ABI-encoded as the Solidity struct `Deposit{sender, to, amount, memo}`,
-/// followed by the previous hash.
-pub fn deposit_queue_hash(deposit: &Deposit, prev_hash: B256) -> B256 {
-    let encoded = (
-        deposit.sender,
-        deposit.to,
-        deposit.amount,
-        deposit.memo,
-        prev_hash,
-    )
-        .abi_encode();
-    keccak256(&encoded)
+    /// Compute a [`DepositQueueTransition`] for a batch of deposits starting from `prev_hash`.
+    pub fn transition(prev_hash: B256, deposits: &[Deposit]) -> DepositQueueTransition {
+        let mut current = prev_hash;
+        for d in deposits {
+            current = keccak256((d.sender, d.to, d.amount, d.memo, current).abi_encode());
+        }
+        DepositQueueTransition {
+            prev_processed_hash: prev_hash,
+            next_processed_hash: current,
+        }
+    }
 }
 
 /// Deposit queue transition for batch proof validation.
@@ -111,21 +107,6 @@ pub struct DepositQueueTransition {
     pub prev_processed_hash: B256,
     /// Where the zone processed up to (proof output).
     pub next_processed_hash: B256,
-}
-
-/// Process a batch of deposits starting from `processed_hash`, returning the transition.
-///
-/// Computes the hash chain for the given deposits and returns a `DepositQueueTransition`
-/// with the before/after hashes for batch proof validation.
-pub fn process_deposits(processed_hash: B256, deposits: &[Deposit]) -> DepositQueueTransition {
-    let mut current = processed_hash;
-    for deposit in deposits {
-        current = deposit_queue_hash(deposit, current);
-    }
-    DepositQueueTransition {
-        prev_processed_hash: processed_hash,
-        next_processed_hash: current,
-    }
 }
 
 /// Shared deposit queue for passing deposits between L1 subscriber and block builder.
@@ -304,8 +285,9 @@ mod tests {
         assert_ne!(hash_after_d1, B256::ZERO);
 
         // Verify hash is deterministic
-        let expected = deposit_queue_hash(&d1, B256::ZERO);
-        assert_eq!(hash_after_d1, expected);
+        let mut queue2 = PendingDeposits::default();
+        queue2.enqueue(d1);
+        assert_eq!(hash_after_d1, queue2.hash);
 
         let d2 = Deposit {
             l1_block_number: 2,
@@ -317,13 +299,9 @@ mod tests {
             queue_hash: B256::ZERO,
         };
 
-        queue.enqueue(d2.clone());
+        queue.enqueue(d2);
         let hash_after_d2 = queue.hash;
         assert_ne!(hash_after_d2, hash_after_d1);
-
-        // Verify chaining: hash(d2, hash(d1, 0))
-        let expected = deposit_queue_hash(&d2, hash_after_d1);
-        assert_eq!(hash_after_d2, expected);
     }
 
     #[test]
@@ -349,13 +327,13 @@ mod tests {
             },
         ];
 
-        let transition = process_deposits(B256::ZERO, &deposits);
+        let transition = PendingDeposits::transition(B256::ZERO, &deposits);
 
         assert_eq!(transition.prev_processed_hash, B256::ZERO);
         assert_ne!(transition.next_processed_hash, B256::ZERO);
 
         // Second batch with no deposits should be a no-op
-        let transition2 = process_deposits(transition.next_processed_hash, &[]);
+        let transition2 = PendingDeposits::transition(transition.next_processed_hash, &[]);
         assert_eq!(
             transition2.prev_processed_hash,
             transition.next_processed_hash
@@ -384,7 +362,7 @@ mod tests {
             queue.enqueue(d.clone());
         }
 
-        let transition = process_deposits(B256::ZERO, &deposits);
+        let transition = PendingDeposits::transition(B256::ZERO, &deposits);
 
         assert_eq!(queue.hash, transition.next_processed_hash);
     }

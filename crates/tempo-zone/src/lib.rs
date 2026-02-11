@@ -14,6 +14,6 @@ mod node;
 
 pub use l1::{
     Deposit, DepositQueue, DepositQueueTransition, L1SubscriberConfig, PendingDeposits,
-    deposit_queue_hash, process_deposits, spawn_l1_subscriber,
+    spawn_l1_subscriber,
 };
 pub use node::ZoneNode;
