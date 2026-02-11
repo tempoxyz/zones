@@ -29,7 +29,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_createZone_success() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: address(pathUSD),
+            initialToken: address(pathUSD),
             sequencer: admin,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -50,7 +50,7 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.zoneId, 1);
         assertEq(info.portal, portal);
         assertTrue(info.messenger != address(0));
-        assertEq(info.token, address(pathUSD));
+        assertEq(info.initialToken, address(pathUSD));
         assertEq(info.sequencer, admin);
         assertEq(info.verifier, zoneFactory.verifier());
         assertEq(info.genesisBlockHash, GENESIS_BLOCK_HASH);
@@ -59,7 +59,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_createZone_deploysMessenger() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: address(pathUSD),
+            initialToken: address(pathUSD),
             sequencer: admin,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -77,7 +77,6 @@ contract ZoneFactoryTest is BaseTest {
         // Verify messenger is deployed and configured correctly
         ZoneMessenger messenger = ZoneMessenger(messengerAddr);
         assertEq(messenger.portal(), portal);
-        assertEq(messenger.token(), address(pathUSD));
 
         // Verify portal references the messenger
         ZonePortal portalContract = ZonePortal(portal);
@@ -86,7 +85,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_createZone_multipleZones() public {
         IZoneFactory.CreateZoneParams memory params1 = IZoneFactory.CreateZoneParams({
-            token: address(pathUSD),
+            initialToken: address(pathUSD),
             sequencer: admin,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -99,7 +98,7 @@ contract ZoneFactoryTest is BaseTest {
         (uint64 zoneId1, address portal1) = zoneFactory.createZone(params1);
 
         IZoneFactory.CreateZoneParams memory params2 = IZoneFactory.CreateZoneParams({
-            token: address(pathUSD),
+            initialToken: address(pathUSD),
             sequencer: alice,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -126,7 +125,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_createZone_emitsEvent() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: address(pathUSD),
+            initialToken: address(pathUSD),
             sequencer: admin,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -171,7 +170,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_createZone_revertsOnInvalidToken_zeroAddress() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: address(0),
+            initialToken: address(0),
             sequencer: admin,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -190,7 +189,7 @@ contract ZoneFactoryTest is BaseTest {
         address notTip20 = address(new NotATIP20());
 
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: notTip20,
+            initialToken: notTip20,
             sequencer: admin,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -206,7 +205,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_createZone_revertsOnInvalidToken_eoa() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: alice, // EOA, not a contract
+            initialToken: alice, // EOA, not a contract
             sequencer: admin,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -226,7 +225,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_createZone_revertsOnInvalidSequencer_zeroAddress() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: address(pathUSD),
+            initialToken: address(pathUSD),
             sequencer: address(0),
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -246,7 +245,7 @@ contract ZoneFactoryTest is BaseTest {
 
     function test_createZone_revertsOnInvalidVerifier() public {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: address(pathUSD),
+            initialToken: address(pathUSD),
             sequencer: admin,
             verifier: address(0xdead),
             zoneParams: ZoneParams({
@@ -279,7 +278,7 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.zoneId, 0);
         assertEq(info.portal, address(0));
         assertEq(info.messenger, address(0));
-        assertEq(info.token, address(0));
+        assertEq(info.initialToken, address(0));
     }
 
 }

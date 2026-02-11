@@ -36,7 +36,11 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_singleDeposit() public pure {
         Deposit memory d = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("memo")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("memo")
         });
 
         bytes32 newHash = DepositQueueLib.enqueue(bytes32(0), d);
@@ -47,13 +51,25 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_multipleDeposits() public pure {
         Deposit memory d1 = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("d1")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("d1")
         });
         Deposit memory d2 = Deposit({
-            sender: address(0x300), to: address(0x200), amount: 200e6, memo: bytes32("d2")
+            token: address(0x1000),
+            sender: address(0x300),
+            to: address(0x200),
+            amount: 200e6,
+            memo: bytes32("d2")
         });
         Deposit memory d3 = Deposit({
-            sender: address(0x200), to: address(0x200), amount: 300e6, memo: bytes32("d3")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x200),
+            amount: 300e6,
+            memo: bytes32("d3")
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -73,10 +89,18 @@ contract DepositQueueLibTest is Test {
     function test_enqueue_hashChainStructure() public pure {
         // Verify that newer deposits wrap older ones
         Deposit memory d1 = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("first")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("first")
         });
         Deposit memory d2 = Deposit({
-            sender: address(0x300), to: address(0x200), amount: 200e6, memo: bytes32("second")
+            token: address(0x1000),
+            sender: address(0x300),
+            to: address(0x200),
+            amount: 200e6,
+            memo: bytes32("second")
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -88,8 +112,9 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_emptyToEmpty() public pure {
         // An empty deposit struct should still produce a valid hash
-        Deposit memory d =
-            Deposit({ sender: address(0), to: address(0), amount: 0, memo: bytes32(0) });
+        Deposit memory d = Deposit({
+            token: address(0x1000), sender: address(0), to: address(0), amount: 0, memo: bytes32(0)
+        });
 
         bytes32 h = DepositQueueLib.enqueue(bytes32(0), d);
         bytes32 expected = keccak256(abi.encode(DepositType.Regular, d, bytes32(0)));
@@ -99,9 +124,14 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_differentInputsProduceDifferentHashes() public pure {
         Deposit memory d1 = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("memo1")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("memo1")
         });
         Deposit memory d2 = Deposit({
+            token: address(0x1000),
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
@@ -116,7 +146,11 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueue_sameDepositDifferentPrevHashProducesDifferentResult() public pure {
         Deposit memory d = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("memo")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("memo")
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d);
@@ -131,6 +165,7 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueueEncrypted_singleDeposit() public pure {
         EncryptedDeposit memory ed = EncryptedDeposit({
+            token: address(0x1000),
             sender: address(0x200),
             amount: 100e6,
             keyIndex: 0,
@@ -150,10 +185,15 @@ contract DepositQueueLibTest is Test {
 
     function test_enqueueEncrypted_mixedQueue() public pure {
         Deposit memory d1 = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("d1")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("d1")
         });
 
         EncryptedDeposit memory ed = EncryptedDeposit({
+            token: address(0x1000),
             sender: address(0x300),
             amount: 200e6,
             keyIndex: 0,
@@ -167,7 +207,11 @@ contract DepositQueueLibTest is Test {
         });
 
         Deposit memory d2 = Deposit({
-            sender: address(0x200), to: address(0x200), amount: 300e6, memo: bytes32("d3")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x200),
+            amount: 300e6,
+            memo: bytes32("d3")
         });
 
         bytes32 h1 = DepositQueueLib.enqueue(bytes32(0), d1);
@@ -186,10 +230,15 @@ contract DepositQueueLibTest is Test {
     function test_enqueue_typeDiscriminatorPreventsCollision() public pure {
         // Same sender/amount but different type discriminators produce different hashes
         Deposit memory d = Deposit({
-            sender: address(0x200), to: address(0x300), amount: 100e6, memo: bytes32("memo")
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(0x300),
+            amount: 100e6,
+            memo: bytes32("memo")
         });
 
         EncryptedDeposit memory ed = EncryptedDeposit({
+            token: address(0x1000),
             sender: address(0x200),
             amount: 100e6,
             keyIndex: 0,

@@ -48,8 +48,8 @@ contract ZoneFactory is IZoneFactory {
         external
         returns (uint64 zoneId, address portal)
     {
-        // Validate token is a TIP-20
-        if (!TempoUtilities.isTIP20(params.token)) revert InvalidToken();
+        // Validate initial token is a TIP-20
+        if (!TempoUtilities.isTIP20(params.initialToken)) revert InvalidToken();
         if (params.sequencer == address(0)) revert InvalidSequencer();
         if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
 
@@ -71,14 +71,15 @@ contract ZoneFactory is IZoneFactory {
         // Compute portal's address (will be deployed at nonce+1)
         address predictedPortal = _computeCreateAddress(address(this), currentNonce + 1);
 
-        // Deploy messenger with predicted portal address
-        ZoneMessenger messengerContract = new ZoneMessenger(predictedPortal, params.token);
+        // Deploy messenger with predicted portal address (no token needed -- portal grants approval per-token)
+        ZoneMessenger messengerContract = new ZoneMessenger(predictedPortal);
         address messengerAddress = address(messengerContract);
 
-        // Deploy portal with messenger address
+        // Deploy portal with messenger address and initial token
+        // The portal constructor enables the initial token automatically
         ZonePortal portalContract = new ZonePortal(
             zoneId,
-            params.token,
+            params.initialToken,
             messengerAddress,
             params.sequencer,
             params.verifier,
@@ -95,7 +96,7 @@ contract ZoneFactory is IZoneFactory {
             zoneId: zoneId,
             portal: portal,
             messenger: messengerAddress,
-            token: params.token,
+            initialToken: params.initialToken,
             sequencer: params.sequencer,
             verifier: params.verifier,
             genesisBlockHash: params.zoneParams.genesisBlockHash,
@@ -110,7 +111,7 @@ contract ZoneFactory is IZoneFactory {
             zoneId,
             portal,
             messengerAddress,
-            params.token,
+            params.initialToken,
             params.sequencer,
             params.verifier,
             params.zoneParams.genesisBlockHash,

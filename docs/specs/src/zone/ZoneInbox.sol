@@ -40,9 +40,6 @@ contract ZoneInbox is IZoneInbox {
     /// @notice The TempoState predeploy address (stored as concrete type for internal use)
     TempoState internal immutable _tempoState;
 
-    /// @notice The zone token (TIP-20 at same address as Tempo)
-    IZoneToken public immutable zoneToken;
-
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
 
@@ -54,16 +51,10 @@ contract ZoneInbox is IZoneInbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(
-        address _config,
-        address _tempoPortalAddr,
-        address _tempoStateAddr,
-        address _zoneToken
-    ) {
+    constructor(address _config, address _tempoPortalAddr, address _tempoStateAddr) {
         config = IZoneConfig(_config);
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
-        zoneToken = IZoneToken(_zoneToken);
     }
 
     /// @notice The TempoState predeploy address
@@ -228,10 +219,10 @@ contract ZoneInbox is IZoneInbox {
                 // Advance the hash chain with type discriminator
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
-                // Mint zone tokens to the recipient
-                zoneToken.mint(d.to, d.amount);
+                // Mint the correct zone-side TIP-20 token to the recipient
+                IZoneToken(d.token).mint(d.to, d.amount);
 
-                emit DepositProcessed(currentHash, d.sender, d.to, d.amount, d.memo);
+                emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
             } else {
                 // Decode encrypted deposit
                 EncryptedDeposit memory ed = abi.decode(qd.depositData, (EncryptedDeposit));
@@ -295,13 +286,13 @@ contract ZoneInbox is IZoneInbox {
                 if (!valid) {
                     // Decryption failed (user encrypted garbage or corrupted data)
                     // Return funds to sender instead of blocking chain progress
-                    zoneToken.mint(ed.sender, ed.amount);
-                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.amount);
+                    IZoneToken(ed.token).mint(ed.sender, ed.amount);
+                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                 } else {
-                    // Decryption succeeded - mint to the decrypted recipient
-                    zoneToken.mint(dec.to, ed.amount);
+                    // Decryption succeeded - mint the correct zone-side TIP-20 to the decrypted recipient
+                    IZoneToken(ed.token).mint(dec.to, ed.amount);
                     emit EncryptedDepositProcessed(
-                        currentHash, ed.sender, dec.to, ed.amount, dec.memo
+                        currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
                     );
                 }
             }

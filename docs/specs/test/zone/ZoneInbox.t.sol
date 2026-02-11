@@ -46,11 +46,11 @@ contract ZoneInboxTest is Test {
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
         tempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
-        config = new ZoneConfig(address(zoneToken), mockPortal, address(tempoState));
+        config = new ZoneConfig(mockPortal, address(tempoState));
         tempoState.setMockStorageValue(
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
-        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState), address(zoneToken));
+        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
 
         zoneToken.setMinter(address(inbox), true);
     }
@@ -93,7 +93,13 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_singleDeposit() public {
         Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = Deposit({ sender: alice, to: bob, amount: 1000e6, memo: bytes32("payment") });
+        deposits[0] = Deposit({
+            token: address(zoneToken),
+            sender: alice,
+            to: bob,
+            amount: 1000e6,
+            memo: bytes32("payment")
+        });
 
         // Calculate expected hash
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
@@ -111,9 +117,15 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_multipleDeposits() public {
         Deposit[] memory deposits = new Deposit[](3);
-        deposits[0] = Deposit({ sender: alice, to: alice, amount: 100e6, memo: bytes32("d1") });
-        deposits[1] = Deposit({ sender: bob, to: bob, amount: 200e6, memo: bytes32("d2") });
-        deposits[2] = Deposit({ sender: alice, to: bob, amount: 300e6, memo: bytes32("d3") });
+        deposits[0] = Deposit({
+            token: address(zoneToken), sender: alice, to: alice, amount: 100e6, memo: bytes32("d1")
+        });
+        deposits[1] = Deposit({
+            token: address(zoneToken), sender: bob, to: bob, amount: 200e6, memo: bytes32("d2")
+        });
+        deposits[2] = Deposit({
+            token: address(zoneToken), sender: alice, to: bob, amount: 300e6, memo: bytes32("d3")
+        });
 
         // Calculate expected hash chain
         bytes32 h0 = bytes32(0);
@@ -138,7 +150,13 @@ contract ZoneInboxTest is Test {
     function test_advanceTempo_allowsHashMismatch() public {
         // Hash mismatch is now allowed on-chain — the proof validates ancestor contiguity
         Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = Deposit({ sender: alice, to: bob, amount: 1000e6, memo: bytes32("payment") });
+        deposits[0] = Deposit({
+            token: address(zoneToken),
+            sender: alice,
+            to: bob,
+            amount: 1000e6,
+            memo: bytes32("payment")
+        });
 
         // Set a different hash (simulating more deposits pending on Tempo)
         tempoState.setMockStorageValue(
@@ -158,8 +176,12 @@ contract ZoneInboxTest is Test {
     function test_advanceTempo_partialProcessingAllowed() public {
         // Partial processing is now allowed — the proof validates ancestor contiguity
         Deposit[] memory allDeposits = new Deposit[](2);
-        allDeposits[0] = Deposit({ sender: alice, to: alice, amount: 100e6, memo: bytes32("d1") });
-        allDeposits[1] = Deposit({ sender: bob, to: bob, amount: 200e6, memo: bytes32("d2") });
+        allDeposits[0] = Deposit({
+            token: address(zoneToken), sender: alice, to: alice, amount: 100e6, memo: bytes32("d1")
+        });
+        allDeposits[1] = Deposit({
+            token: address(zoneToken), sender: bob, to: bob, amount: 200e6, memo: bytes32("d2")
+        });
 
         // Set hash to be for both deposits
         bytes32 h0 = bytes32(0);
@@ -247,8 +269,12 @@ contract ZoneInboxTest is Test {
         inbox.setMaxDepositsPerTempoBlock(1);
 
         Deposit[] memory deposits = new Deposit[](2);
-        deposits[0] = Deposit({ sender: alice, to: alice, amount: 100e6, memo: bytes32("d1") });
-        deposits[1] = Deposit({ sender: bob, to: bob, amount: 200e6, memo: bytes32("d2") });
+        deposits[0] = Deposit({
+            token: address(zoneToken), sender: alice, to: alice, amount: 100e6, memo: bytes32("d1")
+        });
+        deposits[1] = Deposit({
+            token: address(zoneToken), sender: bob, to: bob, amount: 200e6, memo: bytes32("d2")
+        });
 
         bytes32 h0 = bytes32(0);
         bytes32 h1 = keccak256(abi.encode(DepositType.Regular, deposits[0], h0));
@@ -274,9 +300,15 @@ contract ZoneInboxTest is Test {
         assertEq(inbox.maxDepositsPerTempoBlock(), 0);
 
         Deposit[] memory deposits = new Deposit[](3);
-        deposits[0] = Deposit({ sender: alice, to: alice, amount: 100e6, memo: bytes32("d1") });
-        deposits[1] = Deposit({ sender: bob, to: bob, amount: 200e6, memo: bytes32("d2") });
-        deposits[2] = Deposit({ sender: alice, to: bob, amount: 300e6, memo: bytes32("d3") });
+        deposits[0] = Deposit({
+            token: address(zoneToken), sender: alice, to: alice, amount: 100e6, memo: bytes32("d1")
+        });
+        deposits[1] = Deposit({
+            token: address(zoneToken), sender: bob, to: bob, amount: 200e6, memo: bytes32("d2")
+        });
+        deposits[2] = Deposit({
+            token: address(zoneToken), sender: alice, to: bob, amount: 300e6, memo: bytes32("d3")
+        });
 
         bytes32 h0 = bytes32(0);
         bytes32 h1 = keccak256(abi.encode(DepositType.Regular, deposits[0], h0));
@@ -298,8 +330,12 @@ contract ZoneInboxTest is Test {
     function test_advanceTempo_incrementalProcessing() public {
         // First batch of deposits
         Deposit[] memory batch1 = new Deposit[](2);
-        batch1[0] = Deposit({ sender: alice, to: alice, amount: 100e6, memo: bytes32("d1") });
-        batch1[1] = Deposit({ sender: bob, to: bob, amount: 200e6, memo: bytes32("d2") });
+        batch1[0] = Deposit({
+            token: address(zoneToken), sender: alice, to: alice, amount: 100e6, memo: bytes32("d1")
+        });
+        batch1[1] = Deposit({
+            token: address(zoneToken), sender: bob, to: bob, amount: 200e6, memo: bytes32("d2")
+        });
 
         bytes32 h0 = bytes32(0);
         bytes32 h1 = keccak256(abi.encode(DepositType.Regular, batch1[0], h0));
@@ -314,7 +350,9 @@ contract ZoneInboxTest is Test {
 
         // Second batch of deposits
         Deposit[] memory batch2 = new Deposit[](1);
-        batch2[0] = Deposit({ sender: alice, to: bob, amount: 500e6, memo: bytes32("d3") });
+        batch2[0] = Deposit({
+            token: address(zoneToken), sender: alice, to: bob, amount: 500e6, memo: bytes32("d3")
+        });
 
         bytes32 h3 = keccak256(abi.encode(DepositType.Regular, batch2[0], h2));
 
@@ -334,7 +372,13 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_emitsTempoAdvancedEvent() public {
         Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = Deposit({ sender: alice, to: bob, amount: 1000e6, memo: bytes32("payment") });
+        deposits[0] = Deposit({
+            token: address(zoneToken),
+            sender: alice,
+            to: bob,
+            amount: 1000e6,
+            memo: bytes32("payment")
+        });
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
@@ -356,7 +400,13 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_emitsDepositProcessedEvent() public {
         Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = Deposit({ sender: alice, to: bob, amount: 1000e6, memo: bytes32("payment") });
+        deposits[0] = Deposit({
+            token: address(zoneToken),
+            sender: alice,
+            to: bob,
+            amount: 1000e6,
+            memo: bytes32("payment")
+        });
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
@@ -366,7 +416,9 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectEmit(true, true, true, true);
-        emit IZoneInbox.DepositProcessed(expectedHash, alice, bob, 1000e6, bytes32("payment"));
+        emit IZoneInbox.DepositProcessed(
+            expectedHash, alice, bob, address(zoneToken), 1000e6, bytes32("payment")
+        );
         _advanceTempo(deposits);
     }
 
@@ -376,7 +428,9 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_zeroAmountDeposit() public {
         Deposit[] memory deposits = new Deposit[](1);
-        deposits[0] = Deposit({ sender: alice, to: bob, amount: 0, memo: bytes32("empty") });
+        deposits[0] = Deposit({
+            token: address(zoneToken), sender: alice, to: bob, amount: 0, memo: bytes32("empty")
+        });
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
@@ -399,7 +453,6 @@ contract ZoneInboxTest is Test {
         assertEq(address(inbox.config()), address(config));
         assertEq(inbox.tempoPortal(), mockPortal);
         assertEq(address(inbox.tempoState()), address(tempoState));
-        assertEq(address(inbox.zoneToken()), address(zoneToken));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -412,8 +465,13 @@ contract ZoneInboxTest is Test {
 
         bytes32 currentHash = bytes32(0);
         for (uint256 i = 0; i < numDeposits; i++) {
-            deposits[i] =
-                Deposit({ sender: alice, to: bob, amount: uint128(i + 1) * 1e6, memo: bytes32(i) });
+            deposits[i] = Deposit({
+                token: address(zoneToken),
+                sender: alice,
+                to: bob,
+                amount: uint128(i + 1) * 1e6,
+                memo: bytes32(i)
+            });
             currentHash = keccak256(abi.encode(DepositType.Regular, deposits[i], currentHash));
         }
 
@@ -451,10 +509,11 @@ contract ZoneInboxTest is Test {
         uint256 keyIndex
     )
         internal
-        pure
+        view
         returns (QueuedDeposit memory qd, EncryptedDeposit memory ed)
     {
         ed = EncryptedDeposit({
+            token: address(zoneToken),
             sender: sender,
             amount: amount,
             keyIndex: keyIndex,
@@ -598,7 +657,9 @@ contract ZoneInboxTest is Test {
         _setupPrecompileMocks(recipient, encMemo);
 
         // Build regular deposit
-        Deposit memory d = Deposit({ sender: alice, to: bob, amount: 100e6, memo: bytes32("d1") });
+        Deposit memory d = Deposit({
+            token: address(zoneToken), sender: alice, to: bob, amount: 100e6, memo: bytes32("d1")
+        });
         QueuedDeposit memory qdRegular =
             QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d) });
 
@@ -659,7 +720,9 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_extraDecryptionData() public {
         // Build a regular deposit only (no encrypted deposits)
-        Deposit memory d = Deposit({ sender: alice, to: bob, amount: 100e6, memo: bytes32("d1") });
+        Deposit memory d = Deposit({
+            token: address(zoneToken), sender: alice, to: bob, amount: 100e6, memo: bytes32("d1")
+        });
         QueuedDeposit memory qd =
             QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d) });
 

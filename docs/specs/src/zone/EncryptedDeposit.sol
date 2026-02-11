@@ -43,6 +43,7 @@ uint256 constant MIN_CIPHERTEXT_SIZE = 64;
 /// @notice Decrypted deposit (after sequencer decryption)
 /// @dev This is what the sequencer works with internally on the zone
 struct DecryptedDeposit {
+    address token;
     address sender;
     address to;
     uint128 amount;
