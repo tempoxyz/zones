@@ -91,31 +91,13 @@ impl L1Subscriber {
         filter: &Filter,
     ) -> eyre::Result<()> {
         let tip = l1_provider.get_block_number().await?;
-        let portal = self.config.portal_address;
-
-        let last_synced: u64 = l1_provider
-            .call(
-                alloy_rpc_types_eth::TransactionRequest::default()
-                    .to(portal)
-                    .input(lastSyncedTempoBlockNumberCall {}.abi_encode().into()),
-            )
-            .await
-            .map(|r| lastSyncedTempoBlockNumberCall::abi_decode_returns(&r))?
-            .map_err(|e| eyre::eyre!("failed to decode lastSyncedTempoBlockNumber: {e}"))?;
+        let last_synced = self.call_portal(l1_provider, lastSyncedTempoBlockNumberCall {}).await?;
 
         let from = if last_synced > 0 {
             last_synced + 1
         } else {
-            let genesis: u64 = l1_provider
-                .call(
-                    alloy_rpc_types_eth::TransactionRequest::default()
-                        .to(portal)
-                        .input(genesisTempoBlockNumberCall {}.abi_encode().into()),
-                )
-                .await
-                .map(|r| genesisTempoBlockNumberCall::abi_decode_returns(&r))?
-                .map_err(|e| eyre::eyre!("failed to decode genesisTempoBlockNumber: {e}"))?;
-            info!(genesis, "Fresh portal: backfilling from genesis block");
+            let genesis = self.call_portal(l1_provider, genesisTempoBlockNumberCall {}).await?;
+            info!(genesis, "Fresh portal, backfilling from genesis");
             genesis
         };
 
@@ -124,56 +106,55 @@ impl L1Subscriber {
             return Ok(());
         }
 
-        info!(
-            from_block = from,
-            to_block = tip,
-            blocks = tip - from + 1,
-            "Backfilling L1 blocks"
-        );
+        info!(from, tip, blocks = tip - from + 1, "Backfilling deposit events");
+        self.backfill(l1_provider, filter, from, tip).await
+    }
 
+    /// Backfill deposit events from `from..=to` in batches.
+    async fn backfill(
+        &self,
+        l1_provider: &impl Provider,
+        filter: &Filter,
+        from: u64,
+        to: u64,
+    ) -> eyre::Result<()> {
         let mut cursor = from;
-        while cursor <= tip {
-            let batch_end = (cursor + BACKFILL_BATCH_SIZE - 1).min(tip);
+        while cursor <= to {
+            let end = (cursor + BACKFILL_BATCH_SIZE - 1).min(to);
             let logs = l1_provider
-                .get_logs(&filter.clone().select(cursor..=batch_end))
+                .get_logs(&filter.clone().select(cursor..=end))
                 .await?;
 
-            // Group logs by block number so we can enqueue per-block
-            let mut blocks: std::collections::BTreeMap<u64, Vec<Deposit>> =
+            let mut by_block: std::collections::BTreeMap<u64, Vec<Deposit>> =
                 std::collections::BTreeMap::new();
             for log in logs {
-                let block_number = log
-                    .block_number
-                    .ok_or_else(|| eyre::eyre!("log missing block number"))?;
-                let deposit = self.parse_deposit(log, block_number)?;
-                blocks.entry(block_number).or_default().push(deposit);
+                let n = log.block_number.ok_or_else(|| eyre::eyre!("log missing block number"))?;
+                by_block.entry(n).or_default().push(self.parse_deposit(log, n)?);
             }
 
-            // Enqueue each block's deposits
-            for (block_number, deposits) in &blocks {
-                info!(
-                    block = block_number,
-                    count = deposits.len(),
-                    "Backfill: deposits from L1 block"
-                );
-
-                let header = Header {
-                    number: *block_number,
-                    ..Default::default()
-                };
-
-                self.deposit_queue
-                    .lock()
-                    .map_err(|_| eyre::eyre!("Deposit queue lock poisoned"))?
-                    .enqueue(header, deposits.clone());
+            let mut queue = self.deposit_queue.lock().map_err(|_| eyre::eyre!("deposit queue poisoned"))?;
+            for (block_number, deposits) in by_block {
+                debug!(block = block_number, count = deposits.len(), "Backfill deposits");
+                queue.enqueue(Header { number: block_number, ..Default::default() }, deposits);
             }
 
-            debug!(from = cursor, to = batch_end, "Backfill batch complete");
-            cursor = batch_end + 1;
+            cursor = end + 1;
         }
 
-        info!(tip, "Backfill complete, caught up to L1 tip");
+        info!(to, "Backfill complete");
         Ok(())
+    }
+
+    /// Call a view function on the ZonePortal contract.
+    async fn call_portal<C: SolCall>(&self, provider: &impl Provider, call: C) -> eyre::Result<C::Return> {
+        let result = provider
+            .call(
+                alloy_rpc_types_eth::TransactionRequest::default()
+                    .to(self.config.portal_address)
+                    .input(call.abi_encode().into()),
+            )
+            .await?;
+        C::abi_decode_returns(&result).map_err(|e| eyre::eyre!("failed to decode {}: {e}", std::any::type_name::<C>()))
     }
 
     /// Start the L1 subscriber.
