@@ -65,6 +65,7 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
+    sequencer: Option<alloy_primitives::Address>,
 }
 
 impl ZoneNode {
@@ -80,6 +81,7 @@ impl ZoneNode {
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_listener_config: L1StateListenerConfig,
         l1_state_cache: SharedL1StateCache,
+        sequencer: Option<alloy_primitives::Address>,
     ) -> Self {
         Self {
             deposit_queue,
@@ -87,6 +89,7 @@ impl ZoneNode {
             l1_state_provider_config,
             l1_state_listener_config,
             l1_state_cache,
+            sequencer,
         }
     }
 
@@ -94,6 +97,7 @@ impl ZoneNode {
     pub fn components<N>(
         deposit_queue: crate::DepositQueue,
         executor_builder: ZoneExecutorBuilder,
+        sequencer: Option<alloy_primitives::Address>,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -111,6 +115,7 @@ impl ZoneNode {
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
                 deposit_queue,
+                sequencer,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -237,7 +242,7 @@ where
             self.l1_state_listener_config.clone(),
             self.l1_state_cache.clone(),
         );
-        Self::components(self.deposit_queue.clone(), executor_builder)
+        Self::components(self.deposit_queue.clone(), executor_builder, self.sequencer)
     }
 
     fn add_ons(&self) -> Self::AddOns {

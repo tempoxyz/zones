@@ -34,7 +34,10 @@ use tracing::{debug, error, info, warn};
 
 use crate::evm::ZoneEvmConfig;
 use tempo_payload_types::TempoPayloadBuilderAttributes;
-use tempo_primitives::{TempoHeader, TempoPrimitives};
+use tempo_primitives::{
+    TempoHeader, TempoPrimitives,
+    transaction::envelope::TEMPO_SYSTEM_TX_SENDER,
+};
 use tempo_transaction_pool::TempoTransactionPool;
 
 use super::node::ZoneNode;
@@ -46,11 +49,12 @@ use crate::l1::Deposit;
 #[non_exhaustive]
 pub struct ZonePayloadFactory {
     deposit_queue: crate::DepositQueue,
+    sequencer: Option<Address>,
 }
 
 impl ZonePayloadFactory {
-    pub fn new(deposit_queue: crate::DepositQueue) -> Self {
-        Self { deposit_queue }
+    pub fn new(deposit_queue: crate::DepositQueue, sequencer: Option<Address>) -> Self {
+        Self { deposit_queue, sequencer }
     }
 }
 
@@ -72,6 +76,7 @@ where
             provider: ctx.provider().clone(),
             evm_config,
             deposit_queue: self.deposit_queue,
+            sequencer: self.sequencer,
         })
     }
 }
@@ -82,6 +87,7 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
+    sequencer: Option<Address>,
 }
 
 impl<Provider> ZonePayloadBuilder<Provider> {
@@ -90,12 +96,14 @@ impl<Provider> ZonePayloadBuilder<Provider> {
         provider: Provider,
         evm_config: ZoneEvmConfig,
         deposit_queue: crate::DepositQueue,
+        sequencer: Option<Address>,
     ) -> Self {
         Self {
             pool,
             provider,
             evm_config,
             deposit_queue,
+            sequencer,
         }
     }
 }
@@ -208,8 +216,11 @@ where
         // Execute advanceTempo system transactions — one per L1 block.
         // Each call advances the zone's view of Tempo state and processes deposits atomically.
         for l1_block in &pending_l1_blocks {
-            let advance_tx =
-                crate::system_tx::build_advance_tempo_tx(&l1_block.header, &l1_block.deposits);
+            let advance_tx = crate::system_tx::build_advance_tempo_tx(
+                &l1_block.header,
+                &l1_block.deposits,
+                self.sequencer.unwrap_or(TEMPO_SYSTEM_TX_SENDER),
+            );
             if let Err(err) = builder.execute_transaction(advance_tx) {
                 error!(
                     ?err,

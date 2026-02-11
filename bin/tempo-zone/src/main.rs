@@ -100,6 +100,14 @@ fn main() {
         .run_with_components::<ZoneNode>(components, async move |builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
+            // Parse the sequencer key early so we can derive the address for block building.
+            // The signer is kept for later use when spawning sequencer background tasks.
+            let sequencer_signer: Option<alloy_signer_local::PrivateKeySigner> =
+                args.sequencer_key.as_ref().map(|key_hex| {
+                    key_hex.parse().expect("invalid sequencer private key")
+                });
+            let sequencer_addr = sequencer_signer.as_ref().map(|s| s.address());
+
             let deposits = DepositQueue::default();
             let l1_config = L1SubscriberConfig {
                 l1_rpc_url: args.l1_rpc_url.clone(),
@@ -120,6 +128,7 @@ fn main() {
                 l1_state_provider_config,
                 l1_state_listener_config,
                 l1_state_cache,
+                sequencer_addr,
             );
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
@@ -127,10 +136,7 @@ fn main() {
             info!(target: "reth::cli", "Tempo Zone node started");
 
             // Spawn sequencer background tasks if a sequencer key is provided.
-            if let Some(key_hex) = args.sequencer_key {
-                let signer: alloy_signer_local::PrivateKeySigner = key_hex
-                    .parse()
-                    .expect("invalid sequencer private key");
+            if let Some(signer) = sequencer_signer {
                 let sequencer_addr = signer.address();
 
                 info!(
