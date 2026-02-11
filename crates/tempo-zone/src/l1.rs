@@ -95,19 +95,100 @@ where
             .map(|cp| cp.block_number))
     }
 
-    /// Persist the last synced L1 block number to the database.
-    fn save_l1_checkpoint(&self, block_number: u64) -> eyre::Result<()> {
+    /// Persist the last synced L1 block height to the database.
+    fn write_l1_block_height(&self, block_number: u64) -> eyre::Result<()> {
         let provider_rw = self.db_provider_factory.database_provider_rw()?;
         provider_rw.save_stage_checkpoint(L1_SYNC_STAGE_ID, StageCheckpoint::new(block_number))?;
         provider_rw.commit()?;
         Ok(())
     }
 
+    /// Sync to the current L1 tip.
+    ///
+    /// Reads the last synced L1 block from the database and fetches any missed
+    /// blocks up to the current tip. On first boot (no checkpoint), discovers the
+    /// portal's deploy block via `eth_getCode` binary search and backfills from
+    /// there so no deposits are missed.
+    async fn sync_to_l1_tip(
+        &self,
+        l1_provider: &impl Provider,
+        filter: &Filter,
+    ) -> eyre::Result<()> {
+        let tip = l1_provider.get_block_number().await?;
+
+        let from = match self.last_synced_l1_block()? {
+            Some(last_synced) => last_synced + 1,
+            None => {
+                let deploy_block = self.find_portal_deploy_block(l1_provider, tip).await?;
+                info!(
+                    deploy_block,
+                    "First boot: backfilling from ZonePortal deploy block"
+                );
+                deploy_block
+            }
+        };
+
+        if from > tip {
+            info!(from, tip, "Already synced to L1 tip");
+            return Ok(());
+        }
+
+        info!(
+            from_block = from,
+            to_block = tip,
+            blocks = tip - from + 1,
+            "Backfilling L1 blocks"
+        );
+
+        let mut cursor = from;
+        while cursor <= tip {
+            let batch_end = (cursor + BACKFILL_BATCH_SIZE - 1).min(tip);
+            let logs = l1_provider
+                .get_logs(&filter.clone().select(cursor..=batch_end))
+                .await?;
+
+            // Group logs by block number so we can enqueue per-block
+            let mut blocks: std::collections::BTreeMap<u64, Vec<Deposit>> =
+                std::collections::BTreeMap::new();
+            for log in logs {
+                let block_number = log
+                    .block_number
+                    .ok_or_else(|| eyre::eyre!("log missing block number"))?;
+                let deposit = self.parse_deposit(log, block_number)?;
+                blocks.entry(block_number).or_default().push(deposit);
+            }
+
+            // Enqueue each block's deposits
+            for (block_number, deposits) in &blocks {
+                info!(
+                    block = block_number,
+                    count = deposits.len(),
+                    "Backfill: deposits from L1 block"
+                );
+
+                let header = Header {
+                    number: *block_number,
+                    ..Default::default()
+                };
+
+                self.deposit_queue
+                    .lock()
+                    .map_err(|_| eyre::eyre!("Deposit queue lock poisoned"))?
+                    .enqueue(header, deposits.clone());
+            }
+
+            self.write_l1_block_height(batch_end)?;
+            debug!(from = cursor, to = batch_end, "Backfill batch complete");
+            cursor = batch_end + 1;
+        }
+
+        info!(tip, "Backfill complete, caught up to L1 tip");
+        Ok(())
+    }
+
     /// Start the L1 subscriber.
     ///
-    /// On startup, reads the last synced L1 block from the database and backfills
-    /// any missed blocks before subscribing to new ones. Each processed block's
-    /// number is persisted so restarts resume from the correct point.
+    /// Syncs to the current L1 tip on startup, then subscribes to new blocks.
     pub async fn start(self) -> eyre::Result<()> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
@@ -123,84 +204,11 @@ where
 
         info!("Connected to L1 node");
 
-        // Init filter once — same for every block
         let filter = Filter::new()
             .address(self.config.portal_address)
             .event_signature(DepositMade::SIGNATURE_HASH);
 
-        // ── Backfill: catch up on any L1 blocks missed while offline ──
-        let tip = provider.get_block_number().await?;
-
-        // Determine where to start syncing from:
-        // - If we have a checkpoint, resume from the next block after it.
-        // - On first boot (no checkpoint), discover the portal's deploy block
-        //   on L1 and backfill from there so no deposits are missed.
-        let from = match self.last_synced_l1_block()? {
-            Some(last_synced) => last_synced + 1,
-            None => {
-                let deploy_block = self.find_portal_deploy_block(&provider, tip).await?;
-                info!(
-                    deploy_block,
-                    "First boot: backfilling from ZonePortal deploy block"
-                );
-                deploy_block
-            }
-        };
-
-        if from <= tip {
-            info!(
-                from_block = from,
-                to_block = tip,
-                blocks = tip - from + 1,
-                "Backfilling L1 blocks"
-            );
-
-            let mut cursor = from;
-            while cursor <= tip {
-                let batch_end = (cursor + BACKFILL_BATCH_SIZE - 1).min(tip);
-                let logs = provider
-                    .get_logs(&filter.clone().select(cursor..=batch_end))
-                    .await?;
-
-                // Group logs by block number so we can enqueue per-block
-                let mut blocks: std::collections::BTreeMap<u64, Vec<Deposit>> =
-                    std::collections::BTreeMap::new();
-                for log in logs {
-                    let block_number = log
-                        .block_number
-                        .ok_or_else(|| eyre::eyre!("log missing block number"))?;
-                    let deposit = self.parse_deposit(log, block_number)?;
-                    blocks.entry(block_number).or_default().push(deposit);
-                }
-
-                // Enqueue each block's deposits
-                for (block_number, deposits) in &blocks {
-                    info!(
-                        block = block_number,
-                        count = deposits.len(),
-                        "Backfill: deposits from L1 block"
-                    );
-
-                    let header = Header {
-                        number: *block_number,
-                        ..Default::default()
-                    };
-
-                    self.deposit_queue
-                        .lock()
-                        .map_err(|_| eyre::eyre!("Deposit queue lock poisoned"))?
-                        .enqueue(header, deposits.clone());
-                }
-
-                self.save_l1_checkpoint(batch_end)?;
-                debug!(from = cursor, to = batch_end, "Backfill batch complete");
-                cursor = batch_end + 1;
-            }
-
-            info!(tip, "Backfill complete, caught up to L1 tip");
-        } else {
-            info!(from, tip, "Already synced to L1 tip");
-        }
+        self.sync_to_l1_tip(&provider, &filter).await?;
 
         // ── Live subscription: process new blocks as they arrive ──
         let sub = provider.subscribe_blocks().await?;
@@ -235,7 +243,7 @@ where
             }
 
             // Persist progress even for empty blocks so we never re-scan them.
-            self.save_l1_checkpoint(block_number)?;
+            self.write_l1_block_height(block_number)?;
 
             if deposits.is_empty() {
                 debug!(block = block_number, "No deposits in L1 block");
