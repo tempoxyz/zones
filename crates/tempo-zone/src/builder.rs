@@ -5,7 +5,7 @@
 
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_primitives::{Address, U256};
-use alloy_sol_types::{SolCall, sol};
+use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -36,11 +36,8 @@ use tempo_primitives::{
 };
 use tempo_transaction_pool::TempoTransactionPool;
 
+use crate::bindings::mintCall;
 use crate::l1::Deposit;
-
-sol! {
-    function mint(address to, uint256 amount);
-}
 
 /// Simple zone payload builder that executes deposit mint txs + pool txs.
 ///

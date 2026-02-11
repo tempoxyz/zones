@@ -7,33 +7,13 @@ use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
-use alloy_sol_types::{SolCall, SolEvent, SolValue, sol};
+use alloy_sol_types::{SolEvent, SolValue};
 use alloy_transport::Authorization;
 use futures::StreamExt;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
-sol! {
-    // TODO: Rename to DepositEnqueued once the Solidity contract is updated.
-    /// Event emitted by the ZonePortal when a deposit is made.
-    #[derive(Debug)]
-    event DepositMade(
-        bytes32 indexed newCurrentDepositQueueHash,
-        address indexed sender,
-        address to,
-        uint128 netAmount,
-        uint128 fee,
-        bytes32 memo
-    );
-
-    /// Read the last synced Tempo block number from the ZonePortal.
-    #[derive(Debug)]
-    function lastSyncedTempoBlockNumber() external view returns (uint64);
-
-    /// Read the genesis Tempo block number from the ZonePortal.
-    #[derive(Debug)]
-    function genesisTempoBlockNumber() external view returns (uint64);
-}
+use crate::bindings::ZonePortal::{self, DepositMade};
 
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
@@ -91,12 +71,13 @@ impl L1Subscriber {
         filter: &Filter,
     ) -> eyre::Result<()> {
         let tip = l1_provider.get_block_number().await?;
-        let last_synced = self.call_portal(l1_provider, lastSyncedTempoBlockNumberCall {}).await?;
+        let portal = ZonePortal::new(self.config.portal_address, l1_provider);
+        let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
 
         let from = if last_synced > 0 {
             last_synced + 1
         } else {
-            let genesis = self.call_portal(l1_provider, genesisTempoBlockNumberCall {}).await?;
+            let genesis = portal.genesisTempoBlockNumber().call().await?;
             info!(genesis, "Fresh portal, backfilling from genesis");
             genesis
         };
@@ -143,18 +124,6 @@ impl L1Subscriber {
 
         info!(to, "Backfill complete");
         Ok(())
-    }
-
-    /// Call a view function on the ZonePortal contract.
-    async fn call_portal<C: SolCall>(&self, provider: &impl Provider, call: C) -> eyre::Result<C::Return> {
-        let result = provider
-            .call(
-                alloy_rpc_types_eth::TransactionRequest::default()
-                    .to(self.config.portal_address)
-                    .input(call.abi_encode().into()),
-            )
-            .await?;
-        C::abi_decode_returns(&result).map_err(|e| eyre::eyre!("failed to decode {}: {e}", std::any::type_name::<C>()))
     }
 
     /// Start the L1 subscriber.

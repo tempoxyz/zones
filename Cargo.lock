@@ -14163,6 +14163,7 @@ name = "zone"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy-consensus",
+ "alloy-contract",
  "alloy-primitives",
  "alloy-provider",
  "alloy-rlp",

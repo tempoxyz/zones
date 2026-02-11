@@ -8,6 +8,7 @@
 
 use eyre as _;
 
+pub mod bindings;
 mod builder;
 pub mod l1;
 mod node;
