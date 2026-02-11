@@ -133,35 +133,32 @@ where
 
         let start = Instant::now();
 
-        let pending_l1_blocks = self
+        // Take at most one L1 block per zone block — advanceTempo advances Tempo state
+        // by exactly one block, maintaining sequential chain continuity.
+        let next_l1_block = self
             .deposit_queue
             .lock()
             .expect("deposit queue poisoned")
-            .drain();
+            .pop_next();
 
-        let total_deposits: usize = pending_l1_blocks
-            .iter()
-            .map(|block| block.deposits.len())
-            .sum();
+        let total_deposits = next_l1_block.as_ref().map_or(0, |b| b.deposits.len());
 
-        if !pending_l1_blocks.is_empty() {
+        if let Some(ref l1_block) = next_l1_block {
             info!(
                 target: "zone::payload",
-                l1_blocks = pending_l1_blocks.len(),
+                l1_block = l1_block.header.inner.number,
                 deposits = total_deposits,
-                "Including advanceTempo system txs from L1 blocks"
+                "Including advanceTempo system tx"
             );
-            for block in &pending_l1_blocks {
-                for deposit in &block.deposits {
-                    debug!(
-                        target: "zone::payload",
-                        sender = %deposit.sender,
-                        to = %deposit.to,
-                        amount = %deposit.amount,
-                        l1_block = block.header.inner.number,
-                        "Deposit -> advanceTempo"
-                    );
-                }
+            for deposit in &l1_block.deposits {
+                debug!(
+                    target: "zone::payload",
+                    sender = %deposit.sender,
+                    to = %deposit.to,
+                    amount = %deposit.amount,
+                    l1_block = l1_block.header.inner.number,
+                    "Deposit -> advanceTempo"
+                );
             }
         }
 
@@ -213,9 +210,8 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
-        // Execute advanceTempo system transactions — one per L1 block.
-        // Each call advances the zone's view of Tempo state and processes deposits atomically.
-        for l1_block in &pending_l1_blocks {
+        // Execute advanceTempo system transaction for this zone block's L1 block (if any).
+        if let Some(ref l1_block) = next_l1_block {
             let advance_tx = crate::system_tx::build_advance_tempo_tx(
                 &l1_block.header,
                 &l1_block.deposits,

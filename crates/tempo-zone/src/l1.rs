@@ -281,6 +281,18 @@ impl PendingDeposits {
         self.pending.push(L1BlockDeposits { header, deposits });
     }
 
+    /// Take the next pending L1 block (oldest first).
+    ///
+    /// Returns `None` if no L1 blocks are queued. The zone builder calls this once per zone
+    /// block to advance Tempo state by exactly one L1 block at a time.
+    pub fn pop_next(&mut self) -> Option<L1BlockDeposits> {
+        if self.pending.is_empty() {
+            None
+        } else {
+            Some(self.pending.remove(0))
+        }
+    }
+
     /// Drain all pending L1 block deposits.
     pub fn drain(&mut self) -> Vec<L1BlockDeposits> {
         std::mem::take(&mut self.pending)
