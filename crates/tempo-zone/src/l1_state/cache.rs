@@ -3,6 +3,7 @@
 //! The cache stores the latest known L1 state for a set of tracked contracts. It is not versioned
 //! per block — on reorgs the caller is expected to [`L1StateCache::clear`] and re-populate.
 
+use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256};
 use parking_lot::RwLock;
 use std::{collections::HashMap, sync::Arc};
@@ -31,8 +32,8 @@ pub struct L1StateCacheConfig {
 pub struct L1StateCache {
     config: L1StateCacheConfig,
     slots: HashMap<(Address, B256), B256>,
-    anchor_block_hash: B256,
-    anchor_block_number: u64,
+    /// L1 block this cache is anchored to.
+    anchor: NumHash,
 }
 
 impl L1StateCache {
@@ -41,8 +42,7 @@ impl L1StateCache {
         Self {
             config,
             slots: HashMap::new(),
-            anchor_block_hash: B256::ZERO,
-            anchor_block_number: 0,
+            anchor: NumHash::default(),
         }
     }
 
@@ -57,14 +57,13 @@ impl L1StateCache {
     }
 
     /// Updates the anchor block that this cache represents.
-    pub fn update_anchor(&mut self, block_hash: B256, block_number: u64) {
-        self.anchor_block_hash = block_hash;
-        self.anchor_block_number = block_number;
+    pub fn update_anchor(&mut self, anchor: NumHash) {
+        self.anchor = anchor;
     }
 
-    /// Returns the current anchor `(block_hash, block_number)`.
-    pub fn anchor(&self) -> (B256, u64) {
-        (self.anchor_block_hash, self.anchor_block_number)
+    /// Returns the current anchor block.
+    pub fn anchor(&self) -> NumHash {
+        self.anchor
     }
 
     /// Returns `true` if the given address is one of the tracked contracts.
@@ -75,13 +74,27 @@ impl L1StateCache {
     /// Clears all cached slot values but retains the tracked-contract configuration.
     pub fn clear(&mut self) {
         self.slots.clear();
-        self.anchor_block_hash = B256::ZERO;
-        self.anchor_block_number = 0;
+        self.anchor = NumHash::default();
     }
 }
 
 /// Shared handle to the L1 state cache.
-pub type SharedL1StateCache = Arc<RwLock<L1StateCache>>;
+#[derive(Debug, Clone)]
+pub struct SharedL1StateCache(Arc<RwLock<L1StateCache>>);
+
+impl SharedL1StateCache {
+    pub fn new(config: L1StateCacheConfig) -> Self {
+        Self(Arc::new(RwLock::new(L1StateCache::new(config))))
+    }
+
+    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, L1StateCache> {
+        self.0.read()
+    }
+
+    pub fn write(&self) -> parking_lot::RwLockWriteGuard<'_, L1StateCache> {
+        self.0.write()
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -138,26 +151,26 @@ mod tests {
         let addr = address!("0x0000000000000000000000000000000000004242");
 
         cache.set(addr, B256::ZERO, B256::with_last_byte(1));
-        cache.update_anchor(B256::with_last_byte(0xab), 100);
+        cache.update_anchor(NumHash { number: 100, hash: B256::with_last_byte(0xab) });
 
         cache.clear();
 
         assert_eq!(cache.get(addr, B256::ZERO), None);
-        assert_eq!(cache.anchor(), (B256::ZERO, 0));
+        assert_eq!(cache.anchor(), NumHash::default());
     }
 
     #[test]
     fn anchor_defaults_to_zero() {
         let cache = L1StateCache::new(test_config());
-        assert_eq!(cache.anchor(), (B256::ZERO, 0));
+        assert_eq!(cache.anchor(), NumHash::default());
     }
 
     #[test]
     fn update_anchor() {
         let mut cache = L1StateCache::new(test_config());
         let hash = B256::with_last_byte(0xbe);
-        cache.update_anchor(hash, 42);
-        assert_eq!(cache.anchor(), (hash, 42));
+        cache.update_anchor(NumHash { number: 42, hash });
+        assert_eq!(cache.anchor(), NumHash { number: 42, hash });
     }
 
     #[test]

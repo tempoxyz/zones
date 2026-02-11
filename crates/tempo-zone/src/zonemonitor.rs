@@ -136,11 +136,21 @@ impl ZoneMonitor {
 
     /// Process a single zone block.
     ///
-    /// In the POC every zone block is one batch. This method:
-    /// 1. Collects `WithdrawalRequested` events and stores them.
-    /// 2. Reads `BatchFinalized` to get the withdrawal queue hash and batch index.
-    /// 3. Reads on-chain state from `TempoState` and `ZoneInbox`.
-    /// 4. Constructs and sends [`BatchData`] to the batch submitter channel.
+    /// In the POC every zone block is one batch. This method gathers everything
+    /// the batch submitter needs to call `ZonePortal.submitBatch()` on L1:
+    ///
+    /// 1. Collects `WithdrawalRequested` events from the ZoneOutbox and stores the
+    ///    full withdrawal structs in the [`SharedWithdrawalStore`]. The L1 portal only
+    ///    stores hashes, so the sequencer must retain the original data to later call
+    ///    `processWithdrawal()`.
+    /// 2. Reads `BatchFinalized` to get the `withdrawalQueueHash` (the hash chain over
+    ///    this batch's withdrawals) and the `withdrawalBatchIndex` used to key the store.
+    /// 3. Reads `TempoState.tempoBlockNumber()` (the latest L1 block number the zone has
+    ///    synced to) and `ZoneInbox.processedDepositQueueHash()` (how far the zone has
+    ///    consumed the L1 deposit queue). These form the `BlockTransition` and
+    ///    `DepositQueueTransition` structs the portal verifies on L1.
+    /// 4. Constructs [`BatchData`] from the above and sends it to the batch submitter
+    ///    channel.
     #[instrument(skip(self), fields(block_number))]
     async fn process_block(&mut self, block_number: u64) -> Result<()> {
         debug!(block_number, "Processing zone block");

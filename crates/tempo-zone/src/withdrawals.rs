@@ -38,7 +38,24 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::abi::{self, ZonePortal};
 
 /// Shared handle to the withdrawal store.
-pub type SharedWithdrawalStore = Arc<Mutex<WithdrawalStore>>;
+#[derive(Clone)]
+pub struct SharedWithdrawalStore(Arc<Mutex<WithdrawalStore>>);
+
+impl SharedWithdrawalStore {
+    pub fn new() -> Self {
+        Self(Arc::new(Mutex::new(WithdrawalStore::new())))
+    }
+
+    pub fn lock(&self) -> parking_lot::MutexGuard<'_, WithdrawalStore> {
+        self.0.lock()
+    }
+}
+
+impl Default for SharedWithdrawalStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Configuration for the withdrawal processor.
 #[derive(Debug, Clone)]

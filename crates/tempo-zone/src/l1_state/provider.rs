@@ -57,8 +57,12 @@ impl Default for L1StateProviderConfig {
 #[derive(Debug, Clone)]
 pub struct L1StateProvider {
     config: L1StateProviderConfig,
+    /// In-memory cache of L1 contract storage slots, checked before any RPC call.
     cache: SharedL1StateCache,
+    /// HTTP provider pointed at **Tempo L1**, used as a fallback when the cache misses.
     provider: DynProvider<TempoNetwork>,
+    /// Handle to the tokio runtime, used by [`get_storage`](Self::get_storage) to
+    /// dispatch async RPC calls from a blocking (non-async) context.
     runtime_handle: tokio::runtime::Handle,
 }
 

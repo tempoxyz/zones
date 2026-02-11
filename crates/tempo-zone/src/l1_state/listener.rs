@@ -13,6 +13,7 @@
 //! [`L1StateProvider`]: super::provider::L1StateProvider
 
 use crate::l1_state::cache::SharedL1StateCache;
+use alloy_eips::NumHash;
 use alloy_primitives::B256;
 use reth_primitives_traits::AlloyBlockHeader as _;
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
@@ -76,11 +77,11 @@ impl L1StateListener {
             let parent_hash = header.parent_hash;
 
             let mut cache = self.cache.write();
-            let (anchor_hash, _) = cache.anchor();
+            let anchor = cache.anchor();
 
-            if anchor_hash != B256::ZERO && parent_hash != anchor_hash {
+            if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
                 warn!(
-                    old_anchor = %anchor_hash,
+                    old_anchor = %anchor.hash,
                     new_parent = %parent_hash,
                     block_number,
                     "Reorg detected, clearing L1 state cache"
@@ -88,7 +89,7 @@ impl L1StateListener {
                 cache.clear();
             }
 
-            cache.update_anchor(block_hash, block_number);
+            cache.update_anchor(NumHash { number: block_number, hash: block_hash });
             debug!(block_hash = %block_hash, block_number, "Updated L1 state cache anchor");
         }
 
@@ -128,7 +129,7 @@ where
                     self.apply_state_diffs(new.execution_outcome());
                     let tip = new.tip();
                     let mut cache = self.cache.write();
-                    cache.update_anchor(tip.hash(), tip.number());
+                    cache.update_anchor(NumHash { number: tip.number(), hash: tip.hash() });
                     debug!(
                         block_hash = %tip.hash(),
                         block_number = tip.number(),
@@ -148,7 +149,7 @@ where
                     self.apply_state_diffs(new.execution_outcome());
                     let tip = new.tip();
                     let mut cache = self.cache.write();
-                    cache.update_anchor(tip.hash(), tip.number());
+                    cache.update_anchor(NumHash { number: tip.number(), hash: tip.hash() });
                 }
             }
         }

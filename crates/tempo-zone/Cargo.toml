@@ -45,6 +45,7 @@ reth-transaction-pool.workspace = true
 # alloy
 alloy-consensus.workspace = true
 alloy-contract.workspace = true
+alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
