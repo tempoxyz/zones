@@ -4,7 +4,6 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use alloy_primitives::U256;
-use reth_node_builder::components::BasicPayloadServiceBuilder;
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
@@ -15,9 +14,8 @@ use reth_node_api::{
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
-        ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
-        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder,
-        spawn_maintenance_tasks,
+        BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
+        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
@@ -36,16 +34,14 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
 use tempo_evm::{TempoEvmConfig, evm::TempoEvmFactory};
 use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
-use tempo_payload_types::{
-    TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes,
-};
+use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool, amm::AmmLiquidityCache,
     validator::TempoTransactionValidator,
 };
 
-use crate::builder::ZonePayloadBuilderBuilder;
+use crate::builder::ZonePayloadFactory;
 
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
@@ -62,7 +58,10 @@ pub struct ZoneNode {
 
 impl ZoneNode {
     /// Create a new zone node with a deposit queue and the TIP-20 token address to mint on deposit.
-    pub fn new(deposit_queue: crate::DepositQueue, token_address: alloy_primitives::Address) -> Self {
+    pub fn new(
+        deposit_queue: crate::DepositQueue,
+        token_address: alloy_primitives::Address,
+    ) -> Self {
         Self {
             deposit_queue,
             token_address,
@@ -76,7 +75,7 @@ impl ZoneNode {
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
+        BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -89,7 +88,7 @@ impl ZoneNode {
             .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
             .payload(BasicPayloadServiceBuilder::new(
-                ZonePayloadBuilderBuilder::new(deposit_queue, token_address),
+                ZonePayloadFactory::new(deposit_queue, token_address),
             ))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -200,7 +199,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
+        BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,

@@ -16,17 +16,11 @@ use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
 use reth_node_api::FullNodeTypes;
-use reth_node_builder::{
-    BuilderContext,
-    components::PayloadBuilderBuilder,
-};
+use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
-use reth_revm::{
-    State,
-    database::StateProviderDatabase,
-};
+use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_tracing::tracing::{debug, error, info, warn};
 use reth_transaction_pool::{
@@ -52,15 +46,15 @@ sol! {
     function mint(address to, uint256 amount);
 }
 
-/// Payload builder builder for Zone.
+/// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ZonePayloadBuilderBuilder {
+pub struct ZonePayloadFactory {
     deposit_queue: crate::DepositQueue,
     token_address: Address,
 }
 
-impl ZonePayloadBuilderBuilder {
+impl ZonePayloadFactory {
     pub fn new(deposit_queue: crate::DepositQueue, token_address: Address) -> Self {
         Self {
             deposit_queue,
@@ -70,7 +64,7 @@ impl ZonePayloadBuilderBuilder {
 }
 
 impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, TempoEvmConfig>
-    for ZonePayloadBuilderBuilder
+    for ZonePayloadFactory
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
@@ -108,10 +102,7 @@ impl<Provider> ZonePayloadBuilder<Provider>
 where
     Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec>,
 {
-    fn build_deposit_mint_txs(
-        &self,
-        deposits: &[Deposit],
-    ) -> Vec<Recovered<TempoTxEnvelope>> {
+    fn build_deposit_mint_txs(&self, deposits: &[Deposit]) -> Vec<Recovered<TempoTxEnvelope>> {
         let chain_id = Some(self.provider.chain_spec().chain().id());
 
         deposits
@@ -192,8 +183,9 @@ where
         let state_provider: Box<dyn StateProvider> = state_provider;
         let state = StateProviderDatabase::new(&state_provider);
         let mut db = State::builder()
-            .with_database(Box::new(cached_reads.as_db_mut(state))
-                as Box<dyn Database<Error = ProviderError>>)
+            .with_database(
+                Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>
+            )
             .with_bundle_update()
             .build();
 
@@ -247,9 +239,9 @@ where
         // Execute pool transactions
         // TODO: Use gas accounting from TempoPayloadBuilder (payment vs non-payment limits, etc.)
         let base_fee = builder.evm_mut().block.basefee;
-        let mut best_txs = self.pool.best_transactions_with_attributes(
-            BestTransactionsAttributes::new(base_fee, None),
-        );
+        let mut best_txs = self
+            .pool
+            .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
 
         while let Some(pool_tx) = best_txs.next() {
             if cumulative_gas_used + pool_tx.gas_limit() > non_shared_gas_limit {
