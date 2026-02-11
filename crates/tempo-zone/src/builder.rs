@@ -20,7 +20,7 @@ use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
-use reth_tracing::tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn};
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool,
     error::InvalidPoolTransactionError,

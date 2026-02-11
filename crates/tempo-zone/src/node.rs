@@ -28,7 +28,7 @@ use reth_provider::{ChainSpecProvider, EthStorage};
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
-use reth_tracing::tracing::{debug, info};
+use tracing::{debug, info};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
@@ -137,10 +137,9 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
-            .payload(BasicPayloadServiceBuilder::new(ZonePayloadBuilderBuilder::new(
-                deposit_queue,
-                token_address,
-            )))
+            .payload(BasicPayloadServiceBuilder::new(
+                ZonePayloadBuilderBuilder::new(deposit_queue, token_address),
+            ))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }

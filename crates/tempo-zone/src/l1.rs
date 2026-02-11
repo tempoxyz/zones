@@ -9,7 +9,7 @@ use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolValue, sol};
 use alloy_transport::Authorization;
 use futures::StreamExt;
-use reth_tracing::tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
 
 sol! {
