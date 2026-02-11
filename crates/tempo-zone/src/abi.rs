@@ -8,7 +8,7 @@
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
 //!   withdrawal hash chains, and exposes [`LastBatch`] state for proof generation.
 
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{Address, B256, address, keccak256};
 use alloy_sol_types::{SolValue, sol};
 
 /// Sentinel value for empty withdrawal queue slots.
@@ -16,8 +16,16 @@ use alloy_sol_types::{SolValue, sol};
 pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
 
 /// TempoState predeploy address on Zone L2.
-pub const TEMPO_STATE_ADDRESS: alloy_primitives::Address =
-    alloy_primitives::address!("0x1c00000000000000000000000000000000000000");
+pub const TEMPO_STATE_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000000");
+
+/// ZoneInbox predeploy address on Zone L2.
+pub const ZONE_INBOX_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000001");
+
+/// ZoneOutbox predeploy address on Zone L2.
+pub const ZONE_OUTBOX_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000002");
 
 sol! {
     // ---------------------------------------------------------------
@@ -189,17 +197,132 @@ sol! {
 
     #[sol(rpc)]
     contract TempoState {
+        #[derive(Debug)]
+        event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
+
+        error InvalidParentHash();
+        error InvalidBlockNumber();
+        error InvalidRlpData();
+        error OnlyZoneInbox();
+
         function tempoBlockHash() external view returns (bytes32);
         function tempoBlockNumber() external view returns (uint64);
+        function tempoStateRoot() external view returns (bytes32);
+        function tempoParentHash() external view returns (bytes32);
+        function tempoBeneficiary() external view returns (address);
+        function tempoTransactionsRoot() external view returns (bytes32);
+        function tempoReceiptsRoot() external view returns (bytes32);
+        function tempoGasLimit() external view returns (uint64);
+        function tempoGasUsed() external view returns (uint64);
+        function tempoTimestamp() external view returns (uint64);
+        function tempoTimestampMillis() external view returns (uint64);
+        function tempoPrevRandao() external view returns (bytes32);
+        function generalGasLimit() external view returns (uint64);
+        function sharedGasLimit() external view returns (uint64);
+
+        function finalizeTempo(bytes calldata header) external;
     }
 
     // ---------------------------------------------------------------
-    //  ZoneInbox — Zone L2 system contract
+    //  TempoStateReader — Zone L2 standalone precompile
+    //  Separate from TempoState; reads Tempo L1 storage at a caller-specified block.
     // ---------------------------------------------------------------
 
     #[sol(rpc)]
+    contract TempoStateReader {
+        error DelegateCallNotAllowed();
+
+        function readStorageAt(address account, bytes32 slot, uint64 blockNumber) external view returns (bytes32);
+        function readStorageBatchAt(address account, bytes32[] calldata slots, uint64 blockNumber) external view returns (bytes32[] memory);
+    }
+
+    // ---------------------------------------------------------------
+    //  ZoneInbox — Zone L2 system contract (0x1c00...0001)
+    // ---------------------------------------------------------------
+
+    /// Deposit types for the unified deposit queue.
+    #[derive(Debug)]
+    enum DepositType {
+        Regular,
+        Encrypted,
+    }
+
+    /// A queued deposit (regular or encrypted) passed to `advanceTempo`.
+    #[derive(Debug)]
+    struct QueuedDeposit {
+        DepositType depositType;
+        bytes depositData;
+    }
+
+    /// Decryption data provided by the sequencer for encrypted deposits.
+    #[derive(Debug)]
+    struct DecryptionData {
+        bytes32 sharedSecret;
+        uint8 sharedSecretYParity;
+        bytes cpProof;
+        address to;
+        bytes32 memo;
+    }
+
+    #[sol(rpc)]
     contract ZoneInbox {
+        #[derive(Debug)]
+        event TempoAdvanced(
+            bytes32 indexed tempoBlockHash,
+            uint64 indexed tempoBlockNumber,
+            uint256 depositsProcessed,
+            bytes32 newProcessedDepositQueueHash
+        );
+
+        #[derive(Debug)]
+        event DepositProcessed(
+            bytes32 indexed depositHash,
+            address indexed sender,
+            address indexed to,
+            uint128 amount,
+            bytes32 memo
+        );
+
+        #[derive(Debug)]
+        event EncryptedDepositProcessed(
+            bytes32 indexed depositHash,
+            address indexed sender,
+            address indexed to,
+            uint128 amount,
+            bytes32 memo
+        );
+
+        #[derive(Debug)]
+        event EncryptedDepositFailed(
+            bytes32 indexed depositHash,
+            address indexed sender,
+            uint128 amount
+        );
+
+        #[derive(Debug)]
+        event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
+
+        error OnlySequencer();
+        error InvalidDepositQueueHash();
+        error MissingDecryptionData();
+        error ExtraDecryptionData();
+        error InvalidSharedSecretProof();
+        error TooManyDeposits();
+
         function processedDepositQueueHash() external view returns (bytes32);
+        function maxDepositsPerTempoBlock() external view returns (uint256);
+        function tempoPortal() external view returns (address);
+        function tempoState() external view returns (address);
+        function zoneToken() external view returns (address);
+        function config() external view returns (address);
+
+        function setMaxDepositsPerTempoBlock(uint256 _maxDepositsPerTempoBlock) external;
+
+        function advanceTempo(
+            bytes calldata header,
+            QueuedDeposit[] calldata deposits,
+            DecryptionData[] calldata decryptions
+        ) external;
     }
 }
 

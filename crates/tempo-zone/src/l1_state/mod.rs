@@ -6,7 +6,7 @@
 //! - [`L1StateCacheConfig`] — configuration describing which contracts to track.
 //! - [`L1StateListener`] — a service that subscribes to L1 chain notifications and updates the cache.
 //! - [`L1StateProvider`] — a cache-first, RPC-fallback reader for `eth_getStorageAt`.
-//! - [`TempoStatePrecompile`] — a `DynPrecompile` that handles `readTempoStorageSlot` calls.
+//! - [`TempoStateReader`] — a standalone `DynPrecompile` that handles `readStorageAt` calls.
 
 pub mod cache;
 pub mod listener;
@@ -18,5 +18,5 @@ pub use listener::{
     L1ChainNotificationListener, L1StateListener, L1StateListenerConfig,
     spawn_l1_chain_notification_listener, spawn_l1_state_listener,
 };
-pub use precompile::TempoStatePrecompile;
+pub use precompile::TempoStateReader;
 pub use provider::{L1StateProvider, L1StateProviderConfig};

@@ -15,6 +15,7 @@ mod builder;
 pub mod l1;
 pub mod l1_state;
 mod node;
+pub mod system_tx;
 pub mod withdrawals;
 pub mod zonemonitor;
 

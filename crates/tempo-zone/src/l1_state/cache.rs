@@ -1,12 +1,36 @@
-//! In-memory cache of L1 contract storage slots, anchored by L1 block hash.
+//! Block-versioned in-memory cache of Tempo L1 contract storage slots.
 //!
-//! The cache stores the latest known L1 state for a set of tracked contracts. It is not versioned
-//! per block — on reorgs the caller is expected to [`L1StateCache::clear`] and re-populate.
+//! The zone's [`TempoStateReader`](super::precompile::TempoStateReader) precompile reads
+//! Tempo L1 storage at a **specific L1 block height** (the `tempoBlockNumber` the zone committed
+//! to via `TempoState.finalizeTempo()` on Zone L2). Because the L1 chain may advance several
+//! blocks ahead of the zone's committed height, the cache must be able to serve historical
+//! values — not just "latest".
+//!
+//! ## Storage model
+//!
+//! Each `(contract_address, slot_key)` pair maps to a [`BTreeMap<u64, B256>`] of
+//! `block_number → value`. A lookup for block N returns the most recent entry whose
+//! block number is ≤ N, reflecting the value that was current at that height.
+//!
+//! ## Write path
+//!
+//! - The [`L1ChainNotificationListener`](super::listener::L1ChainNotificationListener) writes
+//!   storage diffs for tracked contracts as they arrive, tagged with the L1 tip block number.
+//! - The [`L1StateProvider`](super::provider::L1StateProvider) writes RPC-fetched values on
+//!   cache miss, tagged with the block number that was requested.
+//!
+//! ## Reorg handling
+//!
+//! On reorgs the caller is expected to [`L1StateCache::clear`] the entire cache and re-populate
+//! from the new canonical chain segment. There is no per-block rollback.
 
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256};
 use parking_lot::RwLock;
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::Arc,
+};
 
 /// Describes an L1 contract whose storage slots should be cached.
 #[derive(Debug, Clone)]
@@ -24,15 +48,22 @@ pub struct L1StateCacheConfig {
     pub contracts: Vec<TrackedContract>,
 }
 
-/// In-memory cache of L1 contract storage slots.
+/// Block-versioned cache of Tempo L1 contract storage slots.
 ///
-/// Slot values are keyed by `(Address, B256)` where the second element is the storage slot key.
-/// The cache is anchored to a specific L1 block identified by hash and number.
+/// Each `(contract_address, slot_key)` pair maintains a history of values indexed by L1 block
+/// number. Lookups for a given block return the most recent value at or before that block,
+/// i.e. the value that was current at that height. This allows the zone to read L1 state at
+/// the `tempoBlockNumber` it committed to, even if the L1 chain has since advanced.
+///
+/// The anchor tracks the latest L1 block the cache has received data for, used by the
+/// [`L1StateListener`](super::listener::L1StateListener) for reorg detection.
 #[derive(Debug)]
 pub struct L1StateCache {
     config: L1StateCacheConfig,
-    slots: HashMap<(Address, B256), B256>,
-    /// L1 block this cache is anchored to.
+    /// Per-slot value history: `(address, slot) → { block_number → value }`.
+    /// The `BTreeMap` enables efficient range lookups for "latest value at or before block N".
+    slots: HashMap<(Address, B256), BTreeMap<u64, B256>>,
+    /// Latest L1 block the cache has received data for, used for reorg detection.
     anchor: NumHash,
 }
 
@@ -46,17 +77,25 @@ impl L1StateCache {
         }
     }
 
-    /// Returns the cached value for a storage slot, if present.
-    pub fn get(&self, address: Address, slot: B256) -> Option<B256> {
-        self.slots.get(&(address, slot)).copied()
+    /// Returns the cached value for a storage slot at the given block number.
+    ///
+    /// Returns the most recent value at or before `block_number`, or `None` if no
+    /// value has been cached for this slot at or before the requested block.
+    pub fn get(&self, address: Address, slot: B256, block_number: u64) -> Option<B256> {
+        self.slots
+            .get(&(address, slot))
+            .and_then(|history| history.range(..=block_number).next_back().map(|(_, v)| *v))
     }
 
-    /// Sets a storage slot value in the cache.
-    pub fn set(&mut self, address: Address, slot: B256, value: B256) {
-        self.slots.insert((address, slot), value);
+    /// Sets a storage slot value in the cache at the given block number.
+    pub fn set(&mut self, address: Address, slot: B256, block_number: u64, value: B256) {
+        self.slots
+            .entry((address, slot))
+            .or_default()
+            .insert(block_number, value);
     }
 
-    /// Updates the anchor block that this cache represents.
+    /// Updates the anchor block that this cache has received data up to.
     pub fn update_anchor(&mut self, anchor: NumHash) {
         self.anchor = anchor;
     }
@@ -75,6 +114,31 @@ impl L1StateCache {
     pub fn clear(&mut self) {
         self.slots.clear();
         self.anchor = NumHash::default();
+    }
+
+    /// Remove all entries with block numbers strictly less than `min_block`.
+    ///
+    /// Retains at most one entry per slot below the threshold — the latest one — so that
+    /// lookups at `min_block` still have a baseline value.
+    pub fn prune_before(&mut self, min_block: u64) {
+        for history in self.slots.values_mut() {
+            let keep_from = history
+                .range(..min_block)
+                .next_back()
+                .map(|(k, _)| *k);
+
+            if let Some(keep) = keep_from {
+                let to_remove: Vec<u64> = history
+                    .range(..keep)
+                    .map(|(k, _)| *k)
+                    .collect();
+                for k in to_remove {
+                    history.remove(&k);
+                }
+            }
+        }
+
+        self.slots.retain(|_, history| !history.is_empty());
     }
 }
 
@@ -120,29 +184,43 @@ mod tests {
     fn get_returns_none_for_missing_slot() {
         let cache = L1StateCache::new(test_config());
         let addr = address!("0x0000000000000000000000000000000000004242");
-        assert_eq!(cache.get(addr, B256::ZERO), None);
+        assert_eq!(cache.get(addr, B256::ZERO, 100), None);
     }
 
     #[test]
-    fn set_and_get_round_trip() {
+    fn set_and_get_at_same_block() {
         let mut cache = L1StateCache::new(test_config());
         let addr = address!("0x0000000000000000000000000000000000004242");
         let slot = B256::with_last_byte(1);
         let value = B256::with_last_byte(0xff);
 
-        cache.set(addr, slot, value);
-        assert_eq!(cache.get(addr, slot), Some(value));
+        cache.set(addr, slot, 10, value);
+        assert_eq!(cache.get(addr, slot, 10), Some(value));
     }
 
     #[test]
-    fn set_overwrites_existing_value() {
+    fn get_returns_latest_value_at_or_before_requested_block() {
         let mut cache = L1StateCache::new(test_config());
         let addr = address!("0x0000000000000000000000000000000000004242");
         let slot = B256::with_last_byte(1);
 
-        cache.set(addr, slot, B256::with_last_byte(0x01));
-        cache.set(addr, slot, B256::with_last_byte(0x02));
-        assert_eq!(cache.get(addr, slot), Some(B256::with_last_byte(0x02)));
+        cache.set(addr, slot, 10, B256::with_last_byte(0x0a));
+        cache.set(addr, slot, 20, B256::with_last_byte(0x14));
+
+        assert_eq!(cache.get(addr, slot, 10), Some(B256::with_last_byte(0x0a)));
+        assert_eq!(cache.get(addr, slot, 15), Some(B256::with_last_byte(0x0a)));
+        assert_eq!(cache.get(addr, slot, 20), Some(B256::with_last_byte(0x14)));
+        assert_eq!(cache.get(addr, slot, 25), Some(B256::with_last_byte(0x14)));
+    }
+
+    #[test]
+    fn get_returns_none_before_earliest_entry() {
+        let mut cache = L1StateCache::new(test_config());
+        let addr = address!("0x0000000000000000000000000000000000004242");
+        let slot = B256::with_last_byte(1);
+
+        cache.set(addr, slot, 10, B256::with_last_byte(0xff));
+        assert_eq!(cache.get(addr, slot, 9), None);
     }
 
     #[test]
@@ -150,12 +228,12 @@ mod tests {
         let mut cache = L1StateCache::new(test_config());
         let addr = address!("0x0000000000000000000000000000000000004242");
 
-        cache.set(addr, B256::ZERO, B256::with_last_byte(1));
+        cache.set(addr, B256::ZERO, 100, B256::with_last_byte(1));
         cache.update_anchor(NumHash { number: 100, hash: B256::with_last_byte(0xab) });
 
         cache.clear();
 
-        assert_eq!(cache.get(addr, B256::ZERO), None);
+        assert_eq!(cache.get(addr, B256::ZERO, 100), None);
         assert_eq!(cache.anchor(), NumHash::default());
     }
 
@@ -193,10 +271,28 @@ mod tests {
         let addr_b = address!("0x0000000000000000000000000000000000004343");
         let slot = B256::with_last_byte(1);
 
-        cache.set(addr_a, slot, B256::with_last_byte(0xaa));
-        cache.set(addr_b, slot, B256::with_last_byte(0xbb));
+        cache.set(addr_a, slot, 10, B256::with_last_byte(0xaa));
+        cache.set(addr_b, slot, 10, B256::with_last_byte(0xbb));
 
-        assert_eq!(cache.get(addr_a, slot), Some(B256::with_last_byte(0xaa)));
-        assert_eq!(cache.get(addr_b, slot), Some(B256::with_last_byte(0xbb)));
+        assert_eq!(cache.get(addr_a, slot, 10), Some(B256::with_last_byte(0xaa)));
+        assert_eq!(cache.get(addr_b, slot, 10), Some(B256::with_last_byte(0xbb)));
+    }
+
+    #[test]
+    fn prune_keeps_baseline_entry() {
+        let mut cache = L1StateCache::new(test_config());
+        let addr = address!("0x0000000000000000000000000000000000004242");
+        let slot = B256::with_last_byte(1);
+
+        cache.set(addr, slot, 5, B256::with_last_byte(0x05));
+        cache.set(addr, slot, 10, B256::with_last_byte(0x0a));
+        cache.set(addr, slot, 20, B256::with_last_byte(0x14));
+
+        cache.prune_before(15);
+
+        assert_eq!(cache.get(addr, slot, 5), None);
+        assert_eq!(cache.get(addr, slot, 10), Some(B256::with_last_byte(0x0a)));
+        assert_eq!(cache.get(addr, slot, 15), Some(B256::with_last_byte(0x0a)));
+        assert_eq!(cache.get(addr, slot, 20), Some(B256::with_last_byte(0x14)));
     }
 }

@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_types_eth::BlockId;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, warn};
@@ -84,7 +85,7 @@ impl L1StateProvider {
         Self { config, cache, provider, runtime_handle }
     }
 
-    /// Read a storage slot synchronously — cache first, RPC fallback.
+    /// Read a storage slot synchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// This method is designed for use inside EVM precompiles that run on a **blocking thread**.
     /// On cache miss it dispatches an async RPC call via `runtime_handle.block_on()` with the
@@ -94,64 +95,64 @@ impl L1StateProvider {
     ///
     /// Panics if called from within an async context on the same tokio runtime (see struct-level
     /// docs).
-    pub fn get_storage(&self, address: Address, slot: B256) -> Result<B256> {
+    pub fn get_storage(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
         {
             let cache = self.cache.read();
-            if let Some(value) = cache.get(address, slot) {
-                debug!(%address, %slot, %value, "L1 storage cache hit");
+            if let Some(value) = cache.get(address, slot, block_number) {
+                debug!(%address, %slot, block_number, %value, "L1 storage cache hit");
                 return Ok(value);
             }
         }
 
-        warn!(%address, %slot, "L1 storage cache miss, fetching from RPC");
+        warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
         let result = self.runtime_handle.block_on(tokio::time::timeout(
             self.config.request_timeout,
-            self.fetch_slot(address, slot),
+            self.fetch_slot(address, slot, block_number),
         ));
 
         match result {
             Ok(inner) => {
                 let value = inner?;
-                self.cache.write().set(address, slot, value);
+                self.cache.write().set(address, slot, block_number, value);
                 Ok(value)
             }
             Err(_elapsed) => Err(eyre::eyre!(
-                "L1 RPC request timed out after {:?} for address={address} slot={slot}",
+                "L1 RPC request timed out after {:?} for address={address} slot={slot} block={block_number}",
                 self.config.request_timeout,
             )),
         }
     }
 
-    /// Read a storage slot asynchronously — cache first, RPC fallback.
+    /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// Same semantics as [`get_storage`](Self::get_storage) but natively async, using
     /// `tokio::time::timeout` directly.
-    pub async fn get_storage_async(&self, address: Address, slot: B256) -> Result<B256> {
+    pub async fn get_storage_async(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
         {
             let cache = self.cache.read();
-            if let Some(value) = cache.get(address, slot) {
-                debug!(%address, %slot, %value, "L1 storage cache hit");
+            if let Some(value) = cache.get(address, slot, block_number) {
+                debug!(%address, %slot, block_number, %value, "L1 storage cache hit");
                 return Ok(value);
             }
         }
 
-        warn!(%address, %slot, "L1 storage cache miss, fetching from RPC");
+        warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
         let result = tokio::time::timeout(
             self.config.request_timeout,
-            self.fetch_slot(address, slot),
+            self.fetch_slot(address, slot, block_number),
         )
         .await;
 
         match result {
             Ok(inner) => {
                 let value = inner?;
-                self.cache.write().set(address, slot, value);
+                self.cache.write().set(address, slot, block_number, value);
                 Ok(value)
             }
             Err(_elapsed) => Err(eyre::eyre!(
-                "L1 RPC request timed out after {:?} for address={address} slot={slot}",
+                "L1 RPC request timed out after {:?} for address={address} slot={slot} block={block_number}",
                 self.config.request_timeout,
             )),
         }
@@ -162,16 +163,17 @@ impl L1StateProvider {
         &self.cache
     }
 
-    /// Fetch a single storage slot from L1 via the shared HTTP provider.
-    async fn fetch_slot(&self, address: Address, slot: B256) -> Result<B256> {
+    /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
+    async fn fetch_slot(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
         let key = U256::from_be_bytes(slot.0);
-        let value: U256 = self.provider.get_storage_at(address, key).await.map_err(|e| {
-            warn!(%address, %slot, %e, "eth_getStorageAt RPC call failed");
-            eyre::eyre!("eth_getStorageAt failed for address={address} slot={slot}: {e}")
+        let block_id = BlockId::number(block_number);
+        let value: U256 = self.provider.get_storage_at(address, key).block_id(block_id).await.map_err(|e| {
+            warn!(%address, %slot, block_number, %e, "eth_getStorageAt RPC call failed");
+            eyre::eyre!("eth_getStorageAt failed for address={address} slot={slot} block={block_number}: {e}")
         })?;
 
         let result = B256::from(value.to_be_bytes());
-        debug!(%address, %slot, %result, "fetched L1 storage slot from RPC");
+        debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
         Ok(result)
     }
 }

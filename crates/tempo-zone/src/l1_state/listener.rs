@@ -126,8 +126,8 @@ where
         while let Some(notification) = stream.next().await {
             match &notification {
                 CanonStateNotification::Commit { new } => {
-                    self.apply_state_diffs(new.execution_outcome());
                     let tip = new.tip();
+                    self.apply_state_diffs(new.execution_outcome(), tip.number());
                     let mut cache = self.cache.write();
                     cache.update_anchor(NumHash { number: tip.number(), hash: tip.hash() });
                     debug!(
@@ -146,8 +146,8 @@ where
                         let mut cache = self.cache.write();
                         cache.clear();
                     }
-                    self.apply_state_diffs(new.execution_outcome());
                     let tip = new.tip();
+                    self.apply_state_diffs(new.execution_outcome(), tip.number());
                     let mut cache = self.cache.write();
                     cache.update_anchor(NumHash { number: tip.number(), hash: tip.hash() });
                 }
@@ -159,8 +159,8 @@ where
     }
 
     /// Extract storage changes from an `ExecutionOutcome` for tracked contracts and write them
-    /// into the cache.
-    fn apply_state_diffs<R>(&self, execution_outcome: &reth_provider::ExecutionOutcome<R>) {
+    /// into the cache at the given block number.
+    fn apply_state_diffs<R>(&self, execution_outcome: &reth_provider::ExecutionOutcome<R>, block_number: u64) {
         let mut cache = self.cache.write();
         let mut slots_updated: u64 = 0;
 
@@ -172,13 +172,13 @@ where
             for (slot_key, slot) in &bundle_account.storage {
                 let key = B256::from(slot_key.to_be_bytes::<32>());
                 let value = B256::from(slot.present_value.to_be_bytes::<32>());
-                cache.set(address, key, value);
+                cache.set(address, key, block_number, value);
                 slots_updated += 1;
             }
         }
 
         if slots_updated > 0 {
-            debug!(slots_updated, "Applied L1 state diffs to cache");
+            debug!(slots_updated, block_number, "Applied L1 state diffs to cache");
         }
     }
 }
