@@ -27,6 +27,10 @@ pub const ZONE_INBOX_ADDRESS: Address =
 pub const ZONE_OUTBOX_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000002");
 
+/// TempoStateReader predeploy address on Zone L2.
+pub const TEMPO_STATE_READER_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000003");
+
 sol! {
     // ---------------------------------------------------------------
     //  Shared types

@@ -9,6 +9,7 @@
 use eyre as _;
 
 pub mod abi;
+pub mod evm;
 pub mod batch;
 pub mod bindings;
 mod builder;

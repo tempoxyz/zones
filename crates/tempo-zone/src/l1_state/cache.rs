@@ -28,25 +28,9 @@ use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256};
 use parking_lot::RwLock;
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
-
-/// Describes an L1 contract whose storage slots should be cached.
-#[derive(Debug, Clone)]
-pub struct TrackedContract {
-    /// Contract address on Tempo L1.
-    pub address: Address,
-    /// Human-readable name used in log messages.
-    pub name: String,
-}
-
-/// Configuration for the L1 state cache.
-#[derive(Debug, Clone)]
-pub struct L1StateCacheConfig {
-    /// Contracts whose storage slots are tracked.
-    pub contracts: Vec<TrackedContract>,
-}
 
 /// Block-versioned cache of Tempo L1 contract storage slots.
 ///
@@ -59,7 +43,7 @@ pub struct L1StateCacheConfig {
 /// [`L1StateListener`](super::listener::L1StateListener) for reorg detection.
 #[derive(Debug)]
 pub struct L1StateCache {
-    config: L1StateCacheConfig,
+    tracked_contracts: HashSet<Address>,
     /// Per-slot value history: `(address, slot) → { block_number → value }`.
     /// The `BTreeMap` enables efficient range lookups for "latest value at or before block N".
     slots: HashMap<(Address, B256), BTreeMap<u64, B256>>,
@@ -68,10 +52,12 @@ pub struct L1StateCache {
 }
 
 impl L1StateCache {
-    /// Create a new cache for the given tracked contracts.
-    pub fn new(config: L1StateCacheConfig) -> Self {
+    /// Create a new cache tracking the given contract addresses.
+    pub fn new(portal_address: Address) -> Self {
+        let mut tracked_contracts = HashSet::new();
+        tracked_contracts.insert(portal_address);
         Self {
-            config,
+            tracked_contracts,
             slots: HashMap::new(),
             anchor: NumHash::default(),
         }
@@ -107,10 +93,10 @@ impl L1StateCache {
 
     /// Returns `true` if the given address is one of the tracked contracts.
     pub fn is_tracked(&self, address: &Address) -> bool {
-        self.config.contracts.iter().any(|c| &c.address == address)
+        self.tracked_contracts.contains(address)
     }
 
-    /// Clears all cached slot values but retains the tracked-contract configuration.
+    /// Clears all cached slot values but retains the tracked-contract set.
     pub fn clear(&mut self) {
         self.slots.clear();
         self.anchor = NumHash::default();
@@ -147,8 +133,8 @@ impl L1StateCache {
 pub struct SharedL1StateCache(Arc<RwLock<L1StateCache>>);
 
 impl SharedL1StateCache {
-    pub fn new(config: L1StateCacheConfig) -> Self {
-        Self(Arc::new(RwLock::new(L1StateCache::new(config))))
+    pub fn new(portal_address: Address) -> Self {
+        Self(Arc::new(RwLock::new(L1StateCache::new(portal_address))))
     }
 
     pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, L1StateCache> {
@@ -165,134 +151,113 @@ mod tests {
     use super::*;
     use alloy_primitives::address;
 
-    fn test_config() -> L1StateCacheConfig {
-        L1StateCacheConfig {
-            contracts: vec![
-                TrackedContract {
-                    address: address!("0x0000000000000000000000000000000000004242"),
-                    name: "ZonePortal".to_string(),
-                },
-                TrackedContract {
-                    address: address!("0x0000000000000000000000000000000000004343"),
-                    name: "TempoState".to_string(),
-                },
-            ],
-        }
-    }
+    const PORTAL: Address = address!("0x0000000000000000000000000000000000004242");
 
     #[test]
     fn get_returns_none_for_missing_slot() {
-        let cache = L1StateCache::new(test_config());
-        let addr = address!("0x0000000000000000000000000000000000004242");
-        assert_eq!(cache.get(addr, B256::ZERO, 100), None);
+        let cache = L1StateCache::new(PORTAL);
+        assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
     }
 
     #[test]
     fn set_and_get_at_same_block() {
-        let mut cache = L1StateCache::new(test_config());
-        let addr = address!("0x0000000000000000000000000000000000004242");
+        let mut cache = L1StateCache::new(PORTAL);
         let slot = B256::with_last_byte(1);
         let value = B256::with_last_byte(0xff);
 
-        cache.set(addr, slot, 10, value);
-        assert_eq!(cache.get(addr, slot, 10), Some(value));
+        cache.set(PORTAL, slot, 10, value);
+        assert_eq!(cache.get(PORTAL, slot, 10), Some(value));
     }
 
     #[test]
     fn get_returns_latest_value_at_or_before_requested_block() {
-        let mut cache = L1StateCache::new(test_config());
-        let addr = address!("0x0000000000000000000000000000000000004242");
+        let mut cache = L1StateCache::new(PORTAL);
         let slot = B256::with_last_byte(1);
 
-        cache.set(addr, slot, 10, B256::with_last_byte(0x0a));
-        cache.set(addr, slot, 20, B256::with_last_byte(0x14));
+        cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
+        cache.set(PORTAL, slot, 20, B256::with_last_byte(0x14));
 
-        assert_eq!(cache.get(addr, slot, 10), Some(B256::with_last_byte(0x0a)));
-        assert_eq!(cache.get(addr, slot, 15), Some(B256::with_last_byte(0x0a)));
-        assert_eq!(cache.get(addr, slot, 20), Some(B256::with_last_byte(0x14)));
-        assert_eq!(cache.get(addr, slot, 25), Some(B256::with_last_byte(0x14)));
+        assert_eq!(cache.get(PORTAL, slot, 10), Some(B256::with_last_byte(0x0a)));
+        assert_eq!(cache.get(PORTAL, slot, 15), Some(B256::with_last_byte(0x0a)));
+        assert_eq!(cache.get(PORTAL, slot, 20), Some(B256::with_last_byte(0x14)));
+        assert_eq!(cache.get(PORTAL, slot, 25), Some(B256::with_last_byte(0x14)));
     }
 
     #[test]
     fn get_returns_none_before_earliest_entry() {
-        let mut cache = L1StateCache::new(test_config());
-        let addr = address!("0x0000000000000000000000000000000000004242");
+        let mut cache = L1StateCache::new(PORTAL);
         let slot = B256::with_last_byte(1);
 
-        cache.set(addr, slot, 10, B256::with_last_byte(0xff));
-        assert_eq!(cache.get(addr, slot, 9), None);
+        cache.set(PORTAL, slot, 10, B256::with_last_byte(0xff));
+        assert_eq!(cache.get(PORTAL, slot, 9), None);
     }
 
     #[test]
     fn clear_removes_slots_and_resets_anchor() {
-        let mut cache = L1StateCache::new(test_config());
-        let addr = address!("0x0000000000000000000000000000000000004242");
+        let mut cache = L1StateCache::new(PORTAL);
 
-        cache.set(addr, B256::ZERO, 100, B256::with_last_byte(1));
+        cache.set(PORTAL, B256::ZERO, 100, B256::with_last_byte(1));
         cache.update_anchor(NumHash { number: 100, hash: B256::with_last_byte(0xab) });
 
         cache.clear();
 
-        assert_eq!(cache.get(addr, B256::ZERO, 100), None);
+        assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
         assert_eq!(cache.anchor(), NumHash::default());
     }
 
     #[test]
     fn anchor_defaults_to_zero() {
-        let cache = L1StateCache::new(test_config());
+        let cache = L1StateCache::new(PORTAL);
         assert_eq!(cache.anchor(), NumHash::default());
     }
 
     #[test]
     fn update_anchor() {
-        let mut cache = L1StateCache::new(test_config());
+        let mut cache = L1StateCache::new(PORTAL);
         let hash = B256::with_last_byte(0xbe);
         cache.update_anchor(NumHash { number: 42, hash });
         assert_eq!(cache.anchor(), NumHash { number: 42, hash });
     }
 
     #[test]
-    fn is_tracked_returns_true_for_configured_contracts() {
-        let cache = L1StateCache::new(test_config());
-        assert!(cache.is_tracked(&address!("0x0000000000000000000000000000000000004242")));
-        assert!(cache.is_tracked(&address!("0x0000000000000000000000000000000000004343")));
+    fn is_tracked_returns_true_for_portal() {
+        let cache = L1StateCache::new(PORTAL);
+        assert!(cache.is_tracked(&PORTAL));
     }
 
     #[test]
     fn is_tracked_returns_false_for_unknown_address() {
-        let cache = L1StateCache::new(test_config());
+        let cache = L1StateCache::new(PORTAL);
         assert!(!cache.is_tracked(&address!("0x0000000000000000000000000000000000000001")));
     }
 
     #[test]
     fn different_addresses_same_slot_are_independent() {
-        let mut cache = L1StateCache::new(test_config());
-        let addr_a = address!("0x0000000000000000000000000000000000004242");
+        let mut cache = L1StateCache::new(PORTAL);
         let addr_b = address!("0x0000000000000000000000000000000000004343");
         let slot = B256::with_last_byte(1);
 
-        cache.set(addr_a, slot, 10, B256::with_last_byte(0xaa));
+        cache.set(PORTAL, slot, 10, B256::with_last_byte(0xaa));
         cache.set(addr_b, slot, 10, B256::with_last_byte(0xbb));
 
-        assert_eq!(cache.get(addr_a, slot, 10), Some(B256::with_last_byte(0xaa)));
+        assert_eq!(cache.get(PORTAL, slot, 10), Some(B256::with_last_byte(0xaa)));
         assert_eq!(cache.get(addr_b, slot, 10), Some(B256::with_last_byte(0xbb)));
     }
 
     #[test]
     fn prune_keeps_baseline_entry() {
-        let mut cache = L1StateCache::new(test_config());
-        let addr = address!("0x0000000000000000000000000000000000004242");
+        let mut cache = L1StateCache::new(PORTAL);
         let slot = B256::with_last_byte(1);
 
-        cache.set(addr, slot, 5, B256::with_last_byte(0x05));
-        cache.set(addr, slot, 10, B256::with_last_byte(0x0a));
-        cache.set(addr, slot, 20, B256::with_last_byte(0x14));
+        cache.set(PORTAL, slot, 5, B256::with_last_byte(0x05));
+        cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
+        cache.set(PORTAL, slot, 20, B256::with_last_byte(0x14));
 
         cache.prune_before(15);
 
-        assert_eq!(cache.get(addr, slot, 5), None);
-        assert_eq!(cache.get(addr, slot, 10), Some(B256::with_last_byte(0x0a)));
-        assert_eq!(cache.get(addr, slot, 15), Some(B256::with_last_byte(0x0a)));
-        assert_eq!(cache.get(addr, slot, 20), Some(B256::with_last_byte(0x14)));
+        assert_eq!(cache.get(PORTAL, slot, 5), None);
+        assert_eq!(cache.get(PORTAL, slot, 10), Some(B256::with_last_byte(0x0a)));
+        assert_eq!(cache.get(PORTAL, slot, 15), Some(B256::with_last_byte(0x0a)));
+        assert_eq!(cache.get(PORTAL, slot, 20), Some(B256::with_last_byte(0x14)));
     }
 }
