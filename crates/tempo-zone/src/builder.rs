@@ -15,6 +15,8 @@ use reth_evm::{
     ConfigureEvm, Database, NextBlockEnvAttributes,
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
+use reth_node_api::FullNodeTypes;
+use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
@@ -27,7 +29,9 @@ use reth_transaction_pool::{
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
-use tempo_evm::{TempoEvmConfig, TempoNextBlockEnvAttributes};
+use tempo_evm::TempoNextBlockEnvAttributes;
+
+use crate::evm::ZoneEvmConfig;
 use tempo_payload_types::TempoPayloadBuilderAttributes;
 use tempo_primitives::{
     SubBlockMetadata, TempoHeader, TempoPrimitives, TempoTxEnvelope,
@@ -36,9 +40,49 @@ use tempo_primitives::{
 use tempo_transaction_pool::TempoTransactionPool;
 use tracing::{debug, error, info, warn};
 
+use super::node::ZoneNode;
 use crate::bindings::mintCall;
 use crate::l1::Deposit;
 
+/// Factory for constructing the zone payload builder.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ZonePayloadFactory {
+    deposit_queue: crate::DepositQueue,
+    token_address: Address,
+}
+
+impl ZonePayloadFactory {
+    pub fn new(deposit_queue: crate::DepositQueue, token_address: Address) -> Self {
+        Self {
+            deposit_queue,
+            token_address,
+        }
+    }
+}
+
+impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, ZoneEvmConfig>
+    for ZonePayloadFactory
+where
+    Node: FullNodeTypes<Types = ZoneNode>,
+{
+    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
+
+    async fn build_payload_builder(
+        self,
+        ctx: &BuilderContext<Node>,
+        pool: TempoTransactionPool<Node::Provider>,
+        evm_config: ZoneEvmConfig,
+    ) -> eyre::Result<Self::PayloadBuilder> {
+        Ok(ZonePayloadBuilder {
+            pool,
+            provider: ctx.provider().clone(),
+            evm_config,
+            deposit_queue: self.deposit_queue,
+            token_address: self.token_address,
+        })
+    }
+}
 /// Simple zone payload builder that executes deposit mint txs + pool txs.
 ///
 /// TODO: Integrate with TempoPayloadBuilder for shared metrics, subblock support, etc.
@@ -46,7 +90,7 @@ use crate::l1::Deposit;
 pub struct ZonePayloadBuilder<Provider> {
     pool: TempoTransactionPool<Provider>,
     provider: Provider,
-    evm_config: TempoEvmConfig,
+    evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
     token_address: Address,
 }
@@ -55,7 +99,7 @@ impl<Provider> ZonePayloadBuilder<Provider> {
     pub fn new(
         pool: TempoTransactionPool<Provider>,
         provider: Provider,
-        evm_config: TempoEvmConfig,
+        evm_config: ZoneEvmConfig,
         deposit_queue: crate::DepositQueue,
         token_address: Address,
     ) -> Self {

@@ -12,21 +12,24 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
     revm::{Inspector, database::State, inspector::NoOpInspector},
 };
-use reth_evm::{ConfigureEvm, EvmEnvFor};
+use reth_evm::{ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor};
 use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
+use tempo_payload_types::TempoExecutionData;
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use tempo_chainspec::TempoChainSpec;
 use tempo_evm::{
     TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig, TempoEvmError,
     TempoHaltReason, TempoNextBlockEnvAttributes, evm::TempoEvm,
 };
+use alloy_provider::{Provider, ProviderBuilder};
+use tempo_alloy::TempoNetwork;
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope,
 };
 use tempo_evm::evm::TempoEvmFactory;
 
 use crate::abi::TEMPO_STATE_READER_ADDRESS;
-use crate::l1_state::{L1StateProvider, TempoStateReader};
+use crate::l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache, TempoStateReader};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
@@ -152,6 +155,22 @@ impl ZoneEvmConfig {
         Self { inner, zone_factory, block_assembler }
     }
 
+    /// Create a zone EVM config **without** the TempoStateReader precompile.
+    ///
+    /// Intended for CLI subcommands (import, stage, re-execute) that need a type-compatible
+    /// EVM config but don't have access to an L1 RPC connection. Transactions calling the
+    /// TempoStateReader precompile will get a reverted / empty response.
+    pub fn new_without_l1(chain_spec: Arc<TempoChainSpec>) -> Self {
+        let cache = SharedL1StateCache::default();
+        let config = L1StateProviderConfig::default();
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
+            .erased();
+        let runtime_handle = tokio::runtime::Handle::current();
+        let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+        Self::new(chain_spec, l1_provider)
+    }
+
     /// Returns the chain spec.
     pub fn chain_spec(&self) -> &Arc<TempoChainSpec> {
         self.inner.chain_spec()
@@ -221,5 +240,28 @@ impl ConfigureEvm for ZoneEvmConfig {
         attributes: Self::NextBlockEnvCtx,
     ) -> Result<TempoBlockExecutionCtx<'_>, Self::Error> {
         self.inner.context_for_next_block(parent, attributes)
+    }
+}
+
+impl ConfigureEngineEvm<TempoExecutionData> for ZoneEvmConfig {
+    fn evm_env_for_payload(
+        &self,
+        payload: &TempoExecutionData,
+    ) -> Result<EvmEnvFor<Self>, Self::Error> {
+        self.inner.evm_env_for_payload(payload)
+    }
+
+    fn context_for_payload<'a>(
+        &self,
+        payload: &'a TempoExecutionData,
+    ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
+        self.inner.context_for_payload(payload)
+    }
+
+    fn tx_iterator_for_payload(
+        &self,
+        payload: &TempoExecutionData,
+    ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
+        self.inner.tx_iterator_for_payload(payload)
     }
 }

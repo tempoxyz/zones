@@ -12243,7 +12243,6 @@ dependencies = [
  "reth-node-builder",
  "reth-tracing",
  "tempo-chainspec",
- "tempo-evm",
  "zone",
 ]
 

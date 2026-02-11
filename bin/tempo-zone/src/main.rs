@@ -5,7 +5,7 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use alloy_primitives::Address;
 use clap::Parser;
@@ -14,8 +14,11 @@ use reth_ethereum::cli::Cli;
 
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use zone::{DepositQueue, L1SubscriberConfig, ZoneNode};
+use zone::DepositQueue;
+use zone::L1SubscriberConfig;
+use zone::ZoneNode;
+use zone::evm::ZoneEvmConfig;
+use zone::l1_state::{L1StateProviderConfig, L1StateListenerConfig, SharedL1StateCache};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -54,7 +57,7 @@ fn main() {
 
     let components = |spec: Arc<TempoChainSpec>| {
         (
-            TempoEvmConfig::new(spec, TempoEvmFactory::default()),
+            ZoneEvmConfig::new_without_l1(spec),
             NoopConsensus::default(),
         )
     };
@@ -65,10 +68,26 @@ fn main() {
 
             let deposits = DepositQueue::default();
             let l1_config = L1SubscriberConfig {
-                l1_rpc_url: args.l1_rpc_url,
+                l1_rpc_url: args.l1_rpc_url.clone(),
                 portal_address: args.portal_address,
             };
-            let node = ZoneNode::new(deposits, args.token_address, l1_config);
+            let l1_state_provider_config = L1StateProviderConfig {
+                l1_rpc_url: args.l1_rpc_url.clone(),
+                ..Default::default()
+            };
+            let l1_state_listener_config = L1StateListenerConfig {
+                l1_ws_url: args.l1_rpc_url,
+                ..Default::default()
+            };
+            let l1_state_cache = SharedL1StateCache::new(HashSet::from([args.portal_address]));
+            let node = ZoneNode::new(
+                deposits,
+                args.token_address,
+                l1_config,
+                l1_state_provider_config,
+                l1_state_listener_config,
+                l1_state_cache,
+            );
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
 

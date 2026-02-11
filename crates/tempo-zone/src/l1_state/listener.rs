@@ -19,7 +19,7 @@ use reth_primitives_traits::AlloyBlockHeader as _;
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use futures::StreamExt;
 use reth_provider::{CanonStateNotification, CanonStateSubscriptions};
-use reth_tracing::tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn};
 use std::time::Duration;
 
 /// Configuration for the L1 state listener.

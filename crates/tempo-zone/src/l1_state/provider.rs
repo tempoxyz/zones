@@ -85,6 +85,19 @@ impl L1StateProvider {
         Self { config, cache, provider, runtime_handle }
     }
 
+    /// Create a provider from pre-constructed components.
+    ///
+    /// Used by [`ZoneEvmConfig::new_without_l1`](crate::evm::ZoneEvmConfig::new_without_l1)
+    /// to build a fallback provider that won't panic on an empty RPC URL.
+    pub fn new_raw(
+        config: L1StateProviderConfig,
+        cache: SharedL1StateCache,
+        provider: DynProvider<TempoNetwork>,
+        runtime_handle: tokio::runtime::Handle,
+    ) -> Self {
+        Self { config, cache, provider, runtime_handle }
+    }
+
     /// Read a storage slot synchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// This method is designed for use inside EVM precompiles that run on a **blocking thread**.

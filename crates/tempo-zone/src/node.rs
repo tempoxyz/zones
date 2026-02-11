@@ -15,7 +15,7 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
-        NoopNetworkBuilder, PayloadBuilderBuilder, PoolBuilder, TxPoolBuilder,
+        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder,
         spawn_maintenance_tasks,
     },
     rpc::{
@@ -32,7 +32,6 @@ use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemo
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
-use tempo_evm::{TempoEvmConfig, evm::TempoEvmFactory};
 use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
@@ -42,53 +41,17 @@ use tempo_transaction_pool::{
 };
 use tracing::{debug, info};
 
-use crate::{builder::ZonePayloadBuilder, l1::L1Subscriber};
+use crate::evm::ZoneEvmConfig;
+use crate::l1::L1Subscriber;
+use crate::l1_state::{
+    L1StateProvider, L1StateProviderConfig, SharedL1StateCache,
+    L1StateListenerConfig, spawn_l1_state_listener,
+};
+
+use crate::builder::ZonePayloadFactory;
 
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
-
-/// Constructs the [`ZonePayloadBuilder`] for the node's payload service.
-#[derive(Debug, Clone)]
-#[non_exhaustive]
-pub struct ZonePayloadBuilderBuilder {
-    deposit_queue: crate::DepositQueue,
-    token_address: alloy_primitives::Address,
-}
-
-impl ZonePayloadBuilderBuilder {
-    pub fn new(
-        deposit_queue: crate::DepositQueue,
-        token_address: alloy_primitives::Address,
-    ) -> Self {
-        Self {
-            deposit_queue,
-            token_address,
-        }
-    }
-}
-
-impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, TempoEvmConfig>
-    for ZonePayloadBuilderBuilder
-where
-    Node: FullNodeTypes<Types = ZoneNode>,
-{
-    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
-
-    async fn build_payload_builder(
-        self,
-        ctx: &BuilderContext<Node>,
-        pool: TempoTransactionPool<Node::Provider>,
-        evm_config: TempoEvmConfig,
-    ) -> eyre::Result<Self::PayloadBuilder> {
-        Ok(ZonePayloadBuilder::new(
-            pool,
-            ctx.provider().clone(),
-            evm_config,
-            self.deposit_queue,
-            self.token_address,
-        ))
-    }
-}
 
 /// Tempo Zone node type configuration.
 ///
@@ -99,22 +62,33 @@ pub struct ZoneNode {
     deposit_queue: crate::DepositQueue,
     token_address: alloy_primitives::Address,
     l1_config: crate::L1SubscriberConfig,
+    l1_state_provider_config: L1StateProviderConfig,
+    l1_state_listener_config: L1StateListenerConfig,
+    l1_state_cache: SharedL1StateCache,
 }
 
 impl ZoneNode {
-    /// Create a new zone node with a deposit queue, TIP-20 token address, and L1 subscriber config.
+    /// Create a new zone node with a deposit queue, TIP-20 token address, L1 subscriber config,
+    /// and L1 state infrastructure configs.
     ///
     /// The L1 subscriber is spawned automatically as part of the node lifecycle via
     /// [`ZoneAddOns::launch_add_ons`], ensuring it cannot be accidentally omitted.
+    /// The L1 state listener is spawned by [`ZoneExecutorBuilder`] during EVM construction.
     pub fn new(
         deposit_queue: crate::DepositQueue,
         token_address: alloy_primitives::Address,
         l1_config: crate::L1SubscriberConfig,
+        l1_state_provider_config: L1StateProviderConfig,
+        l1_state_listener_config: L1StateListenerConfig,
+        l1_state_cache: SharedL1StateCache,
     ) -> Self {
         Self {
             deposit_queue,
             token_address,
             l1_config,
+            l1_state_provider_config,
+            l1_state_listener_config,
+            l1_state_cache,
         }
     }
 
@@ -122,10 +96,11 @@ impl ZoneNode {
     pub fn components<N>(
         deposit_queue: crate::DepositQueue,
         token_address: alloy_primitives::Address,
+        executor_builder: ZoneExecutorBuilder,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
+        BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -136,9 +111,9 @@ impl ZoneNode {
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(ZonePoolBuilder)
-            .executor(ZoneExecutorBuilder::default())
+            .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(
-                ZonePayloadBuilderBuilder::new(deposit_queue, token_address),
+                ZonePayloadFactory::new(deposit_queue, token_address),
             ))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -153,7 +128,7 @@ impl NodeTypes for ZoneNode {
 }
 
 /// Zone node add-ons (RPC, etc.)
-pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>> {
+pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> {
     inner: RpcAddOns<
         N,
         ZoneEthApiBuilder,
@@ -166,7 +141,7 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConf
     l1_config: crate::L1SubscriberConfig,
 }
 
-impl<N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>> std::fmt::Debug
+impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
     for ZoneAddOns<N>
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -196,7 +171,7 @@ where
 
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
 where
-    N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>,
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
     ZoneEthApiBuilder: EthApiBuilder<N>,
 {
     type Handle = <RpcAddOns<
@@ -223,7 +198,7 @@ where
 
 impl<N> RethRpcAddOns<N> for ZoneAddOns<N>
 where
-    N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>,
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
     ZoneEthApiBuilder: EthApiBuilder<N>,
 {
     type EthApi = <ZoneEthApiBuilder as EthApiBuilder<N>>::EthApi;
@@ -235,7 +210,7 @@ where
 
 impl<N> EngineValidatorAddOn<N> for ZoneAddOns<N>
 where
-    N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>,
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
     ZoneEthApiBuilder: EthApiBuilder<N>,
 {
     type ValidatorBuilder = BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>;
@@ -252,7 +227,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
+        BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -260,7 +235,12 @@ where
     type AddOns = ZoneAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        Self::components(self.deposit_queue.clone(), self.token_address)
+        let executor_builder = ZoneExecutorBuilder::new(
+            self.l1_state_provider_config.clone(),
+            self.l1_state_listener_config.clone(),
+            self.l1_state_cache.clone(),
+        );
+        Self::components(self.deposit_queue.clone(), self.token_address, executor_builder)
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -321,19 +301,52 @@ impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
     }
 }
 
-/// Executor builder for Zone - uses Tempo EVM with precompiles.
-#[derive(Debug, Default, Clone, Copy)]
+/// Executor builder for Zone — constructs [`ZoneEvmConfig`] with the TempoStateReader precompile
+/// and spawns the L1 state listener for cache updates.
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ZoneExecutorBuilder;
+pub struct ZoneExecutorBuilder {
+    l1_state_provider_config: L1StateProviderConfig,
+    l1_state_listener_config: L1StateListenerConfig,
+    l1_state_cache: SharedL1StateCache,
+}
+
+impl ZoneExecutorBuilder {
+    pub fn new(
+        l1_state_provider_config: L1StateProviderConfig,
+        l1_state_listener_config: L1StateListenerConfig,
+        l1_state_cache: SharedL1StateCache,
+    ) -> Self {
+        Self {
+            l1_state_provider_config,
+            l1_state_listener_config,
+            l1_state_cache,
+        }
+    }
+}
 
 impl<Node> ExecutorBuilder<Node> for ZoneExecutorBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
-    type EVM = TempoEvmConfig;
+    type EVM = ZoneEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        let evm_config = TempoEvmConfig::new(ctx.chain_spec(), TempoEvmFactory::default());
+        let runtime_handle = tokio::runtime::Handle::current();
+        let l1_provider = L1StateProvider::new(
+            self.l1_state_provider_config,
+            self.l1_state_cache.clone(),
+            runtime_handle,
+        );
+
+        spawn_l1_state_listener(
+            self.l1_state_listener_config,
+            self.l1_state_cache,
+            ctx.task_executor().clone(),
+        );
+
+        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
+        info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader precompile");
         Ok(evm_config)
     }
 }
@@ -466,9 +479,9 @@ pub struct ZoneEthApiBuilder;
 
 impl<N> EthApiBuilder<N> for ZoneEthApiBuilder
 where
-    N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>,
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
 {
-    type EthApi = reth_rpc::EthApi<N, DynRpcConverter<TempoEvmConfig, TempoNetwork>>;
+    type EthApi = reth_rpc::EthApi<N, DynRpcConverter<ZoneEvmConfig, TempoNetwork>>;
 
     async fn build_eth_api(self, ctx: EthApiCtx<'_, N>) -> eyre::Result<Self::EthApi> {
         let chain_spec = ctx.components.provider().chain_spec();

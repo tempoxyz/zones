@@ -51,16 +51,20 @@ pub struct L1StateCache {
     anchor: NumHash,
 }
 
-impl L1StateCache {
-    /// Create a new cache tracking the given contract addresses.
-    pub fn new(portal_address: Address) -> Self {
-        let mut tracked_contracts = HashSet::new();
-        tracked_contracts.insert(portal_address);
+impl Default for L1StateCache {
+    fn default() -> Self {
         Self {
-            tracked_contracts,
+            tracked_contracts: HashSet::new(),
             slots: HashMap::new(),
             anchor: NumHash::default(),
         }
+    }
+}
+
+impl L1StateCache {
+    /// Create a new cache tracking the given contract addresses.
+    pub fn new(tracked_contracts: HashSet<Address>) -> Self {
+        Self { tracked_contracts, ..Default::default() }
     }
 
     /// Returns the cached value for a storage slot at the given block number.
@@ -132,9 +136,15 @@ impl L1StateCache {
 #[derive(Debug, Clone)]
 pub struct SharedL1StateCache(Arc<RwLock<L1StateCache>>);
 
+impl Default for SharedL1StateCache {
+    fn default() -> Self {
+        Self(Arc::new(RwLock::new(L1StateCache::default())))
+    }
+}
+
 impl SharedL1StateCache {
-    pub fn new(portal_address: Address) -> Self {
-        Self(Arc::new(RwLock::new(L1StateCache::new(portal_address))))
+    pub fn new(tracked_contracts: HashSet<Address>) -> Self {
+        Self(Arc::new(RwLock::new(L1StateCache::new(tracked_contracts))))
     }
 
     pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, L1StateCache> {
@@ -155,13 +165,13 @@ mod tests {
 
     #[test]
     fn get_returns_none_for_missing_slot() {
-        let cache = L1StateCache::new(PORTAL);
+        let cache = L1StateCache::new(HashSet::from([PORTAL]));
         assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
     }
 
     #[test]
     fn set_and_get_at_same_block() {
-        let mut cache = L1StateCache::new(PORTAL);
+        let mut cache = L1StateCache::new(HashSet::from([PORTAL]));
         let slot = B256::with_last_byte(1);
         let value = B256::with_last_byte(0xff);
 
@@ -171,7 +181,7 @@ mod tests {
 
     #[test]
     fn get_returns_latest_value_at_or_before_requested_block() {
-        let mut cache = L1StateCache::new(PORTAL);
+        let mut cache = L1StateCache::new(HashSet::from([PORTAL]));
         let slot = B256::with_last_byte(1);
 
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
@@ -185,7 +195,7 @@ mod tests {
 
     #[test]
     fn get_returns_none_before_earliest_entry() {
-        let mut cache = L1StateCache::new(PORTAL);
+        let mut cache = L1StateCache::new(HashSet::from([PORTAL]));
         let slot = B256::with_last_byte(1);
 
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0xff));
@@ -194,7 +204,7 @@ mod tests {
 
     #[test]
     fn clear_removes_slots_and_resets_anchor() {
-        let mut cache = L1StateCache::new(PORTAL);
+        let mut cache = L1StateCache::new(HashSet::from([PORTAL]));
 
         cache.set(PORTAL, B256::ZERO, 100, B256::with_last_byte(1));
         cache.update_anchor(NumHash { number: 100, hash: B256::with_last_byte(0xab) });
@@ -207,13 +217,13 @@ mod tests {
 
     #[test]
     fn anchor_defaults_to_zero() {
-        let cache = L1StateCache::new(PORTAL);
+        let cache = L1StateCache::new(HashSet::from([PORTAL]));
         assert_eq!(cache.anchor(), NumHash::default());
     }
 
     #[test]
     fn update_anchor() {
-        let mut cache = L1StateCache::new(PORTAL);
+        let mut cache = L1StateCache::new(HashSet::from([PORTAL]));
         let hash = B256::with_last_byte(0xbe);
         cache.update_anchor(NumHash { number: 42, hash });
         assert_eq!(cache.anchor(), NumHash { number: 42, hash });
@@ -221,19 +231,19 @@ mod tests {
 
     #[test]
     fn is_tracked_returns_true_for_portal() {
-        let cache = L1StateCache::new(PORTAL);
+        let cache = L1StateCache::new(HashSet::from([PORTAL]));
         assert!(cache.is_tracked(&PORTAL));
     }
 
     #[test]
     fn is_tracked_returns_false_for_unknown_address() {
-        let cache = L1StateCache::new(PORTAL);
+        let cache = L1StateCache::new(HashSet::from([PORTAL]));
         assert!(!cache.is_tracked(&address!("0x0000000000000000000000000000000000000001")));
     }
 
     #[test]
     fn different_addresses_same_slot_are_independent() {
-        let mut cache = L1StateCache::new(PORTAL);
+        let mut cache = L1StateCache::new(HashSet::from([PORTAL]));
         let addr_b = address!("0x0000000000000000000000000000000000004343");
         let slot = B256::with_last_byte(1);
 
@@ -246,7 +256,7 @@ mod tests {
 
     #[test]
     fn prune_keeps_baseline_entry() {
-        let mut cache = L1StateCache::new(PORTAL);
+        let mut cache = L1StateCache::new(HashSet::from([PORTAL]));
         let slot = B256::with_last_byte(1);
 
         cache.set(PORTAL, slot, 5, B256::with_last_byte(0x05));
