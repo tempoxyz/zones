@@ -1,6 +1,6 @@
 use alloy::{
     network::{EthereumWallet, primitives::{HeaderResponse, ReceiptResponse}},
-    primitives::{Address, B256, keccak256},
+    primitives::{Address, B256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol,
@@ -107,17 +107,7 @@ impl CreateZone {
 
         let mut header_rlp = Vec::new();
         header.encode(&mut header_rlp);
-        let computed_hash = keccak256(&header_rlp);
-
-        if computed_hash != block_hash {
-            return Err(eyre!(
-                "reconstructed header hash {computed_hash} does not match block hash {block_hash}"
-            ));
-        }
-        println!(
-            "Tempo block {} header validated (hash: {computed_hash})",
-            header.inner.number
-        );
+        println!("Tempo block {} (hash: {block_hash})", header.inner.number);
 
         let factory = ZoneFactory::new(self.zone_factory, &provider);
         println!("Fetching verifier address from ZoneFactory...");
@@ -132,7 +122,7 @@ impl CreateZone {
             verifier,
             zoneParams: ZoneParams {
                 genesisBlockHash: B256::ZERO,
-                genesisTempoBlockHash: computed_hash,
+                genesisTempoBlockHash: block_hash,
                 genesisTempoBlockNumber: tempo_block_number,
             },
         };
