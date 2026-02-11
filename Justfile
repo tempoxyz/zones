@@ -105,6 +105,7 @@ zoneup reset="true" args="":
                       --http.api all \
                       --datadir /tmp/tempo-zone \
                       --log.file.directory /tmp/tempo-zone/logs \
+                      ${SEQUENCER_KEY:+--sequencer.key $SEQUENCER_KEY} \
                       {{args}}
 
 [group('zone')]

@@ -26,9 +26,12 @@ reth-tracing.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
+alloy-signer-local.workspace = true
 
 # misc
 clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [[bin]]
 name = "tempo-zone"

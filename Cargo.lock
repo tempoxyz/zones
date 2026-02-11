@@ -12236,6 +12236,7 @@ name = "tempo-zone"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy-primitives",
+ "alloy-signer-local",
  "clap",
  "reth-cli-util",
  "reth-consensus",
@@ -12243,6 +12244,8 @@ dependencies = [
  "reth-node-builder",
  "reth-tracing",
  "tempo-chainspec",
+ "tokio",
+ "tracing",
  "zone",
 ]
 
