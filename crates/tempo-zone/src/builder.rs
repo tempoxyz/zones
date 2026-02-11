@@ -159,7 +159,7 @@ where
 
         let start = Instant::now();
 
-        let pending_deposits = self.deposit_queue.drain();
+        let pending_deposits = self.deposit_queue.lock().expect("deposit queue poisoned").drain();
 
         if !pending_deposits.is_empty() {
             info!(

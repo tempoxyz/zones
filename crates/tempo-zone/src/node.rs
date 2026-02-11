@@ -93,9 +93,10 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
-            .payload(BasicPayloadServiceBuilder::new(
-                ZonePayloadFactory::new(deposit_queue, token_address),
-            ))
+            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
+                deposit_queue,
+                token_address,
+            )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -165,7 +166,7 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        crate::spawn_l1_subscriber(
+        crate::L1Subscriber::spawn(
             self.l1_config,
             self.deposit_queue,
             ctx.node.task_executor().clone(),

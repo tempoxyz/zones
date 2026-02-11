@@ -26,6 +26,128 @@ sol! {
     );
 }
 
+/// Configuration for the L1 subscriber.
+#[derive(Debug, Clone)]
+pub struct L1SubscriberConfig {
+    /// WebSocket URL of the L1 node.
+    pub l1_rpc_url: String,
+    /// ZonePortal contract address on L1.
+    pub portal_address: Address,
+}
+
+/// L1 chain subscriber that listens for deposit events.
+#[derive(Clone)]
+pub struct L1Subscriber {
+    config: L1SubscriberConfig,
+    deposit_queue: DepositQueue,
+}
+
+impl L1Subscriber {
+    /// Create and spawn the L1 subscriber as a critical background task.
+    pub fn spawn(
+        config: L1SubscriberConfig,
+        deposit_queue: DepositQueue,
+        task_executor: impl reth_ethereum::tasks::TaskSpawner,
+    ) {
+        let subscriber = Self {
+            config,
+            deposit_queue,
+        };
+
+        task_executor.spawn_critical(
+            "l1-deposit-subscriber",
+            Box::pin(async move {
+                loop {
+                    if let Err(e) = subscriber.clone().start().await {
+                        error!(error = %e, "L1 subscriber failed, reconnecting in 5s");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }),
+        );
+    }
+
+    /// Start the L1 subscriber.
+    ///
+    /// This will connect to the L1 node and subscribe to chain notifications,
+    /// extracting deposit events and sending them to the deposit queue.
+    pub async fn start(self) -> eyre::Result<()> {
+        info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
+
+        let url: url::Url = self.config.l1_rpc_url.parse()?;
+        let mut ws = WsConnect::new(self.config.l1_rpc_url.clone());
+
+        if !url.username().is_empty() {
+            let auth = Authorization::basic(url.username(), url.password().unwrap_or_default());
+            ws = ws.with_auth(auth);
+        }
+
+        let provider = ProviderBuilder::new().connect_ws(ws).await?;
+
+        info!("Connected to L1 node, subscribing to logs");
+
+        // Subscribe to DepositEnqueued events from the ZonePortal
+        let filter = Filter::new()
+            .address(self.config.portal_address)
+            .event_signature(DepositMade::SIGNATURE_HASH);
+
+        let sub = provider.subscribe_logs(&filter).await?;
+        let mut stream = sub.into_stream();
+
+        info!(
+            portal = %self.config.portal_address,
+            "Subscribed to L1 deposit events"
+        );
+
+        while let Some(log) = stream.next().await {
+            if let Err(e) = self.process_log(log) {
+                warn!(error = %e, "Failed to process L1 log");
+            }
+        }
+
+        warn!("L1 subscription stream ended");
+        Ok(())
+    }
+
+    /// Process a single log from L1.
+    fn process_log(&self, log: Log) -> eyre::Result<()> {
+        let block_number = log.block_number.unwrap_or(0);
+
+        match DepositMade::decode_log(&log.inner) {
+            Ok(event) => {
+                let deposit = Deposit::from_event(event.data, block_number);
+
+                debug!(
+                    l1_block = block_number,
+                    sender = %deposit.sender,
+                    to = %deposit.to,
+                    amount = %deposit.amount,
+                    memo = %deposit.memo,
+                    "Received deposit from L1"
+                );
+
+                self.deposit_queue
+                    .lock()
+                    .map_err(|_| {
+                        error!("Failed to lock deposit queue");
+                        eyre::eyre!("Deposit queue lock poisoned")
+                    })?
+                    .enqueue(deposit);
+
+                info!(l1_block = block_number, "Enqueued deposit from L1");
+            }
+            Err(e) => {
+                debug!(
+                    error = %e,
+                    "Log from ZonePortal is not a DepositMade event"
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
 /// A deposit extracted from L1.
 #[derive(Debug, Clone)]
 pub struct Deposit {
@@ -80,9 +202,21 @@ impl PendingDeposits {
     /// Hash: `keccak256(abi.encode(sender, to, amount, memo, prevHash))`
     pub fn enqueue(&mut self, deposit: Deposit) {
         self.hash = keccak256(
-            (deposit.sender, deposit.to, deposit.amount, deposit.memo, self.hash).abi_encode(),
+            (
+                deposit.sender,
+                deposit.to,
+                deposit.amount,
+                deposit.memo,
+                self.hash,
+            )
+                .abi_encode(),
         );
         self.pending_deposits.push(deposit);
+    }
+
+    /// Drain all pending deposits, returning them.
+    pub fn drain(&mut self) -> Vec<Deposit> {
+        std::mem::take(&mut self.pending_deposits)
     }
 
     /// Compute a [`DepositQueueTransition`] for a batch of deposits starting from `prev_hash`.
@@ -110,155 +244,7 @@ pub struct DepositQueueTransition {
 }
 
 /// Shared deposit queue for passing deposits between L1 subscriber and block builder.
-#[derive(Debug, Clone, Default)]
-pub struct DepositQueue(Arc<Mutex<PendingDeposits>>);
-
-impl DepositQueue {
-    /// Enqueue a deposit.
-    pub fn enqueue(&self, deposit: Deposit) -> Result<(), ()> {
-        let mut pending = self.0.lock().map_err(|_| ())?;
-        pending.enqueue(deposit);
-        Ok(())
-    }
-
-    /// Drain all pending deposits, returning them.
-    pub fn drain(&self) -> Vec<Deposit> {
-        let mut pending = self.0.lock().expect("deposit queue poisoned");
-        std::mem::take(&mut pending.pending_deposits)
-    }
-}
-
-/// Configuration for the L1 subscriber.
-#[derive(Debug, Clone)]
-pub struct L1SubscriberConfig {
-    /// WebSocket URL of the L1 node.
-    pub l1_rpc_url: String,
-    /// ZonePortal contract address on L1.
-    pub portal_address: Address,
-}
-
-/// L1 chain subscriber that listens for deposit events.
-#[derive(Clone)]
-pub struct L1Subscriber {
-    config: L1SubscriberConfig,
-    deposit_queue: DepositQueue,
-}
-
-impl L1Subscriber {
-    /// Create a new L1 subscriber.
-    pub fn new(config: L1SubscriberConfig, deposit_queue: DepositQueue) -> Self {
-        Self {
-            config,
-            deposit_queue,
-        }
-    }
-
-    /// Start the L1 subscriber.
-    ///
-    /// This will connect to the L1 node and subscribe to chain notifications,
-    /// extracting deposit events and sending them to the deposit queue.
-    pub async fn start(self) -> eyre::Result<()> {
-        info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
-
-        let url: url::Url = self.config.l1_rpc_url.parse()?;
-        let mut ws = WsConnect::new(self.config.l1_rpc_url.clone());
-
-        if !url.username().is_empty() {
-            let auth = Authorization::basic(
-                url.username(),
-                url.password().unwrap_or_default(),
-            );
-            ws = ws.with_auth(auth);
-        }
-
-        let provider = ProviderBuilder::new().connect_ws(ws).await?;
-
-        info!("Connected to L1 node, subscribing to logs");
-
-        // Subscribe to DepositEnqueued events from the ZonePortal
-        let filter = Filter::new()
-            .address(self.config.portal_address)
-            .event_signature(DepositMade::SIGNATURE_HASH);
-
-        let sub = provider.subscribe_logs(&filter).await?;
-        let mut stream = sub.into_stream();
-
-        info!(
-            portal = %self.config.portal_address,
-            "Subscribed to L1 deposit events"
-        );
-
-        while let Some(log) = stream.next().await {
-            if let Err(e) = self.process_log(log) {
-                warn!(error = %e, "Failed to process L1 log");
-            }
-        }
-
-        warn!("L1 subscription stream ended");
-        Ok(())
-    }
-
-    /// Process a single log from L1.
-    fn process_log(&self, log: Log) -> eyre::Result<()> {
-        let block_number = log.block_number.unwrap_or(0);
-
-        match DepositMade::decode_log(&log.inner) {
-            Ok(event) => {
-                let deposit = Deposit::from_event(event.data, block_number);
-
-                debug!(
-                    l1_block = block_number,
-                    sender = %deposit.sender,
-                    to = %deposit.to,
-                    amount = %deposit.amount,
-                    memo = %deposit.memo,
-                    "Received deposit from L1"
-                );
-
-                self.deposit_queue.enqueue(deposit).map_err(|_| {
-                    error!("Failed to lock deposit queue");
-                    eyre::eyre!("Deposit queue lock poisoned")
-                })?;
-
-                info!(
-                    l1_block = block_number,
-                    "Enqueued deposit from L1"
-                );
-            }
-            Err(e) => {
-                debug!(
-                    error = %e,
-                    "Log from ZonePortal is not a DepositMade event"
-                );
-            }
-        }
-
-        Ok(())
-    }
-}
-
-/// Spawn the L1 subscriber as a background task.
-///
-/// Returns the shared deposit queue that the block builder can drain.
-pub fn spawn_l1_subscriber(
-    config: L1SubscriberConfig,
-    deposit_queue: DepositQueue,
-    task_executor: impl reth_ethereum::tasks::TaskSpawner,
-) {
-    let subscriber = L1Subscriber::new(config, deposit_queue);
-
-    task_executor.spawn_critical(
-        "l1-deposit-subscriber",
-        Box::pin(async move {
-            loop {
-                if let Err(e) = subscriber.clone().start().await {
-                    error!(error = %e, "L1 subscriber failed, reconnecting in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-            }
-        }),
-    );
-}
+pub type DepositQueue = Arc<Mutex<PendingDeposits>>;
 
 #[cfg(test)]
 mod tests {
