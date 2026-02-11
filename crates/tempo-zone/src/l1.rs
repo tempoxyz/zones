@@ -94,7 +94,9 @@ impl L1Subscriber {
         self.backfill(l1_provider, filter, from, tip).await
     }
 
-    /// Backfill deposit events from `from..=to` in batches.
+    /// Backfill ALL L1 blocks from `from..=to` in batches, attaching any
+    /// deposit events to the corresponding block. Every block in the range is
+    /// enqueued so that `finalizeTempo` sees a strict sequential chain.
     async fn backfill(
         &self,
         l1_provider: &impl Provider,
@@ -105,20 +107,25 @@ impl L1Subscriber {
         let mut cursor = from;
         while cursor <= to {
             let end = (cursor + BACKFILL_BATCH_SIZE - 1).min(to);
+
+            // 1. Fetch deposit logs for this batch and index by block number.
             let logs = l1_provider
                 .get_logs(&filter.clone().select(cursor..=end))
                 .await?;
 
-            let mut by_block: BTreeMap<u64, Vec<Deposit>> = BTreeMap::new();
+            let mut deposits_by_block: BTreeMap<u64, Vec<Deposit>> = BTreeMap::new();
             for log in logs {
                 let n = log.block_number.ok_or_else(|| eyre::eyre!("log missing block number"))?;
-                by_block.entry(n).or_default().push(self.parse_deposit(log, n)?);
+                deposits_by_block.entry(n).or_default().push(self.parse_deposit(log, n)?);
             }
 
-            // Fetch real L1 headers for each block with deposits
-            let mut blocks = Vec::new();
-            for (block_number, deposits) in by_block {
-                debug!(block = block_number, count = deposits.len(), "Backfill deposits");
+            // 2. Fetch headers for ALL blocks in the range.
+            let mut blocks = Vec::with_capacity((end - cursor + 1) as usize);
+            for block_number in cursor..=end {
+                let deposits = deposits_by_block.remove(&block_number).unwrap_or_default();
+                if !deposits.is_empty() {
+                    debug!(block = block_number, count = deposits.len(), "Backfill deposits");
+                }
                 let header_resp = l1_provider
                     .get_header_by_number(block_number.into())
                     .await?
@@ -126,6 +133,7 @@ impl L1Subscriber {
                 blocks.push((header_resp.inner.inner, deposits));
             }
 
+            // 3. Enqueue every block (with or without deposits).
             let mut queue = self.deposit_queue.lock().map_err(|_| eyre::eyre!("deposit queue poisoned"))?;
             for (header, deposits) in blocks {
                 queue.enqueue(header, deposits);
