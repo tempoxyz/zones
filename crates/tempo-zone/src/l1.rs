@@ -164,42 +164,29 @@ impl L1Subscriber {
             let logs = provider.get_logs(&filter.clone().select(block_number)).await?;
 
             // Parse deposit events from the logs
-            let mut deposits = Vec::new();
-            for log in logs {
-                let deposit = self.parse_deposit(log, block_number)?;
-
-                debug!(
-                    l1_block = block_number,
-                    sender = %deposit.sender,
-                    to = %deposit.to,
-                    amount = %deposit.amount,
-                    memo = %deposit.memo,
-                    "Deposit from L1"
-                );
-
-                deposits.push(deposit);
-            }
+            let deposits: Vec<Deposit> = logs
+                .into_iter()
+                .map(|log| self.parse_deposit(log, block_number))
+                .collect::<eyre::Result<_>>()?;
 
             if deposits.is_empty() {
-                debug!(block = block_number, "No deposits in L1 block");
                 continue;
             }
 
-            info!(
-                block = block_number,
-                count = deposits.len(),
-                "Received deposits from L1 block"
-            );
+            for d in &deposits {
+                info!(
+                    l1_block = block_number,
+                    sender = %d.sender,
+                    to = %d.to,
+                    amount = %d.amount,
+                    "💰 Deposit from L1"
+                );
+            }
 
             self.deposit_queue
                 .lock()
-                .map_err(|_| {
-                    error!("Failed to lock deposit queue");
-                    eyre::eyre!("Deposit queue lock poisoned")
-                })?
+                .map_err(|_| eyre::eyre!("deposit queue poisoned"))?
                 .enqueue(header.clone().into(), deposits);
-
-            info!(block = block_number, "Enqueued L1 block deposits");
         }
 
         warn!("L1 block subscription stream ended");
