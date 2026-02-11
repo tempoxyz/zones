@@ -15,7 +15,8 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
-        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
+        NoopNetworkBuilder, PayloadBuilderBuilder, PoolBuilder, TxPoolBuilder,
+        spawn_maintenance_tasks,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
@@ -41,10 +42,53 @@ use tempo_transaction_pool::{
     validator::TempoTransactionValidator,
 };
 
-use crate::{builder::ZonePayloadBuilderBuilder, l1::L1Subscriber};
+use crate::{builder::ZonePayloadBuilder, l1::L1Subscriber};
 
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
+
+/// Constructs the [`ZonePayloadBuilder`] for the node's payload service.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ZonePayloadBuilderBuilder {
+    deposit_queue: crate::DepositQueue,
+    token_address: alloy_primitives::Address,
+}
+
+impl ZonePayloadBuilderBuilder {
+    pub fn new(
+        deposit_queue: crate::DepositQueue,
+        token_address: alloy_primitives::Address,
+    ) -> Self {
+        Self {
+            deposit_queue,
+            token_address,
+        }
+    }
+}
+
+impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, TempoEvmConfig>
+    for ZonePayloadBuilderBuilder
+where
+    Node: FullNodeTypes<Types = ZoneNode>,
+{
+    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
+
+    async fn build_payload_builder(
+        self,
+        ctx: &BuilderContext<Node>,
+        pool: TempoTransactionPool<Node::Provider>,
+        evm_config: TempoEvmConfig,
+    ) -> eyre::Result<Self::PayloadBuilder> {
+        Ok(ZonePayloadBuilder::new(
+            pool,
+            ctx.provider().clone(),
+            evm_config,
+            self.deposit_queue,
+            self.token_address,
+        ))
+    }
+}
 
 /// Tempo Zone node type configuration.
 ///
