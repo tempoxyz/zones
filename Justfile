@@ -98,6 +98,7 @@ zoneup reset="true" args="":
                       --dev.block-time 1sec \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
                       --l1.portal-address 0x1bc99e6a8c4689f1884527152ba542f012316149 \
+                      --l1.token-address 0x20C0000000000000000000000000000000000000 \
                       --http \
                       --http.addr 0.0.0.0 \
                       --http.port 8546 \

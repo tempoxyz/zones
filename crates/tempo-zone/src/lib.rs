@@ -8,6 +8,7 @@
 
 use eyre as _;
 
+mod builder;
 pub mod l1;
 mod node;
 
