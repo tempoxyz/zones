@@ -56,6 +56,62 @@ localnet accounts="1000" reset="true" profile="maxperf" features="asm-keccak" ar
                       --faucet.address 0x20c0000000000000000000000000000000000001 \
                       {{args}}
 
+[group('zone')]
+[doc('Approves the ZonePortal to spend max TEMPO. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+max-approve-portal:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    PORTAL="0x1bc99e6a8c4689f1884527152ba542f012316149"
+    TOKEN="0x20C0000000000000000000000000000000000000"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    echo "Approving ZonePortal for max TEMPO..."
+    cast send "$TOKEN" "approve(address,uint256)" "$PORTAL" "$(cast max-uint)" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Approved!"
+
+[group('zone')]
+[doc('Sends a test deposit to the ZonePortal on L1 (moderato). Requires L1_RPC_URL and PRIVATE_KEY env vars. Run max-approve-portal first.')]
+send-deposit to amount="1000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    PORTAL="0x1bc99e6a8c4689f1884527152ba542f012316149"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    echo "Depositing {{amount}} to {{to}}..."
+    cast send "$PORTAL" "deposit(address,uint128,bytes32)" "{{to}}" "{{amount}}" "{{memo}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Deposit sent!"
+
+[group('zone')]
+[doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits')]
+zoneup reset="true" args="":
+    #!/bin/bash
+    if [[ "{{reset}}" = "true" ]]; then
+        rm -rf /tmp/tempo-zone || true
+    fi;
+    cargo run --bin tempo-zone -- \
+                      node \
+                      --dev \
+                      --dev.block-time 1sec \
+                      --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
+                      --l1.portal-address 0x1bc99e6a8c4689f1884527152ba542f012316149 \
+                      --l1.token-address 0x20C0000000000000000000000000000000000000 \
+                      --http \
+                      --http.addr 0.0.0.0 \
+                      --http.port 8546 \
+                      --http.api all \
+                      --datadir /tmp/tempo-zone \
+                      --log.file.directory /tmp/tempo-zone/logs \
+                      {{args}}
+
+[group('zone')]
+[doc('Checks TIP-20 token balance for an account on the zone (port 8546)')]
+check-balance account token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8546":
+    @printf "Balance of {{account}}: " && cast call "{{token}}" "balanceOf(address)(uint256)" "{{account}}" --rpc-url "{{rpc}}"
+
 mod scripts
 
 [group('dev')]

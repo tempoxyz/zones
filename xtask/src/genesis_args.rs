@@ -591,6 +591,7 @@ fn create_path_usd_token(
         let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)
             .expect("Could not create pathUSD token instance");
         token.grant_role_internal(admin, *ISSUER_ROLE)?;
+        token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
 
         // Mint to all recipients
         for recipient in recipients.iter().progress() {

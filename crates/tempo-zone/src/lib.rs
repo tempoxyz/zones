@@ -8,8 +8,12 @@
 
 use eyre as _;
 
+mod builder;
 pub mod l1;
 mod node;
 
-pub use l1::{Deposit, DepositQueue, L1SubscriberConfig, spawn_l1_subscriber};
+pub use l1::{
+    Deposit, DepositQueue, DepositQueueTransition, L1SubscriberConfig, PendingDeposits,
+    deposit_queue_hash, process_deposits, spawn_l1_subscriber,
+};
 pub use node::ZoneNode;

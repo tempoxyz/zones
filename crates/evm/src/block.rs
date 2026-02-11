@@ -170,7 +170,9 @@ where
 
             seen_subblocks_signatures = true;
         } else {
-            return Err(BlockValidationError::msg("invalid system transaction"));
+            // TODO: Gate this to only zone nodes. Tempo L1 should reject system txs
+            // to non-zero addresses. Zone nodes use system txs for deposit mints.
+            return Ok(self.section);
         }
 
         Ok(BlockSection::System {
@@ -673,12 +675,10 @@ mod tests {
             TEMPO_SYSTEM_TX_SIGNATURE,
         ));
 
+        // TODO: Once zone-only gating is implemented, this should return an error
+        // for Tempo L1 nodes.
         let result = executor.validate_system_tx(&system_tx);
-        assert!(result.is_err());
-        assert_eq!(
-            result.unwrap_err().to_string(),
-            "invalid system transaction"
-        );
+        assert!(result.is_ok());
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 
+use alloy_primitives::Address;
 use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
@@ -14,7 +15,7 @@ use reth_node_builder::NodeHandle;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
-use zone::{DepositQueue, L1SubscriberConfig, ZoneNode, spawn_l1_subscriber};
+use zone::{DepositQueue, L1SubscriberConfig, ZoneNode};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -24,7 +25,15 @@ static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::ne
 struct ZoneArgs {
     /// L1 WebSocket RPC URL for subscribing to deposit events.
     #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
-    pub l1_rpc_url: Option<String>,
+    pub l1_rpc_url: String,
+
+    /// ZonePortal contract address on L1.
+    #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
+    pub portal_address: Address,
+
+    /// TIP-20 token address to mint on deposit.
+    #[arg(long = "l1.token-address", env = "L1_TOKEN_ADDRESS")]
+    pub token_address: Address,
 
     /// Block building interval in milliseconds.
     #[arg(
@@ -54,40 +63,18 @@ fn main() {
         .run_with_components::<ZoneNode>(components, async move |builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
-            let node = ZoneNode::default();
+            let deposits = DepositQueue::default();
+            let l1_config = L1SubscriberConfig {
+                l1_rpc_url: args.l1_rpc_url,
+                portal_address: args.portal_address,
+            };
+            let node = ZoneNode::new(deposits, args.token_address, l1_config);
 
             let NodeHandle {
-                node_exit_future,
-                node,
-            } = builder.node(node).launch().await?;
+                node_exit_future, ..
+            } = builder.node(node).launch_with_debug_capabilities().await?;
 
             info!(target: "reth::cli", "Tempo Zone node started");
-
-            // Create shared deposit queue
-            let deposits = DepositQueue::default();
-
-            // Spawn L1 subscriber if L1 RPC URL is provided
-            if let Some(l1_rpc_url) = args.l1_rpc_url {
-                let config = L1SubscriberConfig {
-                    l1_rpc_url,
-                    ..Default::default()
-                };
-
-                spawn_l1_subscriber(config, deposits.clone(), node.task_executor.clone());
-
-                info!(target: "reth::cli", "L1 deposit subscriber started");
-            }
-
-            // TODO: Spawn block builder with LocalMiner using args.block_interval_ms
-            // The block builder will:
-            // 1. Drain deposits from the queue
-            // 2. Convert deposits to L2 transactions
-            // 3. Build blocks at the configured interval
-            info!(
-                target: "reth::cli",
-                interval_ms = args.block_interval_ms,
-                "Block builder interval configured (not yet active)"
-            );
 
             node_exit_future.await?;
             Ok(())

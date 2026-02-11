@@ -6,7 +6,6 @@
 use alloy_primitives::U256;
 use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
-use reth_evm::revm::primitives::Address;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
     NewPayloadError, NodeAddOns, NodeTypes, PayloadAttributesBuilder, PayloadTypes,
@@ -15,8 +14,8 @@ use reth_node_api::{
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
-        ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder, NoopNetworkBuilder,
-        NoopPayloadBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
+        BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
+        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
@@ -42,22 +41,47 @@ use tempo_transaction_pool::{
     validator::TempoTransactionValidator,
 };
 
+use crate::builder::ZonePayloadFactory;
+
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 
 /// Tempo Zone node type configuration.
 ///
 /// Uses Tempo primitives, EVM, and pool, but with noop consensus/network/payload.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ZoneNode;
+pub struct ZoneNode {
+    deposit_queue: crate::DepositQueue,
+    token_address: alloy_primitives::Address,
+    l1_config: crate::L1SubscriberConfig,
+}
 
 impl ZoneNode {
+    /// Create a new zone node with a deposit queue, TIP-20 token address, and L1 subscriber config.
+    ///
+    /// The L1 subscriber is spawned automatically as part of the node lifecycle via
+    /// [`ZoneAddOns::launch_add_ons`], ensuring it cannot be accidentally omitted.
+    pub fn new(
+        deposit_queue: crate::DepositQueue,
+        token_address: alloy_primitives::Address,
+        l1_config: crate::L1SubscriberConfig,
+    ) -> Self {
+        Self {
+            deposit_queue,
+            token_address,
+            l1_config,
+        }
+    }
+
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
-    pub fn components<N>() -> ComponentsBuilder<
+    pub fn components<N>(
+        deposit_queue: crate::DepositQueue,
+        token_address: alloy_primitives::Address,
+    ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        NoopPayloadBuilder,
+        BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -69,7 +93,9 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
-            .noop_payload()
+            .payload(BasicPayloadServiceBuilder::new(
+                ZonePayloadFactory::new(deposit_queue, token_address),
+            ))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -92,6 +118,8 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConf
         BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>,
         Identity,
     >,
+    deposit_queue: crate::DepositQueue,
+    l1_config: crate::L1SubscriberConfig,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>> std::fmt::Debug
@@ -107,7 +135,7 @@ where
     N: FullNodeTypes<Types = ZoneNode>,
 {
     /// Creates a new instance.
-    pub fn new() -> Self {
+    pub fn new(deposit_queue: crate::DepositQueue, l1_config: crate::L1SubscriberConfig) -> Self {
         Self {
             inner: RpcAddOns::new(
                 ZoneEthApiBuilder::default(),
@@ -116,16 +144,9 @@ where
                 BasicEngineValidatorBuilder::default(),
                 Identity::default(),
             ),
+            deposit_queue,
+            l1_config,
         }
-    }
-}
-
-impl<N> Default for ZoneAddOns<NodeAdapter<N>>
-where
-    N: FullNodeTypes<Types = ZoneNode>,
-{
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -144,6 +165,14 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+        crate::spawn_l1_subscriber(
+            self.l1_config,
+            self.deposit_queue,
+            ctx.node.task_executor().clone(),
+        );
+
+        info!(target: "reth::cli", "L1 deposit subscriber started as part of node lifecycle");
+
         self.inner.launch_add_ons(ctx).await
     }
 }
@@ -179,7 +208,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        NoopPayloadBuilder,
+        BasicPayloadServiceBuilder<ZonePayloadFactory>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -187,11 +216,11 @@ where
     type AddOns = ZoneAddOns<NodeAdapter<N>>;
 
     fn components_builder(&self) -> Self::ComponentsBuilder {
-        Self::components()
+        Self::components(self.deposit_queue.clone(), self.token_address)
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        ZoneAddOns::new()
+        ZoneAddOns::new(self.deposit_queue.clone(), self.l1_config.clone())
     }
 }
 
@@ -233,7 +262,7 @@ impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
 {
     fn build(&self, parent: &SealedHeader<TempoHeader>) -> TempoPayloadAttributes {
         let mut inner = self.inner.build(parent);
-        inner.suggested_fee_recipient = Address::ZERO;
+        inner.suggested_fee_recipient = alloy_primitives::Address::ZERO;
 
         let timestamp_millis_part = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
