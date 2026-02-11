@@ -115,10 +115,20 @@ impl L1Subscriber {
                 by_block.entry(n).or_default().push(self.parse_deposit(log, n)?);
             }
 
-            let mut queue = self.deposit_queue.lock().map_err(|_| eyre::eyre!("deposit queue poisoned"))?;
+            // Fetch real L1 headers for each block with deposits
+            let mut blocks = Vec::new();
             for (block_number, deposits) in by_block {
                 debug!(block = block_number, count = deposits.len(), "Backfill deposits");
-                queue.enqueue(Header { number: block_number, ..Default::default() }, deposits);
+                let header_resp = l1_provider
+                    .get_header_by_number(block_number.into())
+                    .await?
+                    .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
+                blocks.push((header_resp.inner.inner, deposits));
+            }
+
+            let mut queue = self.deposit_queue.lock().map_err(|_| eyre::eyre!("deposit queue poisoned"))?;
+            for (header, deposits) in blocks {
+                queue.enqueue(header, deposits);
             }
 
             cursor = end + 1;

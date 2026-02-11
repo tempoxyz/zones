@@ -28,6 +28,7 @@ use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Bytes;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use tracing::{debug, error, warn};
 
 use super::provider::L1StateProvider;
 
@@ -78,6 +79,7 @@ impl TempoStateReader {
             PrecompileId::Custom("TempoStateReader".into()),
             move |input| {
                 if !input.is_direct_call() {
+                    warn!(target: "zone::precompile", "TempoStateReader called via DELEGATECALL — rejecting");
                     return Ok(PrecompileOutput::new_reverted(
                         0,
                         DelegateCallNotAllowed {}.abi_encode().into(),
@@ -86,18 +88,34 @@ impl TempoStateReader {
 
                 let data = input.data;
                 if data.len() < 4 {
+                    warn!(target: "zone::precompile", data_len = data.len(), "TempoStateReader called with insufficient data");
                     return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
                 }
 
                 let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
 
-                if selector == readStorageAtCall::SELECTOR {
+                let result = if selector == readStorageAtCall::SELECTOR {
+                    debug!(target: "zone::precompile", "TempoStateReader: readStorageAt");
                     Self::handle_single_slot(&provider, data)
                 } else if selector == readStorageBatchAtCall::SELECTOR {
+                    debug!(target: "zone::precompile", "TempoStateReader: readStorageBatchAt");
                     Self::handle_multi_slot(&provider, data)
                 } else {
+                    warn!(target: "zone::precompile", selector = ?selector, "TempoStateReader: unknown selector");
                     Ok(PrecompileOutput::new_reverted(0, Bytes::new()))
+                };
+
+                match &result {
+                    Ok(output) if output.bytes.is_empty() && output.gas_used == 0 => {
+                        warn!(target: "zone::precompile", "TempoStateReader returned reverted output");
+                    }
+                    Err(e) => {
+                        error!(target: "zone::precompile", %e, "TempoStateReader hard error");
+                    }
+                    _ => {}
                 }
+
+                result
             },
         )
     }
