@@ -7,25 +7,14 @@ use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
-use alloy_sol_types::{SolEvent, SolValue, sol};
+use alloy_sol_types::{SolEvent, SolValue};
 use alloy_transport::Authorization;
 use futures::StreamExt;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
-sol! {
-    // TODO: Rename to DepositEnqueued once the Solidity contract is updated.
-    /// Event emitted by the ZonePortal when a deposit is made.
-    #[derive(Debug)]
-    event DepositMade(
-        bytes32 indexed newCurrentDepositQueueHash,
-        address indexed sender,
-        address to,
-        uint128 netAmount,
-        uint128 fee,
-        bytes32 memo
-    );
-}
+use crate::bindings::ZonePortal::{self, DepositMade};
 
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
@@ -35,6 +24,10 @@ pub struct L1SubscriberConfig {
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
 }
+
+/// Maximum number of blocks to request logs for in a single `eth_getLogs` call
+/// during backfill.
+const BACKFILL_BATCH_SIZE: u64 = 1000;
 
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
 #[derive(Clone)]
@@ -68,10 +61,74 @@ impl L1Subscriber {
         );
     }
 
+    /// Sync to the current L1 tip.
+    ///
+    /// Reads `lastSyncedTempoBlockNumber` from the ZonePortal to determine where
+    /// the zone left off. If the portal hasn't synced yet, falls back to
+    /// `genesisTempoBlockNumber` so we scan from the portal's creation.
+    async fn sync_to_l1_tip(
+        &self,
+        l1_provider: &impl Provider,
+        filter: &Filter,
+    ) -> eyre::Result<()> {
+        let tip = l1_provider.get_block_number().await?;
+        let portal = ZonePortal::new(self.config.portal_address, l1_provider);
+        let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
+
+        let from = if last_synced > 0 {
+            last_synced + 1
+        } else {
+            let genesis = portal.genesisTempoBlockNumber().call().await?;
+            info!(genesis, "Fresh portal, backfilling from genesis");
+            genesis
+        };
+
+        if from > tip {
+            info!(from, tip, "Already synced to L1 tip");
+            return Ok(());
+        }
+
+        info!(from, tip, blocks = tip - from + 1, "Backfilling deposit events");
+        self.backfill(l1_provider, filter, from, tip).await
+    }
+
+    /// Backfill deposit events from `from..=to` in batches.
+    async fn backfill(
+        &self,
+        l1_provider: &impl Provider,
+        filter: &Filter,
+        from: u64,
+        to: u64,
+    ) -> eyre::Result<()> {
+        let mut cursor = from;
+        while cursor <= to {
+            let end = (cursor + BACKFILL_BATCH_SIZE - 1).min(to);
+            let logs = l1_provider
+                .get_logs(&filter.clone().select(cursor..=end))
+                .await?;
+
+            let mut by_block: BTreeMap<u64, Vec<Deposit>> = BTreeMap::new();
+            for log in logs {
+                let n = log.block_number.ok_or_else(|| eyre::eyre!("log missing block number"))?;
+                by_block.entry(n).or_default().push(self.parse_deposit(log, n)?);
+            }
+
+            let mut queue = self.deposit_queue.lock().map_err(|_| eyre::eyre!("deposit queue poisoned"))?;
+            for (block_number, deposits) in by_block {
+                debug!(block = block_number, count = deposits.len(), "Backfill deposits");
+                queue.enqueue(Header { number: block_number, ..Default::default() }, deposits);
+            }
+
+            cursor = end + 1;
+        }
+
+        info!(to, "Backfill complete");
+        Ok(())
+    }
+
     /// Start the L1 subscriber.
     ///
-    /// Subscribes to new L1 block headers. For each block, fetches deposit logs
-    /// from the ZonePortal and enqueues them grouped by block with the header.
+    /// Syncs to the current L1 tip on startup, then subscribes to new blocks.
     pub async fn start(self) -> eyre::Result<()> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
@@ -85,20 +142,20 @@ impl L1Subscriber {
 
         let provider = ProviderBuilder::new().connect_ws(ws).await?;
 
-        info!("Connected to L1 node, subscribing to blocks");
+        info!("Connected to L1 node");
 
-        // Init filter once — same for every block
         let filter = Filter::new()
             .address(self.config.portal_address)
             .event_signature(DepositMade::SIGNATURE_HASH);
 
+        // Subscribe before backfilling so we don't miss blocks between
+        // sync_to_l1_tip finishing and the subscription starting.
         let sub = provider.subscribe_blocks().await?;
         let mut stream = sub.into_stream();
 
-        info!(
-            portal = %self.config.portal_address,
-            "Subscribed to L1 blocks for deposit events"
-        );
+        info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
+
+        self.sync_to_l1_tip(&provider, &filter).await?;
 
         while let Some(header) = stream.next().await {
             let block_number = header.number;
@@ -107,42 +164,29 @@ impl L1Subscriber {
             let logs = provider.get_logs(&filter.clone().select(block_number)).await?;
 
             // Parse deposit events from the logs
-            let mut deposits = Vec::new();
-            for log in logs {
-                let deposit = self.parse_deposit(log, block_number)?;
-
-                debug!(
-                    l1_block = block_number,
-                    sender = %deposit.sender,
-                    to = %deposit.to,
-                    amount = %deposit.amount,
-                    memo = %deposit.memo,
-                    "Deposit from L1"
-                );
-
-                deposits.push(deposit);
-            }
+            let deposits: Vec<Deposit> = logs
+                .into_iter()
+                .map(|log| self.parse_deposit(log, block_number))
+                .collect::<eyre::Result<_>>()?;
 
             if deposits.is_empty() {
-                debug!(block = block_number, "No deposits in L1 block");
                 continue;
             }
 
-            info!(
-                block = block_number,
-                count = deposits.len(),
-                "Received deposits from L1 block"
-            );
+            for d in &deposits {
+                info!(
+                    l1_block = block_number,
+                    sender = %d.sender,
+                    to = %d.to,
+                    amount = %d.amount,
+                    "💰 Deposit from L1"
+                );
+            }
 
             self.deposit_queue
                 .lock()
-                .map_err(|_| {
-                    error!("Failed to lock deposit queue");
-                    eyre::eyre!("Deposit queue lock poisoned")
-                })?
+                .map_err(|_| eyre::eyre!("deposit queue poisoned"))?
                 .enqueue(header.clone().into(), deposits);
-
-            info!(block = block_number, "Enqueued L1 block deposits");
         }
 
         warn!("L1 block subscription stream ended");
