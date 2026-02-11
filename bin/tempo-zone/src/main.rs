@@ -11,7 +11,7 @@ use alloy_primitives::Address;
 use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
-use reth_node_builder::NodeHandle;
+
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use tempo_evm::{TempoEvmConfig, TempoEvmFactory};
@@ -70,13 +70,11 @@ fn main() {
             };
             let node = ZoneNode::new(deposits, args.token_address, l1_config);
 
-            let NodeHandle {
-                node_exit_future, ..
-            } = builder.node(node).launch_with_debug_capabilities().await?;
+            let handle = builder.node(node).launch_with_debug_capabilities().await?;
 
             info!(target: "reth::cli", "Tempo Zone node started");
 
-            node_exit_future.await?;
+            handle.node_exit_future.await?;
             Ok(())
         })
     {
