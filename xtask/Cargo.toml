@@ -11,15 +11,18 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+tempo-alloy.workspace = true
 tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
 tempo-commonware-node-config.workspace = true
 tempo-dkg-onchain-artifacts.workspace = true
 tempo-evm.workspace = true
 tempo-precompiles.workspace = true
+tempo-primitives.workspace = true
 tempo-revm.workspace = true
 
 alloy = { workspace = true, features = [
+  "contract",
   "genesis",
   "providers",
   "reqwest",
@@ -31,7 +34,9 @@ alloy = { workspace = true, features = [
   "sol-types",
   "getrandom",
 ] }
+alloy-consensus.workspace = true
 alloy-primitives.workspace = true
+alloy-rlp.workspace = true
 clap = { version = "4.5.45", features = ["derive"] }
 commonware-codec.workspace = true
 commonware-consensus.workspace = true

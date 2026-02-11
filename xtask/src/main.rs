@@ -2,8 +2,9 @@
 use std::net::SocketAddr;
 
 use crate::{
-    generate_devnet::GenerateDevnet, generate_genesis::GenerateGenesis,
-    generate_localnet::GenerateLocalnet, get_dkg_outcome::GetDkgOutcome,
+    create_zone::CreateZone, generate_devnet::GenerateDevnet, generate_genesis::GenerateGenesis,
+    generate_localnet::GenerateLocalnet, generate_zone_genesis::GenerateZoneGenesis,
+    get_dkg_outcome::GetDkgOutcome,
 };
 
 use alloy::signers::{local::MnemonicBuilder, utils::secret_key_to_address};
@@ -11,9 +12,11 @@ use clap::Parser as _;
 use commonware_codec::DecodeExt;
 use eyre::Context;
 
+mod create_zone;
 mod generate_devnet;
 mod generate_genesis;
 mod generate_localnet;
+mod generate_zone_genesis;
 mod genesis_args;
 mod get_dkg_outcome;
 
@@ -31,6 +34,14 @@ async fn main() -> eyre::Result<()> {
             .run()
             .await
             .wrap_err("failed to generate localnet configs"),
+        Action::CreateZone(args) => args
+            .run()
+            .await
+            .wrap_err("failed to create zone"),
+        Action::GenerateZoneGenesis(args) => args
+            .run()
+            .await
+            .wrap_err("failed to generate zone genesis"),
         Action::GenerateAddPeer(cfg) => generate_config_to_add_peer(cfg),
     }
 }
@@ -47,10 +58,12 @@ struct Args {
 
 #[derive(Debug, clap::Subcommand)]
 enum Action {
+    CreateZone(CreateZone),
     GetDkgOutcome(GetDkgOutcome),
     GenerateGenesis(GenerateGenesis),
     GenerateDevnet(GenerateDevnet),
     GenerateLocalnet(GenerateLocalnet),
+    GenerateZoneGenesis(GenerateZoneGenesis),
     GenerateAddPeer(GenerateAddPeer),
 }
 
