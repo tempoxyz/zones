@@ -27,9 +27,14 @@ pub const ZONE_INBOX_ADDRESS: Address =
 pub const ZONE_OUTBOX_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000002");
 
-/// TempoStateReader predeploy address on Zone L2.
-pub const TEMPO_STATE_READER_ADDRESS: Address =
+/// ZoneConfig predeploy address on Zone L2.
+pub const ZONE_CONFIG_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000003");
+
+/// TempoStateReader predeploy address on Zone L2.
+/// Standalone precompile — separate from the TempoState contract.
+pub const TEMPO_STATE_READER_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000004");
 
 sol! {
     // ---------------------------------------------------------------
