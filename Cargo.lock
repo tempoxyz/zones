@@ -12143,7 +12143,9 @@ name = "tempo-xtask"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy",
+ "alloy-consensus",
  "alloy-primitives",
+ "alloy-rlp",
  "clap",
  "commonware-codec",
  "commonware-consensus",
@@ -12167,6 +12169,7 @@ dependencies = [
  "tempo-dkg-onchain-artifacts",
  "tempo-evm",
  "tempo-precompiles",
+ "tempo-primitives",
  "tempo-revm",
  "tokio",
 ]
