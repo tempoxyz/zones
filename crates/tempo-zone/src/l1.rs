@@ -29,6 +29,10 @@ sol! {
     /// Read the last synced Tempo block number from the ZonePortal.
     #[derive(Debug)]
     function lastSyncedTempoBlockNumber() external view returns (uint64);
+
+    /// Read the genesis Tempo block number from the ZonePortal.
+    #[derive(Debug)]
+    function genesisTempoBlockNumber() external view returns (uint64);
 }
 
 /// Configuration for the L1 subscriber.
@@ -76,44 +80,43 @@ impl L1Subscriber {
         );
     }
 
-    /// Read `lastSyncedTempoBlockNumber` from the ZonePortal contract on L1.
-    ///
-    /// Returns the L1 (Tempo) block number up to which the portal has been synced.
-    /// On a fresh portal this returns 0.
-    async fn last_synced_block(&self, l1_provider: &impl Provider) -> eyre::Result<u64> {
-        let call = lastSyncedTempoBlockNumberCall {};
-        let result = l1_provider
-            .call(
-                alloy_rpc_types_eth::TransactionRequest::default()
-                    .to(self.config.portal_address)
-                    .input(call.abi_encode().into()),
-            )
-            .await?;
-        let decoded =
-            lastSyncedTempoBlockNumberCall::abi_decode_returns(&result)?;
-        Ok(decoded)
-    }
-
     /// Sync to the current L1 tip.
     ///
     /// Reads `lastSyncedTempoBlockNumber` from the ZonePortal to determine where
-    /// the zone left off, then fetches any deposit events between that block and the
-    /// current L1 tip. On a fresh portal (block 0), discovers the deploy block via
-    /// `eth_getCode` binary search to avoid scanning from genesis.
+    /// the zone left off. If the portal hasn't synced yet, falls back to
+    /// `genesisTempoBlockNumber` so we scan from the portal's creation.
     async fn sync_to_l1_tip(
         &self,
         l1_provider: &impl Provider,
         filter: &Filter,
     ) -> eyre::Result<()> {
         let tip = l1_provider.get_block_number().await?;
-        let last_synced = self.last_synced_block(l1_provider).await?;
+        let portal = self.config.portal_address;
+
+        let last_synced: u64 = l1_provider
+            .call(
+                alloy_rpc_types_eth::TransactionRequest::default()
+                    .to(portal)
+                    .input(lastSyncedTempoBlockNumberCall {}.abi_encode().into()),
+            )
+            .await
+            .map(|r| lastSyncedTempoBlockNumberCall::abi_decode_returns(&r))?
+            .map_err(|e| eyre::eyre!("failed to decode lastSyncedTempoBlockNumber: {e}"))?;
 
         let from = if last_synced > 0 {
             last_synced + 1
         } else {
-            let deploy_block = self.find_portal_deploy_block(l1_provider, tip).await?;
-            info!(deploy_block, "Fresh portal: backfilling from deploy block");
-            deploy_block
+            let genesis: u64 = l1_provider
+                .call(
+                    alloy_rpc_types_eth::TransactionRequest::default()
+                        .to(portal)
+                        .input(genesisTempoBlockNumberCall {}.abi_encode().into()),
+                )
+                .await
+                .map(|r| genesisTempoBlockNumberCall::abi_decode_returns(&r))?
+                .map_err(|e| eyre::eyre!("failed to decode genesisTempoBlockNumber: {e}"))?;
+            info!(genesis, "Fresh portal: backfilling from genesis block");
+            genesis
         };
 
         if from > tip {
@@ -253,46 +256,6 @@ impl L1Subscriber {
 
         warn!("L1 block subscription stream ended");
         Ok(())
-    }
-
-    /// Find the block at which the ZonePortal contract was deployed on L1 by
-    /// binary-searching `eth_getCode`. Returns the first block where the contract
-    /// has code.
-    async fn find_portal_deploy_block(
-        &self,
-        l1_provider: &impl Provider,
-        tip: u64,
-    ) -> eyre::Result<u64> {
-        let portal = self.config.portal_address;
-        let mut lo: u64 = 0;
-        let mut hi = tip;
-
-        // Quick check: if no code at tip, the portal isn't deployed yet.
-        let code_at_tip = l1_provider
-            .get_code_at(portal)
-            .block_id(hi.into())
-            .await?;
-        if code_at_tip.is_empty() {
-            return Err(eyre::eyre!(
-                "ZonePortal {portal} has no code at L1 block {tip}"
-            ));
-        }
-
-        while lo < hi {
-            let mid = lo + (hi - lo) / 2;
-            let code = l1_provider
-                .get_code_at(portal)
-                .block_id(mid.into())
-                .await?;
-            if code.is_empty() {
-                lo = mid + 1;
-            } else {
-                hi = mid;
-            }
-        }
-
-        info!(block = lo, portal = %portal, "Found ZonePortal deploy block");
-        Ok(lo)
     }
 
     /// Parse a single log into a [`Deposit`].
