@@ -11,7 +11,7 @@ use reth_evm::{
         context::TxEnv,
         context::result::{ExecutionResult, Output},
         database::{CacheDB, EmptyDB},
-        inspector::JournalExt,
+
         state::AccountInfo,
     },
 };
@@ -21,7 +21,8 @@ use std::{
 };
 use tempo_chainspec::spec::TEMPO_BASE_FEE;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
-use tempo_revm::TempoTxEnv;
+use tempo_revm::{TempoBlockEnv, TempoTxEnv};
+use tempo_chainspec::hardfork::TempoHardfork;
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -74,7 +75,7 @@ impl GenerateZoneGenesis {
     pub(crate) async fn run(self) -> eyre::Result<()> {
         let header_rlp = decode_hex(&self.tempo_genesis_header_rlp)?;
 
-        let mut evm = setup_zone_evm(self.chain_id);
+        let mut evm = setup_zone_evm(self.chain_id, self.gas_limit);
 
         evm.db_mut().insert_account_info(
             DEPLOYER,
@@ -86,6 +87,8 @@ impl GenerateZoneGenesis {
 
         let tempo_state_bytecode = load_artifact(&self.specs_out, "TempoState")?;
         let tempo_state_args = (Bytes::from(header_rlp),).abi_encode_params();
+        let mut nonce = 0u64;
+
         deploy_contract(
             &mut evm,
             &tempo_state_bytecode,
@@ -93,7 +96,9 @@ impl GenerateZoneGenesis {
             TEMPO_STATE_ADDRESS,
             "TempoState",
             self.chain_id,
+            nonce,
         )?;
+        nonce += 1;
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
         let zone_config_args =
@@ -105,7 +110,9 @@ impl GenerateZoneGenesis {
             ZONE_CONFIG_ADDRESS,
             "ZoneConfig",
             self.chain_id,
+            nonce,
         )?;
+        nonce += 1;
 
         let zone_inbox_bytecode = load_artifact(&self.specs_out, "ZoneInbox")?;
         let zone_inbox_args = (
@@ -122,7 +129,9 @@ impl GenerateZoneGenesis {
             ZONE_INBOX_ADDRESS,
             "ZoneInbox",
             self.chain_id,
+            nonce,
         )?;
+        nonce += 1;
 
         let zone_outbox_bytecode = load_artifact(&self.specs_out, "ZoneOutbox")?;
         let zone_outbox_args = (ZONE_CONFIG_ADDRESS, self.zone_token).abi_encode_params();
@@ -133,18 +142,19 @@ impl GenerateZoneGenesis {
             ZONE_OUTBOX_ADDRESS,
             "ZoneOutbox",
             self.chain_id,
+            nonce,
         )?;
 
+        let db = evm.db_mut();
         for (name, addr) in [
             ("TempoState", TEMPO_STATE_ADDRESS),
             ("ZoneConfig", ZONE_CONFIG_ADDRESS),
             ("ZoneInbox", ZONE_INBOX_ADDRESS),
             ("ZoneOutbox", ZONE_OUTBOX_ADDRESS),
         ] {
-            let account = evm
-                .ctx_mut()
-                .journaled_state
-                .evm_state()
+            let account = db
+                .cache
+                .accounts
                 .get(&addr)
                 .ok_or_else(|| eyre!("{name} not found at {addr}"))?;
             let has_code = account
@@ -157,17 +167,18 @@ impl GenerateZoneGenesis {
             }
         }
 
-        let evm_state = evm.ctx_mut().journaled_state.evm_state();
-        let mut genesis_alloc: BTreeMap<Address, GenesisAccount> = evm_state
+        let mut genesis_alloc: BTreeMap<Address, GenesisAccount> = db
+            .cache
+            .accounts
             .iter()
             .filter(|(addr, _)| **addr != DEPLOYER)
             .map(|(address, account)| {
-                let storage = if !account.storage.is_empty() {
+                let storage: Option<BTreeMap<_, _>> = if !account.storage.is_empty() {
                     Some(
                         account
                             .storage
                             .iter()
-                            .map(|(key, val)| ((*key).into(), val.present_value.into()))
+                            .map(|(key, val)| ((*key).into(), (*val).into()))
                             .collect(),
                     )
                 } else {
@@ -242,10 +253,13 @@ impl GenerateZoneGenesis {
     }
 }
 
-fn setup_zone_evm(chain_id: u64) -> TempoEvm<CacheDB<EmptyDB>> {
+fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> TempoEvm<CacheDB<EmptyDB>> {
     let db = CacheDB::default();
-    let mut env = EvmEnv::default().with_timestamp(U256::ZERO);
+    let mut env: EvmEnv<TempoHardfork, TempoBlockEnv> =
+        EvmEnv::default().with_timestamp(U256::ZERO);
     env.cfg_env.chain_id = chain_id;
+    env.cfg_env.tx_gas_limit_cap = Some(u64::MAX);
+    env.block_env.inner.gas_limit = gas_limit;
 
     let factory = TempoEvmFactory::default();
     factory.create_evm(db, env)
@@ -274,6 +288,7 @@ fn deploy_contract(
     predeploy_addr: Address,
     name: &str,
     chain_id: u64,
+    nonce: u64,
 ) -> eyre::Result<()> {
     let mut initcode = Vec::with_capacity(creation_bytecode.len() + constructor_args.len());
     initcode.extend_from_slice(creation_bytecode);
@@ -283,10 +298,11 @@ fn deploy_contract(
         inner: TxEnv {
             caller: DEPLOYER,
             gas_price: 0,
-            gas_limit: 100_000_000,
+            gas_limit: 30_000_000,
             kind: TxKind::Create,
             data: initcode.into(),
             chain_id: Some(chain_id),
+            nonce: nonce,
             ..Default::default()
         },
         ..Default::default()
