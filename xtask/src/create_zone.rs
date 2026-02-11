@@ -70,12 +70,6 @@ pub(crate) struct CreateZone {
     #[arg(long)]
     private_key: String,
 
-    /// Tempo block number to anchor the zone genesis to.
-    /// The header at this block is RLP-encoded and stored in TempoState.
-    /// Defaults to the latest block if not specified.
-    #[arg(long)]
-    tempo_block_number: Option<u64>,
-
     /// Zone L2 chain ID.
     #[arg(long, default_value_t = 13371)]
     chain_id: u64,
@@ -102,14 +96,9 @@ impl CreateZone {
             .wallet(wallet)
             .connect_http(self.l1_rpc_url.parse()?);
 
-        let block_number = match self.tempo_block_number {
-            Some(n) => alloy::eips::BlockNumberOrTag::Number(n),
-            None => alloy::eips::BlockNumberOrTag::Latest,
-        };
-
         println!("Fetching Tempo block header...");
         let block = provider
-            .get_block_by_number(block_number)
+            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
             .await?
             .ok_or_else(|| eyre!("block not found"))?;
 
