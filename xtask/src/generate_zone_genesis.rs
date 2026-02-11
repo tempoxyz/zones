@@ -29,6 +29,12 @@ const ZONE_INBOX_ADDRESS: Address = address!("0x1c000000000000000000000000000000
 const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 
+/// TempoStateReader precompile address — has no deployed contract code, but the zone EVM
+/// registers a custom precompile here. We must insert dummy bytecode (`0xFE`) in genesis
+/// so that Solidity's `EXTCODESIZE` check passes before issuing the STATICCALL.
+const TEMPO_STATE_READER_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000004");
+
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
 #[derive(Debug, clap::Parser)]
@@ -145,6 +151,28 @@ impl GenerateZoneGenesis {
             self.chain_id,
             nonce,
         )?;
+
+        // Insert dummy bytecode at the TempoStateReader precompile address.
+        //
+        // The zone EVM registers a custom precompile at this address, but Solidity ≥0.8
+        // checks `EXTCODESIZE` before every high-level external call. If the address has
+        // no code, the call reverts immediately without issuing the STATICCALL — the
+        // precompile never gets a chance to execute. `0xFE` (INVALID opcode) is safe
+        // because revm routes to the precompile before ever executing bytecode.
+        {
+            use reth_evm::revm::bytecode::Bytecode;
+            evm.db_mut().insert_account_info(
+                TEMPO_STATE_READER_ADDRESS,
+                AccountInfo {
+                    code: Some(Bytecode::new_raw(Bytes::from_static(&[0xFE]))),
+                    nonce: 1,
+                    ..Default::default()
+                },
+            );
+            println!(
+                "Inserted dummy bytecode at TempoStateReader precompile {TEMPO_STATE_READER_ADDRESS}"
+            );
+        }
 
         let db = evm.db_mut();
         for (name, addr) in [

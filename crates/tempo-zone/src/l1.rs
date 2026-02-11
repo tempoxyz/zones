@@ -81,8 +81,8 @@ impl L1Subscriber {
             last_synced + 1
         } else {
             let genesis = portal.genesisTempoBlockNumber().call().await?;
-            info!(genesis, "Fresh portal, backfilling from genesis");
-            genesis
+            info!(genesis, "Fresh portal, backfilling from genesis+1 (genesis block already in TempoState)");
+            genesis + 1
         };
 
         if from > tip {
