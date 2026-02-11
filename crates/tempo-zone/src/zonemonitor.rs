@@ -70,6 +70,9 @@ pub struct ZoneMonitor {
     /// Deposit queue hash from the previous block, used to construct the
     /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
     prev_processed_deposit_hash: B256,
+    /// Previous zone block hash, used as `prev_block_hash` in [`BatchData`].
+    /// Initialized to `B256::ZERO` to match the portal's genesis `blockHash`.
+    prev_block_hash: B256,
 }
 
 impl ZoneMonitor {
@@ -100,6 +103,7 @@ impl ZoneMonitor {
             batch_tx,
             last_processed_block: 0,
             prev_processed_deposit_hash: B256::ZERO,
+            prev_block_hash: B256::ZERO,
         }
     }
 
@@ -220,18 +224,22 @@ impl ZoneMonitor {
             .ok_or_else(|| eyre::eyre!("zone block {block_number} not found"))?;
 
         let block_hash = block.header.hash;
-        let parent_hash = block.header.inner.inner.inner.parent_hash;
 
         // --- 4. Build and send BatchData ---
+        // Use the tracked prev_block_hash rather than the L2 parent_hash.
+        // The portal's blockHash is initialized to B256::ZERO at genesis, so the
+        // first batch must use B256::ZERO as prev_block_hash. After each successful
+        // submission the portal updates blockHash to next_block_hash, which we mirror.
         let batch_data = BatchData {
             tempo_block_number,
-            prev_block_hash: parent_hash,
+            prev_block_hash: self.prev_block_hash,
             next_block_hash: block_hash,
             prev_processed_deposit_hash: self.prev_processed_deposit_hash,
             next_processed_deposit_hash,
             withdrawal_queue_hash,
         };
 
+        self.prev_block_hash = block_hash;
         self.prev_processed_deposit_hash = next_processed_deposit_hash;
         self.last_processed_block = block_number;
 
