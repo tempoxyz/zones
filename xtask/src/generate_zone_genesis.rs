@@ -11,13 +11,12 @@ use reth_evm::{
         context::TxEnv,
         context::result::{ExecutionResult, Output},
         database::{CacheDB, EmptyDB},
-
         state::AccountInfo,
     },
 };
 use std::{
     collections::BTreeMap,
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 use tempo_chainspec::spec::TEMPO_BASE_FEE;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
@@ -73,7 +72,8 @@ struct BytecodeField {
 
 impl GenerateZoneGenesis {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let header_rlp = decode_hex(&self.tempo_genesis_header_rlp)?;
+        let header_rlp =
+            const_hex::decode(&self.tempo_genesis_header_rlp).wrap_err("failed to decode hex string")?;
 
         let mut evm = setup_zone_evm(self.chain_id, self.gas_limit);
 
@@ -265,7 +265,7 @@ fn setup_zone_evm(chain_id: u64, gas_limit: u64) -> TempoEvm<CacheDB<EmptyDB>> {
     factory.create_evm(db, env)
 }
 
-fn load_artifact(specs_out: &PathBuf, name: &str) -> eyre::Result<Vec<u8>> {
+fn load_artifact(specs_out: &Path, name: &str) -> eyre::Result<Vec<u8>> {
     let path = specs_out
         .join(format!("{name}.sol"))
         .join(format!("{name}.json"));
@@ -273,11 +273,7 @@ fn load_artifact(specs_out: &PathBuf, name: &str) -> eyre::Result<Vec<u8>> {
         .wrap_err_with(|| format!("failed to read artifact at `{}`", path.display()))?;
     let artifact: FoundryArtifact = serde_json::from_str(&content)
         .wrap_err_with(|| format!("failed to parse artifact at `{}`", path.display()))?;
-    decode_hex(&artifact.bytecode.object)
-}
-
-fn decode_hex(input: &str) -> eyre::Result<Vec<u8>> {
-    const_hex::decode(input).wrap_err("failed to decode hex string")
+    const_hex::decode(&artifact.bytecode.object).wrap_err("failed to decode bytecode hex")
 }
 
 fn deploy_contract(
@@ -301,7 +297,7 @@ fn deploy_contract(
             kind: TxKind::Create,
             data: initcode.into(),
             chain_id: Some(chain_id),
-            nonce: nonce,
+            nonce,
             ..Default::default()
         },
         ..Default::default()
