@@ -1,16 +1,15 @@
 use alloy::{
-    network::EthereumWallet,
-    primitives::{Address, Bloom, Bytes, B256, B64, U256},
+    network::{EthereumWallet, primitives::{HeaderResponse, ReceiptResponse}},
+    primitives::{Address, B256, keccak256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
     sol,
 };
-use alloy_consensus::Header;
 use alloy_rlp::Encodable;
-use eyre::{WrapErr as _, eyre};
+use eyre::eyre;
 use std::path::PathBuf;
+use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_BASE_FEE;
-use tempo_primitives::TempoHeader;
 
 sol! {
     struct ZoneParams {
@@ -99,7 +98,7 @@ impl CreateZone {
         let key_str = self.private_key.strip_prefix("0x").unwrap_or(&self.private_key);
         let signer: PrivateKeySigner = key_str.parse()?;
         let wallet = EthereumWallet::from(signer);
-        let provider = ProviderBuilder::new()
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
             .connect_http(self.l1_rpc_url.parse()?);
 
@@ -109,41 +108,34 @@ impl CreateZone {
         };
 
         println!("Fetching Tempo block header...");
-        let raw_block: serde_json::Value = retry(|| async {
-            provider
-                .raw_request("eth_getBlockByNumber".into(), (block_number, false))
-                .await
-        })
-        .await?;
+        let block = provider
+            .get_block_by_number(block_number)
+            .await?
+            .ok_or_else(|| eyre!("block not found"))?;
 
-        let header = parse_tempo_header(&raw_block)?;
+        let header = block.header.as_ref();
+        let block_hash = block.header.hash();
+
         let mut header_rlp = Vec::new();
         header.encode(&mut header_rlp);
-        let computed_hash = alloy_primitives::keccak256(&header_rlp);
-        let expected_hash: B256 = raw_block
-            .get("hash")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| eyre!("no hash in block"))?
-            .parse()?;
+        let computed_hash = keccak256(&header_rlp);
 
-        if computed_hash != expected_hash {
+        if computed_hash != block_hash {
             return Err(eyre!(
-                "reconstructed header hash {computed_hash} does not match block hash {expected_hash}"
+                "reconstructed header hash {computed_hash} does not match block hash {block_hash}"
             ));
         }
-        println!("Tempo block {} header validated (hash: {computed_hash})", header.inner.number);
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        println!(
+            "Tempo block {} header validated (hash: {computed_hash})",
+            header.inner.number
+        );
 
         let factory = ZoneFactory::new(self.zone_factory, &provider);
         println!("Fetching verifier address from ZoneFactory...");
-        let verifier = Address::from(retry(|| async { factory.verifier().call().await }).await?.0);
+        let verifier = Address::from(factory.verifier().call().await?.0);
         println!("Verifier: {verifier}");
 
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
         let tempo_block_number = header.inner.number;
-        let tempo_block_hash = computed_hash;
 
         let params = CreateZoneParams {
             token: self.zone_token,
@@ -151,20 +143,21 @@ impl CreateZone {
             verifier,
             zoneParams: ZoneParams {
                 genesisBlockHash: B256::ZERO,
-                genesisTempoBlockHash: tempo_block_hash,
+                genesisTempoBlockHash: computed_hash,
                 genesisTempoBlockNumber: tempo_block_number,
             },
         };
 
-        println!("Creating zone on L1 via ZoneFactory at {}...", self.zone_factory);
-        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        println!(
+            "Creating zone on L1 via ZoneFactory at {}...",
+            self.zone_factory
+        );
         let pending = factory.createZone(params).send().await?;
         println!("Transaction sent, waiting for receipt...");
         let receipt = pending.get_receipt().await?;
         println!("Transaction confirmed in block {:?}", receipt.block_number);
         println!("Status: {}", receipt.status());
         println!("Gas used: {:?}", receipt.gas_used);
-        println!("Logs: {}", receipt.inner.logs().len());
 
         if !receipt.status() {
             return Err(eyre!(
@@ -173,20 +166,17 @@ impl CreateZone {
             ));
         }
 
-        let zone_created_events: Vec<ZoneFactory::ZoneCreated> = receipt
+        let event = receipt
             .inner
             .logs()
             .iter()
-            .filter_map(|log| {
+            .find_map(|log| {
                 log.log_decode::<ZoneFactory::ZoneCreated>()
                     .ok()
                     .map(|decoded| decoded.inner.data)
             })
-            .collect();
-
-        let event = zone_created_events
-            .first()
             .ok_or_else(|| eyre!("no ZoneCreated event in receipt"))?;
+
         let zone_id = event.zoneId;
         let portal = event.portal;
 
@@ -218,126 +208,4 @@ impl CreateZone {
 
         Ok(())
     }
-}
-
-fn parse_tempo_header(block: &serde_json::Value) -> eyre::Result<TempoHeader> {
-    let general_gas_limit = parse_u64_hex(block.get("mainBlockGeneralGasLimit"))?;
-    let shared_gas_limit = parse_u64_hex(block.get("sharedGasLimit"))?;
-    let timestamp_millis_part = parse_u64_hex(block.get("timestampMillisPart"))?;
-
-    let inner = Header {
-        parent_hash: parse_b256(block.get("parentHash"))?,
-        ommers_hash: parse_b256(block.get("sha3Uncles"))?,
-        beneficiary: parse_address(block.get("miner"))?,
-        state_root: parse_b256(block.get("stateRoot"))?,
-        transactions_root: parse_b256(block.get("transactionsRoot"))?,
-        receipts_root: parse_b256(block.get("receiptsRoot"))?,
-        logs_bloom: parse_bloom(block.get("logsBloom"))?,
-        difficulty: parse_u256(block.get("difficulty"))?,
-        number: parse_u64_hex(block.get("number"))?,
-        gas_limit: parse_u64_hex(block.get("gasLimit"))?,
-        gas_used: parse_u64_hex(block.get("gasUsed"))?,
-        timestamp: parse_u64_hex(block.get("timestamp"))?,
-        extra_data: parse_bytes(block.get("extraData"))?,
-        mix_hash: parse_b256(block.get("mixHash"))?,
-        nonce: parse_b64(block.get("nonce"))?,
-        base_fee_per_gas: block
-            .get("baseFeePerGas")
-            .and_then(|v| parse_u64_hex(Some(v)).ok()),
-        withdrawals_root: block
-            .get("withdrawalsRoot")
-            .and_then(|v| parse_b256(Some(v)).ok()),
-        blob_gas_used: block
-            .get("blobGasUsed")
-            .and_then(|v| parse_u64_hex(Some(v)).ok()),
-        excess_blob_gas: block
-            .get("excessBlobGas")
-            .and_then(|v| parse_u64_hex(Some(v)).ok()),
-        parent_beacon_block_root: block
-            .get("parentBeaconBlockRoot")
-            .and_then(|v| parse_b256(Some(v)).ok()),
-        requests_hash: block
-            .get("requestsHash")
-            .and_then(|v| parse_b256(Some(v)).ok()),
-    };
-
-    Ok(TempoHeader {
-        general_gas_limit,
-        shared_gas_limit,
-        timestamp_millis_part,
-        inner,
-    })
-}
-
-fn parse_u64_hex(val: Option<&serde_json::Value>) -> eyre::Result<u64> {
-    let s = val
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre!("missing hex field"))?;
-    let stripped = s.strip_prefix("0x").unwrap_or(s);
-    u64::from_str_radix(stripped, 16).wrap_err("invalid u64 hex")
-}
-
-fn parse_u256(val: Option<&serde_json::Value>) -> eyre::Result<U256> {
-    let s = val
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre!("missing hex field"))?;
-    s.parse::<U256>().wrap_err("invalid U256")
-}
-
-fn parse_b256(val: Option<&serde_json::Value>) -> eyre::Result<B256> {
-    let s = val
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre!("missing bytes32 field"))?;
-    s.parse::<B256>().wrap_err("invalid B256")
-}
-
-fn parse_address(val: Option<&serde_json::Value>) -> eyre::Result<Address> {
-    let s = val
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre!("missing address field"))?;
-    s.parse::<Address>().wrap_err("invalid address")
-}
-
-fn parse_bloom(val: Option<&serde_json::Value>) -> eyre::Result<Bloom> {
-    let s = val
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre!("missing bloom field"))?;
-    s.parse::<Bloom>().wrap_err("invalid bloom")
-}
-
-fn parse_bytes(val: Option<&serde_json::Value>) -> eyre::Result<Bytes> {
-    let s = val
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre!("missing bytes field"))?;
-    let stripped = s.strip_prefix("0x").unwrap_or(s);
-    Ok(Bytes::from(const_hex::decode(stripped)?))
-}
-
-fn parse_b64(val: Option<&serde_json::Value>) -> eyre::Result<B64> {
-    let s = val
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| eyre!("missing B64 field"))?;
-    s.parse::<B64>().wrap_err("invalid B64")
-}
-
-async fn retry<F, Fut, T, E>(mut f: F) -> Result<T, E>
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = Result<T, E>>,
-    E: std::fmt::Debug,
-{
-    for attempt in 0..5 {
-        match f().await {
-            Ok(v) => return Ok(v),
-            Err(e) => {
-                if attempt == 4 {
-                    return Err(e);
-                }
-                let delay = std::time::Duration::from_millis(200 * (attempt + 1));
-                eprintln!("RPC call failed (attempt {}), retrying in {:?}: {e:?}", attempt + 1, delay);
-                tokio::time::sleep(delay).await;
-            }
-        }
-    }
-    unreachable!()
 }
