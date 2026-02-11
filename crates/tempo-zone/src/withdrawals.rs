@@ -30,8 +30,8 @@ use std::{collections::BTreeMap, sync::Arc, time::Duration};
 use alloy_primitives::{Address, B256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use tempo_alloy::TempoNetwork;
 use parking_lot::Mutex;
+use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -90,7 +90,10 @@ impl WithdrawalStore {
     ///
     /// Withdrawals within a batch are stored in FIFO order (oldest first).
     pub fn add_withdrawal(&mut self, batch_index: u64, withdrawal: abi::Withdrawal) {
-        self.batches.entry(batch_index).or_default().push(withdrawal);
+        self.batches
+            .entry(batch_index)
+            .or_default()
+            .push(withdrawal);
     }
 
     /// Get all withdrawals for a batch.
@@ -220,10 +223,8 @@ impl WithdrawalProcessor {
     /// Process the current head slot of the portal's withdrawal queue on Tempo L1.
     #[instrument(skip_all)]
     async fn process_queue(&self) -> eyre::Result<()> {
-        let head: alloy_primitives::U256 =
-            self.portal.withdrawalQueueHead().call().await?;
-        let tail: alloy_primitives::U256 =
-            self.portal.withdrawalQueueTail().call().await?;
+        let head: alloy_primitives::U256 = self.portal.withdrawalQueueHead().call().await?;
+        let tail: alloy_primitives::U256 = self.portal.withdrawalQueueTail().call().await?;
 
         let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
         let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
@@ -234,7 +235,12 @@ impl WithdrawalProcessor {
         }
 
         let pending_slots = tail_val - head_val;
-        info!(head = head_val, tail = tail_val, pending_slots, "Withdrawal queue has pending slots");
+        info!(
+            head = head_val,
+            tail = tail_val,
+            pending_slots,
+            "Withdrawal queue has pending slots"
+        );
 
         let withdrawals = {
             let store = self.store.lock();
@@ -307,7 +313,11 @@ impl WithdrawalProcessor {
 
         self.store.lock().remove_batch(head_val);
 
-        info!(slot = head_val, count = withdrawals.len(), "Batch fully processed and removed from store");
+        info!(
+            slot = head_val,
+            count = withdrawals.len(),
+            "Batch fully processed and removed from store"
+        );
         Ok(())
     }
 }
@@ -337,9 +347,9 @@ pub fn spawn_withdrawal_processor(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::EMPTY_SENTINEL;
     use alloy_primitives::{address, keccak256};
     use alloy_sol_types::SolValue;
-    use crate::abi::EMPTY_SENTINEL;
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {

@@ -15,12 +15,12 @@
 use crate::l1_state::cache::SharedL1StateCache;
 use alloy_eips::NumHash;
 use alloy_primitives::B256;
-use reth_primitives_traits::AlloyBlockHeader as _;
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use futures::StreamExt;
+use reth_primitives_traits::AlloyBlockHeader as _;
 use reth_provider::{CanonStateNotification, CanonStateSubscriptions};
-use tracing::{debug, error, info, warn};
 use std::time::Duration;
+use tracing::{debug, error, info, warn};
 
 /// Configuration for the L1 state listener.
 #[derive(Debug, Clone)]
@@ -89,7 +89,10 @@ impl L1StateListener {
                 cache.clear();
             }
 
-            cache.update_anchor(NumHash { number: block_number, hash: block_hash });
+            cache.update_anchor(NumHash {
+                number: block_number,
+                hash: block_hash,
+            });
             debug!(block_hash = %block_hash, block_number, "Updated L1 state cache anchor");
         }
 
@@ -129,7 +132,10 @@ where
                     let tip = new.tip();
                     self.apply_state_diffs(new.execution_outcome(), tip.number());
                     let mut cache = self.cache.write();
-                    cache.update_anchor(NumHash { number: tip.number(), hash: tip.hash() });
+                    cache.update_anchor(NumHash {
+                        number: tip.number(),
+                        hash: tip.hash(),
+                    });
                     debug!(
                         block_hash = %tip.hash(),
                         block_number = tip.number(),
@@ -149,7 +155,10 @@ where
                     let tip = new.tip();
                     self.apply_state_diffs(new.execution_outcome(), tip.number());
                     let mut cache = self.cache.write();
-                    cache.update_anchor(NumHash { number: tip.number(), hash: tip.hash() });
+                    cache.update_anchor(NumHash {
+                        number: tip.number(),
+                        hash: tip.hash(),
+                    });
                 }
             }
         }
@@ -160,7 +169,11 @@ where
 
     /// Extract storage changes from an `ExecutionOutcome` for tracked contracts and write them
     /// into the cache at the given block number.
-    fn apply_state_diffs<R>(&self, execution_outcome: &reth_provider::ExecutionOutcome<R>, block_number: u64) {
+    fn apply_state_diffs<R>(
+        &self,
+        execution_outcome: &reth_provider::ExecutionOutcome<R>,
+        block_number: u64,
+    ) {
         let mut cache = self.cache.write();
         let mut slots_updated: u64 = 0;
 
@@ -178,7 +191,10 @@ where
         }
 
         if slots_updated > 0 {
-            debug!(slots_updated, block_number, "Applied L1 state diffs to cache");
+            debug!(
+                slots_updated,
+                block_number, "Applied L1 state diffs to cache"
+            );
         }
     }
 }

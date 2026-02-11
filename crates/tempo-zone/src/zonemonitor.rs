@@ -22,9 +22,11 @@ use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::abi::{self, TempoState, ZoneInbox, ZoneOutbox};
-use crate::batch::BatchData;
-use crate::withdrawals::SharedWithdrawalStore;
+use crate::{
+    abi::{self, TempoState, ZoneInbox, ZoneOutbox},
+    batch::BatchData,
+    withdrawals::SharedWithdrawalStore,
+};
 
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
@@ -207,17 +209,9 @@ impl ZoneMonitor {
         }
 
         // --- 3. Read zone state ---
-        let tempo_block_number = self
-            .tempo_state
-            .tempoBlockNumber()
-            .call()
-            .await?;
+        let tempo_block_number = self.tempo_state.tempoBlockNumber().call().await?;
 
-        let next_processed_deposit_hash = self
-            .inbox
-            .processedDepositQueueHash()
-            .call()
-            .await?;
+        let next_processed_deposit_hash = self.inbox.processedDepositQueueHash().call().await?;
 
         let block = self
             .provider

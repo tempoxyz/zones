@@ -18,14 +18,12 @@ use std::sync::Arc;
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use tempo_alloy::TempoNetwork;
 use eyre::Result;
+use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tracing::{error, info, instrument};
 
-use crate::abi::{
-    BlockTransition, DepositQueueTransition, WithdrawalQueueTransition, ZonePortal,
-};
+use crate::abi::{BlockTransition, DepositQueueTransition, WithdrawalQueueTransition, ZonePortal};
 
 /// Configuration for the L1 batch submitter.
 #[derive(Debug, Clone)]

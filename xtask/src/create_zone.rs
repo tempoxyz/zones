@@ -1,5 +1,8 @@
 use alloy::{
-    network::{EthereumWallet, primitives::{HeaderResponse, ReceiptResponse}},
+    network::{
+        EthereumWallet,
+        primitives::{HeaderResponse, ReceiptResponse},
+    },
     primitives::{Address, B256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
@@ -51,7 +54,10 @@ pub(crate) struct CreateZone {
     output: PathBuf,
 
     /// Tempo L1 HTTP RPC URL used to fetch headers and send the createZone transaction.
-    #[arg(long, default_value = "https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz")]
+    #[arg(
+        long,
+        default_value = "https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
+    )]
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
@@ -89,7 +95,10 @@ pub(crate) struct CreateZone {
 
 impl CreateZone {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let key_str = self.private_key.strip_prefix("0x").unwrap_or(&self.private_key);
+        let key_str = self
+            .private_key
+            .strip_prefix("0x")
+            .unwrap_or(&self.private_key);
         let signer: PrivateKeySigner = key_str.parse()?;
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()

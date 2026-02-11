@@ -8,8 +8,10 @@ use reth_evm::{
     Evm as _, EvmEnv, EvmFactory,
     revm::{
         DatabaseCommit,
-        context::TxEnv,
-        context::result::{ExecutionResult, Output},
+        context::{
+            TxEnv,
+            result::{ExecutionResult, Output},
+        },
         database::{CacheDB, EmptyDB},
         state::AccountInfo,
     },
@@ -18,10 +20,9 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
-use tempo_chainspec::spec::TEMPO_BASE_FEE;
+use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_BASE_FEE};
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
-use tempo_chainspec::hardfork::TempoHardfork;
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -72,8 +73,8 @@ struct BytecodeField {
 
 impl GenerateZoneGenesis {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let header_rlp =
-            const_hex::decode(&self.tempo_genesis_header_rlp).wrap_err("failed to decode hex string")?;
+        let header_rlp = const_hex::decode(&self.tempo_genesis_header_rlp)
+            .wrap_err("failed to decode hex string")?;
 
         let mut evm = setup_zone_evm(self.chain_id, self.gas_limit);
 
@@ -157,11 +158,7 @@ impl GenerateZoneGenesis {
                 .accounts
                 .get(&addr)
                 .ok_or_else(|| eyre!("{name} not found at {addr}"))?;
-            let has_code = account
-                .info
-                .code
-                .as_ref()
-                .is_some_and(|c| !c.is_empty());
+            let has_code = account.info.code.as_ref().is_some_and(|c| !c.is_empty());
             if !has_code {
                 return Err(eyre!("{name} has no code at {addr}"));
             }
@@ -195,10 +192,8 @@ impl GenerateZoneGenesis {
             .collect();
 
         if let Some(sequencer) = self.sequencer {
-            genesis_alloc
-                .entry(sequencer)
-                .or_default()
-                .balance = U256::from(1_000_000_000_000_000_000_000u128);
+            genesis_alloc.entry(sequencer).or_default().balance =
+                U256::from(1_000_000_000_000_000_000_000u128);
         }
 
         let chain_config = ChainConfig {
@@ -303,7 +298,9 @@ fn deploy_contract(
         ..Default::default()
     };
 
-    let result = evm.transact_raw(tx).map_err(|e| eyre!("{name} deployment tx failed: {e:?}"))?;
+    let result = evm
+        .transact_raw(tx)
+        .map_err(|e| eyre!("{name} deployment tx failed: {e:?}"))?;
 
     let created_addr = match &result.result {
         ExecutionResult::Success { output, .. } => match output {
@@ -311,10 +308,10 @@ fn deploy_contract(
             _ => return Err(eyre!("{name} deployment did not return a created address")),
         },
         ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("{name} deployment reverted: {output}"))
+            return Err(eyre!("{name} deployment reverted: {output}"));
         }
         ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("{name} deployment halted: {reason:?}"))
+            return Err(eyre!("{name} deployment halted: {reason:?}"));
         }
     };
 

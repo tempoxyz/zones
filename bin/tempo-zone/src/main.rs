@@ -15,11 +15,11 @@ use reth_ethereum::cli::Cli;
 
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use zone::DepositQueue;
-use zone::L1SubscriberConfig;
-use zone::ZoneNode;
-use zone::evm::ZoneEvmConfig;
-use zone::l1_state::{L1StateListenerConfig, L1StateProviderConfig, SharedL1StateCache};
+use zone::{
+    DepositQueue, L1SubscriberConfig, ZoneNode,
+    evm::ZoneEvmConfig,
+    l1_state::{L1StateListenerConfig, L1StateProviderConfig, SharedL1StateCache},
+};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -116,7 +116,6 @@ fn main() {
             let l1_state_cache = SharedL1StateCache::new(HashSet::from([args.portal_address]));
             let node = ZoneNode::new(
                 deposits,
-                args.token_address,
                 l1_config,
                 l1_state_provider_config,
                 l1_state_listener_config,

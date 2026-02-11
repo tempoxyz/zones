@@ -3,7 +3,7 @@
 //! Subscribes to L1 block headers via WebSocket and extracts deposit events
 //! from the ZonePortal contract for each block.
 
-use alloy_consensus::Header;
+use alloy_consensus::BlockHeader as _;
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
@@ -12,6 +12,8 @@ use alloy_transport::Authorization;
 use futures::StreamExt;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use tempo_alloy::TempoNetwork;
+use tempo_primitives::TempoHeader;
 use tracing::{debug, error, info, warn};
 
 use crate::bindings::ZonePortal::{self, DepositMade};
@@ -140,7 +142,9 @@ impl L1Subscriber {
             ws = ws.with_auth(auth);
         }
 
-        let provider = ProviderBuilder::new().connect_ws(ws).await?;
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_ws(ws)
+            .await?;
 
         info!("Connected to L1 node");
 
@@ -158,7 +162,7 @@ impl L1Subscriber {
         self.sync_to_l1_tip(&provider, &filter).await?;
 
         while let Some(header) = stream.next().await {
-            let block_number = header.number;
+            let block_number = header.number();
 
             // Fetch deposit logs for this block — must not skip on failure
             let logs = provider
@@ -240,7 +244,7 @@ impl Deposit {
 #[derive(Debug, Clone)]
 pub struct L1BlockDeposits {
     /// The L1 block header.
-    pub header: Header,
+    pub header: TempoHeader,
     /// Deposits extracted from this block.
     pub deposits: Vec<Deposit>,
 }
@@ -261,7 +265,7 @@ pub struct PendingDeposits {
 
 impl PendingDeposits {
     /// Append deposits from an L1 block to the queue and update the hash chain.
-    pub fn enqueue(&mut self, header: Header, deposits: Vec<Deposit>) {
+    pub fn enqueue(&mut self, header: TempoHeader, deposits: Vec<Deposit>) {
         for deposit in &deposits {
             self.hash = keccak256(
                 (
@@ -314,11 +318,15 @@ pub type DepositQueue = Arc<Mutex<PendingDeposits>>;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_consensus::Header;
     use alloy_primitives::{FixedBytes, address};
 
-    fn make_test_header(number: u64) -> Header {
-        Header {
-            number,
+    fn make_test_header(number: u64) -> TempoHeader {
+        TempoHeader {
+            inner: Header {
+                number,
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -452,9 +460,9 @@ mod tests {
 
         let blocks = queue.drain();
         assert_eq!(blocks.len(), 2);
-        assert_eq!(blocks[0].header.number, 10);
+        assert_eq!(blocks[0].header.inner.number, 10);
         assert_eq!(blocks[0].deposits.len(), 1);
-        assert_eq!(blocks[1].header.number, 11);
+        assert_eq!(blocks[1].header.inner.number, 11);
         assert_eq!(blocks[1].deposits.len(), 1);
 
         // After drain, pending is empty

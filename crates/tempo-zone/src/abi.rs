@@ -16,20 +16,16 @@ use alloy_sol_types::{SolValue, sol};
 pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
 
 /// TempoState predeploy address on Zone L2.
-pub const TEMPO_STATE_ADDRESS: Address =
-    address!("0x1c00000000000000000000000000000000000000");
+pub const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 
 /// ZoneInbox predeploy address on Zone L2.
-pub const ZONE_INBOX_ADDRESS: Address =
-    address!("0x1c00000000000000000000000000000000000001");
+pub const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 
 /// ZoneOutbox predeploy address on Zone L2.
-pub const ZONE_OUTBOX_ADDRESS: Address =
-    address!("0x1c00000000000000000000000000000000000002");
+pub const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 
 /// ZoneConfig predeploy address on Zone L2.
-pub const ZONE_CONFIG_ADDRESS: Address =
-    address!("0x1c00000000000000000000000000000000000003");
+pub const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 
 /// TempoStateReader predeploy address on Zone L2.
 /// Standalone precompile — separate from the TempoState contract.

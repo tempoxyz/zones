@@ -17,7 +17,7 @@ use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::BlockId;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 use super::cache::SharedL1StateCache;
 
@@ -70,19 +70,27 @@ pub struct L1StateProvider {
 impl L1StateProvider {
     /// Create a new provider.
     ///
-    /// The HTTP provider is created eagerly from [`L1StateProviderConfig::l1_rpc_url`] and reused
-    /// for the lifetime of this instance. `runtime_handle` is stored for later use by the
-    /// synchronous [`get_storage`](Self::get_storage) method.
-    pub fn new(
+    /// The provider is created eagerly from [`L1StateProviderConfig::l1_rpc_url`] and reused
+    /// for the lifetime of this instance. The transport (HTTP or WebSocket) is auto-detected
+    /// from the URL scheme. `runtime_handle` is stored for later use by the synchronous
+    /// [`get_storage`](Self::get_storage) method.
+    pub async fn new(
         config: L1StateProviderConfig,
         cache: SharedL1StateCache,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_http(config.l1_rpc_url.parse().expect("valid L1 RPC URL"))
+            .connect(&config.l1_rpc_url)
+            .await
+            .expect("valid L1 RPC URL")
             .erased();
 
-        Self { config, cache, provider, runtime_handle }
+        Self {
+            config,
+            cache,
+            provider,
+            runtime_handle,
+        }
     }
 
     /// Create a provider from pre-constructed components.
@@ -95,7 +103,12 @@ impl L1StateProvider {
         provider: DynProvider<TempoNetwork>,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
-        Self { config, cache, provider, runtime_handle }
+        Self {
+            config,
+            cache,
+            provider,
+            runtime_handle,
+        }
     }
 
     /// Read a storage slot synchronously at a specific L1 block — cache first, RPC fallback.
@@ -119,21 +132,29 @@ impl L1StateProvider {
 
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
-        let result = self.runtime_handle.block_on(tokio::time::timeout(
-            self.config.request_timeout,
-            self.fetch_slot(address, slot, block_number),
-        ));
+        let start = std::time::Instant::now();
+        let result = tokio::task::block_in_place(|| {
+            self.runtime_handle.block_on(tokio::time::timeout(
+                self.config.request_timeout,
+                self.fetch_slot(address, slot, block_number),
+            ))
+        });
+        let elapsed = start.elapsed();
 
         match result {
             Ok(inner) => {
                 let value = inner?;
                 self.cache.write().set(address, slot, block_number, value);
+                info!(%address, %slot, block_number, %value, ?elapsed, "L1 storage RPC fetch succeeded");
                 Ok(value)
             }
-            Err(_elapsed) => Err(eyre::eyre!(
-                "L1 RPC request timed out after {:?} for address={address} slot={slot} block={block_number}",
-                self.config.request_timeout,
-            )),
+            Err(_elapsed) => {
+                warn!(%address, %slot, block_number, ?elapsed, timeout = ?self.config.request_timeout, "L1 storage RPC fetch timed out");
+                Err(eyre::eyre!(
+                    "L1 RPC request timed out after {:?} for address={address} slot={slot} block={block_number}",
+                    self.config.request_timeout,
+                ))
+            }
         }
     }
 
@@ -141,7 +162,12 @@ impl L1StateProvider {
     ///
     /// Same semantics as [`get_storage`](Self::get_storage) but natively async, using
     /// `tokio::time::timeout` directly.
-    pub async fn get_storage_async(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
+    pub async fn get_storage_async(
+        &self,
+        address: Address,
+        slot: B256,
+        block_number: u64,
+    ) -> Result<B256> {
         {
             let cache = self.cache.read();
             if let Some(value) = cache.get(address, slot, block_number) {

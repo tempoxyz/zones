@@ -15,8 +15,7 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
-        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder,
-        spawn_maintenance_tasks,
+        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
@@ -41,11 +40,13 @@ use tempo_transaction_pool::{
 };
 use tracing::{debug, info};
 
-use crate::evm::ZoneEvmConfig;
-use crate::l1::L1Subscriber;
-use crate::l1_state::{
-    L1StateProvider, L1StateProviderConfig, SharedL1StateCache,
-    L1StateListenerConfig, spawn_l1_state_listener,
+use crate::{
+    evm::ZoneEvmConfig,
+    l1::L1Subscriber,
+    l1_state::{
+        L1StateListenerConfig, L1StateProvider, L1StateProviderConfig, SharedL1StateCache,
+        spawn_l1_state_listener,
+    },
 };
 
 use crate::builder::ZonePayloadFactory;
@@ -60,7 +61,6 @@ type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnve
 #[non_exhaustive]
 pub struct ZoneNode {
     deposit_queue: crate::DepositQueue,
-    token_address: alloy_primitives::Address,
     l1_config: crate::L1SubscriberConfig,
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_listener_config: L1StateListenerConfig,
@@ -68,7 +68,7 @@ pub struct ZoneNode {
 }
 
 impl ZoneNode {
-    /// Create a new zone node with a deposit queue, TIP-20 token address, L1 subscriber config,
+    /// Create a new zone node with a deposit queue, L1 subscriber config,
     /// and L1 state infrastructure configs.
     ///
     /// The L1 subscriber is spawned automatically as part of the node lifecycle via
@@ -76,7 +76,6 @@ impl ZoneNode {
     /// The L1 state listener is spawned by [`ZoneExecutorBuilder`] during EVM construction.
     pub fn new(
         deposit_queue: crate::DepositQueue,
-        token_address: alloy_primitives::Address,
         l1_config: crate::L1SubscriberConfig,
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_listener_config: L1StateListenerConfig,
@@ -84,7 +83,6 @@ impl ZoneNode {
     ) -> Self {
         Self {
             deposit_queue,
-            token_address,
             l1_config,
             l1_state_provider_config,
             l1_state_listener_config,
@@ -95,7 +93,6 @@ impl ZoneNode {
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         deposit_queue: crate::DepositQueue,
-        token_address: alloy_primitives::Address,
         executor_builder: ZoneExecutorBuilder,
     ) -> ComponentsBuilder<
         N,
@@ -112,9 +109,9 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(executor_builder)
-            .payload(BasicPayloadServiceBuilder::new(
-                ZonePayloadFactory::new(deposit_queue, token_address),
-            ))
+            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
+                deposit_queue,
+            )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -240,7 +237,7 @@ where
             self.l1_state_listener_config.clone(),
             self.l1_state_cache.clone(),
         );
-        Self::components(self.deposit_queue.clone(), self.token_address, executor_builder)
+        Self::components(self.deposit_queue.clone(), executor_builder)
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -337,7 +334,8 @@ where
             self.l1_state_provider_config,
             self.l1_state_cache.clone(),
             runtime_handle,
-        );
+        )
+        .await;
 
         spawn_l1_state_listener(
             self.l1_state_listener_config,

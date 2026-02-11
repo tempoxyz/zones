@@ -64,7 +64,10 @@ impl Default for L1StateCache {
 impl L1StateCache {
     /// Create a new cache tracking the given contract addresses.
     pub fn new(tracked_contracts: HashSet<Address>) -> Self {
-        Self { tracked_contracts, ..Default::default() }
+        Self {
+            tracked_contracts,
+            ..Default::default()
+        }
     }
 
     /// Returns the cached value for a storage slot at the given block number.
@@ -112,16 +115,10 @@ impl L1StateCache {
     /// lookups at `min_block` still have a baseline value.
     pub fn prune_before(&mut self, min_block: u64) {
         for history in self.slots.values_mut() {
-            let keep_from = history
-                .range(..min_block)
-                .next_back()
-                .map(|(k, _)| *k);
+            let keep_from = history.range(..min_block).next_back().map(|(k, _)| *k);
 
             if let Some(keep) = keep_from {
-                let to_remove: Vec<u64> = history
-                    .range(..keep)
-                    .map(|(k, _)| *k)
-                    .collect();
+                let to_remove: Vec<u64> = history.range(..keep).map(|(k, _)| *k).collect();
                 for k in to_remove {
                     history.remove(&k);
                 }
@@ -187,10 +184,22 @@ mod tests {
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0x0a));
         cache.set(PORTAL, slot, 20, B256::with_last_byte(0x14));
 
-        assert_eq!(cache.get(PORTAL, slot, 10), Some(B256::with_last_byte(0x0a)));
-        assert_eq!(cache.get(PORTAL, slot, 15), Some(B256::with_last_byte(0x0a)));
-        assert_eq!(cache.get(PORTAL, slot, 20), Some(B256::with_last_byte(0x14)));
-        assert_eq!(cache.get(PORTAL, slot, 25), Some(B256::with_last_byte(0x14)));
+        assert_eq!(
+            cache.get(PORTAL, slot, 10),
+            Some(B256::with_last_byte(0x0a))
+        );
+        assert_eq!(
+            cache.get(PORTAL, slot, 15),
+            Some(B256::with_last_byte(0x0a))
+        );
+        assert_eq!(
+            cache.get(PORTAL, slot, 20),
+            Some(B256::with_last_byte(0x14))
+        );
+        assert_eq!(
+            cache.get(PORTAL, slot, 25),
+            Some(B256::with_last_byte(0x14))
+        );
     }
 
     #[test]
@@ -207,7 +216,10 @@ mod tests {
         let mut cache = L1StateCache::new(HashSet::from([PORTAL]));
 
         cache.set(PORTAL, B256::ZERO, 100, B256::with_last_byte(1));
-        cache.update_anchor(NumHash { number: 100, hash: B256::with_last_byte(0xab) });
+        cache.update_anchor(NumHash {
+            number: 100,
+            hash: B256::with_last_byte(0xab),
+        });
 
         cache.clear();
 
@@ -250,8 +262,14 @@ mod tests {
         cache.set(PORTAL, slot, 10, B256::with_last_byte(0xaa));
         cache.set(addr_b, slot, 10, B256::with_last_byte(0xbb));
 
-        assert_eq!(cache.get(PORTAL, slot, 10), Some(B256::with_last_byte(0xaa)));
-        assert_eq!(cache.get(addr_b, slot, 10), Some(B256::with_last_byte(0xbb)));
+        assert_eq!(
+            cache.get(PORTAL, slot, 10),
+            Some(B256::with_last_byte(0xaa))
+        );
+        assert_eq!(
+            cache.get(addr_b, slot, 10),
+            Some(B256::with_last_byte(0xbb))
+        );
     }
 
     #[test]
@@ -266,8 +284,17 @@ mod tests {
         cache.prune_before(15);
 
         assert_eq!(cache.get(PORTAL, slot, 5), None);
-        assert_eq!(cache.get(PORTAL, slot, 10), Some(B256::with_last_byte(0x0a)));
-        assert_eq!(cache.get(PORTAL, slot, 15), Some(B256::with_last_byte(0x0a)));
-        assert_eq!(cache.get(PORTAL, slot, 20), Some(B256::with_last_byte(0x14)));
+        assert_eq!(
+            cache.get(PORTAL, slot, 10),
+            Some(B256::with_last_byte(0x0a))
+        );
+        assert_eq!(
+            cache.get(PORTAL, slot, 15),
+            Some(B256::with_last_byte(0x0a))
+        );
+        assert_eq!(
+            cache.get(PORTAL, slot, 20),
+            Some(B256::with_last_byte(0x14))
+        );
     }
 }

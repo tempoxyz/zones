@@ -9,10 +9,11 @@
 use eyre as _;
 
 pub mod abi;
-pub mod evm;
 pub mod batch;
 pub mod bindings;
 mod builder;
+pub mod evm;
+mod executor;
 pub mod l1;
 pub mod l1_state;
 mod node;
@@ -25,12 +26,11 @@ pub use l1::{
     Deposit, DepositQueue, DepositQueueTransition, L1BlockDeposits, L1Subscriber,
     L1SubscriberConfig, PendingDeposits,
 };
-pub use node::{ZoneNode, ZoneExecutorBuilder};
+pub use node::{ZoneExecutorBuilder, ZoneNode};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
@@ -108,8 +108,12 @@ pub fn spawn_zone_sequencer(
         poll_interval: config.zone_poll_interval,
     };
 
-    let batch_handle =
-        spawn_batch_submitter(batch_config, signer.clone(), batch_rx, withdrawal_notify.clone());
+    let batch_handle = spawn_batch_submitter(
+        batch_config,
+        signer.clone(),
+        batch_rx,
+        withdrawal_notify.clone(),
+    );
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,
         signer,

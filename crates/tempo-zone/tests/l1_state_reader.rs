@@ -19,14 +19,14 @@ fn l1_rpc_url() -> String {
         .unwrap_or_else(|_| "https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz".into())
 }
 
-fn make_provider() -> L1StateProvider {
+async fn make_provider() -> L1StateProvider {
     let config = L1StateProviderConfig {
         l1_rpc_url: l1_rpc_url(),
         ..Default::default()
     };
     let cache = SharedL1StateCache::new(HashSet::from([ZONE_PORTAL]));
     let rt = tokio::runtime::Handle::current();
-    L1StateProvider::new(config, cache, rt)
+    L1StateProvider::new(config, cache, rt).await
 }
 
 async fn recent_block_number() -> u64 {
@@ -43,7 +43,7 @@ async fn recent_block_number() -> u64 {
 #[tokio::test]
 #[ignore = "requires live L1 RPC"]
 async fn l1_provider_reads_storage_slot() {
-    let provider = make_provider();
+    let provider = make_provider().await;
     let block = recent_block_number().await;
 
     let value = provider
@@ -62,7 +62,7 @@ async fn l1_provider_reads_storage_slot() {
 #[tokio::test]
 #[ignore = "requires live L1 RPC"]
 async fn l1_provider_caches_result() {
-    let provider = make_provider();
+    let provider = make_provider().await;
     let block = recent_block_number().await;
 
     let v1 = provider
@@ -90,7 +90,7 @@ async fn l1_provider_caches_result() {
 #[tokio::test]
 #[ignore = "requires live L1 RPC"]
 async fn l1_provider_reads_multiple_slots() {
-    let provider = make_provider();
+    let provider = make_provider().await;
     let block = recent_block_number().await;
 
     let slots = [
@@ -110,7 +110,10 @@ async fn l1_provider_reads_multiple_slots() {
 
     // Slot 0 should be non-zero (contains init data)
     let v0 = provider.cache().read().get(ZONE_PORTAL, B256::ZERO, block);
-    assert!(v0.is_some_and(|v| v != B256::ZERO), "slot 0 should be non-zero");
+    assert!(
+        v0.is_some_and(|v| v != B256::ZERO),
+        "slot 0 should be non-zero"
+    );
 }
 
 // ---------------------------------------------------------------
@@ -120,7 +123,7 @@ async fn l1_provider_reads_multiple_slots() {
 #[tokio::test]
 #[ignore = "requires live L1 RPC"]
 async fn l1_provider_sync_read_from_blocking_thread() {
-    let provider = make_provider();
+    let provider = make_provider().await;
     let block = recent_block_number().await;
 
     let value = tokio::task::spawn_blocking(move || {

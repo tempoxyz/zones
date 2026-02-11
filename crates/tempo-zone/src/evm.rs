@@ -12,24 +12,28 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
     revm::{Inspector, database::State, inspector::NoOpInspector},
 };
-use reth_evm::{ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor};
-use reth_evm::execute::{BlockAssembler, BlockAssemblerInput};
-use tempo_payload_types::TempoExecutionData;
+use alloy_provider::{Provider, ProviderBuilder};
+use reth_evm::{
+    ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+    execute::{BlockAssembler, BlockAssemblerInput},
+};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
+use tempo_alloy::TempoNetwork;
 use tempo_chainspec::TempoChainSpec;
 use tempo_evm::{
     TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig, TempoEvmError,
-    TempoHaltReason, TempoNextBlockEnvAttributes, evm::TempoEvm,
+    TempoHaltReason, TempoNextBlockEnvAttributes,
+    evm::{TempoEvm, TempoEvmFactory},
 };
-use alloy_provider::{Provider, ProviderBuilder};
-use tempo_alloy::TempoNetwork;
-use tempo_primitives::{
-    Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope,
-};
-use tempo_evm::evm::TempoEvmFactory;
+use tempo_payload_types::TempoExecutionData;
+use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 
-use crate::abi::TEMPO_STATE_READER_ADDRESS;
-use crate::l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache, TempoStateReader};
+use crate::executor::ZoneBlockExecutor;
+
+use crate::{
+    abi::TEMPO_STATE_READER_ADDRESS,
+    l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache, TempoStateReader},
+};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
@@ -123,8 +127,8 @@ impl BlockAssembler<ZoneEvmConfig> for ZoneBlockAssembler {
             ..
         } = input;
 
-        self.inner.assemble_block(
-            BlockAssemblerInput::<TempoEvmConfig, TempoHeader>::new(
+        self.inner
+            .assemble_block(BlockAssemblerInput::<TempoEvmConfig, TempoHeader>::new(
                 evm_env,
                 execution_ctx,
                 parent,
@@ -133,8 +137,7 @@ impl BlockAssembler<ZoneEvmConfig> for ZoneBlockAssembler {
                 bundle_state,
                 state_provider,
                 state_root,
-            ),
-        )
+            ))
     }
 }
 
@@ -152,7 +155,11 @@ impl ZoneEvmConfig {
         let zone_factory = ZoneEvmFactory::new(l1_provider);
         let inner = TempoEvmConfig::new_with_default_factory(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
-        Self { inner, zone_factory, block_assembler }
+        Self {
+            inner,
+            zone_factory,
+            block_assembler,
+        }
     }
 
     /// Create a zone EVM config **without** the TempoStateReader precompile.
@@ -196,7 +203,7 @@ impl BlockExecutorFactory for ZoneEvmConfig {
         DB: Database + 'a,
         I: Inspector<TempoCtx<&'a mut State<DB>>> + 'a,
     {
-        BlockExecutorFactory::create_executor(&self.inner, evm, ctx)
+        ZoneBlockExecutor::new(evm, ctx, self.chain_spec())
     }
 }
 
@@ -231,7 +238,23 @@ impl ConfigureEvm for ZoneEvmConfig {
         &self,
         block: &'a SealedBlock<Block>,
     ) -> Result<TempoBlockExecutionCtx<'a>, Self::Error> {
-        self.inner.context_for_block(block)
+        use alloy_consensus::BlockHeader;
+        use alloy_evm::eth::EthBlockExecutionCtx;
+        use std::borrow::Cow;
+
+        Ok(TempoBlockExecutionCtx {
+            inner: EthBlockExecutionCtx {
+                parent_hash: block.header().parent_hash(),
+                parent_beacon_block_root: block.header().parent_beacon_block_root(),
+                ommers: &[],
+                withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
+                extra_data: block.header().extra_data().clone(),
+            },
+            general_gas_limit: 0,
+            shared_gas_limit: 0,
+            validator_set: None,
+            subblock_fee_recipients: Default::default(),
+        })
     }
 
     fn context_for_next_block(
@@ -255,7 +278,9 @@ impl ConfigureEngineEvm<TempoExecutionData> for ZoneEvmConfig {
         &self,
         payload: &'a TempoExecutionData,
     ) -> Result<ExecutionCtxFor<'a, Self>, Self::Error> {
-        self.inner.context_for_payload(payload)
+        let mut context = self.context_for_block(&payload.block)?;
+        context.validator_set = payload.validator_set.clone();
+        Ok(context)
     }
 
     fn tx_iterator_for_payload(
