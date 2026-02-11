@@ -9,7 +9,7 @@ use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolValue, sol};
 use alloy_transport::Authorization;
 use futures::StreamExt;
-use reth_tracing::tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
 
 sol! {
@@ -24,127 +24,6 @@ sol! {
         uint128 fee,
         bytes32 memo
     );
-}
-
-/// A deposit extracted from L1.
-#[derive(Debug, Clone)]
-pub struct Deposit {
-    /// L1 block number where the deposit was included.
-    pub l1_block_number: u64,
-    /// Sender on L1.
-    pub sender: Address,
-    /// Recipient on the zone.
-    pub to: Address,
-    /// Net amount deposited (fee already deducted on L1).
-    pub amount: u128,
-    /// Fee paid on L1.
-    pub fee: u128,
-    /// User-provided memo.
-    pub memo: B256,
-    /// New deposit queue hash after this deposit.
-    pub queue_hash: B256,
-}
-
-impl Deposit {
-    /// Create a new deposit from an event and block number.
-    pub fn from_event(event: DepositMade, l1_block_number: u64) -> Self {
-        Self {
-            l1_block_number,
-            sender: event.sender,
-            to: event.to,
-            amount: event.netAmount,
-            fee: event.fee,
-            memo: event.memo,
-            queue_hash: event.newCurrentDepositQueueHash,
-        }
-    }
-}
-
-/// Deposit queue hash chain state.
-///
-/// Tracks deposits and maintains the hash chain:
-/// `newHash = keccak256(abi.encode(deposit, prevHash))`
-///
-/// This mirrors the L1 portal's `currentDepositQueueHash`.
-#[derive(Debug, Default)]
-pub struct PendingDeposits {
-    /// Deposit queue hash (head of the hash chain).
-    pub hash: B256,
-    /// Pending deposits not yet processed by the zone.
-    pub pending_deposits: Vec<Deposit>,
-}
-
-impl PendingDeposits {
-    /// Append a deposit to the queue and update the hash chain.
-    ///
-    /// Computes: `currentHash = keccak256(abi.encode(deposit, currentHash))`
-    pub fn enqueue(&mut self, deposit: Deposit) {
-        self.hash = deposit_queue_hash(&deposit, self.hash);
-        self.pending_deposits.push(deposit);
-    }
-}
-
-/// Compute the deposit queue hash for a single deposit.
-///
-/// `keccak256(abi.encode(deposit, prevHash))`
-///
-/// The deposit is ABI-encoded as the Solidity struct `Deposit{sender, to, amount, memo}`,
-/// followed by the previous hash.
-pub fn deposit_queue_hash(deposit: &Deposit, prev_hash: B256) -> B256 {
-    let encoded = (
-        deposit.sender,
-        deposit.to,
-        deposit.amount,
-        deposit.memo,
-        prev_hash,
-    )
-        .abi_encode();
-    keccak256(&encoded)
-}
-
-/// Deposit queue transition for batch proof validation.
-///
-/// Tracks where the zone started and stopped processing deposits.
-#[derive(Debug, Clone, Default)]
-pub struct DepositQueueTransition {
-    /// Where the zone started processing (verified against zone state).
-    pub prev_processed_hash: B256,
-    /// Where the zone processed up to (proof output).
-    pub next_processed_hash: B256,
-}
-
-/// Process a batch of deposits starting from `processed_hash`, returning the transition.
-///
-/// Computes the hash chain for the given deposits and returns a `DepositQueueTransition`
-/// with the before/after hashes for batch proof validation.
-pub fn process_deposits(processed_hash: B256, deposits: &[Deposit]) -> DepositQueueTransition {
-    let mut current = processed_hash;
-    for deposit in deposits {
-        current = deposit_queue_hash(deposit, current);
-    }
-    DepositQueueTransition {
-        prev_processed_hash: processed_hash,
-        next_processed_hash: current,
-    }
-}
-
-/// Shared deposit queue for passing deposits between L1 subscriber and block builder.
-#[derive(Debug, Clone, Default)]
-pub struct DepositQueue(Arc<Mutex<PendingDeposits>>);
-
-impl DepositQueue {
-    /// Enqueue a deposit.
-    pub fn enqueue(&self, deposit: Deposit) -> Result<(), ()> {
-        let mut pending = self.0.lock().map_err(|_| ())?;
-        pending.enqueue(deposit);
-        Ok(())
-    }
-
-    /// Drain all pending deposits, returning them.
-    pub fn drain(&self) -> Vec<Deposit> {
-        let mut pending = self.0.lock().expect("deposit queue poisoned");
-        std::mem::take(&mut pending.pending_deposits)
-    }
 }
 
 /// Configuration for the L1 subscriber.
@@ -164,12 +43,28 @@ pub struct L1Subscriber {
 }
 
 impl L1Subscriber {
-    /// Create a new L1 subscriber.
-    pub fn new(config: L1SubscriberConfig, deposit_queue: DepositQueue) -> Self {
-        Self {
+    /// Create and spawn the L1 subscriber as a critical background task.
+    pub fn spawn(
+        config: L1SubscriberConfig,
+        deposit_queue: DepositQueue,
+        task_executor: impl reth_ethereum::tasks::TaskSpawner,
+    ) {
+        let subscriber = Self {
             config,
             deposit_queue,
-        }
+        };
+
+        task_executor.spawn_critical(
+            "l1-deposit-subscriber",
+            Box::pin(async move {
+                loop {
+                    if let Err(e) = subscriber.clone().start().await {
+                        error!(error = %e, "L1 subscriber failed, reconnecting in 5s");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    }
+                }
+            }),
+        );
     }
 
     /// Start the L1 subscriber.
@@ -183,10 +78,7 @@ impl L1Subscriber {
         let mut ws = WsConnect::new(self.config.l1_rpc_url.clone());
 
         if !url.username().is_empty() {
-            let auth = Authorization::basic(
-                url.username(),
-                url.password().unwrap_or_default(),
-            );
+            let auth = Authorization::basic(url.username(), url.password().unwrap_or_default());
             ws = ws.with_auth(auth);
         }
 
@@ -234,15 +126,15 @@ impl L1Subscriber {
                     "Received deposit from L1"
                 );
 
-                self.deposit_queue.enqueue(deposit).map_err(|_| {
-                    error!("Failed to lock deposit queue");
-                    eyre::eyre!("Deposit queue lock poisoned")
-                })?;
+                self.deposit_queue
+                    .lock()
+                    .map_err(|_| {
+                        error!("Failed to lock deposit queue");
+                        eyre::eyre!("Deposit queue lock poisoned")
+                    })?
+                    .enqueue(deposit);
 
-                info!(
-                    l1_block = block_number,
-                    "Enqueued deposit from L1"
-                );
+                info!(l1_block = block_number, "Enqueued deposit from L1");
             }
             Err(e) => {
                 debug!(
@@ -256,28 +148,102 @@ impl L1Subscriber {
     }
 }
 
-/// Spawn the L1 subscriber as a background task.
-///
-/// Returns the shared deposit queue that the block builder can drain.
-pub fn spawn_l1_subscriber(
-    config: L1SubscriberConfig,
-    deposit_queue: DepositQueue,
-    task_executor: impl reth_ethereum::tasks::TaskSpawner,
-) {
-    let subscriber = L1Subscriber::new(config, deposit_queue);
-
-    task_executor.spawn_critical(
-        "l1-deposit-subscriber",
-        Box::pin(async move {
-            loop {
-                if let Err(e) = subscriber.clone().start().await {
-                    error!(error = %e, "L1 subscriber failed, reconnecting in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-            }
-        }),
-    );
+/// A deposit extracted from L1.
+#[derive(Debug, Clone)]
+pub struct Deposit {
+    /// L1 block number where the deposit was included.
+    pub l1_block_number: u64,
+    /// Sender on L1.
+    pub sender: Address,
+    /// Recipient on the zone.
+    pub to: Address,
+    /// Net amount deposited (fee already deducted on L1).
+    pub amount: u128,
+    /// Fee paid on L1.
+    pub fee: u128,
+    /// User-provided memo.
+    pub memo: B256,
+    /// New deposit queue hash after this deposit.
+    pub queue_hash: B256,
 }
+
+impl Deposit {
+    /// Create a new deposit from an event and block number.
+    pub fn from_event(event: DepositMade, l1_block_number: u64) -> Self {
+        Self {
+            l1_block_number,
+            sender: event.sender,
+            to: event.to,
+            amount: event.netAmount,
+            fee: event.fee,
+            memo: event.memo,
+            queue_hash: event.newCurrentDepositQueueHash,
+        }
+    }
+}
+
+/// Deposit queue hash chain state.
+///
+/// Tracks deposits and maintains the hash chain:
+/// `newHash = keccak256(abi.encode(deposit, prevHash))`
+///
+/// This mirrors the L1 portal's `currentDepositQueueHash`.
+#[derive(Debug, Default)]
+pub struct PendingDeposits {
+    /// Head of deposit queue hash chain
+    pub hash: B256,
+    /// Pending deposits not yet processed by the zone
+    pub pending_deposits: Vec<Deposit>,
+}
+
+impl PendingDeposits {
+    /// Append a deposit to the queue and update the hash chain
+    pub fn enqueue(&mut self, deposit: Deposit) {
+        self.hash = keccak256(
+            (
+                deposit.sender,
+                deposit.to,
+                deposit.amount,
+                deposit.memo,
+                self.hash,
+            )
+                .abi_encode(),
+        );
+        self.pending_deposits.push(deposit);
+    }
+
+    pub fn drain(&mut self) -> Vec<Deposit> {
+        std::mem::take(&mut self.pending_deposits)
+    }
+
+    /// Compute a [`DepositQueueTransition`] for a batch of deposits starting from `prev_hash`
+    pub fn transition(prev_hash: B256, deposits: &[Deposit]) -> DepositQueueTransition {
+        let mut current = prev_hash;
+        for d in deposits {
+            current = keccak256((d.sender, d.to, d.amount, d.memo, current).abi_encode());
+        }
+        DepositQueueTransition {
+            prev_processed_hash: prev_hash,
+            next_processed_hash: current,
+        }
+    }
+}
+
+/// Deposit queue transition for batch proof validation.
+///
+/// Represents the state of the deposit hash chain for a batch
+/// of deposits processed by the zone. Used to prove which deposits were
+/// included in a block.
+#[derive(Debug, Clone, Default)]
+pub struct DepositQueueTransition {
+    /// Hash chain head before the is processed
+    pub prev_processed_hash: B256,
+    /// Hash chain head after the is processed
+    pub next_processed_hash: B256,
+}
+
+/// Shared deposit queue for passing deposits between L1 subscriber and block builder.
+pub type DepositQueue = Arc<Mutex<PendingDeposits>>;
 
 #[cfg(test)]
 mod tests {
@@ -304,8 +270,9 @@ mod tests {
         assert_ne!(hash_after_d1, B256::ZERO);
 
         // Verify hash is deterministic
-        let expected = deposit_queue_hash(&d1, B256::ZERO);
-        assert_eq!(hash_after_d1, expected);
+        let mut queue2 = PendingDeposits::default();
+        queue2.enqueue(d1);
+        assert_eq!(hash_after_d1, queue2.hash);
 
         let d2 = Deposit {
             l1_block_number: 2,
@@ -317,13 +284,9 @@ mod tests {
             queue_hash: B256::ZERO,
         };
 
-        queue.enqueue(d2.clone());
+        queue.enqueue(d2);
         let hash_after_d2 = queue.hash;
         assert_ne!(hash_after_d2, hash_after_d1);
-
-        // Verify chaining: hash(d2, hash(d1, 0))
-        let expected = deposit_queue_hash(&d2, hash_after_d1);
-        assert_eq!(hash_after_d2, expected);
     }
 
     #[test]
@@ -349,13 +312,13 @@ mod tests {
             },
         ];
 
-        let transition = process_deposits(B256::ZERO, &deposits);
+        let transition = PendingDeposits::transition(B256::ZERO, &deposits);
 
         assert_eq!(transition.prev_processed_hash, B256::ZERO);
         assert_ne!(transition.next_processed_hash, B256::ZERO);
 
         // Second batch with no deposits should be a no-op
-        let transition2 = process_deposits(transition.next_processed_hash, &[]);
+        let transition2 = PendingDeposits::transition(transition.next_processed_hash, &[]);
         assert_eq!(
             transition2.prev_processed_hash,
             transition.next_processed_hash
@@ -384,7 +347,7 @@ mod tests {
             queue.enqueue(d.clone());
         }
 
-        let transition = process_deposits(B256::ZERO, &deposits);
+        let transition = PendingDeposits::transition(B256::ZERO, &deposits);
 
         assert_eq!(queue.hash, transition.next_processed_hash);
     }

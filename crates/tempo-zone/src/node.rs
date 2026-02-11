@@ -15,7 +15,8 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
-        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
+        NoopNetworkBuilder, PayloadBuilderBuilder, PoolBuilder, TxPoolBuilder,
+        spawn_maintenance_tasks,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
@@ -27,7 +28,7 @@ use reth_provider::{ChainSpecProvider, EthStorage};
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
-use reth_tracing::tracing::{debug, info};
+use tracing::{debug, info};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
@@ -41,10 +42,53 @@ use tempo_transaction_pool::{
     validator::TempoTransactionValidator,
 };
 
-use crate::builder::ZonePayloadFactory;
+use crate::{builder::ZonePayloadBuilder, l1::L1Subscriber};
 
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
+
+/// Constructs the [`ZonePayloadBuilder`] for the node's payload service.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ZonePayloadBuilderBuilder {
+    deposit_queue: crate::DepositQueue,
+    token_address: alloy_primitives::Address,
+}
+
+impl ZonePayloadBuilderBuilder {
+    pub fn new(
+        deposit_queue: crate::DepositQueue,
+        token_address: alloy_primitives::Address,
+    ) -> Self {
+        Self {
+            deposit_queue,
+            token_address,
+        }
+    }
+}
+
+impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, TempoEvmConfig>
+    for ZonePayloadBuilderBuilder
+where
+    Node: FullNodeTypes<Types = ZoneNode>,
+{
+    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
+
+    async fn build_payload_builder(
+        self,
+        ctx: &BuilderContext<Node>,
+        pool: TempoTransactionPool<Node::Provider>,
+        evm_config: TempoEvmConfig,
+    ) -> eyre::Result<Self::PayloadBuilder> {
+        Ok(ZonePayloadBuilder::new(
+            pool,
+            ctx.provider().clone(),
+            evm_config,
+            self.deposit_queue,
+            self.token_address,
+        ))
+    }
+}
 
 /// Tempo Zone node type configuration.
 ///
@@ -81,7 +125,7 @@ impl ZoneNode {
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadFactory>,
+        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -94,7 +138,7 @@ impl ZoneNode {
             .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
             .payload(BasicPayloadServiceBuilder::new(
-                ZonePayloadFactory::new(deposit_queue, token_address),
+                ZonePayloadBuilderBuilder::new(deposit_queue, token_address),
             ))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -165,7 +209,7 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        crate::spawn_l1_subscriber(
+        L1Subscriber::spawn(
             self.l1_config,
             self.deposit_queue,
             ctx.node.task_executor().clone(),
@@ -208,7 +252,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadFactory>,
+        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
