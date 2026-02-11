@@ -69,10 +69,7 @@ sol! {
         bytes32 nextProcessedHash;
     }
 
-    #[derive(Debug)]
-    struct WithdrawalQueueTransition {
-        bytes32 withdrawalQueueHash;
-    }
+    // NOTE: WithdrawalQueueTransition was removed — submitBatch takes a plain bytes32.
 
     #[derive(Debug)]
     struct LastBatch {
@@ -148,9 +145,10 @@ sol! {
 
         function submitBatch(
             uint64 tempoBlockNumber,
+            uint64 recentTempoBlockNumber,
             BlockTransition calldata blockTransition,
             DepositQueueTransition calldata depositQueueTransition,
-            WithdrawalQueueTransition calldata withdrawalQueueTransition,
+            bytes32 withdrawalQueueHash,
             bytes calldata verifierConfig,
             bytes calldata proof
         ) external;
@@ -259,14 +257,21 @@ sol! {
         bytes depositData;
     }
 
+    /// Chaum-Pedersen proof for ECDH shared secret derivation.
+    #[derive(Debug)]
+    struct ChaumPedersenProof {
+        bytes32 s;
+        bytes32 c;
+    }
+
     /// Decryption data provided by the sequencer for encrypted deposits.
     #[derive(Debug)]
     struct DecryptionData {
         bytes32 sharedSecret;
         uint8 sharedSecretYParity;
-        bytes cpProof;
         address to;
         bytes32 memo;
+        ChaumPedersenProof cpProof;
     }
 
     #[sol(rpc)]

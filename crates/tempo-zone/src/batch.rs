@@ -67,11 +67,13 @@ impl BatchSubmitter {
     ///
     /// Builds an HTTP provider with the sequencer wallet and instantiates the
     /// ZonePortal contract for L1 calls.
-    pub fn new(config: BatchSubmitterConfig, signer: PrivateKeySigner) -> Self {
+    pub async fn new(config: BatchSubmitterConfig, signer: PrivateKeySigner) -> Self {
         let wallet = alloy_network::EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
-            .connect_http(config.l1_rpc_url.parse().expect("valid L1 RPC URL"))
+            .connect(&config.l1_rpc_url)
+            .await
+            .expect("valid L1 RPC URL")
             .erased();
 
         let portal = ZonePortal::new(config.portal_address, provider);
@@ -146,9 +148,8 @@ pub fn spawn_batch_submitter(
     mut batch_rx: tokio::sync::mpsc::UnboundedReceiver<BatchData>,
     withdrawal_notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
-    let submitter = BatchSubmitter::new(config, signer);
-
     tokio::spawn(async move {
+        let submitter = BatchSubmitter::new(config, signer).await;
         while let Some(batch) = batch_rx.recv().await {
             match submitter.submit_batch(&batch).await {
                 Ok(tx_hash) => {

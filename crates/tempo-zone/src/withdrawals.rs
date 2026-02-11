@@ -174,7 +174,7 @@ impl WithdrawalProcessor {
     ///
     /// Builds an HTTP provider with the sequencer wallet and instantiates the
     /// ZonePortal contract for L1 calls.
-    pub fn new(
+    pub async fn new(
         config: WithdrawalProcessorConfig,
         signer: PrivateKeySigner,
         store: SharedWithdrawalStore,
@@ -183,7 +183,9 @@ impl WithdrawalProcessor {
         let wallet = alloy_network::EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
-            .connect_http(config.l1_rpc_url.parse().expect("valid L1 RPC URL"))
+            .connect(&config.l1_rpc_url)
+            .await
+            .expect("valid L1 RPC URL")
             .erased();
 
         let portal = ZonePortal::new(config.portal_address, provider);
@@ -332,9 +334,8 @@ pub fn spawn_withdrawal_processor(
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
-    let processor = WithdrawalProcessor::new(config, signer, store, notify);
-
     tokio::spawn(async move {
+        let processor = WithdrawalProcessor::new(config, signer, store, notify).await;
         loop {
             if let Err(e) = processor.run().await {
                 error!(error = %e, "Withdrawal processor failed, restarting in 5s");

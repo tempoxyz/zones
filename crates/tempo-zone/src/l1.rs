@@ -25,6 +25,9 @@ pub struct L1SubscriberConfig {
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
+    /// Genesis Tempo block number from the zone's TempoState genesis anchor.
+    /// Used as fallback when the portal's `genesisTempoBlockNumber` is not yet set.
+    pub genesis_tempo_block_number: Option<u64>,
 }
 
 /// Maximum number of blocks to request logs for in a single `eth_getLogs` call
@@ -80,7 +83,16 @@ impl L1Subscriber {
         let from = if last_synced > 0 {
             last_synced + 1
         } else {
-            let genesis = portal.genesisTempoBlockNumber().call().await?;
+            // Prefer the local genesis anchor (from TempoState) over the portal's value,
+            // which may be 0 if the portal was created with placeholder params.
+            let genesis = if let Some(local) = self.config.genesis_tempo_block_number {
+                info!(genesis = local, "Using local genesis anchor block number");
+                local
+            } else {
+                let on_chain = portal.genesisTempoBlockNumber().call().await?;
+                info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
+                on_chain
+            };
             info!(genesis, "Fresh portal, backfilling from genesis+1 (genesis block already in TempoState)");
             genesis + 1
         };

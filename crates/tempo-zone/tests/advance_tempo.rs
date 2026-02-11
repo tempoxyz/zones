@@ -30,12 +30,16 @@ sol! {
         uint8 depositType;
         bytes depositData;
     }
+    struct ChaumPedersenProof {
+        bytes32 s;
+        bytes32 c;
+    }
     struct DecryptionData {
         bytes32 sharedSecret;
         uint8 sharedSecretYParity;
-        bytes cpProof;
         address to;
         bytes32 memo;
+        ChaumPedersenProof cpProof;
     }
 }
 
@@ -243,7 +247,8 @@ fn build_dummy_header_rlp() -> Vec<u8> {
 fn advance_tempo_repro() {
     let mut evm = setup_zone_evm_with_contracts();
 
-    let sequencer = Address::repeat_byte(0x11);
+    // System txs use Address::ZERO which bypasses OnlySequencer in ZoneInbox/ZoneOutbox
+    let sequencer = Address::ZERO;
 
     // ---------------------------------------------------------------
     // Step 1: Call config() on ZoneInbox — simple view call to verify contracts work
@@ -305,10 +310,58 @@ fn advance_tempo_repro() {
     // ---------------------------------------------------------------
     // Step 3: Call advanceTempo with a minimal next header
     // ---------------------------------------------------------------
-    println!("\n=== Calling ZoneInbox.advanceTempo() ===");
+    // Verify contracts have code
+    {
+        let inbox_code = evm.db_mut().cache.accounts.get(&ZONE_INBOX_ADDRESS)
+            .and_then(|a| a.info.code.as_ref())
+            .map(|c| c.len())
+            .unwrap_or(0);
+        let tempostate_code = evm.db_mut().cache.accounts.get(&TEMPO_STATE_ADDRESS)
+            .and_then(|a| a.info.code.as_ref())
+            .map(|c| c.len())
+            .unwrap_or(0);
+        println!("ZoneInbox code size: {inbox_code}");
+        println!("TempoState code size: {tempostate_code}");
+    }
 
-    // Build a "next" header that's a child of the genesis (block_number=1, parent_hash=genesis_hash)
-    let next_header_rlp = build_dummy_header_rlp();
+    // ---------------------------------------------------------------
+    // Step 2.5: Call finalizeTempo directly on TempoState to isolate
+    // ---------------------------------------------------------------
+    println!("\n=== Building child header ===");
+
+    // Build a "next" header that's a child of the genesis.
+    // finalizeTempo requires: tempoParentHash == prev tempoBlockHash, tempoBlockNumber == prev + 1
+    let genesis_hash = {
+        use alloy_rlp::Encodable;
+        let genesis = tempo_primitives::TempoHeader::default();
+        let mut buf = Vec::new();
+        genesis.encode(&mut buf);
+        alloy_primitives::keccak256(&buf)
+    };
+    println!("Genesis hash (computed): {genesis_hash}");
+
+    let next_header = tempo_primitives::TempoHeader {
+        inner: alloy_consensus::Header {
+            number: 1,
+            parent_hash: genesis_hash,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let next_header_rlp = {
+        use alloy_rlp::Encodable;
+        let mut buf = Vec::new();
+        next_header.encode(&mut buf);
+        buf
+    };
+    println!("Next header RLP length: {}", next_header_rlp.len());
+    println!("Next header block number: {}", next_header.inner.number);
+    println!("Next header parent hash: {}", next_header.inner.parent_hash);
+
+    // NOTE: finalizeTempo() tested separately and works (86729 gas).
+    // Skip calling it directly here to avoid corrupting state for the advanceTempo call.
+
+    println!("\n=== Calling ZoneInbox.advanceTempo() ===");
 
     let advance_calldata = advanceTempoCall {
         header: Bytes::from(next_header_rlp),
@@ -318,13 +371,13 @@ fn advance_tempo_repro() {
     .abi_encode();
 
     println!("advanceTempo calldata length: {} bytes", advance_calldata.len());
+    println!("advanceTempo selector: 0x{}", const_hex::encode(&advance_calldata[..4]));
 
     let advance_result = evm.transact_system_call(
         sequencer,
         ZONE_INBOX_ADDRESS,
-        Bytes::from(advance_calldata),
+        Bytes::from(advance_calldata.clone()),
     );
-
     match &advance_result {
         Ok(result) => match &result.result {
             ExecutionResult::Success { output, gas_used, .. } => {
@@ -336,6 +389,15 @@ fn advance_tempo_repro() {
             ExecutionResult::Revert { output, gas_used, .. } => {
                 println!("advanceTempo() REVERTED: {output}");
                 println!("advanceTempo() gas_used: {gas_used}");
+                if output.len() >= 4 {
+                    let sel = &output[..4];
+                    println!("  error selector: 0x{}", const_hex::encode(sel));
+                    if sel == [0x08, 0xc3, 0x79, 0xa0] && output.len() > 4 {
+                        if let Ok(msg) = <alloy_sol_types::sol_data::String as alloy_sol_types::SolType>::abi_decode(&output[4..]) {
+                            println!("  Error message: {msg}");
+                        }
+                    }
+                }
             }
             ExecutionResult::Halt { reason, gas_used, .. } => {
                 println!("advanceTempo() HALTED: {reason:?}");

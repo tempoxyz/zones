@@ -13,7 +13,7 @@
 //!   from pending withdrawals and writes batch state for proof generation.
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolValue};
 use reth_primitives_traits::Recovered;
@@ -78,7 +78,6 @@ pub fn build_finalize_withdrawal_batch_tx(
 pub fn build_advance_tempo_tx(
     header: &TempoHeader,
     deposits: &[Deposit],
-    sequencer: Address,
 ) -> Recovered<TempoTxEnvelope> {
     // RLP-encode the Tempo header
     let mut header_rlp = Vec::new();
@@ -123,6 +122,6 @@ pub fn build_advance_tempo_tx(
 
     Recovered::new_unchecked(
         TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
-        sequencer,
+        TEMPO_SYSTEM_TX_SENDER,
     )
 }
