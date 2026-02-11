@@ -277,8 +277,7 @@ fn load_artifact(specs_out: &PathBuf, name: &str) -> eyre::Result<Vec<u8>> {
 }
 
 fn decode_hex(input: &str) -> eyre::Result<Vec<u8>> {
-    let stripped = input.strip_prefix("0x").unwrap_or(input);
-    const_hex::decode(stripped).wrap_err("failed to decode hex string")
+    const_hex::decode(input).wrap_err("failed to decode hex string")
 }
 
 fn deploy_contract(
