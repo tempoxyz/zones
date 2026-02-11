@@ -134,27 +134,35 @@ where
 
         let start = Instant::now();
 
-        let pending_deposits = self
+        let pending_l1_blocks = self
             .deposit_queue
             .lock()
             .expect("deposit queue poisoned")
             .drain();
 
-        if !pending_deposits.is_empty() {
+        let all_deposits: Vec<Deposit> = pending_l1_blocks
+            .iter()
+            .flat_map(|block| block.deposits.clone())
+            .collect();
+
+        if !pending_l1_blocks.is_empty() {
             info!(
                 target: "zone::payload",
-                count = pending_deposits.len(),
-                "Including deposit mint txs in block"
+                l1_blocks = pending_l1_blocks.len(),
+                deposits = all_deposits.len(),
+                "Including deposit mint txs from L1 blocks"
             );
-            for deposit in &pending_deposits {
-                debug!(
-                    target: "zone::payload",
-                    sender = %deposit.sender,
-                    to = %deposit.to,
-                    amount = %deposit.amount,
-                    l1_block = deposit.l1_block_number,
-                    "Deposit -> mint"
-                );
+            for block in &pending_l1_blocks {
+                for deposit in &block.deposits {
+                    debug!(
+                        target: "zone::payload",
+                        sender = %deposit.sender,
+                        to = %deposit.to,
+                        amount = %deposit.amount,
+                        l1_block = block.header.number,
+                        "Deposit -> mint"
+                    );
+                }
             }
         }
 
@@ -209,7 +217,7 @@ where
         // Execute deposit mint system transactions.
         // TODO: Replace individual mint txs with a single batchMint(address[],uint256[])
         // system tx to reduce per-deposit overhead.
-        let deposit_txs = self.build_deposit_system_txs(&pending_deposits);
+        let deposit_txs = self.build_deposit_system_txs(&all_deposits);
         for tx in deposit_txs {
             if let Err(err) = builder.execute_transaction(tx) {
                 error!(?err, "deposit mint system tx failed");
@@ -308,7 +316,7 @@ where
             number = sealed_block.number(),
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
-            deposits = pending_deposits.len(),
+            deposits = all_deposits.len(),
             tx_count = sealed_block.body().transactions.len(),
             ?elapsed,
             "Built zone payload"
