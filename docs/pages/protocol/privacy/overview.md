@@ -633,10 +633,6 @@ interface IZoneMessenger {
     /// @notice Returns the zone token address
     function token() external view returns (address);
 
-    /// @notice Returns the L2 sender during callback execution
-    /// @dev Reverts if not in a callback context
-    function xDomainMessageSender() external view returns (address);
-
     /// @notice Relay a withdrawal message. Only callable by the portal.
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
@@ -655,7 +651,7 @@ interface IZoneMessenger {
 }
 ```
 
-The messenger does `token.transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` and call `zoneMessenger.xDomainMessageSender()` to authenticate the L2 origin.
+The messenger does `token.transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` to authenticate the call, and receive the L2 origin as the `sender` parameter in `onWithdrawalReceived`.
 
 #### Withdrawal receiver
 
@@ -1512,7 +1508,7 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
 }
 ```
 
-The messenger does `token.transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` and call `messenger.xDomainMessageSender()` to authenticate the L2 origin. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
+The messenger does `token.transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` to authenticate the call, and receive the L2 origin as the `sender` parameter in `onWithdrawalReceived`. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
 
 ## Withdrawal failure and bounce-back
 
