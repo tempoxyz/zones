@@ -146,7 +146,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
 
     // --- Poll zone for the minted balance ---
 
-    let timeout = std::time::Duration::from_secs(30);
+    let timeout = std::time::Duration::from_secs(5);
     let poll_interval = std::time::Duration::from_millis(500);
     let start = std::time::Instant::now();
 
