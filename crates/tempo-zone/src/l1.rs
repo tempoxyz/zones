@@ -190,16 +190,14 @@ impl Deposit {
 /// This mirrors the L1 portal's `currentDepositQueueHash`.
 #[derive(Debug, Default)]
 pub struct PendingDeposits {
-    /// Deposit queue hash (head of the hash chain).
+    /// Head of deposit queue hash chain
     pub hash: B256,
-    /// Pending deposits not yet processed by the zone.
+    /// Pending deposits not yet processed by the zone
     pub pending_deposits: Vec<Deposit>,
 }
 
 impl PendingDeposits {
-    /// Append a deposit to the queue and update the hash chain.
-    ///
-    /// Hash: `keccak256(abi.encode(sender, to, amount, memo, prevHash))`
+    /// Append a deposit to the queue and update the hash chain
     pub fn enqueue(&mut self, deposit: Deposit) {
         self.hash = keccak256(
             (
@@ -214,12 +212,11 @@ impl PendingDeposits {
         self.pending_deposits.push(deposit);
     }
 
-    /// Drain all pending deposits, returning them.
     pub fn drain(&mut self) -> Vec<Deposit> {
         std::mem::take(&mut self.pending_deposits)
     }
 
-    /// Compute a [`DepositQueueTransition`] for a batch of deposits starting from `prev_hash`.
+    /// Compute a [`DepositQueueTransition`] for a batch of deposits starting from `prev_hash`
     pub fn transition(prev_hash: B256, deposits: &[Deposit]) -> DepositQueueTransition {
         let mut current = prev_hash;
         for d in deposits {
@@ -234,12 +231,14 @@ impl PendingDeposits {
 
 /// Deposit queue transition for batch proof validation.
 ///
-/// Tracks where the zone started and stopped processing deposits.
+/// Represents the state of the deposit hash chain for a batch
+/// of deposits processed by the zone. Used to prove which deposits were
+/// included in a block.
 #[derive(Debug, Clone, Default)]
 pub struct DepositQueueTransition {
-    /// Where the zone started processing (verified against zone state).
+    /// Hash chain head before the is processed
     pub prev_processed_hash: B256,
-    /// Where the zone processed up to (proof output).
+    /// Hash chain head after the is processed
     pub next_processed_hash: B256,
 }
 
