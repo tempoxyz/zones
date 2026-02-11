@@ -134,25 +134,25 @@ where
 
         let start = Instant::now();
 
-        let pending_l1_blocks = self
+        let pending_deposits = self
             .deposit_queue
             .lock()
             .expect("deposit queue poisoned")
             .drain();
 
-        let all_deposits: Vec<Deposit> = pending_l1_blocks
+        let all_deposits: Vec<Deposit> = pending_deposits
             .iter()
             .flat_map(|block| block.deposits.clone())
             .collect();
 
-        if !pending_l1_blocks.is_empty() {
+        if !pending_deposits.is_empty() {
             info!(
                 target: "zone::payload",
-                l1_blocks = pending_l1_blocks.len(),
+                l1_blocks = pending_deposits.len(),
                 deposits = all_deposits.len(),
                 "Including deposit mint txs from L1 blocks"
             );
-            for block in &pending_l1_blocks {
+            for block in &pending_deposits {
                 for deposit in &block.deposits {
                     debug!(
                         target: "zone::payload",

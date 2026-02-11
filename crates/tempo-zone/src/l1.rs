@@ -6,7 +6,7 @@
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
-use alloy_rpc_types_eth::{BlockNumberOrTag, Filter, Log};
+use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolValue, sol};
 use alloy_transport::Authorization;
 use futures::StreamExt;
@@ -87,6 +87,11 @@ impl L1Subscriber {
 
         info!("Connected to L1 node, subscribing to blocks");
 
+        // Init filter once — same for every block
+        let filter = Filter::new()
+            .address(self.config.portal_address)
+            .event_signature(DepositMade::SIGNATURE_HASH);
+
         let sub = provider.subscribe_blocks().await?;
         let mut stream = sub.into_stream();
 
@@ -98,34 +103,24 @@ impl L1Subscriber {
         while let Some(header) = stream.next().await {
             let block_number = header.number;
 
-            // Fetch deposit logs for this specific block
-            let filter = Filter::new()
-                .address(self.config.portal_address)
-                .event_signature(DepositMade::SIGNATURE_HASH)
-                .from_block(BlockNumberOrTag::Number(block_number))
-                .to_block(BlockNumberOrTag::Number(block_number));
-
-            let logs = match provider.get_logs(&filter).await {
-                Ok(logs) => logs,
-                Err(e) => {
-                    warn!(
-                        error = %e,
-                        block = block_number,
-                        "Failed to fetch logs for block, skipping"
-                    );
-                    continue;
-                }
-            };
+            // Fetch deposit logs for this block — must not skip on failure
+            let logs = provider.get_logs(&filter.clone().select(block_number)).await?;
 
             // Parse deposit events from the logs
             let mut deposits = Vec::new();
             for log in logs {
-                match self.parse_deposit(log, block_number) {
-                    Ok(deposit) => deposits.push(deposit),
-                    Err(e) => {
-                        warn!(error = %e, "Failed to parse deposit log");
-                    }
-                }
+                let deposit = self.parse_deposit(log, block_number)?;
+
+                debug!(
+                    l1_block = block_number,
+                    sender = %deposit.sender,
+                    to = %deposit.to,
+                    amount = %deposit.amount,
+                    memo = %deposit.memo,
+                    "Deposit from L1"
+                );
+
+                deposits.push(deposit);
             }
 
             if deposits.is_empty() {
@@ -138,17 +133,6 @@ impl L1Subscriber {
                 count = deposits.len(),
                 "Received deposits from L1 block"
             );
-
-            for deposit in &deposits {
-                debug!(
-                    l1_block = block_number,
-                    sender = %deposit.sender,
-                    to = %deposit.to,
-                    amount = %deposit.amount,
-                    memo = %deposit.memo,
-                    "Deposit from L1"
-                );
-            }
 
             self.deposit_queue
                 .lock()
