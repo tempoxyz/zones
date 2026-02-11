@@ -7,13 +7,9 @@ use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
-use alloy_sol_types::{SolEvent, SolValue, sol};
+use alloy_sol_types::{SolCall, SolEvent, SolValue, sol};
 use alloy_transport::Authorization;
 use futures::StreamExt;
-use reth_stages_types::{StageCheckpoint, StageId};
-use reth_storage_api::{
-    DBProvider, DatabaseProviderFactory, StageCheckpointReader, StageCheckpointWriter,
-};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
@@ -29,6 +25,10 @@ sol! {
         uint128 fee,
         bytes32 memo
     );
+
+    /// Read the last synced Tempo block number from the ZonePortal.
+    #[derive(Debug)]
+    function lastSyncedTempoBlockNumber() external view returns (uint64);
 }
 
 /// Configuration for the L1 subscriber.
@@ -40,38 +40,27 @@ pub struct L1SubscriberConfig {
     pub portal_address: Address,
 }
 
-/// Stage ID used to persist the last synced L1 block number in the reth database.
-const L1_SYNC_STAGE_ID: StageId = StageId::Other("L1Sync");
-
 /// Maximum number of blocks to request logs for in a single `eth_getLogs` call
 /// during backfill.
 const BACKFILL_BATCH_SIZE: u64 = 1000;
 
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
 #[derive(Clone)]
-pub struct L1Subscriber<P> {
+pub struct L1Subscriber {
     config: L1SubscriberConfig,
     deposit_queue: DepositQueue,
-    /// Reth database provider factory for persisting the L1 sync checkpoint.
-    db_provider_factory: P,
 }
 
-impl<P> L1Subscriber<P>
-where
-    P: DatabaseProviderFactory + StageCheckpointReader + Send + Sync + Clone + 'static,
-    P::ProviderRW: StageCheckpointWriter,
-{
+impl L1Subscriber {
     /// Create and spawn the L1 subscriber as a critical background task.
     pub fn spawn(
         config: L1SubscriberConfig,
         deposit_queue: DepositQueue,
-        db_provider_factory: P,
         task_executor: impl reth_ethereum::tasks::TaskSpawner,
     ) {
         let subscriber = Self {
             config,
             deposit_queue,
-            db_provider_factory,
         };
 
         task_executor.spawn_critical(
@@ -87,45 +76,44 @@ where
         );
     }
 
-    /// Read the last synced L1 block number from the database.
-    fn last_synced_l1_block(&self) -> eyre::Result<Option<u64>> {
-        Ok(self
-            .db_provider_factory
-            .get_stage_checkpoint(L1_SYNC_STAGE_ID)?
-            .map(|cp| cp.block_number))
-    }
-
-    /// Persist the last synced L1 block height to the database.
-    fn write_l1_block_height(&self, block_number: u64) -> eyre::Result<()> {
-        let provider_rw = self.db_provider_factory.database_provider_rw()?;
-        provider_rw.save_stage_checkpoint(L1_SYNC_STAGE_ID, StageCheckpoint::new(block_number))?;
-        provider_rw.commit()?;
-        Ok(())
+    /// Read `lastSyncedTempoBlockNumber` from the ZonePortal contract on L1.
+    ///
+    /// Returns the L1 (Tempo) block number up to which the portal has been synced.
+    /// On a fresh portal this returns 0.
+    async fn last_synced_block(&self, l1_provider: &impl Provider) -> eyre::Result<u64> {
+        let call = lastSyncedTempoBlockNumberCall {};
+        let result = l1_provider
+            .call(
+                alloy_rpc_types_eth::TransactionRequest::default()
+                    .to(self.config.portal_address)
+                    .input(call.abi_encode().into()),
+            )
+            .await?;
+        let decoded =
+            lastSyncedTempoBlockNumberCall::abi_decode_returns(&result)?;
+        Ok(decoded)
     }
 
     /// Sync to the current L1 tip.
     ///
-    /// Reads the last synced L1 block from the database and fetches any missed
-    /// blocks up to the current tip. On first boot (no checkpoint), discovers the
-    /// portal's deploy block via `eth_getCode` binary search and backfills from
-    /// there so no deposits are missed.
+    /// Reads `lastSyncedTempoBlockNumber` from the ZonePortal to determine where
+    /// the zone left off, then fetches any deposit events between that block and the
+    /// current L1 tip. On a fresh portal (block 0), discovers the deploy block via
+    /// `eth_getCode` binary search to avoid scanning from genesis.
     async fn sync_to_l1_tip(
         &self,
         l1_provider: &impl Provider,
         filter: &Filter,
     ) -> eyre::Result<()> {
         let tip = l1_provider.get_block_number().await?;
+        let last_synced = self.last_synced_block(l1_provider).await?;
 
-        let from = match self.last_synced_l1_block()? {
-            Some(last_synced) => last_synced + 1,
-            None => {
-                let deploy_block = self.find_portal_deploy_block(l1_provider, tip).await?;
-                info!(
-                    deploy_block,
-                    "First boot: backfilling from ZonePortal deploy block"
-                );
-                deploy_block
-            }
+        let from = if last_synced > 0 {
+            last_synced + 1
+        } else {
+            let deploy_block = self.find_portal_deploy_block(l1_provider, tip).await?;
+            info!(deploy_block, "Fresh portal: backfilling from deploy block");
+            deploy_block
         };
 
         if from > tip {
@@ -177,7 +165,6 @@ where
                     .enqueue(header, deposits.clone());
             }
 
-            self.write_l1_block_height(batch_end)?;
             debug!(from = cursor, to = batch_end, "Backfill batch complete");
             cursor = batch_end + 1;
         }
@@ -241,9 +228,6 @@ where
 
                 deposits.push(deposit);
             }
-
-            // Persist progress even for empty blocks so we never re-scan them.
-            self.write_l1_block_height(block_number)?;
 
             if deposits.is_empty() {
                 debug!(block = block_number, "No deposits in L1 block");

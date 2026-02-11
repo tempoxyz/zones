@@ -360,7 +360,6 @@ vergen-git2 = "1.0.7"
 # reth-rpc-eth-types = { path = "../reth/crates/rpc/rpc-eth-types" }
 # reth-rpc-server-types = { path = "../reth/crates/rpc/rpc-server-types" }
 # reth-stages-api = { path = "../reth/crates/stages/api" }
-reth-stages-types = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 # reth-stages-types = { path = "../reth/crates/stages/types" }
 # reth-static-file = { path = "../reth/crates/static-file/static-file" }
 # reth-static-file-types = { path = "../reth/crates/static-file/types" }

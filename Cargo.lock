@@ -14188,7 +14188,6 @@ dependencies = [
  "reth-rpc",
  "reth-rpc-builder",
  "reth-rpc-eth-api",
- "reth-stages-types",
  "reth-storage-api",
  "reth-transaction-pool",
  "tempo-alloy",
