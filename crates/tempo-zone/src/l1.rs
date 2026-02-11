@@ -131,65 +131,75 @@ where
         // ── Backfill: catch up on any L1 blocks missed while offline ──
         let tip = provider.get_block_number().await?;
 
-        if let Some(last_synced) = self.last_synced_l1_block()? {
-            let from = last_synced + 1;
-            if from <= tip {
+        // Determine where to start syncing from:
+        // - If we have a checkpoint, resume from the next block after it.
+        // - On first boot (no checkpoint), discover the portal's deploy block
+        //   on L1 and backfill from there so no deposits are missed.
+        let from = match self.last_synced_l1_block()? {
+            Some(last_synced) => last_synced + 1,
+            None => {
+                let deploy_block = self.find_portal_deploy_block(&provider, tip).await?;
                 info!(
-                    from_block = from,
-                    to_block = tip,
-                    missed = tip - from + 1,
-                    "Backfilling missed L1 blocks"
+                    deploy_block,
+                    "First boot: backfilling from ZonePortal deploy block"
                 );
+                deploy_block
+            }
+        };
 
-                let mut cursor = from;
-                while cursor <= tip {
-                    let batch_end = (cursor + BACKFILL_BATCH_SIZE - 1).min(tip);
-                    let logs = provider
-                        .get_logs(&filter.clone().select(cursor..=batch_end))
-                        .await?;
+        if from <= tip {
+            info!(
+                from_block = from,
+                to_block = tip,
+                blocks = tip - from + 1,
+                "Backfilling L1 blocks"
+            );
 
-                    // Group logs by block number so we can enqueue per-block
-                    let mut blocks: std::collections::BTreeMap<u64, Vec<Deposit>> =
-                        std::collections::BTreeMap::new();
-                    for log in logs {
-                        let block_number = log
-                            .block_number
-                            .ok_or_else(|| eyre::eyre!("log missing block number"))?;
-                        let deposit = self.parse_deposit(log, block_number)?;
-                        blocks.entry(block_number).or_default().push(deposit);
-                    }
+            let mut cursor = from;
+            while cursor <= tip {
+                let batch_end = (cursor + BACKFILL_BATCH_SIZE - 1).min(tip);
+                let logs = provider
+                    .get_logs(&filter.clone().select(cursor..=batch_end))
+                    .await?;
 
-                    // Enqueue each block's deposits
-                    for (block_number, deposits) in &blocks {
-                        info!(
-                            block = block_number,
-                            count = deposits.len(),
-                            "Backfill: deposits from L1 block"
-                        );
-
-                        let header = Header {
-                            number: *block_number,
-                            ..Default::default()
-                        };
-
-                        self.deposit_queue
-                            .lock()
-                            .map_err(|_| eyre::eyre!("Deposit queue lock poisoned"))?
-                            .enqueue(header, deposits.clone());
-                    }
-
-                    self.save_l1_checkpoint(batch_end)?;
-                    debug!(from = cursor, to = batch_end, "Backfill batch complete");
-                    cursor = batch_end + 1;
+                // Group logs by block number so we can enqueue per-block
+                let mut blocks: std::collections::BTreeMap<u64, Vec<Deposit>> =
+                    std::collections::BTreeMap::new();
+                for log in logs {
+                    let block_number = log
+                        .block_number
+                        .ok_or_else(|| eyre::eyre!("log missing block number"))?;
+                    let deposit = self.parse_deposit(log, block_number)?;
+                    blocks.entry(block_number).or_default().push(deposit);
                 }
 
-                info!(tip, "Backfill complete, caught up to L1 tip");
-            } else {
-                info!(last_synced, tip, "Already synced to L1 tip");
+                // Enqueue each block's deposits
+                for (block_number, deposits) in &blocks {
+                    info!(
+                        block = block_number,
+                        count = deposits.len(),
+                        "Backfill: deposits from L1 block"
+                    );
+
+                    let header = Header {
+                        number: *block_number,
+                        ..Default::default()
+                    };
+
+                    self.deposit_queue
+                        .lock()
+                        .map_err(|_| eyre::eyre!("Deposit queue lock poisoned"))?
+                        .enqueue(header, deposits.clone());
+                }
+
+                self.save_l1_checkpoint(batch_end)?;
+                debug!(from = cursor, to = batch_end, "Backfill batch complete");
+                cursor = batch_end + 1;
             }
+
+            info!(tip, "Backfill complete, caught up to L1 tip");
         } else {
-            info!(tip, "No previous L1 sync state, starting from current tip");
-            self.save_l1_checkpoint(tip)?;
+            info!(from, tip, "Already synced to L1 tip");
         }
 
         // ── Live subscription: process new blocks as they arrive ──
@@ -251,6 +261,46 @@ where
 
         warn!("L1 block subscription stream ended");
         Ok(())
+    }
+
+    /// Find the block at which the ZonePortal contract was deployed on L1 by
+    /// binary-searching `eth_getCode`. Returns the first block where the contract
+    /// has code.
+    async fn find_portal_deploy_block(
+        &self,
+        l1_provider: &impl Provider,
+        tip: u64,
+    ) -> eyre::Result<u64> {
+        let portal = self.config.portal_address;
+        let mut lo: u64 = 0;
+        let mut hi = tip;
+
+        // Quick check: if no code at tip, the portal isn't deployed yet.
+        let code_at_tip = l1_provider
+            .get_code_at(portal)
+            .block_id(hi.into())
+            .await?;
+        if code_at_tip.is_empty() {
+            return Err(eyre::eyre!(
+                "ZonePortal {portal} has no code at L1 block {tip}"
+            ));
+        }
+
+        while lo < hi {
+            let mid = lo + (hi - lo) / 2;
+            let code = l1_provider
+                .get_code_at(portal)
+                .block_id(mid.into())
+                .await?;
+            if code.is_empty() {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+
+        info!(block = lo, portal = %portal, "Found ZonePortal deploy block");
+        Ok(lo)
     }
 
     /// Parse a single log into a [`Deposit`].
