@@ -10,6 +10,7 @@ use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolValue};
 use alloy_transport::Authorization;
 use futures::StreamExt;
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
@@ -106,8 +107,7 @@ impl L1Subscriber {
                 .get_logs(&filter.clone().select(cursor..=end))
                 .await?;
 
-            let mut by_block: std::collections::BTreeMap<u64, Vec<Deposit>> =
-                std::collections::BTreeMap::new();
+            let mut by_block: BTreeMap<u64, Vec<Deposit>> = BTreeMap::new();
             for log in logs {
                 let n = log.block_number.ok_or_else(|| eyre::eyre!("log missing block number"))?;
                 by_block.entry(n).or_default().push(self.parse_deposit(log, n)?);
@@ -148,16 +148,14 @@ impl L1Subscriber {
             .address(self.config.portal_address)
             .event_signature(DepositMade::SIGNATURE_HASH);
 
-        self.sync_to_l1_tip(&provider, &filter).await?;
-
-        // ── Live subscription: process new blocks as they arrive ──
+        // Subscribe before backfilling so we don't miss blocks between
+        // sync_to_l1_tip finishing and the subscription starting.
         let sub = provider.subscribe_blocks().await?;
         let mut stream = sub.into_stream();
 
-        info!(
-            portal = %self.config.portal_address,
-            "Subscribed to L1 blocks for deposit events"
-        );
+        info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
+
+        self.sync_to_l1_tip(&provider, &filter).await?;
 
         while let Some(header) = stream.next().await {
             let block_number = header.number;
