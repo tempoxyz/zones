@@ -41,7 +41,7 @@ use tempo_transaction_pool::{
     validator::TempoTransactionValidator,
 };
 
-use crate::builder::ZonePayloadFactory;
+use crate::{builder::ZonePayloadBuilderBuilder, l1::L1Subscriber};
 
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
@@ -81,7 +81,7 @@ impl ZoneNode {
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadFactory>,
+        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,
@@ -93,7 +93,7 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(ZoneExecutorBuilder::default())
-            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
+            .payload(BasicPayloadServiceBuilder::new(ZonePayloadBuilderBuilder::new(
                 deposit_queue,
                 token_address,
             )))
@@ -166,7 +166,7 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        crate::L1Subscriber::spawn(
+        L1Subscriber::spawn(
             self.l1_config,
             self.deposit_queue,
             ctx.node.task_executor().clone(),
@@ -209,7 +209,7 @@ where
     type ComponentsBuilder = ComponentsBuilder<
         N,
         ZonePoolBuilder,
-        BasicPayloadServiceBuilder<ZonePayloadFactory>,
+        BasicPayloadServiceBuilder<ZonePayloadBuilderBuilder>,
         NoopNetworkBuilder<ZoneNetworkPrimitives>,
         ZoneExecutorBuilder,
         NoopConsensusBuilder,

@@ -102,7 +102,8 @@ impl<Provider> ZonePayloadBuilder<Provider>
 where
     Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec>,
 {
-    fn build_deposit_mint_txs(&self, deposits: &[Deposit]) -> Vec<Recovered<TempoTxEnvelope>> {
+    // TODO: Update this to use a single system tx for minting deposits
+    fn build_deposit_system_txs(&self, deposits: &[Deposit]) -> Vec<Recovered<TempoTxEnvelope>> {
         let chain_id = Some(self.provider.chain_spec().chain().id());
 
         deposits
@@ -159,7 +160,11 @@ where
 
         let start = Instant::now();
 
-        let pending_deposits = self.deposit_queue.lock().expect("deposit queue poisoned").drain();
+        let pending_deposits = self
+            .deposit_queue
+            .lock()
+            .expect("deposit queue poisoned")
+            .drain();
 
         if !pending_deposits.is_empty() {
             info!(
