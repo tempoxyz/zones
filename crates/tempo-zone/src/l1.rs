@@ -104,7 +104,9 @@ impl L1Subscriber {
             let block_number = header.number;
 
             // Fetch deposit logs for this block — must not skip on failure
-            let logs = provider.get_logs(&filter.clone().select(block_number)).await?;
+            let logs = provider
+                .get_logs(&filter.clone().select(block_number))
+                .await?;
 
             // Parse deposit events from the logs
             let mut deposits = Vec::new();

@@ -14,8 +14,7 @@ pub(crate) const TEST_MNEMONIC: &str =
 
 /// Deterministic salt for the zone test token.
 pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
 ]);
 
 /// Compute the TIP-20 token address for a given sender and salt.
