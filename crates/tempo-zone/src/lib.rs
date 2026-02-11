@@ -13,7 +13,7 @@ pub mod l1;
 mod node;
 
 pub use l1::{
-    Deposit, DepositQueue, DepositQueueTransition, L1Subscriber, L1SubscriberConfig,
-    PendingDeposits,
+    Deposit, DepositQueue, DepositQueueTransition, L1BlockDeposits, L1Subscriber,
+    L1SubscriberConfig, PendingDeposits,
 };
 pub use node::ZoneNode;
