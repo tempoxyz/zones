@@ -32,7 +32,6 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     //////////////////////////////////////////////////////////////*/
 
     error UnauthorizedMessenger();
-    error SenderMismatch();
     error InvalidTargetPortal();
     error InvalidToken();
 
@@ -53,7 +52,6 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /// @dev Implements IWithdrawalReceiver. Only callable by registered zone messengers.
     ///      The messenger has already transferred tokens to this router.
     ///      On failure, the entire callback reverts, triggering bounce-back to source zone.
-    /// @param sender The original sender on the source zone
     /// @param amount The amount of tokens transferred
     /// @param data ABI-encoded callbackData (see format below)
     /// @return selector The function selector to confirm successful handling
@@ -63,7 +61,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     ///
     /// Note: minAmountOut is ignored for same-token transfers (no swap)
     function onWithdrawalReceived(
-        address sender,
+        address, /* sender */
         uint128 amount,
         bytes calldata data
     )
@@ -72,10 +70,6 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     {
         if (!zoneFactory.isZoneMessenger(msg.sender)) {
             revert UnauthorizedMessenger();
-        }
-
-        if (sender != IZoneMessenger(msg.sender).xDomainMessageSender()) {
-            revert SenderMismatch();
         }
 
         address tokenIn = IZoneMessenger(msg.sender).token();

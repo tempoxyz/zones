@@ -72,22 +72,13 @@ contract MockZoneFactoryForRouter {
 contract MockZoneMessengerForRouter {
 
     address public tokenAddr;
-    address public xDomainSender;
 
     function setToken(address _token) external {
         tokenAddr = _token;
     }
 
-    function setXDomainMessageSender(address _sender) external {
-        xDomainSender = _sender;
-    }
-
     function token() external view returns (address) {
         return tokenAddr;
-    }
-
-    function xDomainMessageSender() external view returns (address) {
-        return xDomainSender;
     }
 
 }
@@ -170,7 +161,6 @@ contract SwapAndDepositRouterTest is BaseTest {
         mockPortal2.setToken(address(token1));
 
         mockMessenger.setToken(address(pathUSD));
-        mockMessenger.setXDomainMessageSender(sender);
 
         vm.startPrank(pathUSDAdmin);
         pathUSD.grantRole(_ISSUER_ROLE, pathUSDAdmin);
@@ -230,17 +220,6 @@ contract SwapAndDepositRouterTest is BaseTest {
 
         vm.prank(alice);
         vm.expectRevert(SwapAndDepositRouter.UnauthorizedMessenger.selector);
-        router.onWithdrawalReceived(sender, AMOUNT, data);
-    }
-
-    function test_revertSenderMismatch() public {
-        bytes memory data =
-            _buildPlaintextData(address(pathUSD), address(mockPortal), alice, bytes32("memo"), 0);
-
-        mockMessenger.setXDomainMessageSender(address(0xBAD));
-
-        vm.prank(address(mockMessenger));
-        vm.expectRevert(SwapAndDepositRouter.SenderMismatch.selector);
         router.onWithdrawalReceived(sender, AMOUNT, data);
     }
 

@@ -562,10 +562,6 @@ interface IZoneMessenger {
     /// @notice Returns the zone token address
     function token() external view returns (address);
 
-    /// @notice Returns the L2 sender during callback execution
-    /// @dev Reverts if not in a callback context
-    function xDomainMessageSender() external view returns (address);
-
     /// @notice Relay a withdrawal message. Only callable by the portal.
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).

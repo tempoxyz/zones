@@ -20,15 +20,11 @@ contract ZoneMessenger is IZoneMessenger {
     /// @notice The zone token address
     address public immutable token;
 
-    /// @notice The L2 sender during callback execution (only valid within a callback)
-    address internal _xDomainMessageSender;
-
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
 
     error OnlyPortal();
-    error NotInCallback();
     error CallbackRejected();
     error TransferFailed();
 
@@ -53,13 +49,6 @@ contract ZoneMessenger is IZoneMessenger {
     /*//////////////////////////////////////////////////////////////
                            MESSAGE RELAY
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Returns the L2 sender during callback execution
-    /// @dev Reverts if not in a callback context
-    function xDomainMessageSender() external view returns (address) {
-        if (_xDomainMessageSender == address(0)) revert NotInCallback();
-        return _xDomainMessageSender;
-    }
 
     /// @notice Relay a withdrawal message. Only callable by the portal.
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
@@ -103,15 +92,9 @@ contract ZoneMessenger is IZoneMessenger {
             revert TransferFailed();
         }
 
-        // Set the L2 sender for the callback
-        _xDomainMessageSender = sender;
-
         // Call the receiver
         bytes4 selector =
             IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(sender, amount, data);
-
-        // Clear the L2 sender
-        _xDomainMessageSender = address(0);
 
         // Verify the callback returned the correct selector
         if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {
