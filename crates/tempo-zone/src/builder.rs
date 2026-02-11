@@ -227,7 +227,9 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
-        // Execute deposit mint system transactions
+        // Execute deposit mint system transactions.
+        // TODO: Replace individual mint txs with a single batchMint(address[],uint256[])
+        // system tx to reduce per-deposit overhead.
         let deposit_txs = self.build_deposit_mint_txs(&pending_deposits);
         for tx in deposit_txs {
             if let Err(err) = builder.execute_transaction(tx) {
