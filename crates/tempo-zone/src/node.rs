@@ -548,10 +548,7 @@ where
         let start = Instant::now();
 
         // Drain pending deposits
-        let pending_deposits = {
-            let mut queue = self.deposit_queue.lock().expect("deposit queue poisoned");
-            std::mem::take(&mut queue.pending_deposits)
-        };
+        let pending_deposits = self.deposit_queue.drain();
 
         if !pending_deposits.is_empty() {
             info!(

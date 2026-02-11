@@ -13,6 +13,7 @@ use reth_tracing::tracing::{debug, error, info, warn};
 use std::sync::{Arc, Mutex};
 
 sol! {
+    // TODO: Rename to DepositEnqueued once the Solidity contract is updated.
     /// Event emitted by the ZonePortal when a deposit is made.
     #[derive(Debug)]
     event DepositMade(
@@ -66,19 +67,19 @@ impl Deposit {
 ///
 /// This mirrors the L1 portal's `currentDepositQueueHash`.
 #[derive(Debug, Default)]
-pub struct DepositQueueState {
-    /// Current deposit queue hash (head of the hash chain).
-    pub current_hash: B256,
+pub struct PendingDeposits {
+    /// Deposit queue hash (head of the hash chain).
+    pub hash: B256,
     /// Pending deposits not yet processed by the zone.
     pub pending_deposits: Vec<Deposit>,
 }
 
-impl DepositQueueState {
+impl PendingDeposits {
     /// Append a deposit to the queue and update the hash chain.
     ///
     /// Computes: `currentHash = keccak256(abi.encode(deposit, currentHash))`
     pub fn enqueue(&mut self, deposit: Deposit) {
-        self.current_hash = deposit_queue_hash(&deposit, self.current_hash);
+        self.hash = deposit_queue_hash(&deposit, self.hash);
         self.pending_deposits.push(deposit);
     }
 }
@@ -129,12 +130,20 @@ pub fn process_deposits(processed_hash: B256, deposits: &[Deposit]) -> DepositQu
 
 /// Shared deposit queue for passing deposits between L1 subscriber and block builder.
 #[derive(Debug, Clone, Default)]
-pub struct DepositQueue(Arc<Mutex<DepositQueueState>>);
+pub struct DepositQueue(Arc<Mutex<PendingDeposits>>);
 
 impl DepositQueue {
-    /// Lock the queue and return a guard.
-    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, DepositQueueState>> {
-        self.0.lock()
+    /// Enqueue a deposit.
+    pub fn enqueue(&self, deposit: Deposit) -> Result<(), ()> {
+        let mut pending = self.0.lock().map_err(|_| ())?;
+        pending.enqueue(deposit);
+        Ok(())
+    }
+
+    /// Drain all pending deposits, returning them.
+    pub fn drain(&self) -> Vec<Deposit> {
+        let mut pending = self.0.lock().expect("deposit queue poisoned");
+        std::mem::take(&mut pending.pending_deposits)
     }
 }
 
@@ -225,18 +234,15 @@ impl L1Subscriber {
                     "Received deposit from L1"
                 );
 
-                if let Ok(mut queue) = self.deposit_queue.lock() {
-                    queue.enqueue(deposit);
-                    info!(
-                        l1_block = block_number,
-                        queue_len = queue.pending_deposits.len(),
-                        current_hash = %queue.current_hash,
-                        "Enqueued deposit from L1"
-                    );
-                } else {
+                self.deposit_queue.enqueue(deposit).map_err(|_| {
                     error!("Failed to lock deposit queue");
-                    return Err(eyre::eyre!("Deposit queue lock poisoned"));
-                }
+                    eyre::eyre!("Deposit queue lock poisoned")
+                })?;
+
+                info!(
+                    l1_block = block_number,
+                    "Enqueued deposit from L1"
+                );
             }
             Err(e) => {
                 debug!(
@@ -280,8 +286,8 @@ mod tests {
 
     #[test]
     fn test_deposit_queue_hash_chain() {
-        let mut queue = DepositQueueState::default();
-        assert_eq!(queue.current_hash, B256::ZERO);
+        let mut queue = PendingDeposits::default();
+        assert_eq!(queue.hash, B256::ZERO);
 
         let d1 = Deposit {
             l1_block_number: 1,
@@ -294,7 +300,7 @@ mod tests {
         };
 
         queue.enqueue(d1.clone());
-        let hash_after_d1 = queue.current_hash;
+        let hash_after_d1 = queue.hash;
         assert_ne!(hash_after_d1, B256::ZERO);
 
         // Verify hash is deterministic
@@ -312,7 +318,7 @@ mod tests {
         };
 
         queue.enqueue(d2.clone());
-        let hash_after_d2 = queue.current_hash;
+        let hash_after_d2 = queue.hash;
         assert_ne!(hash_after_d2, hash_after_d1);
 
         // Verify chaining: hash(d2, hash(d1, 0))
@@ -362,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_queue_and_process_deposits_hashes_match() {
-        let mut queue = DepositQueueState::default();
+        let mut queue = PendingDeposits::default();
 
         let deposits = vec![Deposit {
             l1_block_number: 1,
@@ -380,6 +386,6 @@ mod tests {
 
         let transition = process_deposits(B256::ZERO, &deposits);
 
-        assert_eq!(queue.current_hash, transition.next_processed_hash);
+        assert_eq!(queue.hash, transition.next_processed_hash);
     }
 }
