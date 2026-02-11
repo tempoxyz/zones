@@ -177,6 +177,8 @@ impl<N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>> std::fmt::De
 impl<N> ZoneAddOns<NodeAdapter<N>>
 where
     N: FullNodeTypes<Types = ZoneNode>,
+    <N::Provider as reth_storage_api::DatabaseProviderFactory>::ProviderRW:
+        reth_storage_api::StageCheckpointWriter,
 {
     /// Creates a new instance.
     pub fn new(deposit_queue: crate::DepositQueue, l1_config: crate::L1SubscriberConfig) -> Self {
@@ -198,6 +200,8 @@ impl<N> NodeAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>,
     ZoneEthApiBuilder: EthApiBuilder<N>,
+    <N::Provider as reth_storage_api::DatabaseProviderFactory>::ProviderRW:
+        reth_storage_api::StageCheckpointWriter,
 {
     type Handle = <RpcAddOns<
         N,
@@ -212,6 +216,7 @@ where
         L1Subscriber::spawn(
             self.l1_config,
             self.deposit_queue,
+            ctx.node.provider().clone(),
             ctx.node.task_executor().clone(),
         );
 
@@ -225,6 +230,8 @@ impl<N> RethRpcAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>,
     ZoneEthApiBuilder: EthApiBuilder<N>,
+    <N::Provider as reth_storage_api::DatabaseProviderFactory>::ProviderRW:
+        reth_storage_api::StageCheckpointWriter,
 {
     type EthApi = <ZoneEthApiBuilder as EthApiBuilder<N>>::EthApi;
 
@@ -237,6 +244,8 @@ impl<N> EngineValidatorAddOn<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = TempoEvmConfig>,
     ZoneEthApiBuilder: EthApiBuilder<N>,
+    <N::Provider as reth_storage_api::DatabaseProviderFactory>::ProviderRW:
+        reth_storage_api::StageCheckpointWriter,
 {
     type ValidatorBuilder = BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>;
 
@@ -248,6 +257,8 @@ where
 impl<N> Node<N> for ZoneNode
 where
     N: FullNodeTypes<Types = Self>,
+    <N::Provider as reth_storage_api::DatabaseProviderFactory>::ProviderRW:
+        reth_storage_api::StageCheckpointWriter,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -268,7 +279,11 @@ where
     }
 }
 
-impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for ZoneNode {
+impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for ZoneNode
+where
+    <N::Provider as reth_storage_api::DatabaseProviderFactory>::ProviderRW:
+        reth_storage_api::StageCheckpointWriter,
+{
     type RpcBlock =
         alloy_rpc_types_eth::Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeader>;
 

@@ -10,6 +10,10 @@ use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolValue, sol};
 use alloy_transport::Authorization;
 use futures::StreamExt;
+use reth_stages_types::{StageCheckpoint, StageId};
+use reth_storage_api::{
+    DBProvider, DatabaseProviderFactory, StageCheckpointReader, StageCheckpointWriter,
+};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
@@ -36,23 +40,38 @@ pub struct L1SubscriberConfig {
     pub portal_address: Address,
 }
 
+/// Stage ID used to persist the last synced L1 block number in the reth database.
+const L1_SYNC_STAGE_ID: StageId = StageId::Other("L1Sync");
+
+/// Maximum number of blocks to request logs for in a single `eth_getLogs` call
+/// during backfill.
+const BACKFILL_BATCH_SIZE: u64 = 1000;
+
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
 #[derive(Clone)]
-pub struct L1Subscriber {
+pub struct L1Subscriber<P> {
     config: L1SubscriberConfig,
     deposit_queue: DepositQueue,
+    /// Reth database provider factory for persisting the L1 sync checkpoint.
+    db_provider_factory: P,
 }
 
-impl L1Subscriber {
+impl<P> L1Subscriber<P>
+where
+    P: DatabaseProviderFactory + StageCheckpointReader + Send + Sync + Clone + 'static,
+    P::ProviderRW: StageCheckpointWriter,
+{
     /// Create and spawn the L1 subscriber as a critical background task.
     pub fn spawn(
         config: L1SubscriberConfig,
         deposit_queue: DepositQueue,
+        db_provider_factory: P,
         task_executor: impl reth_ethereum::tasks::TaskSpawner,
     ) {
         let subscriber = Self {
             config,
             deposit_queue,
+            db_provider_factory,
         };
 
         task_executor.spawn_critical(
@@ -68,10 +87,27 @@ impl L1Subscriber {
         );
     }
 
+    /// Read the last synced L1 block number from the database.
+    fn last_synced_l1_block(&self) -> eyre::Result<Option<u64>> {
+        Ok(self
+            .db_provider_factory
+            .get_stage_checkpoint(L1_SYNC_STAGE_ID)?
+            .map(|cp| cp.block_number))
+    }
+
+    /// Persist the last synced L1 block number to the database.
+    fn save_l1_checkpoint(&self, block_number: u64) -> eyre::Result<()> {
+        let provider_rw = self.db_provider_factory.database_provider_rw()?;
+        provider_rw.save_stage_checkpoint(L1_SYNC_STAGE_ID, StageCheckpoint::new(block_number))?;
+        provider_rw.commit()?;
+        Ok(())
+    }
+
     /// Start the L1 subscriber.
     ///
-    /// Subscribes to new L1 block headers. For each block, fetches deposit logs
-    /// from the ZonePortal and enqueues them grouped by block with the header.
+    /// On startup, reads the last synced L1 block from the database and backfills
+    /// any missed blocks before subscribing to new ones. Each processed block's
+    /// number is persisted so restarts resume from the correct point.
     pub async fn start(self) -> eyre::Result<()> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
@@ -85,13 +121,78 @@ impl L1Subscriber {
 
         let provider = ProviderBuilder::new().connect_ws(ws).await?;
 
-        info!("Connected to L1 node, subscribing to blocks");
+        info!("Connected to L1 node");
 
         // Init filter once — same for every block
         let filter = Filter::new()
             .address(self.config.portal_address)
             .event_signature(DepositMade::SIGNATURE_HASH);
 
+        // ── Backfill: catch up on any L1 blocks missed while offline ──
+        let tip = provider.get_block_number().await?;
+
+        if let Some(last_synced) = self.last_synced_l1_block()? {
+            let from = last_synced + 1;
+            if from <= tip {
+                info!(
+                    from_block = from,
+                    to_block = tip,
+                    missed = tip - from + 1,
+                    "Backfilling missed L1 blocks"
+                );
+
+                let mut cursor = from;
+                while cursor <= tip {
+                    let batch_end = (cursor + BACKFILL_BATCH_SIZE - 1).min(tip);
+                    let logs = provider
+                        .get_logs(&filter.clone().select(cursor..=batch_end))
+                        .await?;
+
+                    // Group logs by block number so we can enqueue per-block
+                    let mut blocks: std::collections::BTreeMap<u64, Vec<Deposit>> =
+                        std::collections::BTreeMap::new();
+                    for log in logs {
+                        let block_number = log
+                            .block_number
+                            .ok_or_else(|| eyre::eyre!("log missing block number"))?;
+                        let deposit = self.parse_deposit(log, block_number)?;
+                        blocks.entry(block_number).or_default().push(deposit);
+                    }
+
+                    // Enqueue each block's deposits
+                    for (block_number, deposits) in &blocks {
+                        info!(
+                            block = block_number,
+                            count = deposits.len(),
+                            "Backfill: deposits from L1 block"
+                        );
+
+                        let header = Header {
+                            number: *block_number,
+                            ..Default::default()
+                        };
+
+                        self.deposit_queue
+                            .lock()
+                            .map_err(|_| eyre::eyre!("Deposit queue lock poisoned"))?
+                            .enqueue(header, deposits.clone());
+                    }
+
+                    self.save_l1_checkpoint(batch_end)?;
+                    debug!(from = cursor, to = batch_end, "Backfill batch complete");
+                    cursor = batch_end + 1;
+                }
+
+                info!(tip, "Backfill complete, caught up to L1 tip");
+            } else {
+                info!(last_synced, tip, "Already synced to L1 tip");
+            }
+        } else {
+            info!(tip, "No previous L1 sync state, starting from current tip");
+            self.save_l1_checkpoint(tip)?;
+        }
+
+        // ── Live subscription: process new blocks as they arrive ──
         let sub = provider.subscribe_blocks().await?;
         let mut stream = sub.into_stream();
 
@@ -122,6 +223,9 @@ impl L1Subscriber {
 
                 deposits.push(deposit);
             }
+
+            // Persist progress even for empty blocks so we never re-scan them.
+            self.save_l1_checkpoint(block_number)?;
 
             if deposits.is_empty() {
                 debug!(block = block_number, "No deposits in L1 block");
