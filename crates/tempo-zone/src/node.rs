@@ -28,7 +28,6 @@ use reth_provider::{ChainSpecProvider, EthStorage};
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
-use tracing::{debug, info};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
@@ -41,6 +40,7 @@ use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool, amm::AmmLiquidityCache,
     validator::TempoTransactionValidator,
 };
+use tracing::{debug, info};
 
 use crate::{builder::ZonePayloadBuilder, l1::L1Subscriber};
 

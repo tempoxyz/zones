@@ -20,7 +20,6 @@ use reth_payload_primitives::PayloadBuilderAttributes;
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
-use tracing::{debug, error, info, warn};
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool,
     error::InvalidPoolTransactionError,
@@ -35,6 +34,7 @@ use tempo_primitives::{
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
 use tempo_transaction_pool::TempoTransactionPool;
+use tracing::{debug, error, info, warn};
 
 use crate::bindings::mintCall;
 use crate::l1::Deposit;
