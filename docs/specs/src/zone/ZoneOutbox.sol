@@ -78,6 +78,7 @@ contract ZoneOutbox is IZoneOutbox {
     error GasFeeRateTooHigh();
     error TransferFailed();
     error OnlySequencer();
+    error InvalidBlockNumber();
     error TooManyWithdrawalsThisBlock();
 
     /*//////////////////////////////////////////////////////////////
@@ -216,8 +217,9 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Emits BatchFinalized for observability (proof reads from state).
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
+    function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber) external returns (bytes32 withdrawalQueueHash) {
         if (msg.sender != config.sequencer()) revert OnlySequencer();
+        if (blockNumber != uint64(block.number)) revert InvalidBlockNumber();
 
         uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
 

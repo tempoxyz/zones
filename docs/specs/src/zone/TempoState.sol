@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITempoState } from "./IZone.sol";
+import { ITempoState, ITempoStateReader } from "./IZone.sol";
 
 /// @title TempoState
 /// @notice Zone-side predeploy for Tempo state verification

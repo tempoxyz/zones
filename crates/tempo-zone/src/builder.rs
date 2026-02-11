@@ -311,14 +311,26 @@ where
             }
         }
 
+        // Finalize the withdrawal batch — must run after all user txs.
+        // Calls ZoneOutbox.finalizeWithdrawalBatch(MAX, blockNumber) to build the
+        // withdrawal hash chain and write batch state for proof generation.
+        let block_number: u64 = builder.evm_mut().block.number.try_into().expect("block number fits u64");
+        let finalize_tx = crate::system_tx::build_finalize_withdrawal_batch_tx(
+            U256::MAX,
+            block_number,
+        );
+        if let Err(err) = builder.execute_transaction(finalize_tx) {
+            error!(?err, "finalizeWithdrawalBatch system tx failed");
+            return Err(PayloadBuilderError::evm(err));
+        }
+
         // TODO: Omit this when running a zone node. Currently required because
         // TempoBlockExecutor::finish() expects an end-of-block subblock metadata
         // system tx. Zone nodes don't have subblocks, so we emit an empty one.
-        let block_number = builder.evm_mut().block.number;
         let empty_metadata: Vec<SubBlockMetadata> = Vec::new();
         let subblock_metadata_input: Vec<u8> = alloy_rlp::encode(&empty_metadata)
             .into_iter()
-            .chain(block_number.to_be_bytes_vec())
+            .chain(block_number.to_be_bytes())
             .collect();
         let seal_tx = Recovered::new_unchecked(
             TempoTxEnvelope::Legacy(Signed::new_unhashed(

@@ -30,11 +30,13 @@ use crate::abi::{self, ZONE_OUTBOX_ADDRESS};
 /// - Writes `_lastBatch` to state for proof access
 /// - Emits `BatchFinalized`
 ///
-/// Pass `u256::MAX` to batch all pending withdrawals.
+/// Pass `u256::MAX` to batch all pending withdrawals. `block_number` must match the current zone
+/// block number.
 pub fn build_finalize_withdrawal_batch_tx(
     count: U256,
+    block_number: u64,
 ) -> Recovered<TempoTxEnvelope> {
-    let calldata = abi::ZoneOutbox::finalizeWithdrawalBatchCall { count }.abi_encode();
+    let calldata = abi::ZoneOutbox::finalizeWithdrawalBatchCall { count, blockNumber: block_number }.abi_encode();
 
     let tx = TxLegacy {
         chain_id: None,

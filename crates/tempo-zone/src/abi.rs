@@ -197,7 +197,7 @@ sol! {
 
         // -- State-changing functions --
 
-        function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+        function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber) external returns (bytes32 withdrawalQueueHash);
     }
 
     // ---------------------------------------------------------------
