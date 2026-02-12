@@ -28,8 +28,7 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256};
-use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_signer_local::PrivateKeySigner;
+use alloy_provider::DynProvider;
 use parking_lot::Mutex;
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
@@ -170,24 +169,15 @@ pub struct WithdrawalProcessor {
 }
 
 impl WithdrawalProcessor {
-    /// Create a new withdrawal processor.
+    /// Create a new withdrawal processor from a shared L1 provider.
     ///
-    /// Builds an HTTP provider with the sequencer wallet and instantiates the
-    /// ZonePortal contract for L1 calls.
-    pub async fn new(
+    /// The provider must already include the sequencer wallet for signing.
+    pub fn new(
         config: WithdrawalProcessorConfig,
-        signer: PrivateKeySigner,
+        provider: DynProvider<TempoNetwork>,
         store: SharedWithdrawalStore,
         notify: Arc<Notify>,
     ) -> Self {
-        let wallet = alloy_network::EthereumWallet::from(signer);
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
-            .connect(&config.l1_rpc_url)
-            .await
-            .expect("valid L1 RPC URL")
-            .erased();
-
         let portal = ZonePortal::new(config.portal_address, provider);
 
         Self {
@@ -328,14 +318,16 @@ impl WithdrawalProcessor {
 ///
 /// The processor waits for notifications from the batch submitter (via `notify`) and then
 /// processes withdrawals from the ZonePortal queue on Tempo L1.
+///
+/// The `provider` must already include the sequencer wallet for signing L1 transactions.
 pub fn spawn_withdrawal_processor(
     config: WithdrawalProcessorConfig,
-    signer: PrivateKeySigner,
+    provider: DynProvider<TempoNetwork>,
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let processor = WithdrawalProcessor::new(config, signer, store, notify).await;
+        let processor = WithdrawalProcessor::new(config, provider, store, notify);
         loop {
             if let Err(e) = processor.run().await {
                 error!(error = %e, "Withdrawal processor failed, restarting in 5s");

@@ -22,7 +22,7 @@ pub mod system_tx;
 pub mod withdrawals;
 pub mod zonemonitor;
 
-pub use batch::{BatchData, BatchSubmitter, BatchSubmitterConfig};
+pub use batch::{BatchData, BatchSubmitter};
 pub use engine::ZoneEngine;
 pub use l1::{
     Deposit, DepositQueue, DepositQueueTransition, L1BlockDeposits, L1Subscriber,
@@ -35,7 +35,9 @@ pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
+use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
+use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 
 /// Configuration for all zone sequencer background tasks.
@@ -77,13 +79,25 @@ pub struct ZoneSequencerHandle {
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawal` for each pending withdrawal.
 ///
-/// The monitor and withdrawal processor use the sequencer signer for L1 transactions.
+/// Both tasks share a **single L1 provider** (and therefore a single nonce manager)
+/// to prevent signing/nonce contention when submitting concurrent L1 transactions.
 ///
 /// Returns a [`ZoneSequencerHandle`] with join handles for both tasks.
-pub fn spawn_zone_sequencer(
+pub async fn spawn_zone_sequencer(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
 ) -> ZoneSequencerHandle {
+    // Build a single shared L1 provider with the sequencer wallet.
+    // Both the batch submitter (inside the zone monitor) and the withdrawal
+    // processor use this provider, ensuring nonces are tracked in one place.
+    let wallet = alloy_network::EthereumWallet::from(signer);
+    let l1_provider: DynProvider<TempoNetwork> = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .wallet(wallet)
+        .connect(&config.l1_rpc_url)
+        .await
+        .expect("valid L1 RPC URL")
+        .erased();
+
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());
 
@@ -100,17 +114,20 @@ pub fn spawn_zone_sequencer(
         zone_rpc_url: config.zone_rpc_url,
         poll_interval: config.zone_poll_interval,
         portal_address: config.portal_address,
-        l1_rpc_url: config.l1_rpc_url,
-        signer: signer.clone(),
     };
 
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,
-        signer,
+        l1_provider.clone(),
         withdrawal_store.clone(),
         withdrawal_notify.clone(),
     );
-    let monitor_handle = spawn_zone_monitor(monitor_config, withdrawal_store, withdrawal_notify);
+    let monitor_handle = spawn_zone_monitor(
+        monitor_config,
+        l1_provider,
+        withdrawal_store,
+        withdrawal_notify,
+    );
 
     ZoneSequencerHandle {
         withdrawal_handle,

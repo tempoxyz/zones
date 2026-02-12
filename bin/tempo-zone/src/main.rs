@@ -167,7 +167,7 @@ fn main() {
                     zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 };
 
-                let seq_handle = zone::spawn_zone_sequencer(sequencer_config, signer);
+                let seq_handle = zone::spawn_zone_sequencer(sequencer_config, signer).await;
 
                 info!(
                     target: "reth::cli",

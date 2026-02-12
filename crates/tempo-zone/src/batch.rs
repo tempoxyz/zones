@@ -14,22 +14,12 @@
 //! accept empty proofs for this to work.
 
 use alloy_primitives::{Address, B256, Bytes};
-use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_signer_local::PrivateKeySigner;
+use alloy_provider::DynProvider;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{info, instrument};
 
 use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
-
-/// Configuration for the L1 batch submitter.
-#[derive(Debug, Clone)]
-pub struct BatchSubmitterConfig {
-    /// ZonePortal contract address on Tempo L1.
-    pub portal_address: Address,
-    /// Tempo L1 RPC URL (HTTP).
-    pub l1_rpc_url: String,
-}
 
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
@@ -52,30 +42,20 @@ pub struct BatchData {
 
 /// Submits zone batches to the ZonePortal contract on Tempo L1.
 ///
-/// Holds a [`DynProvider`] with the sequencer's signing wallet and a contract
-/// instance pointing at the portal.
+/// Holds a contract instance pointing at the portal, backed by a shared
+/// [`DynProvider`] with the sequencer's signing wallet.
 pub struct BatchSubmitter {
-    config: BatchSubmitterConfig,
+    portal_address: Address,
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
 }
 
 impl BatchSubmitter {
-    /// Create a new batch submitter.
+    /// Create a new batch submitter from a shared L1 provider.
     ///
-    /// Builds an HTTP provider with the sequencer wallet and instantiates the
-    /// ZonePortal contract for L1 calls.
-    pub async fn new(config: BatchSubmitterConfig, signer: PrivateKeySigner) -> Self {
-        let wallet = alloy_network::EthereumWallet::from(signer);
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(wallet)
-            .connect(&config.l1_rpc_url)
-            .await
-            .expect("valid L1 RPC URL")
-            .erased();
-
-        let portal = ZonePortal::new(config.portal_address, provider);
-
-        Self { config, portal }
+    /// The provider must already include the sequencer wallet for signing.
+    pub fn new(portal_address: Address, provider: DynProvider<TempoNetwork>) -> Self {
+        let portal = ZonePortal::new(portal_address, provider);
+        Self { portal_address, portal }
     }
 
     /// Submit a batch to the ZonePortal on Tempo L1.
@@ -89,7 +69,7 @@ impl BatchSubmitter {
     /// contract must be configured to accept empty proofs.
     // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
-        portal = %self.config.portal_address,
+        portal = %self.portal_address,
         tempo_block = batch.tempo_block_number,
         prev_block_hash = %batch.prev_block_hash,
         next_block_hash = %batch.next_block_hash,
@@ -121,6 +101,8 @@ impl BatchSubmitter {
             )
             .send()
             .await?
+            .with_required_confirmations(1)
+            .with_timeout(Some(std::time::Duration::from_secs(30)))
             .watch()
             .await?;
 
