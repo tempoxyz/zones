@@ -1,5 +1,8 @@
 use alloy::{
-    network::{EthereumWallet, primitives::{HeaderResponse, ReceiptResponse}},
+    network::{
+        EthereumWallet,
+        primitives::{HeaderResponse, ReceiptResponse},
+    },
     primitives::{Address, B256},
     providers::{Provider, ProviderBuilder},
     signers::local::PrivateKeySigner,
@@ -51,11 +54,14 @@ pub(crate) struct CreateZone {
     output: PathBuf,
 
     /// Tempo L1 HTTP RPC URL used to fetch headers and send the createZone transaction.
-    #[arg(long, default_value = "https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz")]
+    #[arg(
+        long,
+        default_value = "https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
+    )]
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    #[arg(long, default_value = "0xb425C093b3f303f63d7af6bd85a45ae15De0d3d9")]
+    #[arg(long, default_value = "0x86A7Ca9816806B59C7172015D04F9C2EF5F5D8E0")]
     zone_factory: Address,
 
     /// TIP-20 token address for the zone (same address on both Tempo and the zone L2).
@@ -89,41 +95,31 @@ pub(crate) struct CreateZone {
 
 impl CreateZone {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let key_str = self.private_key.strip_prefix("0x").unwrap_or(&self.private_key);
+        let key_str = self
+            .private_key
+            .strip_prefix("0x")
+            .unwrap_or(&self.private_key);
         let signer: PrivateKeySigner = key_str.parse()?;
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
             .connect_http(self.l1_rpc_url.parse()?);
 
-        println!("Fetching Tempo block header...");
-        let block = provider
-            .get_block_by_number(alloy::eips::BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| eyre!("block not found"))?;
-
-        let header = block.header.as_ref();
-        let block_hash = block.header.hash();
-
-        let mut header_rlp = Vec::new();
-        header.encode(&mut header_rlp);
-        println!("Tempo block {} (hash: {block_hash})", header.inner.number);
-
         let factory = ZoneFactory::new(self.zone_factory, &provider);
         println!("Fetching verifier address from ZoneFactory...");
         let verifier = Address::from(factory.verifier().call().await?.0);
         println!("Verifier: {verifier}");
 
-        let tempo_block_number = header.inner.number;
-
+        // Use placeholder values for the zone params — these will be overridden
+        // after the createZone tx confirms, using the confirmation block.
         let params = CreateZoneParams {
             token: self.zone_token,
             sequencer: self.sequencer,
             verifier,
             zoneParams: ZoneParams {
                 genesisBlockHash: B256::ZERO,
-                genesisTempoBlockHash: block_hash,
-                genesisTempoBlockNumber: tempo_block_number,
+                genesisTempoBlockHash: B256::ZERO,
+                genesisTempoBlockNumber: 0,
             },
         };
 
@@ -159,14 +155,34 @@ impl CreateZone {
         let zone_id = event.zoneId;
         let portal = event.portal;
 
-        let header_rlp_hex = const_hex::encode(&header_rlp);
+        // Re-fetch the header from the block that included the `createZone` tx.
+        // The portal (and its sequencer storage slot) only exists from this block onward,
+        // so using the pre-tx header would cause `readTempoStorageSlot` to read empty state.
+        let confirm_block_number = receipt
+            .block_number
+            .ok_or_else(|| eyre!("receipt missing block number"))?;
+        let confirm_block = provider
+            .get_block_by_number(confirm_block_number.into())
+            .await?
+            .ok_or_else(|| eyre!("confirmation block {confirm_block_number} not found"))?;
+        let confirm_header = confirm_block.header.as_ref();
+        let confirm_hash = confirm_block.header.hash();
+
+        let mut genesis_header_rlp = Vec::new();
+        confirm_header.encode(&mut genesis_header_rlp);
+
+        println!(
+            "Using confirmation block {} (hash: {confirm_hash}) as genesis anchor",
+            confirm_header.inner.number
+        );
+
+        let header_rlp_hex = const_hex::encode(&genesis_header_rlp);
 
         let genesis_cmd = crate::generate_zone_genesis::GenerateZoneGenesis {
             output: self.output.clone(),
             chain_id: self.chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
-            zone_token: self.zone_token,
             tempo_portal: portal,
             tempo_genesis_header_rlp: header_rlp_hex,
             sequencer: Some(self.sequencer),
@@ -179,7 +195,7 @@ impl CreateZone {
         println!("  Portal: {portal}");
         println!("  Token: {}", self.zone_token);
         println!("  Sequencer: {}", self.sequencer);
-        println!("  Tempo anchor block: {tempo_block_number}");
+        println!("  Tempo anchor block: {}", confirm_header.inner.number);
         println!(
             "  Genesis written to: {}",
             self.output.join("genesis.json").display()

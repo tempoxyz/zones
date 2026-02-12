@@ -1,23 +1,23 @@
 //! Zone payload builder.
 //!
-//! Simple payload builder that executes deposit mint system transactions
-//! from L1 and pool transactions.
+//! Builds zone blocks by executing `advanceTempo` system transactions (one per L1 block)
+//! followed by pool transactions and a withdrawal batch finalization.
 
-use alloy_consensus::{Signed, TxLegacy};
 use alloy_primitives::{Address, U256};
-use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
-use reth_chainspec::{ChainSpecProvider, EthChainSpec, EthereumHardforks};
+use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
     ConfigureEvm, Database, NextBlockEnvAttributes,
     execute::{BlockBuilder, BlockBuilderOutcome},
 };
+use reth_node_api::FullNodeTypes;
+use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::PayloadBuilderAttributes;
-use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
+use reth_primitives_traits::AlloyBlockHeader as _;
 use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
@@ -27,82 +27,80 @@ use reth_transaction_pool::{
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
-use tempo_evm::{TempoEvmConfig, TempoNextBlockEnvAttributes};
-use tempo_payload_types::TempoPayloadBuilderAttributes;
-use tempo_primitives::{
-    SubBlockMetadata, TempoHeader, TempoPrimitives, TempoTxEnvelope,
-    transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
-};
-use tempo_transaction_pool::TempoTransactionPool;
+use tempo_evm::TempoNextBlockEnvAttributes;
 use tracing::{debug, error, info, warn};
 
-use crate::bindings::mintCall;
-use crate::l1::Deposit;
+use crate::evm::ZoneEvmConfig;
+use tempo_payload_types::TempoPayloadBuilderAttributes;
+use tempo_primitives::{TempoHeader, TempoPrimitives};
+use tempo_transaction_pool::TempoTransactionPool;
 
-/// Simple zone payload builder that executes deposit mint txs + pool txs.
-///
-/// TODO: Integrate with TempoPayloadBuilder for shared metrics, subblock support, etc.
+use super::node::ZoneNode;
+
+/// Factory for constructing the zone payload builder.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct ZonePayloadFactory {
+    deposit_queue: crate::DepositQueue,
+    sequencer: Option<Address>,
+}
+
+impl ZonePayloadFactory {
+    pub fn new(deposit_queue: crate::DepositQueue, sequencer: Option<Address>) -> Self {
+        Self {
+            deposit_queue,
+            sequencer,
+        }
+    }
+}
+
+impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, ZoneEvmConfig>
+    for ZonePayloadFactory
+where
+    Node: FullNodeTypes<Types = ZoneNode>,
+{
+    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
+
+    async fn build_payload_builder(
+        self,
+        ctx: &BuilderContext<Node>,
+        pool: TempoTransactionPool<Node::Provider>,
+        evm_config: ZoneEvmConfig,
+    ) -> eyre::Result<Self::PayloadBuilder> {
+        Ok(ZonePayloadBuilder {
+            pool,
+            provider: ctx.provider().clone(),
+            evm_config,
+            deposit_queue: self.deposit_queue,
+            _sequencer: self.sequencer,
+        })
+    }
+}
+/// Zone payload builder that executes `advanceTempo` system txs + pool txs.
 #[derive(Debug, Clone)]
 pub struct ZonePayloadBuilder<Provider> {
     pool: TempoTransactionPool<Provider>,
     provider: Provider,
-    evm_config: TempoEvmConfig,
+    evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
-    token_address: Address,
+    _sequencer: Option<Address>,
 }
 
 impl<Provider> ZonePayloadBuilder<Provider> {
     pub fn new(
         pool: TempoTransactionPool<Provider>,
         provider: Provider,
-        evm_config: TempoEvmConfig,
+        evm_config: ZoneEvmConfig,
         deposit_queue: crate::DepositQueue,
-        token_address: Address,
+        sequencer: Option<Address>,
     ) -> Self {
         Self {
             pool,
             provider,
             evm_config,
             deposit_queue,
-            token_address,
+            _sequencer: sequencer,
         }
-    }
-}
-
-impl<Provider> ZonePayloadBuilder<Provider>
-where
-    Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec>,
-{
-    // TODO: Update this to use a single system tx for minting deposits
-    fn build_deposit_system_txs(&self, deposits: &[Deposit]) -> Vec<Recovered<TempoTxEnvelope>> {
-        let chain_id = Some(self.provider.chain_spec().chain().id());
-
-        deposits
-            .iter()
-            .map(|deposit| {
-                let calldata = mintCall {
-                    to: deposit.to,
-                    amount: U256::from(deposit.amount),
-                }
-                .abi_encode();
-
-                Recovered::new_unchecked(
-                    TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                        TxLegacy {
-                            chain_id,
-                            nonce: 0,
-                            gas_price: 0,
-                            gas_limit: 0,
-                            to: self.token_address.into(),
-                            value: U256::ZERO,
-                            input: calldata.into(),
-                        },
-                        TEMPO_SYSTEM_TX_SIGNATURE,
-                    )),
-                    TEMPO_SYSTEM_TX_SENDER,
-                )
-            })
-            .collect()
     }
 }
 
@@ -131,36 +129,104 @@ where
 
         let start = Instant::now();
 
-        let pending_deposits = self
+        // Read the current tempoBlockHash and tempoBlockNumber from TempoState storage
+        // to validate the next L1 block we process is the expected successor.
+        let (tempo_block_hash, expected_l1_number) = {
+            let sp = self.provider.state_by_block_hash(parent_header.hash())?;
+            let hash = sp
+                .storage(
+                    crate::abi::TEMPO_STATE_ADDRESS,
+                    alloy_primitives::B256::ZERO,
+                )
+                .map_err(|e| PayloadBuilderError::Internal(e.into()))?
+                .map(|v| alloy_primitives::B256::from(v.to_be_bytes()))
+                .unwrap_or_default();
+            // tempoBlockNumber is at slot 7, offset 0 (packed as lowest uint64 in the slot,
+            // alongside tempoGasLimit, tempoGasUsed, tempoTimestamp)
+            let slot7 = sp
+                .storage(crate::abi::TEMPO_STATE_ADDRESS, U256::from(7).into())
+                .map_err(|e| PayloadBuilderError::Internal(e.into()))?
+                .unwrap_or_default();
+            // Extract lowest 8 bytes (uint64 at offset 0)
+            let tempo_block_number: u64 = (slot7 & U256::from(u64::MAX)).to::<u64>();
+            let expected: u64 = tempo_block_number + 1;
+            (hash, expected)
+        };
+
+        info!(
+            target: "zone::payload",
+            %tempo_block_hash,
+            expected_l1_number,
+            "TempoState current state"
+        );
+
+        // Take exactly one L1 block per zone block — advanceTempo advances Tempo state
+        // by exactly one block, maintaining sequential chain continuity.
+        // The ZoneEngine ensures an L1 block is queued before triggering a build.
+        let l1_block = match self
             .deposit_queue
             .lock()
             .expect("deposit queue poisoned")
-            .drain();
-
-        let all_deposits: Vec<Deposit> = pending_deposits
-            .iter()
-            .flat_map(|block| block.deposits.clone())
-            .collect();
-
-        if !pending_deposits.is_empty() {
-            info!(
-                target: "zone::payload",
-                l1_blocks = pending_deposits.len(),
-                deposits = all_deposits.len(),
-                "Including deposit mint txs from L1 blocks"
-            );
-            for block in &pending_deposits {
-                for deposit in &block.deposits {
-                    debug!(
-                        target: "zone::payload",
-                        sender = %deposit.sender,
-                        to = %deposit.to,
-                        amount = %deposit.amount,
-                        l1_block = block.header.number,
-                        "Deposit -> mint"
-                    );
-                }
+            .pop_next()
+        {
+            Some(block) => block,
+            None => {
+                debug!(target: "zone::payload", "No L1 block available, cancelling build");
+                return Ok(BuildOutcome::Cancelled);
             }
+        };
+
+        // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
+        // and its parent hash must match the stored tempoBlockHash.
+        if l1_block.header.inner.number != expected_l1_number {
+            error!(
+                target: "zone::payload",
+                got = l1_block.header.inner.number,
+                expected = expected_l1_number,
+                "L1 block number mismatch — chain continuity broken"
+            );
+            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                format!(
+                    "L1 block number mismatch: got {} expected {}",
+                    l1_block.header.inner.number, expected_l1_number
+                ),
+            )));
+        }
+        if l1_block.header.inner.parent_hash != tempo_block_hash {
+            error!(
+                target: "zone::payload",
+                got = %l1_block.header.inner.parent_hash,
+                expected = %tempo_block_hash,
+                l1_block = l1_block.header.inner.number,
+                "L1 parent hash mismatch — chain continuity broken"
+            );
+            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                format!(
+                    "L1 parent hash mismatch at block {}: got {} expected {}",
+                    l1_block.header.inner.number,
+                    l1_block.header.inner.parent_hash,
+                    tempo_block_hash
+                ),
+            )));
+        }
+
+        let total_deposits = l1_block.deposits.len();
+
+        info!(
+            target: "zone::payload",
+            l1_block = l1_block.header.inner.number,
+            deposits = total_deposits,
+            "Including advanceTempo system tx (chain continuity OK)"
+        );
+        for deposit in &l1_block.deposits {
+            debug!(
+                target: "zone::payload",
+                sender = %deposit.sender,
+                to = %deposit.to,
+                amount = %deposit.amount,
+                l1_block = l1_block.header.inner.number,
+                "Deposit -> advanceTempo"
+            );
         }
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
@@ -211,13 +277,28 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
-        // Execute deposit mint system transactions.
-        // TODO: Replace individual mint txs with a single batchMint(address[],uint256[])
-        // system tx to reduce per-deposit overhead.
-        let deposit_txs = self.build_deposit_system_txs(&all_deposits);
-        for tx in deposit_txs {
-            if let Err(err) = builder.execute_transaction(tx) {
-                error!(?err, "deposit mint system tx failed");
+        // Execute advanceTempo system transaction — exactly one per zone block.
+        {
+            // Log header details for debugging chain continuity
+            let header_rlp = alloy_rlp::encode(&l1_block.header);
+            info!(
+                target: "zone::payload",
+                l1_block_number = l1_block.header.inner.number,
+                l1_parent_hash = %l1_block.header.inner.parent_hash,
+                l1_block_hash = %alloy_primitives::keccak256(&header_rlp),
+                header_rlp_len = header_rlp.len(),
+                "advanceTempo header details"
+            );
+
+            let advance_tx =
+                crate::system_tx::build_advance_tempo_tx(&l1_block.header, &l1_block.deposits);
+            if let Err(err) = builder.execute_transaction(advance_tx) {
+                error!(
+                    ?err,
+                    l1_block = l1_block.header.inner.number,
+                    deposits = l1_block.deposits.len(),
+                    "advanceTempo system tx failed"
+                );
                 return Err(PayloadBuilderError::evm(err));
             }
         }
@@ -267,32 +348,19 @@ where
             }
         }
 
-        // TODO: Omit this when running a zone node. Currently required because
-        // TempoBlockExecutor::finish() expects an end-of-block subblock metadata
-        // system tx. Zone nodes don't have subblocks, so we emit an empty one.
-        let block_number = builder.evm_mut().block.number;
-        let empty_metadata: Vec<SubBlockMetadata> = Vec::new();
-        let subblock_metadata_input: Vec<u8> = alloy_rlp::encode(&empty_metadata)
-            .into_iter()
-            .chain(block_number.to_be_bytes_vec())
-            .collect();
-        let seal_tx = Recovered::new_unchecked(
-            TempoTxEnvelope::Legacy(Signed::new_unhashed(
-                TxLegacy {
-                    chain_id: Some(self.provider.chain_spec().chain().id()),
-                    nonce: 0,
-                    gas_price: 0,
-                    gas_limit: 0,
-                    to: Address::ZERO.into(),
-                    value: U256::ZERO,
-                    input: subblock_metadata_input.into(),
-                },
-                TEMPO_SYSTEM_TX_SIGNATURE,
-            )),
-            TEMPO_SYSTEM_TX_SENDER,
-        );
-        if let Err(err) = builder.execute_transaction(seal_tx) {
-            error!(?err, "subblock metadata system tx failed");
+        // Finalize the withdrawal batch — must run after all user txs.
+        // Calls ZoneOutbox.finalizeWithdrawalBatch(MAX, blockNumber) to build the
+        // withdrawal hash chain and write batch state for proof generation.
+        let block_number: u64 = builder
+            .evm_mut()
+            .block
+            .number
+            .try_into()
+            .expect("block number fits u64");
+        let finalize_tx =
+            crate::system_tx::build_finalize_withdrawal_batch_tx(U256::MAX, block_number);
+        if let Err(err) = builder.execute_transaction(finalize_tx) {
+            error!(?err, "finalizeWithdrawalBatch system tx failed");
             return Err(PayloadBuilderError::evm(err));
         }
 
@@ -313,7 +381,7 @@ where
             number = sealed_block.number(),
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
-            deposits = all_deposits.len(),
+            deposits = total_deposits,
             tx_count = sealed_block.body().transactions.len(),
             ?elapsed,
             "Built zone payload"

@@ -34,14 +34,10 @@ async fn main() -> eyre::Result<()> {
             .run()
             .await
             .wrap_err("failed to generate localnet configs"),
-        Action::CreateZone(args) => args
-            .run()
-            .await
-            .wrap_err("failed to create zone"),
-        Action::GenerateZoneGenesis(args) => args
-            .run()
-            .await
-            .wrap_err("failed to generate zone genesis"),
+        Action::CreateZone(args) => args.run().await.wrap_err("failed to create zone"),
+        Action::GenerateZoneGenesis(args) => {
+            args.run().await.wrap_err("failed to generate zone genesis")
+        }
         Action::GenerateAddPeer(cfg) => generate_config_to_add_peer(cfg),
     }
 }

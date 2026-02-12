@@ -219,19 +219,19 @@ contract TempoStateTest is Test {
                         STORAGE READING TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_readTempoStorageSlot_revertsAsStub() public {
+    function test_readTempoStorageSlot_revertsWithoutPrecompile() public {
         vm.prank(zoneInbox);
-        vm.expectRevert("TempoState: readTempoStorageSlot is a precompile stub");
+        vm.expectRevert();
         tempoState.readTempoStorageSlot(address(0x1234), bytes32(0));
     }
 
-    function test_readTempoStorageSlots_revertsAsStub() public {
+    function test_readTempoStorageSlots_revertsWithoutPrecompile() public {
         bytes32[] memory slots = new bytes32[](2);
         slots[0] = bytes32(uint256(1));
         slots[1] = bytes32(uint256(2));
 
         vm.prank(zoneInbox);
-        vm.expectRevert("TempoState: readTempoStorageSlots is a precompile stub");
+        vm.expectRevert();
         tempoState.readTempoStorageSlots(address(0x1234), slots);
     }
 

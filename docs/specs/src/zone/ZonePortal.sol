@@ -3,7 +3,7 @@ pragma solidity ^0.8.13;
 
 import { ITIP20 } from "../interfaces/ITIP20.sol";
 
-import { BLOCKHASH_HISTORY, IBlockHashHistory } from "./BlockHashHistory.sol";
+import { getBlockHash } from "./BlockHashHistory.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "./EncryptedDeposit.sol";
 import {
@@ -595,7 +595,7 @@ contract ZonePortal is IZonePortal {
             anchorBlockNumber = tempoBlockNumber;
             if (tempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
 
-            anchorBlockHash = IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(tempoBlockNumber);
+            anchorBlockHash = getBlockHash(tempoBlockNumber);
             if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
         } else {
             // Ancestry mode: read recentTempoBlockNumber hash, proof verifies ancestry chain
@@ -603,8 +603,7 @@ contract ZonePortal is IZonePortal {
             if (recentTempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
 
             anchorBlockNumber = recentTempoBlockNumber;
-            anchorBlockHash =
-                IBlockHashHistory(BLOCKHASH_HISTORY).getBlockHash(recentTempoBlockNumber);
+            anchorBlockHash = getBlockHash(recentTempoBlockNumber);
             if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
         }
 

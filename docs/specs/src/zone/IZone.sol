@@ -6,7 +6,7 @@ pragma solidity ^0.8.13;
 interface IZoneToken {
 
     function mint(address to, uint256 amount) external;
-    function burn(address from, uint256 amount) external;
+    function burn(uint256 amount) external;
     function transfer(address to, uint256 amount) external returns (bool);
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
     function balanceOf(address account) external view returns (uint256);
@@ -224,6 +224,41 @@ interface IAesGcmDecrypt {
 
 }
 
+/// @title ITempoStateReader
+/// @notice Standalone precompile for reading Tempo L1 contract storage at a given block height
+/// @dev Predeploy at 0x1c00000000000000000000000000000000000004
+interface ITempoStateReader {
+
+    /// @notice Read a single storage slot from a Tempo L1 contract
+    /// @param account The Tempo L1 contract address
+    /// @param slot The storage slot to read
+    /// @param blockNumber The L1 block number to query
+    /// @return value The storage value
+    function readStorageAt(
+        address account,
+        bytes32 slot,
+        uint64 blockNumber
+    )
+        external
+        view
+        returns (bytes32);
+
+    /// @notice Read multiple storage slots from a Tempo L1 contract
+    /// @param account The Tempo L1 contract address
+    /// @param slots The storage slots to read
+    /// @param blockNumber The L1 block number to query
+    /// @return values The storage values
+    function readStorageBatchAt(
+        address account,
+        bytes32[] calldata slots,
+        uint64 blockNumber
+    )
+        external
+        view
+        returns (bytes32[] memory);
+
+}
+
 struct Withdrawal {
     address sender; // who initiated the withdrawal on the zone
     address to; // Tempo recipient
@@ -250,6 +285,9 @@ address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 
 // ZoneConfig system contract address (0x1c00...0003)
 address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
+
+// TempoStateReader precompile address (0x1c00...0004)
+address constant TEMPO_STATE_READER = 0x1c00000000000000000000000000000000000004;
 
 /*//////////////////////////////////////////////////////////////
                 ZONE PORTAL STORAGE SLOT CONSTANTS
@@ -833,7 +871,12 @@ interface IZoneOutbox {
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+    function finalizeWithdrawalBatch(
+        uint256 count,
+        uint64 blockNumber
+    )
+        external
+        returns (bytes32 withdrawalQueueHash);
 
 }
 

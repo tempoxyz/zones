@@ -177,7 +177,7 @@ contract ZoneInbox is IZoneInbox {
     ///      that could exceed zone block gas limits.
     /// @param _maxDepositsPerTempoBlock The maximum number of deposits per Tempo block
     function setMaxDepositsPerTempoBlock(uint256 _maxDepositsPerTempoBlock) external {
-        if (msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
         maxDepositsPerTempoBlock = _maxDepositsPerTempoBlock;
         emit MaxDepositsPerTempoBlockUpdated(_maxDepositsPerTempoBlock);
     }
@@ -204,7 +204,7 @@ contract ZoneInbox is IZoneInbox {
     )
         external
     {
-        if (msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
 
         // Enforce deposit cap (0 = unlimited)
         if (maxDepositsPerTempoBlock > 0 && deposits.length > maxDepositsPerTempoBlock) {
