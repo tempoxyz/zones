@@ -110,8 +110,12 @@ impl CreateZone {
         let verifier = Address::from(factory.verifier().call().await?.0);
         println!("Verifier: {verifier}");
 
-        // Use placeholder values for the zone params — these will be overridden
-        // after the createZone tx confirms, using the confirmation block.
+        // We cannot know the confirmation block number before sending, so we pass
+        // the current block number. The tx typically confirms in the next block, but
+        // zone.json records the actual confirmation block for the zone node to use
+        // via --l1.genesis-block-number.
+        let current_block = provider.get_block_number().await?;
+
         let params = CreateZoneParams {
             token: self.zone_token,
             sequencer: self.sequencer,
@@ -119,7 +123,7 @@ impl CreateZone {
             zoneParams: ZoneParams {
                 genesisBlockHash: B256::ZERO,
                 genesisTempoBlockHash: B256::ZERO,
-                genesisTempoBlockNumber: 0,
+                genesisTempoBlockNumber: current_block,
             },
         };
 
