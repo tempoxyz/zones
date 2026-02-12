@@ -94,7 +94,7 @@ pub struct ZoneMonitor {
     /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
     prev_processed_deposit_hash: B256,
     /// Previous zone block hash, used as `prev_block_hash` in [`BatchData`].
-    /// Initialized to `B256::ZERO` to match the portal's genesis `blockHash`.
+    /// Initialized from the portal's on-chain `blockHash()` at startup.
     prev_block_hash: B256,
     /// Tracks the portal's withdrawal queue tail position.
     /// The withdrawal store keys must match the portal's queue slot indices
@@ -126,6 +126,11 @@ impl ZoneMonitor {
 
         let batch_submitter = BatchSubmitter::new(config.portal_address, l1_provider);
 
+        let prev_block_hash = batch_submitter
+            .read_portal_block_hash()
+            .await
+            .expect("failed to read portal blockHash at startup");
+
         Self {
             config,
             provider,
@@ -137,7 +142,7 @@ impl ZoneMonitor {
             withdrawal_notify,
             last_processed_block: 0,
             prev_processed_deposit_hash: B256::ZERO,
-            prev_block_hash: B256::ZERO,
+            prev_block_hash,
             portal_withdrawal_queue_tail: 0,
         }
     }
