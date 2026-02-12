@@ -27,7 +27,7 @@ genesis accounts="1000" output="./" profile="maxperf":
 [group('localnet')]
 [doc('Deletes local network data and launches a new localnet')]
 [confirm('This will wipe your data directory (unless you have reset=false) - please confirm before proceeding (y/n):')]
-localnet accounts="1000" reset="true" profile="maxperf" features="asm-keccak" args="":
+localnet accounts="1000" reset="false" profile="maxperf" features="asm-keccak" args="":
     #!/bin/bash
     if [[ "{{reset}}" = "true" ]]; then
         rm -r ./localnet/ || true
@@ -113,7 +113,7 @@ create-zone name:
 
 [group('zone')]
 [doc('Starts a Tempo Zone L2 node, subscribing to L1 deposits. Pass the zone name used in create-zone.')]
-zone-up name reset="true" args="":
+zone-up name reset="false" args="":
     #!/bin/bash
     set -euo pipefail
     ZONE_DIR="generated/{{name}}"

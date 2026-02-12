@@ -185,13 +185,25 @@ impl L1Subscriber {
         Ok(())
     }
 
+    /// Derive an HTTP URL from the configured WSS URL for RPC calls that don't
+    /// need a subscription (backfilling, one-off reads).
+    fn http_url(&self) -> String {
+        self.config
+            .l1_rpc_url
+            .replacen("wss://", "https://", 1)
+            .replacen("ws://", "http://", 1)
+    }
+
     /// Start the L1 subscriber.
     ///
-    /// Syncs to the current L1 tip on startup, then subscribes to new blocks.
+    /// Syncs to the current L1 tip on startup using HTTP, then subscribes to
+    /// new blocks via WebSocket.
     pub async fn start(self) -> eyre::Result<()> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
         let url: url::Url = self.config.l1_rpc_url.parse()?;
+
+        // Connect WS first so subscription captures blocks during backfill.
         let mut ws = WsConnect::new(self.config.l1_rpc_url.clone());
 
         if !url.username().is_empty() {
@@ -199,31 +211,37 @@ impl L1Subscriber {
             ws = ws.with_auth(auth);
         }
 
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        let ws_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_ws(ws)
             .await?;
 
         info!("Connected to L1 node");
 
-        let filter = Filter::new()
-            .address(self.config.portal_address)
-            .event_signature(DepositMade::SIGNATURE_HASH);
-
         // Subscribe before backfilling so we don't miss blocks between
-        // sync_to_l1_tip finishing and the subscription starting.
-        let sub = provider.subscribe_blocks().await?;
+        // sync_to_l1_tip finishing and the stream starting.
+        let sub = ws_provider.subscribe_blocks().await?;
         let mut stream = sub.into_stream();
 
         info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
 
-        self.sync_to_l1_tip(&provider, &filter).await?;
+        // Use HTTP for backfilling — more reliable than hammering a WebSocket
+        // with hundreds of sequential requests.
+        let http_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http(self.http_url().parse()?)
+            .erased();
+
+        let filter = Filter::new()
+            .address(self.config.portal_address)
+            .event_signature(DepositMade::SIGNATURE_HASH);
+
+        self.sync_to_l1_tip(&http_provider, &filter).await?;
 
         // Track the last enqueued block so we can detect and backfill gaps
         // when the WebSocket subscription skips blocks.
         let mut last_enqueued: u64 = self
             .deposit_queue
             .last_enqueued_block()
-            .unwrap_or(provider.get_block_number().await?);
+            .unwrap_or(http_provider.get_block_number().await?);
 
         while let Some(header) = stream.next().await {
             let block_number = header.number();
@@ -240,11 +258,11 @@ impl L1Subscriber {
                     skipped = gap_to - gap_from + 1,
                     "Gap detected in L1 subscription, backfilling"
                 );
-                self.backfill(&provider, &filter, gap_from, gap_to).await?;
+                self.backfill(&http_provider, &filter, gap_from, gap_to).await?;
             }
 
-            // Fetch deposit logs for this block
-            let logs = provider
+            // Fetch deposit logs for this block via HTTP
+            let logs = http_provider
                 .get_logs(&filter.clone().select(block_number))
                 .await?;
 
