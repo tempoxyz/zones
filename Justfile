@@ -181,14 +181,6 @@ zone-launch reset="true" profile="release" args="":
         {{args}}
 
 [group('zone')]
-<<<<<<< Updated upstream
-[doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits')]
-zoneup reset="true" profile="release" args="":
-    #!/bin/bash
-    if [[ "{{reset}}" = "true" ]]; then
-        rm -rf /tmp/tempo-zone || true
-    fi;
-=======
 [doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits. Pass the zone name used in create-zone.')]
 zoneup name reset="true" profile="release" args="":
     #!/bin/bash
@@ -210,13 +202,12 @@ zoneup name reset="true" profile="release" args="":
     if [[ "{{reset}}" = "true" ]]; then
         rm -rf "$DATADIR" || true
     fi
->>>>>>> Stashed changes
     cargo run --bin tempo-zone --profile {{profile}} -- \
                       node \
                       --chain "$GENESIS_JSON" \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
-                      --l1.portal-address "${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}" \
-                      --l1.token-address 0x20C0000000000000000000000000000000000000 \
+                      --l1.portal-address "$PORTAL" \
+                      --l1.token-address "$TOKEN" \
                       --http \
                       --http.addr 0.0.0.0 \
                       --http.port 8546 \
