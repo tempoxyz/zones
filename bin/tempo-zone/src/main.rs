@@ -168,7 +168,7 @@ fn main() {
 
                 info!(
                     target: "reth::cli",
-                    "Sequencer tasks spawned: batch submitter, withdrawal processor, zone monitor"
+                    "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
                 );
 
                 // If any sequencer task exits, log it.

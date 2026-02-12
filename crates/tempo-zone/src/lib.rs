@@ -21,7 +21,7 @@ pub mod system_tx;
 pub mod withdrawals;
 pub mod zonemonitor;
 
-pub use batch::{BatchData, BatchSubmitter, BatchSubmitterConfig, spawn_batch_submitter};
+pub use batch::{BatchData, BatchSubmitter, BatchSubmitterConfig};
 pub use l1::{
     Deposit, DepositQueue, DepositQueueTransition, L1BlockDeposits, L1Subscriber,
     L1SubscriberConfig, PendingDeposits,
@@ -59,11 +59,9 @@ pub struct ZoneSequencerConfig {
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
 pub struct ZoneSequencerHandle {
-    /// Join handle for the batch submitter task.
-    pub batch_handle: tokio::task::JoinHandle<()>,
     /// Join handle for the withdrawal processor task.
     pub withdrawal_handle: tokio::task::JoinHandle<()>,
-    /// Join handle for the zone monitor task.
+    /// Join handle for the zone monitor task (which also handles batch submission).
     pub monitor_handle: tokio::task::JoinHandle<()>,
 }
 
@@ -71,32 +69,25 @@ pub struct ZoneSequencerHandle {
 ///
 /// This is the top-level POC entrypoint that starts:
 /// - **Zone monitor** — polls the Zone L2 for new blocks, extracts withdrawal events into the
-///   shared store, and sends [`BatchData`] to the batch submitter channel.
-/// - **Batch submitter** — listens on a channel for [`BatchData`] and submits each batch to the
-///   ZonePortal on Tempo L1 (with empty proof bytes).
+///   shared store, builds [`BatchData`], and submits each batch **synchronously** to the
+///   ZonePortal on Tempo L1 (with empty proof bytes). Local state only advances on
+///   successful submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawal` for each pending withdrawal.
 ///
-/// The L1 tasks (batch submitter and withdrawal processor) use the sequencer signer for
-/// L1 transactions. The zone monitor is read-only.
+/// The monitor and withdrawal processor use the sequencer signer for L1 transactions.
 ///
-/// Returns a [`ZoneSequencerHandle`] with join handles for all three tasks.
+/// Returns a [`ZoneSequencerHandle`] with join handles for both tasks.
 pub fn spawn_zone_sequencer(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
 ) -> ZoneSequencerHandle {
-    let (batch_tx, batch_rx) = tokio::sync::mpsc::unbounded_channel();
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());
 
-    let batch_config = BatchSubmitterConfig {
-        portal_address: config.portal_address,
-        l1_rpc_url: config.l1_rpc_url.clone(),
-    };
-
     let withdrawal_config = WithdrawalProcessorConfig {
         portal_address: config.portal_address,
-        l1_rpc_url: config.l1_rpc_url,
+        l1_rpc_url: config.l1_rpc_url.clone(),
         fallback_poll_interval: config.withdrawal_poll_interval,
     };
 
@@ -106,24 +97,20 @@ pub fn spawn_zone_sequencer(
         tempo_state_address: config.tempo_state_address,
         zone_rpc_url: config.zone_rpc_url,
         poll_interval: config.zone_poll_interval,
+        portal_address: config.portal_address,
+        l1_rpc_url: config.l1_rpc_url,
+        signer: signer.clone(),
     };
 
-    let batch_handle = spawn_batch_submitter(
-        batch_config,
-        signer.clone(),
-        batch_rx,
-        withdrawal_notify.clone(),
-    );
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,
         signer,
         withdrawal_store.clone(),
-        withdrawal_notify,
+        withdrawal_notify.clone(),
     );
-    let monitor_handle = spawn_zone_monitor(monitor_config, batch_tx, withdrawal_store);
+    let monitor_handle = spawn_zone_monitor(monitor_config, withdrawal_store, withdrawal_notify);
 
     ZoneSequencerHandle {
-        batch_handle,
         withdrawal_handle,
         monitor_handle,
     }

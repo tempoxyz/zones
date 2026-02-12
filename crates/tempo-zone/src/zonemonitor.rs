@@ -1,32 +1,41 @@
-//! Zone L2 block monitor.
+//! Zone L2 block monitor with integrated batch submission.
 //!
 //! Watches the **Zone L2** chain for new blocks, collecting withdrawal events and
-//! reading on-chain state to produce [`BatchData`] for the L1 batch submitter.
-//!
-//! All RPC calls in this module target the zone L2 node — never Tempo L1.
+//! reading on-chain state to produce [`BatchData`]. Submits each batch **synchronously**
+//! to the ZonePortal on Tempo L1 before advancing local state, ensuring that
+//! `prev_block_hash` and `prev_processed_deposit_hash` never diverge from the portal.
 //!
 //! ## Data produced
 //!
-//! - **[`BatchData`]** — sent over an unbounded channel to the batch submitter, which
-//!   posts it to the ZonePortal on L1.
+//! - **[`BatchData`]** — built from zone block data and submitted directly to the
+//!   ZonePortal on L1. Local state only advances on successful submission.
 //! - **Withdrawals** — extracted from `WithdrawalRequested` events and stored in the
 //!   [`SharedWithdrawalStore`] so the withdrawal processor can later call
 //!   `processWithdrawal` on L1.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::BlockNumberOrTag;
+use alloy_signer_local::PrivateKeySigner;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
+use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox},
-    batch::BatchData,
+    batch::{BatchData, BatchSubmitter, BatchSubmitterConfig},
     withdrawals::SharedWithdrawalStore,
 };
+
+/// Maximum number of times to retry a failed batch submission before resyncing.
+const MAX_RETRIES: u32 = 3;
+
+/// Initial delay between retries (doubles on each attempt).
+const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
 
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
@@ -41,12 +50,21 @@ pub struct ZoneMonitorConfig {
     pub zone_rpc_url: String,
     /// How often to poll for new zone blocks.
     pub poll_interval: Duration,
+    /// ZonePortal contract address on Tempo L1.
+    pub portal_address: Address,
+    /// Tempo L1 RPC URL (HTTP).
+    pub l1_rpc_url: String,
+    /// Private key signer for L1 batch submission transactions.
+    pub signer: PrivateKeySigner,
 }
 
-/// Monitors the Zone L2 chain for new blocks, producing [`BatchData`] and
-/// populating the [`SharedWithdrawalStore`].
+/// Monitors the Zone L2 chain for new blocks, submits batches synchronously to
+/// the ZonePortal on L1, and populates the [`SharedWithdrawalStore`].
 ///
 /// In the current POC every zone block corresponds to exactly one batch.
+/// Local state (`prev_block_hash`, `prev_processed_deposit_hash`) only advances
+/// after a successful L1 submission. On repeated failures the monitor resyncs
+/// from the portal's on-chain `blockHash()`.
 pub struct ZoneMonitor {
     config: ZoneMonitorConfig,
     /// Read-only HTTP provider pointed at the **Zone L2** RPC node.
@@ -62,9 +80,11 @@ pub struct ZoneMonitor {
     /// Shared store for withdrawal data, written here and consumed by the
     /// [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor) on **Tempo L1**.
     withdrawal_store: SharedWithdrawalStore,
-    /// Channel sender for [`BatchData`], consumed by the
-    /// [`BatchSubmitter`](crate::batch::BatchSubmitter) which posts batches to **Tempo L1**.
-    batch_tx: tokio::sync::mpsc::UnboundedSender<BatchData>,
+    /// Batch submitter for posting batches to the ZonePortal on **Tempo L1**.
+    batch_submitter: BatchSubmitter,
+    /// Notifier for the withdrawal processor — signalled after each successful
+    /// batch submission so it can process newly enqueued withdrawal slots.
+    withdrawal_notify: Arc<Notify>,
     /// Last **Zone L2** block number that was fully processed.
     last_processed_block: u64,
     /// Deposit queue hash from the previous block, used to construct the
@@ -76,14 +96,15 @@ pub struct ZoneMonitor {
 }
 
 impl ZoneMonitor {
-    /// Create a new zone monitor.
+    /// Create a new zone monitor with integrated batch submission.
     ///
-    /// Builds a read-only HTTP provider (no wallet) pointed at the Zone L2 RPC
-    /// and instantiates the on-chain contract handles.
-    pub fn new(
+    /// Builds a read-only HTTP provider (no wallet) pointed at the Zone L2 RPC,
+    /// instantiates the on-chain contract handles, and creates a [`BatchSubmitter`]
+    /// for posting batches to the ZonePortal on L1.
+    pub async fn new(
         config: ZoneMonitorConfig,
-        batch_tx: tokio::sync::mpsc::UnboundedSender<BatchData>,
         withdrawal_store: SharedWithdrawalStore,
+        withdrawal_notify: Arc<Notify>,
     ) -> Self {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_http(config.zone_rpc_url.parse().expect("valid Zone RPC URL"))
@@ -93,6 +114,12 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
+        let batch_config = BatchSubmitterConfig {
+            portal_address: config.portal_address,
+            l1_rpc_url: config.l1_rpc_url.clone(),
+        };
+        let batch_submitter = BatchSubmitter::new(batch_config, config.signer.clone()).await;
+
         Self {
             config,
             provider,
@@ -100,7 +127,8 @@ impl ZoneMonitor {
             inbox,
             tempo_state,
             withdrawal_store,
-            batch_tx,
+            batch_submitter,
+            withdrawal_notify,
             last_processed_block: 0,
             prev_processed_deposit_hash: B256::ZERO,
             prev_block_hash: B256::ZERO,
@@ -140,10 +168,104 @@ impl ZoneMonitor {
         }
     }
 
+    /// Submit a batch to L1 with retry logic.
+    ///
+    /// Retries up to [`MAX_RETRIES`] times with exponential backoff (starting at
+    /// [`INITIAL_RETRY_DELAY`]). On success, advances local state and notifies the
+    /// withdrawal processor. On exhaustion of retries, resyncs `prev_block_hash`
+    /// from the portal's on-chain `blockHash()` and skips this block.
+    async fn submit_batch_with_retry(
+        &mut self,
+        batch_data: &BatchData,
+        block_number: u64,
+    ) -> Result<()> {
+        let mut delay = INITIAL_RETRY_DELAY;
+
+        for attempt in 1..=MAX_RETRIES {
+            match self.batch_submitter.submit_batch(batch_data).await {
+                Ok(tx_hash) => {
+                    info!(
+                        block_number,
+                        tempo_block_number = batch_data.tempo_block_number,
+                        %tx_hash,
+                        withdrawal_queue_hash = %batch_data.withdrawal_queue_hash,
+                        "Batch successfully submitted to L1"
+                    );
+
+                    // Only advance local state on success.
+                    self.prev_block_hash = batch_data.next_block_hash;
+                    self.prev_processed_deposit_hash =
+                        batch_data.next_processed_deposit_hash;
+                    self.last_processed_block = block_number;
+
+                    // Signal the withdrawal processor.
+                    self.withdrawal_notify.notify_one();
+
+                    return Ok(());
+                }
+                Err(e) => {
+                    if attempt < MAX_RETRIES {
+                        warn!(
+                            attempt,
+                            max_retries = MAX_RETRIES,
+                            delay_secs = delay.as_secs(),
+                            error = %e,
+                            "Batch submission failed, retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay *= 2;
+                    } else {
+                        error!(
+                            error = %e,
+                            block_number,
+                            tempo_block_number = batch_data.tempo_block_number,
+                            prev_block_hash = %batch_data.prev_block_hash,
+                            next_block_hash = %batch_data.next_block_hash,
+                            "Batch submission failed after {MAX_RETRIES} retries"
+                        );
+                    }
+                }
+            }
+        }
+
+        // All retries exhausted — resync from portal.
+        self.resync_from_portal(block_number).await;
+
+        Ok(())
+    }
+
+    /// Resync `prev_block_hash` from the portal's on-chain `blockHash()`.
+    ///
+    /// Called after exhausting retries so subsequent batches start from the
+    /// portal's actual state rather than the stale local value.
+    async fn resync_from_portal(&mut self, block_number: u64) {
+        let old_hash = self.prev_block_hash;
+        match self.batch_submitter.read_portal_block_hash().await {
+            Ok(portal_hash) => {
+                warn!(
+                    old_prev_block_hash = %old_hash,
+                    new_block_hash = %portal_hash,
+                    block_number,
+                    "Resynced prev_block_hash from portal after max retries"
+                );
+                self.prev_block_hash = portal_hash;
+                // Skip this block — the monitor will pick up from the next one.
+                self.last_processed_block = block_number;
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "Failed to read blockHash from portal during resync"
+                );
+                // Don't advance last_processed_block so we retry this block.
+            }
+        }
+    }
+
     /// Process a single zone block.
     ///
     /// In the POC every zone block is one batch. This method gathers everything
-    /// the batch submitter needs to call `ZonePortal.submitBatch()` on L1:
+    /// needed to call `ZonePortal.submitBatch()` on L1:
     ///
     /// 1. Collects `WithdrawalRequested` events from the ZoneOutbox and stores the
     ///    full withdrawal structs in the [`SharedWithdrawalStore`]. The L1 portal only
@@ -155,8 +277,8 @@ impl ZoneMonitor {
     ///    synced to) and `ZoneInbox.processedDepositQueueHash()` (how far the zone has
     ///    consumed the L1 deposit queue). These form the `BlockTransition` and
     ///    `DepositQueueTransition` structs the portal verifies on L1.
-    /// 4. Constructs [`BatchData`] from the above and sends it to the batch submitter
-    ///    channel.
+    /// 4. Constructs [`BatchData`] and submits it synchronously to L1. Local state
+    ///    only advances on successful submission.
     #[instrument(skip(self), fields(block_number))]
     async fn process_block(&mut self, block_number: u64) -> Result<()> {
         debug!(block_number, "Processing zone block");
@@ -225,7 +347,7 @@ impl ZoneMonitor {
 
         let block_hash = block.header.hash;
 
-        // --- 4. Build and send BatchData ---
+        // --- 4. Build and submit BatchData synchronously ---
         // Use the tracked prev_block_hash rather than the L2 parent_hash.
         // The portal's blockHash is initialized to B256::ZERO at genesis, so the
         // first batch must use B256::ZERO as prev_block_hash. After each successful
@@ -239,21 +361,8 @@ impl ZoneMonitor {
             withdrawal_queue_hash,
         };
 
-        self.prev_block_hash = block_hash;
-        self.prev_processed_deposit_hash = next_processed_deposit_hash;
-        self.last_processed_block = block_number;
-
-        if let Err(e) = self.batch_tx.send(batch_data) {
-            error!(block_number, error = %e, "Failed to send BatchData — receiver dropped");
-        } else {
-            info!(
-                block_number,
-                tempo_block_number,
-                %block_hash,
-                %withdrawal_queue_hash,
-                "Produced BatchData for zone block"
-            );
-        }
+        // Submit synchronously — state only advances on success.
+        self.submit_batch_with_retry(&batch_data, block_number).await?;
 
         Ok(())
     }
@@ -262,14 +371,15 @@ impl ZoneMonitor {
 /// Spawn the zone monitor as a background task.
 ///
 /// The monitor polls the Zone L2 for new blocks, extracts withdrawal events into the
-/// [`SharedWithdrawalStore`], and sends [`BatchData`] to the batch submitter channel.
+/// [`SharedWithdrawalStore`], builds [`BatchData`], and submits each batch synchronously
+/// to the ZonePortal on Tempo L1. Local state only advances on successful submission.
 pub fn spawn_zone_monitor(
     config: ZoneMonitorConfig,
-    batch_tx: tokio::sync::mpsc::UnboundedSender<BatchData>,
     withdrawal_store: SharedWithdrawalStore,
+    withdrawal_notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut monitor = ZoneMonitor::new(config, batch_tx, withdrawal_store);
+        let mut monitor = ZoneMonitor::new(config, withdrawal_store, withdrawal_notify).await;
         loop {
             if let Err(e) = monitor.run().await {
                 error!(error = %e, "Zone monitor failed, restarting in 5s");

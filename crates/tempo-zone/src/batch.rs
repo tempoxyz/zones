@@ -13,15 +13,12 @@
 //! are submitted as empty bytes. The L1 verifier contract must be configured to
 //! accept empty proofs for this to work.
 
-use std::sync::Arc;
-
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
-use tokio::sync::Notify;
-use tracing::{error, info, instrument};
+use tracing::{info, instrument};
 
 use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
 
@@ -131,42 +128,13 @@ impl BatchSubmitter {
 
         Ok(tx_hash)
     }
-}
 
-/// Spawn the batch submitter as a background task.
-///
-/// Listens on `batch_rx` for [`BatchData`] produced by the zone monitor
-/// and submits each batch to the ZonePortal on Tempo L1. After a successful
-/// submission, notifies the withdrawal processor via `withdrawal_notify` so
-/// it can process the newly enqueued withdrawal slot.
-pub fn spawn_batch_submitter(
-    config: BatchSubmitterConfig,
-    signer: PrivateKeySigner,
-    mut batch_rx: tokio::sync::mpsc::UnboundedReceiver<BatchData>,
-    withdrawal_notify: Arc<Notify>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let submitter = BatchSubmitter::new(config, signer).await;
-        while let Some(batch) = batch_rx.recv().await {
-            match submitter.submit_batch(&batch).await {
-                Ok(tx_hash) => {
-                    info!(
-                        %tx_hash,
-                        next_block_hash = %batch.next_block_hash,
-                        "Batch successfully submitted to L1"
-                    );
-                    withdrawal_notify.notify_one();
-                }
-                Err(e) => {
-                    error!(
-                        error = %e,
-                        next_block_hash = %batch.next_block_hash,
-                        "Failed to submit batch to L1"
-                    );
-                }
-            }
-        }
-
-        error!("Batch submission channel closed — shutting down submitter");
-    })
+    /// Read the current `blockHash` from the ZonePortal on L1.
+    ///
+    /// Used to resync the monitor's `prev_block_hash` after repeated submission
+    /// failures, ensuring subsequent batches use the portal's actual state.
+    pub async fn read_portal_block_hash(&self) -> Result<B256> {
+        let hash = self.portal.blockHash().call().await?;
+        Ok(hash)
+    }
 }
