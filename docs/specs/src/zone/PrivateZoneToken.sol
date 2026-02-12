@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneConfig, ZONE_INBOX, ZONE_OUTBOX } from "./IZone.sol";
+import {IZoneConfig, ZONE_INBOX, ZONE_OUTBOX} from "./IZone.sol";
 
 /**
  * @title PrivateZoneToken
@@ -22,7 +22,6 @@ import { IZoneConfig, ZONE_INBOX, ZONE_OUTBOX } from "./IZone.sol";
  * pause controls, rewards) is identical to the standard TIP-20 spec.
  */
 contract PrivateZoneToken {
-
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -80,11 +79,7 @@ contract PrivateZoneToken {
      *      Both parties can still check the allowance for standard ERC-20 approval flows.
      */
     function allowance(address owner, address spender) external view returns (uint256) {
-        if (
-            msg.sender != owner
-            && msg.sender != spender
-            && msg.sender != config.sequencer()
-        ) {
+        if (msg.sender != owner && msg.sender != spender && msg.sender != config.sequencer()) {
             revert Unauthorized();
         }
 
@@ -181,8 +176,7 @@ contract PrivateZoneToken {
      */
     function _requireMintBurnAuth() internal view {
         if (
-            msg.sender != ZONE_INBOX
-            && msg.sender != ZONE_OUTBOX
+            msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX
             // && !hasRole(ISSUER_ROLE, msg.sender)  // standard role check preserved
         ) {
             revert Unauthorized();
