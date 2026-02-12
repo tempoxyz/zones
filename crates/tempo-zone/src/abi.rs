@@ -77,8 +77,6 @@ sol! {
         bytes32 nextProcessedHash;
     }
 
-    // NOTE: WithdrawalQueueTransition was removed — submitBatch takes a plain bytes32.
-
     #[derive(Debug)]
     struct LastBatch {
         bytes32 withdrawalQueueHash;

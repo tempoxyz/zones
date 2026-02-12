@@ -41,7 +41,7 @@ use std::{
 ///
 /// The anchor tracks the latest L1 block the cache has received data for, used by the
 /// [`L1StateListener`](super::listener::L1StateListener) for reorg detection.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct L1StateCache {
     tracked_contracts: HashSet<Address>,
     /// Per-slot value history: `(address, slot) → { block_number → value }`.
@@ -49,16 +49,6 @@ pub struct L1StateCache {
     slots: HashMap<(Address, B256), BTreeMap<u64, B256>>,
     /// Latest L1 block the cache has received data for, used for reorg detection.
     anchor: NumHash,
-}
-
-impl Default for L1StateCache {
-    fn default() -> Self {
-        Self {
-            tracked_contracts: HashSet::new(),
-            slots: HashMap::new(),
-            anchor: NumHash::default(),
-        }
-    }
 }
 
 impl L1StateCache {

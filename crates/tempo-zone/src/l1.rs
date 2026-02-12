@@ -74,7 +74,7 @@ impl L1Subscriber {
     /// `genesisTempoBlockNumber` so we scan from the portal's creation.
     async fn sync_to_l1_tip(
         &self,
-        l1_provider: &impl Provider,
+        l1_provider: &impl Provider<TempoNetwork>,
         filter: &Filter,
     ) -> eyre::Result<()> {
         let tip = l1_provider.get_block_number().await?;
@@ -112,7 +112,7 @@ impl L1Subscriber {
     /// enqueued so that `finalizeTempo` sees a strict sequential chain.
     async fn backfill(
         &self,
-        l1_provider: &impl Provider,
+        l1_provider: &impl Provider<TempoNetwork>,
         filter: &Filter,
         from: u64,
         to: u64,

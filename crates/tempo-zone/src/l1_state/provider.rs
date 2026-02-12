@@ -57,7 +57,8 @@ impl Default for L1StateProviderConfig {
 /// `spawn_blocking`). Calling it from within an async task on the same runtime will panic.
 #[derive(Debug, Clone)]
 pub struct L1StateProvider {
-    config: L1StateProviderConfig,
+    /// Timeout applied to each individual RPC request.
+    request_timeout: Duration,
     /// In-memory cache of L1 contract storage slots, checked before any RPC call.
     cache: SharedL1StateCache,
     /// HTTP provider pointed at **Tempo L1**, used as a fallback when the cache misses.
@@ -86,7 +87,7 @@ impl L1StateProvider {
             .erased();
 
         Self {
-            config,
+            request_timeout: config.request_timeout,
             cache,
             provider,
             runtime_handle,
@@ -104,7 +105,7 @@ impl L1StateProvider {
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
-            config,
+            request_timeout: config.request_timeout,
             cache,
             provider,
             runtime_handle,
@@ -135,7 +136,7 @@ impl L1StateProvider {
         let start = std::time::Instant::now();
         let result = tokio::task::block_in_place(|| {
             self.runtime_handle.block_on(tokio::time::timeout(
-                self.config.request_timeout,
+                self.request_timeout,
                 self.fetch_slot(address, slot, block_number),
             ))
         });
@@ -149,10 +150,10 @@ impl L1StateProvider {
                 Ok(value)
             }
             Err(_elapsed) => {
-                warn!(%address, %slot, block_number, ?elapsed, timeout = ?self.config.request_timeout, "L1 storage RPC fetch timed out");
+                warn!(%address, %slot, block_number, ?elapsed, timeout = ?self.request_timeout, "L1 storage RPC fetch timed out");
                 Err(eyre::eyre!(
                     "L1 RPC request timed out after {:?} for address={address} slot={slot} block={block_number}",
-                    self.config.request_timeout,
+                    self.request_timeout,
                 ))
             }
         }
@@ -179,7 +180,7 @@ impl L1StateProvider {
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
         let result = tokio::time::timeout(
-            self.config.request_timeout,
+            self.request_timeout,
             self.fetch_slot(address, slot, block_number),
         )
         .await;
@@ -192,7 +193,7 @@ impl L1StateProvider {
             }
             Err(_elapsed) => Err(eyre::eyre!(
                 "L1 RPC request timed out after {:?} for address={address} slot={slot} block={block_number}",
-                self.config.request_timeout,
+                self.request_timeout,
             )),
         }
     }

@@ -31,7 +31,7 @@ use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox},

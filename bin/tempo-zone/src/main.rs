@@ -78,7 +78,7 @@ struct ZoneArgs {
         env = "WITHDRAWAL_POLL_INTERVAL_SECS",
         default_value = "5"
     )]
-    pub withdrawal_poll_interval_secs: u64,
+    pub poll_interval_secs: u64,
 
     /// Genesis Tempo L1 block number (the block used to anchor TempoState at genesis).
     /// If set, overrides the portal's `genesisTempoBlockNumber` for backfill.
@@ -158,7 +158,7 @@ fn main() {
                     portal_address: args.portal_address,
                     l1_rpc_url: args.l1_rpc_url,
                     withdrawal_poll_interval: Duration::from_secs(
-                        args.withdrawal_poll_interval_secs,
+                        args.poll_interval_secs,
                     ),
                     outbox_address: zone::abi::ZONE_OUTBOX_ADDRESS,
                     inbox_address: zone::abi::ZONE_INBOX_ADDRESS,

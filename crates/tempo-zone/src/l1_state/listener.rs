@@ -25,7 +25,7 @@ use tracing::{debug, error, info, warn};
 /// Configuration for the L1 state listener.
 #[derive(Debug, Clone)]
 pub struct L1StateListenerConfig {
-    /// WebSocket URL of the L1 node (used for header-only mode).
+    /// WebSocket URL of the L1 node.
     pub l1_ws_url: String,
     /// Fallback poll interval if the WebSocket subscription drops.
     pub poll_interval: Duration,
@@ -42,32 +42,30 @@ impl Default for L1StateListenerConfig {
 
 /// Listener that subscribes to L1 block headers and keeps the state cache anchor current.
 ///
-/// In header-only mode, storage values are populated lazily via `L1StateProvider` RPC fallback.
+/// Storage values are populated lazily via `L1StateProvider` RPC fallback.
 #[derive(Clone)]
 pub struct L1StateListener {
-    config: L1StateListenerConfig,
     cache: SharedL1StateCache,
 }
 
 impl L1StateListener {
-    pub fn new(config: L1StateListenerConfig, cache: SharedL1StateCache) -> Self {
-        Self { config, cache }
+    pub fn new(cache: SharedL1StateCache) -> Self {
+        Self { cache }
     }
 
     /// Connect to the L1 node via WebSocket and subscribe to new block headers.
     ///
     /// On each new block the cache anchor is updated. If the new block's parent hash does not
     /// match the current anchor (indicating a reorg), the cache is cleared first.
-    pub async fn start(self) -> eyre::Result<()> {
-        info!(url = %self.config.l1_ws_url, "Connecting to L1 for state listener");
+    pub async fn start(self, config: &L1StateListenerConfig) -> eyre::Result<()> {
+        info!(url = %config.l1_ws_url, "Connecting to L1 for state listener");
 
-        let ws = WsConnect::new(&self.config.l1_ws_url);
+        let ws = WsConnect::new(&config.l1_ws_url);
         let provider = ProviderBuilder::new().connect_ws(ws).await?;
 
         info!("Connected to L1 node, subscribing to block headers");
 
-        let sub = provider.subscribe_blocks().await?;
-        let mut stream = sub.into_stream();
+        let mut stream = provider.subscribe_blocks().await?.into_stream();
 
         info!("Subscribed to L1 block headers");
 
@@ -206,13 +204,13 @@ pub fn spawn_l1_state_listener(
     cache: SharedL1StateCache,
     task_executor: impl reth_ethereum::tasks::TaskSpawner,
 ) {
-    let listener = L1StateListener::new(config, cache);
+    let listener = L1StateListener::new(cache);
 
     task_executor.spawn_critical(
         "l1-state-listener",
         Box::pin(async move {
             loop {
-                if let Err(e) = listener.clone().start().await {
+                if let Err(e) = listener.clone().start(&config).await {
                     error!(error = %e, "L1 state listener failed, reconnecting in 5s");
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 }

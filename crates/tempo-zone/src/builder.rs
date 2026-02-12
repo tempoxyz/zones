@@ -3,9 +3,7 @@
 //! Builds zone blocks by executing `advanceTempo` system transactions (one per L1 block)
 //! followed by pool transactions and a withdrawal batch finalization.
 
-use alloy_consensus::{Signed, TxLegacy};
 use alloy_primitives::{Address, U256};
-use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -40,8 +38,6 @@ use tempo_primitives::{
 use tempo_transaction_pool::TempoTransactionPool;
 
 use super::node::ZoneNode;
-use crate::bindings::mintCall;
-use crate::l1::Deposit;
 
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
