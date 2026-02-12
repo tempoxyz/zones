@@ -186,13 +186,36 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+        // Spawn L1 deposit subscriber
         L1Subscriber::spawn(
             self.l1_config,
-            self.deposit_queue,
+            self.deposit_queue.clone(),
             ctx.node.task_executor().clone(),
         );
-
         info!(target: "reth::cli", "L1 deposit subscriber started as part of node lifecycle");
+
+        // Spawn the ZoneEngine — L1-event-driven block production
+        {
+            let provider = ctx.node.provider().clone();
+            let chain_spec = ctx.node.provider().chain_spec();
+            let payload_attributes_builder = ZonePayloadAttributesBuilder::new(chain_spec);
+            let to_engine = ctx.beacon_engine_handle.clone();
+            let payload_builder = ctx.node.payload_builder_handle().clone();
+            let deposit_queue = self.deposit_queue;
+
+            ctx.node.task_executor().spawn_critical("zone-engine", async move {
+                crate::engine::ZoneEngine::new(
+                    provider,
+                    payload_attributes_builder,
+                    to_engine,
+                    payload_builder,
+                    deposit_queue,
+                )
+                .run()
+                .await
+            });
+            info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
+        }
 
         self.inner.launch_add_ons(ctx).await
     }

@@ -137,6 +137,9 @@ fn main() {
                 sequencer_addr,
             );
 
+            // NOTE: `--dev` is no longer needed for block production — the ZoneEngine
+            // (spawned from ZoneAddOns::launch_add_ons) handles L1-driven block building.
+            // We keep `launch_with_debug_capabilities()` for its debug RPC features.
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
 
             info!(target: "reth::cli", "Tempo Zone node started");

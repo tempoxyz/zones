@@ -162,24 +162,18 @@ where
 
         // Take exactly one L1 block per zone block — advanceTempo advances Tempo state
         // by exactly one block, maintaining sequential chain continuity.
-        // Every zone block MUST contain an advanceTempo; wait until one is available.
-        let l1_block = loop {
-            let popped = self
-                .deposit_queue
-                .lock()
-                .expect("deposit queue poisoned")
-                .pop_next();
-
-            if let Some(block) = popped {
-                break block;
-            }
-
-            if cancel.is_cancelled() {
+        // The ZoneEngine ensures an L1 block is queued before triggering a build.
+        let l1_block = match self
+            .deposit_queue
+            .lock()
+            .expect("deposit queue poisoned")
+            .pop_next()
+        {
+            Some(block) => block,
+            None => {
+                debug!(target: "zone::payload", "No L1 block available, cancelling build");
                 return Ok(BuildOutcome::Cancelled);
             }
-
-            debug!(target: "zone::payload", "Waiting for L1 block to become available...");
-            std::thread::sleep(std::time::Duration::from_millis(100));
         };
 
         // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1

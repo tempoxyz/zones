@@ -93,6 +93,12 @@ pub struct ZoneMonitor {
     /// Previous zone block hash, used as `prev_block_hash` in [`BatchData`].
     /// Initialized to `B256::ZERO` to match the portal's genesis `blockHash`.
     prev_block_hash: B256,
+    /// Tracks the portal's withdrawal queue tail position.
+    /// The withdrawal store keys must match the portal's queue slot indices
+    /// (not the L2 outbox's internal `withdrawalBatchIndex`). This counter
+    /// starts at 0 and increments each time a batch with a non-zero
+    /// `withdrawal_queue_hash` is successfully submitted to L1.
+    portal_withdrawal_queue_tail: u64,
 }
 
 impl ZoneMonitor {
@@ -132,6 +138,7 @@ impl ZoneMonitor {
             last_processed_block: 0,
             prev_processed_deposit_hash: B256::ZERO,
             prev_block_hash: B256::ZERO,
+            portal_withdrawal_queue_tail: 0,
         }
     }
 
@@ -197,6 +204,11 @@ impl ZoneMonitor {
                     self.prev_processed_deposit_hash =
                         batch_data.next_processed_deposit_hash;
                     self.last_processed_block = block_number;
+
+                    // Advance portal queue tail if this batch had withdrawals.
+                    if batch_data.withdrawal_queue_hash != B256::ZERO {
+                        self.portal_withdrawal_queue_tail += 1;
+                    }
 
                     // Signal the withdrawal processor.
                     self.withdrawal_notify.notify_one();
@@ -308,30 +320,33 @@ impl ZoneMonitor {
                 (B256::ZERO, None)
             };
 
-        // Store withdrawals under the batch index from BatchFinalized.
-        if let Some(batch_index) = withdrawal_batch_index {
-            if !withdrawal_events.is_empty() {
-                let mut store = self.withdrawal_store.lock();
-                for (event, _log) in &withdrawal_events {
-                    let withdrawal = abi::Withdrawal {
-                        sender: event.sender,
-                        to: event.to,
-                        amount: event.amount,
-                        fee: event.fee,
-                        memo: event.memo,
-                        gasLimit: event.gasLimit,
-                        fallbackRecipient: event.fallbackRecipient,
-                        callbackData: event.data.clone(),
-                    };
-                    store.add_withdrawal(batch_index, withdrawal);
-                }
-                info!(
-                    block_number,
-                    batch_index,
-                    count = withdrawal_events.len(),
-                    "Stored withdrawals for batch"
-                );
+        // Store withdrawals under the portal's queue tail position (not the L2
+        // outbox's internal withdrawalBatchIndex). The portal queue only advances
+        // its tail when a non-zero withdrawalQueueHash is enqueued, so
+        // `portal_withdrawal_queue_tail` is the slot index the processor will use.
+        if withdrawal_queue_hash != B256::ZERO && !withdrawal_events.is_empty() {
+            let portal_slot = self.portal_withdrawal_queue_tail;
+            let mut store = self.withdrawal_store.lock();
+            for (event, _log) in &withdrawal_events {
+                let withdrawal = abi::Withdrawal {
+                    sender: event.sender,
+                    to: event.to,
+                    amount: event.amount,
+                    fee: event.fee,
+                    memo: event.memo,
+                    gasLimit: event.gasLimit,
+                    fallbackRecipient: event.fallbackRecipient,
+                    callbackData: event.data.clone(),
+                };
+                store.add_withdrawal(portal_slot, withdrawal);
             }
+            info!(
+                block_number,
+                portal_slot,
+                l2_batch_index = ?withdrawal_batch_index,
+                count = withdrawal_events.len(),
+                "Stored withdrawals for portal queue slot"
+            );
         }
 
         // --- 3. Read zone state ---

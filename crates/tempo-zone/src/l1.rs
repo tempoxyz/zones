@@ -147,9 +147,8 @@ impl L1Subscriber {
             }
 
             // 3. Enqueue every block (with or without deposits).
-            let mut queue = self.deposit_queue.lock().map_err(|_| eyre::eyre!("deposit queue poisoned"))?;
             for (header, deposits) in blocks {
-                queue.enqueue(header, deposits);
+                self.deposit_queue.enqueue(header, deposits);
             }
 
             cursor = end + 1;
@@ -220,10 +219,9 @@ impl L1Subscriber {
                 );
             }
 
-            self.deposit_queue
-                .lock()
-                .map_err(|_| eyre::eyre!("deposit queue poisoned"))?
-                .enqueue(header.clone().into(), deposits);
+            self.deposit_queue.enqueue(header.as_ref().clone(), deposits);
+
+            info!(block = block_number, "Enqueued L1 block deposits");
         }
 
         warn!("L1 block subscription stream ended");
@@ -370,8 +368,64 @@ pub struct DepositQueueTransition {
     pub next_processed_hash: B256,
 }
 
-/// Shared deposit queue for passing deposits between L1 subscriber and block builder.
-pub type DepositQueue = Arc<Mutex<PendingDeposits>>;
+/// Shared deposit queue with notification support.
+///
+/// Wraps the pending deposits with a `Notify` so the ZoneEngine can be
+/// woken instantly when new L1 blocks arrive.
+#[derive(Debug, Clone)]
+pub struct DepositQueue {
+    inner: Arc<Mutex<PendingDeposits>>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+impl DepositQueue {
+    /// Create a new empty deposit queue.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(PendingDeposits::default())),
+            notify: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    /// Enqueue an L1 block with its deposits and notify waiters.
+    pub fn enqueue(&self, header: TempoHeader, deposits: Vec<Deposit>) {
+        let mut queue = self.inner.lock().expect("deposit queue poisoned");
+        queue.enqueue(header, deposits);
+        drop(queue); // release lock before notifying
+        self.notify.notify_one();
+    }
+
+    /// Pop the next L1 block from the queue.
+    pub fn pop_next(&self) -> Option<L1BlockDeposits> {
+        self.inner.lock().expect("deposit queue poisoned").pop_next()
+    }
+
+    /// Returns the number of pending L1 blocks.
+    pub fn pending_count(&self) -> usize {
+        self.inner.lock().expect("deposit queue poisoned").pending.len()
+    }
+
+    /// Wait until an L1 block is available.
+    pub async fn notified(&self) {
+        self.notify.notified().await
+    }
+
+    /// Get a reference to the notify for external use.
+    pub fn notify_ref(&self) -> &Arc<tokio::sync::Notify> {
+        &self.notify
+    }
+
+    /// Lock the inner queue directly (for backward compat where needed).
+    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, PendingDeposits>> {
+        self.inner.lock()
+    }
+}
+
+impl Default for DepositQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[cfg(test)]
 mod tests {

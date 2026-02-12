@@ -12,6 +12,7 @@ pub mod abi;
 pub mod batch;
 pub mod bindings;
 mod builder;
+pub mod engine;
 pub mod evm;
 mod executor;
 pub mod l1;
@@ -22,6 +23,7 @@ pub mod withdrawals;
 pub mod zonemonitor;
 
 pub use batch::{BatchData, BatchSubmitter, BatchSubmitterConfig};
+pub use engine::ZoneEngine;
 pub use l1::{
     Deposit, DepositQueue, DepositQueueTransition, L1BlockDeposits, L1Subscriber,
     L1SubscriberConfig, PendingDeposits,

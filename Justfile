@@ -87,7 +87,7 @@ send-deposit to amount="1000000" memo="0x000000000000000000000000000000000000000
 
 [group('zone')]
 [doc('Creates a new zone on L1 via ZoneFactory, generates zone genesis, and launches the zone node. Requires L1_RPC_URL, PRIVATE_KEY, ZONE_TOKEN, and SEQUENCER_KEY env vars.')]
-zone-launch reset="true" args="":
+zone-launch reset="true" profile="release" args="":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -106,14 +106,16 @@ zone-launch reset="true" args="":
         mkdir -p "$ZONE_DIR"
     fi
 
-    # Build solidity specs first (needed for genesis artifact loading)
-    # Run in subshell so CWD is preserved even if forge returns non-zero
+    # Build everything upfront so the node starts instantly after zone creation
     echo "Building Solidity specs..."
     (cd docs/specs && forge build --skip test) || true
+    echo "Building binaries..."
+    cargo build --profile {{profile}} -p tempo-xtask
+    cargo build --profile {{profile}} --bin tempo-zone
 
     # Step 1: Create zone on L1 + generate genesis
     echo "Creating zone on L1 and generating genesis..."
-    CREATE_OUTPUT=$(cargo run -p tempo-xtask -- create-zone \
+    CREATE_OUTPUT=$(cargo run -p tempo-xtask --profile {{profile}} -- create-zone \
         --output "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
         --zone-token "$ZONE_TOKEN_L1" \
@@ -140,11 +142,9 @@ zone-launch reset="true" args="":
 
     # Step 2: Launch zone node
     echo "Launching Tempo Zone node..."
-    cargo run --bin tempo-zone -- \
+    cargo run --bin tempo-zone --profile {{profile}} -- \
         node \
         --chain "$ZONE_DIR/genesis.json" \
-        --dev \
-        --dev.block-time 300ms \
         --l1.rpc-url "$L1_RPC" \
         --l1.portal-address "${L1_PORTAL_ADDRESS:-$PORTAL_ADDR}" \
         --l1.token-address "$ZONE_TOKEN_L1" \
@@ -160,15 +160,13 @@ zone-launch reset="true" args="":
 
 [group('zone')]
 [doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits')]
-zoneup reset="true" args="":
+zoneup reset="true" profile="release" args="":
     #!/bin/bash
     if [[ "{{reset}}" = "true" ]]; then
         rm -rf /tmp/tempo-zone || true
     fi;
-    cargo run --bin tempo-zone -- \
+    cargo run --bin tempo-zone --profile {{profile}} -- \
                       node \
-                      --dev \
-                      --dev.block-time 300ms \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
                       --l1.portal-address "${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}" \
                       --l1.token-address 0x20C0000000000000000000000000000000000000 \
