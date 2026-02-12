@@ -55,7 +55,10 @@ impl BatchSubmitter {
     /// The provider must already include the sequencer wallet for signing.
     pub fn new(portal_address: Address, provider: DynProvider<TempoNetwork>) -> Self {
         let portal = ZonePortal::new(portal_address, provider);
-        Self { portal_address, portal }
+        Self {
+            portal_address,
+            portal,
+        }
     }
 
     /// Submit a batch to the ZonePortal on Tempo L1.

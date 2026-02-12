@@ -91,12 +91,13 @@ pub async fn spawn_zone_sequencer(
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
     let wallet = alloy_network::EthereumWallet::from(signer);
-    let l1_provider: DynProvider<TempoNetwork> = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .wallet(wallet)
-        .connect(&config.l1_rpc_url)
-        .await
-        .expect("valid L1 RPC URL")
-        .erased();
+    let l1_provider: DynProvider<TempoNetwork> =
+        ProviderBuilder::new_with_network::<TempoNetwork>()
+            .wallet(wallet)
+            .connect(&config.l1_rpc_url)
+            .await
+            .expect("valid L1 RPC URL")
+            .erased();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());

@@ -203,17 +203,19 @@ where
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
 
-            ctx.node.task_executor().spawn_critical("zone-engine", async move {
-                crate::engine::ZoneEngine::new(
-                    provider,
-                    payload_attributes_builder,
-                    to_engine,
-                    payload_builder,
-                    deposit_queue,
-                )
-                .run()
-                .await
-            });
+            ctx.node
+                .task_executor()
+                .spawn_critical("zone-engine", async move {
+                    crate::engine::ZoneEngine::new(
+                        provider,
+                        payload_attributes_builder,
+                        to_engine,
+                        payload_builder,
+                        deposit_queue,
+                    )
+                    .run()
+                    .await
+                });
             info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
         }
 

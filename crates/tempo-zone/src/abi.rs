@@ -37,8 +37,7 @@ pub const TEMPO_STATE_READER_ADDRESS: Address =
 /// The zone uses pathUSD as its native token: deposits mint pathUSD, withdrawals burn it.
 /// This is the same TIP20 precompile address as on Tempo L1, initialized in zone genesis
 /// with the TIP20Factory so that `is_valid_fee_token` passes for user transactions.
-pub const ZONE_TOKEN_ADDRESS: Address =
-    address!("0x20C0000000000000000000000000000000000000");
+pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
 
 sol! {
     // ---------------------------------------------------------------
@@ -387,7 +386,10 @@ mod tests {
         println!("abi_encode length: {}", encoded.len());
         println!("abi_encode_params length: {}", encoded_params.len());
         println!("abi_encode hex:\n{}", const_hex::encode(&encoded));
-        println!("abi_encode_params hex:\n{}", const_hex::encode(&encoded_params));
+        println!(
+            "abi_encode_params hex:\n{}",
+            const_hex::encode(&encoded_params)
+        );
         println!("Are they equal: {}", encoded == encoded_params);
     }
 
@@ -408,11 +410,26 @@ mod tests {
             depositData: deposit_data.clone(),
         };
 
-        println!("DepositType::Regular abi_encode: {}", const_hex::encode(DepositType::Regular.abi_encode()));
-        println!("deposit.abi_encode() length: {}", deposit.abi_encode().len());
-        println!("deposit.abi_encode(): {}", const_hex::encode(deposit.abi_encode()));
-        println!("QueuedDeposit.abi_encode() length: {}", qd.abi_encode().len());
-        println!("QueuedDeposit.abi_encode(): {}", const_hex::encode(qd.abi_encode()));
+        println!(
+            "DepositType::Regular abi_encode: {}",
+            const_hex::encode(DepositType::Regular.abi_encode())
+        );
+        println!(
+            "deposit.abi_encode() length: {}",
+            deposit.abi_encode().len()
+        );
+        println!(
+            "deposit.abi_encode(): {}",
+            const_hex::encode(deposit.abi_encode())
+        );
+        println!(
+            "QueuedDeposit.abi_encode() length: {}",
+            qd.abi_encode().len()
+        );
+        println!(
+            "QueuedDeposit.abi_encode(): {}",
+            const_hex::encode(qd.abi_encode())
+        );
 
         // Now test the full advanceTempo call encoding
         let header_bytes = Bytes::from(vec![0xc0]); // minimal RLP empty list
@@ -424,8 +441,14 @@ mod tests {
         .abi_encode();
 
         println!("\nadvanceTempo calldata length: {}", calldata.len());
-        println!("advanceTempo selector: 0x{}", const_hex::encode(&calldata[..4]));
-        println!("advanceTempo full calldata:\n{}", const_hex::encode(&calldata));
+        println!(
+            "advanceTempo selector: 0x{}",
+            const_hex::encode(&calldata[..4])
+        );
+        println!(
+            "advanceTempo full calldata:\n{}",
+            const_hex::encode(&calldata)
+        );
     }
 
     #[test]
@@ -448,13 +471,7 @@ mod tests {
         let rust_encoding = (DepositType::Regular, deposit, prev_hash).abi_encode();
         let rust_hash = keccak256(&rust_encoding);
 
-        assert_eq!(
-            solidity_encoding, rust_encoding,
-            "ABI encodings must match"
-        );
-        assert_eq!(
-            solidity_hash, rust_hash,
-            "Deposit hash chains must match"
-        );
+        assert_eq!(solidity_encoding, rust_encoding, "ABI encodings must match");
+        assert_eq!(solidity_hash, rust_hash, "Deposit hash chains must match");
     }
 }

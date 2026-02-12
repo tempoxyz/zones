@@ -22,8 +22,7 @@
 //! blocks at L1 speed — the monitor would need to fall ~2.3 hours behind to hit
 //! this limit.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
@@ -330,8 +329,7 @@ impl ZoneMonitor {
         for attempt in 1..=MAX_RETRIES {
             match self.batch_submitter.submit_batch(batch_data).await {
                 Ok(tx_hash) => {
-                    let blocks_in_batch =
-                        last_block_number - self.last_processed_block;
+                    let blocks_in_batch = last_block_number - self.last_processed_block;
                     info!(
                         last_block_number,
                         blocks_in_batch,
@@ -343,8 +341,7 @@ impl ZoneMonitor {
 
                     // Only advance local state on success.
                     self.prev_block_hash = batch_data.next_block_hash;
-                    self.prev_processed_deposit_hash =
-                        batch_data.next_processed_deposit_hash;
+                    self.prev_processed_deposit_hash = batch_data.next_processed_deposit_hash;
                     self.last_processed_block = last_block_number;
 
                     // Advance portal queue tail if this batch had withdrawals.

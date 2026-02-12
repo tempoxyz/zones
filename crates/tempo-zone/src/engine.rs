@@ -15,8 +15,7 @@ use reth_payload_primitives::{
 };
 use reth_primitives_traits::{HeaderTy, SealedHeaderFor};
 use reth_storage_api::BlockReader;
-use std::collections::VecDeque;
-use std::time::Duration;
+use std::{collections::VecDeque, time::Duration};
 use tracing::{debug, error, info};
 
 use crate::DepositQueue;
@@ -46,9 +45,9 @@ impl<T, B> ZoneEngine<T, B>
 where
     T: PayloadTypes,
     B: PayloadAttributesBuilder<
-        T::PayloadAttributes,
-        HeaderTy<<T::BuiltPayload as BuiltPayload>::Primitives>,
-    >,
+            T::PayloadAttributes,
+            HeaderTy<<T::BuiltPayload as BuiltPayload>::Primitives>,
+        >,
 {
     /// Create a new `ZoneEngine`.
     pub fn new(
@@ -58,8 +57,10 @@ where
         payload_builder: PayloadBuilderHandle<T>,
         deposit_queue: DepositQueue,
     ) -> Self {
-        let last_header =
-            provider.sealed_header(provider.best_block_number().unwrap()).unwrap().unwrap();
+        let last_header = provider
+            .sealed_header(provider.best_block_number().unwrap())
+            .unwrap()
+            .unwrap();
 
         Self {
             payload_attributes_builder,
@@ -152,7 +153,10 @@ where
     /// Returns the current forkchoice state.
     fn forkchoice_state(&self) -> ForkchoiceState {
         ForkchoiceState {
-            head_block_hash: *self.last_block_hashes.back().expect("at least 1 block exists"),
+            head_block_hash: *self
+                .last_block_hashes
+                .back()
+                .expect("at least 1 block exists"),
             safe_block_hash: *self
                 .last_block_hashes
                 .get(self.last_block_hashes.len().saturating_sub(32))
@@ -199,8 +203,10 @@ where
 
         let payload_id = res.payload_id.ok_or_eyre("No payload id")?;
 
-        let Some(Ok(payload)) =
-            self.payload_builder.resolve_kind(payload_id, PayloadKind::WaitForPending).await
+        let Some(Ok(payload)) = self
+            .payload_builder
+            .resolve_kind(payload_id, PayloadKind::WaitForPending)
+            .await
         else {
             eyre::bail!("No payload")
         };

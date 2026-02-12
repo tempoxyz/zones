@@ -10,14 +10,18 @@ use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolValue};
 use alloy_transport::Authorization;
 use futures::StreamExt;
-use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
 use tracing::{debug, error, info, warn};
 
-use crate::abi;
-use crate::bindings::ZonePortal::{self, DepositMade};
+use crate::{
+    abi,
+    bindings::ZonePortal::{self, DepositMade},
+};
 
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
@@ -94,7 +98,10 @@ impl L1Subscriber {
                 info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
                 on_chain
             };
-            info!(genesis, "Fresh portal, backfilling from genesis+1 (genesis block already in TempoState)");
+            info!(
+                genesis,
+                "Fresh portal, backfilling from genesis+1 (genesis block already in TempoState)"
+            );
             genesis + 1
         };
 
@@ -103,7 +110,12 @@ impl L1Subscriber {
             return Ok(());
         }
 
-        info!(from, tip, blocks = tip - from + 1, "Backfilling deposit events");
+        info!(
+            from,
+            tip,
+            blocks = tip - from + 1,
+            "Backfilling deposit events"
+        );
         self.backfill(l1_provider, filter, from, tip).await
     }
 
@@ -128,8 +140,13 @@ impl L1Subscriber {
 
             let mut deposits_by_block: BTreeMap<u64, Vec<Deposit>> = BTreeMap::new();
             for log in logs {
-                let n = log.block_number.ok_or_else(|| eyre::eyre!("log missing block number"))?;
-                deposits_by_block.entry(n).or_default().push(self.parse_deposit(log, n)?);
+                let n = log
+                    .block_number
+                    .ok_or_else(|| eyre::eyre!("log missing block number"))?;
+                deposits_by_block
+                    .entry(n)
+                    .or_default()
+                    .push(self.parse_deposit(log, n)?);
             }
 
             // 2. Fetch headers for ALL blocks in the range.
@@ -137,7 +154,11 @@ impl L1Subscriber {
             for block_number in cursor..=end {
                 let deposits = deposits_by_block.remove(&block_number).unwrap_or_default();
                 if !deposits.is_empty() {
-                    debug!(block = block_number, count = deposits.len(), "Backfill deposits");
+                    debug!(
+                        block = block_number,
+                        count = deposits.len(),
+                        "Backfill deposits"
+                    );
                 }
                 let header_resp = l1_provider
                     .get_header_by_number(block_number.into())
@@ -219,7 +240,8 @@ impl L1Subscriber {
                 );
             }
 
-            self.deposit_queue.enqueue(header.as_ref().clone(), deposits);
+            self.deposit_queue
+                .enqueue(header.as_ref().clone(), deposits);
 
             info!(block = block_number, "Enqueued L1 block deposits");
         }
@@ -397,12 +419,19 @@ impl DepositQueue {
 
     /// Pop the next L1 block from the queue.
     pub fn pop_next(&self) -> Option<L1BlockDeposits> {
-        self.inner.lock().expect("deposit queue poisoned").pop_next()
+        self.inner
+            .lock()
+            .expect("deposit queue poisoned")
+            .pop_next()
     }
 
     /// Returns the number of pending L1 blocks.
     pub fn pending_count(&self) -> usize {
-        self.inner.lock().expect("deposit queue poisoned").pending.len()
+        self.inner
+            .lock()
+            .expect("deposit queue poisoned")
+            .pending
+            .len()
     }
 
     /// Wait until an L1 block is available.

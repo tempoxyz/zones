@@ -39,8 +39,7 @@ const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 /// TempoStateReader precompile address — has no deployed contract code, but the zone EVM
 /// registers a custom precompile here. We must insert dummy bytecode (`0xFE`) in genesis
 /// so that Solidity's `EXTCODESIZE` check passes before issuing the STATICCALL.
-const TEMPO_STATE_READER_ADDRESS: Address =
-    address!("0x1c00000000000000000000000000000000000004");
+const TEMPO_STATE_READER_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000004");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 

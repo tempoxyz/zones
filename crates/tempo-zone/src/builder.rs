@@ -32,9 +32,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::evm::ZoneEvmConfig;
 use tempo_payload_types::TempoPayloadBuilderAttributes;
-use tempo_primitives::{
-    TempoHeader, TempoPrimitives,
-};
+use tempo_primitives::{TempoHeader, TempoPrimitives};
 use tempo_transaction_pool::TempoTransactionPool;
 
 use super::node::ZoneNode;
@@ -49,7 +47,10 @@ pub struct ZonePayloadFactory {
 
 impl ZonePayloadFactory {
     pub fn new(deposit_queue: crate::DepositQueue, sequencer: Option<Address>) -> Self {
-        Self { deposit_queue, sequencer }
+        Self {
+            deposit_queue,
+            sequencer,
+        }
     }
 }
 
@@ -133,7 +134,10 @@ where
         let (tempo_block_hash, expected_l1_number) = {
             let sp = self.provider.state_by_block_hash(parent_header.hash())?;
             let hash = sp
-                .storage(crate::abi::TEMPO_STATE_ADDRESS, alloy_primitives::B256::ZERO.into())
+                .storage(
+                    crate::abi::TEMPO_STATE_ADDRESS,
+                    alloy_primitives::B256::ZERO.into(),
+                )
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .map(|v| alloy_primitives::B256::from(v.to_be_bytes()))
                 .unwrap_or_default();
@@ -181,12 +185,12 @@ where
                 expected = expected_l1_number,
                 "L1 block number mismatch — chain continuity broken"
             );
-            return Err(PayloadBuilderError::Internal(
-                reth_errors::RethError::msg(format!(
+            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                format!(
                     "L1 block number mismatch: got {} expected {}",
                     l1_block.header.inner.number, expected_l1_number
-                )),
-            ));
+                ),
+            )));
         }
         if l1_block.header.inner.parent_hash != tempo_block_hash {
             error!(
@@ -196,12 +200,14 @@ where
                 l1_block = l1_block.header.inner.number,
                 "L1 parent hash mismatch — chain continuity broken"
             );
-            return Err(PayloadBuilderError::Internal(
-                reth_errors::RethError::msg(format!(
+            return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                format!(
                     "L1 parent hash mismatch at block {}: got {} expected {}",
-                    l1_block.header.inner.number, l1_block.header.inner.parent_hash, tempo_block_hash
-                )),
-            ));
+                    l1_block.header.inner.number,
+                    l1_block.header.inner.parent_hash,
+                    tempo_block_hash
+                ),
+            )));
         }
 
         let total_deposits = l1_block.deposits.len();
@@ -284,10 +290,8 @@ where
                 "advanceTempo header details"
             );
 
-            let advance_tx = crate::system_tx::build_advance_tempo_tx(
-                &l1_block.header,
-                &l1_block.deposits,
-            );
+            let advance_tx =
+                crate::system_tx::build_advance_tempo_tx(&l1_block.header, &l1_block.deposits);
             if let Err(err) = builder.execute_transaction(advance_tx) {
                 error!(
                     ?err,

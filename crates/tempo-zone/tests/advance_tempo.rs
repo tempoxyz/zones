@@ -99,7 +99,9 @@ fn deploy_contract(
         ..Default::default()
     };
 
-    let result = evm.transact_raw(tx).unwrap_or_else(|e| panic!("{name} deploy tx failed: {e:?}"));
+    let result = evm
+        .transact_raw(tx)
+        .unwrap_or_else(|e| panic!("{name} deploy tx failed: {e:?}"));
     let created_addr = match &result.result {
         ExecutionResult::Success { output, .. } => match output {
             Output::Create(_, Some(addr)) => *addr,
@@ -255,25 +257,28 @@ fn advance_tempo_repro() {
     // ---------------------------------------------------------------
     println!("\n=== Calling ZoneInbox.config() ===");
     let config_calldata = configCall {}.abi_encode();
-    let config_result = evm.transact_system_call(
-        sequencer,
-        ZONE_INBOX_ADDRESS,
-        Bytes::from(config_calldata),
-    );
+    let config_result =
+        evm.transact_system_call(sequencer, ZONE_INBOX_ADDRESS, Bytes::from(config_calldata));
     match &config_result {
         Ok(result) => {
             println!("config() result: {:?}", result.result);
             match &result.result {
-                ExecutionResult::Success { output, gas_used, .. } => {
+                ExecutionResult::Success {
+                    output, gas_used, ..
+                } => {
                     if let Output::Call(data) = output {
                         println!("config() returned: {}", data);
                     }
                     println!("config() gas_used: {gas_used}");
                 }
-                ExecutionResult::Revert { output, gas_used, .. } => {
+                ExecutionResult::Revert {
+                    output, gas_used, ..
+                } => {
                     println!("config() REVERTED: {output}, gas_used: {gas_used}");
                 }
-                ExecutionResult::Halt { reason, gas_used, .. } => {
+                ExecutionResult::Halt {
+                    reason, gas_used, ..
+                } => {
                     println!("config() HALTED: {reason:?}, gas_used: {gas_used}");
                 }
             }
@@ -286,20 +291,21 @@ fn advance_tempo_repro() {
     // ---------------------------------------------------------------
     println!("\n=== Calling TempoState.tempoBlockHash() ===");
     let hash_calldata = tempoBlockHashCall {}.abi_encode();
-    let hash_result = evm.transact_system_call(
-        sequencer,
-        TEMPO_STATE_ADDRESS,
-        Bytes::from(hash_calldata),
-    );
+    let hash_result =
+        evm.transact_system_call(sequencer, TEMPO_STATE_ADDRESS, Bytes::from(hash_calldata));
     match &hash_result {
         Ok(result) => match &result.result {
-            ExecutionResult::Success { output, gas_used, .. } => {
+            ExecutionResult::Success {
+                output, gas_used, ..
+            } => {
                 if let Output::Call(data) = output {
                     println!("tempoBlockHash() returned: {}", data);
                 }
                 println!("tempoBlockHash() gas_used: {gas_used}");
             }
-            ExecutionResult::Revert { output, gas_used, .. } => {
+            ExecutionResult::Revert {
+                output, gas_used, ..
+            } => {
                 println!("tempoBlockHash() REVERTED: {output}, gas_used: {gas_used}");
             }
             other => println!("tempoBlockHash() other: {other:?}"),
@@ -312,11 +318,19 @@ fn advance_tempo_repro() {
     // ---------------------------------------------------------------
     // Verify contracts have code
     {
-        let inbox_code = evm.db_mut().cache.accounts.get(&ZONE_INBOX_ADDRESS)
+        let inbox_code = evm
+            .db_mut()
+            .cache
+            .accounts
+            .get(&ZONE_INBOX_ADDRESS)
             .and_then(|a| a.info.code.as_ref())
             .map(|c| c.len())
             .unwrap_or(0);
-        let tempostate_code = evm.db_mut().cache.accounts.get(&TEMPO_STATE_ADDRESS)
+        let tempostate_code = evm
+            .db_mut()
+            .cache
+            .accounts
+            .get(&TEMPO_STATE_ADDRESS)
             .and_then(|a| a.info.code.as_ref())
             .map(|c| c.len())
             .unwrap_or(0);
@@ -370,8 +384,14 @@ fn advance_tempo_repro() {
     }
     .abi_encode();
 
-    println!("advanceTempo calldata length: {} bytes", advance_calldata.len());
-    println!("advanceTempo selector: 0x{}", const_hex::encode(&advance_calldata[..4]));
+    println!(
+        "advanceTempo calldata length: {} bytes",
+        advance_calldata.len()
+    );
+    println!(
+        "advanceTempo selector: 0x{}",
+        const_hex::encode(&advance_calldata[..4])
+    );
 
     let advance_result = evm.transact_system_call(
         sequencer,
@@ -380,13 +400,17 @@ fn advance_tempo_repro() {
     );
     match &advance_result {
         Ok(result) => match &result.result {
-            ExecutionResult::Success { output, gas_used, .. } => {
+            ExecutionResult::Success {
+                output, gas_used, ..
+            } => {
                 if let Output::Call(data) = output {
                     println!("advanceTempo() SUCCESS, output: {}", data);
                 }
                 println!("advanceTempo() gas_used: {gas_used}");
             }
-            ExecutionResult::Revert { output, gas_used, .. } => {
+            ExecutionResult::Revert {
+                output, gas_used, ..
+            } => {
                 println!("advanceTempo() REVERTED: {output}");
                 println!("advanceTempo() gas_used: {gas_used}");
                 if output.len() >= 4 {
@@ -399,7 +423,9 @@ fn advance_tempo_repro() {
                     }
                 }
             }
-            ExecutionResult::Halt { reason, gas_used, .. } => {
+            ExecutionResult::Halt {
+                reason, gas_used, ..
+            } => {
                 println!("advanceTempo() HALTED: {reason:?}");
                 println!("advanceTempo() gas_used: {gas_used}");
             }
