@@ -190,16 +190,24 @@ impl CreateZone {
         };
         genesis_cmd.run().await?;
 
+        // Write zone.json with L1 metadata needed by the zone node.
+        let zone_json = serde_json::json!({
+            "zone_id": zone_id.to_string(),
+            "portal": format!("{portal}"),
+            "token": format!("{}", self.zone_token),
+            "sequencer": format!("{}", self.sequencer),
+        });
+        let zone_json_path = self.output.join("zone.json");
+        std::fs::write(&zone_json_path, serde_json::to_string_pretty(&zone_json)?)?;
+
         println!("Zone created successfully!");
         println!("  Zone ID: {zone_id}");
         println!("  Portal: {portal}");
         println!("  Token: {}", self.zone_token);
         println!("  Sequencer: {}", self.sequencer);
         println!("  Tempo anchor block: {}", confirm_header.inner.number);
-        println!(
-            "  Genesis written to: {}",
-            self.output.join("genesis.json").display()
-        );
+        println!("  Genesis written to: {}", self.output.join("genesis.json").display());
+        println!("  Zone config written to: {}", zone_json_path.display());
 
         Ok(())
     }
