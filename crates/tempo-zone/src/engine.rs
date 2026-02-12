@@ -122,7 +122,7 @@ where
             match self.advance().await {
                 Ok(()) => {
                     blocks_advanced += 1;
-                    if blocks_advanced % 100 == 0 {
+                    if blocks_advanced.is_multiple_of(100) {
                         info!(
                             target: "zone::engine",
                             blocks_advanced,

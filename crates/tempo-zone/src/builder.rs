@@ -72,7 +72,7 @@ where
             provider: ctx.provider().clone(),
             evm_config,
             deposit_queue: self.deposit_queue,
-            sequencer: self.sequencer,
+            _sequencer: self.sequencer,
         })
     }
 }
@@ -83,7 +83,7 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
-    sequencer: Option<Address>,
+    _sequencer: Option<Address>,
 }
 
 impl<Provider> ZonePayloadBuilder<Provider> {
@@ -99,7 +99,7 @@ impl<Provider> ZonePayloadBuilder<Provider> {
             provider,
             evm_config,
             deposit_queue,
-            sequencer,
+            _sequencer: sequencer,
         }
     }
 }
@@ -136,7 +136,7 @@ where
             let hash = sp
                 .storage(
                     crate::abi::TEMPO_STATE_ADDRESS,
-                    alloy_primitives::B256::ZERO.into(),
+                    alloy_primitives::B256::ZERO,
                 )
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .map(|v| alloy_primitives::B256::from(v.to_be_bytes()))
