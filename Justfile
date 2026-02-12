@@ -129,6 +129,7 @@ zone-up name reset="true" args="":
     fi
     PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     TOKEN=$(jq -r '.token' "$ZONE_JSON")
+    ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$ZONE_JSON")
     DATADIR="/tmp/tempo-zone-{{name}}"
     if [[ "{{reset}}" = "true" ]]; then
         rm -rf "$DATADIR" || true
@@ -139,6 +140,7 @@ zone-up name reset="true" args="":
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
                       --l1.portal-address "$PORTAL" \
                       --l1.token-address "$TOKEN" \
+                      --l1.genesis-block-number "$ANCHOR_BLOCK" \
                       --http \
                       --http.addr 0.0.0.0 \
                       --http.port 8546 \
