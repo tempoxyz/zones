@@ -32,6 +32,11 @@ pub const ZONE_CONFIG_ADDRESS: Address = address!("0x1c0000000000000000000000000
 pub const TEMPO_STATE_READER_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000004");
 
+/// Zone token predeploy address on Zone L2.
+/// Uses a non-TIP20-prefix address so the Tempo EVM's TIP20 precompile doesn't intercept calls.
+pub const ZONE_TOKEN_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000005");
+
 sol! {
     // ---------------------------------------------------------------
     //  Shared types
@@ -357,5 +362,98 @@ impl Withdrawal {
             hash = keccak256((w.clone(), hash).abi_encode());
         }
         hash
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Bytes, address};
+    use alloy_sol_types::SolCall;
+
+    #[test]
+    fn test_deposit_abi_encode_vs_params() {
+        let d = Deposit {
+            sender: address!("0x0000000000000000000000000000000000000001"),
+            to: address!("0x0000000000000000000000000000000000000002"),
+            amount: 1000u128,
+            memo: B256::ZERO,
+        };
+
+        let encoded = d.abi_encode();
+        let encoded_params = d.abi_encode_params();
+
+        println!("abi_encode length: {}", encoded.len());
+        println!("abi_encode_params length: {}", encoded_params.len());
+        println!("abi_encode hex:\n{}", const_hex::encode(&encoded));
+        println!("abi_encode_params hex:\n{}", const_hex::encode(&encoded_params));
+        println!("Are they equal: {}", encoded == encoded_params);
+    }
+
+    #[test]
+    fn test_queued_deposit_encoding() {
+        // Test that the QueuedDeposit encoding matches what Solidity expects
+        let deposit = Deposit {
+            sender: address!("0x0000000000000000000000000000000000000001"),
+            to: address!("0x0000000000000000000000000000000000000002"),
+            amount: 1000u128,
+            memo: B256::ZERO,
+        };
+
+        let deposit_data = Bytes::from(deposit.abi_encode());
+
+        let qd = QueuedDeposit {
+            depositType: DepositType::Regular,
+            depositData: deposit_data.clone(),
+        };
+
+        println!("DepositType::Regular abi_encode: {}", const_hex::encode(DepositType::Regular.abi_encode()));
+        println!("deposit.abi_encode() length: {}", deposit.abi_encode().len());
+        println!("deposit.abi_encode(): {}", const_hex::encode(deposit.abi_encode()));
+        println!("QueuedDeposit.abi_encode() length: {}", qd.abi_encode().len());
+        println!("QueuedDeposit.abi_encode(): {}", const_hex::encode(qd.abi_encode()));
+
+        // Now test the full advanceTempo call encoding
+        let header_bytes = Bytes::from(vec![0xc0]); // minimal RLP empty list
+        let calldata = ZoneInbox::advanceTempoCall {
+            header: header_bytes,
+            deposits: vec![qd],
+            decryptions: vec![],
+        }
+        .abi_encode();
+
+        println!("\nadvanceTempo calldata length: {}", calldata.len());
+        println!("advanceTempo selector: 0x{}", const_hex::encode(&calldata[..4]));
+        println!("advanceTempo full calldata:\n{}", const_hex::encode(&calldata));
+    }
+
+    #[test]
+    fn test_deposit_hash_chain_matches_solidity() {
+        // Both Solidity and Rust must compute:
+        //   keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
+        let deposit = Deposit {
+            sender: address!("0x0000000000000000000000000000000000000001"),
+            to: address!("0x0000000000000000000000000000000000000002"),
+            amount: 1000u128,
+            memo: B256::ZERO,
+        };
+        let prev_hash = B256::ZERO;
+
+        // What Solidity computes: abi.encode(DepositType.Regular, deposit, prevHash)
+        let solidity_encoding = (DepositType::Regular, deposit.clone(), prev_hash).abi_encode();
+        let solidity_hash = keccak256(&solidity_encoding);
+
+        // What Rust l1.rs now computes (with DepositType discriminator)
+        let rust_encoding = (DepositType::Regular, deposit, prev_hash).abi_encode();
+        let rust_hash = keccak256(&rust_encoding);
+
+        assert_eq!(
+            solidity_encoding, rust_encoding,
+            "ABI encodings must match"
+        );
+        assert_eq!(
+            solidity_hash, rust_hash,
+            "Deposit hash chains must match"
+        );
     }
 }

@@ -1,7 +1,7 @@
 use alloy::{
     genesis::{ChainConfig, Genesis, GenesisAccount},
     primitives::{Address, Bytes, TxKind, U256, address},
-    sol_types::SolValue,
+    sol_types::{SolCall, SolValue},
 };
 use eyre::{WrapErr as _, eyre};
 use reth_evm::{
@@ -28,6 +28,9 @@ const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
+/// Zone token predeploy address. Must NOT use the TIP20 prefix (0x20C_) to avoid
+/// being intercepted by the Tempo EVM's TIP20 precompile at runtime.
+const ZONE_TOKEN_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000005");
 
 /// TempoStateReader precompile address — has no deployed contract code, but the zone EVM
 /// registers a custom precompile here. We must insert dummy bytecode (`0xFE`) in genesis
@@ -36,6 +39,11 @@ const TEMPO_STATE_READER_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000004");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+
+alloy::sol! {
+    function setMinter(address minter, bool authorized) external;
+    function setBurner(address burner, bool authorized) external;
+}
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct GenerateZoneGenesis {
@@ -51,8 +59,11 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long, default_value_t = 30_000_000)]
     pub(crate) gas_limit: u64,
 
-    #[arg(long)]
-    pub(crate) zone_token: Address,
+    #[arg(long, default_value = "pathUSD")]
+    pub(crate) zone_token_name: String,
+
+    #[arg(long, default_value = "pathUSD")]
+    pub(crate) zone_token_symbol: String,
 
     #[arg(long)]
     pub(crate) tempo_portal: Address,
@@ -109,7 +120,7 @@ impl GenerateZoneGenesis {
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
         let zone_config_args =
-            (self.zone_token, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
+            (ZONE_TOKEN_ADDRESS, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_config_bytecode,
@@ -126,7 +137,7 @@ impl GenerateZoneGenesis {
             ZONE_CONFIG_ADDRESS,
             self.tempo_portal,
             TEMPO_STATE_ADDRESS,
-            self.zone_token,
+            ZONE_TOKEN_ADDRESS,
         )
             .abi_encode_params();
         deploy_contract(
@@ -141,7 +152,7 @@ impl GenerateZoneGenesis {
         nonce += 1;
 
         let zone_outbox_bytecode = load_artifact(&self.specs_out, "ZoneOutbox")?;
-        let zone_outbox_args = (ZONE_CONFIG_ADDRESS, self.zone_token).abi_encode_params();
+        let zone_outbox_args = (ZONE_CONFIG_ADDRESS, ZONE_TOKEN_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_outbox_bytecode,
@@ -150,6 +161,50 @@ impl GenerateZoneGenesis {
             "ZoneOutbox",
             self.chain_id,
             nonce,
+        )?;
+        nonce += 1;
+
+        // Deploy MockZoneToken at the zone_token address.
+        // Constructor: MockZoneToken(name, symbol)
+        // DEPLOYER is admin so we can grant minter/burner roles.
+        let token_bytecode = load_artifact(&self.specs_out, "MockZoneToken")?;
+        let token_args = (
+            self.zone_token_name.clone(),
+            self.zone_token_symbol.clone(),
+        )
+            .abi_encode_params();
+        deploy_contract(
+            &mut evm,
+            &token_bytecode,
+            &token_args,
+            ZONE_TOKEN_ADDRESS,
+            "MockZoneToken",
+            self.chain_id,
+            nonce,
+        )?;
+        nonce += 1;
+
+        // Grant minter role to ZoneInbox so it can mint on deposits.
+        call_contract(
+            &mut evm,
+            DEPLOYER,
+            ZONE_TOKEN_ADDRESS,
+            setMinterCall { minter: ZONE_INBOX_ADDRESS, authorized: true }.abi_encode(),
+            self.chain_id,
+            nonce,
+            "MockZoneToken.setMinter(ZoneInbox)",
+        )?;
+        nonce += 1;
+
+        // Grant burner role to ZoneOutbox so it can burn on withdrawals.
+        call_contract(
+            &mut evm,
+            DEPLOYER,
+            ZONE_TOKEN_ADDRESS,
+            setBurnerCall { burner: ZONE_OUTBOX_ADDRESS, authorized: true }.abi_encode(),
+            self.chain_id,
+            nonce,
+            "MockZoneToken.setBurner(ZoneOutbox)",
         )?;
 
         // Insert dummy bytecode at the TempoStateReader precompile address.
@@ -180,6 +235,7 @@ impl GenerateZoneGenesis {
             ("ZoneConfig", ZONE_CONFIG_ADDRESS),
             ("ZoneInbox", ZONE_INBOX_ADDRESS),
             ("ZoneOutbox", ZONE_OUTBOX_ADDRESS),
+            ("MockZoneToken", ZONE_TOKEN_ADDRESS),
         ] {
             let account = db
                 .cache
@@ -356,5 +412,47 @@ fn deploy_contract(
     }
 
     println!("Deployed {name} at {predeploy_addr} (created at {created_addr})");
+    Ok(())
+}
+
+fn call_contract(
+    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
+    caller: Address,
+    to: Address,
+    calldata: Vec<u8>,
+    chain_id: u64,
+    nonce: u64,
+    name: &str,
+) -> eyre::Result<()> {
+    let tx = TempoTxEnv {
+        inner: TxEnv {
+            caller,
+            gas_price: 0,
+            gas_limit: 30_000_000,
+            kind: TxKind::Call(to),
+            data: calldata.into(),
+            chain_id: Some(chain_id),
+            nonce,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    let result = evm
+        .transact_raw(tx)
+        .map_err(|e| eyre!("{name} call failed: {e:?}"))?;
+
+    match &result.result {
+        ExecutionResult::Success { .. } => {}
+        ExecutionResult::Revert { output, .. } => {
+            return Err(eyre!("{name} call reverted: {output}"));
+        }
+        ExecutionResult::Halt { reason, .. } => {
+            return Err(eyre!("{name} call halted: {reason:?}"));
+        }
+    };
+
+    evm.db_mut().commit(result.state);
+    println!("Called {name} successfully");
     Ok(())
 }

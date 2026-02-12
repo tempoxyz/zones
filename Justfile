@@ -63,7 +63,7 @@ max-approve-portal:
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    PORTAL="0x1bc99e6a8c4689f1884527152ba542f012316149"
+    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
     TOKEN="0x20C0000000000000000000000000000000000000"
     HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     echo "Approving ZonePortal for max TEMPO..."
@@ -78,7 +78,7 @@ send-deposit to amount="1000000" memo="0x000000000000000000000000000000000000000
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    PORTAL="0x1bc99e6a8c4689f1884527152ba542f012316149"
+    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
     HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     echo "Depositing {{amount}} to {{to}}..."
     cast send "$PORTAL" "deposit(address,uint128,bytes32)" "{{to}}" "{{amount}}" "{{memo}}" \
@@ -91,7 +91,7 @@ zone-launch reset="true" args="":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    ZONE_TOKEN_ADDR="${ZONE_TOKEN:?Set ZONE_TOKEN env var}"
+    ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
     SEQ_KEY="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}"
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
@@ -116,7 +116,7 @@ zone-launch reset="true" args="":
     CREATE_OUTPUT=$(cargo run -p tempo-xtask -- create-zone \
         --output "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
-        --zone-token "$ZONE_TOKEN_ADDR" \
+        --zone-token "$ZONE_TOKEN_L1" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$PK" 2>&1 | tee /dev/stderr)
 
@@ -144,10 +144,10 @@ zone-launch reset="true" args="":
         node \
         --chain "$ZONE_DIR/genesis.json" \
         --dev \
-        --dev.block-time 1sec \
+        --dev.block-time 300ms \
         --l1.rpc-url "$L1_RPC" \
         --l1.portal-address "${L1_PORTAL_ADDRESS:-$PORTAL_ADDR}" \
-        --l1.token-address "$ZONE_TOKEN_ADDR" \
+        --l1.token-address "$ZONE_TOKEN_L1" \
         --l1.genesis-block-number "$GENESIS_L1_BLOCK" \
         --http \
         --http.addr 0.0.0.0 \
@@ -168,9 +168,9 @@ zoneup reset="true" args="":
     cargo run --bin tempo-zone -- \
                       node \
                       --dev \
-                      --dev.block-time 1sec \
+                      --dev.block-time 300ms \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
-                      --l1.portal-address 0x1bc99e6a8c4689f1884527152ba542f012316149 \
+                      --l1.portal-address "${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}" \
                       --l1.token-address 0x20C0000000000000000000000000000000000000 \
                       --http \
                       --http.addr 0.0.0.0 \

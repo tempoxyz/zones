@@ -16,6 +16,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
 use tracing::{debug, error, info, warn};
 
+use crate::abi;
 use crate::bindings::ZonePortal::{self, DepositMade};
 
 /// Configuration for the L1 subscriber.
@@ -299,10 +300,13 @@ impl PendingDeposits {
         for deposit in &deposits {
             self.hash = keccak256(
                 (
-                    deposit.sender,
-                    deposit.to,
-                    deposit.amount,
-                    deposit.memo,
+                    abi::DepositType::Regular,
+                    abi::Deposit {
+                        sender: deposit.sender,
+                        to: deposit.to,
+                        amount: deposit.amount,
+                        memo: deposit.memo,
+                    },
                     self.hash,
                 )
                     .abi_encode(),
@@ -332,7 +336,19 @@ impl PendingDeposits {
     pub fn transition(prev_hash: B256, deposits: &[Deposit]) -> DepositQueueTransition {
         let mut current = prev_hash;
         for d in deposits {
-            current = keccak256((d.sender, d.to, d.amount, d.memo, current).abi_encode());
+            current = keccak256(
+                (
+                    abi::DepositType::Regular,
+                    abi::Deposit {
+                        sender: d.sender,
+                        to: d.to,
+                        amount: d.amount,
+                        memo: d.memo,
+                    },
+                    current,
+                )
+                    .abi_encode(),
+            );
         }
         DepositQueueTransition {
             prev_processed_hash: prev_hash,

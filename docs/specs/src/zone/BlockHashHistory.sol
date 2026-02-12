@@ -5,6 +5,9 @@ pragma solidity ^0.8.13;
 // Takes raw 32-byte calldata (block number, no function selector) and returns the block hash.
 address constant EIP2935 = 0x0000F90827F1C53a10cb7A02335B175320002935;
 
+/// @dev Legacy alias for tests that reference BLOCKHASH_HISTORY.
+address constant BLOCKHASH_HISTORY = EIP2935;
+
 // EIP-2935 history window size (8192 blocks).
 uint256 constant BLOCKHASH_HISTORY_WINDOW = 8192;
 
