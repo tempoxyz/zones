@@ -86,6 +86,32 @@ send-deposit to amount="1000000" memo="0x000000000000000000000000000000000000000
     echo "Deposit sent!"
 
 [group('zone')]
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
+create-zone name profile="release":
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    SEQ_KEY="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}"
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    SEQUENCER_ADDR=$(cast wallet address "$SEQ_KEY")
+    OUTPUT="generated/{{name}}"
+    mkdir -p "$OUTPUT"
+    echo "Building Solidity specs..."
+    (cd docs/specs && forge build --skip test) || true
+    echo "Building xtask..."
+    cargo build --profile {{profile}} -p tempo-xtask
+    echo "Creating zone '{{name}}' on L1 and generating genesis..."
+    cargo run -p tempo-xtask --profile {{profile}} -- create-zone \
+        --output "$OUTPUT" \
+        --l1-rpc-url "$HTTP_RPC" \
+        --zone-token "$ZONE_TOKEN_L1" \
+        --sequencer "$SEQUENCER_ADDR" \
+        --private-key "$PK"
+    echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
+
+[group('zone')]
 [doc('Creates a new zone on L1 via ZoneFactory, generates zone genesis, and launches the zone node. Requires L1_RPC_URL, PRIVATE_KEY, ZONE_TOKEN, and SEQUENCER_KEY env vars.')]
 zone-launch reset="true" profile="release" args="":
     #!/bin/bash
@@ -155,14 +181,39 @@ zone-launch reset="true" profile="release" args="":
         {{args}}
 
 [group('zone')]
+<<<<<<< Updated upstream
 [doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits')]
 zoneup reset="true" profile="release" args="":
     #!/bin/bash
     if [[ "{{reset}}" = "true" ]]; then
         rm -rf /tmp/tempo-zone || true
     fi;
+=======
+[doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits. Pass the zone name used in create-zone.')]
+zoneup name reset="true" profile="release" args="":
+    #!/bin/bash
+    set -euo pipefail
+    ZONE_DIR="generated/{{name}}"
+    ZONE_JSON="$ZONE_DIR/zone.json"
+    GENESIS_JSON="$ZONE_DIR/genesis.json"
+    if [[ ! -f "$ZONE_JSON" ]]; then
+        echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    if [[ ! -f "$GENESIS_JSON" ]]; then
+        echo "Error: $GENESIS_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    PORTAL=$(jq -r '.portal' "$ZONE_JSON")
+    TOKEN=$(jq -r '.token' "$ZONE_JSON")
+    DATADIR="/tmp/tempo-zone-{{name}}"
+    if [[ "{{reset}}" = "true" ]]; then
+        rm -rf "$DATADIR" || true
+    fi
+>>>>>>> Stashed changes
     cargo run --bin tempo-zone --profile {{profile}} -- \
                       node \
+                      --chain "$GENESIS_JSON" \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
                       --l1.portal-address "${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}" \
                       --l1.token-address 0x20C0000000000000000000000000000000000000 \
@@ -170,8 +221,8 @@ zoneup reset="true" profile="release" args="":
                       --http.addr 0.0.0.0 \
                       --http.port 8546 \
                       --http.api all \
-                      --datadir /tmp/tempo-zone \
-                      --log.file.directory /tmp/tempo-zone/logs \
+                      --datadir "$DATADIR" \
+                      --log.file.directory "$DATADIR/logs" \
                       ${SEQUENCER_KEY:+--sequencer.key $SEQUENCER_KEY} \
                       {{args}}
 
