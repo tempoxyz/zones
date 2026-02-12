@@ -1,7 +1,7 @@
 use alloy::{
     genesis::{ChainConfig, Genesis, GenesisAccount},
     primitives::{Address, Bytes, TxKind, U256, address},
-    sol_types::{SolCall, SolValue},
+    sol_types::SolValue,
 };
 use eyre::{WrapErr as _, eyre};
 use reth_evm::{
@@ -22,15 +22,19 @@ use std::{
 };
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_BASE_FEE};
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
+use tempo_precompiles::{
+    PATH_USD_ADDRESS,
+    storage::StorageCtx,
+    tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
+    tip20_factory::TIP20Factory,
+    tip403_registry::TIP403Registry,
+};
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
-/// Zone token predeploy address. Must NOT use the TIP20 prefix (0x20C_) to avoid
-/// being intercepted by the Tempo EVM's TIP20 precompile at runtime.
-const ZONE_TOKEN_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000005");
 
 /// TempoStateReader precompile address — has no deployed contract code, but the zone EVM
 /// registers a custom precompile here. We must insert dummy bytecode (`0xFE`) in genesis
@@ -39,11 +43,6 @@ const TEMPO_STATE_READER_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000004");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-
-alloy::sol! {
-    function setMinter(address minter, bool authorized) external;
-    function setBurner(address burner, bool authorized) external;
-}
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct GenerateZoneGenesis {
@@ -58,12 +57,6 @@ pub(crate) struct GenerateZoneGenesis {
 
     #[arg(long, default_value_t = 30_000_000)]
     pub(crate) gas_limit: u64,
-
-    #[arg(long, default_value = "pathUSD")]
-    pub(crate) zone_token_name: String,
-
-    #[arg(long, default_value = "pathUSD")]
-    pub(crate) zone_token_symbol: String,
 
     #[arg(long)]
     pub(crate) tempo_portal: Address,
@@ -103,6 +96,13 @@ impl GenerateZoneGenesis {
             },
         );
 
+        // Initialize TIP403Registry, TIP20Factory, and pathUSD — required so the Tempo EVM
+        // handler can validate fee tokens for user transactions on the zone.
+        // This mirrors the L1 genesis setup.
+        initialize_tip403_registry(&mut evm)?;
+        initialize_tip20_factory(&mut evm)?;
+        create_path_usd_token(&mut evm, self.sequencer)?;
+
         let tempo_state_bytecode = load_artifact(&self.specs_out, "TempoState")?;
         let tempo_state_args = (Bytes::from(header_rlp),).abi_encode_params();
         let mut nonce = 0u64;
@@ -120,7 +120,7 @@ impl GenerateZoneGenesis {
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
         let zone_config_args =
-            (ZONE_TOKEN_ADDRESS, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
+            (PATH_USD_ADDRESS, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_config_bytecode,
@@ -137,7 +137,7 @@ impl GenerateZoneGenesis {
             ZONE_CONFIG_ADDRESS,
             self.tempo_portal,
             TEMPO_STATE_ADDRESS,
-            ZONE_TOKEN_ADDRESS,
+            PATH_USD_ADDRESS,
         )
             .abi_encode_params();
         deploy_contract(
@@ -152,7 +152,7 @@ impl GenerateZoneGenesis {
         nonce += 1;
 
         let zone_outbox_bytecode = load_artifact(&self.specs_out, "ZoneOutbox")?;
-        let zone_outbox_args = (ZONE_CONFIG_ADDRESS, ZONE_TOKEN_ADDRESS).abi_encode_params();
+        let zone_outbox_args = (ZONE_CONFIG_ADDRESS, PATH_USD_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_outbox_bytecode,
@@ -161,50 +161,6 @@ impl GenerateZoneGenesis {
             "ZoneOutbox",
             self.chain_id,
             nonce,
-        )?;
-        nonce += 1;
-
-        // Deploy MockZoneToken at the zone_token address.
-        // Constructor: MockZoneToken(name, symbol)
-        // DEPLOYER is admin so we can grant minter/burner roles.
-        let token_bytecode = load_artifact(&self.specs_out, "MockZoneToken")?;
-        let token_args = (
-            self.zone_token_name.clone(),
-            self.zone_token_symbol.clone(),
-        )
-            .abi_encode_params();
-        deploy_contract(
-            &mut evm,
-            &token_bytecode,
-            &token_args,
-            ZONE_TOKEN_ADDRESS,
-            "MockZoneToken",
-            self.chain_id,
-            nonce,
-        )?;
-        nonce += 1;
-
-        // Grant minter role to ZoneInbox so it can mint on deposits.
-        call_contract(
-            &mut evm,
-            DEPLOYER,
-            ZONE_TOKEN_ADDRESS,
-            setMinterCall { minter: ZONE_INBOX_ADDRESS, authorized: true }.abi_encode(),
-            self.chain_id,
-            nonce,
-            "MockZoneToken.setMinter(ZoneInbox)",
-        )?;
-        nonce += 1;
-
-        // Grant burner role to ZoneOutbox so it can burn on withdrawals.
-        call_contract(
-            &mut evm,
-            DEPLOYER,
-            ZONE_TOKEN_ADDRESS,
-            setBurnerCall { burner: ZONE_OUTBOX_ADDRESS, authorized: true }.abi_encode(),
-            self.chain_id,
-            nonce,
-            "MockZoneToken.setBurner(ZoneOutbox)",
         )?;
 
         // Insert dummy bytecode at the TempoStateReader precompile address.
@@ -235,7 +191,6 @@ impl GenerateZoneGenesis {
             ("ZoneConfig", ZONE_CONFIG_ADDRESS),
             ("ZoneInbox", ZONE_INBOX_ADDRESS),
             ("ZoneOutbox", ZONE_OUTBOX_ADDRESS),
-            ("MockZoneToken", ZONE_TOKEN_ADDRESS),
         ] {
             let account = db
                 .cache
@@ -415,44 +370,77 @@ fn deploy_contract(
     Ok(())
 }
 
-fn call_contract(
+/// Initialize the TIP403Registry precompile (required for fee token transfer checks).
+fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, || {
+        TIP403Registry::new().initialize()
+    })?;
+    println!("Initialized TIP403Registry");
+    Ok(())
+}
+
+/// Initialize the TIP20Factory precompile (required before creating any TIP20 tokens).
+fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, || {
+        TIP20Factory::new().initialize()
+    })?;
+    println!("Initialized TIP20Factory");
+    Ok(())
+}
+
+/// Create pathUSD as the default fee token at its reserved TIP20 address.
+///
+/// This mirrors the L1 genesis setup: the Tempo EVM handler defaults to pathUSD
+/// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
+/// Without this, user transactions on the zone revert with `InvalidFeeToken`.
+fn create_path_usd_token(
     evm: &mut TempoEvm<CacheDB<EmptyDB>>,
-    caller: Address,
-    to: Address,
-    calldata: Vec<u8>,
-    chain_id: u64,
-    nonce: u64,
-    name: &str,
+    sequencer: Option<Address>,
 ) -> eyre::Result<()> {
-    let tx = TempoTxEnv {
-        inner: TxEnv {
-            caller,
-            gas_price: 0,
-            gas_limit: 30_000_000,
-            kind: TxKind::Call(to),
-            data: calldata.into(),
-            chain_id: Some(chain_id),
-            nonce,
-            ..Default::default()
-        },
-        ..Default::default()
-    };
+    let admin = DEPLOYER;
 
-    let result = evm
-        .transact_raw(tx)
-        .map_err(|e| eyre!("{name} call failed: {e:?}"))?;
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, || {
+        TIP20Factory::new().create_token_reserved_address(
+            PATH_USD_ADDRESS,
+            "pathUSD",
+            "pathUSD",
+            "USD",
+            Address::ZERO,
+            admin,
+        )?;
 
-    match &result.result {
-        ExecutionResult::Success { .. } => {}
-        ExecutionResult::Revert { output, .. } => {
-            return Err(eyre!("{name} call reverted: {output}"));
+        let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+        token.grant_role_internal(admin, *ISSUER_ROLE)?;
+        // Allow address(0) to mint (system transactions use sender=0)
+        token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
+        // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
+        token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+
+        // Set a large supply cap
+        token.set_supply_cap(
+            admin,
+            ITIP20::setSupplyCapCall {
+                newSupplyCap: U256::from(u128::MAX),
+            },
+        )?;
+
+        // If a sequencer is specified, mint some pathUSD for gas fees
+        if let Some(sequencer) = sequencer {
+            token.mint(
+                admin,
+                ITIP20::mintCall {
+                    to: sequencer,
+                    amount: U256::from(1_000_000_000_000u128), // 1M pathUSD (6 decimals)
+                },
+            )?;
         }
-        ExecutionResult::Halt { reason, .. } => {
-            return Err(eyre!("{name} call halted: {reason:?}"));
-        }
-    };
 
-    evm.db_mut().commit(result.state);
-    println!("Called {name} successfully");
+        Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
+    })?;
+
+    println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
     Ok(())
 }

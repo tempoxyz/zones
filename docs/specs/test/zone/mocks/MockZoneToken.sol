@@ -54,12 +54,11 @@ contract MockZoneToken is IZoneToken {
         emit Transfer(address(0), to, amount);
     }
 
-    function burn(address from, uint256 amount) external {
-        if (!burners[msg.sender]) revert Unauthorized();
-        if (balanceOf[from] < amount) revert InsufficientBalance();
+    function burn(uint256 amount) external {
+        if (balanceOf[msg.sender] < amount) revert InsufficientBalance();
         totalSupply -= amount;
-        balanceOf[from] -= amount;
-        emit Transfer(from, address(0), amount);
+        balanceOf[msg.sender] -= amount;
+        emit Transfer(msg.sender, address(0), amount);
     }
 
     function transfer(address to, uint256 amount) external returns (bool) {

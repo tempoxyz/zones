@@ -32,10 +32,13 @@ pub const ZONE_CONFIG_ADDRESS: Address = address!("0x1c0000000000000000000000000
 pub const TEMPO_STATE_READER_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000004");
 
-/// Zone token predeploy address on Zone L2.
-/// Uses a non-TIP20-prefix address so the Tempo EVM's TIP20 precompile doesn't intercept calls.
+/// Zone token address on Zone L2 — pathUSD TIP20 precompile.
+///
+/// The zone uses pathUSD as its native token: deposits mint pathUSD, withdrawals burn it.
+/// This is the same TIP20 precompile address as on Tempo L1, initialized in zone genesis
+/// with the TIP20Factory so that `is_valid_fee_token` passes for user transactions.
 pub const ZONE_TOKEN_ADDRESS: Address =
-    address!("0x1c00000000000000000000000000000000000005");
+    address!("0x20C0000000000000000000000000000000000000");
 
 sol! {
     // ---------------------------------------------------------------

@@ -68,14 +68,6 @@ pub(crate) struct CreateZone {
     #[arg(long)]
     zone_token: Address,
 
-    /// Name of the zone token TIP-20 contract deployed in genesis.
-    #[arg(long, default_value = "pathUSD")]
-    zone_token_name: String,
-
-    /// Symbol of the zone token contract deployed in genesis.
-    #[arg(long, default_value = "pathUSD")]
-    zone_token_symbol: String,
-
     /// Sequencer address that will operate the zone.
     #[arg(long)]
     sequencer: Address,
@@ -191,8 +183,6 @@ impl CreateZone {
             chain_id: self.chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
-            zone_token_name: self.zone_token_name.clone(),
-            zone_token_symbol: self.zone_token_symbol.clone(),
             tempo_portal: portal,
             tempo_genesis_header_rlp: header_rlp_hex,
             sequencer: Some(self.sequencer),

@@ -181,7 +181,7 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
         // Amount goes to recipient, fee goes to sequencer
-        zoneToken.burn(address(this), totalBurn);
+        zoneToken.burn(totalBurn);
 
         // Store withdrawal in pending array
         _pendingWithdrawals.push(
