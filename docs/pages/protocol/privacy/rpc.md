@@ -27,6 +27,7 @@ The signed message is the `keccak256` hash of the following packed encoding:
 ```solidity
 bytes32 accessKeyHash = keccak256(abi.encodePacked(
     bytes32(0x54656d706f5a6f6e65525043),  // "TempoZoneRPC" magic prefix
+    uint8(version),                         // spec version (currently 0)
     uint64(zoneId),                         // zone this key is valid for
     uint64(chainId),                        // zone chain ID (replay protection)
     address(zonePortal),                    // ZonePortal address on Tempo
@@ -34,6 +35,8 @@ bytes32 accessKeyHash = keccak256(abi.encodePacked(
     uint64(expiresAt)                       // unix timestamp (seconds) of expiry
 ));
 ```
+
+The `version` field MUST be `0` for this version of the spec. The RPC server MUST reject access keys with an unrecognized version. This allows future revisions to change the access key semantics (e.g., adding scoped permissions) without ambiguity.
 
 This hash is the challenge that must be signed. Using a raw hash (rather than EIP-712 typed data) allows all Tempo signature types to sign the same message consistently.
 
@@ -124,10 +127,10 @@ Content-Type: application/json
 The `X-Access-Key` value is a single hex-encoded blob containing the concatenation of the signature and the access key fields:
 
 ```
-<signature bytes><zoneId: 8 bytes><chainId: 8 bytes><zonePortal: 20 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
+<signature bytes><version: 1 byte><zoneId: 8 bytes><chainId: 8 bytes><zonePortal: 20 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
 ```
 
-The access key fields are always exactly 52 bytes (8 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 52 bytes** as the access key fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
+The access key fields are always exactly 53 bytes (1 + 8 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 53 bytes** as the access key fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
 
 Requests without a valid access key receive a `401 Unauthorized` HTTP response. Requests with an expired or malformed key receive `403 Forbidden`.
 
