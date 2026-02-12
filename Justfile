@@ -129,16 +129,8 @@ zone-launch reset="true" profile="release" args="":
         exit 1
     fi
 
-    # Extract Tempo anchor block number (line: "  Tempo anchor block: <number>")
-    GENESIS_L1_BLOCK=$(echo "$CREATE_OUTPUT" | sed -n 's/.*Tempo anchor block: \([0-9]*\).*/\1/p')
-    if [[ -z "$GENESIS_L1_BLOCK" ]]; then
-        echo "ERROR: Failed to extract genesis L1 block number from create-zone output"
-        exit 1
-    fi
-
     echo "Zone genesis generated at $ZONE_DIR/genesis.json"
     echo "Portal address: $PORTAL_ADDR"
-    echo "Genesis L1 block: $GENESIS_L1_BLOCK"
 
     # Step 2: Launch zone node
     echo "Launching Tempo Zone node..."
@@ -148,7 +140,6 @@ zone-launch reset="true" profile="release" args="":
         --l1.rpc-url "$L1_RPC" \
         --l1.portal-address "${L1_PORTAL_ADDRESS:-$PORTAL_ADDR}" \
         --l1.token-address "$ZONE_TOKEN_L1" \
-        --l1.genesis-block-number "$GENESIS_L1_BLOCK" \
         --http \
         --http.addr 0.0.0.0 \
         --http.port 8546 \

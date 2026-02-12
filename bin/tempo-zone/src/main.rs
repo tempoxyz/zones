@@ -80,10 +80,7 @@ struct ZoneArgs {
     )]
     pub poll_interval_secs: u64,
 
-    /// Genesis Tempo L1 block number (the block used to anchor TempoState at genesis).
-    /// If set, overrides the portal's `genesisTempoBlockNumber` for backfill.
-    #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
-    pub l1_genesis_block_number: Option<u64>,
+
 }
 
 fn main() {
@@ -117,7 +114,7 @@ fn main() {
             let l1_config = L1SubscriberConfig {
                 l1_rpc_url: args.l1_rpc_url.clone(),
                 portal_address: args.portal_address,
-                genesis_tempo_block_number: args.l1_genesis_block_number,
+
             };
             let l1_state_provider_config = L1StateProviderConfig {
                 l1_rpc_url: args.l1_rpc_url.clone(),
