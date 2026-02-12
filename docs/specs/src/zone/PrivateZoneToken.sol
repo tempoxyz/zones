@@ -21,7 +21,7 @@ import { IZoneConfig, ZONE_INBOX, ZONE_OUTBOX } from "./IZone.sol";
  * All other TIP-20 behavior (transfer logic, approval logic, events, roles, TIP-403 enforcement,
  * pause controls, rewards) is identical to the standard TIP-20 spec.
  */
-contract PrivateZoneToken {
+abstract contract PrivateZoneToken {
 
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
@@ -61,7 +61,7 @@ contract PrivateZoneToken {
             revert Unauthorized();
         }
 
-        // ... return balance from precompile storage ...
+        revert(); // precompile stub — actual logic is in the precompile
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -84,7 +84,7 @@ contract PrivateZoneToken {
             revert Unauthorized();
         }
 
-        // ... return allowance from precompile storage ...
+        revert(); // precompile stub — actual logic is in the precompile
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -107,19 +107,19 @@ contract PrivateZoneToken {
      */
     function transfer(address to, uint256 amount) external returns (bool) {
         // Precompile charges exactly FIXED_TRANSFER_GAS
-        // ... standard transfer logic ...
+        revert(); // precompile stub
     }
 
     /// @dev Same fixed gas cost as transfer().
     function transferFrom(address from, address to, uint256 amount) external returns (bool) {
         // Precompile charges exactly FIXED_TRANSFER_GAS
-        // ... standard transferFrom logic ...
+        revert(); // precompile stub
     }
 
     /// @dev Same fixed gas cost as transfer().
     function transferWithMemo(address to, uint256 amount, bytes32 memo) external {
         // Precompile charges exactly FIXED_TRANSFER_GAS
-        // ... standard transferWithMemo logic ...
+        revert(); // precompile stub
     }
 
     /// @dev Same fixed gas cost as transfer().
@@ -127,7 +127,7 @@ contract PrivateZoneToken {
         returns (bool)
     {
         // Precompile charges exactly FIXED_TRANSFER_GAS
-        // ... standard transferFromWithMemo logic ...
+        revert(); // precompile stub
     }
 
     /**
@@ -140,7 +140,7 @@ contract PrivateZoneToken {
      */
     function approve(address spender, uint256 amount) external returns (bool) {
         // Precompile charges exactly FIXED_TRANSFER_GAS
-        // ... standard approve logic ...
+        revert(); // precompile stub
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -161,7 +161,7 @@ contract PrivateZoneToken {
      */
     function mint(address to, uint256 amount) external {
         _requireMintBurnAuth();
-        // ... standard mint logic ...
+        revert(); // precompile stub
     }
 
     /**
@@ -179,7 +179,7 @@ contract PrivateZoneToken {
      */
     function burn(address from, uint256 amount) external {
         _requireMintBurnAuth();
-        // ... standard burn logic ...
+        revert(); // precompile stub
     }
 
     /**
