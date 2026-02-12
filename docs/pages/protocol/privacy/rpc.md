@@ -245,10 +245,12 @@ Block responses are modified to protect transaction privacy:
 When `eth_getBlockByNumber` or `eth_getBlockByHash` is called by a non-sequencer:
 
 - The `transactions` field is **always an empty array** `[]`, regardless of the `include_transactions` parameter. If the parameter is `true`, the request is rejected (sequencer-only).
-- The `transactionsRoot` field is included (it is committed in the block hash).
-- The header fields (`number`, `hash`, `parentHash`, `timestamp`, `stateRoot`, `transactionsRoot`, `receiptsRoot`) are returned normally.
+- The `logsBloom` field MUST be replaced with the zero Bloom (`0x` followed by 512 zero bytes). The Bloom filter is a compressed summary of all log topics and emitting addresses in the block — returning the real value would allow any caller to probe whether a specific address had activity in that block, completely defeating per-account event scoping.
+- The `gasUsed` field MUST be replaced with `0x0`. Since all TIP-20 transfers cost exactly 100,000 gas, the real `gasUsed` directly reveals the approximate number of transactions in the block, defeating the sequencer-only restriction on `eth_getBlockTransactionCountByNumber`/`eth_getBlockTransactionCountByHash`.
+- The `transactionsRoot` and `receiptsRoot` fields are included (they are committed in the block hash and do not directly reveal individual data without the underlying content).
+- The remaining header fields (`number`, `hash`, `parentHash`, `timestamp`, `stateRoot`, `baseFeePerGas`, `extraData`) are returned normally.
 
-**Rationale**: Transaction count and ordering within a block reveals information about zone activity and could allow correlation attacks.
+**Rationale**: Transaction count, ordering, and per-address activity within a block reveals information about zone activity and could allow correlation attacks. Zeroed fields are still present in the response (for schema compatibility) but carry no information.
 
 ### Sequencer callers
 
@@ -310,7 +312,8 @@ In addition to the Ethereum JSON-RPC methods, the zone exposes zone-specific met
 | `zone_getAccessKeyInfo` | Any authenticated | Returns the authenticated account address and key expiry. Useful for verifying the access key is valid. |
 | `zone_getZoneInfo` | Any authenticated | Returns zone metadata: `zoneId`, `zoneToken`, `sequencer` (address only, not private key), `chainId`. |
 | `zone_getDepositStatus(tempoBlockNumber)` | Scoped | Returns whether deposits from the given Tempo block have been processed on the zone. Only returns information about deposits where the sender or recipient is the authenticated account. |
-| `zone_requestWithdrawal(to, amount, memo, gasLimit, fallbackRecipient, data)` | Scoped | Convenience method that constructs and sends a withdrawal request transaction on behalf of the authenticated account. Equivalent to calling `ZoneOutbox.requestWithdrawal(...)`. |
+
+**Withdrawals**: To request a withdrawal, the caller MUST construct and sign a transaction calling `ZoneOutbox.requestWithdrawal(...)` and submit it via `eth_sendRawTransaction`. There is no server-side convenience method — access keys are read-only credentials and MUST NOT be sufficient to authorize state-changing operations such as token transfers or withdrawals. Requiring a full transaction signature ensures that a stolen or replayed access key cannot be used to move funds.
 
 ## Error codes
 
@@ -329,12 +332,12 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 
 - **Side channels via timing**: Scoped methods that must fetch data before checking authorization are subject to a mandatory 100 ms response floor (see [Timing side channels and the 100 ms speed bump](#timing-side-channels-and-the-100-ms-speed-bump)). This ensures that `eth_getTransactionByHash` for a non-existent transaction and for another user's transaction have indistinguishable response times.
 - **Nonce privacy**: `eth_getTransactionCount` for non-authenticated accounts returns `0x0` rather than an error. This avoids revealing whether an account exists. The constant `0x0` response is indistinguishable from a genuinely new account.
-- **Access key replay**: Access keys are scoped to a specific zone (`zoneId` and `chainId`) and a specific portal (`zonePortal`), with a maximum 30-minute window. The RPC server MAY implement nonce tracking or rate limiting to prevent abuse, but this is not required for correctness since access keys are read-only credentials.
+- **Access key replay**: Access keys are scoped to a specific zone (`zoneId` and `chainId`) and a specific portal (`zonePortal`), with a maximum 30-minute window. Access keys are strictly read-only credentials — no RPC method that is authenticated solely by an access key may modify state (see [Withdrawals](#zone-specific-rpc-methods)). The RPC server SHOULD implement nonce tracking or rate limiting to further reduce the window for abuse if a key is intercepted, but replay of a read-only key cannot move funds.
 - **Keychain key revocation**: When a Keychain access key is used, the RPC server verifies the key's status against the AccountKeychain precompile on every request (or caches with a short TTL). If a root account revokes an access key on-chain, the RPC SHOULD stop accepting that key within a reasonable window. Implementations SHOULD cache Keychain key status for at most one zone block to balance performance and revocation latency.
 - **P256/WebAuthn key compromise**: Unlike secp256k1, P256 and WebAuthn keys include the public key in the signature. This means the public key is visible to the RPC server on every request. This is not a security concern (public keys are public), but implementations should be aware that the key material is transmitted in the clear over the connection.
 - **Metadata leakage**: Even with content-level privacy, connection-level metadata (IP addresses, request timing, request frequency) can leak information. Deployments SHOULD use TLS and MAY require additional transport-level privacy measures.
 - **Fixed gas and transfer receipts**: The [fixed 100,000 gas cost](./execution#fixed-gas-constant-transfer-cost) on TIP-20 transfers ensures that `gasUsed` in transaction receipts is identical for all transfers. Without this, an observer who obtains a receipt (e.g., the sender) could infer whether the recipient was a new or existing account.
-- **Block header information**: Block headers (`stateRoot`, `transactionsRoot`, `receiptsRoot`, `gasUsed`) are public. The `stateRoot` changes with every state update but does not directly reveal individual account state without a state proof (which is disabled). The `transactionsRoot` commits to transaction ordering but individual transactions are not exposed.
+- **Block header sanitization**: Block headers returned to non-sequencer callers have `logsBloom` zeroed and `gasUsed` set to `0x0` (see [Block responses](#block-responses)). Without this, `logsBloom` would allow probing per-address activity, and `gasUsed` would reveal transaction counts (since TIP-20 transfers have a fixed 100,000 gas cost). The remaining public fields — `stateRoot`, `transactionsRoot`, `receiptsRoot` — do not directly reveal individual account state without the underlying data (state proofs are disabled, transactions are not exposed).
 
 ## Implementation notes
 
