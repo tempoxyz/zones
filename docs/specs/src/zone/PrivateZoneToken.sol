@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {IZoneConfig, ZONE_INBOX, ZONE_OUTBOX} from "./IZone.sol";
+import { IZoneConfig, ZONE_INBOX, ZONE_OUTBOX } from "./IZone.sol";
 
 /**
  * @title PrivateZoneToken
@@ -22,6 +22,7 @@ import {IZoneConfig, ZONE_INBOX, ZONE_OUTBOX} from "./IZone.sol";
  * pause controls, rewards) is identical to the standard TIP-20 spec.
  */
 contract PrivateZoneToken {
+
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -122,7 +123,15 @@ contract PrivateZoneToken {
     }
 
     /// @dev Same fixed gas cost as transfer().
-    function transferFromWithMemo(address from, address to, uint256 amount, bytes32 memo) external returns (bool) {
+    function transferFromWithMemo(
+        address from,
+        address to,
+        uint256 amount,
+        bytes32 memo
+    )
+        external
+        returns (bool)
+    {
         // Precompile charges exactly FIXED_TRANSFER_GAS
         // ... standard transferFromWithMemo logic ...
     }
@@ -207,4 +216,6 @@ contract PrivateZoneToken {
     //
     //   Gas costs for unchanged operations use standard variable gas accounting.
     //   Only the four transfer-family functions above use FIXED_TRANSFER_GAS.
+
+
 }
