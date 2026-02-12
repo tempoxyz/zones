@@ -183,8 +183,8 @@ These methods are available to any authenticated caller but filter results to on
 
 | Method | Scoping rule |
 |--------|-------------|
-| `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected. |
-| `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. |
+| `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected with error code `-32004` (account mismatch). |
+| `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. Returns `-32004` on mismatch. |
 
 **Rationale**: Transaction simulation could reveal state about other accounts (e.g., simulating a transfer to probe whether a recipient exists). Restricting simulation to the caller's own transactions prevents this.
 
@@ -348,10 +348,12 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 |------|---------|---------|
 | `-32001` | `Access key required` | No access key provided |
 | `-32002` | `Access key expired` | The access key has expired |
-| `-32003` | `Transaction rejected` | Transaction sender does not match authenticated account |
-| `-32004` | `Account mismatch` | The queried account does not match the authenticated account |
+| `-32003` | `Transaction rejected` | Transaction sender does not match authenticated account (`eth_sendRawTransaction`) |
+| `-32004` | `Account mismatch` | The `from` field does not match the authenticated account (`eth_call`, `eth_estimateGas`) |
 | `-32005` | `Sequencer only` | Method requires sequencer access |
 | `-32006` | `Method disabled` | Method is not available on privacy zones |
+
+**Error vs. silent response**: Methods where the user explicitly provides a mismatched parameter (`eth_sendRawTransaction` with wrong sender, `eth_call` with wrong `from`) return explicit errors — the user already knows the address they supplied, so the error leaks nothing. Methods that query *about* other accounts (`eth_getBalance`, `eth_getTransactionByHash`, etc.) return silent dummy values (`0x0`, `null`, empty results) instead of errors — an error would reveal "this data exists but you can't see it," which leaks information.
 
 ## Security considerations
 
