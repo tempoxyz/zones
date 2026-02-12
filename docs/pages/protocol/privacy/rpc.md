@@ -180,7 +180,6 @@ These methods are available to any authenticated caller but filter results to on
 |--------|-------------|
 | `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected. |
 | `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. |
-| `eth_createAccessList` | Same restriction: `from` must be the authenticated account. |
 
 **Rationale**: Transaction simulation could reveal state about other accounts (e.g., simulating a transfer to probe whether a recipient exists). Restricting simulation to the caller's own transactions prevents this.
 
@@ -202,7 +201,7 @@ To close this side channel, the RPC server MUST enforce a **minimum response tim
 
 Methods that do **not** need the speed bump include those where authorization can be checked before any data fetch:
 - `eth_getBalance` / `eth_getTransactionCount`: The server checks if the queried address matches the caller *before* reading state. Non-matching addresses return `0x0` without a lookup.
-- `eth_call` / `eth_estimateGas` / `eth_createAccessList`: The `from` field is validated against the authenticated account before execution begins.
+- `eth_call` / `eth_estimateGas`: The `from` field is validated against the authenticated account before execution begins.
 - `eth_sendRawTransaction`: Sender verification happens during transaction decoding, before any state access.
 
 #### Event filtering
@@ -223,6 +222,7 @@ These methods are only available when the authenticated account is the sequencer
 
 | Method | Notes |
 |--------|-------|
+| `eth_createAccessList` | Returns the set of storage slots a transaction would access. Could reveal storage layout of accounts the transaction interacts with, especially if smart contracts are added in the future. |
 | `eth_getCode` | Zone predeploys are precompiles (no EVM bytecode); user accounts never have code. Raw code inspection has no legitimate non-sequencer use case. |
 | `eth_getStorageAt` | Raw storage reads bypass all access control. A caller could read TIP-20 balance mappings directly, defeating [execution-level `balanceOf` restrictions](./execution#balance-privacy-balanceof-access-control), or probe account existence via nonce/storage slots. |
 | `eth_getBlockByNumber` (with `true`) | Full block with all transactions — sequencer only |
