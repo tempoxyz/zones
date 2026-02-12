@@ -182,7 +182,7 @@ zone-launch reset="true" profile="release" args="":
 
 [group('zone')]
 [doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits. Pass the zone name used in create-zone.')]
-zoneup name reset="true" profile="release" args="":
+zone-up name reset="true" profile="release" args="":
     #!/bin/bash
     set -euo pipefail
     ZONE_DIR="generated/{{name}}"
