@@ -48,6 +48,7 @@ All TIP-20 transfer operations on a privacy zone charge a fixed gas cost of **10
 | `transferFrom(from, to, amount)` | 100,000 |
 | `transferWithMemo(to, amount, memo)` | 100,000 |
 | `transferFromWithMemo(from, to, amount, memo)` | 100,000 |
+| `approve(spender, amount)` | 100,000 |
 
 On a standard EVM chain, gas cost varies depending on whether a transfer writes to a previously empty storage slot (zero → non-zero costs 20,000 gas more than non-zero → non-zero). This difference reveals whether the recipient has previously received tokens — a binary signal about account existence.
 
@@ -59,7 +60,7 @@ By fixing the gas cost:
 
 **Implementation**: The zone's TIP-20 precompile always charges exactly 100,000 gas for any transfer-family call, regardless of the actual storage operations required. If the transaction provides less than 100,000 gas to the precompile call, it reverts with out-of-gas. Excess gas beyond 100,000 is returned to the caller as usual.
 
-**Unchanged operations**: `approve` and system functions (`systemTransferFrom`, `transferFeePreTx`, `transferFeePostTx`) retain their standard gas costs. These are either not transfer operations or are restricted to precompile-only callers where the gas side channel is not exploitable.
+**Unchanged operations**: System functions (`systemTransferFrom`, `transferFeePreTx`, `transferFeePostTx`) retain their standard gas costs. These are restricted to precompile-only callers where the gas side channel is not exploitable.
 
 ### System mint and burn permissions
 

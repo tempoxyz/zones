@@ -14,7 +14,7 @@ import { IZoneConfig, ZONE_INBOX, ZONE_OUTBOX } from "./IZone.sol";
  *
  *   1. **Balance privacy**: balanceOf() is restricted to the account owner and sequencer.
  *   2. **Allowance privacy**: allowance() is restricted to the owner, spender, and sequencer.
- *   3. **Fixed transfer gas**: All transfer-family calls cost exactly FIXED_TRANSFER_GAS.
+ *   3. **Fixed gas**: All transfer-family calls and approve() cost exactly FIXED_TRANSFER_GAS.
  *   4. **System mint/burn**: ZoneInbox can mint (deposits), ZoneOutbox can burn (withdrawals),
  *      without requiring the standard ISSUER_ROLE.
  *
@@ -123,17 +123,24 @@ contract PrivateZoneToken {
     }
 
     /// @dev Same fixed gas cost as transfer().
-    function transferFromWithMemo(
-        address from,
-        address to,
-        uint256 amount,
-        bytes32 memo
-    )
-        external
+    function transferFromWithMemo(address from, address to, uint256 amount, bytes32 memo) external
         returns (bool)
     {
         // Precompile charges exactly FIXED_TRANSFER_GAS
         // ... standard transferFromWithMemo logic ...
+    }
+
+    /**
+     * @notice Approve `spender` to spend `amount` on behalf of the caller.
+     * @dev Charges exactly FIXED_TRANSFER_GAS regardless of whether the previous
+     *      allowance was zero or non-zero. Without fixed gas, the ~15k gas difference
+     *      between a new approval (zero → non-zero storage) and an update (non-zero →
+     *      non-zero) would be visible in the sender's receipt, leaking whether a prior
+     *      approval existed between the two parties.
+     */
+    function approve(address spender, uint256 amount) external returns (bool) {
+        // Precompile charges exactly FIXED_TRANSFER_GAS
+        // ... standard approve logic ...
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -203,7 +210,6 @@ contract PrivateZoneToken {
     //     - paused(), supplyCap(), currency(), quoteToken(), transferPolicyId()
     //
     //   State-changing functions (standard access control):
-    //     - approve(spender, amount)
     //     - burnBlocked(from, amount)            — requires BURN_BLOCKED_ROLE
     //     - pause() / unpause()                  — requires PAUSE_ROLE / UNPAUSE_ROLE
     //     - changeTransferPolicyId(newPolicyId)   — requires DEFAULT_ADMIN_ROLE
@@ -215,7 +221,7 @@ contract PrivateZoneToken {
     //     - transferFeePostTx(to, refund, actualUsed)
     //
     //   Gas costs for unchanged operations use standard variable gas accounting.
-    //   Only the four transfer-family functions above use FIXED_TRANSFER_GAS.
+    //   The four transfer-family functions and approve() above use FIXED_TRANSFER_GAS.
 
 
 }
