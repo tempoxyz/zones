@@ -135,6 +135,8 @@ Requests without a valid access key receive a `401 Unauthorized` HTTP response. 
 
 The zone RPC starts from the standard Ethereum JSON-RPC method set and applies per-method restrictions. Each method falls into one of four categories: **allowed** (unrestricted), **scoped** (filtered to the authenticated account), **restricted** (sequencer-only), or **disabled** (not available).
 
+**Default deny**: Any method not explicitly listed below MUST return error code `-32601` (method not found). This ensures that new methods added by future Ethereum specs or node implementations are not accidentally exposed without privacy review.
+
 ### Allowed methods
 
 These methods return public zone information and are available to any authenticated caller.
@@ -149,9 +151,12 @@ These methods return public zone information and are available to any authentica
 | `eth_getBlockByNumber` | Returns block headers **without transaction details** (see [Block responses](#block-responses)) |
 | `eth_getBlockByHash` | Returns block headers **without transaction details** |
 | `eth_subscribe("newHeads")` | Pushes block headers on new blocks. The `logsBloom` field is zeroed (see [Block responses](#block-responses)). |
+| `eth_syncing` | Returns sync status. Low risk — reveals node state, not account data. |
+| `eth_coinbase` | Returns the sequencer address (already public via `zone_getZoneInfo`). |
 | `net_version` | Network ID |
 | `net_listening` | Node status |
 | `web3_clientVersion` | Client version |
+| `web3_sha3` | Pure Keccak-256 hash — no state access |
 
 ### Scoped methods
 
