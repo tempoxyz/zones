@@ -127,7 +127,7 @@ The `X-Access-Key` value is a single hex-encoded blob containing the concatenati
 <signature bytes><zoneId: 8 bytes><chainId: 8 bytes><zonePortal: 20 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
 ```
 
-The signature portion is variable-length and self-describing (secp256k1 is always 65 bytes; P256/WebAuthn/Keychain signatures start with a type byte). The RPC server parses the signature first using the same detection rules as Tempo transaction signatures, then reads the fixed-size access key fields from the remaining bytes.
+The access key fields are always exactly 52 bytes (8 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 52 bytes** as the access key fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
 
 Requests without a valid access key receive a `401 Unauthorized` HTTP response. Requests with an expired or malformed key receive `403 Forbidden`.
 
