@@ -87,7 +87,7 @@ send-deposit to amount="1000000" memo="0x000000000000000000000000000000000000000
 
 [group('zone')]
 [doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
-create-zone name profile="release":
+create-zone name:
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -101,9 +101,9 @@ create-zone name profile="release":
     echo "Building Solidity specs..."
     (cd docs/specs && forge build --skip test) || true
     echo "Building xtask..."
-    cargo build --profile {{profile}} -p tempo-xtask
+    cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
-    cargo run -p tempo-xtask --profile {{profile}} -- create-zone \
+    cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --zone-token "$ZONE_TOKEN_L1" \
@@ -113,7 +113,7 @@ create-zone name profile="release":
 
 [group('zone')]
 [doc('Creates a new zone on L1 via ZoneFactory, generates zone genesis, and launches the zone node. Requires L1_RPC_URL, PRIVATE_KEY, ZONE_TOKEN, and SEQUENCER_KEY env vars.')]
-zone-launch reset="true" profile="release" args="":
+zone-launch reset="true" args="":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -136,12 +136,12 @@ zone-launch reset="true" profile="release" args="":
     echo "Building Solidity specs..."
     (cd docs/specs && forge build --skip test) || true
     echo "Building binaries..."
-    cargo build --profile {{profile}} -p tempo-xtask
-    cargo build --profile {{profile}} --bin tempo-zone
+    cargo build -p tempo-xtask
+    cargo build --bin tempo-zone
 
     # Step 1: Create zone on L1 + generate genesis
     echo "Creating zone on L1 and generating genesis..."
-    CREATE_OUTPUT=$(cargo run -p tempo-xtask --profile {{profile}} -- create-zone \
+    CREATE_OUTPUT=$(cargo run -p tempo-xtask -- create-zone \
         --output "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
         --zone-token "$ZONE_TOKEN_L1" \
@@ -164,10 +164,10 @@ zone-launch reset="true" profile="release" args="":
 
     # Step 2: Launch zone node
     echo "Launching Tempo Zone node..."
-    cargo run --bin tempo-zone --profile {{profile}} -- \
-        node \
-        --chain "$ZONE_DIR/genesis.json" \
-        --l1.rpc-url "$L1_RPC" \
+    cargo run --bin tempo-zone -- \
+                      node \
+                      --chain "$ZONE_DIR/genesis.json" \
+                      --l1.rpc-url "$L1_RPC" \
         --l1.portal-address "${L1_PORTAL_ADDRESS:-$PORTAL_ADDR}" \
         --l1.token-address "$ZONE_TOKEN_L1" \
         ${GENESIS_L1_BLOCK:+--l1.genesis-block-number "$GENESIS_L1_BLOCK"} \
@@ -182,7 +182,7 @@ zone-launch reset="true" profile="release" args="":
 
 [group('zone')]
 [doc('Starts a Tempo Zone L2 node in dev mode, subscribing to L1 deposits. Pass the zone name used in create-zone.')]
-zone-up name reset="true" profile="release" args="":
+zone-up name reset="true" args="":
     #!/bin/bash
     set -euo pipefail
     ZONE_DIR="generated/{{name}}"
@@ -202,7 +202,7 @@ zone-up name reset="true" profile="release" args="":
     if [[ "{{reset}}" = "true" ]]; then
         rm -rf "$DATADIR" || true
     fi
-    cargo run --bin tempo-zone --profile {{profile}} -- \
+    cargo run --bin tempo-zone -- \
                       node \
                       --chain "$GENESIS_JSON" \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
