@@ -218,10 +218,32 @@ impl L1Subscriber {
 
         self.sync_to_l1_tip(&provider, &filter).await?;
 
+        // Track the last enqueued block so we can detect and backfill gaps
+        // when the WebSocket subscription skips blocks.
+        let mut last_enqueued: u64 = self
+            .deposit_queue
+            .last_enqueued_block()
+            .unwrap_or(provider.get_block_number().await?);
+
         while let Some(header) = stream.next().await {
             let block_number = header.number();
 
-            // Fetch deposit logs for this block — must not skip on failure
+            // Detect gaps: if the subscription skipped blocks, backfill them.
+            // Each skipped block must be enqueued (even without deposits) to
+            // maintain chain continuity for advanceTempo.
+            if block_number > last_enqueued + 1 {
+                let gap_from = last_enqueued + 1;
+                let gap_to = block_number - 1;
+                warn!(
+                    gap_from,
+                    gap_to,
+                    skipped = gap_to - gap_from + 1,
+                    "Gap detected in L1 subscription, backfilling"
+                );
+                self.backfill(&provider, &filter, gap_from, gap_to).await?;
+            }
+
+            // Fetch deposit logs for this block
             let logs = provider
                 .get_logs(&filter.clone().select(block_number))
                 .await?;
@@ -231,10 +253,6 @@ impl L1Subscriber {
                 .into_iter()
                 .map(|log| self.parse_deposit(log, block_number))
                 .collect::<eyre::Result<_>>()?;
-
-            if deposits.is_empty() {
-                continue;
-            }
 
             for d in &deposits {
                 info!(
@@ -246,10 +264,12 @@ impl L1Subscriber {
                 );
             }
 
+            // Enqueue every block — even those without deposits — so the zone
+            // sees a strict sequential chain for advanceTempo.
             self.deposit_queue
                 .enqueue(header.as_ref().clone(), deposits);
 
-            info!(block = block_number, "Enqueued L1 block deposits");
+            last_enqueued = block_number;
         }
 
         warn!("L1 block subscription stream ended");
@@ -448,6 +468,16 @@ impl DepositQueue {
     /// Get a reference to the notify for external use.
     pub fn notify_ref(&self) -> &Arc<tokio::sync::Notify> {
         &self.notify
+    }
+
+    /// Returns the block number of the most recently enqueued L1 block, if any.
+    pub fn last_enqueued_block(&self) -> Option<u64> {
+        self.inner
+            .lock()
+            .expect("deposit queue poisoned")
+            .pending
+            .last()
+            .map(|b| b.header.inner.number)
     }
 
     /// Lock the inner queue directly (for backward compat where needed).
