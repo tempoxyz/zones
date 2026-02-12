@@ -130,6 +130,7 @@ These methods return public zone information and are available to any authentica
 | `eth_feeHistory` | Fee history is public |
 | `eth_getBlockByNumber` | Returns block headers **without transaction details** (see [Block responses](#block-responses)) |
 | `eth_getBlockByHash` | Returns block headers **without transaction details** |
+| `eth_subscribe("newHeads")` | Pushes block headers on new blocks. The `logsBloom` field is zeroed (see [Block responses](#block-responses)). |
 | `net_version` | Network ID |
 | `net_listening` | Node status |
 | `web3_clientVersion` | Client version |
@@ -194,6 +195,7 @@ Methods that do **not** need the speed bump include those where authorization ca
 | `eth_getFilterLogs` | Same filtering as `eth_getLogs`. |
 | `eth_getFilterChanges` | Same filtering. Only returns new events matching the filter since last poll. |
 | `eth_newFilter` | Creates a filter. The filter is implicitly scoped to the authenticated account. |
+| `eth_subscribe("logs")` | WebSocket equivalent of `eth_newFilter` + `eth_getFilterChanges`. The subscription is implicitly scoped to the authenticated account using the same [event filtering rules](#event-filtering-rules). |
 | `eth_newBlockFilter` | Allowed. Returns new block hashes. |
 | `eth_uninstallFilter` | Allowed. Removes a previously created filter. |
 
@@ -232,7 +234,7 @@ These methods are not supported on privacy zones.
 | `eth_submitHashrate` | Zones have no mining |
 | `eth_getProof` | State proofs could leak information about other accounts' storage layout |
 | `eth_getFilterLogs` (unscoped) | All log access goes through the scoped path |
-| `eth_subscribe` (for `newPendingTransactions`) | Mempool observation reveals all pending activity |
+| `eth_subscribe("newPendingTransactions")` | Mempool observation reveals all pending activity. Other subscription types (`newHeads`, `logs`) are classified above. |
 
 Disabled methods return error code `-32601` (method not found).
 
@@ -242,15 +244,13 @@ Block responses are modified to protect transaction privacy:
 
 ### Non-sequencer callers
 
-When `eth_getBlockByNumber` or `eth_getBlockByHash` is called by a non-sequencer:
+When `eth_getBlockByNumber`, `eth_getBlockByHash`, or `eth_subscribe("newHeads")` returns a block header to a non-sequencer:
 
 - The `transactions` field is **always an empty array** `[]`, regardless of the `include_transactions` parameter. If the parameter is `true`, the request is rejected (sequencer-only).
-- The `logsBloom` field MUST be replaced with the zero Bloom (`0x` followed by 512 zero bytes). The Bloom filter is a compressed summary of all log topics and emitting addresses in the block — returning the real value would allow any caller to probe whether a specific address had activity in that block, completely defeating per-account event scoping.
-- The `gasUsed` field MUST be replaced with `0x0`. Since all TIP-20 transfers cost exactly 100,000 gas, the real `gasUsed` directly reveals the approximate number of transactions in the block, defeating the sequencer-only restriction on `eth_getBlockTransactionCountByNumber`/`eth_getBlockTransactionCountByHash`.
-- The `transactionsRoot` and `receiptsRoot` fields are included (they are committed in the block hash and do not directly reveal individual data without the underlying content).
-- The remaining header fields (`number`, `hash`, `parentHash`, `timestamp`, `stateRoot`, `baseFeePerGas`, `extraData`) are returned normally.
+- The `logsBloom` field MUST be replaced with the zero Bloom (`0x` followed by 512 zero bytes). The Bloom filter is a compressed summary of all log topics and emitting addresses in the block — returning the real value would allow any caller to probe whether a specific address had activity in that block, completely defeating per-account event scoping. The zeroed `logsBloom` is still present in the response for schema compatibility.
+- All other header fields (`number`, `hash`, `parentHash`, `timestamp`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `gasUsed`, `gasLimit`, `baseFeePerGas`, `extraData`) are returned normally.
 
-**Rationale**: Transaction count, ordering, and per-address activity within a block reveals information about zone activity and could allow correlation attacks. Zeroed fields are still present in the response (for schema compatibility) but carry no information.
+**Rationale**: Transaction ordering and per-address activity within a block reveals information that could allow correlation attacks. Aggregate activity metrics (`gasUsed`, `gasLimit`) are intentionally public — the zone does not attempt to hide overall transaction volume, only per-account details.
 
 ### Sequencer callers
 
@@ -337,7 +337,7 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 - **P256/WebAuthn key compromise**: Unlike secp256k1, P256 and WebAuthn keys include the public key in the signature. This means the public key is visible to the RPC server on every request. This is not a security concern (public keys are public), but implementations should be aware that the key material is transmitted in the clear over the connection.
 - **Metadata leakage**: Even with content-level privacy, connection-level metadata (IP addresses, request timing, request frequency) can leak information. Deployments SHOULD use TLS and MAY require additional transport-level privacy measures.
 - **Fixed gas and transfer receipts**: The [fixed 100,000 gas cost](./execution#fixed-gas-constant-transfer-cost) on TIP-20 transfers ensures that `gasUsed` in transaction receipts is identical for all transfers. Without this, an observer who obtains a receipt (e.g., the sender) could infer whether the recipient was a new or existing account.
-- **Block header sanitization**: Block headers returned to non-sequencer callers have `logsBloom` zeroed and `gasUsed` set to `0x0` (see [Block responses](#block-responses)). Without this, `logsBloom` would allow probing per-address activity, and `gasUsed` would reveal transaction counts (since TIP-20 transfers have a fixed 100,000 gas cost). The remaining public fields — `stateRoot`, `transactionsRoot`, `receiptsRoot` — do not directly reveal individual account state without the underlying data (state proofs are disabled, transactions are not exposed).
+- **Block header sanitization**: Block headers returned to non-sequencer callers have `logsBloom` zeroed (see [Block responses](#block-responses)). The Bloom filter would otherwise allow probing whether a specific address had activity in a given block, defeating per-account event scoping. This applies to all code paths that return block headers: `eth_getBlockByNumber`, `eth_getBlockByHash`, and `eth_subscribe("newHeads")`. Aggregate fields like `gasUsed` are intentionally public — the zone does not hide overall activity volume, only per-account details.
 
 ## Implementation notes
 
