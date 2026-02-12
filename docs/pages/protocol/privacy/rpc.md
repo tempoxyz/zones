@@ -259,7 +259,7 @@ These methods are not supported on privacy zones.
 | `eth_getWork` | Zones have no mining |
 | `eth_submitWork` | Zones have no mining |
 | `eth_submitHashrate` | Zones have no mining |
-| `eth_getProof` | State proofs could leak information about other accounts' storage layout |
+| `eth_getProof` | Merkle proofs include sibling hashes that reveal state trie structure (number of accounts, address prefix distribution, slot occupancy), leaking information beyond the queried account |
 | `eth_getFilterLogs` (unscoped) | All log access goes through the scoped path |
 | `eth_newPendingTransactionFilter` | Polling equivalent of `eth_subscribe("newPendingTransactions")` — mempool observation |
 | `eth_subscribe("newPendingTransactions")` | Mempool observation reveals all pending activity. Other subscription types (`newHeads`, `logs`) are classified above. |
