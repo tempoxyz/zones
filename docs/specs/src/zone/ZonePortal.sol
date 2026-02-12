@@ -603,8 +603,7 @@ contract ZonePortal is IZonePortal {
             if (recentTempoBlockNumber > block.number) revert InvalidTempoBlockNumber();
 
             anchorBlockNumber = recentTempoBlockNumber;
-            anchorBlockHash =
-                getBlockHash(recentTempoBlockNumber);
+            anchorBlockHash = getBlockHash(recentTempoBlockNumber);
             if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
         }
 

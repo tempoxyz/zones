@@ -234,14 +234,28 @@ interface ITempoStateReader {
     /// @param slot The storage slot to read
     /// @param blockNumber The L1 block number to query
     /// @return value The storage value
-    function readStorageAt(address account, bytes32 slot, uint64 blockNumber) external view returns (bytes32);
+    function readStorageAt(
+        address account,
+        bytes32 slot,
+        uint64 blockNumber
+    )
+        external
+        view
+        returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo L1 contract
     /// @param account The Tempo L1 contract address
     /// @param slots The storage slots to read
     /// @param blockNumber The L1 block number to query
     /// @return values The storage values
-    function readStorageBatchAt(address account, bytes32[] calldata slots, uint64 blockNumber) external view returns (bytes32[] memory);
+    function readStorageBatchAt(
+        address account,
+        bytes32[] calldata slots,
+        uint64 blockNumber
+    )
+        external
+        view
+        returns (bytes32[] memory);
 
 }
 
@@ -857,7 +871,12 @@ interface IZoneOutbox {
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber) external returns (bytes32 withdrawalQueueHash);
+    function finalizeWithdrawalBatch(
+        uint256 count,
+        uint64 blockNumber
+    )
+        external
+        returns (bytes32 withdrawalQueueHash);
 
 }
 

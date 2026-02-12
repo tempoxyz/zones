@@ -158,7 +158,8 @@ contract TempoState is ITempoState {
         onlySystemContract
         returns (bytes32[] memory values)
     {
-        values = ITempoStateReader(TEMPO_STATE_READER).readStorageBatchAt(account, slots, tempoBlockNumber);
+        values = ITempoStateReader(TEMPO_STATE_READER)
+            .readStorageBatchAt(account, slots, tempoBlockNumber);
     }
 
     /*//////////////////////////////////////////////////////////////
