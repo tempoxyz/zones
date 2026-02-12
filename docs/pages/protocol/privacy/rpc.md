@@ -58,7 +58,25 @@ The signature includes the public key coordinates, so the server verifies the P2
 
 #### WebAuthn
 
-The access key hash is embedded as the WebAuthn challenge (Base64URL-encoded). The server parses `authenticatorData` and `clientDataJSON`, verifies the challenge matches `accessKeyHash`, checks the User Presence flag, and verifies the P256 signature. The account address is derived from the public key in the signature, following the same derivation as P256.
+The access key hash is embedded as the WebAuthn challenge (Base64URL-encoded). Verification follows the same rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#webauthn-signatures):
+
+**Verified:**
+
+- `authenticatorData` minimum length (37 bytes: 32-byte rpIdHash + 1-byte flags + 4-byte signCount).
+- User Presence (UP) or User Verification (UV) flag is set (at least one required).
+- AT (attested credential data) flag is NOT set (must be an assertion, not a registration).
+- ED (extension data) flag is NOT set (extensions are not supported).
+- `clientDataJSON.type` equals `"webauthn.get"`.
+- `clientDataJSON.challenge` matches `accessKeyHash` (Base64URL-encoded, no padding).
+- P256 signature over `sha256(authenticatorData || sha256(clientDataJSON))` is valid.
+
+**Intentionally skipped:**
+
+- **RP ID hash** (`authenticatorData` bytes 0–31): Not validated. In traditional WebAuthn, the server checks that `rpIdHash` matches its own domain to prevent cross-site credential use. Tempo has no single relying party — users interact through many frontends (wallets, dApps, SDKs), each with a different RP ID. The challenge binding to `accessKeyHash` provides the security guarantee instead: even if a signature is obtained from an unexpected origin, it is only valid for the specific access key parameters that were signed.
+- **`clientDataJSON.origin`**: Not validated, for the same reason — there is no canonical origin to check against.
+- **Signature counter**: Not checked. Anti-cloning detection is left to the application layer.
+
+The account address is derived from the public key in the signature, following the same derivation as P256.
 
 #### Keychain access keys
 
