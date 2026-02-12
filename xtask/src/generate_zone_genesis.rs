@@ -418,6 +418,8 @@ fn create_path_usd_token(
         token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
         // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
         token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+        // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
+        token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
 
         // Set a large supply cap
         token.set_supply_cap(
