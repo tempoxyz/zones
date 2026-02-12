@@ -38,7 +38,7 @@ bytes32 accessKeyHash = keccak256(abi.encodePacked(
 
 The `version` field MUST be `0` for this version of the spec. The RPC server MUST reject access keys with an unrecognized version. This allows future revisions to change the access key semantics (e.g., adding scoped permissions) without ambiguity.
 
-This hash is the challenge that must be signed. Using a raw hash (rather than EIP-712 typed data) allows all Tempo signature types to sign the same message consistently.
+This hash is the challenge that must be signed. Using a raw `keccak256` hash (rather than EIP-191 personal messages or EIP-712 typed data) allows all Tempo signature types to sign the same message consistently — P256 and WebAuthn signers cannot produce EIP-191 prefixed signatures. The `"TempoZoneRPC"` magic prefix provides domain separation, ensuring that access key hashes cannot collide with Tempo transaction hashes or other signing contexts.
 
 ### Signature types
 
