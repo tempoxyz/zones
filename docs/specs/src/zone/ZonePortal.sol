@@ -203,7 +203,7 @@ contract ZonePortal is IZonePortal {
     ///      Validates the token is a TIP-20 and grants messenger max approval.
     function enableToken(address _token) external onlySequencer {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
-        if (!TempoUtilities.isTIP20(_token)) revert TokenNotEnabled();
+        if (!TempoUtilities.isTIP20(_token)) revert InvalidToken();
         _enableTokenInternal(_token);
     }
 

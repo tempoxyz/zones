@@ -77,6 +77,7 @@ contract ZoneOutbox is IZoneOutbox {
     error TransferFailed();
     error OnlySequencer();
     error TooManyWithdrawalsThisBlock();
+    error TokenNotEnabled();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -147,6 +148,9 @@ contract ZoneOutbox is IZoneOutbox {
     )
         external
     {
+        // Validate token is enabled (withdrawals can never be disabled for enabled tokens)
+        if (!config.isEnabledToken(token)) revert TokenNotEnabled();
+
         // Always require a valid fallback recipient
         if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();

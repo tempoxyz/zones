@@ -12,6 +12,7 @@ import {
     IZoneFactory,
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT,
     QueuedDeposit,
     Withdrawal,
     ZoneParams
@@ -112,6 +113,9 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
         );
+        // Enable l2ZoneToken in the mock portal's token registry for zone-side validation
+        bytes32 tokenConfigSlot = keccak256(abi.encode(address(l2ZoneToken), PORTAL_TOKEN_CONFIGS_SLOT));
+        l2TempoState.setMockStorageValue(address(l1Portal), tokenConfigSlot, bytes32(uint256(0x0101)));
         l2Inbox = new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));
         l2Outbox = new ZoneOutbox(address(l2Config));
 

@@ -454,6 +454,7 @@ interface IZonePortal {
     error InvalidProofOfPossession();
     error DepositTooSmall();
     error GasFeeRateTooHigh();
+    error InvalidToken();
     error TokenNotEnabled();
     error DepositsNotActive();
     error TokenAlreadyEnabled();

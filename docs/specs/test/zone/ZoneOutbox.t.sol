@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneOutbox, LastBatch, Withdrawal } from "../../src/zone/IZone.sol";
+import { IZoneOutbox, LastBatch, PORTAL_TOKEN_CONFIGS_SLOT, Withdrawal } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
@@ -43,6 +43,12 @@ contract ZoneOutboxTest is Test {
         // Grant minter role to inbox and burner role to outbox
         zoneToken.setMinter(address(inbox), true);
         zoneToken.setBurner(address(outbox), true);
+
+        // Enable zoneToken in the mock portal's token registry
+        // TokenConfig is packed: enabled (bool, byte 0) and depositsActive (bool, byte 1)
+        bytes32 tokenConfigSlot = keccak256(abi.encode(address(zoneToken), PORTAL_TOKEN_CONFIGS_SLOT));
+        // enabled=true (0x01) | depositsActive=true (0x01 << 8) = 0x0101
+        tempoState.setMockStorageValue(mockPortal, tokenConfigSlot, bytes32(uint256(0x0101)));
 
         // Give alice and bob tokens
         zoneToken.setMinter(address(this), true);
