@@ -9,7 +9,7 @@ use alloy::{
     sol,
 };
 use alloy_rlp::Encodable;
-use eyre::eyre;
+use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_BASE_FEE;
@@ -190,6 +190,22 @@ impl CreateZone {
         };
         genesis_cmd.run().await?;
 
+        // Write zone.json with deployment metadata for downstream tooling (e.g. `just zone-up`).
+        let zone_json = serde_json::json!({
+            "zoneId": zone_id,
+            "portal": format!("{portal}"),
+            "token": format!("{}", self.zone_token),
+            "sequencer": format!("{}", self.sequencer),
+            "tempoAnchorBlock": confirm_header.inner.number,
+        });
+        let zone_json_path = self.output.join("zone.json");
+        std::fs::write(
+            &zone_json_path,
+            serde_json::to_string_pretty(&zone_json)
+                .wrap_err("failed encoding zone.json")?,
+        )
+        .wrap_err("failed writing zone.json")?;
+
         println!("Zone created successfully!");
         println!("  Zone ID: {zone_id}");
         println!("  Portal: {portal}");
@@ -200,6 +216,7 @@ impl CreateZone {
             "  Genesis written to: {}",
             self.output.join("genesis.json").display()
         );
+        println!("  Zone metadata written to: {}", zone_json_path.display());
 
         Ok(())
     }
