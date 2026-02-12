@@ -231,6 +231,7 @@ These methods are only available when the authenticated account is the sequencer
 | `eth_getBlockTransactionCountByHash` | Same as above |
 | `eth_getTransactionByBlockNumberAndIndex` | Arbitrary transaction access — sequencer only |
 | `eth_getTransactionByBlockHashAndIndex` | Same as above |
+| `eth_getBlockReceipts` | Returns all receipts in a block, bypassing per-sender receipt scoping |
 | `eth_getUncleCountByBlockNumber` | Sequencer only (always returns 0, but restricted for consistency) |
 | `eth_getUncleCountByBlockHash` | Same as above |
 | `debug_*` | All debug namespace methods |
@@ -252,6 +253,7 @@ These methods are not supported on privacy zones.
 | `eth_submitHashrate` | Zones have no mining |
 | `eth_getProof` | State proofs could leak information about other accounts' storage layout |
 | `eth_getFilterLogs` (unscoped) | All log access goes through the scoped path |
+| `eth_newPendingTransactionFilter` | Polling equivalent of `eth_subscribe("newPendingTransactions")` — mempool observation |
 | `eth_subscribe("newPendingTransactions")` | Mempool observation reveals all pending activity. Other subscription types (`newHeads`, `logs`) are classified above. |
 
 Disabled methods return error code `-32601` (method not found).
