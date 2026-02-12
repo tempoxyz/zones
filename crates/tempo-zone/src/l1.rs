@@ -30,6 +30,10 @@ pub struct L1SubscriberConfig {
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
+    /// Optional genesis Tempo block number override. When set, used instead of
+    /// the portal's on-chain `genesisTempoBlockNumber` (which may be 0 for
+    /// portals not created via ZoneFactory).
+    pub genesis_tempo_block_number: Option<u64>,
 }
 
 /// Maximum number of blocks to request logs for in a single `eth_getLogs` call
@@ -85,8 +89,21 @@ impl L1Subscriber {
         let from = if last_synced > 0 {
             last_synced + 1
         } else {
-            let genesis = portal.genesisTempoBlockNumber().call().await?;
-            info!(genesis, "Using portal's genesisTempoBlockNumber");
+            let genesis = if let Some(local) = self.config.genesis_tempo_block_number {
+                info!(genesis = local, "Using CLI genesis block number override");
+                local
+            } else {
+                let on_chain = portal.genesisTempoBlockNumber().call().await?;
+                if on_chain == 0 {
+                    warn!(
+                        "Portal genesisTempoBlockNumber is 0 — skipping backfill. \
+                         Set --l1.genesis-block-number to backfill from the correct block."
+                    );
+                    return Ok(());
+                }
+                info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
+                on_chain
+            };
             info!(
                 genesis,
                 "Fresh portal, backfilling from genesis+1 (genesis block already in TempoState)"
