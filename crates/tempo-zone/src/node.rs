@@ -69,20 +69,42 @@ pub struct ZoneNode {
 }
 
 impl ZoneNode {
-    /// Create a new zone node with a deposit queue, L1 subscriber config,
-    /// and L1 state infrastructure configs.
+    /// Create a new zone node from minimal configuration.
+    ///
+    /// Internally constructs the [`DepositQueue`], [`L1SubscriberConfig`],
+    /// [`L1StateProviderConfig`], [`L1StateListenerConfig`], and [`SharedL1StateCache`]
+    /// from the provided parameters — callers don't need to know about these internals.
     ///
     /// The L1 subscriber is spawned automatically as part of the node lifecycle via
     /// [`ZoneAddOns::launch_add_ons`], ensuring it cannot be accidentally omitted.
     /// The L1 state listener is spawned by [`ZoneExecutorBuilder`] during EVM construction.
     pub fn new(
-        deposit_queue: crate::DepositQueue,
-        l1_config: crate::L1SubscriberConfig,
-        l1_state_provider_config: L1StateProviderConfig,
-        l1_state_listener_config: L1StateListenerConfig,
-        l1_state_cache: SharedL1StateCache,
+        l1_rpc_url: String,
+        portal_address: alloy_primitives::Address,
+        genesis_tempo_block_number: Option<u64>,
         sequencer: Option<alloy_primitives::Address>,
     ) -> Self {
+        let deposit_queue = crate::DepositQueue::default();
+
+        let l1_config = crate::L1SubscriberConfig {
+            l1_rpc_url: l1_rpc_url.clone(),
+            portal_address,
+            genesis_tempo_block_number,
+        };
+
+        let l1_state_provider_config = L1StateProviderConfig {
+            l1_rpc_url: l1_rpc_url.clone(),
+            ..Default::default()
+        };
+
+        let l1_state_listener_config = L1StateListenerConfig {
+            l1_ws_url: l1_rpc_url,
+            ..Default::default()
+        };
+
+        let l1_state_cache =
+            SharedL1StateCache::new(std::collections::HashSet::from([portal_address]));
+
         Self {
             deposit_queue,
             l1_config,
@@ -91,6 +113,11 @@ impl ZoneNode {
             l1_state_cache,
             sequencer,
         }
+    }
+
+    /// Returns a clone of the deposit queue handle for external use (e.g. sequencer tasks).
+    pub fn deposit_queue(&self) -> crate::DepositQueue {
+        self.deposit_queue.clone()
     }
 
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
