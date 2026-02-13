@@ -34,7 +34,7 @@ use reth_transaction_pool::{
 };
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
-use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
+use tempo_consensus::TEMPO_SHARED_GAS_DIVISOR;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::TempoPayloadBuilderAttributes;
 use tempo_primitives::{
@@ -252,8 +252,7 @@ where
 
         let block_gas_limit = parent_header.gas_limit();
         let shared_gas_limit = block_gas_limit / TEMPO_SHARED_GAS_DIVISOR;
-        let non_shared_gas_limit = block_gas_limit - shared_gas_limit;
-        let general_gas_limit = non_shared_gas_limit / TEMPO_GENERAL_GAS_DIVISOR;
+        let general_gas_limit = 0;
 
         let mut cumulative_gas_used = 0u64;
         let total_fees = U256::ZERO;
@@ -319,12 +318,13 @@ where
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
 
         while let Some(pool_tx) = best_txs.next() {
-            if cumulative_gas_used + pool_tx.gas_limit() > non_shared_gas_limit {
+            let gas_limit_left = block_gas_limit.saturating_sub(shared_gas_limit);
+            if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
                 best_txs.mark_invalid(
                     &pool_tx,
                     &InvalidPoolTransactionError::ExceedsGasLimit(
                         pool_tx.gas_limit(),
-                        non_shared_gas_limit - cumulative_gas_used,
+                        gas_limit_left.saturating_sub(cumulative_gas_used),
                     ),
                 );
                 continue;

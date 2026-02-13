@@ -20,7 +20,7 @@ use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
 };
-use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_BASE_FEE};
+use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_T0_BASE_FEE};
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
@@ -51,7 +51,7 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(long, default_value_t = 13371)]
     pub(crate) chain_id: u64,
 
-    #[arg(long, default_value_t = TEMPO_BASE_FEE.into())]
+    #[arg(long, default_value_t = TEMPO_T0_BASE_FEE.into())]
     pub(crate) base_fee_per_gas: u128,
 
     #[arg(long, default_value_t = 30_000_000)]
@@ -372,7 +372,7 @@ fn deploy_contract(
 /// Initialize the TIP403Registry precompile (required for fee token transfer checks).
 fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, || {
+    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx, || {
         TIP403Registry::new().initialize()
     })?;
     println!("Initialized TIP403Registry");
@@ -382,7 +382,7 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 /// Initialize the TIP20Factory precompile (required before creating any TIP20 tokens).
 fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, || {
+    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx, || {
         TIP20Factory::new().initialize()
     })?;
     println!("Initialized TIP20Factory");
@@ -401,7 +401,7 @@ fn create_path_usd_token(
     let admin = DEPLOYER;
 
     let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, || {
+    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx, || {
         TIP20Factory::new().create_token_reserved_address(
             PATH_USD_ADDRESS,
             "pathUSD",

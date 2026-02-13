@@ -122,30 +122,30 @@ reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "c59a120
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "c59a120" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "c59a120" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "c59a120" }
-revm = { version = "33.1.0", features = ["optional_fee_charge"] }
+revm = { version = "34.0.0", features = ["optional_fee_charge"] }
 
 # alloy
-alloy = { version = "1.4.2", default-features = false }
-alloy-consensus = { version = "1.4.2", default-features = false }
-alloy-contract = { version = "1.4.2", default-features = false }
-alloy-eips = { version = "1.4.2", default-features = false }
-alloy-evm = "0.25.2"
-alloy-network = { version = "1.4.2", default-features = false }
-alloy-primitives = { version = "1.5.0", default-features = false }
-alloy-provider = { version = "1.4.2", default-features = false }
-alloy-rlp = "0.3.12"
-alloy-rpc-types-engine = "1.4.2"
-alloy-rpc-types-eth = { version = "1.4.2" }
-alloy-signer-local = "1.4.2"
-alloy-sol-types = "1.5.0"
-alloy-transport = "1.4.2"
+alloy = { version = "1.6.1", default-features = false }
+alloy-consensus = { version = "1.6.1", default-features = false }
+alloy-contract = { version = "1.6.1", default-features = false }
+alloy-eips = { version = "1.6.1", default-features = false }
+alloy-evm = "0.26.4"
+alloy-network = { version = "1.6.1", default-features = false }
+alloy-primitives = { version = "1.5.4", default-features = false }
+alloy-provider = { version = "1.6.1", default-features = false }
+alloy-rlp = "0.3.13"
+alloy-rpc-types-engine = "1.6.1"
+alloy-rpc-types-eth = { version = "1.6.1" }
+alloy-signer-local = "1.6.1"
+alloy-sol-types = "1.5.4"
+alloy-transport = "1.6.1"
 
 # commonware
-commonware-codec = "0.0.64"
-commonware-consensus = "0.0.64"
-commonware-cryptography = "0.0.64"
-commonware-math = "0.0.64"
-commonware-utils = "0.0.64"
+commonware-codec = "2026.2.0"
+commonware-consensus = "2026.2.0"
+commonware-cryptography = "2026.2.0"
+commonware-math = "2026.2.0"
+commonware-utils = "2026.2.0"
 
 # misc
 clap = { version = "4.5.45", features = ["derive"] }
@@ -168,9 +168,4 @@ tracing = "0.1.41"
 vergen = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
 vergen-git2 = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
 vergen-lib = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
-# Commonware main right after https://github.com/commonwarexyz/monorepo/pull/2740 was merged
-commonware-codec = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
-commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
-commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
-commonware-math = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
-commonware-utils = { git = "https://github.com/commonwarexyz/monorepo", rev = "5ca1fb0bba4f2f04bf27d1da2b68ef034dca93be" }
+
