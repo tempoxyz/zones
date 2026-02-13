@@ -123,7 +123,13 @@ abstract contract PrivateZoneToken {
     }
 
     /// @dev Same fixed gas cost as transfer().
-    function transferFromWithMemo(address from, address to, uint256 amount, bytes32 memo) external
+    function transferFromWithMemo(
+        address from,
+        address to,
+        uint256 amount,
+        bytes32 memo
+    )
+        external
         returns (bool)
     {
         // Precompile charges exactly FIXED_TRANSFER_GAS
