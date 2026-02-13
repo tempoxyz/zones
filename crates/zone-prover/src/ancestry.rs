@@ -86,7 +86,7 @@ pub fn verify_tempo_ancestry_chain(
 /// Tempo headers are encoded as: `rlp([general_gas_limit, shared_gas_limit,
 /// timestamp_millis_part, inner])` where `inner` is a standard Ethereum header.
 /// The parent hash is the first field of the inner header.
-fn extract_parent_hash_from_rlp(header_rlp: &[u8]) -> Result<B256, String> {
+pub(crate) fn extract_parent_hash_from_rlp(header_rlp: &[u8]) -> Result<B256, String> {
     // Decode the outer list.
     let outer_payload = decode_rlp_list_payload(header_rlp)
         .map_err(|e| format!("outer list: {e}"))?;
@@ -181,6 +181,88 @@ fn rlp_item_total_length(data: &[u8]) -> Result<usize, &'static str> {
             len = (len << 8) | (b as usize);
         }
         Ok(1 + len_len + len)
+    }
+}
+
+/// Extract the block number from an RLP-encoded Tempo header.
+///
+/// Tempo headers are encoded as: `rlp([general_gas_limit, shared_gas_limit,
+/// timestamp_millis_part, inner])` where `inner` is a standard Ethereum header.
+///
+/// The block number is the 9th field (index 8) of the inner Ethereum header:
+/// `[parentHash, ommersHash, beneficiary, stateRoot, transactionsRoot,
+///  receiptsRoot, logsBloom, difficulty, **number**, ...]`
+pub(crate) fn extract_block_number_from_rlp(header_rlp: &[u8]) -> Result<u64, String> {
+    // Decode the outer list.
+    let outer_payload = decode_rlp_list_payload(header_rlp)
+        .map_err(|e| format!("outer list: {e}"))?;
+
+    // Skip the first 3 wrapper fields (general_gas_limit, shared_gas_limit, timestamp_millis_part).
+    let mut offset = 0;
+    for i in 0..3 {
+        let item_len = rlp_item_total_length(&outer_payload[offset..])
+            .map_err(|e| format!("wrapper field {i}: {e}"))?;
+        offset += item_len;
+    }
+
+    // The 4th item is the inner Ethereum header (a list).
+    let inner_rlp = &outer_payload[offset..];
+    let inner_payload = decode_rlp_list_payload(inner_rlp)
+        .map_err(|e| format!("inner list: {e}"))?;
+
+    // Skip the first 8 fields to reach `number` (index 8).
+    let mut inner_offset = 0;
+    for i in 0..8 {
+        if inner_offset >= inner_payload.len() {
+            return Err(format!("inner header too short at field {i}"));
+        }
+        let item_len = rlp_item_total_length(&inner_payload[inner_offset..])
+            .map_err(|e| format!("inner field {i}: {e}"))?;
+        inner_offset += item_len;
+    }
+
+    if inner_offset >= inner_payload.len() {
+        return Err("inner header too short for number field".into());
+    }
+
+    // The 9th field is the block number (U256, variable-length big-endian integer).
+    decode_rlp_u64(&inner_payload[inner_offset..])
+        .map_err(|e| format!("block number: {e}"))
+}
+
+/// Decode a u64 from the start of an RLP payload.
+///
+/// Handles RLP-encoded integers: single byte (0x00..0x7f), short string (0x80 + len),
+/// or empty (0x80 = zero).
+fn decode_rlp_u64(data: &[u8]) -> Result<u64, &'static str> {
+    if data.is_empty() {
+        return Err("empty data");
+    }
+
+    let prefix = data[0];
+
+    if prefix == 0x80 {
+        // Empty bytes = zero
+        Ok(0)
+    } else if prefix <= 0x7f {
+        // Single byte value
+        Ok(prefix as u64)
+    } else if prefix <= 0xb7 {
+        // Short string: 0x80 + length, then the bytes
+        let len = (prefix - 0x80) as usize;
+        if len > 8 {
+            return Err("integer too large for u64");
+        }
+        if data.len() < 1 + len {
+            return Err("integer data truncated");
+        }
+        let mut value: u64 = 0;
+        for &b in &data[1..1 + len] {
+            value = (value << 8) | (b as u64);
+        }
+        Ok(value)
+    } else {
+        Err("unexpected prefix for integer")
     }
 }
 
