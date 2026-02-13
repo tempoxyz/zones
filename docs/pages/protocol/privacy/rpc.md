@@ -83,7 +83,9 @@ The account address is derived from the public key in the signature, following t
 
 #### Keychain Access Keys
 
-Accounts that have authorized Access Keys via the [AccountKeychain](/protocol/transactions/AccountKeychain) precompile can use those keys to authenticate to the RPC. A Keychain signature wraps an inner signature (secp256k1, P256, or WebAuthn) and includes the root account address:
+Accounts that have authorized Access Keys via the zone's `AccountKeychain` precompile can use those keys to authenticate to the RPC. The zone has its own independent `AccountKeychain` instance — it is **not** mirrored from Tempo L1. Users must register Keychain keys on the zone directly via transactions submitted to the zone's `AccountKeychain` precompile. This means a key registered on Tempo L1 does not automatically grant RPC access to the zone; the user must separately authorize it on the zone.
+
+A Keychain signature wraps an inner signature (secp256k1, P256, or WebAuthn) and includes the root account address:
 
 ```
 keychain_signature = 0x03 || user_address (20 bytes) || inner_signature
