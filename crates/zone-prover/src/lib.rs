@@ -22,17 +22,25 @@ pub mod mpt;
 pub mod tempo;
 pub mod types;
 
-use alloy_primitives::{B256, keccak256};
+use alloy_primitives::{B256, U256, keccak256};
+use revm::Database;
 use tracing::{debug, info};
 
 use crate::{
     db::WitnessDatabase,
+    execute::storage,
     tempo::TempoStateAccessor,
     types::{
         BatchOutput, BatchWitness, BlockTransition, DepositQueueTransition,
         LastBatch, LastBatchCommitment, ProverError, ZoneHeader,
     },
 };
+
+/// Default chain ID for the prover.
+///
+/// This should come from a chain spec, but for now we use a constant.
+/// Zone blocks don't typically validate chain ID in the prover context.
+const DEFAULT_CHAIN_ID: u64 = 1;
 
 /// Pure state transition function for zone batch proving.
 ///
@@ -69,13 +77,13 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
     // ---------------------------------------------------------------
     debug!("Phase 2: Initializing zone state from witness");
 
-    let zone_state = WitnessDatabase::from_witness(&witness.initial_zone_state)?;
+    let witness_db = WitnessDatabase::from_witness(&witness.initial_zone_state)?;
 
-    // Bind initial state root to the previous block hash.
-    if zone_state.state_root() != witness.prev_block_header.state_root {
+    // Bind initial state root to the previous block header.
+    if witness_db.state_root() != witness.prev_block_header.state_root {
         return Err(ProverError::InconsistentState(format!(
             "witness state root {} does not match previous block header state root {}",
-            zone_state.state_root(),
+            witness_db.state_root(),
             witness.prev_block_header.state_root
         )));
     }
@@ -89,10 +97,12 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
         )));
     }
 
-    // Capture deposit queue start.
-    // In a full implementation, this reads ZoneInbox.processedDepositQueueHash
-    // from the initial zone state. For now, we trust the witness.
-    let deposit_prev = read_zone_inbox_processed_hash(&witness)?;
+    // Read the initial deposit queue hash from the witness database.
+    let deposit_prev = read_storage_from_db(
+        &witness_db,
+        execute::ZONE_INBOX_ADDRESS,
+        storage::ZONE_INBOX_PROCESSED_HASH_SLOT,
+    )?;
 
     // ---------------------------------------------------------------
     // Phase 3: Execute zone blocks and compute block hashes
@@ -104,6 +114,12 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
 
     let mut prev_block_hash = witness.public_inputs.prev_block_hash;
     let mut prev_header = witness.prev_block_header.clone();
+
+    // Track the database across block executions.
+    // For now, we pass the WitnessDatabase through each block execution.
+    // The WitnessDatabase provides the initial state; the EVM tracks changes
+    // via its journaled state.
+    let mut current_db = witness_db;
 
     for (idx, block) in witness.zone_blocks.iter().enumerate() {
         let is_last_block = idx + 1 == witness.zone_blocks.len();
@@ -160,28 +176,28 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
             )));
         }
 
-        // Execute the block.
-        //
-        // In a full implementation, this would:
-        // 1. Set up revm with the WitnessDatabase and TempoState precompile
-        // 2. Execute advanceTempo system tx
-        // 3. Execute user transactions
-        // 4. Execute finalizeWithdrawalBatch system tx
-        // 5. Return (tx_root, receipts_root)
-        //
-        // For now, we validate the block structure and compute the block hash
-        // from the witness data. The full EVM execution will be wired up
-        // once the Tempo EVM config is integrated.
-        let (tx_root, receipts_root) =
-            execute_zone_block_stub(&mut tempo_state, block, idx)?;
+        // Execute the block using the real EVM.
+        let (exec_result, db) = execute::execute_zone_block(
+            current_db,
+            block,
+            idx,
+            &mut tempo_state,
+            DEFAULT_CHAIN_ID,
+            is_last_block,
+        )?;
+        current_db = db;
+
+        // Use the expected state root from the witness (Phase 1 approach).
+        // Full state root computation from BundleState will be Phase 2.
+        let state_root = block.expected_state_root;
 
         // Build the zone block header and compute the block hash.
         let header = ZoneHeader {
             parent_hash: prev_block_hash,
             beneficiary: block.beneficiary,
-            state_root: witness.initial_zone_state.state_root, // TODO: updated state root after execution
-            transactions_root: tx_root,
-            receipts_root,
+            state_root,
+            transactions_root: exec_result.transactions_root,
+            receipts_root: exec_result.receipts_root,
             number: block.number,
             timestamp: block.timestamp,
         };
@@ -201,13 +217,25 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
     // ---------------------------------------------------------------
     debug!("Phase 4: Extracting output commitments");
 
-    let deposit_next = read_zone_inbox_processed_hash_final(&witness)?;
-    let last_batch = read_zone_outbox_last_batch(&witness)?;
+    // Read the final deposit queue hash from the post-execution state.
+    let deposit_next = read_storage_from_db(
+        &current_db,
+        execute::ZONE_INBOX_ADDRESS,
+        storage::ZONE_INBOX_PROCESSED_HASH_SLOT,
+    )?;
+
+    // Read the last batch from the post-execution state.
+    let last_batch = read_last_batch_from_db(&current_db)?;
 
     // Validate TempoState binding.
-    // In a full implementation, read TempoState.tempoBlockNumber() from zone state
-    // after execution.
-    let tempo_number = witness.public_inputs.tempo_block_number;
+    // Read TempoState.tempoBlockNumber() from post-execution zone state.
+    let packed_slot = read_storage_from_db(
+        &current_db,
+        execute::TEMPO_STATE_ADDRESS,
+        storage::TEMPO_STATE_PACKED_SLOT,
+    )?;
+    let tempo_block_number_u256 = U256::from_be_bytes(packed_slot.into());
+    let tempo_number = storage::extract_tempo_block_number(tempo_block_number_u256);
 
     if tempo_number != witness.public_inputs.tempo_block_number {
         return Err(ProverError::InconsistentState(format!(
@@ -220,7 +248,6 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
     // Anchor validation.
     if witness.public_inputs.anchor_block_number == tempo_number {
         // Direct mode: anchor == tempo, hashes must match.
-        // The hash comes from the finalized Tempo header.
         let tempo_hash = compute_tempo_block_hash(&witness)?;
         if tempo_hash != witness.public_inputs.anchor_block_hash {
             return Err(ProverError::InconsistentState(format!(
@@ -263,65 +290,44 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
 }
 
 // ---------------------------------------------------------------------------
-//  Helper functions (stubs for Phase 3)
+//  Helper functions: state reads
 // ---------------------------------------------------------------------------
 
-/// Stub for zone block execution.
+/// Read a storage slot from a WitnessDatabase-backed state.
 ///
-/// In the full implementation, this runs EVM execution and returns the
-/// transaction and receipts roots. For now, returns placeholder values.
-///
-/// TODO: Wire up full EVM execution with `TempoEvmConfig`.
-fn execute_zone_block_stub(
-    _tempo_state: &mut TempoStateAccessor,
-    block: &crate::types::ZoneBlock,
-    _block_index: usize,
-) -> Result<(B256, B256), ProverError> {
-    // If the block advances Tempo, bind the block.
-    if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
-        // Compute the Tempo block hash from the header RLP.
-        let _tempo_block_hash = keccak256(tempo_header_rlp);
-
-        // The Tempo block number would be extracted from the header.
-        // For now, we bind using the block index.
-        // In full implementation: extract number from header, bind, and validate.
-    }
-
-    // Placeholder: return empty roots.
-    // The real implementation computes these from actual EVM execution results.
-    Ok((B256::ZERO, B256::ZERO))
-}
-
-/// Read ZoneInbox.processedDepositQueueHash from the initial zone state.
-///
-/// In a full implementation, this reads from the WitnessDatabase.
-/// For now, returns a placeholder.
-fn read_zone_inbox_processed_hash(
-    _witness: &BatchWitness,
+/// Converts the U256 value to a B256 for hash-type slots.
+fn read_storage_from_db(
+    db: &WitnessDatabase,
+    address: alloy_primitives::Address,
+    slot: U256,
 ) -> Result<B256, ProverError> {
-    // TODO: Read from witness.initial_zone_state accounts at ZONE_INBOX_ADDRESS, slot 0.
-    // For now, return zero as a placeholder.
-    Ok(B256::ZERO)
+    // Clone to get a mutable reference for the Database trait.
+    let mut db_clone = db.clone();
+    let value = db_clone.storage(address, slot)?;
+    Ok(B256::from(value.to_be_bytes()))
 }
 
-/// Read ZoneInbox.processedDepositQueueHash after batch execution.
-///
-/// In a full implementation, this reads from the post-execution zone state.
-fn read_zone_inbox_processed_hash_final(
-    _witness: &BatchWitness,
-) -> Result<B256, ProverError> {
-    // TODO: Read from post-execution zone state.
-    Ok(B256::ZERO)
-}
+/// Read ZoneOutbox.lastBatch from the zone state.
+fn read_last_batch_from_db(db: &WitnessDatabase) -> Result<LastBatch, ProverError> {
+    let mut db_clone = db.clone();
 
-/// Read ZoneOutbox.lastBatch from the zone state after execution.
-fn read_zone_outbox_last_batch(
-    witness: &BatchWitness,
-) -> Result<LastBatch, ProverError> {
-    // TODO: Read from post-execution zone state.
+    // Read withdrawal_queue_hash from base slot.
+    let wqh_value = db_clone.storage(
+        execute::ZONE_OUTBOX_ADDRESS,
+        storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
+    )?;
+    let withdrawal_queue_hash = B256::from(wqh_value.to_be_bytes());
+
+    // Read withdrawal_batch_index from base + 1.
+    let wbi_value = db_clone.storage(
+        execute::ZONE_OUTBOX_ADDRESS,
+        storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1),
+    )?;
+    let withdrawal_batch_index = wbi_value.to::<u64>();
+
     Ok(LastBatch {
-        withdrawal_queue_hash: B256::ZERO,
-        withdrawal_batch_index: witness.public_inputs.expected_withdrawal_batch_index,
+        withdrawal_queue_hash,
+        withdrawal_batch_index,
     })
 }
 

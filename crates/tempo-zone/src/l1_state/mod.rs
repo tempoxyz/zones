@@ -6,6 +6,10 @@
 //! - [`L1StateProvider`] — a cache-first, RPC-fallback reader for `eth_getStorageAt`.
 //! - [`TempoStateReader`] — a standalone `DynPrecompile` that handles `readStorageAt` calls.
 //! - [`tip403`] — TIP-403 policy cache and provider.
+//! - [`L1StorageReader`] — trait abstracting synchronous L1 storage reads.
+
+use alloy_primitives::{Address, B256};
+use eyre::Result;
 
 pub mod cache;
 pub mod precompile;
@@ -20,3 +24,15 @@ pub use tip403::{
     AuthRole, PolicyCache, PolicyEvent, PolicyProvider, PolicyTaskHandle, PolicyTaskMessage,
     SharedPolicyCache, Tip403Metrics, spawn_policy_resolution_task, spawn_pool_prefetch_task,
 };
+
+/// Trait abstracting synchronous L1 storage reads.
+///
+/// Implemented by [`L1StateProvider`] (cache + RPC) and
+/// [`RecordingL1StateProvider`](crate::witness::RecordingL1StateProvider) (recording wrapper).
+///
+/// Used by [`TempoStateReader`] and [`ZoneEvmFactory`](crate::evm::ZoneEvmFactory) to decouple
+/// the precompile from the concrete provider implementation.
+pub trait L1StorageReader: Send + Sync + 'static {
+    /// Read a storage slot from Tempo L1 at a specific block height.
+    fn get_storage(&self, address: Address, slot: B256, block_number: u64) -> Result<B256>;
+}

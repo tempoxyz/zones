@@ -4,21 +4,29 @@
 //! accessed during EVM execution. After execution, the recorded accesses can be
 //! used to generate MPT proofs for the [`ZoneStateWitness`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::{Arc, Mutex},
+};
 
 use alloy_primitives::{Address, B256, U256};
 use reth_errors::ProviderError;
 use reth_revm::Database;
 use revm::state::{AccountInfo, Bytecode};
 
-/// A database wrapper that records all state accesses.
+/// Shared handle to recorded state accesses.
 ///
-/// Delegates all reads to the inner database but logs every `basic()`,
-/// `storage()`, and `code_by_hash()` call. After execution, the recorded
-/// accesses can be extracted via [`accessed_accounts`](Self::accessed_accounts)
-/// and [`accessed_storage`](Self::accessed_storage).
-pub struct RecordingDatabase<DB> {
-    inner: DB,
+/// This handle can be cloned before the `RecordingDatabase` is consumed by
+/// `State::builder().with_database(...)`, allowing the caller to retrieve
+/// recorded accesses after execution is complete.
+#[derive(Clone, Default)]
+pub struct RecordedAccesses {
+    inner: Arc<Mutex<RecordedAccessesInner>>,
+}
+
+/// Interior data for recorded accesses.
+#[derive(Default)]
+struct RecordedAccessesInner {
     /// Accounts whose `basic()` was called.
     accounts: BTreeSet<Address>,
     /// Storage slots read per account.
@@ -29,36 +37,100 @@ pub struct RecordingDatabase<DB> {
     block_hashes: BTreeSet<u64>,
 }
 
+impl RecordedAccesses {
+    /// Create a new empty handle.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Returns a snapshot of all accessed account addresses.
+    pub fn accessed_accounts(&self) -> BTreeSet<Address> {
+        self.inner.lock().expect("poisoned").accounts.clone()
+    }
+
+    /// Returns a snapshot of all accessed storage slots, grouped by account.
+    pub fn accessed_storage(&self) -> BTreeMap<Address, BTreeSet<U256>> {
+        self.inner.lock().expect("poisoned").storage.clone()
+    }
+
+    /// Returns a snapshot of all accessed code hashes.
+    pub fn accessed_code_hashes(&self) -> BTreeSet<B256> {
+        self.inner.lock().expect("poisoned").code_hashes.clone()
+    }
+
+    /// Returns a snapshot of all accessed block numbers (for BLOCKHASH).
+    pub fn accessed_block_hashes(&self) -> BTreeSet<u64> {
+        self.inner.lock().expect("poisoned").block_hashes.clone()
+    }
+
+    /// Record an account access.
+    fn record_account(&self, address: Address) {
+        self.inner.lock().expect("poisoned").accounts.insert(address);
+    }
+
+    /// Record a storage slot access.
+    fn record_storage(&self, address: Address, slot: U256) {
+        let mut inner = self.inner.lock().expect("poisoned");
+        inner.accounts.insert(address);
+        inner.storage.entry(address).or_default().insert(slot);
+    }
+
+    /// Record a code hash access.
+    fn record_code_hash(&self, code_hash: B256) {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .code_hashes
+            .insert(code_hash);
+    }
+
+    /// Record a block hash access.
+    fn record_block_hash(&self, number: u64) {
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .block_hashes
+            .insert(number);
+    }
+}
+
+/// A database wrapper that records all state accesses via a shared handle.
+///
+/// Delegates all reads to the inner database but logs every `basic()`,
+/// `storage()`, and `code_by_hash()` call to a [`RecordedAccesses`] handle.
+///
+/// The handle can be cloned before the database is consumed, allowing
+/// the caller to retrieve the accesses after execution.
+///
+/// # Usage
+///
+/// ```ignore
+/// let accesses = RecordedAccesses::new();
+/// let recording_db = RecordingDatabase::new(inner_db, accesses.clone());
+/// // ... wrap in State, execute blocks ...
+/// let accounts = accesses.accessed_accounts();
+/// let storage = accesses.accessed_storage();
+/// ```
+pub struct RecordingDatabase<DB> {
+    inner: DB,
+    accesses: RecordedAccesses,
+}
+
+impl<DB> std::fmt::Debug for RecordingDatabase<DB> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordingDatabase")
+            .field("accesses", &"RecordedAccesses { ... }")
+            .finish()
+    }
+}
+
 impl<DB> RecordingDatabase<DB> {
     /// Create a new recording wrapper around an existing database.
-    pub fn new(inner: DB) -> Self {
-        Self {
-            inner,
-            accounts: BTreeSet::new(),
-            storage: BTreeMap::new(),
-            code_hashes: BTreeSet::new(),
-            block_hashes: BTreeSet::new(),
-        }
-    }
-
-    /// Returns the set of all accessed account addresses.
-    pub fn accessed_accounts(&self) -> &BTreeSet<Address> {
-        &self.accounts
-    }
-
-    /// Returns the set of all accessed storage slots, grouped by account.
-    pub fn accessed_storage(&self) -> &BTreeMap<Address, BTreeSet<U256>> {
-        &self.storage
-    }
-
-    /// Returns the set of all accessed code hashes.
-    pub fn accessed_code_hashes(&self) -> &BTreeSet<B256> {
-        &self.code_hashes
-    }
-
-    /// Returns the set of all accessed block numbers (for BLOCKHASH).
-    pub fn accessed_block_hashes(&self) -> &BTreeSet<u64> {
-        &self.block_hashes
+    ///
+    /// The `accesses` handle is shared — clone it before passing it here
+    /// to retrieve recorded data after the database is consumed.
+    pub fn new(inner: DB, accesses: RecordedAccesses) -> Self {
+        Self { inner, accesses }
     }
 
     /// Consume the wrapper and return the inner database.
@@ -75,32 +147,33 @@ impl<DB> RecordingDatabase<DB> {
     pub fn inner_mut(&mut self) -> &mut DB {
         &mut self.inner
     }
+
+    /// Get a reference to the shared recorded accesses handle.
+    pub fn accesses(&self) -> &RecordedAccesses {
+        &self.accesses
+    }
 }
 
 impl<DB: Database<Error = ProviderError>> Database for RecordingDatabase<DB> {
     type Error = ProviderError;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        self.accounts.insert(address);
+        self.accesses.record_account(address);
         self.inner.basic(address)
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
-        self.code_hashes.insert(code_hash);
+        self.accesses.record_code_hash(code_hash);
         self.inner.code_by_hash(code_hash)
     }
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
-        self.accounts.insert(address);
-        self.storage
-            .entry(address)
-            .or_default()
-            .insert(index);
+        self.accesses.record_storage(address, index);
         self.inner.storage(address, index)
     }
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
-        self.block_hashes.insert(number);
+        self.accesses.record_block_hash(number);
         self.inner.block_hash(number)
     }
 }
@@ -134,7 +207,8 @@ mod tests {
 
     #[test]
     fn test_recording_db_captures_accesses() {
-        let mut db = RecordingDatabase::new(TestDb);
+        let accesses = RecordedAccesses::new();
+        let mut db = RecordingDatabase::new(TestDb, accesses.clone());
 
         let addr1 = Address::with_last_byte(1);
         let addr2 = Address::with_last_byte(2);
@@ -149,12 +223,32 @@ mod tests {
         let _ = db.storage(addr1, U256::from(20));
         let _ = db.storage(addr2, U256::from(30));
 
-        assert_eq!(db.accessed_accounts().len(), 2);
-        assert!(db.accessed_accounts().contains(&addr1));
-        assert!(db.accessed_accounts().contains(&addr2));
+        // Use the cloned handle to retrieve accesses.
+        assert_eq!(accesses.accessed_accounts().len(), 2);
+        assert!(accesses.accessed_accounts().contains(&addr1));
+        assert!(accesses.accessed_accounts().contains(&addr2));
 
-        assert_eq!(db.accessed_storage().len(), 2);
-        assert_eq!(db.accessed_storage()[&addr1].len(), 2);
-        assert_eq!(db.accessed_storage()[&addr2].len(), 1);
+        let storage = accesses.accessed_storage();
+        assert_eq!(storage.len(), 2);
+        assert_eq!(storage[&addr1].len(), 2);
+        assert_eq!(storage[&addr2].len(), 1);
+    }
+
+    #[test]
+    fn test_shared_handle_after_consume() {
+        let accesses = RecordedAccesses::new();
+        let mut db = RecordingDatabase::new(TestDb, accesses.clone());
+
+        let addr = Address::with_last_byte(1);
+        let _ = db.basic(addr);
+        let _ = db.storage(addr, U256::from(42));
+
+        // Consume the database.
+        let _inner = db.into_inner();
+
+        // The shared handle still has the recorded accesses.
+        assert_eq!(accesses.accessed_accounts().len(), 1);
+        assert!(accesses.accessed_accounts().contains(&addr));
+        assert_eq!(accesses.accessed_storage()[&addr].len(), 1);
     }
 }

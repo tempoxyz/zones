@@ -6,18 +6,30 @@
 //! - The Tempo EVM configuration (custom instructions, precompiles)
 
 use alloy_consensus::{Signed, TxLegacy};
-use alloy_primitives::{Address, Bytes, U256, address};
+use alloy_evm::{
+    Database, Evm, EvmEnv, FromRecoveredTx,
+    revm::{context::result::ResultAndState, inspector::NoOpInspector},
+};
+use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
+use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
 use reth_primitives_traits::{Recovered, SignerRecoverable};
+use tempo_chainspec::hardfork::TempoHardfork;
+use tempo_evm::evm::TempoEvm;
 use tempo_primitives::{
     TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
+use tempo_revm::{TempoBlockEnv, TempoTxEnv};
+use tracing::debug;
 
-use crate::types::{
-    DecryptionData, DepositType, ProverError, QueuedDeposit,
-    advanceTempoCall, finalizeWithdrawalBatchCall,
-    SolQueuedDeposit, SolDecryptionData, SolChaumPedersenProof,
+use crate::{
+    tempo::TempoStateAccessor,
+    types::{
+        DecryptionData, DepositType, ProverError, QueuedDeposit, ZoneBlock,
+        advanceTempoCall, finalizeWithdrawalBatchCall,
+        SolQueuedDeposit, SolDecryptionData, SolChaumPedersenProof,
+    },
 };
 
 /// Predeploy addresses matching the zone node's ABI constants.
@@ -26,6 +38,295 @@ pub const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000
 pub const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 pub const TEMPO_STATE_READER_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000004");
+
+/// Result of executing a single zone block.
+#[derive(Debug)]
+pub struct BlockExecutionResult {
+    /// Transactions root (ordered trie of transaction hashes).
+    pub transactions_root: B256,
+    /// Receipts root (ordered trie of receipt RLP).
+    pub receipts_root: B256,
+}
+
+/// Execute a zone block within the prover.
+///
+/// Creates a `TempoEvm`, registers the proof-based precompile, and executes
+/// all transactions in order:
+/// 1. `advanceTempo` system tx (if block advances Tempo)
+/// 2. User transactions
+/// 3. `finalizeWithdrawalBatch` system tx (only in final block)
+///
+/// Returns the transactions root and receipts root.
+pub fn execute_zone_block<DB: Database<Error = ProverError>>(
+    db: DB,
+    block: &ZoneBlock,
+    block_index: usize,
+    tempo_state: &mut TempoStateAccessor,
+    chain_id: u64,
+    is_last_block: bool,
+) -> Result<(BlockExecutionResult, DB), ProverError> {
+    // Build the EVM environment for this block.
+    let evm_env = build_evm_env(block, chain_id);
+
+    // Create the TempoEvm.
+    let mut evm: TempoEvm<DB, NoOpInspector> = TempoEvm::new(db, evm_env);
+
+    // Register the proof-based TempoStateReader precompile.
+    let precompile = crate::tempo::prover_tempo_state_precompile(tempo_state, block_index);
+    {
+        let (_, _, precompiles) = evm.components_mut();
+        precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| Some(precompile));
+    }
+
+    // Collect all transactions (as TempoTxEnvelope) and their execution results.
+    let mut all_txs: Vec<TempoTxEnvelope> = Vec::new();
+    let mut cumulative_gas_used: u64 = 0;
+    let mut receipt_envelopes: Vec<ReceiptData> = Vec::new();
+
+    // 1. Execute advanceTempo system tx (if block advances Tempo).
+    if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
+        let recovered_tx = build_advance_tempo_tx(
+            tempo_header_rlp,
+            &block.deposits,
+            &block.decryptions,
+        );
+
+        // Extract the Tempo block number from the header RLP for binding.
+        let tempo_block_hash = keccak256(tempo_header_rlp);
+        debug!(
+            block_number = block.number,
+            %tempo_block_hash,
+            "advanceTempo system tx"
+        );
+
+        let tx_env = <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
+            recovered_tx.inner(),
+            recovered_tx.signer(),
+        );
+        let result = evm.transact_raw(tx_env).map_err(|e| {
+            ProverError::ExecutionError(format!("advanceTempo failed: {e:?}"))
+        })?;
+
+        cumulative_gas_used += gas_used_from_result(&result);
+
+        receipt_envelopes.push(ReceiptData {
+            status: result.result.is_success(),
+            cumulative_gas_used,
+            logs: result.result.logs().to_vec(),
+        });
+        all_txs.push(recovered_tx.into_inner());
+
+        // Bind the Tempo block after execution.
+        // The TempoState contract now has the new block info; bind it for precompile lookups.
+        tempo_state.bind_block(block_index as u64, block.number);
+    }
+
+    // 2. Execute user transactions.
+    let user_txs = decode_user_transactions(&block.transactions)?;
+    for (i, recovered_tx) in user_txs.into_iter().enumerate() {
+        let tx_env = <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
+            recovered_tx.inner(),
+            recovered_tx.signer(),
+        );
+        let result = evm.transact_raw(tx_env).map_err(|e| {
+            ProverError::ExecutionError(format!("user tx {i} failed: {e:?}"))
+        })?;
+
+        cumulative_gas_used += gas_used_from_result(&result);
+
+        receipt_envelopes.push(ReceiptData {
+            status: result.result.is_success(),
+            cumulative_gas_used,
+            logs: result.result.logs().to_vec(),
+        });
+        all_txs.push(recovered_tx.into_inner());
+    }
+
+    // 3. Execute finalizeWithdrawalBatch system tx (only in final block).
+    if is_last_block {
+        if let Some(count) = block.finalize_withdrawal_batch_count {
+            let recovered_tx = build_finalize_withdrawal_batch_tx(count, block.number);
+
+            let tx_env = <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
+                recovered_tx.inner(),
+                recovered_tx.signer(),
+            );
+            let result = evm.transact_raw(tx_env).map_err(|e| {
+                ProverError::ExecutionError(format!("finalizeWithdrawalBatch failed: {e:?}"))
+            })?;
+
+            cumulative_gas_used += gas_used_from_result(&result);
+
+            receipt_envelopes.push(ReceiptData {
+                status: result.result.is_success(),
+                cumulative_gas_used,
+                logs: result.result.logs().to_vec(),
+            });
+            all_txs.push(recovered_tx.into_inner());
+        }
+    }
+
+    // Compute transactions root and receipts root.
+    let transactions_root = compute_transactions_root(&all_txs);
+    let receipts_root = compute_receipts_root(&receipt_envelopes);
+
+    // Extract the database back from the EVM.
+    let (db, _env) = evm.finish();
+
+    Ok((
+        BlockExecutionResult {
+            transactions_root,
+            receipts_root,
+        },
+        db,
+    ))
+}
+
+/// Build the EVM environment for a zone block.
+fn build_evm_env(block: &ZoneBlock, chain_id: u64) -> EvmEnv<TempoHardfork, TempoBlockEnv> {
+    use revm::context::{BlockEnv, CfgEnv};
+
+    let block_env = TempoBlockEnv {
+        inner: BlockEnv {
+            number: U256::from(block.number),
+            beneficiary: block.beneficiary,
+            timestamp: U256::from(block.timestamp),
+            gas_limit: u64::MAX, // No gas limit enforcement in the prover
+            basefee: 0,
+            ..Default::default()
+        },
+        timestamp_millis_part: 0,
+    };
+
+    let mut cfg_env = CfgEnv::new_with_spec(TempoHardfork::T0);
+    cfg_env.chain_id = chain_id;
+
+    EvmEnv {
+        cfg_env,
+        block_env,
+    }
+}
+
+/// Extract gas used from a transaction result.
+fn gas_used_from_result(result: &ResultAndState<tempo_revm::TempoHaltReason>) -> u64 {
+    result.result.gas_used()
+}
+
+/// Internal receipt data used to compute the receipts root.
+struct ReceiptData {
+    status: bool,
+    cumulative_gas_used: u64,
+    logs: Vec<alloy_primitives::Log>,
+}
+
+// ---------------------------------------------------------------------------
+//  Transaction and receipt root computation
+// ---------------------------------------------------------------------------
+
+/// Compute the transactions root from an ordered list of transactions.
+///
+/// Uses the ordered trie pattern: key = RLP(index), value = RLP(tx).
+fn compute_transactions_root(txs: &[TempoTxEnvelope]) -> B256 {
+    if txs.is_empty() {
+        return alloy_trie::EMPTY_ROOT_HASH;
+    }
+
+    use alloy_trie::HashBuilder;
+    use nybbles::Nibbles;
+
+    let mut hb = HashBuilder::default();
+    for (i, tx) in txs.iter().enumerate() {
+        let key = {
+            let mut buf = Vec::new();
+            i.encode(&mut buf);
+            Nibbles::unpack(&buf)
+        };
+        let value = {
+            let mut buf = Vec::new();
+            tx.encode(&mut buf);
+            buf
+        };
+        hb.add_leaf(key, &value);
+    }
+    hb.root()
+}
+
+/// Compute the receipts root from an ordered list of receipt data.
+///
+/// Uses the ordered trie pattern: key = RLP(index), value = RLP(receipt).
+fn compute_receipts_root(receipts: &[ReceiptData]) -> B256 {
+    if receipts.is_empty() {
+        return alloy_trie::EMPTY_ROOT_HASH;
+    }
+
+    use alloy_trie::HashBuilder;
+    use nybbles::Nibbles;
+
+    let mut hb = HashBuilder::default();
+    for (i, receipt) in receipts.iter().enumerate() {
+        let key = {
+            let mut buf = Vec::new();
+            i.encode(&mut buf);
+            Nibbles::unpack(&buf)
+        };
+        // Build a minimal receipt RLP: [status, cumulativeGasUsed, logsBloom, logs]
+        let value = encode_receipt_rlp(receipt);
+        hb.add_leaf(key, &value);
+    }
+    hb.root()
+}
+
+/// Encode a receipt to RLP for the receipts trie.
+fn encode_receipt_rlp(receipt: &ReceiptData) -> Vec<u8> {
+    use alloy_primitives::Bloom;
+
+    // Build the logs bloom from the receipt's logs.
+    let bloom = {
+        let mut bloom = Bloom::default();
+        for log in &receipt.logs {
+            bloom.accrue_log(log);
+        }
+        bloom
+    };
+
+    // RLP: [status (bool), cumulativeGasUsed, logsBloom, [logs...]]
+    let status: bool = receipt.status;
+    let cumulative_gas_used = receipt.cumulative_gas_used;
+    let logs = &receipt.logs;
+
+    // Compute the logs list RLP length.
+    let logs_list_payload: usize = logs.iter().map(|l| alloy_rlp::Encodable::length(l)).sum();
+    let logs_len = alloy_rlp::Header {
+        list: true,
+        payload_length: logs_list_payload,
+    }
+    .length()
+        + logs_list_payload;
+
+    // Compute the outer list payload length.
+    let status_len = alloy_rlp::Encodable::length(&status);
+    let gas_len = alloy_rlp::Encodable::length(&cumulative_gas_used);
+    let bloom_len = alloy_rlp::Encodable::length(&bloom);
+    let payload_len = status_len + gas_len + bloom_len + logs_len;
+
+    let mut buf = Vec::with_capacity(payload_len + 5);
+    alloy_rlp::Header {
+        list: true,
+        payload_length: payload_len,
+    }
+    .encode(&mut buf);
+
+    status.encode(&mut buf);
+    cumulative_gas_used.encode(&mut buf);
+    bloom.encode(&mut buf);
+    alloy_rlp::encode_list(logs, &mut buf);
+
+    buf
+}
+
+// ---------------------------------------------------------------------------
+//  Transaction builders
+// ---------------------------------------------------------------------------
 
 /// Build the `advanceTempo(header, deposits, decryptions)` system transaction.
 ///
@@ -149,9 +450,7 @@ pub mod storage {
     /// `tempoBlockNumber` is the lowest uint64 (offset 0).
     pub const TEMPO_STATE_PACKED_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);
 
-    /// ZoneInbox: `processedDepositQueueHash` is at slot 1
-    /// (after `config`, `tempoPortal`, `_tempoState`, `zoneToken` which are immutable,
-    /// and the first mutable storage variable).
+    /// ZoneInbox: `processedDepositQueueHash` is at slot 0.
     pub const ZONE_INBOX_PROCESSED_HASH_SLOT: U256 = U256::ZERO;
 
     /// ZoneOutbox: `_lastBatch` is at a fixed storage slot.
@@ -171,3 +470,4 @@ pub mod storage {
         (packed & U256::from(u64::MAX)).to::<u64>()
     }
 }
+

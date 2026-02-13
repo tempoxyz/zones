@@ -558,7 +558,7 @@ where
         )
         .await?;
 
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
+        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), std::sync::Arc::new(l1_provider));
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -570,6 +570,7 @@ where
             crate::l1_state::PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
         evm_config = evm_config.with_policy_provider(policy_provider);
         info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
+
 
         Ok(evm_config)
     }
