@@ -40,6 +40,12 @@ pub struct BatchWitness {
     /// Public inputs committed by the proof system.
     pub public_inputs: PublicInputs,
 
+    /// Zone chain ID for EVM configuration.
+    ///
+    /// Must match the chain ID used during the original execution (from genesis).
+    /// Default is 13371 for Tempo zones.
+    pub chain_id: u64,
+
     /// Previous batch's block header (for state-root binding).
     pub prev_block_header: ZoneHeader,
 

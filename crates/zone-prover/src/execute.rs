@@ -10,6 +10,7 @@ use alloy_evm::{
     Database, Evm, EvmEnv, FromRecoveredTx,
     revm::{context::result::ResultAndState, inspector::NoOpInspector},
 };
+use revm::DatabaseCommit;
 use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
@@ -56,12 +57,18 @@ pub struct BlockExecutionResult {
 /// 2. User transactions
 /// 3. `finalizeWithdrawalBatch` system tx (only in final block)
 ///
+/// State changes are committed to the database after each transaction so that
+/// subsequent transactions can see prior modifications.
+///
+/// The caller is responsible for calling `tempo_state.bind_block()` before this
+/// function so that the precompile has the correct Tempo block binding.
+///
 /// Returns the transactions root and receipts root.
-pub fn execute_zone_block<DB: Database<Error = ProverError>>(
+pub fn execute_zone_block<DB: Database<Error = ProverError> + DatabaseCommit>(
     db: DB,
     block: &ZoneBlock,
     block_index: usize,
-    tempo_state: &mut TempoStateAccessor,
+    tempo_state: &TempoStateAccessor,
     chain_id: u64,
     is_last_block: bool,
 ) -> Result<(BlockExecutionResult, DB), ProverError> {
@@ -72,6 +79,8 @@ pub fn execute_zone_block<DB: Database<Error = ProverError>>(
     let mut evm: TempoEvm<DB, NoOpInspector> = TempoEvm::new(db, evm_env);
 
     // Register the proof-based TempoStateReader precompile.
+    // Note: bind_block() must have been called by the caller before this point
+    // so the precompile's cloned block_bindings includes the current block.
     let precompile = crate::tempo::prover_tempo_state_precompile(tempo_state, block_index);
     {
         let (_, _, precompiles) = evm.components_mut();
@@ -91,7 +100,6 @@ pub fn execute_zone_block<DB: Database<Error = ProverError>>(
             &block.decryptions,
         );
 
-        // Extract the Tempo block number from the header RLP for binding.
         let tempo_block_hash = keccak256(tempo_header_rlp);
         debug!(
             block_number = block.number,
@@ -103,22 +111,21 @@ pub fn execute_zone_block<DB: Database<Error = ProverError>>(
             recovered_tx.inner(),
             recovered_tx.signer(),
         );
-        let result = evm.transact_raw(tx_env).map_err(|e| {
+        let ResultAndState { result, state } = evm.transact_raw(tx_env).map_err(|e| {
             ProverError::ExecutionError(format!("advanceTempo failed: {e:?}"))
         })?;
 
-        cumulative_gas_used += gas_used_from_result(&result);
+        // Commit state changes so subsequent transactions see them.
+        evm.db_mut().commit(state);
+
+        cumulative_gas_used += result.gas_used();
 
         receipt_envelopes.push(ReceiptData {
-            status: result.result.is_success(),
+            status: result.is_success(),
             cumulative_gas_used,
-            logs: result.result.logs().to_vec(),
+            logs: result.logs().to_vec(),
         });
         all_txs.push(recovered_tx.into_inner());
-
-        // Bind the Tempo block after execution.
-        // The TempoState contract now has the new block info; bind it for precompile lookups.
-        tempo_state.bind_block(block_index as u64, block.number);
     }
 
     // 2. Execute user transactions.
@@ -128,16 +135,18 @@ pub fn execute_zone_block<DB: Database<Error = ProverError>>(
             recovered_tx.inner(),
             recovered_tx.signer(),
         );
-        let result = evm.transact_raw(tx_env).map_err(|e| {
+        let ResultAndState { result, state } = evm.transact_raw(tx_env).map_err(|e| {
             ProverError::ExecutionError(format!("user tx {i} failed: {e:?}"))
         })?;
 
-        cumulative_gas_used += gas_used_from_result(&result);
+        evm.db_mut().commit(state);
+
+        cumulative_gas_used += result.gas_used();
 
         receipt_envelopes.push(ReceiptData {
-            status: result.result.is_success(),
+            status: result.is_success(),
             cumulative_gas_used,
-            logs: result.result.logs().to_vec(),
+            logs: result.logs().to_vec(),
         });
         all_txs.push(recovered_tx.into_inner());
     }
@@ -151,16 +160,18 @@ pub fn execute_zone_block<DB: Database<Error = ProverError>>(
                 recovered_tx.inner(),
                 recovered_tx.signer(),
             );
-            let result = evm.transact_raw(tx_env).map_err(|e| {
+            let ResultAndState { result, state } = evm.transact_raw(tx_env).map_err(|e| {
                 ProverError::ExecutionError(format!("finalizeWithdrawalBatch failed: {e:?}"))
             })?;
 
-            cumulative_gas_used += gas_used_from_result(&result);
+            evm.db_mut().commit(state);
+
+            cumulative_gas_used += result.gas_used();
 
             receipt_envelopes.push(ReceiptData {
-                status: result.result.is_success(),
+                status: result.is_success(),
                 cumulative_gas_used,
-                logs: result.result.logs().to_vec(),
+                logs: result.logs().to_vec(),
             });
             all_txs.push(recovered_tx.into_inner());
         }
@@ -207,11 +218,6 @@ fn build_evm_env(block: &ZoneBlock, chain_id: u64) -> EvmEnv<TempoHardfork, Temp
     }
 }
 
-/// Extract gas used from a transaction result.
-fn gas_used_from_result(result: &ResultAndState<tempo_revm::TempoHaltReason>) -> u64 {
-    result.result.gas_used()
-}
-
 /// Internal receipt data used to compute the receipts root.
 struct ReceiptData {
     status: bool,
@@ -226,6 +232,9 @@ struct ReceiptData {
 /// Compute the transactions root from an ordered list of transactions.
 ///
 /// Uses the ordered trie pattern: key = RLP(index), value = RLP(tx).
+/// Leaves must be added to `HashBuilder` in sorted key order. Since
+/// `RLP(0) = [0x80]` sorts after `RLP(1..127) = [0x01..0x7f]`, we
+/// collect all (key, value) pairs first and sort by key.
 fn compute_transactions_root(txs: &[TempoTxEnvelope]) -> B256 {
     if txs.is_empty() {
         return alloy_trie::EMPTY_ROOT_HASH;
@@ -234,19 +243,31 @@ fn compute_transactions_root(txs: &[TempoTxEnvelope]) -> B256 {
     use alloy_trie::HashBuilder;
     use nybbles::Nibbles;
 
+    // Collect (nibble_key, encoded_value) pairs.
+    let mut leaves: Vec<(Nibbles, Vec<u8>)> = txs
+        .iter()
+        .enumerate()
+        .map(|(i, tx)| {
+            let key = {
+                let mut buf = Vec::new();
+                i.encode(&mut buf);
+                Nibbles::unpack(&buf)
+            };
+            let value = {
+                let mut buf = Vec::new();
+                tx.encode(&mut buf);
+                buf
+            };
+            (key, value)
+        })
+        .collect();
+
+    // Sort by nibble key — required by HashBuilder.
+    leaves.sort_by(|(a, _), (b, _)| a.cmp(b));
+
     let mut hb = HashBuilder::default();
-    for (i, tx) in txs.iter().enumerate() {
-        let key = {
-            let mut buf = Vec::new();
-            i.encode(&mut buf);
-            Nibbles::unpack(&buf)
-        };
-        let value = {
-            let mut buf = Vec::new();
-            tx.encode(&mut buf);
-            buf
-        };
-        hb.add_leaf(key, &value);
+    for (key, value) in &leaves {
+        hb.add_leaf(key.clone(), value);
     }
     hb.root()
 }
@@ -254,6 +275,7 @@ fn compute_transactions_root(txs: &[TempoTxEnvelope]) -> B256 {
 /// Compute the receipts root from an ordered list of receipt data.
 ///
 /// Uses the ordered trie pattern: key = RLP(index), value = RLP(receipt).
+/// Sorted by key for `HashBuilder` (see `compute_transactions_root`).
 fn compute_receipts_root(receipts: &[ReceiptData]) -> B256 {
     if receipts.is_empty() {
         return alloy_trie::EMPTY_ROOT_HASH;
@@ -262,16 +284,25 @@ fn compute_receipts_root(receipts: &[ReceiptData]) -> B256 {
     use alloy_trie::HashBuilder;
     use nybbles::Nibbles;
 
+    let mut leaves: Vec<(Nibbles, Vec<u8>)> = receipts
+        .iter()
+        .enumerate()
+        .map(|(i, receipt)| {
+            let key = {
+                let mut buf = Vec::new();
+                i.encode(&mut buf);
+                Nibbles::unpack(&buf)
+            };
+            let value = encode_receipt_rlp(receipt);
+            (key, value)
+        })
+        .collect();
+
+    leaves.sort_by(|(a, _), (b, _)| a.cmp(b));
+
     let mut hb = HashBuilder::default();
-    for (i, receipt) in receipts.iter().enumerate() {
-        let key = {
-            let mut buf = Vec::new();
-            i.encode(&mut buf);
-            Nibbles::unpack(&buf)
-        };
-        // Build a minimal receipt RLP: [status, cumulativeGasUsed, logsBloom, logs]
-        let value = encode_receipt_rlp(receipt);
-        hb.add_leaf(key, &value);
+    for (key, value) in &leaves {
+        hb.add_leaf(key.clone(), value);
     }
     hb.root()
 }
