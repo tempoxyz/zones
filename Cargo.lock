@@ -14384,6 +14384,29 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zone-prover",
+]
+
+[[package]]
+name = "zone-prover"
+version = "1.0.0-rc.5"
+dependencies = [
+ "alloy-consensus",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-sol-types",
+ "alloy-trie",
+ "nybbles",
+ "reth-primitives-traits",
+ "revm",
+ "serde",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-primitives",
+ "tempo-revm",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

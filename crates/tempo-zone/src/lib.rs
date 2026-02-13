@@ -20,6 +20,7 @@ pub mod l1_state;
 mod node;
 pub mod system_tx;
 pub mod withdrawals;
+pub mod witness;
 pub mod zonemonitor;
 
 pub use batch::{BatchData, BatchSubmitter};

@@ -28,6 +28,7 @@ members = [
   "crates/precompiles-macros",
   "crates/primitives",
   "crates/tempo-zone",
+  "crates/zone-prover",
   "crates/contracts",
   "crates/telemetry-util",
   "crates/transaction-pool",
@@ -122,6 +123,7 @@ tempo-primitives = { path = "crates/primitives", default-features = false, featu
 tempo-contracts = { path = "crates/contracts", default-features = false }
 tempo-telemetry-util = { path = "crates/telemetry-util", default-features = false }
 tempo-transaction-pool = { path = "crates/transaction-pool", default-features = false }
+zone-prover = { path = "crates/zone-prover" }
 tempo-zone-exex = { path = "crates/tempo-zone-exex" }
 
 # reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", tag = "v1.10.0-rc.2" }

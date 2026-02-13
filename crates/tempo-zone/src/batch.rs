@@ -38,6 +38,10 @@ pub struct BatchData {
     pub next_processed_deposit_hash: B256,
     /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
     pub withdrawal_queue_hash: B256,
+    /// Verifier configuration bytes (empty for POC, populated when prover is active).
+    pub verifier_config: Bytes,
+    /// Proof bytes (empty for POC, populated by `zone_prover::prove_zone_batch`).
+    pub proof: Bytes,
 }
 
 /// Submits zone batches to the ZonePortal contract on Tempo L1.
@@ -66,17 +70,19 @@ impl BatchSubmitter {
     /// Constructs the on-chain structs from [`BatchData`], sends the
     /// `submitBatch` transaction, and waits for the receipt.
     ///
-    /// # POC note
+    /// Submit a batch to the ZonePortal on Tempo L1.
     ///
-    /// `verifierConfig` and `proof` are set to empty bytes — the verifier
-    /// contract must be configured to accept empty proofs.
-    // TODO: pass real proof bytes once proof generation is implemented.
+    /// Uses the `verifier_config` and `proof` bytes from [`BatchData`].
+    /// When proof generation is enabled, these are populated by
+    /// `zone_prover::prove_zone_batch`. When disabled (POC mode), they default
+    /// to empty bytes and the verifier contract must accept empty proofs.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = batch.tempo_block_number,
         prev_block_hash = %batch.prev_block_hash,
         next_block_hash = %batch.next_block_hash,
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
+        has_proof = !batch.proof.is_empty(),
     ))]
     pub async fn submit_batch(&self, batch: &BatchData) -> Result<B256> {
         let block_transition = BlockTransition {
@@ -99,8 +105,8 @@ impl BatchSubmitter {
                 block_transition,
                 deposit_transition,
                 batch.withdrawal_queue_hash,
-                Bytes::new(),
-                Bytes::new(),
+                batch.verifier_config.clone(),
+                batch.proof.clone(),
             )
             .send()
             .await?

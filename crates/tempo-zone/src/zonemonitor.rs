@@ -303,6 +303,18 @@ impl ZoneMonitor {
         let block_hash = block.header.hash;
 
         // --- 5. Build and submit BatchData ---
+        //
+        // Proof generation is not yet wired up (requires the recording wrappers
+        // in ZonePayloadBuilder to capture state accesses during block building,
+        // then feeding those into WitnessGenerator + prove_zone_batch). For now,
+        // we submit with empty proof bytes (POC mode).
+        //
+        // When proof generation is enabled, the flow will be:
+        //   1. Collect recorded state accesses from the builder (RecordingDatabase)
+        //   2. Collect recorded L1 reads from the TempoStateReader (RecordingL1StateProvider)
+        //   3. Use WitnessGenerator to assemble a BatchWitness
+        //   4. Call zone_prover::prove_zone_batch(witness) to get BatchOutput + proof
+        //   5. Include the proof bytes in BatchData
         let batch_data = BatchData {
             tempo_block_number,
             prev_block_hash: self.prev_block_hash,
@@ -310,6 +322,8 @@ impl ZoneMonitor {
             prev_processed_deposit_hash: self.prev_processed_deposit_hash,
             next_processed_deposit_hash,
             withdrawal_queue_hash,
+            verifier_config: alloy_primitives::Bytes::new(),
+            proof: alloy_primitives::Bytes::new(),
         };
 
         // Submit — state only advances on success.

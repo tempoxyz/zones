@@ -21,6 +21,7 @@ tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-alloy = { workspace = true, features = ["tempo-compat"] }
+zone-prover.workspace = true
 
 # reth
 reth-basic-payload-builder.workspace = true
