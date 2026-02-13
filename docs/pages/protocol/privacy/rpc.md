@@ -5,7 +5,7 @@ This document specifies the RPC interface for Tempo privacy zones. The design st
 ## Goals
 
 - Expose a familiar Ethereum JSON-RPC so that existing tooling (wallets, SDKs, block explorers) can connect with minimal changes.
-- Authenticate every request via a short-lived access key tied to an Ethereum account.
+- Authenticate every request via a short-lived authorization token tied to an Ethereum account.
 - Ensure that no RPC call leaks information about accounts other than the caller's own.
 - Work in concert with the [execution environment modifications](./execution) that enforce privacy at the EVM level.
 
@@ -14,18 +14,18 @@ This document specifies the RPC interface for Tempo privacy zones. The design st
 - Public block explorers or permissionless indexing. The zone is a private validium; only authenticated participants and the sequencer can observe state.
 - Support for arbitrary smart contract deployment. Zones run a fixed set of predeploys; contract creation is disabled.
 
-## Access keys
+## Authorization tokens
 
-Every RPC request must include an access key in the `X-Access-Key` HTTP header (or as the first element of a JSON-RPC batch params wrapper — see [Transport](#transport)). The access key proves that the caller controls a Tempo account and scopes all responses to that account.
+Every RPC request must include an authorization token in the `X-Authorization-Token` HTTP header (or as the first element of a JSON-RPC batch params wrapper — see [Transport](#transport)). The authorization token proves that the caller controls a Tempo account and scopes all responses to that account.
 
-Tempo accounts support multiple signature types (secp256k1, P256, and WebAuthn), so the access key scheme must support all of them. Additionally, accounts that have authorized access keys via the [AccountKeychain](/protocol/transactions/AccountKeychain) precompile can use those access keys to authenticate to the RPC on behalf of their root account.
+Tempo accounts support multiple signature types (secp256k1, P256, and WebAuthn), so the authorization token scheme must support all of them. Additionally, accounts that have authorized Access Keys via the [AccountKeychain](/protocol/transactions/AccountKeychain) precompile can use those Access Keys to authenticate to the RPC on behalf of their root account.
 
 ### Message
 
 The signed message is the `keccak256` hash of the following packed encoding:
 
 ```solidity
-bytes32 accessKeyHash = keccak256(abi.encodePacked(
+bytes32 authorizationTokenHash = keccak256(abi.encodePacked(
     bytes32(0x54656d706f5a6f6e65525043),  // "TempoZoneRPC" magic prefix
     uint8(version),                         // spec version (currently 0)
     uint64(zoneId),                         // zone this key is valid for
@@ -36,32 +36,32 @@ bytes32 accessKeyHash = keccak256(abi.encodePacked(
 ));
 ```
 
-The `version` field MUST be `0` for this version of the spec. The RPC server MUST reject access keys with an unrecognized version. This allows future revisions to change the access key semantics (e.g., adding scoped permissions) without ambiguity.
+The `version` field MUST be `0` for this version of the spec. The RPC server MUST reject authorization tokens with an unrecognized version. This allows future revisions to change authorization token semantics (e.g., adding scoped permissions) without ambiguity.
 
-This hash is the challenge that must be signed. Using a raw `keccak256` hash (rather than EIP-191 personal messages or EIP-712 typed data) allows all Tempo signature types to sign the same message consistently — P256 and WebAuthn signers cannot produce EIP-191 prefixed signatures. The `"TempoZoneRPC"` magic prefix provides domain separation, ensuring that access key hashes cannot collide with Tempo transaction hashes or other signing contexts.
+This hash is the challenge that must be signed. Using a raw `keccak256` hash (rather than EIP-191 personal messages or EIP-712 typed data) allows all Tempo signature types to sign the same message consistently — P256 and WebAuthn signers cannot produce EIP-191 prefixed signatures. The `"TempoZoneRPC"` magic prefix provides domain separation, ensuring that authorization token hashes cannot collide with Tempo transaction hashes or other signing contexts.
 
 ### Signature types
 
-The access key signature follows the same format as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types). The signature type is determined by the first byte and length:
+The authorization token signature follows the same format as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types). The signature type is determined by the first byte and length:
 
 | Type | Detection | Address derivation |
 |------|-----------|-------------------|
 | **secp256k1** | Exactly 65 bytes, no type prefix | `address(uint160(uint256(keccak256(abi.encode(x, y)))))` — standard `ecrecover` |
 | **P256** | First byte `0x01`, 130 bytes total | `address(uint160(uint256(keccak256(abi.encodePacked(pubKeyX, pubKeyY)))))` — public key is embedded in the signature |
 | **WebAuthn** | First byte `0x02`, variable length (max 2KB) | Same as P256 (WebAuthn uses P256 keys) |
-| **Keychain** | First byte `0x03`, variable length | Authenticated account is the `user_address` field, not the signing key's address (see [Keychain access keys](#keychain-access-keys)) |
+| **Keychain** | First byte `0x03`, variable length | Authenticated account is the `user_address` field, not the signing key's address (see [Keychain Access Keys](#keychain-access-keys)) |
 
 #### secp256k1
 
-Standard Ethereum signature. The RPC server recovers the public key via `ecrecover(accessKeyHash, v, r, s)` and derives the account address.
+Standard Ethereum signature. The RPC server recovers the public key via `ecrecover(authorizationTokenHash, v, r, s)` and derives the account address.
 
 #### P256
 
-The signature includes the public key coordinates, so the server verifies the P256 signature directly and derives the address from the embedded public key. If the `pre_hash` flag is set, the server applies `sha256(accessKeyHash)` before verification.
+The signature includes the public key coordinates, so the server verifies the P256 signature directly and derives the address from the embedded public key. If the `pre_hash` flag is set, the server applies `sha256(authorizationTokenHash)` before verification.
 
 #### WebAuthn
 
-The access key hash is embedded as the WebAuthn challenge (Base64URL-encoded). Verification follows the same rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#webauthn-signatures):
+The authorization token hash is embedded as the WebAuthn challenge (Base64URL-encoded). Verification follows the same rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#webauthn-signatures):
 
 **Verified:**
 
@@ -70,20 +70,20 @@ The access key hash is embedded as the WebAuthn challenge (Base64URL-encoded). V
 - AT (attested credential data) flag is NOT set (must be an assertion, not a registration).
 - ED (extension data) flag is NOT set (extensions are not supported).
 - `clientDataJSON.type` equals `"webauthn.get"`.
-- `clientDataJSON.challenge` matches `accessKeyHash` (Base64URL-encoded, no padding).
+- `clientDataJSON.challenge` matches `authorizationTokenHash` (Base64URL-encoded, no padding).
 - P256 signature over `sha256(authenticatorData || sha256(clientDataJSON))` is valid.
 
 **Intentionally skipped:**
 
-- **RP ID hash** (`authenticatorData` bytes 0–31): Not validated. In traditional WebAuthn, the server checks that `rpIdHash` matches its own domain to prevent cross-site credential use. Tempo has no single relying party — users interact through many frontends (wallets, dApps, SDKs), each with a different RP ID. The challenge binding to `accessKeyHash` provides the security guarantee instead: even if a signature is obtained from an unexpected origin, it is only valid for the specific access key parameters that were signed.
+- **RP ID hash** (`authenticatorData` bytes 0–31): Not validated. In traditional WebAuthn, the server checks that `rpIdHash` matches its own domain to prevent cross-site credential use. Tempo has no single relying party — users interact through many frontends (wallets, dApps, SDKs), each with a different RP ID. The challenge binding to `authorizationTokenHash` provides the security guarantee instead: even if a signature is obtained from an unexpected origin, it is only valid for the specific authorization token parameters that were signed.
 - **`clientDataJSON.origin`**: Not validated, for the same reason — there is no canonical origin to check against.
 - **Signature counter**: Not checked. Anti-cloning detection is left to the application layer.
 
 The account address is derived from the public key in the signature, following the same derivation as P256.
 
-#### Keychain access keys
+#### Keychain Access Keys
 
-Accounts that have authorized access keys via the [AccountKeychain](/protocol/transactions/AccountKeychain) precompile can use those keys to authenticate to the RPC. A Keychain signature wraps an inner signature (secp256k1, P256, or WebAuthn) and includes the root account address:
+Accounts that have authorized Access Keys via the [AccountKeychain](/protocol/transactions/AccountKeychain) precompile can use those keys to authenticate to the RPC. A Keychain signature wraps an inner signature (secp256k1, P256, or WebAuthn) and includes the root account address:
 
 ```
 keychain_signature = 0x03 || user_address (20 bytes) || inner_signature
@@ -91,17 +91,20 @@ keychain_signature = 0x03 || user_address (20 bytes) || inner_signature
 
 The server:
 
-1. Verifies the inner signature against `accessKeyHash`.
+1. Verifies the inner signature against `authorizationTokenHash`.
 2. Derives the signing key's address from the inner signature.
 3. Queries the zone's `AccountKeychain` precompile to verify that `user_address` has authorized the signing key (i.e., `getKey(user_address, keyId)` returns an active, non-expired, non-revoked key).
-4. Sets the authenticated account to `user_address` (the root account), not the access key's address.
+4. Sets the authenticated account to `user_address` (the root account), not the Access Key's address.
 
-This allows session keys and scoped access keys to authenticate to the RPC with the same permissions as the root account. The AccountKeychain's spending limits and expiry are orthogonal to the RPC access key — the Keychain key must be active to authenticate, but its token-spending limits only apply to on-chain transactions, not RPC reads.
+This allows session keys and scoped Access Keys to authenticate to the RPC with the same permissions as the root account. The AccountKeychain's spending limits and expiry are orthogonal to the RPC authorization token — the Keychain key must be active to authenticate, but its token-spending limits only apply to on-chain transactions, not RPC reads.
 
 ### Validation
 
-The RPC server MUST reject access keys where:
+The RPC server MUST reject authorization tokens where:
 
+- `zoneId` does not equal the zone's configured `zoneId`.
+- `chainId` does not equal the zone's configured chain ID (`eth_chainId`).
+- `zonePortal` does not equal the zone's configured Tempo ZonePortal address.
 - `expiresAt - issuedAt > 1800` (maximum validity window is 30 minutes).
 - `expiresAt <= now` (key has expired).
 - `issuedAt > now + 60` (clock skew tolerance of 60 seconds into the future).
@@ -114,25 +117,25 @@ The zone sequencer is identified by the `sequencer` address registered in the `Z
 
 ### Transport
 
-Access keys are sent as an HTTP header on every request:
+Authorization tokens are sent as an HTTP header on every request:
 
 ```
 POST /
-X-Access-Key: <hex-encoded access key>
+X-Authorization-Token: <hex-encoded authorization token>
 Content-Type: application/json
 
 {"jsonrpc":"2.0","method":"eth_getBalance","params":[...],"id":1}
 ```
 
-The `X-Access-Key` value is a single hex-encoded blob containing the concatenation of the signature and the access key fields:
+The `X-Authorization-Token` value is a single hex-encoded blob containing the concatenation of the signature and the authorization token fields:
 
 ```
 <signature bytes><version: 1 byte><zoneId: 8 bytes><chainId: 8 bytes><zonePortal: 20 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
 ```
 
-The access key fields are always exactly 53 bytes (1 + 8 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 53 bytes** as the access key fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
+The authorization token fields are always exactly 53 bytes (1 + 8 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 53 bytes** as the authorization token fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
 
-Requests without a valid access key receive a `401 Unauthorized` HTTP response. Requests with an expired or malformed key receive `403 Forbidden`.
+Requests without a valid authorization token receive a `401 Unauthorized` HTTP response. Requests with an expired or malformed token receive `403 Forbidden`.
 
 ## RPC method access control
 
@@ -186,8 +189,8 @@ These methods are available to any authenticated caller but filter results to on
 
 | Method | Scoping rule |
 |--------|-------------|
-| `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected with error code `-32004` (account mismatch). |
-| `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. Returns `-32004` on mismatch. |
+| `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected with error code `-32004` (account mismatch). Requests that include a state override set or block override object (client-specific simulation extensions) MUST be rejected with `-32602` (invalid params). |
+| `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. Returns `-32004` on mismatch. Requests that include a state override set or block override object MUST be rejected with `-32602` (invalid params). |
 
 **Rationale**: Transaction simulation could reveal state about other accounts (e.g., simulating a transfer to probe whether a recipient exists). Restricting simulation to the caller's own transactions prevents this.
 
@@ -337,11 +340,11 @@ In addition to the Ethereum JSON-RPC methods, the zone exposes zone-specific met
 
 | Method | Access | Description |
 |--------|--------|-------------|
-| `zone_getAccessKeyInfo` | Any authenticated | Returns the authenticated account address and key expiry. Useful for verifying the access key is valid. |
+| `zone_getAuthorizationTokenInfo` | Any authenticated | Returns the authenticated account address and token expiry. Useful for verifying the authorization token is valid. |
 | `zone_getZoneInfo` | Any authenticated | Returns zone metadata: `zoneId`, `zoneToken`, `sequencer` (address only, not private key), `chainId`. |
 | `zone_getDepositStatus(tempoBlockNumber)` | Scoped | Returns whether deposits from the given Tempo block have been processed on the zone. Only returns information about deposits where the sender or recipient is the authenticated account. |
 
-**Withdrawals**: To request a withdrawal, the caller MUST construct and sign a transaction calling `ZoneOutbox.requestWithdrawal(...)` and submit it via `eth_sendRawTransaction`. There is no server-side convenience method — access keys are read-only credentials and MUST NOT be sufficient to authorize state-changing operations such as token transfers or withdrawals. Requiring a full transaction signature ensures that a stolen or replayed access key cannot be used to move funds.
+**Withdrawals**: To request a withdrawal, the caller MUST construct and sign a transaction calling `ZoneOutbox.requestWithdrawal(...)` and submit it via `eth_sendRawTransaction`. There is no server-side convenience method — authorization tokens are read-only credentials and MUST NOT be sufficient to authorize state-changing operations such as token transfers or withdrawals. Requiring a full transaction signature ensures that a stolen or replayed authorization token cannot be used to move funds.
 
 ## Error codes
 
@@ -349,8 +352,8 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 
 | Code | Message | Meaning |
 |------|---------|---------|
-| `-32001` | `Access key required` | No access key provided |
-| `-32002` | `Access key expired` | The access key has expired |
+| `-32001` | `Authorization token required` | No authorization token provided |
+| `-32002` | `Authorization token expired` | The authorization token has expired |
 | `-32003` | `Transaction rejected` | Transaction sender does not match authenticated account (`eth_sendRawTransaction`) |
 | `-32004` | `Account mismatch` | The `from` field does not match the authenticated account (`eth_call`, `eth_estimateGas`) |
 | `-32005` | `Sequencer only` | Method requires sequencer access |
@@ -362,8 +365,9 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 
 - **Side channels via timing**: Scoped methods that must fetch data before checking authorization are subject to a mandatory 100 ms response floor (see [Timing side channels and the 100 ms speed bump](#timing-side-channels-and-the-100-ms-speed-bump)). This ensures that `eth_getTransactionByHash` for a non-existent transaction and for another user's transaction have indistinguishable response times.
 - **Nonce privacy**: `eth_getTransactionCount` for non-authenticated accounts returns `0x0` rather than an error. This avoids revealing whether an account exists. The constant `0x0` response is indistinguishable from a genuinely new account.
-- **Access key replay**: Access keys are scoped to a specific zone (`zoneId` and `chainId`) and a specific portal (`zonePortal`), with a maximum 30-minute window. Access keys are strictly read-only credentials — no RPC method that is authenticated solely by an access key may modify state (see [Withdrawals](#zone-specific-rpc-methods)). The RPC server SHOULD implement nonce tracking or rate limiting to further reduce the window for abuse if a key is intercepted, but replay of a read-only key cannot move funds.
-- **Keychain key revocation**: When a root account revokes a Keychain key on-chain, the RPC server MUST stop accepting that key within 1 second of importing the block that contains the revocation. The recommended implementation is event-driven: the zone node watches for `KeyRevoked(account, publicKey)` events emitted by the AccountKeychain precompile during block execution and immediately evicts matching entries from the access key cache. This requires no cryptography — just a cache lookup and delete. As a fallback, implementations MAY poll the precompile via `getKey(user_address, keyId)`, but the 1-second deadline still applies.
+- **Authorization token replay**: Authorization tokens are scoped to a specific zone (`zoneId` and `chainId`) and a specific portal (`zonePortal`), with a maximum 30-minute window. Authorization tokens are strictly read-only credentials — no RPC method that is authenticated solely by an authorization token may modify state (see [Withdrawals](#zone-specific-rpc-methods)). The RPC server SHOULD implement nonce tracking or rate limiting to further reduce the window for abuse if a token is intercepted, but replay of a read-only token cannot move funds.
+- **Simulation override extensions**: Some Ethereum clients support non-standard simulation extensions (state override sets and block override objects) on `eth_call`/`eth_estimateGas`. Privacy zones MUST reject these extensions for non-sequencer callers, because they can bypass or distort normal state access assumptions used by this spec's privacy model.
+- **Keychain key revocation and expiry**: When a root account revokes a Keychain key on-chain, the RPC server MUST stop accepting that key within 1 second of importing the block that contains the revocation. Cached Keychain verifications MUST also honor key expiry: a cache entry MUST expire no later than `min(authorizationToken.expiresAt, keyExpiry)` where `keyExpiry` is read from `AccountKeychain.getKey(...)` (`keyExpiry == 0` means no key-level expiry, so `authorizationToken.expiresAt` is the bound). The recommended implementation is event-driven: the zone node watches for `KeyRevoked(account, publicKey)` events emitted by the AccountKeychain precompile during block execution and immediately evicts matching entries from the authorization token cache. This requires no cryptography — just a cache lookup and delete. As a fallback, implementations MAY poll the precompile via `getKey(user_address, keyId)`, but the 1-second deadline still applies.
 - **P256/WebAuthn key compromise**: Unlike secp256k1, P256 and WebAuthn keys include the public key in the signature. This means the public key is visible to the RPC server on every request. This is not a security concern (public keys are public), but implementations should be aware that the key material is transmitted in the clear over the connection.
 - **Metadata leakage**: Even with content-level privacy, connection-level metadata (IP addresses, request timing, request frequency) can leak information. Deployments SHOULD use TLS and MAY require additional transport-level privacy measures.
 - **Fixed gas and transfer receipts**: The [fixed 100,000 gas cost](./execution#fixed-gas-constant-transfer-cost) on TIP-20 transfers ensures that `gasUsed` in transaction receipts is identical for all transfers. Without this, an observer who obtains a receipt (e.g., the sender) could infer whether the recipient was a new or existing account.
@@ -372,7 +376,7 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 ## Implementation notes
 
 - The zone node enforces access control at two layers: the RPC server (request filtering) and the [EVM execution environment](./execution) (TIP-20 modifications). Both layers are required — see [Interaction with RPC](./execution#interaction-with-rpc) for why neither layer alone is sufficient.
-- Filter state (from `eth_newFilter`) is stored per-authenticated-account. Filters created by one access key are accessible by subsequent access keys for the same account.
-- The zone node SHOULD cache access key verification results for the duration of the key's validity to avoid repeated signature recovery. For Keychain access keys, the cache MUST be invalidated within 1 second of importing a block that revokes the key (see [Keychain key revocation](#security-considerations)). The recommended approach is to hook into block import and evict cache entries when `KeyRevoked` events are observed.
-- P256 and WebAuthn signature verification is more expensive than secp256k1. The RPC server SHOULD aggressively cache verified access keys to amortize the verification cost. A verified access key can be cached by its hash for the remaining duration of its validity.
-- WebSocket connections (`eth_subscribe`) follow the same access key model. The access key is provided during the WebSocket handshake and scopes all subscriptions for that connection. The connection is terminated when the access key expires; clients must reconnect with a fresh key.
+- Filter state (from `eth_newFilter`) is stored per-authenticated-account. Filters created by one authorization token are accessible by subsequent authorization tokens for the same account.
+- The zone node SHOULD cache authorization token verification results for the duration of token validity to avoid repeated signature recovery. For Keychain Access Keys, cache entries MUST have a TTL bounded by the earlier of authorization-token expiry and Keychain key expiry (if any), and MUST be invalidated within 1 second of importing a block that revokes the key (see [Keychain key revocation and expiry](#security-considerations)). The recommended approach is to hook into block import and evict cache entries when `KeyRevoked` events are observed.
+- P256 and WebAuthn signature verification is more expensive than secp256k1. The RPC server SHOULD aggressively cache verified authorization tokens to amortize the verification cost. A verified authorization token can be cached by its hash for the remaining duration of its validity.
+- WebSocket connections (`eth_subscribe`) follow the same authorization-token model. The authorization token is provided during the WebSocket handshake and scopes all subscriptions for that connection. The connection is terminated when the authorization token expires; clients must reconnect with a fresh token.

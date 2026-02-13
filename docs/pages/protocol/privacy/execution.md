@@ -73,6 +73,8 @@ The TIP-20 precompile on a privacy zone extends the mint/burn authorization to i
 | `mint(to, amount)` | `ISSUER_ROLE` only | `ISSUER_ROLE` **or** ZoneInbox (`0x1c...0001`) |
 | `burn(from, amount)` | `ISSUER_ROLE` only | `ISSUER_ROLE` **or** ZoneOutbox (`0x1c...0002`) |
 
+Authorization is **operation-specific**: ZoneInbox access applies to `mint` only, and ZoneOutbox access applies to `burn` only. Implementations MUST NOT use a shared "inbox-or-outbox" check for both operations.
+
 **ZoneInbox mints** during deposit processing in `advanceTempo()`:
 
 - Regular deposit: `mint(deposit.to, deposit.amount)` — credits the recipient.

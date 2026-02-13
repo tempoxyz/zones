@@ -160,7 +160,7 @@ abstract contract PrivateZoneToken {
      *      Gas: standard (not fixed) — only the sequencer calls this.
      */
     function mint(address to, uint256 amount) external {
-        _requireMintBurnAuth();
+        _requireMintAuth();
         revert(); // precompile stub
     }
 
@@ -178,21 +178,34 @@ abstract contract PrivateZoneToken {
      *      Gas: standard (not fixed) — only the sequencer/outbox calls this.
      */
     function burn(address from, uint256 amount) external {
-        _requireMintBurnAuth();
+        _requireBurnAuth();
         revert(); // precompile stub
     }
 
     /**
-     * @dev Check that the caller is authorized to mint or burn.
-     *      On a privacy zone, this is: ISSUER_ROLE OR ZoneInbox OR ZoneOutbox.
+     * @dev Check that the caller is authorized to mint.
+     *      On a privacy zone, this is: ISSUER_ROLE OR ZoneInbox.
      *
      *      Note: On a zone, no external party typically holds ISSUER_ROLE (the zone token
      *      is a bridged representation). The system contracts are the primary minters/burners.
      *      ISSUER_ROLE is preserved for forward compatibility.
      */
-    function _requireMintBurnAuth() internal view {
+    function _requireMintAuth() internal view {
         if (
-            msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX
+            msg.sender != ZONE_INBOX
+            // && !hasRole(ISSUER_ROLE, msg.sender)  // standard role check preserved
+        ) {
+            revert Unauthorized();
+        }
+    }
+
+    /**
+     * @dev Check that the caller is authorized to burn.
+     *      On a privacy zone, this is: ISSUER_ROLE OR ZoneOutbox.
+     */
+    function _requireBurnAuth() internal view {
+        if (
+            msg.sender != ZONE_OUTBOX
             // && !hasRole(ISSUER_ROLE, msg.sender)  // standard role check preserved
         ) {
             revert Unauthorized();
