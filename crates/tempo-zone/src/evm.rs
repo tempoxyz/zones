@@ -32,22 +32,35 @@ use crate::executor::ZoneBlockExecutor;
 
 use crate::{
     abi::TEMPO_STATE_READER_ADDRESS,
-    l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache, TempoStateReader},
+    l1_state::{
+        L1StateProvider, L1StateProviderConfig, L1StorageReader, SharedL1StateCache,
+        TempoStateReader,
+    },
 };
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
 /// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the
 /// [`TempoStateReader`] precompile for reading Tempo L1 storage from zone contracts.
-#[derive(Debug, Clone)]
+///
+/// The L1 storage reader is stored as `Arc<dyn L1StorageReader>` to allow swapping
+/// in a [`RecordingL1StateProvider`](crate::witness::RecordingL1StateProvider) during
+/// witness generation without changing the factory's type.
+#[derive(Clone)]
 pub struct ZoneEvmFactory {
-    l1_provider: L1StateProvider,
+    l1_reader: Arc<dyn L1StorageReader>,
+}
+
+impl std::fmt::Debug for ZoneEvmFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZoneEvmFactory").finish()
+    }
 }
 
 impl ZoneEvmFactory {
-    /// Create a new factory with the given L1 state provider.
-    pub fn new(l1_provider: L1StateProvider) -> Self {
-        Self { l1_provider }
+    /// Create a new factory with the given L1 storage reader.
+    pub fn new(l1_reader: Arc<dyn L1StorageReader>) -> Self {
+        Self { l1_reader }
     }
 
     fn register_precompile<DB: Database, I: Inspector<TempoCtx<DB>>>(
@@ -56,7 +69,7 @@ impl ZoneEvmFactory {
     ) -> TempoEvm<DB, I> {
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| {
-            Some(TempoStateReader::create(self.l1_provider.clone()))
+            Some(TempoStateReader::create(self.l1_reader.clone()))
         });
         evm
     }
@@ -150,9 +163,9 @@ pub struct ZoneEvmConfig {
 }
 
 impl ZoneEvmConfig {
-    /// Create a new zone EVM config with the given chain spec and L1 state provider.
-    pub fn new(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
-        let zone_factory = ZoneEvmFactory::new(l1_provider);
+    /// Create a new zone EVM config with the given chain spec and L1 storage reader.
+    pub fn new(chain_spec: Arc<TempoChainSpec>, l1_reader: Arc<dyn L1StorageReader>) -> Self {
+        let zone_factory = ZoneEvmFactory::new(l1_reader);
         let inner = TempoEvmConfig::new_with_default_factory(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
@@ -175,7 +188,7 @@ impl ZoneEvmConfig {
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
-        Self::new(chain_spec, l1_provider)
+        Self::new(chain_spec, Arc::new(l1_provider))
     }
 
     /// Returns the chain spec.

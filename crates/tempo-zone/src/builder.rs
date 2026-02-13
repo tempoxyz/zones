@@ -232,10 +232,17 @@ where
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
         let state_provider: Box<dyn StateProvider> = state_provider;
         let state = StateProviderDatabase::new(&state_provider);
+
+        // Wrap the database in a RecordingDatabase to capture all state accesses
+        // for witness generation. The `accesses` handle is cloned so we can
+        // retrieve recorded data after the State is consumed.
+        let recorded_accesses = crate::witness::RecordedAccesses::new();
+        let recording_db = crate::witness::RecordingDatabase::new(
+            Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>,
+            recorded_accesses.clone(),
+        );
         let mut db = State::builder()
-            .with_database(
-                Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>
-            )
+            .with_database(recording_db)
             .with_bundle_update()
             .build();
 
@@ -376,6 +383,17 @@ where
 
         let sealed_block = Arc::new(block.sealed_block().clone());
         let elapsed = start.elapsed();
+
+        // Log witness generation statistics.
+        // The recorded_accesses handle captured all EVM state reads during
+        // block execution. In a full prover integration, these would be
+        // forwarded to the WitnessGenerator.
+        debug!(
+            target: "zone::payload",
+            accounts = recorded_accesses.accessed_accounts().len(),
+            storage_accounts = recorded_accesses.accessed_storage().len(),
+            "Recorded state accesses for witness generation"
+        );
 
         info!(
             number = sealed_block.number(),

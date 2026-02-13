@@ -1,6 +1,6 @@
 //! Recording wrapper for L1 state reads.
 //!
-//! Wraps [`L1StateProvider`] to capture all Tempo L1 storage reads performed
+//! Wraps any [`L1StorageReader`] to capture all Tempo L1 storage reads performed
 //! during zone block execution. The recorded reads are used to build the
 //! [`BatchStateProof`] with deduplicated MPT node pool.
 
@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use alloy_primitives::{Address, B256};
 use eyre::Result;
 
-use crate::l1_state::L1StateProvider;
+use crate::l1_state::L1StorageReader;
 
 /// A recorded Tempo L1 storage read.
 #[derive(Debug, Clone)]
@@ -31,22 +31,30 @@ pub type SharedRecordedReads = Arc<Mutex<Vec<RecordedL1Read>>>;
 
 /// An L1 state provider wrapper that records all storage reads.
 ///
-/// Delegates to the inner [`L1StateProvider`] for the actual read, but captures
+/// Delegates to the inner [`L1StorageReader`] for the actual read, but captures
 /// every `get_storage` call in the shared [`RecordedL1Read`] collection.
 ///
 /// The `zone_block_index` is set by the caller before each zone block is executed
 /// and used to tag reads with the correct block index.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct RecordingL1StateProvider {
-    inner: L1StateProvider,
+    inner: Arc<dyn L1StorageReader>,
     reads: SharedRecordedReads,
     /// Current zone block index (set before each block execution).
     zone_block_index: u64,
 }
 
+impl std::fmt::Debug for RecordingL1StateProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordingL1StateProvider")
+            .field("zone_block_index", &self.zone_block_index)
+            .finish()
+    }
+}
+
 impl RecordingL1StateProvider {
-    /// Create a new recording wrapper.
-    pub fn new(inner: L1StateProvider) -> Self {
+    /// Create a new recording wrapper around any [`L1StorageReader`].
+    pub fn new(inner: Arc<dyn L1StorageReader>) -> Self {
         Self {
             inner,
             reads: Arc::new(Mutex::new(Vec::new())),
@@ -59,13 +67,21 @@ impl RecordingL1StateProvider {
         self.zone_block_index = index;
     }
 
-    /// Read a storage slot, recording the access.
-    pub fn get_storage(
-        &self,
-        address: Address,
-        slot: B256,
-        block_number: u64,
-    ) -> Result<B256> {
+    /// Take all recorded reads, clearing the internal buffer.
+    pub fn take_reads(&self) -> Vec<RecordedL1Read> {
+        std::mem::take(
+            &mut *self.reads.lock().expect("recording lock poisoned"),
+        )
+    }
+
+    /// Get a reference to the shared recorded reads.
+    pub fn recorded_reads(&self) -> SharedRecordedReads {
+        self.reads.clone()
+    }
+}
+
+impl L1StorageReader for RecordingL1StateProvider {
+    fn get_storage(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
         let value = self.inner.get_storage(address, slot, block_number)?;
 
         self.reads
@@ -80,22 +96,5 @@ impl RecordingL1StateProvider {
             });
 
         Ok(value)
-    }
-
-    /// Take all recorded reads, clearing the internal buffer.
-    pub fn take_reads(&self) -> Vec<RecordedL1Read> {
-        std::mem::take(
-            &mut *self.reads.lock().expect("recording lock poisoned"),
-        )
-    }
-
-    /// Get a reference to the shared recorded reads.
-    pub fn recorded_reads(&self) -> SharedRecordedReads {
-        self.reads.clone()
-    }
-
-    /// Get a reference to the inner provider.
-    pub fn inner(&self) -> &L1StateProvider {
-        &self.inner
     }
 }

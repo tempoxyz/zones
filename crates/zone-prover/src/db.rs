@@ -13,7 +13,7 @@ use revm::{
 
 use crate::{
     mpt,
-    types::{AccountWitness, ProverError, ZoneStateWitness},
+    types::{ProverError, ZoneStateWitness},
 };
 
 /// A database backed by zone state witness data.
@@ -23,6 +23,7 @@ use crate::{
 ///
 /// The database also tracks mutations during EVM execution so the final
 /// state root can be computed.
+#[derive(Debug, Clone)]
 pub struct WitnessDatabase {
     /// Verified account data, keyed by address.
     accounts: HashMap<Address, VerifiedAccount>,
@@ -55,15 +56,10 @@ impl WitnessDatabase {
         let mut code_by_hash: HashMap<B256, Bytecode> = HashMap::default();
 
         for (addr, acct) in &witness.accounts {
-            // Compute storage root from the account's storage proofs.
-            // For EOAs (empty code hash), the storage root is the empty trie root.
-            let storage_root = if acct.storage_proofs.is_empty() && acct.storage.is_empty() {
-                mpt::empty_storage_root()
-            } else {
-                // The storage root must be derived from the account proof.
-                // We verify it as part of the account proof below.
-                compute_storage_root_from_witness(acct)?
-            };
+            // Use the storage_root provided in the witness.
+            // The account proof verification below validates that this storage_root
+            // is correct (it's part of the account RLP in the state trie).
+            let storage_root = acct.storage_root;
 
             // Verify the account proof against the state root.
             mpt::verify_account_proof(
@@ -163,35 +159,6 @@ impl Database for WitnessDatabase {
         // Return zero for now; if needed, the witness can include block hashes.
         Ok(B256::ZERO)
     }
-}
-
-/// Compute the storage root for an account from its witness.
-///
-/// The storage root is embedded in the account's MPT proof (in the account trie leaf).
-/// For now, we extract it from the account proof by trusting the witness value
-/// and verifying it against the state root via the account proof.
-///
-/// TODO: Once we have full trie reconstruction, compute the storage root from
-/// the storage proofs themselves.
-fn compute_storage_root_from_witness(_acct: &AccountWitness) -> Result<B256, ProverError> {
-    // The storage root is part of the account RLP in the trie.
-    // We trust the account proof to verify it, but we need a value to pass.
-    // For accounts with storage proofs, we must reconstruct or trust the value.
-    //
-    // For now, we accept the storage root as implicitly verified by the account proof.
-    // The account proof verification in `verify_account_proof` validates that the
-    // account RLP (including storage_root) matches the state root.
-    //
-    // We need to extract the storage root from the account proof leaf node.
-    // As a pragmatic approach, we'll pass the empty root and let the account proof
-    // verification handle it — but this won't work for accounts with storage.
-    //
-    // The real solution: the AccountWitness should include the storage_root explicitly,
-    // and the account proof verifies it's correct.
-    //
-    // For now, we use a sentinel that forces the caller to provide it.
-    // This is a placeholder until we add storage_root to AccountWitness.
-    Ok(mpt::empty_storage_root())
 }
 
 #[cfg(test)]

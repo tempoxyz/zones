@@ -3,12 +3,28 @@
 //! Takes recorded state accesses from [`RecordingDatabase`] and
 //! [`RecordingL1StateProvider`] and assembles a complete [`BatchWitness`]
 //! that can be passed to [`prove_zone_batch`](zone_prover::prove_zone_batch).
+//!
+//! ## MPT proof generation
+//!
+//! **Zone state proofs** are generated using reth's [`StateProofProvider::proof()`],
+//! which walks the on-disk Merkle Patricia Trie and returns inclusion proofs for
+//! requested accounts and their storage slots. These proofs enable the prover to
+//! re-derive account data and storage values from the zone state root alone.
+//!
+//! **Tempo L1 state proofs** are fetched from the Tempo L1 chain via `eth_getProof`.
+//! The caller is responsible for the async RPC calls; this module accepts pre-fetched
+//! [`EIP1186AccountProofResponse`]s and deduplicates all MPT nodes into a compact
+//! shared pool.
+//!
+//! [`EIP1186AccountProofResponse`]: alloy_rpc_types_eth::EIP1186AccountProofResponse
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::HashMap};
+use alloy_rpc_types_eth::EIP1186AccountProofResponse;
 use reth_storage_api::StateProvider;
-use tracing::{debug, info};
+use reth_trie_common::TrieInput;
+use tracing::{debug, info, warn};
 use zone_prover::types::{
     AccountWitness, BatchStateProof, BatchWitness, L1StateRead, PublicInputs,
     ZoneBlock, ZoneHeader, ZoneStateWitness,
@@ -21,6 +37,16 @@ use super::recording_l1::RecordedL1Read;
 pub struct WitnessGeneratorConfig {
     /// Sequencer address (for public inputs).
     pub sequencer: Address,
+}
+
+/// A pre-fetched L1 proof response, tagged with the Tempo block number
+/// it was fetched against.
+#[derive(Debug, Clone)]
+pub struct FetchedL1Proof {
+    /// The Tempo block number this proof was retrieved at.
+    pub tempo_block_number: u64,
+    /// The `eth_getProof` response from the Tempo L1 chain.
+    pub proof: EIP1186AccountProofResponse,
 }
 
 /// Generates a [`BatchWitness`] from recorded state accesses.
@@ -40,8 +66,8 @@ impl WitnessGenerator {
 
     /// Generate a [`ZoneStateWitness`] from recorded state accesses.
     ///
-    /// Reads the current state for all accessed accounts and storage slots,
-    /// then generates MPT proofs against the given `state_root`.
+    /// Uses [`StateProofProvider::proof()`] to generate real MPT proofs for each
+    /// accessed account and its storage slots against the given `state_root`.
     ///
     /// # Arguments
     ///
@@ -59,29 +85,62 @@ impl WitnessGenerator {
         let mut accounts = HashMap::default();
 
         for &addr in accessed_accounts {
-            // Read account data from the state provider.
-            let nonce = state_provider
-                .account_nonce(&addr)
-                .ok()
-                .flatten()
-                .unwrap_or(0);
-            let balance = state_provider
-                .account_balance(&addr)
-                .ok()
-                .flatten()
-                .unwrap_or(U256::ZERO);
-            let code = state_provider
-                .account_code(&addr)
-                .ok()
-                .flatten();
+            // Collect storage slots as B256 keys for the proof request.
+            let slot_keys: Vec<B256> = accessed_storage
+                .get(&addr)
+                .map(|slots| {
+                    slots.iter().map(|s| B256::from(s.to_be_bytes())).collect()
+                })
+                .unwrap_or_default();
+
+            // Generate MPT proofs via the state provider's trie.
+            // TrieInput::default() means no overlay — proofs are against the
+            // committed state that `state_provider` represents.
+            let account_proof_result =
+                state_provider.proof(TrieInput::default(), addr, &slot_keys);
+
+            let (nonce, balance, code_hash_from_proof, storage_root, proof_nodes, storage_proofs) =
+                match account_proof_result {
+                    Ok(acct_proof) => {
+                        let n = acct_proof.info.as_ref().map_or(0, |a| a.nonce);
+                        let b = acct_proof.info.as_ref().map_or(U256::ZERO, |a| a.balance);
+                        let ch = acct_proof
+                            .info
+                            .as_ref()
+                            .and_then(|a| a.bytecode_hash);
+
+                        // Convert storage proofs: StorageProof -> (U256, Vec<Bytes>)
+                        let sp: HashMap<U256, Vec<Bytes>> = acct_proof
+                            .storage_proofs
+                            .into_iter()
+                            .map(|sp| {
+                                let slot = U256::from_be_bytes(sp.key.0);
+                                (slot, sp.proof)
+                            })
+                            .collect();
+
+                        (n, b, ch, acct_proof.storage_root, acct_proof.proof, sp)
+                    }
+                    Err(e) => {
+                        warn!(
+                            %addr, %e,
+                            "Failed to generate MPT proof, using empty proof"
+                        );
+                        (0, U256::ZERO, None, B256::ZERO, Vec::new(), HashMap::default())
+                    }
+                };
+
+            // Read code separately (not included in the account proof).
+            let code = state_provider.account_code(&addr).ok().flatten();
             let code_hash = code
                 .as_ref()
                 .map(|c| keccak256(c.bytes_slice()))
+                .or(code_hash_from_proof)
                 .unwrap_or(B256::ZERO);
 
-            // Read storage slots.
+            // Read storage values (the proof gives us proof nodes but we also
+            // need the actual slot values in the witness).
             let mut storage = HashMap::default();
-            let mut storage_proofs = HashMap::default();
             if let Some(slots) = accessed_storage.get(&addr) {
                 for &slot in slots {
                     let value = state_provider
@@ -90,16 +149,8 @@ impl WitnessGenerator {
                         .flatten()
                         .unwrap_or(U256::ZERO);
                     storage.insert(slot, value);
-                    // Storage proofs would be generated from the state trie.
-                    // For now, we leave them empty — full proof generation requires
-                    // trie access which is not yet wired up.
-                    storage_proofs.insert(slot, Vec::new());
                 }
             }
-
-            // Account proofs would be generated from the state trie.
-            // For now, leave empty as a placeholder.
-            let account_proof = Vec::new();
 
             accounts.insert(
                 addr,
@@ -107,9 +158,10 @@ impl WitnessGenerator {
                     nonce,
                     balance,
                     code_hash,
+                    storage_root,
                     code: code.map(|c| Bytes::copy_from_slice(c.bytes_slice())),
                     storage,
-                    account_proof,
+                    account_proof: proof_nodes,
                     storage_proofs,
                 },
             );
@@ -118,7 +170,7 @@ impl WitnessGenerator {
         debug!(
             accounts = accounts.len(),
             state_root = %state_root,
-            "Generated zone state witness"
+            "Generated zone state witness with MPT proofs"
         );
 
         ZoneStateWitness {
@@ -127,39 +179,105 @@ impl WitnessGenerator {
         }
     }
 
-    /// Generate a [`BatchStateProof`] from recorded L1 reads.
+    /// Generate a [`BatchStateProof`] from recorded L1 reads and pre-fetched proofs.
     ///
-    /// Deduplicates MPT nodes across all reads to produce the compact
-    /// proof structure.
+    /// Each `FetchedL1Proof` is an `eth_getProof` response from the Tempo L1 chain.
+    /// All MPT nodes from account and storage proofs are deduplicated into a shared
+    /// pool, keyed by `keccak256(node_bytes)`. Each read is annotated with a
+    /// `node_path` — the sequence of hashes through the pool that forms the proof
+    /// path from the L1 state root to the target storage value.
     ///
     /// # Arguments
     ///
     /// * `recorded_reads` - All L1 storage reads captured during batch execution
+    /// * `l1_proofs` - Pre-fetched `eth_getProof` results from the Tempo L1 chain
     pub fn generate_tempo_state_proof(
         &self,
         recorded_reads: &[RecordedL1Read],
+        l1_proofs: &[FetchedL1Proof],
     ) -> BatchStateProof {
-        // Build the deduplicated node pool and read entries.
-        // Full MPT proof generation requires access to the Tempo L1 state trie.
-        // For now, we create the structure with empty proofs — the proofs will
-        // be populated once we have access to Tempo state trie data (via
-        // eth_getProof RPC calls).
+        let mut node_pool: HashMap<B256, Vec<u8>> = HashMap::default();
 
-        let node_pool = HashMap::default();
+        // Index proofs by (tempo_block_number, account) for lookup.
+        let mut proof_index: BTreeMap<(u64, Address), &EIP1186AccountProofResponse> =
+            BTreeMap::new();
+
+        // Pre-compute account proof hashes, keyed by (block_number, account).
+        let mut account_proof_hashes: BTreeMap<(u64, Address), Vec<B256>> = BTreeMap::new();
+
+        // Pre-compute storage proof hashes, keyed by (block_number, account, slot_b256).
+        let mut storage_proof_hashes: BTreeMap<(u64, Address, B256), Vec<B256>> = BTreeMap::new();
+
+        for fetched in l1_proofs {
+            let block_num = fetched.tempo_block_number;
+            let proof = &fetched.proof;
+
+            // Add account proof nodes to the pool and record their hashes.
+            let acct_hashes: Vec<B256> = proof
+                .account_proof
+                .iter()
+                .map(|node| {
+                    let hash = keccak256(node);
+                    node_pool.entry(hash).or_insert_with(|| node.to_vec());
+                    hash
+                })
+                .collect();
+            account_proof_hashes.insert((block_num, proof.address), acct_hashes);
+
+            // Add storage proof nodes to the pool.
+            for sp in &proof.storage_proof {
+                let slot_b256 = sp.key.as_b256();
+                let sp_hashes: Vec<B256> = sp
+                    .proof
+                    .iter()
+                    .map(|node| {
+                        let hash = keccak256(node);
+                        node_pool.entry(hash).or_insert_with(|| node.to_vec());
+                        hash
+                    })
+                    .collect();
+                storage_proof_hashes.insert((block_num, proof.address, slot_b256), sp_hashes);
+            }
+
+            proof_index.insert((block_num, proof.address), proof);
+        }
+
+        // Build reads with node_path linking into the pool.
         let reads: Vec<L1StateRead> = recorded_reads
             .iter()
-            .map(|r| L1StateRead {
-                zone_block_index: r.zone_block_index,
-                tempo_block_number: r.tempo_block_number,
-                account: r.account,
-                slot: U256::from_be_bytes(r.slot.0),
-                node_path: Vec::new(), // TODO: populate from eth_getProof
-                value: U256::from_be_bytes(r.value.0),
+            .map(|r| {
+                let mut node_path = Vec::new();
+
+                // Append account proof hashes.
+                if let Some(acct_hashes) =
+                    account_proof_hashes.get(&(r.tempo_block_number, r.account))
+                {
+                    node_path.extend_from_slice(acct_hashes);
+                }
+
+                // Append storage proof hashes for this specific slot.
+                if let Some(sp_hashes) = storage_proof_hashes.get(&(
+                    r.tempo_block_number,
+                    r.account,
+                    r.slot,
+                )) {
+                    node_path.extend_from_slice(sp_hashes);
+                }
+
+                L1StateRead {
+                    zone_block_index: r.zone_block_index,
+                    tempo_block_number: r.tempo_block_number,
+                    account: r.account,
+                    slot: U256::from_be_bytes(r.slot.0),
+                    node_path,
+                    value: U256::from_be_bytes(r.value.0),
+                }
             })
             .collect();
 
-        debug!(
+        info!(
             reads = reads.len(),
+            unique_nodes = node_pool.len(),
             "Generated Tempo state proof ({} reads, {} unique nodes)",
             reads.len(),
             node_pool.len(),
@@ -203,4 +321,24 @@ impl WitnessGenerator {
             tempo_ancestry_headers,
         }
     }
+}
+
+/// Convenience function: group recorded L1 reads by `(tempo_block_number, account)`
+/// and collect all unique slots per group.
+///
+/// The returned entries can be used to batch `eth_getProof` calls.
+pub fn group_l1_reads_for_proof_fetch(
+    recorded_reads: &[RecordedL1Read],
+) -> BTreeMap<(u64, Address), Vec<B256>> {
+    let mut groups: BTreeMap<(u64, Address), BTreeSet<B256>> = BTreeMap::new();
+    for r in recorded_reads {
+        groups
+            .entry((r.tempo_block_number, r.account))
+            .or_default()
+            .insert(r.slot);
+    }
+    groups
+        .into_iter()
+        .map(|(k, slots)| (k, slots.into_iter().collect()))
+        .collect()
 }

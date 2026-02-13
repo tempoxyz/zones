@@ -218,6 +218,7 @@ reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "d76ba
 reth-rpc-server-types = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553" }
 
 reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "d76babb2f17773f79c9cf1eda497c539bd5cf553", features = [

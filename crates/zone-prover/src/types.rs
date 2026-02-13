@@ -126,6 +126,11 @@ pub struct ZoneBlock {
     /// Beneficiary (must match registered sequencer).
     pub beneficiary: Address,
 
+    /// Expected state root after executing this block.
+    /// Provided by the zone node (from `BlockBuilderOutcome`); the prover validates
+    /// that EVM execution produces a consistent result.
+    pub expected_state_root: B256,
+
     /// Tempo header RLP used by the call (`ZoneInbox.advanceTempo`).
     /// If `None`, the block does not advance Tempo and the binding carries over.
     pub tempo_header_rlp: Option<Vec<u8>>,
@@ -230,6 +235,8 @@ pub struct AccountWitness {
     pub nonce: u64,
     pub balance: U256,
     pub code_hash: B256,
+    /// The account's storage root (verified by the account MPT proof).
+    pub storage_root: B256,
     /// Contract bytecode (if this account is a contract).
     pub code: Option<Bytes>,
 

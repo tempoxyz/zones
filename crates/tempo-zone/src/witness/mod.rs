@@ -25,6 +25,8 @@ pub mod generator;
 pub mod recording_db;
 pub mod recording_l1;
 
-pub use generator::{WitnessGenerator, WitnessGeneratorConfig};
-pub use recording_db::RecordingDatabase;
+pub use generator::{
+    FetchedL1Proof, WitnessGenerator, WitnessGeneratorConfig, group_l1_reads_for_proof_fetch,
+};
+pub use recording_db::{RecordedAccesses, RecordingDatabase};
 pub use recording_l1::{RecordedL1Read, RecordingL1StateProvider, SharedRecordedReads};
