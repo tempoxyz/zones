@@ -79,6 +79,8 @@ impl EvmFactory for ZoneEvmFactory {
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let evm = TempoEvm::new(db, input);
+
+        // TODO: FIXME: clean this up to emualte tempo precompile setup
         self.register_precompile(evm)
     }
 

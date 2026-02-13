@@ -20,6 +20,8 @@ use tracing::{debug, error, info};
 
 use crate::DepositQueue;
 
+// TODO: FIXME: this module needs to be cleaned up
+
 /// Engine that drives L2 block production on L1 events
 #[derive(Debug)]
 pub struct ZoneEngine<T: PayloadTypes, B> {
@@ -109,25 +111,12 @@ where
     /// delays between blocks.
     async fn advance_all_available(&mut self) {
         // Keep advancing as long as there are L1 blocks queued
-        loop {
-            if self.deposit_queue.pending_count() == 0 {
-                break;
-            }
-
+        while self.deposit_queue.pending_count() > 0 {
             if let Err(e) = self.advance().await {
                 error!(target: "zone::engine", "Error advancing the chain: {:?}", e);
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 break;
             }
-        }
-
-        if blocks_advanced > 0 {
-            debug!(
-                target: "zone::engine",
-                blocks_advanced,
-                head = ?self.last_header.hash(),
-                "Advanced zone chain"
-            );
         }
     }
 
@@ -178,7 +167,7 @@ where
             )
             .await?;
 
-        if !res.is_valid() {
+        if res.is_invalid() {
             eyre::bail!("Invalid payload status")
         }
 
