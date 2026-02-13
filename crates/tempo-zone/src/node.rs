@@ -41,6 +41,7 @@ use tempo_transaction_pool::{
 use tracing::{debug, info};
 
 use crate::{
+    ZoneEngine,
     evm::ZoneEvmConfig,
     l1::L1Subscriber,
     l1_state::{
@@ -224,8 +225,8 @@ where
         // Spawn the ZoneEngine — L1-event-driven block production
         {
             let provider = ctx.node.provider().clone();
-            let chain_spec = ctx.node.provider().chain_spec();
-            let payload_attributes_builder = ZonePayloadAttributesBuilder::new(chain_spec);
+            let payload_attributes_builder =
+                ZonePayloadAttributesBuilder::new(provider.chain_spec());
             let to_engine = ctx.beacon_engine_handle.clone();
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
@@ -233,7 +234,7 @@ where
             ctx.node
                 .task_executor()
                 .spawn_critical("zone-engine", async move {
-                    crate::engine::ZoneEngine::new(
+                    ZoneEngine::new(
                         provider,
                         payload_attributes_builder,
                         to_engine,
