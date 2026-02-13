@@ -12,7 +12,7 @@ use alloy_rlp::Encodable;
 use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TEMPO_BASE_FEE;
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 
 sol! {
     struct ZoneParams {
@@ -81,7 +81,7 @@ pub(crate) struct CreateZone {
     chain_id: u64,
 
     /// Base fee per gas for the zone L2.
-    #[arg(long, default_value_t = TEMPO_BASE_FEE.into())]
+    #[arg(long, default_value_t = TEMPO_T0_BASE_FEE.into())]
     base_fee_per_gas: u128,
 
     /// Genesis block gas limit for the zone L2.
