@@ -77,11 +77,13 @@ impl L1Subscriber {
     /// Reads `lastSyncedTempoBlockNumber` from the ZonePortal to determine where
     /// the zone left off. If the portal hasn't synced yet, falls back to
     /// `genesisTempoBlockNumber` so we scan from the portal's creation.
+
     async fn sync_to_l1_tip(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
         filter: &Filter,
     ) -> eyre::Result<()> {
+        // FIXME: same here this is should be cleaned up
         let tip = l1_provider.get_block_number().await?;
         let portal = ZonePortal::new(self.config.portal_address, l1_provider);
         let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
@@ -128,6 +130,7 @@ impl L1Subscriber {
     /// Backfill ALL L1 blocks from `from..=to` in batches, attaching any
     /// deposit events to the corresponding block. Every block in the range is
     /// enqueued so that `finalizeTempo` sees a strict sequential chain.
+    // FIXME: same here this can be updated to be cleaner
     async fn backfill(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
@@ -258,7 +261,8 @@ impl L1Subscriber {
                     skipped = gap_to - gap_from + 1,
                     "Gap detected in L1 subscription, backfilling"
                 );
-                self.backfill(&http_provider, &filter, gap_from, gap_to).await?;
+                self.backfill(&http_provider, &filter, gap_from, gap_to)
+                    .await?;
             }
 
             // Fetch deposit logs for this block via HTTP

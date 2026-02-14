@@ -79,6 +79,8 @@ impl EvmFactory for ZoneEvmFactory {
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let evm = TempoEvm::new(db, input);
+
+        // TODO: FIXME: clean this up to emualte tempo precompile setup
         self.register_precompile(evm)
     }
 
@@ -249,8 +251,9 @@ impl ConfigureEvm for ZoneEvmConfig {
                 ommers: &[],
                 withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
                 extra_data: block.header().extra_data().clone(),
-            },
-            general_gas_limit: 0,
+                                tx_count_hint: Some(block.body().transactions.len()),
+                            },
+                            general_gas_limit: 0,
             shared_gas_limit: 0,
             validator_set: None,
             subblock_fee_recipients: Default::default(),

@@ -3,7 +3,15 @@
 //! Builds zone blocks by executing `advanceTempo` system transactions (one per L1 block)
 //! followed by pool transactions and a withdrawal batch finalization.
 
-use alloy_primitives::{Address, U256};
+use crate::{
+    abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
+    evm::ZoneEvmConfig,
+    l1::Deposit,
+};
+use alloy_consensus::{Signed, TxLegacy};
+use alloy_primitives::{Address, Bytes, U256};
+use alloy_rlp::Encodable;
+use alloy_sol_types::{SolCall, SolValue};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -17,7 +25,7 @@ use reth_node_api::FullNodeTypes;
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::PayloadBuilderAttributes;
-use reth_primitives_traits::AlloyBlockHeader as _;
+use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
@@ -26,14 +34,15 @@ use reth_transaction_pool::{
 };
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
-use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
+use tempo_consensus::TEMPO_SHARED_GAS_DIVISOR;
 use tempo_evm::TempoNextBlockEnvAttributes;
-use tracing::{debug, error, info, warn};
-
-use crate::evm::ZoneEvmConfig;
 use tempo_payload_types::TempoPayloadBuilderAttributes;
-use tempo_primitives::{TempoHeader, TempoPrimitives};
+use tempo_primitives::{
+    TempoHeader, TempoPrimitives, TempoTxEnvelope,
+    transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
+};
 use tempo_transaction_pool::TempoTransactionPool;
+use tracing::{debug, error, info, warn};
 
 use super::node::ZoneNode;
 
@@ -243,8 +252,7 @@ where
 
         let block_gas_limit = parent_header.gas_limit();
         let shared_gas_limit = block_gas_limit / TEMPO_SHARED_GAS_DIVISOR;
-        let non_shared_gas_limit = block_gas_limit - shared_gas_limit;
-        let general_gas_limit = non_shared_gas_limit / TEMPO_GENERAL_GAS_DIVISOR;
+        let general_gas_limit = 0;
 
         let mut cumulative_gas_used = 0u64;
         let total_fees = U256::ZERO;
@@ -290,8 +298,7 @@ where
                 "advanceTempo header details"
             );
 
-            let advance_tx =
-                crate::system_tx::build_advance_tempo_tx(&l1_block.header, &l1_block.deposits);
+            let advance_tx = build_advance_tempo_tx(&l1_block.header, &l1_block.deposits);
             if let Err(err) = builder.execute_transaction(advance_tx) {
                 error!(
                     ?err,
@@ -311,12 +318,13 @@ where
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
 
         while let Some(pool_tx) = best_txs.next() {
-            if cumulative_gas_used + pool_tx.gas_limit() > non_shared_gas_limit {
+            let gas_limit_left = block_gas_limit.saturating_sub(shared_gas_limit);
+            if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
                 best_txs.mark_invalid(
                     &pool_tx,
                     &InvalidPoolTransactionError::ExceedsGasLimit(
                         pool_tx.gas_limit(),
-                        non_shared_gas_limit - cumulative_gas_used,
+                        gas_limit_left.saturating_sub(cumulative_gas_used),
                     ),
                 );
                 continue;
@@ -357,8 +365,7 @@ where
             .number
             .try_into()
             .expect("block number fits u64");
-        let finalize_tx =
-            crate::system_tx::build_finalize_withdrawal_batch_tx(U256::MAX, block_number);
+        let finalize_tx = build_finalize_withdrawal_batch_tx(U256::MAX, block_number);
         if let Err(err) = builder.execute_transaction(finalize_tx) {
             error!(?err, "finalizeWithdrawalBatch system tx failed");
             return Err(PayloadBuilderError::evm(err));
@@ -417,4 +424,103 @@ where
         .into_payload()
         .ok_or_else(|| PayloadBuilderError::MissingPayload)
     }
+}
+
+/// Build the `finalizeWithdrawalBatch(count)` system transaction.
+///
+/// This must be the **last** transaction in every zone block. It calls
+/// [`ZoneOutbox.finalizeWithdrawalBatch`](crate::abi::ZoneOutbox) which:
+/// - Collects up to `count` pending withdrawals
+/// - Builds the withdrawal hash chain (oldest outermost)
+/// - Increments `withdrawalBatchIndex`
+/// - Writes `_lastBatch` to state for proof access
+/// - Emits `BatchFinalized`
+///
+/// Pass `u256::MAX` to batch all pending withdrawals. `block_number` must match the current zone
+/// block number.
+pub fn build_finalize_withdrawal_batch_tx(
+    count: U256,
+    block_number: u64,
+) -> Recovered<TempoTxEnvelope> {
+    let calldata = abi::ZoneOutbox::finalizeWithdrawalBatchCall {
+        count,
+        blockNumber: block_number,
+    }
+    .abi_encode();
+
+    let tx = TxLegacy {
+        chain_id: None,
+        nonce: 0,
+        gas_price: 0,
+        gas_limit: 0,
+        to: ZONE_OUTBOX_ADDRESS.into(),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+
+    Recovered::new_unchecked(
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
+        TEMPO_SYSTEM_TX_SENDER,
+    )
+}
+
+/// Build the `advanceTempo(header, deposits, decryptions)` system transaction.
+///
+/// This must be called **once per L1 block** at the start of a zone block (before user txs).
+/// It calls [`ZoneInbox.advanceTempo`](crate::abi::ZoneInbox) which atomically:
+/// - Advances the zone's view of Tempo by processing the L1 block header
+/// - Processes deposits from the queue (minting zone tokens to recipients)
+/// - Validates the deposit hash chain against Tempo state
+///
+/// Each deposit is wrapped as a `QueuedDeposit` with `DepositType::Regular`.
+/// Encrypted deposits are not yet supported, so `decryptions` is always empty.
+pub fn build_advance_tempo_tx(
+    header: &TempoHeader,
+    deposits: &[Deposit],
+) -> Recovered<TempoTxEnvelope> {
+    // RLP-encode the Tempo header
+    let mut header_rlp = Vec::new();
+    header.encode(&mut header_rlp);
+
+    // Wrap each deposit as a QueuedDeposit with DepositType::Regular
+    let queued_deposits: Vec<abi::QueuedDeposit> = deposits
+        .iter()
+        .map(|d| {
+            let deposit = abi::Deposit {
+                sender: d.sender,
+                to: d.to,
+                amount: d.amount,
+                memo: d.memo,
+            };
+            abi::QueuedDeposit {
+                depositType: abi::DepositType::Regular,
+                depositData: Bytes::from(deposit.abi_encode()),
+            }
+        })
+        .collect();
+
+    // No encrypted deposits yet
+    let decryptions: Vec<abi::DecryptionData> = Vec::new();
+
+    let calldata = abi::ZoneInbox::advanceTempoCall {
+        header: Bytes::from(header_rlp),
+        deposits: queued_deposits,
+        decryptions,
+    }
+    .abi_encode();
+
+    let tx = TxLegacy {
+        chain_id: None,
+        nonce: 0,
+        gas_price: 0,
+        gas_limit: 0,
+        to: ZONE_INBOX_ADDRESS.into(),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+
+    Recovered::new_unchecked(
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
+        TEMPO_SYSTEM_TX_SENDER,
+    )
 }

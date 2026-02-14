@@ -30,8 +30,9 @@ use reth_rpc_eth_api::RpcConverter;
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
+use tempo_chainspec::{spec::TempoChainSpec, hardfork::TempoHardfork};
 use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
+use tempo_transaction_pool::validator::DEFAULT_MAX_TEMPO_AUTHORIZATIONS;
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
@@ -41,6 +42,7 @@ use tempo_transaction_pool::{
 use tracing::{debug, info};
 
 use crate::{
+    ZoneEngine,
     evm::ZoneEvmConfig,
     l1::L1Subscriber,
     l1_state::{
@@ -69,20 +71,42 @@ pub struct ZoneNode {
 }
 
 impl ZoneNode {
-    /// Create a new zone node with a deposit queue, L1 subscriber config,
-    /// and L1 state infrastructure configs.
+    /// Create a new zone node from minimal configuration.
+    ///
+    /// Internally constructs the [`DepositQueue`], [`L1SubscriberConfig`],
+    /// [`L1StateProviderConfig`], [`L1StateListenerConfig`], and [`SharedL1StateCache`]
+    /// from the provided parameters — callers don't need to know about these internals.
     ///
     /// The L1 subscriber is spawned automatically as part of the node lifecycle via
     /// [`ZoneAddOns::launch_add_ons`], ensuring it cannot be accidentally omitted.
     /// The L1 state listener is spawned by [`ZoneExecutorBuilder`] during EVM construction.
     pub fn new(
-        deposit_queue: crate::DepositQueue,
-        l1_config: crate::L1SubscriberConfig,
-        l1_state_provider_config: L1StateProviderConfig,
-        l1_state_listener_config: L1StateListenerConfig,
-        l1_state_cache: SharedL1StateCache,
+        l1_rpc_url: String,
+        portal_address: alloy_primitives::Address,
+        genesis_tempo_block_number: Option<u64>,
         sequencer: Option<alloy_primitives::Address>,
     ) -> Self {
+        let deposit_queue = crate::DepositQueue::default();
+
+        let l1_config = crate::L1SubscriberConfig {
+            l1_rpc_url: l1_rpc_url.clone(),
+            portal_address,
+            genesis_tempo_block_number,
+        };
+
+        let l1_state_provider_config = L1StateProviderConfig {
+            l1_rpc_url: l1_rpc_url.clone(),
+            ..Default::default()
+        };
+
+        let l1_state_listener_config = L1StateListenerConfig {
+            l1_ws_url: l1_rpc_url,
+            ..Default::default()
+        };
+
+        let l1_state_cache =
+            SharedL1StateCache::new(std::collections::HashSet::from([portal_address]));
+
         Self {
             deposit_queue,
             l1_config,
@@ -91,6 +115,11 @@ impl ZoneNode {
             l1_state_cache,
             sequencer,
         }
+    }
+
+    /// Returns a clone of the deposit queue handle for external use (e.g. sequencer tasks).
+    pub fn deposit_queue(&self) -> crate::DepositQueue {
+        self.deposit_queue.clone()
     }
 
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
@@ -197,8 +226,8 @@ where
         // Spawn the ZoneEngine — L1-event-driven block production
         {
             let provider = ctx.node.provider().clone();
-            let chain_spec = ctx.node.provider().chain_spec();
-            let payload_attributes_builder = ZonePayloadAttributesBuilder::new(chain_spec);
+            let payload_attributes_builder =
+                ZonePayloadAttributesBuilder::new(provider.chain_spec());
             let to_engine = ctx.beacon_engine_handle.clone();
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
@@ -206,7 +235,7 @@ where
             ctx.node
                 .task_executor()
                 .spawn_critical("zone-engine", async move {
-                    crate::engine::ZoneEngine::new(
+                    ZoneEngine::new(
                         provider,
                         payload_attributes_builder,
                         to_engine,
@@ -438,7 +467,7 @@ where
 
     async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
         let mut pool_config = ctx.pool_config();
-        pool_config.minimal_protocol_basefee = TEMPO_BASE_FEE;
+        pool_config.minimal_protocol_basefee = TempoHardfork::default().base_fee();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 
         let blob_store = InMemoryBlobStore::default();
@@ -457,7 +486,9 @@ where
 
         let aa_2d_config = AA2dPoolConfig {
             price_bump_config: pool_config.price_bumps,
-            aa_2d_limit: pool_config.pending_limit,
+            pending_limit: pool_config.pending_limit,
+            queued_limit: pool_config.queued_limit,
+            ..Default::default()
         };
         let aa_2d_pool = AA2dPool::new(aa_2d_config);
         let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;
@@ -466,6 +497,7 @@ where
             TempoTransactionValidator::new(
                 v,
                 DEFAULT_AA_VALID_AFTER_MAX_SECS,
+                DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
                 amm_liquidity_cache.clone(),
             )
         });
@@ -477,21 +509,9 @@ where
 
         spawn_maintenance_tasks(ctx, transaction_pool.clone(), &pool_config)?;
 
-        let task_pool = transaction_pool.clone();
-        let task_provider = ctx.provider().clone();
         ctx.task_executor().spawn_critical(
-            "txpool maintenance (protocol) - evict expired AA txs",
-            tempo_transaction_pool::maintain::evict_expired_aa_txs(task_pool, task_provider),
-        );
-
-        ctx.task_executor().spawn_critical(
-            "txpool maintenance - 2d nonce AA txs",
-            tempo_transaction_pool::maintain::maintain_2d_nonce_pool(transaction_pool.clone()),
-        );
-
-        ctx.task_executor().spawn_critical(
-            "txpool maintenance - amm liquidity cache",
-            tempo_transaction_pool::maintain::maintain_amm_cache(transaction_pool.clone()),
+            "txpool maintenance (tempo)",
+            tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.clone()),
         );
 
         info!(target: "reth::cli", "Transaction pool initialized");

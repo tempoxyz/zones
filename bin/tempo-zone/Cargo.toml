@@ -30,6 +30,7 @@ alloy-signer-local.workspace = true
 # misc
 clap.workspace = true
 tokio.workspace = true
+derive_more.workspace = true
 tracing.workspace = true
 
 [[bin]]

@@ -6,7 +6,7 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
 use clap::Parser;
@@ -15,11 +15,7 @@ use reth_ethereum::cli::Cli;
 
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use zone::{
-    DepositQueue, L1SubscriberConfig, ZoneNode,
-    evm::ZoneEvmConfig,
-    l1_state::{L1StateListenerConfig, L1StateProviderConfig, SharedL1StateCache},
-};
+use zone::{ZoneNode, evm::ZoneEvmConfig};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -47,12 +43,8 @@ struct ZoneArgs {
     )]
     pub block_interval_ms: u64,
 
-    // ---------------------------------------------------------------
-    //  Sequencer-mode arguments (optional — enable with --sequencer.key)
-    // ---------------------------------------------------------------
-    /// Sequencer private key (hex). When set, enables sequencer background tasks
-    /// (batch submission, withdrawal processing, zone monitoring).
-    #[arg(long = "sequencer.key", env = "SEQUENCER_KEY")]
+    /// TODO:
+    #[arg(long = "sequencer-key", env = "SEQUENCER_KEY")]
     pub sequencer_key: Option<String>,
 
     /// Zone L2 HTTP RPC URL for the zone monitor to poll.
@@ -74,7 +66,7 @@ struct ZoneArgs {
 
     /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(
-        long = "withdrawal.poll-interval-secs",
+        long = "withdrawal-poll-interval-secs",
         env = "WITHDRAWAL_POLL_INTERVAL_SECS",
         default_value = "5"
     )]
@@ -101,6 +93,7 @@ fn main() {
         )
     };
 
+    // TODO:
     if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
         .run_with_components::<ZoneNode>(components, async move |builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
@@ -113,35 +106,14 @@ fn main() {
                 });
             let sequencer_addr = sequencer_signer.as_ref().map(|s| s.address());
 
-            let deposits = DepositQueue::default();
-            let l1_config = L1SubscriberConfig {
-                l1_rpc_url: args.l1_rpc_url.clone(),
-                portal_address: args.portal_address,
-                genesis_tempo_block_number: args.l1_genesis_block_number,
-            };
-            let l1_state_provider_config = L1StateProviderConfig {
-                l1_rpc_url: args.l1_rpc_url.clone(),
-                ..Default::default()
-            };
-            let l1_state_listener_config = L1StateListenerConfig {
-                l1_ws_url: args.l1_rpc_url.clone(),
-                ..Default::default()
-            };
-            let l1_state_cache = SharedL1StateCache::new(HashSet::from([args.portal_address]));
             let node = ZoneNode::new(
-                deposits,
-                l1_config,
-                l1_state_provider_config,
-                l1_state_listener_config,
-                l1_state_cache,
+                args.l1_rpc_url.clone(),
+                args.portal_address,
+                args.l1_genesis_block_number,
                 sequencer_addr,
             );
 
-            // NOTE: `--dev` is no longer needed for block production — the ZoneEngine
-            // (spawned from ZoneAddOns::launch_add_ons) handles L1-driven block building.
-            // We keep `launch_with_debug_capabilities()` for its debug RPC features.
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
-
             info!(target: "reth::cli", "Tempo Zone node started");
 
             // Spawn sequencer background tasks if a sequencer key is provided.

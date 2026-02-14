@@ -20,24 +20,23 @@ use tracing::{debug, error, info};
 
 use crate::DepositQueue;
 
-/// L1-event-driven engine that produces zone blocks.
-///
-/// Unlike `LocalMiner` which fires on a timer, `ZoneEngine` waits for
-/// L1 blocks to arrive in the deposit queue and then advances the chain
-/// as fast as possible — one zone block per L1 block.
+// TODO: FIXME: this module needs to be cleaned up
+
+/// Engine that drives L2 block production on L1 events
 #[derive(Debug)]
 pub struct ZoneEngine<T: PayloadTypes, B> {
-    /// Payload attributes builder.
+    /// Attributes builder for Zone blocks
     payload_attributes_builder: B,
     /// Engine API handle for FCU and newPayload.
+    // FIXME: do we need the cl handle, fcu new payload
     to_engine: ConsensusEngineHandle<T>,
     /// Payload builder handle.
     payload_builder: PayloadBuilderHandle<T>,
-    /// Deposit queue — source of L1 blocks and notification.
+    /// Queue of deposit txs from L1
     deposit_queue: DepositQueue,
-    /// Latest block header.
+    /// Latest block header on L1
     last_header: SealedHeaderFor<<T::BuiltPayload as BuiltPayload>::Primitives>,
-    /// Recent block hashes for forkchoice state.
+    /// Recent block hashes for forkchoice state
     last_block_hashes: VecDeque<B256>,
 }
 
@@ -49,7 +48,6 @@ where
             HeaderTy<<T::BuiltPayload as BuiltPayload>::Primitives>,
         >,
 {
-    /// Create a new `ZoneEngine`.
     pub fn new(
         provider: impl BlockReader<Header = HeaderTy<<T::BuiltPayload as BuiltPayload>::Primitives>>,
         payload_attributes_builder: B,
@@ -72,7 +70,8 @@ where
         }
     }
 
-    /// Run the zone engine loop.
+    /// Runs the main Zone engine loop
+    ///
     ///
     /// This method never returns under normal operation. It:
     /// 1. Waits for L1 blocks to arrive in the deposit queue
@@ -111,42 +110,13 @@ where
     /// processes blocks as fast as the EVM can execute them, with no timer
     /// delays between blocks.
     async fn advance_all_available(&mut self) {
-        let mut blocks_advanced = 0u64;
-
         // Keep advancing as long as there are L1 blocks queued
-        loop {
-            if self.deposit_queue.pending_count() == 0 {
+        while self.deposit_queue.pending_count() > 0 {
+            if let Err(e) = self.advance().await {
+                error!(target: "zone::engine", "Error advancing the chain: {:?}", e);
+                tokio::time::sleep(Duration::from_millis(100)).await;
                 break;
             }
-
-            match self.advance().await {
-                Ok(()) => {
-                    blocks_advanced += 1;
-                    if blocks_advanced.is_multiple_of(100) {
-                        info!(
-                            target: "zone::engine",
-                            blocks_advanced,
-                            pending = self.deposit_queue.pending_count(),
-                            "Sync progress"
-                        );
-                    }
-                }
-                Err(e) => {
-                    error!(target: "zone::engine", "Error advancing the chain: {:?}", e);
-                    // Brief pause on error to avoid tight error loops
-                    tokio::time::sleep(Duration::from_millis(100)).await;
-                    break;
-                }
-            }
-        }
-
-        if blocks_advanced > 0 {
-            debug!(
-                target: "zone::engine",
-                blocks_advanced,
-                head = ?self.last_header.hash(),
-                "Advanced zone chain"
-            );
         }
     }
 
@@ -197,7 +167,7 @@ where
             )
             .await?;
 
-        if !res.is_valid() {
+        if res.is_invalid() {
             eyre::bail!("Invalid payload status")
         }
 

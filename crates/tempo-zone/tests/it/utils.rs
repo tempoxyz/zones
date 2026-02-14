@@ -7,7 +7,7 @@ use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
 use std::{sync::Arc, time::Duration};
 use tempo_chainspec::spec::TempoChainSpec;
-use zone::{DepositQueue, L1SubscriberConfig, ZoneNode};
+use zone::{DepositQueue, ZoneNode};
 
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
@@ -62,13 +62,12 @@ impl ZoneTestNode {
             serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
         let chain_spec = TempoChainSpec::from_genesis(serde_json::from_value(genesis)?);
 
-        let deposit_queue = DepositQueue::default();
-
-        let l1_config = L1SubscriberConfig {
-            l1_rpc_url: l1_ws_url,
+        let zone_node = ZoneNode::new(
+            l1_ws_url,
             portal_address,
-        };
-        let zone_node = ZoneNode::new(deposit_queue.clone(), token_address, l1_config);
+            None,    // genesis_tempo_block_number
+            None,    // sequencer
+        );
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))
             .with_unused_ports()
@@ -80,6 +79,8 @@ impl ZoneTestNode {
                     .with_http_api(RpcModuleSelection::All),
             );
         node_config.dev.block_time = Some(Duration::from_millis(250));
+
+        let deposit_queue = zone_node.deposit_queue();
 
         let node_handle = NodeBuilder::new(node_config)
             .testing_node(tasks.executor())

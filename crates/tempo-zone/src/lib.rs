@@ -18,7 +18,6 @@ mod executor;
 pub mod l1;
 pub mod l1_state;
 mod node;
-pub mod system_tx;
 pub mod withdrawals;
 pub mod zonemonitor;
 
@@ -91,6 +90,7 @@ pub async fn spawn_zone_sequencer(
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
     let wallet = alloy_network::EthereumWallet::from(signer);
+    // FIXME: dyn provider, check if not needed
     let l1_provider: DynProvider<TempoNetwork> =
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)

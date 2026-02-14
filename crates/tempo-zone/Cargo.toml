@@ -63,6 +63,7 @@ revm.workspace = true
 
 # misc
 url = "2"
+derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 eyre.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
