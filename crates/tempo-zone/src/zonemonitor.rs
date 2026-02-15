@@ -117,7 +117,8 @@ impl ZoneMonitor {
         withdrawal_notify: Arc<Notify>,
     ) -> Self {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_http(config.zone_rpc_url.parse().expect("valid Zone RPC URL"))
+            .connect(config.zone_rpc_url.parse().expect("valid Zone RPC URL"))
+            .await
             .erased();
 
         let outbox = ZoneOutbox::new(config.outbox_address, provider.clone());
