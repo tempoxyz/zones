@@ -90,7 +90,7 @@ Deposits incur a processing fee to compensate the sequencer for zone-side proces
 - **Fixed gas value**: `FIXED_DEPOSIT_GAS` is fixed at 100,000 gas
 - **Total fee**: `FIXED_DEPOSIT_GAS * zoneGasRate` = `100,000 * zoneGasRate`
 
-The fee is paid in the **same token being deposited**. The sequencer configures `zoneGasRate` via `ZonePortal.setZoneGasRate()`. The fixed gas value of 100,000 provides a stable pricing basis for deposits while allowing the sequencer flexibility to adjust the rate based on operational costs and future deposit mechanism variations. A single uniform `zoneGasRate` applies to all tokens (stablecoins of similar value).
+The fee is paid in the **same token being deposited**. The sequencer configures `zoneGasRate` via `ZonePortal.setZoneGasRate()`. The fixed gas value of 100,000 provides a stable pricing basis for deposits while allowing the sequencer flexibility to adjust the rate based on operational costs and future deposit mechanism variations. A single uniform `zoneGasRate` applies to all tokens (stablecoins of the same value).
 
 The fee is deducted from the deposit amount and paid to the sequencer immediately on Tempo. The deposit queue stores the net amount (`amount - fee`) which is minted on the zone.
 
