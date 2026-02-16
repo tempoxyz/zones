@@ -11231,7 +11231,6 @@ dependencies = [
  "alloy-primitives",
  "alloy-signer-local",
  "clap",
- "derive_more",
  "reth-cli-util",
  "reth-consensus",
  "reth-ethereum",
@@ -13333,18 +13332,3 @@ dependencies = [
  "cc",
  "pkg-config",
 ]
-
-[[patch.unused]]
-name = "vergen"
-version = "9.0.6"
-source = "git+https://github.com/rustyhorde/vergen?rev=0875fb7417586fb42d0ed6ddbfd4de0b35745ecc#0875fb7417586fb42d0ed6ddbfd4de0b35745ecc"
-
-[[patch.unused]]
-name = "vergen-git2"
-version = "1.0.7"
-source = "git+https://github.com/rustyhorde/vergen?rev=0875fb7417586fb42d0ed6ddbfd4de0b35745ecc#0875fb7417586fb42d0ed6ddbfd4de0b35745ecc"
-
-[[patch.unused]]
-name = "vergen-lib"
-version = "0.1.6"
-source = "git+https://github.com/rustyhorde/vergen?rev=0875fb7417586fb42d0ed6ddbfd4de0b35745ecc#0875fb7417586fb42d0ed6ddbfd4de0b35745ecc"
