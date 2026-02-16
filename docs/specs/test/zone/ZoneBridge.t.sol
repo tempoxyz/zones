@@ -30,6 +30,7 @@ import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
+import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
@@ -42,6 +43,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
 
     bool public shouldAccept = true;
     address public lastSender;
+    address public lastToken;
     uint128 public lastAmount;
     bytes public lastCallbackData;
 
@@ -51,6 +53,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
 
     function onWithdrawalReceived(
         address sender,
+        address token,
         uint128 amount,
         bytes calldata callbackData
     )
@@ -58,6 +61,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         returns (bytes4)
     {
         lastSender = sender;
+        lastToken = token;
         lastAmount = amount;
         lastCallbackData = callbackData;
         return shouldAccept ? IWithdrawalReceiver.onWithdrawalReceived.selector : bytes4(0);
@@ -123,55 +127,55 @@ contract ZoneBridgeTest is BaseTest {
         super.setUp();
 
         // === Deploy L1 Contracts ===
-        l1Factory = new ZoneFactory();
+        l1Factory = new ZoneFactory(); // Keep factory for verifier only
         withdrawalReceiver = new MockWithdrawalReceiver();
 
-        // Fund test accounts on L1
-        vm.startPrank(pathUSDAdmin);
-        pathUSD.grantRole(_ISSUER_ROLE, pathUSDAdmin);
-        pathUSD.mint(alice, 100_000e6);
-        pathUSD.mint(bob, 100_000e6);
-        vm.stopPrank();
+        // Deploy zone token FIRST (used for both L1 escrow and zone-side operations).
+        // In production, L1 and zone-side tokens are at the same address, so we use
+        // a single MockZoneToken for both roles to avoid ISSUER_ROLE issues with pathUSD.
+        l2ZoneToken = new MockZoneToken("Zone USD", "zUSD");
+
+        // Fund test accounts with zone token (for L1 deposits)
+        l2ZoneToken.setMinter(address(this), true);
+        l2ZoneToken.mint(alice, 100_000e6);
+        l2ZoneToken.mint(bob, 100_000e6);
+        l2ZoneToken.setMinter(address(this), false);
 
         // Record genesis block number for Tempo
         genesisTempoBlockNumber = uint64(block.number);
 
-        // Create zone on L1
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            token: address(pathUSD),
-            sequencer: admin,
-            verifier: l1Factory.verifier(),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: genesisTempoBlockNumber
-            })
-        });
-        address portalAddr;
-        (zoneId, portalAddr) = l1Factory.createZone(params);
-        l1Portal = ZonePortal(portalAddr);
+        // Deploy messenger and portal directly (bypass factory to avoid TIP20 prefix check).
+        // Predict portal address so messenger can reference it in its constructor.
+        uint256 currentNonce = vm.getNonce(address(this));
+        address predictedPortal = vm.computeCreateAddress(address(this), currentNonce + 1);
+        ZoneMessenger messengerContract = new ZoneMessenger(predictedPortal);
+        l1Portal = new ZonePortal(
+            1, // zoneId
+            address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
+            address(messengerContract),
+            admin, // sequencer
+            l1Factory.verifier(),
+            GENESIS_BLOCK_HASH,
+            genesisTempoBlockNumber
+        );
+        zoneId = 1;
 
         // === Deploy zone contracts ===
-        // Zone token (same concept as pathUSD, deployed at "same address" conceptually)
-        l2ZoneToken = new MockZoneToken("Zone USD", "zUSD");
-
         // TempoState mock for testing
         l2TempoState = new MockTempoState(admin, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
 
         // Zone config (reads sequencer from L1 portal via Tempo state)
-        l2Config = new ZoneConfig(address(l2ZoneToken), portalAddr, address(l2TempoState));
+        l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
         l2TempoState.setMockStorageValue(
-            portalAddr, bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
+            address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
         );
 
         // Zone inbox (advances Tempo state and processes deposits)
-        l2Inbox = new ZoneInbox(
-            address(l2Config), portalAddr, address(l2TempoState), address(l2ZoneToken)
-        );
+        l2Inbox = new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));
         l2ZoneToken.setMinter(address(l2Inbox), true);
 
         // Zone outbox (handles withdrawals)
-        l2Outbox = new ZoneOutbox(address(l2Config), address(l2ZoneToken));
+        l2Outbox = new ZoneOutbox(address(l2Config));
         l2ZoneToken.setBurner(address(l2Outbox), true);
 
         // Initialize zone block hash
@@ -193,7 +197,9 @@ contract ZoneBridgeTest is BaseTest {
         returns (bytes32 newHash)
     {
         // Record the deposit
-        Deposit memory d = Deposit({ sender: sender, to: to, amount: amount, memo: memo });
+        Deposit memory d = Deposit({
+            token: address(l2ZoneToken), sender: sender, to: to, amount: amount, memo: memo
+        });
 
         // Calculate the new hash (matches what Tempo portal computes)
         bytes32 prevHash = pendingDeposits.length > 0
@@ -265,6 +271,7 @@ contract ZoneBridgeTest is BaseTest {
             ObservedWithdrawal({
                 index: index,
                 withdrawal: Withdrawal({
+                    token: address(l2ZoneToken),
                     sender: sender,
                     to: to,
                     amount: amount,
@@ -339,13 +346,14 @@ contract ZoneBridgeTest is BaseTest {
         // === STEP 1: Alice deposits on L1 ===
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), depositAmount);
-        bytes32 l1DepositHash = l1Portal.deposit(alice, depositAmount, bytes32("hello zone"));
+        l2ZoneToken.approve(address(l1Portal), depositAmount);
+        bytes32 l1DepositHash =
+            l1Portal.deposit(address(l2ZoneToken), alice, depositAmount, bytes32("hello zone"));
         vm.stopPrank();
 
         // Verify L1 state
         assertEq(l1Portal.currentDepositQueueHash(), l1DepositHash);
-        assertEq(pathUSD.balanceOf(address(l1Portal)), depositAmount);
+        assertEq(l2ZoneToken.balanceOf(address(l1Portal)), depositAmount);
 
         // === STEP 2: Sequencer observes deposit (simulated event watching) ===
         _sequencerObserveDeposit(alice, alice, depositAmount, bytes32("hello zone"));
@@ -353,10 +361,10 @@ contract ZoneBridgeTest is BaseTest {
         // === STEP 3: Sequencer relays deposit to zone (sequencer-only call) ===
         bytes32 newProcessedHash = _sequencerRelayDepositsToL2();
 
-        // Verify zone state
-        assertEq(l2ZoneToken.balanceOf(alice), depositAmount);
+        // Verify zone state (alice's net balance is unchanged: -deposit on L1, +mint on zone)
+        assertEq(l2ZoneToken.balanceOf(alice), 100_000e6);
         assertEq(l2Inbox.processedDepositQueueHash(), newProcessedHash);
-        assertEq(l2ZoneToken.totalSupply(), depositAmount);
+        assertEq(l2ZoneToken.totalSupply(), 200_000e6 + depositAmount);
 
         // === STEP 4: Submit batch to L1 (no withdrawals yet) ===
         _sequencerSubmitBatch(newProcessedHash);
@@ -370,6 +378,7 @@ contract ZoneBridgeTest is BaseTest {
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), withdrawAmount);
         l2Outbox.requestWithdrawal(
+            address(l2ZoneToken),
             alice, // to (back to self on L1)
             withdrawAmount,
             bytes32(0), // memo
@@ -379,8 +388,8 @@ contract ZoneBridgeTest is BaseTest {
         );
         vm.stopPrank();
 
-        // Verify zone state - tokens burned
-        assertEq(l2ZoneToken.balanceOf(alice), depositAmount - withdrawAmount);
+        // Verify zone state - tokens burned (from alice's net balance of 100_000e6)
+        assertEq(l2ZoneToken.balanceOf(alice), 100_000e6 - withdrawAmount);
 
         // === STEP 6: Sequencer observes withdrawal event ===
         _sequencerObserveWithdrawal(0, alice, alice, withdrawAmount, bytes32(0), 0, alice, "");
@@ -394,6 +403,7 @@ contract ZoneBridgeTest is BaseTest {
         // Verify L1 queue updated
         assertEq(l1Portal.withdrawalBatchIndex(), 2);
         Withdrawal memory w = Withdrawal({
+            token: address(l2ZoneToken),
             sender: alice,
             to: alice,
             amount: withdrawAmount,
@@ -409,11 +419,11 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(l1Portal.withdrawalQueueTail(), 1);
 
         // === STEP 8: Sequencer processes withdrawal on L1 ===
-        uint256 aliceL1BalanceBefore = pathUSD.balanceOf(alice);
+        uint256 aliceL1BalanceBefore = l2ZoneToken.balanceOf(alice);
         l1Portal.processWithdrawal(w, bytes32(0)); // 0 = last item in slot
 
         // Verify Alice received funds on L1
-        assertEq(pathUSD.balanceOf(alice), aliceL1BalanceBefore + withdrawAmount);
+        assertEq(l2ZoneToken.balanceOf(alice), aliceL1BalanceBefore + withdrawAmount);
 
         // Verify slot cleared and head advanced
         assertEq(l1Portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
@@ -423,13 +433,13 @@ contract ZoneBridgeTest is BaseTest {
     function test_fullFlow_multipleDepositsAndWithdrawals() public {
         // === Alice and Bob both deposit ===
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 5000e6);
-        l1Portal.deposit(alice, 2000e6, bytes32("alice1"));
+        l2ZoneToken.approve(address(l1Portal), 5000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 2000e6, bytes32("alice1"));
         vm.stopPrank();
 
         vm.startPrank(bob);
-        pathUSD.approve(address(l1Portal), 5000e6);
-        l1Portal.deposit(bob, 3000e6, bytes32("bob1"));
+        l2ZoneToken.approve(address(l1Portal), 5000e6);
+        l1Portal.deposit(address(l2ZoneToken), bob, 3000e6, bytes32("bob1"));
         vm.stopPrank();
 
         // Sequencer observes and relays
@@ -437,9 +447,9 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveDeposit(bob, bob, 3000e6, bytes32("bob1"));
         bytes32 processedHash = _sequencerRelayDepositsToL2();
 
-        // Verify zone balances
-        assertEq(l2ZoneToken.balanceOf(alice), 2000e6);
-        assertEq(l2ZoneToken.balanceOf(bob), 3000e6);
+        // Verify zone balances (net: -deposit on L1, +mint on zone = initial funding)
+        assertEq(l2ZoneToken.balanceOf(alice), 100_000e6);
+        assertEq(l2ZoneToken.balanceOf(bob), 100_000e6);
 
         // Submit batch
         _sequencerSubmitBatch(processedHash);
@@ -447,12 +457,12 @@ contract ZoneBridgeTest is BaseTest {
         // === Both request withdrawals ===
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), 500e6);
-        l2Outbox.requestWithdrawal(alice, 500e6, bytes32(0), 0, alice, "");
+        l2Outbox.requestWithdrawal(address(l2ZoneToken), alice, 500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l2Outbox), 1000e6);
-        l2Outbox.requestWithdrawal(bob, 1000e6, bytes32(0), 0, bob, "");
+        l2Outbox.requestWithdrawal(address(l2ZoneToken), bob, 1000e6, bytes32(0), 0, bob, "");
         vm.stopPrank();
 
         // Sequencer observes withdrawals
@@ -465,6 +475,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Build expected queue hash (oldest = outermost, innermost wraps EMPTY_SENTINEL)
         Withdrawal memory w0 = Withdrawal({
+            token: address(l2ZoneToken),
             sender: alice,
             to: alice,
             amount: 500e6,
@@ -475,6 +486,7 @@ contract ZoneBridgeTest is BaseTest {
             callbackData: ""
         });
         Withdrawal memory w1 = Withdrawal({
+            token: address(l2ZoneToken),
             sender: bob,
             to: bob,
             amount: 1000e6,
@@ -490,21 +502,21 @@ contract ZoneBridgeTest is BaseTest {
         assertEq(l1Portal.withdrawalQueueSlot(0), queueHash);
 
         // Process withdrawals in order
-        uint256 aliceBefore = pathUSD.balanceOf(alice);
-        uint256 bobBefore = pathUSD.balanceOf(bob);
+        uint256 aliceBefore = l2ZoneToken.balanceOf(alice);
+        uint256 bobBefore = l2ZoneToken.balanceOf(bob);
 
         l1Portal.processWithdrawal(w0, innerHash);
-        assertEq(pathUSD.balanceOf(alice), aliceBefore + 500e6);
+        assertEq(l2ZoneToken.balanceOf(alice), aliceBefore + 500e6);
 
         l1Portal.processWithdrawal(w1, bytes32(0)); // 0 = last item in slot
-        assertEq(pathUSD.balanceOf(bob), bobBefore + 1000e6);
+        assertEq(l2ZoneToken.balanceOf(bob), bobBefore + 1000e6);
     }
 
     function test_fullFlow_withdrawalWithCallback() public {
         // Setup: deposit to zone
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32(""));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
@@ -515,6 +527,7 @@ contract ZoneBridgeTest is BaseTest {
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), 500e6);
         l2Outbox.requestWithdrawal(
+            address(l2ZoneToken),
             address(withdrawalReceiver), // to: receiver contract
             500e6,
             bytes32(0), // memo
@@ -540,6 +553,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Process withdrawal
         Withdrawal memory w = Withdrawal({
+            token: address(l2ZoneToken),
             sender: alice,
             to: address(withdrawalReceiver),
             amount: 500e6,
@@ -552,7 +566,7 @@ contract ZoneBridgeTest is BaseTest {
         l1Portal.processWithdrawal(w, bytes32(0));
 
         // Verify callback was executed
-        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 500e6);
+        assertEq(l2ZoneToken.balanceOf(address(withdrawalReceiver)), 500e6);
         assertEq(withdrawalReceiver.lastSender(), alice);
         assertEq(withdrawalReceiver.lastAmount(), 500e6);
         assertEq(withdrawalReceiver.lastCallbackData(), "callback_data");
@@ -561,8 +575,8 @@ contract ZoneBridgeTest is BaseTest {
     function test_fullFlow_bounceBackOnCallbackFailure() public {
         // Setup: deposit to zone
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32(""));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
@@ -574,6 +588,7 @@ contract ZoneBridgeTest is BaseTest {
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), 500e6);
         l2Outbox.requestWithdrawal(
+            address(l2ZoneToken),
             address(withdrawalReceiver),
             500e6,
             bytes32(0), // memo
@@ -594,6 +609,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Process withdrawal - callback will fail, triggering bounce-back
         Withdrawal memory w = Withdrawal({
+            token: address(l2ZoneToken),
             sender: alice,
             to: address(withdrawalReceiver),
             amount: 500e6,
@@ -606,7 +622,7 @@ contract ZoneBridgeTest is BaseTest {
         l1Portal.processWithdrawal(w, bytes32(0));
 
         // Verify receiver did NOT get funds (transfer reverted)
-        assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 0);
+        assertEq(l2ZoneToken.balanceOf(address(withdrawalReceiver)), 0);
 
         // Verify bounce-back deposit was created
         assertTrue(l1Portal.currentDepositQueueHash() != depositHashBefore);
@@ -615,8 +631,8 @@ contract ZoneBridgeTest is BaseTest {
     function test_fullFlow_transferOnL2() public {
         // Deposit to Alice
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32(""));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
@@ -626,60 +642,62 @@ contract ZoneBridgeTest is BaseTest {
         vm.prank(alice);
         l2ZoneToken.transfer(bob, 300e6);
 
-        // Verify zone balances
-        assertEq(l2ZoneToken.balanceOf(alice), 700e6);
-        assertEq(l2ZoneToken.balanceOf(bob), 300e6);
+        // Verify zone balances (alice net = 100K, then -300e6 transfer; bob = 100K + 300e6)
+        assertEq(l2ZoneToken.balanceOf(alice), 100_000e6 - 300e6);
+        assertEq(l2ZoneToken.balanceOf(bob), 100_000e6 + 300e6);
 
         // Bob withdraws on zone
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l2Outbox), 300e6);
-        l2Outbox.requestWithdrawal(bob, 300e6, bytes32(0), 0, bob, "");
+        l2Outbox.requestWithdrawal(address(l2ZoneToken), bob, 300e6, bytes32(0), 0, bob, "");
         vm.stopPrank();
 
-        // Verify Bob's zone balance debited
-        assertEq(l2ZoneToken.balanceOf(bob), 0);
+        // Verify Bob's zone balance debited (100K + 300e6 received - 300e6 withdrawn)
+        assertEq(l2ZoneToken.balanceOf(bob), 100_000e6);
         assertEq(l2Outbox.nextWithdrawalIndex(), 1);
     }
 
     function test_l2_insufficientBalanceReverts() public {
         // Deposit to Alice
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32(""));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
         _sequencerRelayDepositsToL2();
 
-        // Alice tries to withdraw more than balance
+        // Alice tries to withdraw more than balance (net balance is 100_000e6 after deposit+mint)
         vm.startPrank(alice);
-        l2ZoneToken.approve(address(l2Outbox), 2000e6);
+        l2ZoneToken.approve(address(l2Outbox), type(uint256).max);
         vm.expectRevert(MockZoneToken.InsufficientBalance.selector);
-        l2Outbox.requestWithdrawal(alice, 2000e6, bytes32(0), 0, alice, "");
+        l2Outbox.requestWithdrawal(
+            address(l2ZoneToken), alice, uint128(100_001e6), bytes32(0), 0, alice, ""
+        );
         vm.stopPrank();
     }
 
     function test_l2_transferInsufficientBalance() public {
         // Deposit to Alice
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32(""));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
         _sequencerRelayDepositsToL2();
 
-        // Alice tries to transfer more than balance
+        // Alice tries to transfer more than balance (net balance is 100_000e6 after deposit+mint)
         vm.prank(alice);
         vm.expectRevert(MockZoneToken.InsufficientBalance.selector);
-        l2ZoneToken.transfer(bob, 2000e6);
+        l2ZoneToken.transfer(bob, 100_001e6);
     }
 
     function test_l2_depositHashMismatchAllowed() public {
         // Deposit on L1
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32(""));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
@@ -700,8 +718,8 @@ contract ZoneBridgeTest is BaseTest {
     function test_l2_callbackRequiresFallbackRecipient() public {
         // Deposit to Alice
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32(""));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
@@ -712,6 +730,7 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.approve(address(l2Outbox), 500e6);
         vm.expectRevert(ZoneOutbox.InvalidFallbackRecipient.selector);
         l2Outbox.requestWithdrawal(
+            address(l2ZoneToken),
             address(withdrawalReceiver),
             500e6,
             bytes32(0), // memo
@@ -724,8 +743,8 @@ contract ZoneBridgeTest is BaseTest {
 
     function test_l2_onlySequencerCanAdvanceTempo() public {
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32(""));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
         _sequencerObserveDeposit(alice, alice, 1000e6, bytes32(""));
@@ -754,8 +773,8 @@ contract ZoneBridgeTest is BaseTest {
     function test_storageLayout_currentDepositQueueHashSlot() public {
         // Make a deposit to get a non-zero currentDepositQueueHash
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(alice, 1000e6, bytes32("layout-test"));
+        l2ZoneToken.approve(address(l1Portal), 1000e6);
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("layout-test"));
         vm.stopPrank();
 
         // Read via vm.load using our constant
@@ -825,7 +844,11 @@ contract ZoneBridgeTest is BaseTest {
         returns (bytes32 newHash)
     {
         EncryptedDeposit memory ed = EncryptedDeposit({
-            sender: sender, amount: netAmount, keyIndex: keyIndex, encrypted: encrypted
+            token: address(l2ZoneToken),
+            sender: sender,
+            amount: netAmount,
+            keyIndex: keyIndex,
+            encrypted: encrypted
         });
 
         // Calculate the new hash (matches what portal computes via DepositQueueLib)
@@ -979,14 +1002,15 @@ contract ZoneBridgeTest is BaseTest {
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
 
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), depositAmount);
-        bytes32 l1DepositHash = l1Portal.depositEncrypted(depositAmount, 0, payload);
+        l2ZoneToken.approve(address(l1Portal), depositAmount);
+        bytes32 l1DepositHash =
+            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload);
         vm.stopPrank();
 
         // Verify L1 state
         assertEq(l1Portal.currentDepositQueueHash(), l1DepositHash, "L1 queue hash mismatch");
         assertEq(
-            pathUSD.balanceOf(address(l1Portal)),
+            l2ZoneToken.balanceOf(address(l1Portal)),
             depositAmount - fee,
             "Portal should hold net amount"
         );
@@ -1009,11 +1033,17 @@ contract ZoneBridgeTest is BaseTest {
         bytes32 newProcessedHash =
             _sequencerRelayEncryptedDepositsToL2(decryptedRecipient, decryptedMemo, true);
 
-        // Verify zone state — tokens minted to decrypted recipient
+        // Verify zone state — tokens minted to decrypted recipient (bob starts with 100K)
         assertEq(
-            l2ZoneToken.balanceOf(decryptedRecipient), netAmount, "Recipient should receive tokens"
+            l2ZoneToken.balanceOf(decryptedRecipient),
+            100_000e6 + netAmount,
+            "Recipient should receive tokens"
         );
-        assertEq(l2ZoneToken.balanceOf(alice), 0, "Sender should not receive tokens");
+        assertEq(
+            l2ZoneToken.balanceOf(alice),
+            100_000e6 - depositAmount,
+            "Sender keeps remaining balance"
+        );
         assertEq(
             l2Inbox.processedDepositQueueHash(), newProcessedHash, "Zone processed hash mismatch"
         );
@@ -1038,8 +1068,8 @@ contract ZoneBridgeTest is BaseTest {
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
 
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), depositAmount);
-        l1Portal.depositEncrypted(depositAmount, 0, payload);
+        l2ZoneToken.approve(address(l1Portal), depositAmount);
+        l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload);
         vm.stopPrank();
 
         // === STEP 3: Sequencer observes and relays with FAILED decryption ===
@@ -1050,8 +1080,12 @@ contract ZoneBridgeTest is BaseTest {
         bytes32 newProcessedHash =
             _sequencerRelayEncryptedDepositsToL2(address(0xBEEF), bytes32("wrong"), false);
 
-        // Verify zone state — tokens bounced back to sender (alice), not to any recipient
-        assertEq(l2ZoneToken.balanceOf(alice), netAmount, "Sender should get bounced tokens");
+        // Verify zone state — tokens bounced back to sender (alice = 100K - deposit + bounce)
+        assertEq(
+            l2ZoneToken.balanceOf(alice),
+            100_000e6 - depositAmount + netAmount,
+            "Sender should get bounced tokens"
+        );
         assertEq(l2ZoneToken.balanceOf(address(0xBEEF)), 0, "Failed recipient should get nothing");
         assertEq(
             l2Inbox.processedDepositQueueHash(), newProcessedHash, "Zone processed hash mismatch"
@@ -1073,24 +1107,26 @@ contract ZoneBridgeTest is BaseTest {
 
         // === STEP 2: Alice makes a regular deposit ===
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), depositAmount * 2);
-        bytes32 h1 = l1Portal.deposit(alice, depositAmount, bytes32("regular"));
+        l2ZoneToken.approve(address(l1Portal), depositAmount * 2);
+        bytes32 h1 =
+            l1Portal.deposit(address(l2ZoneToken), alice, depositAmount, bytes32("regular"));
         vm.stopPrank();
 
         // === STEP 3: Bob makes an encrypted deposit ===
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
         vm.startPrank(bob);
-        pathUSD.approve(address(l1Portal), depositAmount);
-        bytes32 h2 = l1Portal.depositEncrypted(depositAmount, 0, payload);
+        l2ZoneToken.approve(address(l1Portal), depositAmount);
+        bytes32 h2 = l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload);
         vm.stopPrank();
 
         // === STEP 4: Carol makes another regular deposit ===
         address carol = address(0x600);
-        vm.prank(pathUSDAdmin);
-        pathUSD.mint(carol, 100_000e6);
+        l2ZoneToken.setMinter(address(this), true);
+        l2ZoneToken.mint(carol, 100_000e6);
+        l2ZoneToken.setMinter(address(this), false);
         vm.startPrank(carol);
-        pathUSD.approve(address(l1Portal), depositAmount);
-        bytes32 h3 = l1Portal.deposit(carol, depositAmount, bytes32("carol"));
+        l2ZoneToken.approve(address(l1Portal), depositAmount);
+        bytes32 h3 = l1Portal.deposit(address(l2ZoneToken), carol, depositAmount, bytes32("carol"));
         vm.stopPrank();
 
         assertEq(l1Portal.currentDepositQueueHash(), h3, "L1 hash should be after 3rd deposit");
@@ -1099,21 +1135,36 @@ contract ZoneBridgeTest is BaseTest {
         // We need to compute hashes in the same order the portal did
 
         // Regular deposit from alice
-        Deposit memory d1 =
-            Deposit({ sender: alice, to: alice, amount: depositAmount, memo: bytes32("regular") });
+        Deposit memory d1 = Deposit({
+            token: address(l2ZoneToken),
+            sender: alice,
+            to: alice,
+            amount: depositAmount,
+            memo: bytes32("regular")
+        });
         bytes32 prevHash = l2Inbox.processedDepositQueueHash();
         bytes32 hash1 = keccak256(abi.encode(DepositType.Regular, d1, prevHash));
         assertEq(hash1, h1, "hash1 must match L1");
 
         // Encrypted deposit from bob
-        EncryptedDeposit memory ed =
-            EncryptedDeposit({ sender: bob, amount: netAmount, keyIndex: 0, encrypted: payload });
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            token: address(l2ZoneToken),
+            sender: bob,
+            amount: netAmount,
+            keyIndex: 0,
+            encrypted: payload
+        });
         bytes32 hash2 = keccak256(abi.encode(DepositType.Encrypted, ed, hash1));
         assertEq(hash2, h2, "hash2 must match L1");
 
         // Regular deposit from carol
-        Deposit memory d3 =
-            Deposit({ sender: carol, to: carol, amount: depositAmount, memo: bytes32("carol") });
+        Deposit memory d3 = Deposit({
+            token: address(l2ZoneToken),
+            sender: carol,
+            to: carol,
+            amount: depositAmount,
+            memo: bytes32("carol")
+        });
         bytes32 hash3 = keccak256(abi.encode(DepositType.Regular, d3, hash2));
         assertEq(hash3, h3, "hash3 must match L1");
 
@@ -1147,19 +1198,27 @@ contract ZoneBridgeTest is BaseTest {
         l2Inbox.advanceTempo("", queued, decs);
 
         // === STEP 7: Verify all balances ===
-        assertEq(l2ZoneToken.balanceOf(alice), depositAmount, "Alice gets regular deposit");
+        // alice: 100K - deposit + zone mint = 100K
+        assertEq(l2ZoneToken.balanceOf(alice), 100_000e6, "Alice gets regular deposit");
+        // decryptedTo (0x700) has no initial balance, receives only zone mint
         assertEq(
             l2ZoneToken.balanceOf(decryptedTo), netAmount, "Bob's encrypted recipient gets tokens"
         );
-        assertEq(l2ZoneToken.balanceOf(bob), 0, "Bob (sender) should not receive tokens");
-        assertEq(l2ZoneToken.balanceOf(carol), depositAmount, "Carol gets regular deposit");
+        // bob: 100K - deposit, no zone mint to bob (encrypted goes to decryptedTo)
+        assertEq(
+            l2ZoneToken.balanceOf(bob),
+            100_000e6 - depositAmount,
+            "Bob (sender) keeps remaining balance"
+        );
+        // carol: 100K - deposit + zone mint = 100K
+        assertEq(l2ZoneToken.balanceOf(carol), 100_000e6, "Carol gets regular deposit");
         assertEq(l2Inbox.processedDepositQueueHash(), hash3, "Zone processed hash matches L1");
 
-        // Total supply = alice_regular + bob_encrypted_net + carol_regular
+        // Total supply = initial (alice 100K + bob 100K + carol 100K) + zone mints
         assertEq(
             l2ZoneToken.totalSupply(),
-            depositAmount + netAmount + depositAmount,
-            "Total supply should equal all deposits"
+            300_000e6 + depositAmount + netAmount + depositAmount,
+            "Total supply should equal initial funding plus all zone mints"
         );
 
         // === STEP 8: Submit batch to L1 ===
@@ -1180,8 +1239,8 @@ contract ZoneBridgeTest is BaseTest {
         EncryptedDepositPayload memory payload1 = _makeEncryptedPayload();
 
         vm.startPrank(alice);
-        pathUSD.approve(address(l1Portal), depositAmount);
-        bytes32 h1 = l1Portal.depositEncrypted(depositAmount, 0, payload1);
+        l2ZoneToken.approve(address(l1Portal), depositAmount);
+        bytes32 h1 = l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload1);
         vm.stopPrank();
 
         // === STEP 3: Sequencer rotates to second encryption key ===
@@ -1192,8 +1251,8 @@ contract ZoneBridgeTest is BaseTest {
         EncryptedDepositPayload memory payload2 = _makeEncryptedPayload();
 
         vm.startPrank(bob);
-        pathUSD.approve(address(l1Portal), depositAmount);
-        bytes32 h2 = l1Portal.depositEncrypted(depositAmount, 1, payload2);
+        l2ZoneToken.approve(address(l1Portal), depositAmount);
+        bytes32 h2 = l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 1, payload2);
         vm.stopPrank();
 
         assertEq(l1Portal.currentDepositQueueHash(), h2, "L1 hash after both deposits");
@@ -1201,13 +1260,22 @@ contract ZoneBridgeTest is BaseTest {
         // === STEP 5: Compute expected hashes ===
         bytes32 prevHash = l2Inbox.processedDepositQueueHash();
         EncryptedDeposit memory ed1 = EncryptedDeposit({
-            sender: alice, amount: netAmount, keyIndex: 0, encrypted: payload1
+            token: address(l2ZoneToken),
+            sender: alice,
+            amount: netAmount,
+            keyIndex: 0,
+            encrypted: payload1
         });
         bytes32 hash1 = keccak256(abi.encode(DepositType.Encrypted, ed1, prevHash));
         assertEq(hash1, h1, "hash1 must match L1");
 
-        EncryptedDeposit memory ed2 =
-            EncryptedDeposit({ sender: bob, amount: netAmount, keyIndex: 1, encrypted: payload2 });
+        EncryptedDeposit memory ed2 = EncryptedDeposit({
+            token: address(l2ZoneToken),
+            sender: bob,
+            amount: netAmount,
+            keyIndex: 1,
+            encrypted: payload2
+        });
         bytes32 hash2 = keccak256(abi.encode(DepositType.Encrypted, ed2, hash1));
         assertEq(hash2, h2, "hash2 must match L1");
 
@@ -1290,14 +1358,19 @@ contract ZoneBridgeTest is BaseTest {
         l2Inbox.advanceTempo("", queued, decs);
 
         // === STEP 7: Verify ===
-        // Both deposits go to sharedRecipient
+        // Both deposits go to sharedRecipient (no prior balance)
         assertEq(
             l2ZoneToken.balanceOf(sharedRecipient),
             netAmount * 2,
             "Recipient should receive both deposits"
         );
-        assertEq(l2ZoneToken.balanceOf(alice), 0, "Alice (sender) should not receive tokens");
-        assertEq(l2ZoneToken.balanceOf(bob), 0, "Bob (sender) should not receive tokens");
+        // alice/bob: 100K - deposit, no zone mint to them (encrypted goes to sharedRecipient)
+        assertEq(
+            l2ZoneToken.balanceOf(alice), 100_000e6 - depositAmount, "Alice keeps remaining balance"
+        );
+        assertEq(
+            l2ZoneToken.balanceOf(bob), 100_000e6 - depositAmount, "Bob keeps remaining balance"
+        );
         assertEq(l2Inbox.processedDepositQueueHash(), hash2, "Zone processed hash matches L1");
 
         // === STEP 8: Submit batch ===

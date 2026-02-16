@@ -7,7 +7,7 @@ import { IWithdrawalReceiver, IZoneMessenger } from "./IZone.sol";
 /// @title ZoneMessenger
 /// @notice Per-zone messenger that handles withdrawal callbacks
 /// @dev Deployed by ZoneFactory for each zone. The portal gives the messenger max approval
-///      for the zone token. Withdrawal callbacks originate from this contract, not the portal.
+///      for each enabled token. Withdrawal callbacks originate from this contract, not the portal.
 contract ZoneMessenger is IZoneMessenger {
 
     /*//////////////////////////////////////////////////////////////
@@ -16,9 +16,6 @@ contract ZoneMessenger is IZoneMessenger {
 
     /// @notice The zone's portal address
     address public immutable portal;
-
-    /// @notice The zone token address
-    address public immutable token;
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -32,9 +29,8 @@ contract ZoneMessenger is IZoneMessenger {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _portal, address _token) {
+    constructor(address _portal) {
         portal = _portal;
-        token = _token;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -54,12 +50,14 @@ contract ZoneMessenger is IZoneMessenger {
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
     ///      If callback reverts, returns false (does not revert). The transfer is atomic
     ///      with the callback via a self-call pattern.
+    /// @param _token The TIP-20 token to transfer
     /// @param sender The L2 origin address
     /// @param target The Tempo recipient
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
     function relayMessage(
+        address _token,
         address sender,
         address target,
         uint128 amount,
@@ -70,12 +68,13 @@ contract ZoneMessenger is IZoneMessenger {
         onlyPortal
     {
         // Atomic transfer + callback via self-call
-        this._executeRelay(sender, target, amount, gasLimit, data);
+        this._executeRelay(_token, sender, target, amount, gasLimit, data);
     }
 
     /// @notice Internal function for atomic transfer + callback (called via self-call)
     /// @dev This function reverts if either the transfer or callback fails
     function _executeRelay(
+        address _token,
         address sender,
         address target,
         uint128 amount,
@@ -88,13 +87,14 @@ contract ZoneMessenger is IZoneMessenger {
         if (msg.sender != address(this)) revert OnlyPortal();
 
         // Transfer tokens from portal to target
-        if (!ITIP20(token).transferFrom(portal, target, amount)) {
+        if (!ITIP20(_token).transferFrom(portal, target, amount)) {
             revert TransferFailed();
         }
 
-        // Call the receiver
-        bytes4 selector =
-            IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(sender, amount, data);
+        // Call the receiver (includes token address for multi-asset awareness)
+        bytes4 selector = IWithdrawalReceiver(target).onWithdrawalReceived{ gas: gasLimit }(
+            sender, _token, amount, data
+        );
 
         // Verify the callback returned the correct selector
         if (selector != IWithdrawalReceiver.onWithdrawalReceived.selector) {

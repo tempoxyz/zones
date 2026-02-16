@@ -675,9 +675,8 @@ contract StablecoinDEXTest is BaseTest {
         } else {
             // May fail due to insufficient balance/allowance - that's OK
             try exchange.place(address(token1), amount, true, tick) {
-            // Success is fine
-            }
-                catch {
+                // Success is fine
+            } catch {
                 // Failure due to balance/allowance is also OK for fuzz test
             }
         }
@@ -732,9 +731,8 @@ contract StablecoinDEXTest is BaseTest {
         } else {
             // May fail due to insufficient balance/allowance - that's OK
             try exchange.placeFlip(address(token1), amount, isBid, tick, flipTick) {
-            // Success is fine
-            }
-                catch {
+                // Success is fine
+            } catch {
                 // Failure due to balance/allowance is also OK for fuzz test
             }
         }
@@ -1920,9 +1918,8 @@ contract StablecoinDEXTest is BaseTest {
                 thisAmount += remainder; // last split gets the remainder
             }
             if (thisAmount > 0) {
-                totalSplitQuote += exchange.quoteSwapExactAmountOut(
-                    address(pathUSD), address(token1), thisAmount
-                );
+                totalSplitQuote +=
+                    exchange.quoteSwapExactAmountOut(address(pathUSD), address(token1), thisAmount);
             }
         }
 

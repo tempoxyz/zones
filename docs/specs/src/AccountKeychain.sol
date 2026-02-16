@@ -99,7 +99,10 @@ contract AccountKeychain is IAccountKeychain {
 
         // Store the new key
         keys[msg.sender][keyId] = AuthorizedKey({
-            signatureType: sigType, expiry: expiry, enforceLimits: enforceLimits, isRevoked: false
+            signatureType: sigType,
+            expiry: expiry,
+            enforceLimits: enforceLimits,
+            isRevoked: false
         });
 
         // Set initial spending limits (only if enforce_limits is true)

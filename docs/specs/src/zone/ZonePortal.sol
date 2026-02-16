@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import { ITIP20 } from "../interfaces/ITIP20.sol";
 
+import { TempoUtilities } from "../TempoUtilities.sol";
 import { getBlockHash } from "./BlockHashHistory.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "./EncryptedDeposit.sol";
@@ -19,6 +20,7 @@ import {
     IZoneMessenger,
     IZonePortal,
     QueuedDeposit,
+    TokenConfig,
     Withdrawal
 } from "./IZone.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
@@ -47,7 +49,6 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     uint64 public immutable zoneId;
-    address public immutable token;
     address public immutable messenger;
     address public immutable verifier;
     uint64 public immutable genesisTempoBlockNumber;
@@ -76,6 +77,14 @@ contract ZonePortal is IZonePortal {
     ///      Stored at slot 6 in the ZonePortal storage layout.
     EncryptionKeyEntry[] internal _encryptionKeys;
 
+    /// @notice Per-token configuration (stored at slot 7)
+    /// @dev TokenConfig.enabled is permanent (write-once true); depositsActive can be toggled.
+    mapping(address => TokenConfig) internal _tokenConfigs;
+
+    /// @notice Append-only list of enabled tokens (stored at slot 8)
+    /// @dev Tokens can never be removed from this list (non-custodial guarantee).
+    address[] internal _enabledTokens;
+
     /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
     WithdrawalQueue internal _withdrawalQueue;
 
@@ -85,7 +94,7 @@ contract ZonePortal is IZonePortal {
 
     constructor(
         uint64 _zoneId,
-        address _token,
+        address _initialToken,
         address _messenger,
         address _sequencer,
         address _verifier,
@@ -93,15 +102,14 @@ contract ZonePortal is IZonePortal {
         uint64 _genesisTempoBlockNumber
     ) {
         zoneId = _zoneId;
-        token = _token;
         messenger = _messenger;
         sequencer = _sequencer;
         verifier = _verifier;
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
 
-        // Give messenger max approval for the zone token
-        ITIP20(_token).approve(_messenger, type(uint256).max);
+        // Enable the initial token
+        _enableTokenInternal(_initialToken);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -158,6 +166,71 @@ contract ZonePortal is IZonePortal {
 
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32) {
         return _withdrawalQueue.slots[slot];
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          TOKEN REGISTRY
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Check if a token is enabled for bridging
+    function isTokenEnabled(address _token) external view returns (bool) {
+        return _tokenConfigs[_token].enabled;
+    }
+
+    /// @notice Check if deposits are currently active for a token
+    function areDepositsActive(address _token) external view returns (bool) {
+        TokenConfig storage cfg = _tokenConfigs[_token];
+        return cfg.enabled && cfg.depositsActive;
+    }
+
+    /// @notice Get the token configuration for a specific token
+    function tokenConfig(address _token) external view returns (TokenConfig memory) {
+        return _tokenConfigs[_token];
+    }
+
+    /// @notice Get the number of enabled tokens
+    function enabledTokenCount() external view returns (uint256) {
+        return _enabledTokens.length;
+    }
+
+    /// @notice Get an enabled token by index
+    function enabledTokenAt(uint256 index) external view returns (address) {
+        return _enabledTokens[index];
+    }
+
+    /// @notice Enable a new TIP-20 token for bridging. Only callable by sequencer.
+    /// @dev Irreversible: once enabled, a token cannot be disabled (non-custodial guarantee).
+    ///      Validates the token is a TIP-20 and grants messenger max approval.
+    function enableToken(address _token) external onlySequencer {
+        if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
+        if (!TempoUtilities.isTIP20(_token)) revert TokenNotEnabled();
+        _enableTokenInternal(_token);
+    }
+
+    /// @notice Pause deposits for a token. Only callable by sequencer.
+    /// @dev Does not affect withdrawal processing (non-custodial guarantee).
+    function pauseDeposits(address _token) external onlySequencer {
+        if (!_tokenConfigs[_token].enabled) revert TokenNotEnabled();
+        _tokenConfigs[_token].depositsActive = false;
+        emit DepositsPaused(_token);
+    }
+
+    /// @notice Resume deposits for a token. Only callable by sequencer.
+    function resumeDeposits(address _token) external onlySequencer {
+        if (!_tokenConfigs[_token].enabled) revert TokenNotEnabled();
+        _tokenConfigs[_token].depositsActive = true;
+        emit DepositsResumed(_token);
+    }
+
+    /// @notice Internal function to enable a token (used by constructor and enableToken)
+    function _enableTokenInternal(address _token) internal {
+        _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
+        _enabledTokens.push(_token);
+
+        // Give messenger max approval for this token
+        ITIP20(_token).approve(messenger, type(uint256).max);
+
+        emit TokenEnabled(_token);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -372,13 +445,16 @@ contract ZonePortal is IZonePortal {
         fee = uint128(FIXED_DEPOSIT_GAS) * zoneGasRate;
     }
 
-    /// @notice Deposit zone token into the zone. Returns the new current deposit queue hash.
-    /// @dev Fee is deducted from amount and paid to sequencer. Net amount is credited on zone.
+    /// @notice Deposit a TIP-20 token into the zone. Returns the new current deposit queue hash.
+    /// @dev Fee is deducted from amount and paid to sequencer in the same token.
+    ///      The token must be enabled and deposits must be active.
+    /// @param _token The TIP-20 token to deposit
     /// @param to Recipient address on the zone
     /// @param amount Total amount to deposit (fee will be deducted)
     /// @param memo User-provided context
     /// @return newCurrentDepositQueueHash The new deposit queue hash after this deposit
     function deposit(
+        address _token,
         address to,
         uint128 amount,
         bytes32 memo
@@ -386,6 +462,11 @@ contract ZonePortal is IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
+        // Validate token is enabled and deposits are active
+        TokenConfig storage cfg = _tokenConfigs[_token];
+        if (!cfg.enabled) revert TokenNotEnabled();
+        if (!cfg.depositsActive) revert DepositsNotActive();
+
         // Calculate deposit fee
         uint128 fee = calculateDepositFee();
         if (amount <= fee) revert DepositTooSmall();
@@ -393,33 +474,36 @@ contract ZonePortal is IZonePortal {
 
         // Transfer full amount from sender to this contract
         // TIP-20 transfers revert on failure, so no boolean check is needed here.
-        ITIP20(token).transferFrom(msg.sender, address(this), amount);
+        ITIP20(_token).transferFrom(msg.sender, address(this), amount);
 
         // Transfer fee to sequencer
         if (fee > 0) {
-            ITIP20(token).transfer(sequencer, fee);
+            ITIP20(_token).transfer(sequencer, fee);
         }
 
         // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
         Deposit memory depositData =
-            Deposit({ sender: msg.sender, to: to, amount: netAmount, memo: memo });
+            Deposit({ token: _token, sender: msg.sender, to: to, amount: netAmount, memo: memo });
 
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
-        emit DepositMade(newCurrentDepositQueueHash, msg.sender, to, netAmount, fee, memo);
+        emit DepositMade(newCurrentDepositQueueHash, msg.sender, _token, to, netAmount, fee, memo);
     }
 
     /// @notice Deposit with encrypted recipient and memo
     /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key.
+    ///      The token identity is public (not encrypted) since the portal must escrow it.
     ///      Validates that keyIndex is valid (exists and not expired).
     ///      Charges the same deposit fee as regular deposits.
+    /// @param _token The TIP-20 token to deposit
     /// @param amount Amount to deposit (fee deducted from this amount)
     /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
     /// @param encrypted The encrypted payload (recipient and memo)
     /// @return newCurrentDepositQueueHash The new deposit queue hash
     function depositEncrypted(
+        address _token,
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted
@@ -427,6 +511,11 @@ contract ZonePortal is IZonePortal {
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
+        // Validate token is enabled and deposits are active
+        TokenConfig storage cfg = _tokenConfigs[_token];
+        if (!cfg.enabled) revert TokenNotEnabled();
+        if (!cfg.depositsActive) revert DepositsNotActive();
+
         // Validate ephemeral public key is a valid secp256k1 point
         // Prevents griefing: invalid points make Chaum-Pedersen proofs impossible,
         // which would block chain progress on the zone side.
@@ -459,14 +548,18 @@ contract ZonePortal is IZonePortal {
         uint128 netAmount = amount - fee;
 
         // Transfer full amount from sender to this contract
-        ITIP20(token).transferFrom(msg.sender, address(this), amount);
+        ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         if (fee > 0) {
-            ITIP20(token).transfer(sequencer, fee);
+            ITIP20(_token).transfer(sequencer, fee);
         }
 
         // Build encrypted deposit struct
         EncryptedDeposit memory depositData = EncryptedDeposit({
-            sender: msg.sender, amount: netAmount, keyIndex: keyIndex, encrypted: encrypted
+            token: _token,
+            sender: msg.sender,
+            amount: netAmount,
+            keyIndex: keyIndex,
+            encrypted: encrypted
         });
 
         // Insert encrypted deposit into queue
@@ -477,6 +570,7 @@ contract ZonePortal is IZonePortal {
         emit EncryptedDepositMade(
             newCurrentDepositQueueHash,
             msg.sender,
+            _token,
             netAmount,
             fee,
             keyIndex,
@@ -495,6 +589,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
     /// @dev Fee is always paid to sequencer regardless of success/failure.
     ///      On failure, only the amount (not fee) is bounced back.
+    ///      The token to transfer is read from the withdrawal struct.
     function processWithdrawal(
         Withdrawal calldata withdrawal,
         bytes32 remainingQueue
@@ -505,59 +600,75 @@ contract ZonePortal is IZonePortal {
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
+        address _token = withdrawal.token;
+
         // Transfer fee to sequencer (always, regardless of withdrawal success)
         if (withdrawal.fee > 0) {
-            ITIP20(token).transfer(sequencer, withdrawal.fee);
+            ITIP20(_token).transfer(sequencer, withdrawal.fee);
         }
 
         // Execute the withdrawal
         if (withdrawal.gasLimit == 0) {
             // Simple transfer, no callback
             bool success;
-            try ITIP20(token).transfer(withdrawal.to, withdrawal.amount) returns (bool ok) {
+            try ITIP20(_token).transfer(withdrawal.to, withdrawal.amount) returns (bool ok) {
                 success = ok;
             } catch {
                 success = false;
             }
 
             if (!success) {
-                _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient);
-                emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, false);
+                _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+                emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
                 return;
             }
 
-            emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
+            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, true);
             return;
         }
 
         // Try callback via messenger; revert is treated as failure
         try IZoneMessenger(messenger)
             .relayMessage(
+                _token,
                 withdrawal.sender,
                 withdrawal.to,
                 withdrawal.amount,
                 withdrawal.gasLimit,
                 withdrawal.callbackData
             ) {
-            emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, true);
+            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, true);
         } catch {
             // Callback failed: bounce back to zone (only amount, not fee)
-            _enqueueBounceBack(withdrawal.amount, withdrawal.fallbackRecipient);
-            emit WithdrawalProcessed(withdrawal.to, withdrawal.amount, false);
+            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
         }
     }
 
     /// @notice Enqueue a bounce-back deposit for failed callback
-    function _enqueueBounceBack(uint128 amount, address fallbackRecipient) internal {
+    /// @param _token The token from the failed withdrawal
+    /// @param amount The amount to bounce back
+    /// @param fallbackRecipient The zone address to receive the bounce-back
+    function _enqueueBounceBack(
+        address _token,
+        uint128 amount,
+        address fallbackRecipient
+    )
+        internal
+    {
         Deposit memory depositData = Deposit({
-            sender: address(this), to: fallbackRecipient, amount: amount, memo: bytes32(0)
+            token: _token,
+            sender: address(this),
+            to: fallbackRecipient,
+            amount: amount,
+            memo: bytes32(0)
         });
 
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
-        emit BounceBack(newCurrentDepositQueueHash, fallbackRecipient, amount);
+        emit BounceBack(newCurrentDepositQueueHash, fallbackRecipient, _token, amount);
     }
 
     /*//////////////////////////////////////////////////////////////

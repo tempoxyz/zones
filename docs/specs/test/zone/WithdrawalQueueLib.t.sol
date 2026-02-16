@@ -353,6 +353,7 @@ contract WithdrawalQueueLibTest is Test {
         returns (Withdrawal memory)
     {
         return Withdrawal({
+            token: address(0x100),
             sender: sender,
             to: to,
             amount: amount,
