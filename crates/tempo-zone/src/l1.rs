@@ -263,6 +263,14 @@ impl L1Subscriber {
         while let Some(header) = stream.next().await {
             let block_number = header.number();
 
+            // Skip blocks already enqueued during backfill. The WS subscription
+            // starts before backfill so it may buffer blocks that were already
+            // processed. Enqueuing them again would break chain continuity.
+            if block_number <= last_enqueued {
+                debug!(block_number, last_enqueued, "Skipping already-enqueued L1 block");
+                continue;
+            }
+
             // Detect gaps: if the subscription skipped blocks, backfill them.
             // Each skipped block must be enqueued (even without deposits) to
             // maintain chain continuity for advanceTempo.

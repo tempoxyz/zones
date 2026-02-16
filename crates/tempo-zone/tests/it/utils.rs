@@ -133,7 +133,7 @@ impl ZoneTestNode {
             let tip20 = &tip20;
             async move {
                 let balance = tip20.balanceOf(account).call().await?;
-                if balance > min_balance {
+                if balance >= min_balance {
                     Ok(Some(balance))
                 } else {
                     Ok(None)
@@ -437,6 +437,45 @@ impl L1TestNode {
         self.dev_signer().address()
     }
 
+    /// Returns a signer for the second test account (mnemonic index 1).
+    ///
+    /// This account is NOT pre-funded — use [`fund_user`](Self::fund_user) to
+    /// transfer pathUSD from the dev account before depositing.
+    pub(crate) fn user_signer(&self) -> alloy_signer_local::PrivateKeySigner {
+        MnemonicBuilder::<English>::default()
+            .phrase(TEST_MNEMONIC)
+            .index(1)
+            .expect("valid derivation index")
+            .build()
+            .expect("valid test mnemonic")
+    }
+
+    /// Returns a signer derived from [`TEST_MNEMONIC`] at the given BIP-44 index.
+    pub(crate) fn signer_at(&self, index: u32) -> alloy_signer_local::PrivateKeySigner {
+        MnemonicBuilder::<English>::default()
+            .phrase(TEST_MNEMONIC)
+            .index(index)
+            .expect("valid derivation index")
+            .build()
+            .expect("valid test mnemonic")
+    }
+
+    /// Transfer pathUSD from the dev account to a recipient on L1.
+    pub(crate) async fn fund_user(&self, to: Address, amount: u128) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+        use tempo_precompiles::PATH_USD_ADDRESS;
+
+        let provider = self.dev_provider();
+        let receipt = ITIP20::new(PATH_USD_ADDRESS, &provider)
+            .transfer(to, U256::from(amount))
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "fund_user transfer failed");
+        Ok(())
+    }
+
     /// Read a TIP-20 token balance on L1 (single-shot, no polling).
     pub(crate) async fn balance_of(&self, token: Address, account: Address) -> eyre::Result<U256> {
         use tempo_contracts::precompiles::ITIP20;
@@ -566,6 +605,15 @@ impl L1TestNode {
     /// Captures the current L1 header as the genesis anchor, then calls
     /// `createZone()` with pathUSD as the token and the dev account as sequencer.
     pub(crate) async fn create_zone(&self, factory_address: Address) -> eyre::Result<Address> {
+        self.create_zone_with_sequencer(factory_address, self.dev_address()).await
+    }
+
+    /// Create a zone on an existing ZoneFactory with a custom sequencer address.
+    pub(crate) async fn create_zone_with_sequencer(
+        &self,
+        factory_address: Address,
+        sequencer: Address,
+    ) -> eyre::Result<Address> {
         use zone::abi::ZoneFactory;
         use tempo_precompiles::PATH_USD_ADDRESS;
 
@@ -589,7 +637,7 @@ impl L1TestNode {
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 token: PATH_USD_ADDRESS,
-                sequencer: self.dev_address(),
+                sequencer,
                 verifier: verifier_address,
                 zoneParams: ZoneFactory::ZoneParams {
                     genesisBlockHash: B256::ZERO,
@@ -649,14 +697,15 @@ impl L1TestNode {
             .ok_or_else(|| eyre::eyre!("SwapAndDepositRouter deployment missing contract address"))
     }
 
-    /// Deploy L1 infrastructure for a two-zone cross-zone test.
-    ///
-    /// Creates a ZoneFactory, two zones (A and B), and a SwapAndDepositRouter.
-    /// Returns `(portal_a, portal_b, router_address)`.
-    pub(crate) async fn deploy_two_zones(&self) -> eyre::Result<(Address, Address, Address)> {
+    /// Deploy L1 infrastructure for a two-zone cross-zone test with separate sequencers.
+    pub(crate) async fn deploy_two_zones_with_sequencers(
+        &self,
+        sequencer_a: Address,
+        sequencer_b: Address,
+    ) -> eyre::Result<(Address, Address, Address)> {
         let factory = self.deploy_zone_factory().await?;
-        let portal_a = self.create_zone(factory).await?;
-        let portal_b = self.create_zone(factory).await?;
+        let portal_a = self.create_zone_with_sequencer(factory, sequencer_a).await?;
+        let portal_b = self.create_zone_with_sequencer(factory, sequencer_b).await?;
         let router = self.deploy_router(factory).await?;
         Ok((portal_a, portal_b, router))
     }
@@ -808,8 +857,6 @@ impl WithdrawalArgs {
 pub(crate) struct ZoneAccount {
     /// The account's on-chain address (derived from `signer`).
     address: Address,
-    /// Signing key used for both L1 and L2 transactions.
-    signer: alloy_signer_local::PrivateKeySigner,
     /// Wallet-attached provider for Tempo L1 (deposits, approvals).
     l1_provider: alloy_provider::DynProvider,
     /// Wallet-attached provider for the Zone L2 (withdrawals, approvals).
@@ -825,14 +872,18 @@ pub(crate) struct ZoneAccount {
 impl ZoneAccount {
     /// Create a new `ZoneAccount` from an [`L1TestNode`] and [`ZoneTestNode`].
     ///
-    /// Uses the L1's dev signer as the account key. The same key signs both
-    /// L1 and L2 transactions.
+    /// Uses the L1's **user** signer (mnemonic index 1) as the account key,
+    /// separate from the dev/sequencer account (index 0). The same key signs
+    /// both L1 and L2 transactions.
+    ///
+    /// The user account must be funded on L1 before depositing — call
+    /// [`L1TestNode::fund_user`] first.
     pub(crate) fn from_l1_and_zone(
         l1: &L1TestNode,
         zone: &ZoneTestNode,
         portal_address: Address,
     ) -> Self {
-        let signer = l1.dev_signer();
+        let signer = l1.user_signer();
         let address = signer.address();
 
         let l1_provider = ProviderBuilder::new()
@@ -847,7 +898,6 @@ impl ZoneAccount {
 
         Self {
             address,
-            signer,
             l1_provider,
             l2_provider,
             portal_address,
@@ -859,11 +909,6 @@ impl ZoneAccount {
     /// The account's address.
     pub(crate) fn address(&self) -> Address {
         self.address
-    }
-
-    /// The account's signer (for spawning the zone sequencer, etc.).
-    pub(crate) fn signer(&self) -> alloy_signer_local::PrivateKeySigner {
-        self.signer.clone()
     }
 
     /// Approve the ZonePortal to spend `amount` of `token` on L1, then deposit.
@@ -955,11 +1000,12 @@ impl ZoneAccount {
         Ok(())
     }
 
-    /// Spawn the zone sequencer background tasks for this account.
+    /// Spawn the zone sequencer background tasks using the given L1 signer.
     pub(crate) async fn spawn_sequencer(
         &self,
         l1: &L1TestNode,
         zone: &ZoneTestNode,
+        sequencer_signer: alloy_signer_local::PrivateKeySigner,
     ) -> zone::ZoneSequencerHandle {
         use zone::abi::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
@@ -974,7 +1020,7 @@ impl ZoneAccount {
             zone_poll_interval: Duration::from_millis(500),
         };
 
-        zone::spawn_zone_sequencer(config, self.signer()).await
+        zone::spawn_zone_sequencer(config, sequencer_signer).await
     }
 }
 

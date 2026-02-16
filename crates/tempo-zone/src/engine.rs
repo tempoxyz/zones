@@ -16,7 +16,7 @@ use reth_payload_primitives::{
 use reth_primitives_traits::{HeaderTy, SealedHeaderFor};
 use reth_storage_api::BlockReader;
 use std::{collections::VecDeque, time::Duration};
-use tracing::{debug, error, info};
+use tracing::error;
 
 use crate::DepositQueue;
 

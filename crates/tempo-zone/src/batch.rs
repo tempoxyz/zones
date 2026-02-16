@@ -188,9 +188,15 @@ impl BatchSubmitter {
     async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
-        if tempo_block_number > current_l1_block {
+        // EIP-2935 stores the hash of block N when block N+1 is processed, so
+        // getBlockHash(N) only returns non-zero when block.number > N. If our
+        // tempo_block_number equals the current L1 tip the batch tx would land
+        // in the same or next block where getBlockHash would still return zero.
+        // Wait until L1 advances past our anchor block.
+        if tempo_block_number >= current_l1_block {
             return Err(eyre::eyre!(
-                "tempo_block_number ({tempo_block_number}) is ahead of current L1 block ({current_l1_block})"
+                "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 (tip={current_l1_block}), \
+                 will retry after L1 advances"
             ));
         }
 

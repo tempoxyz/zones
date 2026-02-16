@@ -4,7 +4,6 @@
 //! Unlike the Tempo L1 [`TempoBlockExecutor`], this executor does **not** enforce subblock
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
 
-use alloy_consensus::Transaction;
 use alloy_evm::{
     Database, Evm,
     block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},

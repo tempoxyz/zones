@@ -70,13 +70,13 @@ async fn test_multiple_deposits_across_blocks() -> eyre::Result<()> {
 
     // Alice should have 500k + 300k = 800k
     let alice_balance = zone
-        .wait_for_balance(PATH_USD_ADDRESS, alice, U256::ZERO, DEFAULT_TIMEOUT)
+        .wait_for_balance(PATH_USD_ADDRESS, alice, U256::from(800_000u128), DEFAULT_TIMEOUT)
         .await?;
     assert_eq!(alice_balance, U256::from(800_000u128));
 
     // Bob should have 700k
     let bob_balance = zone
-        .wait_for_balance(PATH_USD_ADDRESS, bob, U256::ZERO, DEFAULT_TIMEOUT)
+        .wait_for_balance(PATH_USD_ADDRESS, bob, U256::from(700_000u128), DEFAULT_TIMEOUT)
         .await?;
     assert_eq!(bob_balance, U256::from(700_000u128));
 
@@ -145,7 +145,7 @@ async fn test_two_zones_independent_deposits() -> eyre::Result<()> {
 
     // Zone1: Alice should have 500k + 300k = 800k, Bob should have 0
     let zone1_alice = zone1
-        .wait_for_balance(PATH_USD_ADDRESS, alice, U256::ZERO, DEFAULT_TIMEOUT)
+        .wait_for_balance(PATH_USD_ADDRESS, alice, U256::from(800_000u128), DEFAULT_TIMEOUT)
         .await?;
     assert_eq!(zone1_alice, U256::from(800_000u128));
 
@@ -154,7 +154,7 @@ async fn test_two_zones_independent_deposits() -> eyre::Result<()> {
 
     // Zone2: Bob should have 700k + 200k = 900k, Alice should have 0
     let zone2_bob = zone2
-        .wait_for_balance(PATH_USD_ADDRESS, bob, U256::ZERO, DEFAULT_TIMEOUT)
+        .wait_for_balance(PATH_USD_ADDRESS, bob, U256::from(900_000u128), DEFAULT_TIMEOUT)
         .await?;
     assert_eq!(zone2_bob, U256::from(900_000u128));
 
