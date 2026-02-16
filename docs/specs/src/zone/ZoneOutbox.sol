@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { IZoneConfig, IZoneOutbox, IZoneToken, LastBatch, Withdrawal } from "./IZone.sol";
+
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
@@ -33,9 +34,6 @@ contract ZoneOutbox is IZoneOutbox {
 
     /// @notice Zone configuration (reads sequencer from L1)
     IZoneConfig public immutable config;
-
-    /// @notice The zone token (TIP-20 at same address as Tempo)
-    IZoneToken public immutable zoneToken;
 
     /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
@@ -85,9 +83,8 @@ contract ZoneOutbox is IZoneOutbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config, address _zoneToken) {
+    constructor(address _config) {
         config = IZoneConfig(_config);
-        zoneToken = IZoneToken(_zoneToken);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -128,9 +125,12 @@ contract ZoneOutbox is IZoneOutbox {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Request a withdrawal from the zone back to Tempo
-    /// @dev Caller must have approved the outbox to spend `amount + fee` of zone tokens.
+    /// @dev Caller must have approved the outbox to spend `amount + fee` of the specified token.
     ///      The outbox burns the tokens and stores the withdrawal. The sequencer
     ///      calls finalizeWithdrawalBatch() to construct the withdrawal queue hash.
+    ///      The token must be enabled on the portal. Withdrawals can never be disabled
+    ///      for an enabled token (non-custodial guarantee).
+    /// @param token The TIP-20 token to withdraw
     /// @param to The Tempo recipient address
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
@@ -138,6 +138,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param fallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     function requestWithdrawal(
+        address token,
         address to,
         uint128 amount,
         bytes32 memo,
@@ -170,11 +171,13 @@ contract ZoneOutbox is IZoneOutbox {
         }
 
         // Calculate processing fee (locked in at request time)
+        // Fee is paid in the same token being withdrawn
         uint128 fee = calculateWithdrawalFee(gasLimit);
         uint128 totalBurn = amount + fee;
 
         // Transfer tokens from sender to this contract, then burn
         // (Using transferFrom so user must approve first)
+        IZoneToken zoneToken = IZoneToken(token);
         if (!zoneToken.transferFrom(msg.sender, address(this), totalBurn)) {
             revert TransferFailed();
         }
@@ -186,6 +189,7 @@ contract ZoneOutbox is IZoneOutbox {
         // Store withdrawal in pending array
         _pendingWithdrawals.push(
             Withdrawal({
+                token: token,
                 sender: msg.sender,
                 to: to,
                 amount: amount,
@@ -201,7 +205,7 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 index = nextWithdrawalIndex++;
 
         emit WithdrawalRequested(
-            index, msg.sender, to, amount, fee, memo, gasLimit, fallbackRecipient, data
+            index, msg.sender, token, to, amount, fee, memo, gasLimit, fallbackRecipient, data
         );
     }
 

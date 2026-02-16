@@ -850,9 +850,9 @@ contract StablecoinDEXInvariantTest is BaseTest {
                 orderCount++;
                 if (order.isBid) {
                     uint32 price = exchange.tickToPrice(order.tick);
-                    uint256 escrow =
-                        (uint256(order.remaining) * uint256(price) + exchange.PRICE_SCALE() - 1)
-                            / exchange.PRICE_SCALE();
+                    uint256 escrow = (
+                        uint256(order.remaining) * uint256(price) + exchange.PRICE_SCALE() - 1
+                    ) / exchange.PRICE_SCALE();
                     pathUsdEscrowed += escrow;
                 } else {
                     // Find which token this order is for
@@ -894,11 +894,8 @@ contract StablecoinDEXInvariantTest is BaseTest {
         }
 
         vm.recordLogs();
-        try exchange.swapExactAmountIn(
-            before.tokenIn, before.tokenOut, amount, amount - 100
-        ) returns (
-            uint128 amountOut
-        ) {
+        try exchange.swapExactAmountIn(before.tokenIn, before.tokenOut, amount, amount - 100)
+        returns (uint128 amountOut) {
             _maxDust += _countOrderFilledEvents();
             // TEMPO-DEX4: amountOut >= minAmountOut
             assertTrue(
@@ -955,11 +952,8 @@ contract StablecoinDEXInvariantTest is BaseTest {
         }
 
         vm.recordLogs();
-        try exchange.swapExactAmountOut(
-            before.tokenIn, before.tokenOut, amount, amount + 100
-        ) returns (
-            uint128 amountIn
-        ) {
+        try exchange.swapExactAmountOut(before.tokenIn, before.tokenOut, amount, amount + 100)
+        returns (uint128 amountIn) {
             _maxDust += _countOrderFilledEvents();
             // TEMPO-DEX5: amountIn <= maxAmountIn
             assertTrue(
@@ -1017,8 +1011,8 @@ contract StablecoinDEXInvariantTest is BaseTest {
 
         uint256 tokenInTotalAfter =
             TIP20(before.tokenIn).balanceOf(swapper) + exchange.balanceOf(swapper, before.tokenIn);
-        uint256 tokenOutTotalAfter = TIP20(before.tokenOut).balanceOf(swapper)
-            + exchange.balanceOf(swapper, before.tokenOut);
+        uint256 tokenOutTotalAfter =
+            TIP20(before.tokenOut).balanceOf(swapper) + exchange.balanceOf(swapper, before.tokenOut);
 
         // Swapper's total tokenIn should decrease by tokenInSpent
         assertEq(

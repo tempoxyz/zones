@@ -4,10 +4,10 @@ pragma solidity ^0.8.13;
 import {
     ITempoState,
     IZoneConfig,
-    IZoneToken,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
-    PORTAL_SEQUENCER_SLOT
+    PORTAL_SEQUENCER_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT
 } from "./IZone.sol";
 
 /// @title ZoneConfig
@@ -20,9 +20,6 @@ contract ZoneConfig is IZoneConfig {
     /*//////////////////////////////////////////////////////////////
                                IMMUTABLES
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Zone token address (TIP-20 at same address as Tempo)
-    address public immutable zoneToken;
 
     /// @notice L1 ZonePortal address
     address public immutable tempoPortal;
@@ -38,8 +35,7 @@ contract ZoneConfig is IZoneConfig {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _zoneToken, address _tempoPortal, address _tempoState) {
-        zoneToken = _zoneToken;
+    constructor(address _tempoPortal, address _tempoState) {
         tempoPortal = _tempoPortal;
         tempoState = ITempoState(_tempoState);
     }
@@ -118,10 +114,19 @@ contract ZoneConfig is IZoneConfig {
         return account == this.sequencer();
     }
 
-    /// @notice Get zone token as IZoneToken interface
-    /// @return Zone token interface
-    function getZoneToken() external view returns (IZoneToken) {
-        return IZoneToken(zoneToken);
+    /*//////////////////////////////////////////////////////////////
+                         TOKEN REGISTRY ACCESS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Check if a token is enabled by reading from L1 ZonePortal
+    /// @dev Reads the TokenConfig.enabled field from the portal's _tokenConfigs mapping.
+    ///      Mapping storage slot: keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT))
+    ///      TokenConfig is packed: enabled (bool, byte 0) and depositsActive (bool, byte 1)
+    function isEnabledToken(address token) external view returns (bool) {
+        bytes32 configSlot = keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT));
+        bytes32 value = tempoState.readTempoStorageSlot(tempoPortal, configSlot);
+        // TokenConfig.enabled is the first bool in the struct (lowest byte)
+        return uint8(uint256(value) & 0xff) != 0;
     }
 
 }

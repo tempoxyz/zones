@@ -18,7 +18,7 @@ struct ZoneInfo {
     uint64 zoneId;
     address portal;
     address messenger;
-    address token;
+    address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
     address sequencer;
     address verifier;
     bytes32 genesisBlockHash;
@@ -58,6 +58,7 @@ enum DepositType {
 }
 
 struct Deposit {
+    address token; // TIP-20 token being deposited
     address sender;
     address to;
     uint128 amount;
@@ -79,10 +80,12 @@ struct EncryptedDepositPayload {
 }
 
 /// @notice Encrypted deposit stored in the queue
-/// @dev Sender, amount, and key index are public; recipient and memo are encrypted.
+/// @dev Sender, token, amount, and key index are public; recipient and memo are encrypted.
+///      The token identity is public because the portal must escrow the correct token.
 ///      The keyIndex specifies which encryption key the user used, allowing the prover
 ///      to look up the correct key for decryption even after key rotations.
 struct EncryptedDeposit {
+    address token; // TIP-20 token being deposited (public, for escrow accounting)
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
@@ -260,6 +263,7 @@ interface ITempoStateReader {
 }
 
 struct Withdrawal {
+    address token; // TIP-20 token being withdrawn
     address sender; // who initiated the withdrawal on the zone
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
@@ -301,6 +305,8 @@ address constant TEMPO_STATE_READER = 0x1c00000000000000000000000000000000000004
 //   slot 4: currentDepositQueueHash (bytes32)
 //   slot 5: lastSyncedTempoBlockNumber (uint64)
 //   slot 6: _encryptionKeys (EncryptionKeyEntry[])
+//   slot 7: _tokenConfigs (mapping(address => TokenConfig))
+//   slot 8: _enabledTokens (address[])
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -310,6 +316,8 @@ bytes32 constant PORTAL_SEQUENCER_SLOT = bytes32(uint256(0));
 bytes32 constant PORTAL_PENDING_SEQUENCER_SLOT = bytes32(uint256(1));
 bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
 bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(6));
+bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(7));
+bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(8));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -358,7 +366,7 @@ interface IVerifier {
 interface IZoneFactory {
 
     struct CreateZoneParams {
-        address token;
+        address initialToken; // first TIP-20 to enable (sequencer can enable more later)
         address sequencer;
         address verifier;
         ZoneParams zoneParams;
@@ -368,7 +376,7 @@ interface IZoneFactory {
         uint64 indexed zoneId,
         address indexed portal,
         address indexed messenger,
-        address token,
+        address initialToken,
         address sequencer,
         address verifier,
         bytes32 genesisBlockHash,
@@ -391,6 +399,14 @@ interface IZoneFactory {
 
 }
 
+/// @notice Per-token configuration in the portal's token registry
+/// @dev enabled is permanent (write-once true); depositsActive can be toggled by sequencer.
+///      Once enabled, withdrawals can never be disabled (non-custodial guarantee).
+struct TokenConfig {
+    bool enabled; // true once sequencer enables this token (permanent, irreversible)
+    bool depositsActive; // sequencer can pause/unpause deposits; does not affect withdrawals
+}
+
 /// @title IZonePortal
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
@@ -398,6 +414,7 @@ interface IZonePortal {
     event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
+        address token,
         address to,
         uint128 netAmount,
         uint128 fee,
@@ -411,11 +428,14 @@ interface IZonePortal {
         bytes32 withdrawalQueueHash
     );
 
-    event WithdrawalProcessed(address indexed to, uint128 amount, bool callbackSuccess);
+    event WithdrawalProcessed(
+        address indexed to, address token, uint128 amount, bool callbackSuccess
+    );
 
     event BounceBack(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed fallbackRecipient,
+        address token,
         uint128 amount
     );
 
@@ -428,6 +448,7 @@ interface IZonePortal {
     event EncryptedDepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
+        address token,
         uint128 netAmount,
         uint128 fee,
         uint256 keyIndex,
@@ -448,6 +469,15 @@ interface IZonePortal {
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
+    /// @notice Emitted when sequencer enables a new TIP-20 token for bridging
+    event TokenEnabled(address indexed token);
+
+    /// @notice Emitted when sequencer pauses deposits for a token
+    event DepositsPaused(address indexed token);
+
+    /// @notice Emitted when sequencer resumes deposits for a token
+    event DepositsResumed(address indexed token);
+
     error NotSequencer();
     error NotPendingSequencer();
     error InvalidProof();
@@ -462,6 +492,9 @@ interface IZonePortal {
     error InvalidProofOfPossession();
     error DepositTooSmall();
     error GasFeeRateTooHigh();
+    error TokenNotEnabled();
+    error DepositsNotActive();
+    error TokenAlreadyEnabled();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
@@ -470,7 +503,6 @@ interface IZonePortal {
     function MAX_GAS_FEE_RATE() external view returns (uint128);
 
     function zoneId() external view returns (uint64);
-    function token() external view returns (address);
     function messenger() external view returns (address);
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
@@ -485,6 +517,37 @@ interface IZonePortal {
     function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);
+
+    /*//////////////////////////////////////////////////////////////
+                          TOKEN REGISTRY
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Check if a token is enabled for bridging (permanent once enabled)
+    function isTokenEnabled(address token) external view returns (bool);
+
+    /// @notice Check if deposits are currently active for a token
+    function areDepositsActive(address token) external view returns (bool);
+
+    /// @notice Get the token configuration for a specific token
+    function tokenConfig(address token) external view returns (TokenConfig memory);
+
+    /// @notice Get the number of enabled tokens
+    function enabledTokenCount() external view returns (uint256);
+
+    /// @notice Get an enabled token by index
+    function enabledTokenAt(uint256 index) external view returns (address);
+
+    /// @notice Enable a new TIP-20 token for bridging. Only callable by sequencer.
+    /// @dev Irreversible: once enabled, a token cannot be disabled.
+    ///      Validates the token is a TIP-20 and grants messenger max approval.
+    function enableToken(address token) external;
+
+    /// @notice Pause deposits for a token. Only callable by sequencer.
+    /// @dev Does not affect withdrawal processing (non-custodial guarantee).
+    function pauseDeposits(address token) external;
+
+    /// @notice Resume deposits for a token. Only callable by sequencer.
+    function resumeDeposits(address token) external;
 
     /// @notice Start a sequencer transfer. Only callable by current sequencer.
     /// @param newSequencer The address that will become sequencer after accepting.
@@ -553,6 +616,7 @@ interface IZonePortal {
         returns (bool valid, uint64 expiresAtBlock);
 
     function deposit(
+        address token,
         address to,
         uint128 amount,
         bytes32 memo
@@ -564,11 +628,14 @@ interface IZonePortal {
     /// @dev The encrypted payload contains (to, memo) encrypted to the sequencer's key
     ///      at the specified keyIndex. The user must specify which key they encrypted to,
     ///      ensuring correct decryption even if the key rotates before inclusion.
+    ///      The token identity is public (not encrypted) since the portal must escrow it.
+    /// @param token The TIP-20 token to deposit
     /// @param amount Amount to deposit
     /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
     /// @param encrypted The encrypted payload (recipient and memo)
     /// @return newCurrentDepositQueueHash The new deposit queue hash
     function depositEncrypted(
+        address token,
         uint128 amount,
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted
@@ -597,18 +664,17 @@ interface IZoneMessenger {
     /// @notice Returns the zone's portal address
     function portal() external view returns (address);
 
-    /// @notice Returns the zone token address
-    function token() external view returns (address);
-
     /// @notice Relay a withdrawal message. Only callable by the portal.
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
+    /// @param token The TIP-20 token to transfer
     /// @param sender The L2 origin address
     /// @param target The Tempo recipient
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
     function relayMessage(
+        address token,
         address sender,
         address target,
         uint128 amount,
@@ -625,6 +691,7 @@ interface IWithdrawalReceiver {
 
     function onWithdrawalReceived(
         address sender,
+        address token,
         uint128 amount,
         bytes calldata callbackData
     )
@@ -712,22 +779,25 @@ interface IZoneInbox {
         bytes32 indexed depositHash,
         address indexed sender,
         address indexed to,
+        address token,
         uint128 amount,
         bytes32 memo
     );
 
     /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
+    // Revealed after decryption
     event EncryptedDepositProcessed(
         bytes32 indexed depositHash,
         address indexed sender,
-        address indexed to, // Revealed after decryption
+        address indexed to,
+        address token,
         uint128 amount,
-        bytes32 memo // Revealed after decryption
+        bytes32 memo
     );
 
     /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
     event EncryptedDepositFailed(
-        bytes32 indexed depositHash, address indexed sender, uint128 amount
+        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
     event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
 
@@ -746,9 +816,6 @@ interface IZoneInbox {
 
     /// @notice The TempoState predeploy address
     function tempoState() external view returns (ITempoState);
-
-    /// @notice The zone token (TIP-20 at same address as Tempo)
-    function zoneToken() external view returns (IZoneToken);
 
     /// @notice The zone's last processed deposit queue hash
     function processedDepositQueueHash() external view returns (bytes32);
@@ -799,6 +866,7 @@ interface IZoneOutbox {
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex,
         address indexed sender,
+        address token,
         address to,
         uint128 amount,
         uint128 fee,
@@ -818,9 +886,6 @@ interface IZoneOutbox {
 
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);
-
-    /// @notice The zone token (same as Tempo portal's token)
-    function zoneToken() external view returns (IZoneToken);
 
     /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
     /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
@@ -855,8 +920,12 @@ interface IZoneOutbox {
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo
-    /// @dev Caller must approve outbox to spend amount + fee
+    /// @dev Caller must approve outbox to spend amount + fee of the specified token.
+    ///      The token must be enabled on the portal. Withdrawals can never be disabled
+    ///      for an enabled token (non-custodial guarantee).
+    /// @param token The TIP-20 token to withdraw
     function requestWithdrawal(
+        address token,
         address to,
         uint128 amount,
         bytes32 memo,
@@ -889,9 +958,6 @@ interface IZoneConfig {
     error NotSequencer();
     error NoEncryptionKeySet();
 
-    /// @notice Zone token address (TIP-20 at same address as Tempo)
-    function zoneToken() external view returns (address);
-
     /// @notice L1 ZonePortal address
     function tempoPortal() external view returns (address);
 
@@ -912,7 +978,7 @@ interface IZoneConfig {
     /// @notice Check if an address is the current sequencer
     function isSequencer(address account) external view returns (bool);
 
-    /// @notice Get zone token as IZoneToken interface
-    function getZoneToken() external view returns (IZoneToken);
+    /// @notice Check if a token is enabled by reading from L1 ZonePortal
+    function isEnabledToken(address token) external view returns (bool);
 
 }
