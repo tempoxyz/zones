@@ -29,10 +29,6 @@ const EIP2935_HISTORY_WINDOW: u64 = 8192;
 /// the block falls out of the window between our check and on-chain execution.
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 
-/// Finality margin for L1 anchor blocks. Using 64 blocks (~32s at 500ms
-/// block time) to avoid anchoring to blocks that may be reorged.
-const FINALITY_MARGIN: u64 = 64;
-
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
 /// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
@@ -201,11 +197,8 @@ impl BatchSubmitter {
         }
 
         // tempo_block_number is outside the EIP-2935 window — use ancestry mode.
-        // Pick a recent block well within the window as anchor. Use the larger
-        // of the two margins to ensure the anchor is both within EIP-2935 and
-        // past the finality horizon.
-        let anchor_offset = EIP2935_SAFETY_MARGIN.max(FINALITY_MARGIN);
-        let anchor_block = current_l1_block.saturating_sub(anchor_offset);
+        // Pick a recent block well within the window as anchor.
+        let anchor_block = current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN);
 
         warn!(
             tempo_block_number,
