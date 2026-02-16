@@ -29,6 +29,10 @@ const EIP2935_HISTORY_WINDOW: u64 = 8192;
 /// the block falls out of the window between our check and on-chain execution.
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 
+/// Finality margin for L1 anchor blocks. Using 64 blocks (~32s at 500ms
+/// block time) to avoid anchoring to blocks that may be reorged.
+const FINALITY_MARGIN: u64 = 64;
+
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
 /// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
@@ -61,18 +65,26 @@ pub struct BatchSubmitter {
     /// ZonePortal contract instance for calling `submitBatch` and reading
     /// on-chain state such as `blockHash()`.
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    /// The portal's `genesisTempoBlockNumber` — batches with a
+    /// `tempo_block_number` below this value will be rejected on-chain.
+    genesis_tempo_block_number: u64,
 }
 
 impl BatchSubmitter {
     /// Create a new batch submitter from a shared L1 provider.
     ///
     /// The provider must already include the sequencer wallet for signing.
-    pub fn new(portal_address: Address, provider: DynProvider<TempoNetwork>) -> Self {
+    pub fn new(
+        portal_address: Address,
+        provider: DynProvider<TempoNetwork>,
+        genesis_tempo_block_number: u64,
+    ) -> Self {
         let portal = ZonePortal::new(portal_address, provider.clone());
         Self {
             portal_address,
             l1_provider: provider,
             portal,
+            genesis_tempo_block_number,
         }
     }
 
@@ -103,6 +115,18 @@ impl BatchSubmitter {
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
     ))]
     pub async fn submit_batch(&self, batch: &BatchData) -> Result<B256> {
+        if batch.tempo_block_number < self.genesis_tempo_block_number {
+            return Err(eyre::eyre!(
+                "tempo_block_number ({}) is below genesis ({})",
+                batch.tempo_block_number,
+                self.genesis_tempo_block_number
+            ));
+        }
+
+        if !batch.withdrawal_queue_hash.is_zero() {
+            self.check_withdrawal_queue_capacity().await?;
+        }
+
         let block_transition = BlockTransition {
             prevBlockHash: batch.prev_block_hash,
             nextBlockHash: batch.next_block_hash,
@@ -164,6 +188,12 @@ impl BatchSubmitter {
     async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
+        if tempo_block_number > current_l1_block {
+            return Err(eyre::eyre!(
+                "tempo_block_number ({tempo_block_number}) is ahead of current L1 block ({current_l1_block})"
+            ));
+        }
+
         let effective_window = EIP2935_HISTORY_WINDOW.saturating_sub(EIP2935_SAFETY_MARGIN);
 
         if current_l1_block.saturating_sub(tempo_block_number) < effective_window {
@@ -171,8 +201,11 @@ impl BatchSubmitter {
         }
 
         // tempo_block_number is outside the EIP-2935 window — use ancestry mode.
-        // Pick a recent block well within the window as anchor.
-        let anchor_block = current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN);
+        // Pick a recent block well within the window as anchor. Use the larger
+        // of the two margins to ensure the anchor is both within EIP-2935 and
+        // past the finality horizon.
+        let anchor_offset = EIP2935_SAFETY_MARGIN.max(FINALITY_MARGIN);
+        let anchor_block = current_l1_block.saturating_sub(anchor_offset);
 
         warn!(
             tempo_block_number,
@@ -183,6 +216,12 @@ impl BatchSubmitter {
         );
 
         Ok(AnchorMode::Ancestry { anchor_block })
+    }
+
+    /// Read the portal's `genesisTempoBlockNumber` from L1.
+    pub async fn read_genesis_tempo_block_number(&self) -> Result<u64> {
+        let n = self.portal.genesisTempoBlockNumber().call().await?;
+        Ok(n)
     }
 
     /// Read the current `blockHash` from the ZonePortal on L1.
@@ -205,6 +244,35 @@ impl BatchSubmitter {
             .try_into()
             .map_err(|_| eyre::eyre!("withdrawal queue tail overflow"))?;
         Ok(tail)
+    }
+
+    /// Read the current withdrawal queue head from the ZonePortal on L1.
+    pub async fn read_portal_withdrawal_queue_head(&self) -> Result<u64> {
+        let head = self.portal.withdrawalQueueHead().call().await?;
+        let head: u64 = head
+            .try_into()
+            .map_err(|_| eyre::eyre!("withdrawal queue head overflow"))?;
+        Ok(head)
+    }
+
+    /// Check if the withdrawal queue has capacity for another batch.
+    ///
+    /// The portal uses a ring buffer with 100 slots. Returns an error if the
+    /// queue is full (`tail - head >= 100`).
+    pub async fn check_withdrawal_queue_capacity(&self) -> Result<()> {
+        let (head, tail) = tokio::try_join!(
+            self.read_portal_withdrawal_queue_head(),
+            self.read_portal_withdrawal_queue_tail(),
+        )?;
+        const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
+        if tail.saturating_sub(head) >= WITHDRAWAL_QUEUE_CAPACITY {
+            return Err(eyre::eyre!(
+                "withdrawal queue full ({} pending slots, capacity {})",
+                tail.saturating_sub(head),
+                WITHDRAWAL_QUEUE_CAPACITY
+            ));
+        }
+        Ok(())
     }
 }
 

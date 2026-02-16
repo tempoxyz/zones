@@ -157,8 +157,8 @@ pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count:
 ///
 /// ## POC limitations
 ///
-/// - Transactions are submitted to L1 but the processor does not wait for confirmation receipts
-///   in a production-ready way. Failures are logged and the processor continues.
+/// - Transactions are submitted sequentially and the processor waits for each confirmation.
+///   On failure, processing stops and remaining withdrawals are retried on the next cycle.
 /// - The portal automatically pays the processing fee to the sequencer; this processor does not
 ///   handle fee accounting.
 pub struct WithdrawalProcessor {
@@ -274,21 +274,44 @@ impl WithdrawalProcessor {
                 "Submitting processWithdrawal to L1"
             );
 
-            match self
+            let tx_result = self
                 .portal
                 .processWithdrawal(withdrawal.clone(), remaining_queue)
                 .send()
-                .await
-            {
+                .await;
+
+            match tx_result {
                 Ok(pending) => {
-                    info!(
-                        slot = head_val,
-                        index = i,
-                        tx_hash = %pending.tx_hash(),
-                        to = %withdrawal.to,
-                        amount = %withdrawal.amount,
-                        "processWithdrawal tx submitted to L1"
-                    );
+                    let tx_hash = *pending.tx_hash();
+                    match pending
+                        .with_required_confirmations(1)
+                        .with_timeout(Some(std::time::Duration::from_secs(30)))
+                        .watch()
+                        .await
+                    {
+                        Ok(_) => {
+                            info!(
+                                slot = head_val,
+                                index = i,
+                                %tx_hash,
+                                to = %withdrawal.to,
+                                amount = %withdrawal.amount,
+                                "processWithdrawal confirmed on L1"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                slot = head_val,
+                                index = i,
+                                %tx_hash,
+                                to = %withdrawal.to,
+                                amount = %withdrawal.amount,
+                                error = %e,
+                                "processWithdrawal tx not confirmed, stopping batch processing"
+                            );
+                            return Ok(());
+                        }
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -297,12 +320,14 @@ impl WithdrawalProcessor {
                         to = %withdrawal.to,
                         amount = %withdrawal.amount,
                         error = %e,
-                        "processWithdrawal tx failed"
+                        "processWithdrawal tx failed to send, stopping batch processing"
                     );
+                    return Ok(());
                 }
             }
         }
 
+        // All withdrawals in this slot confirmed — safe to remove.
         self.store.lock().remove_batch(head_val);
 
         info!(
