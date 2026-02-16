@@ -14,13 +14,15 @@
 //! Withdrawals from all blocks in the range are combined into a single hash chain
 //! and stored under one portal queue slot.
 //!
-//! ## EIP-2935 constraint
+//! ## EIP-2935 and ancestry mode
 //!
 //! The portal verifies `tempoBlockNumber` via EIP-2935, which stores the last 8192
-//! block hashes. The batch's `tempoBlockNumber` must be within this window of the
-//! current L1 block. In practice this is not a concern because the zone produces
-//! blocks at L1 speed — the monitor would need to fall ~2.3 hours behind to hit
-//! this limit.
+//! block hashes. When `tempoBlockNumber` is within this window the batch submitter
+//! uses **direct mode** (reading the hash straight from EIP-2935). If the zone
+//! falls behind (e.g. sequencer downtime >2 hours), the submitter automatically
+//! switches to **ancestry mode**: it supplies a recent L1 block number that IS
+//! within the EIP-2935 window, and the proof must include a block header chain
+//! linking that anchor back to `tempoBlockNumber`.
 
 use std::{sync::Arc, time::Duration};
 
