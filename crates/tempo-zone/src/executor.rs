@@ -8,7 +8,10 @@ use alloy_consensus::Transaction;
 use alloy_evm::{
     Database, Evm,
     block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
-    eth::{EthBlockExecutor, receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx}},
+    eth::{
+        EthBlockExecutor,
+        receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
+    },
 };
 use reth_revm::{Inspector, State, context::result::ResultAndState};
 use tempo_chainspec::TempoChainSpec;
@@ -67,12 +70,7 @@ where
         chain_spec: &'a TempoChainSpec,
     ) -> Self {
         Self {
-            inner: EthBlockExecutor::new(
-                evm,
-                ctx.inner,
-                chain_spec,
-                ZoneReceiptBuilder,
-            ),
+            inner: EthBlockExecutor::new(evm, ctx.inner, chain_spec, ZoneReceiptBuilder),
         }
     }
 }

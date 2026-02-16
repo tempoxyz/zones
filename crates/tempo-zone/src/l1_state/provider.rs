@@ -80,11 +80,29 @@ impl L1StateProvider {
         cache: SharedL1StateCache,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        let provider = match ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect(&config.l1_rpc_url)
             .await
-            .expect("valid L1 RPC URL")
-            .erased();
+        {
+            Ok(p) => p.erased(),
+            Err(e) => {
+                warn!(
+                    url = %config.l1_rpc_url,
+                    error = %e,
+                    "Failed to connect L1 state provider, using fallback (TempoStateReader precompile will not work)"
+                );
+                ProviderBuilder::new_with_network::<TempoNetwork>()
+                    .connect_http(
+                        config
+                            .l1_rpc_url
+                            .replacen("wss://", "https://", 1)
+                            .replacen("ws://", "http://", 1)
+                            .parse()
+                            .unwrap_or_else(|_| "http://127.0.0.1:1".parse().unwrap()),
+                    )
+                    .erased()
+            }
+        };
 
         Self {
             request_timeout: config.request_timeout,
