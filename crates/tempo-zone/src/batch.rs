@@ -117,10 +117,7 @@ impl BatchSubmitter {
 
         let recent_tempo_block_number = anchor_mode.recent_block_number();
 
-        info!(
-            ?anchor_mode,
-            "Submitting batch to ZonePortal on L1"
-        );
+        info!(?anchor_mode, "Submitting batch to ZonePortal on L1");
 
         let tx_hash = self
             .portal
@@ -164,7 +161,6 @@ impl BatchSubmitter {
     /// A safety margin of [`EIP2935_SAFETY_MARGIN`] (360 blocks, ~3 min) is
     /// applied to guard against the block aging out of the window between our
     /// check here and the transaction's on-chain execution.
-    ///
     async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
@@ -196,6 +192,19 @@ impl BatchSubmitter {
     pub async fn read_portal_block_hash(&self) -> Result<B256> {
         let hash = self.portal.blockHash().call().await?;
         Ok(hash)
+    }
+
+    /// Read the current withdrawal queue tail from the ZonePortal on L1.
+    ///
+    /// Used at startup and during resync to initialize
+    /// `portal_withdrawal_queue_tail` so withdrawal data is stored under the
+    /// correct portal queue slot.
+    pub async fn read_portal_withdrawal_queue_tail(&self) -> Result<u64> {
+        let tail = self.portal.withdrawalQueueTail().call().await?;
+        let tail: u64 = tail
+            .try_into()
+            .map_err(|_| eyre::eyre!("withdrawal queue tail overflow"))?;
+        Ok(tail)
     }
 }
 

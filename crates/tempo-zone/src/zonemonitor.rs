@@ -99,8 +99,9 @@ pub struct ZoneMonitor {
     prev_block_hash: B256,
     /// Tracks the portal's withdrawal queue tail position.
     /// The withdrawal store keys must match the portal's queue slot indices
-    /// (not the L2 outbox's internal `withdrawalBatchIndex`). This counter
-    /// starts at 0 and increments each time a batch with a non-zero
+    /// (not the L2 outbox's internal `withdrawalBatchIndex`). This counter is
+    /// initialized from the portal’s on-chain `withdrawalQueueTail()` at startup,
+    /// and incremented each time a batch with a non-zero
     /// `withdrawal_queue_hash` is successfully submitted to L1.
     portal_withdrawal_queue_tail: u64,
 }
@@ -129,10 +130,17 @@ impl ZoneMonitor {
 
         let batch_submitter = BatchSubmitter::new(config.portal_address, l1_provider);
 
-        let prev_block_hash = batch_submitter
-            .read_portal_block_hash()
-            .await
-            .expect("failed to read portal blockHash at startup");
+        let (prev_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
+            batch_submitter.read_portal_block_hash(),
+            batch_submitter.read_portal_withdrawal_queue_tail(),
+        )
+        .expect("failed to read portal state at startup");
+
+        info!(
+            %prev_block_hash,
+            portal_withdrawal_queue_tail,
+            "Initialized from portal state"
+        );
 
         Self {
             config,
@@ -146,7 +154,7 @@ impl ZoneMonitor {
             last_processed_block: 0,
             prev_processed_deposit_hash: B256::ZERO,
             prev_block_hash,
-            portal_withdrawal_queue_tail: 0,
+            portal_withdrawal_queue_tail,
         }
     }
 
@@ -311,20 +319,24 @@ impl ZoneMonitor {
         let tempo_call = self.tempo_state.tempoBlockNumber().block(to.into());
         let deposit_call = self.inbox.processedDepositQueueHash().block(to.into());
         let block_fut = async {
-            self.provider.get_block_by_number(to.into()).await.map_err(Into::into)
+            self.provider
+                .get_block_by_number(to.into())
+                .await
+                .map_err(Into::into)
         };
-        let (tempo_block_number, processed_deposit_hash, block) = tokio::try_join!(
-            tempo_call.call(),
-            deposit_call.call(),
-            block_fut,
-        )?;
+        let (tempo_block_number, processed_deposit_hash, block) =
+            tokio::try_join!(tempo_call.call(), deposit_call.call(), block_fut,)?;
 
         let block_hash = block
             .ok_or_else(|| eyre::eyre!("zone block {to} not found"))?
             .header
             .hash;
 
-        Ok(ZoneBlockSnapshot { tempo_block_number, processed_deposit_hash, block_hash })
+        Ok(ZoneBlockSnapshot {
+            tempo_block_number,
+            processed_deposit_hash,
+            block_hash,
+        })
     }
 
     /// Submit a `submitBatch` transaction to the ZonePortal on L1 with exponential
@@ -338,8 +350,9 @@ impl ZoneMonitor {
     ///   so it can finalize newly enqueued withdrawal slots.
     ///
     /// On failure (after [`MAX_RETRIES`] attempts with [`INITIAL_RETRY_DELAY`]
-    /// doubling each time): resyncs `prev_block_hash` from the portal's on-chain
-    /// `blockHash()` and skips this block range so the monitor can continue.
+    /// doubling each time): resyncs `prev_block_hash` and
+    /// `portal_withdrawal_queue_tail` from the portal and skips this block range
+    /// so the monitor can continue.
     async fn submit_batch_with_retry(
         &mut self,
         batch_data: &BatchData,
@@ -406,28 +419,36 @@ impl ZoneMonitor {
         Ok(())
     }
 
-    /// Resync `prev_block_hash` from the portal's on-chain `blockHash()`.
+    /// Resync `prev_block_hash` and `portal_withdrawal_queue_tail` from the
+    /// portal's on-chain `blockHash()` and `withdrawalQueueTail()`.
     ///
     /// Called after exhausting retries so subsequent batches start from the
-    /// portal's actual state rather than the stale local value.
+    /// portal's actual state rather than stale local values.
     async fn resync_from_portal(&mut self, block_number: u64) {
         let old_hash = self.prev_block_hash;
-        match self.batch_submitter.read_portal_block_hash().await {
-            Ok(portal_hash) => {
+        let old_tail = self.portal_withdrawal_queue_tail;
+        match tokio::try_join!(
+            self.batch_submitter.read_portal_block_hash(),
+            self.batch_submitter.read_portal_withdrawal_queue_tail(),
+        ) {
+            Ok((portal_hash, portal_tail)) => {
                 warn!(
                     old_prev_block_hash = %old_hash,
                     new_block_hash = %portal_hash,
+                    old_portal_tail = old_tail,
+                    new_portal_tail = portal_tail,
                     block_number,
-                    "Resynced prev_block_hash from portal after max retries"
+                    "Resynced prev_block_hash and portal_withdrawal_queue_tail from portal after max retries"
                 );
                 self.prev_block_hash = portal_hash;
+                self.portal_withdrawal_queue_tail = portal_tail;
                 // Skip this block — the monitor will pick up from the next one.
                 self.last_processed_block = block_number;
             }
             Err(e) => {
                 error!(
                     error = %e,
-                    "Failed to read blockHash from portal during resync"
+                    "Failed to read portal state during resync"
                 );
                 // Don't advance last_processed_block so we retry this block.
             }

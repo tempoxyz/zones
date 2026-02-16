@@ -427,4 +427,27 @@ mod tests {
         assert!(!store.has_batch(0));
         assert_eq!(store.batch_count(), 0);
     }
+
+    #[test]
+    fn store_slot_index_must_match_portal_tail() {
+        // Demonstrates that withdrawals must be stored under the portal's actual
+        // queue tail index. If the monitor starts with tail=0 but the portal is
+        // at tail=5, withdrawals end up in slot 0 while the withdrawal processor
+        // looks for them in slot 5.
+        let mut store = WithdrawalStore::new();
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
+
+        // Simulate storing under the wrong slot (tail=0 when portal is at 5).
+        store.add_withdrawal(0, w.clone());
+        assert!(store.has_batch(0));
+        assert!(
+            !store.has_batch(5),
+            "withdrawal processor would look at slot 5 and find nothing"
+        );
+
+        // Correct: store under the portal's actual tail.
+        let portal_tail = 5u64;
+        store.add_withdrawal(portal_tail, w);
+        assert!(store.has_batch(portal_tail));
+    }
 }
