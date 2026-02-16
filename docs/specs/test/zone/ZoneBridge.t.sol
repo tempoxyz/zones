@@ -305,7 +305,8 @@ contract ZoneBridgeTest is BaseTest {
     function _sequencerSubmitBatch(bytes32 newProcessedDepositQueueHash) internal {
         // Sequencer calls finalizeWithdrawalBatch() on zone outbox to get withdrawal hash on-chain
         vm.prank(admin);
-        bytes32 withdrawalQueueHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
+        bytes32 withdrawalQueueHash =
+            l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);

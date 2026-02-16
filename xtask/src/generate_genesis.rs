@@ -52,15 +52,23 @@ impl GenerateGenesis {
                     )
                 })?;
                 let signing_key_dst = validator.dst_signing_key(&output);
-                validator
-                    .signing_key
-                    .write_to_file(&signing_key_dst)
-                    .wrap_err_with(|| {
+                {
+                    let file = std::fs::File::create(&signing_key_dst).wrap_err_with(|| {
                         format!(
-                            "failed writing ed25519 signing key to `{}`",
+                            "failed creating ed25519 signing key file `{}`",
                             signing_key_dst.display()
                         )
                     })?;
+                    validator
+                        .signing_key
+                        .to_writer(file)
+                        .wrap_err_with(|| {
+                            format!(
+                                "failed writing ed25519 signing key to `{}`",
+                                signing_key_dst.display()
+                            )
+                        })?;
+                }
                 let signing_share_dst = validator.dst_signing_share(&output);
                 validator
                     .signing_share

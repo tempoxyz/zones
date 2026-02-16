@@ -340,7 +340,8 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Finalize L2 batch
         vm.prank(admin);
-        bytes32 withdrawalHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
+        bytes32 withdrawalHash =
+            l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
 
         // Submit L1 batch
         vm.roll(block.number + 1);
@@ -413,10 +414,13 @@ contract ZoneIntegrationTest is BaseTest {
         );
         vm.stopPrank();
 
-        vm.prank(admin);
-        bytes32 wHash1 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
-
+        // Each finalizeWithdrawalBatch requires blockNumber == block.number, and each
+        // batch needs a distinct block.number, so we advance before each finalize+submit pair.
         vm.roll(block.number + 1);
+
+        vm.prank(admin);
+        bytes32 wHash1 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
@@ -438,10 +442,11 @@ contract ZoneIntegrationTest is BaseTest {
         );
         vm.stopPrank();
 
-        vm.prank(admin);
-        bytes32 wHash2 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
-
         vm.roll(block.number + 1);
+
+        vm.prank(admin);
+        bytes32 wHash2 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
@@ -463,10 +468,11 @@ contract ZoneIntegrationTest is BaseTest {
         );
         vm.stopPrank();
 
-        vm.prank(admin);
-        bytes32 wHash3 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
-
         vm.roll(block.number + 1);
+
+        vm.prank(admin);
+        bytes32 wHash3 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
@@ -583,7 +589,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.stopPrank();
 
         vm.prank(admin);
-        bytes32 wHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max);
+        bytes32 wHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
 
         // Phase 3: More deposits arrive while withdrawals are pending
         vm.startPrank(charlie);

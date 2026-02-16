@@ -13,6 +13,7 @@ import { INonce } from "../src/interfaces/INonce.sol";
 import { ITIP20 } from "../src/interfaces/ITIP20.sol";
 import { IValidatorConfig } from "../src/interfaces/IValidatorConfig.sol";
 import { BLOCKHASH_HISTORY } from "../src/zone/BlockHashHistory.sol";
+import { MockEIP2935 } from "./zone/mocks/MockEIP2935.sol";
 import { Test, console } from "forge-std/Test.sol";
 
 /// @notice Base test framework for all spec tests
@@ -83,7 +84,9 @@ contract BaseTest is Test {
             deployCodeTo("Nonce", _NONCE);
             // Deploy ValidatorConfig with admin as owner
             deployCodeTo("ValidatorConfig.sol", abi.encode(admin), _VALIDATOR_CONFIG);
-            deployCodeTo("BlockHashHistory", _BLOCKHASH_HISTORY);
+            // Deploy EIP-2935 mock that handles raw 32-byte calldata (no selector)
+            MockEIP2935 mock2935 = new MockEIP2935();
+            vm.etch(_BLOCKHASH_HISTORY, address(mock2935).code);
         }
 
         if (isTempo) {
@@ -112,10 +115,11 @@ contract BaseTest is Test {
                 revert MissingPrecompile("ValidatorConfig", _VALIDATOR_CONFIG);
             }
             // tempo-foundry may not expose EIP-2935 BlockHashHistory at 0x100 yet.
-            // Install the existing deterministic mock only when absent so zone tests
+            // Install the EIP-2935 mock (raw 32-byte calldata) only when absent so zone tests
             // can still run against Rust precompiles.
             if (_BLOCKHASH_HISTORY.code.length == 0) {
-                deployCodeTo("BlockHashHistory", _BLOCKHASH_HISTORY);
+                MockEIP2935 tempoMock2935 = new MockEIP2935();
+                vm.etch(_BLOCKHASH_HISTORY, address(tempoMock2935).code);
             }
             if (_BLOCKHASH_HISTORY.code.length == 0) {
                 revert MissingPrecompile("BlockHashHistory", _BLOCKHASH_HISTORY);

@@ -76,6 +76,7 @@ contract ZoneOutbox is IZoneOutbox {
     error GasFeeRateTooHigh();
     error TransferFailed();
     error OnlySequencer();
+    error InvalidBlockNumber();
     error TooManyWithdrawalsThisBlock();
 
     /*//////////////////////////////////////////////////////////////
@@ -96,7 +97,7 @@ contract ZoneOutbox is IZoneOutbox {
     ///      If actual Tempo gas is lower, sequencer keeps the surplus.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
         if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
@@ -106,7 +107,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
     /// @param _maxWithdrawalsPerBlock The maximum number of requestWithdrawal() calls per block
     function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external {
-        if (msg.sender != config.sequencer()) revert OnlySequencer();
+        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
         maxWithdrawalsPerBlock = _maxWithdrawalsPerBlock;
         emit MaxWithdrawalsPerBlockUpdated(_maxWithdrawalsPerBlock);
     }
@@ -183,7 +184,7 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Burn the tokens (they'll be released on Tempo when withdrawal is processed)
         // Amount goes to recipient, fee goes to sequencer
-        zoneToken.burn(address(this), totalBurn);
+        zoneToken.burn(totalBurn);
 
         // Store withdrawal in pending array
         _pendingWithdrawals.push(
@@ -220,8 +221,15 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Emits BatchFinalized for observability (proof reads from state).
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash) {
-        if (msg.sender != config.sequencer()) revert OnlySequencer();
+    function finalizeWithdrawalBatch(
+        uint256 count,
+        uint64 blockNumber
+    )
+        external
+        returns (bytes32 withdrawalQueueHash)
+    {
+        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        if (blockNumber != uint64(block.number)) revert InvalidBlockNumber();
 
         uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
 
