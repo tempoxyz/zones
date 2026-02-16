@@ -164,8 +164,4 @@ serde_json = "1.0.142"
 tokio = { version = "1.45.1", features = ["full"] }
 tracing = "0.1.41"
 
-[patch.crates-io]
-vergen = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
-vergen-git2 = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
-vergen-lib = { git = "https://github.com/rustyhorde/vergen", rev = "0875fb7417586fb42d0ed6ddbfd4de0b35745ecc" }
 
