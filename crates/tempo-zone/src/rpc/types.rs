@@ -92,20 +92,20 @@ impl JsonRpcError {
         }
     }
 
-    /// Method disabled (-32601).
+    /// Method disabled (-32006).
     pub fn method_disabled() -> Self {
         Self {
-            code: -32601,
-            message: "Method disabled on private RPC".to_string(),
+            code: -32006,
+            message: "Method disabled".to_string(),
             data: None,
         }
     }
 
-    /// Sequencer-only method (-32604).
+    /// Sequencer-only method (-32005).
     pub fn sequencer_only() -> Self {
         Self {
-            code: -32604,
-            message: "Method restricted to sequencer".to_string(),
+            code: -32005,
+            message: "Sequencer only".to_string(),
             data: None,
         }
     }
@@ -175,16 +175,22 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "eth_maxPriorityFeePerGas"
         | "eth_getBlockByNumber"
         | "eth_getBlockByHash"
+        | "eth_syncing"
+        | "eth_coinbase"
         | "net_version"
         | "net_listening"
-        | "web3_clientVersion" => Some(MethodTier::Public),
+        | "web3_clientVersion"
+        | "web3_sha3" => Some(MethodTier::Public),
 
         // Fetch-then-check: public but redacted based on caller identity
         "eth_getTransactionByHash"
         | "eth_getTransactionReceipt"
         | "eth_getLogs"
         | "eth_getFilterLogs"
-        | "eth_getFilterChanges" => Some(MethodTier::Public),
+        | "eth_getFilterChanges"
+        | "eth_newFilter"
+        | "eth_newBlockFilter"
+        | "eth_uninstallFilter" => Some(MethodTier::Public),
 
         // Transaction preparation: public (scoped to caller's account)
         "eth_fillTransaction" => Some(MethodTier::Public),
@@ -200,6 +206,13 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "debug_traceTransaction"
         | "debug_traceBlockByNumber"
         | "debug_traceBlockByHash"
+        | "eth_createAccessList"
+        | "eth_getBlockTransactionCountByNumber"
+        | "eth_getBlockTransactionCountByHash"
+        | "eth_getTransactionByBlockNumberAndIndex"
+        | "eth_getTransactionByBlockHashAndIndex"
+        | "eth_getUncleCountByBlockNumber"
+        | "eth_getUncleCountByBlockHash"
         | "txpool_content"
         | "txpool_status"
         | "txpool_inspect" => Some(MethodTier::Restricted),
@@ -208,6 +221,7 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         "eth_mining" | "eth_hashrate" | "eth_submitWork" | "eth_submitHashrate"
         | "eth_subscribe" | "eth_unsubscribe" => Some(MethodTier::Disabled),
 
+        _ if method.starts_with("admin_") => Some(MethodTier::Restricted),
         _ => None,
     }
 }

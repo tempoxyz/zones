@@ -272,17 +272,27 @@ where
         &self,
         mut request: TempoTransactionRequest,
         block: Option<BlockId>,
+        state_override: Option<StateOverride>,
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
+            // Defense-in-depth: handlers.rs also rejects this, but enforce here too.
+            if !auth.is_sequencer && state_override.is_some() {
+                return Err(JsonRpcError::invalid_params("state overrides not allowed"));
+            }
+
             if !auth.is_sequencer {
                 enforce_from(&mut request, &auth)?;
             }
 
-            let result =
-                EthCall::estimate_gas_at(&self.eth.api, request, block.unwrap_or_default(), None)
-                    .await
-                    .map_err(internal)?;
+            let result = EthCall::estimate_gas_at(
+                &self.eth.api,
+                request,
+                block.unwrap_or_default(),
+                state_override,
+            )
+            .await
+            .map_err(internal)?;
             to_raw(&result)
         })
     }

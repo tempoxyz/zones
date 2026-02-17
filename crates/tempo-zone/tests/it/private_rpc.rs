@@ -2,7 +2,7 @@
 
 use alloy_primitives::{Address, keccak256};
 use zone::rpc::{
-    auth::{AuthorizationToken, SignatureType},
+    auth::{AuthorizationToken, SignatureType, build_token_fields},
     types::{MethodTier, classify_method},
 };
 
@@ -16,6 +16,9 @@ fn now_secs() -> u64 {
 }
 
 /// Build a raw token blob from the given fields with a fake 65-byte secp256k1 signature.
+///
+/// Uses [`build_token_fields`] for the canonical encoding and patches the
+/// version byte when a non-zero version is requested (for negative tests).
 fn build_token_blob(
     version: u8,
     zone_id: u64,
@@ -24,13 +27,12 @@ fn build_token_blob(
     issued_at: u64,
     expires_at: u64,
 ) -> Vec<u8> {
+    let (mut fields, _digest) =
+        build_token_fields(zone_id, chain_id, portal, issued_at, expires_at);
+    // build_token_fields always sets version=0; override for tests that need a different version.
+    fields[0] = version;
     let mut blob = vec![0u8; 65]; // fake secp256k1 sig
-    blob.push(version);
-    blob.extend_from_slice(&zone_id.to_be_bytes());
-    blob.extend_from_slice(&chain_id.to_be_bytes());
-    blob.extend_from_slice(portal.as_slice());
-    blob.extend_from_slice(&issued_at.to_be_bytes());
-    blob.extend_from_slice(&expires_at.to_be_bytes());
+    blob.extend_from_slice(&fields);
     blob
 }
 
@@ -244,18 +246,23 @@ fn classify_public_methods() {
         "eth_getTransactionCount",
         "eth_call",
         "eth_estimateGas",
-        "eth_getCode",
-        "eth_getStorageAt",
+        "eth_syncing",
+        "eth_coinbase",
         "eth_getBlockByNumber",
         "eth_getBlockByHash",
-        "eth_getBlockReceipts",
         "eth_getTransactionByHash",
         "eth_getTransactionReceipt",
         "eth_getLogs",
+        "eth_getFilterLogs",
+        "eth_getFilterChanges",
+        "eth_newFilter",
+        "eth_newBlockFilter",
+        "eth_uninstallFilter",
         "eth_sendRawTransaction",
         "net_version",
         "net_listening",
         "web3_clientVersion",
+        "web3_sha3",
     ] {
         assert_eq!(
             classify_method(method),
@@ -268,7 +275,17 @@ fn classify_public_methods() {
 #[test]
 fn classify_restricted_methods() {
     for method in [
+        "eth_getCode",
+        "eth_getStorageAt",
+        "eth_getBlockReceipts",
         "eth_sendTransaction",
+        "eth_createAccessList",
+        "eth_getBlockTransactionCountByNumber",
+        "eth_getBlockTransactionCountByHash",
+        "eth_getTransactionByBlockNumberAndIndex",
+        "eth_getTransactionByBlockHashAndIndex",
+        "eth_getUncleCountByBlockNumber",
+        "eth_getUncleCountByBlockHash",
         "debug_traceTransaction",
         "debug_traceBlockByNumber",
         "debug_traceBlockByHash",
@@ -298,6 +315,22 @@ fn classify_disabled_methods() {
             classify_method(method),
             Some(MethodTier::Disabled),
             "expected {method} to be Disabled"
+        );
+    }
+}
+
+#[test]
+fn classify_admin_wildcard() {
+    for method in [
+        "admin_addPeer",
+        "admin_removePeer",
+        "admin_nodeInfo",
+        "admin_peers",
+    ] {
+        assert_eq!(
+            classify_method(method),
+            Some(MethodTier::Restricted),
+            "expected {method} to be Restricted (admin_* wildcard)"
         );
     }
 }

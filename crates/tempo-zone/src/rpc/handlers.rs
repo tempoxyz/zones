@@ -99,13 +99,15 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
         auth: AuthContext,
     ) -> BoxFut<'_>;
 
-    /// `eth_estimateGas(request, block)` — estimates gas for a transaction.
+    /// `eth_estimateGas(request, block, state_override)` — estimates gas for a transaction.
     ///
-    /// Same `from`-enforcement as [`call`](Self::call).
+    /// Same `from`-enforcement as [`call`](Self::call). State overrides are
+    /// rejected for non-sequencer callers (`-32602`).
     fn estimate_gas(
         &self,
         request: TempoTransactionRequest,
         block: Option<BlockId>,
+        state_override: Option<StateOverride>,
         auth: AuthContext,
     ) -> BoxFut<'_>;
 
@@ -358,25 +360,35 @@ async fn handle_call(
 }
 
 /// Handle `eth_estimateGas`. Same `from`-enforcement as `eth_call`.
+/// Rejects state overrides for non-sequencer callers.
 async fn handle_estimate_gas(
     id: Value,
     raw: &str,
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
-    let (request, block) = match parse_params::<(TempoTransactionRequest, Option<BlockId>)>(
-        raw,
-        &id,
-        "expected [request, block?]",
-    ) {
-        Ok(v) => v,
-        Err(resp) => return resp,
-    };
+    let (request, block, state_override) =
+        match parse_params::<(
+            TempoTransactionRequest,
+            Option<BlockId>,
+            Option<StateOverride>,
+        )>(raw, &id, "expected [request, block?, stateOverride?]")
+        {
+            Ok(v) => v,
+            Err(resp) => return resp,
+        };
+
+    if !auth.is_sequencer && state_override.is_some() {
+        return JsonRpcResponse::error(
+            id,
+            JsonRpcError::invalid_params("state overrides not allowed"),
+        );
+    }
 
     api_result(
         id,
         "eth_estimateGas",
-        api.estimate_gas(request, block, auth.clone()).await,
+        api.estimate_gas(request, block, state_override, auth.clone()).await,
     )
 }
 
