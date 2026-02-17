@@ -118,8 +118,7 @@ impl GenerateZoneGenesis {
         nonce += 1;
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
-        let zone_config_args =
-            (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
+        let zone_config_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_config_bytecode,
@@ -132,12 +131,8 @@ impl GenerateZoneGenesis {
         nonce += 1;
 
         let zone_inbox_bytecode = load_artifact(&self.specs_out, "ZoneInbox")?;
-        let zone_inbox_args = (
-            ZONE_CONFIG_ADDRESS,
-            self.tempo_portal,
-            TEMPO_STATE_ADDRESS,
-        )
-            .abi_encode_params();
+        let zone_inbox_args =
+            (ZONE_CONFIG_ADDRESS, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_inbox_bytecode,
@@ -371,9 +366,13 @@ fn deploy_contract(
 /// Initialize the TIP403Registry precompile (required for fee token transfer checks).
 fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx, || {
-        TIP403Registry::new().initialize()
-    })?;
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        || TIP403Registry::new().initialize(),
+    )?;
     println!("Initialized TIP403Registry");
     Ok(())
 }
@@ -381,9 +380,13 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
 /// Initialize the TIP20Factory precompile (required before creating any TIP20 tokens).
 fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx, || {
-        TIP20Factory::new().initialize()
-    })?;
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        || TIP20Factory::new().initialize(),
+    )?;
     println!("Initialized TIP20Factory");
     Ok(())
 }
@@ -400,46 +403,52 @@ fn create_path_usd_token(
     let admin = DEPLOYER;
 
     let ctx = evm.ctx_mut();
-    StorageCtx::enter_evm(&mut ctx.journaled_state, &ctx.block, &ctx.cfg, &ctx.tx, || {
-        TIP20Factory::new().create_token_reserved_address(
-            PATH_USD_ADDRESS,
-            "pathUSD",
-            "pathUSD",
-            "USD",
-            Address::ZERO,
-            admin,
-        )?;
-
-        let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
-        token.grant_role_internal(admin, *ISSUER_ROLE)?;
-        // Allow address(0) to mint (system transactions use sender=0)
-        token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
-        // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
-        token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
-        // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
-        token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
-
-        // Set a large supply cap
-        token.set_supply_cap(
-            admin,
-            ITIP20::setSupplyCapCall {
-                newSupplyCap: U256::from(u128::MAX),
-            },
-        )?;
-
-        // If a sequencer is specified, mint some pathUSD for gas fees
-        if let Some(sequencer) = sequencer {
-            token.mint(
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        || {
+            TIP20Factory::new().create_token_reserved_address(
+                PATH_USD_ADDRESS,
+                "pathUSD",
+                "pathUSD",
+                "USD",
+                Address::ZERO,
                 admin,
-                ITIP20::mintCall {
-                    to: sequencer,
-                    amount: U256::from(1_000_000_000_000u128), // 1M pathUSD (6 decimals)
+            )?;
+
+            let mut token = TIP20Token::from_address(PATH_USD_ADDRESS)?;
+            token.grant_role_internal(admin, *ISSUER_ROLE)?;
+            // Allow address(0) to mint (system transactions use sender=0)
+            token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
+            // Grant ISSUER_ROLE to ZoneInbox so it can mint pathUSD on deposits
+            token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+            // Grant ISSUER_ROLE to ZoneOutbox so it can burn pathUSD on withdrawals
+            token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+
+            // Set a large supply cap
+            token.set_supply_cap(
+                admin,
+                ITIP20::setSupplyCapCall {
+                    newSupplyCap: U256::from(u128::MAX),
                 },
             )?;
-        }
 
-        Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
-    })?;
+            // If a sequencer is specified, mint some pathUSD for gas fees
+            if let Some(sequencer) = sequencer {
+                token.mint(
+                    admin,
+                    ITIP20::mintCall {
+                        to: sequencer,
+                        amount: U256::from(1_000_000_000_000u128), // 1M pathUSD (6 decimals)
+                    },
+                )?;
+            }
+
+            Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
+        },
+    )?;
 
     println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
     Ok(())

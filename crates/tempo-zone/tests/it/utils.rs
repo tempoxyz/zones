@@ -302,13 +302,14 @@ impl ZoneTestNode {
                     let logs = provider.get_logs(filter).await?;
                     for log in logs.iter().rev() {
                         if let Ok(ev) = TempoState::TempoBlockFinalized::decode_log(&log.inner)
-                            && ev.blockNumber > after_block {
-                                // Confirm on-chain state matches
-                                let on_chain = tempo_state.tempoBlockNumber().call().await?;
-                                if on_chain >= ev.blockNumber {
-                                    return Ok(Some(on_chain));
-                                }
+                            && ev.blockNumber > after_block
+                        {
+                            // Confirm on-chain state matches
+                            let on_chain = tempo_state.tempoBlockNumber().call().await?;
+                            if on_chain >= ev.blockNumber {
+                                return Ok(Some(on_chain));
                             }
+                        }
                     }
                     Ok(None)
                 }
