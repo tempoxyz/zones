@@ -184,6 +184,51 @@ fn rlp_item_total_length(data: &[u8]) -> Result<usize, &'static str> {
     }
 }
 
+/// Extract the state root from an RLP-encoded Tempo header.
+///
+/// Tempo headers are encoded as: `rlp([general_gas_limit, shared_gas_limit,
+/// timestamp_millis_part, inner])` where `inner` is a standard Ethereum header.
+///
+/// The state root is the 4th field (index 3) of the inner Ethereum header:
+/// `[parentHash, ommersHash, beneficiary, **stateRoot**, transactionsRoot, ...]`
+pub(crate) fn extract_state_root_from_rlp(header_rlp: &[u8]) -> Result<B256, String> {
+    // Decode the outer list.
+    let outer_payload = decode_rlp_list_payload(header_rlp)
+        .map_err(|e| format!("outer list: {e}"))?;
+
+    // Skip the first 3 wrapper fields (general_gas_limit, shared_gas_limit, timestamp_millis_part).
+    let mut offset = 0;
+    for i in 0..3 {
+        let item_len = rlp_item_total_length(&outer_payload[offset..])
+            .map_err(|e| format!("wrapper field {i}: {e}"))?;
+        offset += item_len;
+    }
+
+    // The 4th item is the inner Ethereum header (a list).
+    let inner_rlp = &outer_payload[offset..];
+    let inner_payload = decode_rlp_list_payload(inner_rlp)
+        .map_err(|e| format!("inner list: {e}"))?;
+
+    // Skip the first 3 fields (parentHash, ommersHash, beneficiary) to reach stateRoot.
+    let mut inner_offset = 0;
+    for i in 0..3 {
+        if inner_offset >= inner_payload.len() {
+            return Err(format!("inner header too short at field {i}"));
+        }
+        let item_len = rlp_item_total_length(&inner_payload[inner_offset..])
+            .map_err(|e| format!("inner field {i}: {e}"))?;
+        inner_offset += item_len;
+    }
+
+    if inner_offset >= inner_payload.len() {
+        return Err("inner header too short for stateRoot field".into());
+    }
+
+    // The 4th field is the state root (bytes32).
+    decode_rlp_bytes32(&inner_payload[inner_offset..])
+        .map_err(|e| format!("stateRoot: {e}"))
+}
+
 /// Extract the block number from an RLP-encoded Tempo header.
 ///
 /// Tempo headers are encoded as: `rlp([general_gas_limit, shared_gas_limit,

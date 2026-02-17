@@ -30,12 +30,13 @@ use zone_prover::{
         TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
         storage::{
             TEMPO_STATE_BLOCK_HASH_SLOT, TEMPO_STATE_PACKED_SLOT,
-            ZONE_INBOX_PROCESSED_HASH_SLOT, ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
+            TEMPO_STATE_STATE_ROOT_SLOT, ZONE_INBOX_PROCESSED_HASH_SLOT,
+            ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
         },
     },
     types::{
-        AccountWitness, BatchStateProof, BatchWitness, L1StateRead, PublicInputs,
-        ZoneBlock, ZoneHeader, ZoneStateWitness,
+        AccountWitness, BatchStateProof, BatchWitness, L1AccountProof, L1StateRead,
+        PublicInputs, ZoneBlock, ZoneHeader, ZoneStateWitness,
     },
 };
 
@@ -99,12 +100,16 @@ impl WitnessGenerator {
         let mut accessed_accounts = accessed_accounts.clone();
         let mut accessed_storage = accessed_storage.clone();
 
-        // TempoState: slot 0 (block hash) and slot 7 (packed block number).
+        // TempoState: slot 0 (block hash), slot 4 (state root), slot 7 (packed).
         accessed_accounts.insert(TEMPO_STATE_ADDRESS);
         accessed_storage
             .entry(TEMPO_STATE_ADDRESS)
             .or_default()
-            .extend([TEMPO_STATE_BLOCK_HASH_SLOT, TEMPO_STATE_PACKED_SLOT]);
+            .extend([
+                TEMPO_STATE_BLOCK_HASH_SLOT,
+                TEMPO_STATE_STATE_ROOT_SLOT,
+                TEMPO_STATE_PACKED_SLOT,
+            ]);
 
         // ZoneInbox: slot 0 (processed deposit queue hash).
         accessed_accounts.insert(ZONE_INBOX_ADDRESS);
@@ -124,6 +129,7 @@ impl WitnessGenerator {
             ]);
 
         let mut accounts = HashMap::default();
+        let mut absent_accounts: HashMap<Address, Vec<Bytes>> = HashMap::default();
 
         for &addr in &accessed_accounts {
             // Collect storage slots as B256 keys for the proof request.
@@ -142,6 +148,14 @@ impl WitnessGenerator {
 
             let acct_proof = account_proof_result
                 .map_err(|e| eyre::eyre!("MPT proof generation failed for {addr}: {e}"))?;
+
+            // If the account doesn't exist in the state trie, store it as an
+            // absent account with the exclusion proof so the prover can return
+            // Ok(None) from Database::basic() instead of an error.
+            if acct_proof.info.is_none() {
+                absent_accounts.insert(addr, acct_proof.proof);
+                continue;
+            }
 
             let nonce = acct_proof.info.as_ref().map_or(0, |a| a.nonce);
             let balance = acct_proof.info.as_ref().map_or(U256::ZERO, |a| a.balance);
@@ -205,12 +219,14 @@ impl WitnessGenerator {
 
         debug!(
             accounts = accounts.len(),
+            absent = absent_accounts.len(),
             state_root = %state_root,
             "Generated zone state witness with MPT proofs"
         );
 
         Ok(ZoneStateWitness {
             accounts,
+            absent_accounts,
             state_root,
         })
     }
@@ -220,8 +236,8 @@ impl WitnessGenerator {
     /// Each `FetchedL1Proof` is an `eth_getProof` response from the Tempo L1 chain.
     /// All MPT nodes from account and storage proofs are deduplicated into a shared
     /// pool, keyed by `keccak256(node_bytes)`. Each read is annotated with a
-    /// `node_path` — the sequence of hashes through the pool that forms the proof
-    /// path from the L1 state root to the target storage value.
+    /// `storage_path` — the sequence of hashes through the pool that forms the
+    /// storage proof path. Account proofs are stored separately in `account_proofs`.
     ///
     /// # Arguments
     ///
@@ -234,15 +250,14 @@ impl WitnessGenerator {
     ) -> BatchStateProof {
         let mut node_pool: HashMap<B256, Vec<u8>> = HashMap::default();
 
-        // Index proofs by (tempo_block_number, account) for lookup.
-        let mut proof_index: BTreeMap<(u64, Address), &EIP1186AccountProofResponse> =
-            BTreeMap::new();
-
         // Pre-compute account proof hashes, keyed by (block_number, account).
         let mut account_proof_hashes: BTreeMap<(u64, Address), Vec<B256>> = BTreeMap::new();
 
         // Pre-compute storage proof hashes, keyed by (block_number, account, slot_b256).
         let mut storage_proof_hashes: BTreeMap<(u64, Address, B256), Vec<B256>> = BTreeMap::new();
+
+        // Build L1AccountProof entries, deduplicated by (tempo_block_number, account).
+        let mut account_proofs_map: BTreeMap<(u64, Address), L1AccountProof> = BTreeMap::new();
 
         for fetched in l1_proofs {
             let block_num = fetched.tempo_block_number;
@@ -258,7 +273,20 @@ impl WitnessGenerator {
                     hash
                 })
                 .collect();
-            account_proof_hashes.insert((block_num, proof.address), acct_hashes);
+            account_proof_hashes.insert((block_num, proof.address), acct_hashes.clone());
+
+            // Build L1AccountProof from the eth_getProof response.
+            account_proofs_map
+                .entry((block_num, proof.address))
+                .or_insert_with(|| L1AccountProof {
+                    tempo_block_number: block_num,
+                    account: proof.address,
+                    nonce: proof.nonce,
+                    balance: proof.balance,
+                    storage_root: proof.storage_hash,
+                    code_hash: proof.code_hash,
+                    account_path: acct_hashes,
+                });
 
             // Add storage proof nodes to the pool.
             for sp in &proof.storage_proof {
@@ -274,52 +302,43 @@ impl WitnessGenerator {
                     .collect();
                 storage_proof_hashes.insert((block_num, proof.address, slot_b256), sp_hashes);
             }
-
-            proof_index.insert((block_num, proof.address), proof);
         }
 
-        // Build reads with node_path linking into the pool.
+        // Build reads with storage_path only (account proof is separate).
         let reads: Vec<L1StateRead> = recorded_reads
             .iter()
             .map(|r| {
-                let mut node_path = Vec::new();
-
-                // Append account proof hashes.
-                if let Some(acct_hashes) =
-                    account_proof_hashes.get(&(r.tempo_block_number, r.account))
-                {
-                    node_path.extend_from_slice(acct_hashes);
-                }
-
-                // Append storage proof hashes for this specific slot.
-                if let Some(sp_hashes) = storage_proof_hashes.get(&(
-                    r.tempo_block_number,
-                    r.account,
-                    r.slot,
-                )) {
-                    node_path.extend_from_slice(sp_hashes);
-                }
+                // Only the storage proof hashes for this specific slot.
+                let storage_path = storage_proof_hashes
+                    .get(&(r.tempo_block_number, r.account, r.slot))
+                    .cloned()
+                    .unwrap_or_default();
 
                 L1StateRead {
                     zone_block_index: r.zone_block_index,
                     tempo_block_number: r.tempo_block_number,
                     account: r.account,
                     slot: U256::from_be_bytes(r.slot.0),
-                    node_path,
+                    storage_path,
                     value: U256::from_be_bytes(r.value.0),
                 }
             })
             .collect();
 
+        let account_proofs: Vec<L1AccountProof> =
+            account_proofs_map.into_values().collect();
+
         info!(
             reads = reads.len(),
+            account_proofs = account_proofs.len(),
             unique_nodes = node_pool.len(),
-            "Generated Tempo state proof ({} reads, {} unique nodes)",
+            "Generated Tempo state proof ({} reads, {} account proofs, {} unique nodes)",
             reads.len(),
+            account_proofs.len(),
             node_pool.len(),
         );
 
-        BatchStateProof { node_pool, reads }
+        BatchStateProof { node_pool, reads, account_proofs }
     }
 
     /// Assemble a complete [`BatchWitness`] from all components.

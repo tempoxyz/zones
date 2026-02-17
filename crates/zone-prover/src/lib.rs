@@ -19,16 +19,19 @@ pub mod db;
 pub mod execute;
 pub mod header;
 pub mod mpt;
+pub mod sparse_mpt;
 pub mod tempo;
 pub mod types;
 
-use alloy_primitives::{B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256, keccak256, map::HashMap as PrimHashMap};
+use alloy_trie::TrieAccount;
 use revm::{Database, database::State};
 use tracing::{debug, info};
 
 use crate::{
     db::WitnessDatabase,
     execute::storage,
+    sparse_mpt::SparseTrie,
     tempo::TempoStateAccessor,
     types::{
         BatchOutput, BatchWitness, BlockTransition, DepositQueueTransition,
@@ -93,8 +96,10 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
 
     // Wrap WitnessDatabase in State so that EVM state changes are committed
     // and visible to subsequent transactions and post-execution reads.
+    // Enable bundle update tracking so we can extract per-block state changes
+    // for sparse MPT state root computation.
     let mut current_state: State<WitnessDatabase> =
-        State::builder().with_database(witness_db).build();
+        State::builder().with_database(witness_db).with_bundle_update().build();
 
     // Read the initial deposit queue hash from the zone state.
     let deposit_prev = read_storage_from_db(
@@ -112,6 +117,24 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
     )?;
     let mut current_tempo_block_number =
         storage::extract_tempo_block_number(U256::from_be_bytes(initial_packed.into()));
+
+    // Build sparse tries from witness proofs for state root computation.
+    let mut state_trie = sparse_mpt::build_state_trie(&witness.initial_zone_state)?;
+    let mut storage_tries: PrimHashMap<Address, SparseTrie> = PrimHashMap::default();
+    for (addr, acct) in &witness.initial_zone_state.accounts {
+        let storage_trie = sparse_mpt::build_storage_trie(acct)?;
+        storage_tries.insert(*addr, storage_trie);
+    }
+
+    // Read the initial tempoStateRoot from TempoState (slot 4).
+    // This is the Merkle root of the Tempo L1 state trie, used to verify L1
+    // storage proofs. It is updated whenever `advanceTempo` fires.
+    let initial_tempo_state_root = read_storage_from_db(
+        &mut current_state,
+        execute::TEMPO_STATE_ADDRESS,
+        storage::TEMPO_STATE_STATE_ROOT_SLOT,
+    )?;
+    let mut current_tempo_state_root = initial_tempo_state_root;
 
     // ---------------------------------------------------------------
     // Phase 3: Execute zone blocks and compute block hashes
@@ -180,20 +203,28 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
             )));
         }
 
-        // Update Tempo block number if this block advances Tempo.
+        // Update Tempo block number and state root if this block advances Tempo.
         if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
             current_tempo_block_number =
                 ancestry::extract_block_number_from_rlp(tempo_header_rlp).map_err(|e| {
                     ProverError::RlpDecode(format!(
-                        "block {} tempo header: {e}",
+                        "block {} tempo header block number: {e}",
+                        block.number,
+                    ))
+                })?;
+            current_tempo_state_root =
+                ancestry::extract_state_root_from_rlp(tempo_header_rlp).map_err(|e| {
+                    ProverError::RlpDecode(format!(
+                        "block {} tempo header state root: {e}",
                         block.number,
                     ))
                 })?;
         }
 
-        // Bind the current Tempo block number BEFORE creating the precompile,
-        // so that the precompile's cloned block_bindings includes this binding.
+        // Bind the current Tempo block number and state root BEFORE creating
+        // the precompile, so that the precompile's cloned bindings are correct.
         tempo_state.bind_block(idx as u64, current_tempo_block_number);
+        tempo_state.bind_state_root(idx as u64, current_tempo_state_root);
 
         // Execute the block using the real EVM.
         let (exec_result, state) = execute::execute_zone_block(
@@ -206,9 +237,25 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
         )?;
         current_state = state;
 
-        // Use the expected state root from the witness (Phase 1 approach).
-        // Full state root computation from BundleState will be Phase 2.
-        let state_root = block.expected_state_root;
+        // Merge the execution transitions into the bundle and extract the
+        // per-block BundleState (account + storage changes).
+        current_state.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
+        let bundle = current_state.take_bundle();
+
+        // Compute the new state root from bundle changes + sparse tries.
+        let state_root = compute_state_root_from_bundle(
+            &bundle,
+            &mut state_trie,
+            &mut storage_tries,
+        )?;
+
+        // Verify the computed state root matches the expected value.
+        if state_root != block.expected_state_root {
+            return Err(ProverError::InconsistentState(format!(
+                "block {} state root mismatch: computed={state_root}, expected={}",
+                block.number, block.expected_state_root,
+            )));
+        }
 
         // Build the zone block header and compute the block hash.
         let header = ZoneHeader {
@@ -312,6 +359,89 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
 }
 
 // ---------------------------------------------------------------------------
+//  Helper functions: state root computation
+// ---------------------------------------------------------------------------
+
+/// Compute the new state root from a per-block `BundleState` and the
+/// persistent sparse tries.
+///
+/// For each changed account:
+/// 1. Compute the new storage root from storage changes
+/// 2. Build the updated `TrieAccount` (nonce, balance, storage_root, code_hash)
+/// 3. Update the state trie leaf
+///
+/// For destroyed accounts, remove the state trie leaf.
+fn compute_state_root_from_bundle(
+    bundle: &revm::database::BundleState,
+    state_trie: &mut SparseTrie,
+    storage_tries: &mut PrimHashMap<Address, SparseTrie>,
+) -> Result<B256, ProverError> {
+    for (addr, account) in &bundle.state {
+        // Skip accounts that weren't modified.
+        if account.status.is_not_modified() {
+            continue;
+        }
+
+        let acct_key = sparse_mpt::account_key(*addr);
+
+        // Check if the account was destroyed.
+        if account.status.was_destroyed() {
+            state_trie.remove_leaf(&acct_key);
+            storage_tries.remove(addr);
+            // If the account was destroyed then re-created (DestroyedChanged),
+            // we still need to add it back below.
+            if account.info.is_none() {
+                continue;
+            }
+        }
+
+        // Compute the new storage root for this account.
+        let storage_trie = storage_tries
+            .entry(*addr)
+            .or_insert_with(SparseTrie::empty);
+
+        let has_storage_changes = account.storage.iter().any(|(_, slot)| {
+            slot.present_value != slot.previous_or_original_value
+        });
+
+        if has_storage_changes || account.status.was_destroyed() {
+            for (slot_key, slot) in &account.storage {
+                if slot.present_value == slot.previous_or_original_value
+                    && !account.status.was_destroyed()
+                {
+                    continue;
+                }
+                let key = sparse_mpt::storage_key(*slot_key);
+                if slot.present_value.is_zero() {
+                    storage_trie.remove_leaf(&key);
+                } else {
+                    let mut encoded = Vec::new();
+                    alloy_rlp::Encodable::encode(&slot.present_value, &mut encoded);
+                    storage_trie.update_leaf(key, encoded);
+                }
+            }
+        }
+
+        let new_storage_root = storage_trie.root();
+
+        // Build the updated TrieAccount for the state trie leaf.
+        if let Some(info) = &account.info {
+            let trie_account = TrieAccount {
+                nonce: info.nonce,
+                balance: info.balance,
+                storage_root: new_storage_root,
+                code_hash: info.code_hash,
+            };
+            let mut encoded = Vec::new();
+            alloy_rlp::Encodable::encode(&trie_account, &mut encoded);
+            state_trie.update_leaf(acct_key, encoded);
+        }
+    }
+
+    Ok(state_trie.root())
+}
+
+// ---------------------------------------------------------------------------
 //  Helper functions: state reads
 // ---------------------------------------------------------------------------
 
@@ -380,7 +510,7 @@ fn compute_tempo_block_hash(
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, B256, U256, map::HashMap};
+    use alloy_primitives::{Address, B256, map::HashMap};
 
     use crate::types::*;
 
@@ -411,11 +541,13 @@ mod tests {
             zone_blocks: vec![],
             initial_zone_state: ZoneStateWitness {
                 accounts: HashMap::default(),
+                absent_accounts: HashMap::default(),
                 state_root: B256::ZERO,
             },
             tempo_state_proofs: BatchStateProof {
                 node_pool: HashMap::default(),
                 reads: vec![],
+                account_proofs: vec![],
             },
             tempo_ancestry_headers: vec![],
         };

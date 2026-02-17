@@ -230,6 +230,13 @@ pub struct ZoneStateWitness {
     /// Account data with storage proofs, keyed by address.
     pub accounts: HashMap<Address, AccountWitness>,
 
+    /// Accounts confirmed absent from the state trie, with exclusion proofs.
+    ///
+    /// These are addresses accessed during execution that do not exist in the
+    /// state (e.g., fresh ETH transfer targets, CALL targets with no code).
+    /// The proof verifies that the account path is absent from the state trie.
+    pub absent_accounts: HashMap<Address, Vec<Bytes>>,
+
     /// Zone state root at start of batch.
     pub state_root: B256,
 }
@@ -271,11 +278,48 @@ pub struct BatchStateProof {
     /// Deduplicated pool of all MPT nodes, keyed by `keccak256(rlp(node))`.
     pub node_pool: HashMap<B256, Vec<u8>>,
 
-    /// Tempo state reads with proof paths.
+    /// Tempo state reads with storage proof paths.
     pub reads: Vec<L1StateRead>,
+
+    /// Per-account Tempo L1 proof data (account trie proofs).
+    ///
+    /// Deduplicated by `(tempo_block_number, account)` — multiple storage reads
+    /// to the same account at the same block share a single account proof.
+    pub account_proofs: Vec<L1AccountProof>,
 }
 
-/// A single Tempo L1 state read with a proof path through the deduplicated node pool.
+/// Account-level proof data from a Tempo L1 `eth_getProof` response.
+///
+/// One entry per unique `(tempo_block_number, account)` pair. Contains the
+/// account's trie data and the proof path from `tempoStateRoot` to the
+/// account leaf in the L1 state trie.
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct L1AccountProof {
+    /// The Tempo block number this proof was retrieved at.
+    pub tempo_block_number: u64,
+
+    /// Tempo L1 account address.
+    pub account: Address,
+
+    /// Account nonce.
+    pub nonce: u64,
+
+    /// Account balance.
+    pub balance: U256,
+
+    /// Account storage root.
+    pub storage_root: B256,
+
+    /// Account code hash.
+    pub code_hash: B256,
+
+    /// Account proof path through `node_pool` (state root -> account leaf).
+    pub account_path: Vec<B256>,
+}
+
+/// A single Tempo L1 state read with a storage proof path through the
+/// deduplicated node pool.
 #[derive(Debug, Clone)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct L1StateRead {
@@ -291,8 +335,10 @@ pub struct L1StateRead {
     /// Storage slot.
     pub slot: U256,
 
-    /// Path through `node_pool` from state root to leaf.
-    pub node_path: Vec<B256>,
+    /// Storage proof path through `node_pool` (storage root -> slot leaf).
+    ///
+    /// Only the storage proof portion; the account proof is in `L1AccountProof`.
+    pub storage_path: Vec<B256>,
 
     /// Expected value.
     pub value: U256,
