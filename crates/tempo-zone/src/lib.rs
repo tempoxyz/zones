@@ -28,6 +28,7 @@ pub use l1::{
     Deposit, DepositQueue, DepositQueueTransition, L1BlockDeposits, L1Subscriber,
     L1SubscriberConfig, PendingDeposits,
 };
+pub use l1_state::SharedL1StateCache;
 pub use node::{ZoneExecutorBuilder, ZoneNode};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};

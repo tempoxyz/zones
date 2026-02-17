@@ -83,17 +83,36 @@ impl L1Subscriber {
         l1_provider: &impl Provider<TempoNetwork>,
         filter: &Filter,
     ) -> eyre::Result<()> {
-        // FIXME: same here this is should be cleaned up
         let tip = l1_provider.get_block_number().await?;
-        let portal = ZonePortal::new(self.config.portal_address, l1_provider);
-        let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
 
-        let from = if last_synced > 0 {
-            last_synced + 1
+        // When genesis_tempo_block_number is set and portal is Address::ZERO,
+        // skip portal queries entirely — no portal is deployed.
+        let from = if let Some(genesis) = self.config.genesis_tempo_block_number {
+            if self.config.portal_address.is_zero() {
+                info!(genesis, "Using genesis block number override (no portal)");
+                genesis + 1
+            } else {
+                let portal = ZonePortal::new(self.config.portal_address, l1_provider);
+                let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
+                if last_synced > 0 {
+                    last_synced + 1
+                } else {
+                    info!(genesis, "Using CLI genesis block number override");
+                    genesis + 1
+                }
+            }
         } else {
-            let genesis = if let Some(local) = self.config.genesis_tempo_block_number {
-                info!(genesis = local, "Using CLI genesis block number override");
-                local
+            if self.config.portal_address.is_zero() {
+                warn!(
+                    "No portal address and no genesis block number override — skipping backfill. \
+                     Set --l1.genesis-block-number or provide a portal address."
+                );
+                return Ok(());
+            }
+            let portal = ZonePortal::new(self.config.portal_address, l1_provider);
+            let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
+            if last_synced > 0 {
+                last_synced + 1
             } else {
                 let on_chain = portal.genesisTempoBlockNumber().call().await?;
                 if on_chain == 0 {
@@ -104,13 +123,8 @@ impl L1Subscriber {
                     return Ok(());
                 }
                 info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
-                on_chain
-            };
-            info!(
-                genesis,
-                "Fresh portal, backfilling from genesis+1 (genesis block already in TempoState)"
-            );
-            genesis + 1
+                on_chain + 1
+            }
         };
 
         if from > tip {
@@ -248,6 +262,14 @@ impl L1Subscriber {
 
         while let Some(header) = stream.next().await {
             let block_number = header.number();
+
+            // Skip blocks already enqueued during backfill. The WS subscription
+            // starts before backfill so it may buffer blocks that were already
+            // processed. Enqueuing them again would break chain continuity.
+            if block_number <= last_enqueued {
+                debug!(block_number, last_enqueued, "Skipping already-enqueued L1 block");
+                continue;
+            }
 
             // Detect gaps: if the subscription skipped blocks, backfill them.
             // Each skipped block must be enqueued (even without deposits) to

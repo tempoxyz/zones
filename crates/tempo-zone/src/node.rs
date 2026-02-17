@@ -122,6 +122,13 @@ impl ZoneNode {
         self.deposit_queue.clone()
     }
 
+    /// Returns a clone of the shared L1 state cache handle.
+    ///
+    /// Allows pre-populating the cache for testing scenarios where no real L1 is available.
+    pub fn l1_state_cache(&self) -> SharedL1StateCache {
+        self.l1_state_cache.clone()
+    }
+
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         deposit_queue: crate::DepositQueue,
@@ -394,7 +401,7 @@ where
             self.l1_state_cache.clone(),
             runtime_handle,
         )
-        .await;
+        .await?;
 
         spawn_l1_state_listener(
             self.l1_state_listener_config,
