@@ -62,7 +62,10 @@ impl ZoneProvider {
         let (provider, expires_at) = build_provider_with_token(&config)?;
         Ok(Self {
             config,
-            state: Arc::new(Mutex::new(CachedState { provider, expires_at })),
+            state: Arc::new(Mutex::new(CachedState {
+                provider,
+                expires_at,
+            })),
         })
     }
 

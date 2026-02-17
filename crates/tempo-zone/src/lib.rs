@@ -17,8 +17,8 @@ pub mod evm;
 mod executor;
 pub mod l1;
 pub mod l1_state;
-pub mod rpc;
 mod node;
+pub mod rpc;
 pub mod withdrawals;
 pub mod zonemonitor;
 

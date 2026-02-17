@@ -30,14 +30,14 @@ use reth_rpc_eth_api::RpcConverter;
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::{spec::TempoChainSpec, hardfork::TempoHardfork};
+use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoChainSpec};
 use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
-use tempo_transaction_pool::validator::DEFAULT_MAX_TEMPO_AUTHORIZATIONS;
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
-    AA2dPool, AA2dPoolConfig, TempoTransactionPool, amm::AmmLiquidityCache,
-    validator::TempoTransactionValidator,
+    AA2dPool, AA2dPoolConfig, TempoTransactionPool,
+    amm::AmmLiquidityCache,
+    validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tracing::{debug, info};
 

@@ -89,7 +89,16 @@ impl AuthorizationToken {
         msg.extend_from_slice(&expires_at.to_be_bytes());
         let digest = keccak256(&msg);
 
-        Ok(Self { version, zone_id, chain_id, zone_portal, issued_at, expires_at, signature, digest })
+        Ok(Self {
+            version,
+            zone_id,
+            chain_id,
+            zone_portal,
+            issued_at,
+            expires_at,
+            signature,
+            digest,
+        })
     }
 
     /// Validate token fields against the server's zone configuration.

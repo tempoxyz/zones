@@ -11,8 +11,7 @@ pub fn recover_secp256k1(signature: &[u8], digest: &B256) -> Result<Address, Aut
         return Err(AuthError::InvalidSignature);
     }
 
-    let sig =
-        Signature::try_from(&signature[..65]).map_err(|_| AuthError::InvalidSignature)?;
+    let sig = Signature::try_from(&signature[..65]).map_err(|_| AuthError::InvalidSignature)?;
 
     recover_signer_unchecked(&sig, *digest).map_err(|_| AuthError::InvalidSignature)
 }

@@ -65,8 +65,8 @@ impl ZoneTestNode {
         let zone_node = ZoneNode::new(
             l1_ws_url,
             portal_address,
-            None,    // genesis_tempo_block_number
-            None,    // sequencer
+            None, // genesis_tempo_block_number
+            None, // sequencer
         );
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))

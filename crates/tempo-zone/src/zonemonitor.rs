@@ -309,20 +309,24 @@ impl ZoneMonitor {
         let tempo_call = self.tempo_state.tempoBlockNumber().block(to.into());
         let deposit_call = self.inbox.processedDepositQueueHash().block(to.into());
         let block_fut = async {
-            self.provider.get_block_by_number(to.into()).await.map_err(Into::into)
+            self.provider
+                .get_block_by_number(to.into())
+                .await
+                .map_err(Into::into)
         };
-        let (tempo_block_number, processed_deposit_hash, block) = tokio::try_join!(
-            tempo_call.call(),
-            deposit_call.call(),
-            block_fut,
-        )?;
+        let (tempo_block_number, processed_deposit_hash, block) =
+            tokio::try_join!(tempo_call.call(), deposit_call.call(), block_fut,)?;
 
         let block_hash = block
             .ok_or_else(|| eyre::eyre!("zone block {to} not found"))?
             .header
             .hash;
 
-        Ok(ZoneBlockSnapshot { tempo_block_number, processed_deposit_hash, block_hash })
+        Ok(ZoneBlockSnapshot {
+            tempo_block_number,
+            processed_deposit_hash,
+            block_hash,
+        })
     }
 
     /// Submit a `submitBatch` transaction to the ZonePortal on L1 with exponential

@@ -37,20 +37,24 @@ pub struct RpcState {
 pub async fn start_private_rpc(
     config: PrivateRpcConfig,
     api: Arc<dyn ZoneRpcApi>,
-) -> eyre::Result<()> {
+) -> eyre::Result<std::net::SocketAddr> {
     let listen_addr = config.listen_addr;
     let state = Arc::new(RpcState { config, api });
 
-    let app = Router::new()
-        .route("/", post(handle_rpc))
-        .with_state(state);
-
-    info!(target: "zone::rpc", %listen_addr, "Starting private zone RPC server");
+    let app = Router::new().route("/", post(handle_rpc)).with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
-    axum::serve(listener, app).await?;
+    let local_addr = listener.local_addr()?;
 
-    Ok(())
+    info!(target: "zone::rpc", %local_addr, "Starting private zone RPC server");
+
+    tokio::spawn(async move {
+        if let Err(err) = axum::serve(listener, app).await {
+            tracing::error!(target: "zone::rpc", %err, "Private RPC server failed");
+        }
+    });
+
+    Ok(local_addr)
 }
 
 /// Main RPC handler — authenticates, dispatches, returns response.
@@ -100,8 +104,7 @@ async fn handle_rpc(
 
         let mut responses = Vec::with_capacity(requests.len());
         for req in &requests {
-            responses
-                .push(handlers::dispatch(req, &auth, &state.config, state.api.as_ref()).await);
+            responses.push(handlers::dispatch(req, &auth, state.api.as_ref()).await);
         }
 
         (StatusCode::OK, axum::Json(responses)).into_response()
@@ -120,8 +123,7 @@ async fn handle_rpc(
             }
         };
 
-        let response =
-            handlers::dispatch(&request, &auth, &state.config, state.api.as_ref()).await;
+        let response = handlers::dispatch(&request, &auth, state.api.as_ref()).await;
         (StatusCode::OK, axum::Json(response)).into_response()
     }
 }

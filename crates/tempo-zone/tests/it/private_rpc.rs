@@ -308,5 +308,3 @@ fn classify_unknown_is_none() {
     assert_eq!(classify_method("foo_bar"), None);
     assert_eq!(classify_method(""), None);
 }
-
-
