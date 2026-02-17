@@ -433,3 +433,4 @@ fn advance_tempo_repro() {
     // The test should not panic; we want to see the output
     println!("\n=== Test complete ===");
 }
+

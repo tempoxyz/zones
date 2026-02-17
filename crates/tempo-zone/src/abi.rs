@@ -144,6 +144,7 @@ sol! {
         function withdrawalQueueMaxSize() external view returns (uint256);
         function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
         function genesisTempoBlockNumber() external view returns (uint64);
+        function calculateDepositFee() external view returns (uint128 fee);
 
         // -- State-changing functions --
 
@@ -199,9 +200,18 @@ sol! {
         function withdrawalBatchIndex() external view returns (uint64);
         function nextWithdrawalIndex() external view returns (uint64);
         function pendingWithdrawalsCount() external view returns (uint256);
+        function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128 fee);
 
         // -- State-changing functions --
 
+        function requestWithdrawal(
+            address to,
+            uint128 amount,
+            bytes32 memo,
+            uint64 gasLimit,
+            address fallbackRecipient,
+            bytes calldata data
+        ) external;
         function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber) external returns (bytes32 withdrawalQueueHash);
     }
 
@@ -285,6 +295,45 @@ sol! {
         ChaumPedersenProof cpProof;
     }
 
+    // ---------------------------------------------------------------
+    //  ZoneFactory — deployed on Tempo L1
+    // ---------------------------------------------------------------
+
+    #[sol(rpc)]
+    contract ZoneFactory {
+        struct ZoneParams {
+            bytes32 genesisBlockHash;
+            bytes32 genesisTempoBlockHash;
+            uint64 genesisTempoBlockNumber;
+        }
+        struct CreateZoneParams {
+            address token;
+            address sequencer;
+            address verifier;
+            ZoneParams zoneParams;
+        }
+        #[derive(Debug)]
+        event ZoneCreated(
+            uint64 indexed zoneId,
+            address indexed portal,
+            address indexed messenger,
+            address token,
+            address sequencer,
+            address verifier,
+            bytes32 genesisBlockHash,
+            bytes32 genesisTempoBlockHash,
+            uint64 genesisTempoBlockNumber
+        );
+        function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
+        function verifier() external view returns (address);
+        function isZonePortal(address portal) external view returns (bool);
+        function isZoneMessenger(address messenger) external view returns (bool);
+    }
+
+    // ---------------------------------------------------------------
+    //  ZoneInbox — Zone L2 system contract (0x1c00...0001)
+    // ---------------------------------------------------------------
+
     #[sol(rpc)]
     contract ZoneInbox {
         #[derive(Debug)]
@@ -346,6 +395,19 @@ sol! {
             QueuedDeposit[] calldata deposits,
             DecryptionData[] calldata decryptions
         ) external;
+    }
+
+    // ---------------------------------------------------------------
+    //  SwapAndDepositRouter — deployed on Tempo L1
+    // ---------------------------------------------------------------
+
+    #[sol(rpc)]
+    contract SwapAndDepositRouter {
+        function onWithdrawalReceived(
+            address sender,
+            uint128 amount,
+            bytes calldata data
+        ) external returns (bytes4);
     }
 }
 

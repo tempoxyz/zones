@@ -26,7 +26,7 @@ async fn make_provider() -> L1StateProvider {
     };
     let cache = SharedL1StateCache::new(HashSet::from([ZONE_PORTAL]));
     let rt = tokio::runtime::Handle::current();
-    L1StateProvider::new(config, cache, rt).await
+    L1StateProvider::new(config, cache, rt).await.expect("failed to connect L1 state provider")
 }
 
 async fn recent_block_number() -> u64 {

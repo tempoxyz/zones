@@ -438,7 +438,7 @@ where
 ///
 /// Pass `u256::MAX` to batch all pending withdrawals. `block_number` must match the current zone
 /// block number.
-pub fn build_finalize_withdrawal_batch_tx(
+pub(crate) fn build_finalize_withdrawal_batch_tx(
     count: U256,
     block_number: u64,
 ) -> Recovered<TempoTxEnvelope> {
@@ -474,7 +474,7 @@ pub fn build_finalize_withdrawal_batch_tx(
 ///
 /// Each deposit is wrapped as a `QueuedDeposit` with `DepositType::Regular`.
 /// Encrypted deposits are not yet supported, so `decryptions` is always empty.
-pub fn build_advance_tempo_tx(
+pub(crate) fn build_advance_tempo_tx(
     header: &TempoHeader,
     deposits: &[Deposit],
 ) -> Recovered<TempoTxEnvelope> {
