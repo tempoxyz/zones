@@ -13,6 +13,7 @@ use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 
+use reth_ethereum::chainspec::EthChainSpec;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone::{ZoneNode, evm::ZoneEvmConfig};
@@ -76,6 +77,14 @@ struct ZoneArgs {
     /// `genesisTempoBlockNumber` is 0 (not created via ZoneFactory).
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
     pub l1_genesis_block_number: Option<u64>,
+
+    /// Port for the private zone RPC server (0 for OS-assigned).
+    #[arg(
+        long = "private-rpc.port",
+        env = "PRIVATE_RPC_PORT",
+        default_value_t = 8544
+    )]
+    pub private_rpc_port: u16,
 }
 
 fn main() {
@@ -115,6 +124,20 @@ fn main() {
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
             info!(target: "reth::cli", "Tempo Zone node started");
+
+            // Launch the private zone RPC server.
+            let eth_handlers = handle.node.eth_handlers().clone();
+            let private_rpc_config = zone::rpc::PrivateRpcConfig {
+                listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
+                zone_id: 0, // TODO: hardcoded for now
+                chain_id: handle.node.chain_spec().chain().id(),
+                zone_portal: args.portal_address,
+                sequencer: sequencer_addr.unwrap_or_default(),
+            };
+            let api: Arc<dyn zone::rpc::ZoneRpcApi> =
+                Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
+            let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
+            info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 
             // Spawn sequencer background tasks if a sequencer key is provided.
             if let Some(signer) = sequencer_signer {
