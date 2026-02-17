@@ -14,13 +14,15 @@
 //! Withdrawals from all blocks in the range are combined into a single hash chain
 //! and stored under one portal queue slot.
 //!
-//! ## EIP-2935 constraint
+//! ## EIP-2935 and ancestry mode
 //!
 //! The portal verifies `tempoBlockNumber` via EIP-2935, which stores the last 8192
-//! block hashes. The batch's `tempoBlockNumber` must be within this window of the
-//! current L1 block. In practice this is not a concern because the zone produces
-//! blocks at L1 speed — the monitor would need to fall ~2.3 hours behind to hit
-//! this limit.
+//! block hashes. When `tempoBlockNumber` is within this window the batch submitter
+//! uses **direct mode** (reading the hash straight from EIP-2935). If the zone
+//! falls behind (e.g. sequencer downtime >2 hours), the submitter automatically
+//! switches to **ancestry mode**: it supplies a recent L1 block number that IS
+//! within the EIP-2935 window, and the proof must include a block header chain
+//! linking that anchor back to `tempoBlockNumber`.
 
 use std::{sync::Arc, time::Duration};
 
@@ -32,7 +34,7 @@ use tokio::sync::Notify;
 use tracing::{error, info, instrument, warn};
 
 use crate::{
-    abi::{self, TempoState, ZoneInbox, ZoneOutbox},
+    abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
     batch::{BatchData, BatchSubmitter},
     withdrawals::SharedWithdrawalStore,
 };
@@ -97,8 +99,9 @@ pub struct ZoneMonitor {
     prev_block_hash: B256,
     /// Tracks the portal's withdrawal queue tail position.
     /// The withdrawal store keys must match the portal's queue slot indices
-    /// (not the L2 outbox's internal `withdrawalBatchIndex`). This counter
-    /// starts at 0 and increments each time a batch with a non-zero
+    /// (not the L2 outbox's internal `withdrawalBatchIndex`). This counter is
+    /// initialized from the portal’s on-chain `withdrawalQueueTail()` at startup,
+    /// and incremented each time a batch with a non-zero
     /// `withdrawal_queue_hash` is successfully submitted to L1.
     portal_withdrawal_queue_tail: u64,
 }
@@ -125,12 +128,37 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let batch_submitter = BatchSubmitter::new(config.portal_address, l1_provider);
-
-        let prev_block_hash = batch_submitter
-            .read_portal_block_hash()
+        let portal_for_init = ZonePortal::new(config.portal_address, l1_provider.clone());
+        let genesis_tempo_block_number: u64 = portal_for_init
+            .genesisTempoBlockNumber()
+            .call()
             .await
-            .expect("failed to read portal blockHash at startup");
+            .expect("failed to read genesisTempoBlockNumber");
+
+        let batch_submitter = BatchSubmitter::new(
+            config.portal_address,
+            l1_provider,
+            genesis_tempo_block_number,
+        );
+
+        let (prev_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
+            batch_submitter.read_portal_block_hash(),
+            batch_submitter.read_portal_withdrawal_queue_tail(),
+        )
+        .expect("failed to read portal state at startup");
+
+        let prev_processed_deposit_hash = inbox
+            .processedDepositQueueHash()
+            .call()
+            .await
+            .unwrap_or(B256::ZERO);
+
+        info!(
+            %prev_block_hash,
+            %prev_processed_deposit_hash,
+            portal_withdrawal_queue_tail,
+            "Initialized from portal state"
+        );
 
         Self {
             config,
@@ -142,9 +170,9 @@ impl ZoneMonitor {
             batch_submitter,
             withdrawal_notify,
             last_processed_block: 0,
-            prev_processed_deposit_hash: B256::ZERO,
+            prev_processed_deposit_hash,
             prev_block_hash,
-            portal_withdrawal_queue_tail: 0,
+            portal_withdrawal_queue_tail,
         }
     }
 
@@ -218,6 +246,14 @@ impl ZoneMonitor {
             B256::ZERO
         };
 
+        // --- 3. Validate withdrawal data consistency ---
+        if !withdrawal_queue_hash.is_zero() && all_withdrawals.is_empty() {
+            return Err(eyre::eyre!(
+                "withdrawal_queue_hash is non-zero but no withdrawal events found — \
+                 RPC may have returned incomplete data"
+            ));
+        }
+
         if !all_withdrawals.is_empty() {
             info!(
                 from,
@@ -229,21 +265,7 @@ impl ZoneMonitor {
             );
         }
 
-        // --- 3. Store withdrawals under the next portal queue slot ---
-        if !withdrawal_queue_hash.is_zero() {
-            let portal_slot = self.portal_withdrawal_queue_tail;
-            let mut store = self.withdrawal_store.lock();
-            for w in &all_withdrawals {
-                store.add_withdrawal(portal_slot, w.clone());
-            }
-            info!(
-                portal_slot,
-                count = all_withdrawals.len(),
-                "Stored withdrawals for portal queue slot"
-            );
-        }
-
-        // --- 5. Build and submit BatchData ---
+        // --- 4. Build and submit BatchData ---
         let batch_data = BatchData {
             tempo_block_number: end_state.tempo_block_number,
             prev_block_hash: self.prev_block_hash,
@@ -253,8 +275,9 @@ impl ZoneMonitor {
             withdrawal_queue_hash,
         };
 
-        // Submit — state only advances on success.
-        self.submit_batch_with_retry(&batch_data, to).await?;
+        // Submit — state and withdrawal store only advance on success.
+        self.submit_batch_with_retry(&batch_data, to, all_withdrawals)
+            .await?;
 
         Ok(())
     }
@@ -270,9 +293,23 @@ impl ZoneMonitor {
             .query()
             .await?;
 
-        Ok(events
+        let mut events_with_order: Vec<_> = events
             .into_iter()
-            .map(|(event, _log)| abi::Withdrawal {
+            .map(|(event, log)| {
+                let sort_key = (
+                    log.block_number.unwrap_or(0),
+                    log.transaction_index.unwrap_or(0),
+                    log.log_index.unwrap_or(0),
+                );
+                (sort_key, event)
+            })
+            .collect();
+
+        events_with_order.sort_by_key(|(key, _)| *key);
+
+        Ok(events_with_order
+            .into_iter()
+            .map(|(_, event)| abi::Withdrawal {
                 sender: event.sender,
                 to: event.to,
                 amount: event.amount,
@@ -309,20 +346,24 @@ impl ZoneMonitor {
         let tempo_call = self.tempo_state.tempoBlockNumber().block(to.into());
         let deposit_call = self.inbox.processedDepositQueueHash().block(to.into());
         let block_fut = async {
-            self.provider.get_block_by_number(to.into()).await.map_err(Into::into)
+            self.provider
+                .get_block_by_number(to.into())
+                .await
+                .map_err(Into::into)
         };
-        let (tempo_block_number, processed_deposit_hash, block) = tokio::try_join!(
-            tempo_call.call(),
-            deposit_call.call(),
-            block_fut,
-        )?;
+        let (tempo_block_number, processed_deposit_hash, block) =
+            tokio::try_join!(tempo_call.call(), deposit_call.call(), block_fut,)?;
 
         let block_hash = block
             .ok_or_else(|| eyre::eyre!("zone block {to} not found"))?
             .header
             .hash;
 
-        Ok(ZoneBlockSnapshot { tempo_block_number, processed_deposit_hash, block_hash })
+        Ok(ZoneBlockSnapshot {
+            tempo_block_number,
+            processed_deposit_hash,
+            block_hash,
+        })
     }
 
     /// Submit a `submitBatch` transaction to the ZonePortal on L1 with exponential
@@ -336,13 +377,32 @@ impl ZoneMonitor {
     ///   so it can finalize newly enqueued withdrawal slots.
     ///
     /// On failure (after [`MAX_RETRIES`] attempts with [`INITIAL_RETRY_DELAY`]
-    /// doubling each time): resyncs `prev_block_hash` from the portal's on-chain
-    /// `blockHash()` and skips this block range so the monitor can continue.
+    /// doubling each time): resyncs `prev_block_hash` and
+    /// `portal_withdrawal_queue_tail` from the portal and skips this block range
+    /// so the monitor can continue.
     async fn submit_batch_with_retry(
         &mut self,
         batch_data: &BatchData,
         last_block_number: u64,
+        withdrawals: Vec<abi::Withdrawal>,
     ) -> Result<()> {
+        // Preflight: verify prev_block_hash matches portal state.
+        match self.batch_submitter.read_portal_block_hash().await {
+            Ok(portal_hash) if portal_hash != batch_data.prev_block_hash => {
+                warn!(
+                    local_prev = %batch_data.prev_block_hash,
+                    portal_hash = %portal_hash,
+                    "prev_block_hash mismatch with portal, resyncing"
+                );
+                self.resync_from_portal().await;
+                return Ok(());
+            }
+            Err(e) => {
+                warn!(error = %e, "Failed preflight portal hash check, continuing with submission");
+            }
+            _ => {}
+        }
+
         let mut delay = INITIAL_RETRY_DELAY;
 
         for attempt in 1..=MAX_RETRIES {
@@ -363,8 +423,20 @@ impl ZoneMonitor {
                     self.prev_processed_deposit_hash = batch_data.next_processed_deposit_hash;
                     self.last_processed_block = last_block_number;
 
-                    // Advance portal queue tail if this batch had withdrawals.
+                    // Store withdrawals and advance portal queue tail if this batch had withdrawals.
                     if !batch_data.withdrawal_queue_hash.is_zero() {
+                        if !withdrawals.is_empty() {
+                            let portal_slot = self.portal_withdrawal_queue_tail;
+                            let mut store = self.withdrawal_store.lock();
+                            for w in &withdrawals {
+                                store.add_withdrawal(portal_slot, w.clone());
+                            }
+                            info!(
+                                portal_slot,
+                                count = withdrawals.len(),
+                                "Stored withdrawals for portal queue slot"
+                            );
+                        }
                         self.portal_withdrawal_queue_tail += 1;
                     }
 
@@ -399,35 +471,51 @@ impl ZoneMonitor {
         }
 
         // All retries exhausted — resync from portal.
-        self.resync_from_portal(last_block_number).await;
+        self.resync_from_portal().await;
 
         Ok(())
     }
 
-    /// Resync `prev_block_hash` from the portal's on-chain `blockHash()`.
+    /// Resync `prev_block_hash`, `prev_processed_deposit_hash`, and
+    /// `portal_withdrawal_queue_tail` from on-chain state.
     ///
-    /// Called after exhausting retries so subsequent batches start from the
-    /// portal's actual state rather than the stale local value.
-    async fn resync_from_portal(&mut self, block_number: u64) {
+    /// Called after exhausting retries or when a preflight hash mismatch is
+    /// detected, so subsequent batches start from the portal's actual state
+    /// rather than stale local values. Does NOT advance `last_processed_block`
+    /// — the same block range will be retried on the next poll cycle.
+    async fn resync_from_portal(&mut self) {
         let old_hash = self.prev_block_hash;
-        match self.batch_submitter.read_portal_block_hash().await {
-            Ok(portal_hash) => {
+        let old_tail = self.portal_withdrawal_queue_tail;
+        match tokio::try_join!(
+            self.batch_submitter.read_portal_block_hash(),
+            self.batch_submitter.read_portal_withdrawal_queue_tail(),
+        ) {
+            Ok((portal_hash, portal_tail)) => {
+                // Also resync prev_processed_deposit_hash from ZoneInbox.
+                let deposit_hash = self
+                    .inbox
+                    .processedDepositQueueHash()
+                    .call()
+                    .await
+                    .unwrap_or(self.prev_processed_deposit_hash);
+
                 warn!(
                     old_prev_block_hash = %old_hash,
                     new_block_hash = %portal_hash,
-                    block_number,
-                    "Resynced prev_block_hash from portal after max retries"
+                    old_portal_tail = old_tail,
+                    new_portal_tail = portal_tail,
+                    %deposit_hash,
+                    "Resynced from portal and zone state"
                 );
                 self.prev_block_hash = portal_hash;
-                // Skip this block — the monitor will pick up from the next one.
-                self.last_processed_block = block_number;
+                self.portal_withdrawal_queue_tail = portal_tail;
+                self.prev_processed_deposit_hash = deposit_hash;
             }
             Err(e) => {
                 error!(
                     error = %e,
-                    "Failed to read blockHash from portal during resync"
+                    "Failed to read portal state during resync"
                 );
-                // Don't advance last_processed_block so we retry this block.
             }
         }
     }

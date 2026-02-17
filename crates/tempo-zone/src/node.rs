@@ -30,14 +30,14 @@ use reth_rpc_eth_api::RpcConverter;
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::{spec::TempoChainSpec, hardfork::TempoHardfork};
+use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoChainSpec};
 use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
-use tempo_transaction_pool::validator::DEFAULT_MAX_TEMPO_AUTHORIZATIONS;
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
-    AA2dPool, AA2dPoolConfig, TempoTransactionPool, amm::AmmLiquidityCache,
-    validator::TempoTransactionValidator,
+    AA2dPool, AA2dPoolConfig, TempoTransactionPool,
+    amm::AmmLiquidityCache,
+    validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tracing::{debug, info};
 
@@ -120,6 +120,13 @@ impl ZoneNode {
     /// Returns a clone of the deposit queue handle for external use (e.g. sequencer tasks).
     pub fn deposit_queue(&self) -> crate::DepositQueue {
         self.deposit_queue.clone()
+    }
+
+    /// Returns a clone of the shared L1 state cache handle.
+    ///
+    /// Allows pre-populating the cache for testing scenarios where no real L1 is available.
+    pub fn l1_state_cache(&self) -> SharedL1StateCache {
+        self.l1_state_cache.clone()
     }
 
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
@@ -394,7 +401,7 @@ where
             self.l1_state_cache.clone(),
             runtime_handle,
         )
-        .await;
+        .await?;
 
         spawn_l1_state_listener(
             self.l1_state_listener_config,

@@ -157,8 +157,8 @@ pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count:
 ///
 /// ## POC limitations
 ///
-/// - Transactions are submitted to L1 but the processor does not wait for confirmation receipts
-///   in a production-ready way. Failures are logged and the processor continues.
+/// - Transactions are submitted sequentially and the processor waits for each confirmation.
+///   On failure, processing stops and remaining withdrawals are retried on the next cycle.
 /// - The portal automatically pays the processing fee to the sequencer; this processor does not
 ///   handle fee accounting.
 pub struct WithdrawalProcessor {
@@ -274,21 +274,44 @@ impl WithdrawalProcessor {
                 "Submitting processWithdrawal to L1"
             );
 
-            match self
+            let tx_result = self
                 .portal
                 .processWithdrawal(withdrawal.clone(), remaining_queue)
                 .send()
-                .await
-            {
+                .await;
+
+            match tx_result {
                 Ok(pending) => {
-                    info!(
-                        slot = head_val,
-                        index = i,
-                        tx_hash = %pending.tx_hash(),
-                        to = %withdrawal.to,
-                        amount = %withdrawal.amount,
-                        "processWithdrawal tx submitted to L1"
-                    );
+                    let tx_hash = *pending.tx_hash();
+                    match pending
+                        .with_required_confirmations(1)
+                        .with_timeout(Some(std::time::Duration::from_secs(30)))
+                        .watch()
+                        .await
+                    {
+                        Ok(_) => {
+                            info!(
+                                slot = head_val,
+                                index = i,
+                                %tx_hash,
+                                to = %withdrawal.to,
+                                amount = %withdrawal.amount,
+                                "processWithdrawal confirmed on L1"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                slot = head_val,
+                                index = i,
+                                %tx_hash,
+                                to = %withdrawal.to,
+                                amount = %withdrawal.amount,
+                                error = %e,
+                                "processWithdrawal tx not confirmed, stopping batch processing"
+                            );
+                            return Ok(());
+                        }
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -297,12 +320,14 @@ impl WithdrawalProcessor {
                         to = %withdrawal.to,
                         amount = %withdrawal.amount,
                         error = %e,
-                        "processWithdrawal tx failed"
+                        "processWithdrawal tx failed to send, stopping batch processing"
                     );
+                    return Ok(());
                 }
             }
         }
 
+        // All withdrawals in this slot confirmed — safe to remove.
         self.store.lock().remove_batch(head_val);
 
         info!(
@@ -426,5 +451,28 @@ mod tests {
         store.remove_batch(0);
         assert!(!store.has_batch(0));
         assert_eq!(store.batch_count(), 0);
+    }
+
+    #[test]
+    fn store_slot_index_must_match_portal_tail() {
+        // Demonstrates that withdrawals must be stored under the portal's actual
+        // queue tail index. If the monitor starts with tail=0 but the portal is
+        // at tail=5, withdrawals end up in slot 0 while the withdrawal processor
+        // looks for them in slot 5.
+        let mut store = WithdrawalStore::new();
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
+
+        // Simulate storing under the wrong slot (tail=0 when portal is at 5).
+        store.add_withdrawal(0, w.clone());
+        assert!(store.has_batch(0));
+        assert!(
+            !store.has_batch(5),
+            "withdrawal processor would look at slot 5 and find nothing"
+        );
+
+        // Correct: store under the portal's actual tail.
+        let portal_tail = 5u64;
+        store.add_withdrawal(portal_tail, w);
+        assert!(store.has_batch(portal_tail));
     }
 }
