@@ -18,20 +18,21 @@ use alloy_provider::{DynProvider, Provider};
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{info, instrument, warn};
-
 use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
 
-/// EIP-2935 stores the last 8192 block hashes. Blocks older than this require
-/// ancestry mode.
+/// EIP-2935 stores the last 8192 block hashes (~68 min at 500ms block time).
+/// Blocks older than this require ancestry mode.
 const EIP2935_HISTORY_WINDOW: u64 = 8192;
 
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 
-/// Finality margin for L1 anchor blocks. Using 64 blocks (~32s at 500ms
-/// block time) to avoid anchoring to blocks that may be reorged.
-const FINALITY_MARGIN: u64 = 64;
+/// Effective EIP-2935 window after subtracting the safety margin.
+const EIP2935_EFFECTIVE_WINDOW: u64 = EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MARGIN;
+
+/// Maximum number of pending withdrawal queue slots in the portal ring buffer.
+const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
 
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
@@ -59,8 +60,9 @@ pub struct BatchData {
 pub struct BatchSubmitter {
     /// ZonePortal contract address on Tempo L1 (used in tracing spans).
     portal_address: Address,
-    /// Shared L1 provider for querying the current block number (EIP-2935
-    /// window check). The same provider backs the `portal` contract instance.
+    /// Shared L1 provider (HTTP or WS) for querying the current block number
+    /// (EIP-2935 window check). The same provider backs the `portal` contract
+    /// instance.
     l1_provider: DynProvider<TempoNetwork>,
     /// ZonePortal contract instance for calling `submitBatch` and reading
     /// on-chain state such as `blockHash()`.
@@ -200,18 +202,13 @@ impl BatchSubmitter {
             ));
         }
 
-        let effective_window = EIP2935_HISTORY_WINDOW.saturating_sub(EIP2935_SAFETY_MARGIN);
-
-        if current_l1_block.saturating_sub(tempo_block_number) < effective_window {
+        if current_l1_block.saturating_sub(tempo_block_number) < EIP2935_EFFECTIVE_WINDOW {
             return Ok(AnchorMode::Direct);
         }
 
         // tempo_block_number is outside the EIP-2935 window — use ancestry mode.
-        // Pick a recent block well within the window as anchor. Use the larger
-        // of the two margins to ensure the anchor is both within EIP-2935 and
-        // past the finality horizon.
-        let anchor_offset = EIP2935_SAFETY_MARGIN.max(FINALITY_MARGIN);
-        let anchor_block = current_l1_block.saturating_sub(anchor_offset);
+        // Pick a recent block well within the window as anchor.
+        let anchor_block = current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN);
 
         warn!(
             tempo_block_number,
@@ -226,8 +223,7 @@ impl BatchSubmitter {
 
     /// Read the portal's `genesisTempoBlockNumber` from L1.
     pub async fn read_genesis_tempo_block_number(&self) -> Result<u64> {
-        let n = self.portal.genesisTempoBlockNumber().call().await?;
-        Ok(n)
+        Ok(self.portal.genesisTempoBlockNumber().call().await?)
     }
 
     /// Read the current `blockHash` from the ZonePortal on L1.
@@ -270,7 +266,6 @@ impl BatchSubmitter {
             self.read_portal_withdrawal_queue_head(),
             self.read_portal_withdrawal_queue_tail(),
         )?;
-        const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
         if tail.saturating_sub(head) >= WITHDRAWAL_QUEUE_CAPACITY {
             return Err(eyre::eyre!(
                 "withdrawal queue full ({} pending slots, capacity {})",

@@ -401,7 +401,7 @@ where
             self.l1_state_cache.clone(),
             runtime_handle,
         )
-        .await;
+        .await?;
 
         spawn_l1_state_listener(
             self.l1_state_listener_config,
