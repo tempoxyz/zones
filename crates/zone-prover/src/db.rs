@@ -5,7 +5,8 @@
 //! to an account or storage slot NOT present in the witness is a hard error,
 //! preventing the prover from omitting non-zero state.
 
-use alloy_primitives::{Address, B256, U256, map::HashMap};
+use alloy_primitives::{Address, B256, U256, map::HashMap, KECCAK256_EMPTY};
+use alloy_primitives::map::HashSet;
 use revm::{
     Database,
     state::{AccountInfo, Bytecode},
@@ -28,6 +29,9 @@ pub struct WitnessDatabase {
     /// Verified account data, keyed by address.
     accounts: HashMap<Address, VerifiedAccount>,
 
+    /// Addresses confirmed absent from the state trie (verified by exclusion proof).
+    absent_accounts: HashSet<Address>,
+
     /// Code indexed by code hash for `code_by_hash` lookups.
     code_by_hash: HashMap<B256, Bytecode>,
 
@@ -41,9 +45,8 @@ struct VerifiedAccount {
     info: AccountInfo,
     storage: HashMap<U256, U256>,
     /// The verified storage root (from the account trie).
-    /// Used during full MPT verification but not yet read in the stub path.
-    #[allow(dead_code)]
-    storage_root: B256,
+    /// Verified during construction and retained for diagnostics.
+    _storage_root: B256,
 }
 
 impl WitnessDatabase {
@@ -98,13 +101,21 @@ impl WitnessDatabase {
                 VerifiedAccount {
                     info,
                     storage: acct.storage.clone(),
-                    storage_root,
+                    _storage_root: storage_root,
                 },
             );
         }
 
+        // Verify absence proofs for confirmed-absent accounts.
+        let mut absent_accounts = HashSet::default();
+        for (addr, proof) in &witness.absent_accounts {
+            mpt::verify_account_absence_proof(witness.state_root, *addr, proof)?;
+            absent_accounts.insert(*addr);
+        }
+
         Ok(Self {
             accounts,
+            absent_accounts,
             code_by_hash,
             state_root: witness.state_root,
         })
@@ -120,17 +131,26 @@ impl Database for WitnessDatabase {
     type Error = ProverError;
 
     fn basic(&mut self, address: Address) -> Result<Option<AccountInfo>, Self::Error> {
-        match self.accounts.get(&address) {
-            Some(acct) => Ok(Some(acct.info.clone())),
-            // Per spec: "Any account or storage access not present in the witness
-            // must be treated as an error (do not default to zero)."
-            None => Err(ProverError::MissingWitness(format!(
-                "account {address} not in witness"
-            ))),
+        if let Some(acct) = self.accounts.get(&address) {
+            return Ok(Some(acct.info.clone()));
         }
+        // Account is confirmed absent (verified by exclusion proof).
+        if self.absent_accounts.contains(&address) {
+            return Ok(None);
+        }
+        // Truly missing from the witness — hard error.
+        Err(ProverError::MissingWitness(format!(
+            "account {address} not in witness"
+        )))
     }
 
     fn code_by_hash(&mut self, code_hash: B256) -> Result<Bytecode, Self::Error> {
+        // KECCAK_EMPTY is the code hash for EOAs (no bytecode). revm may call
+        // code_by_hash with this value, so return empty bytecode without
+        // requiring it in the witness.
+        if code_hash == KECCAK256_EMPTY {
+            return Ok(Bytecode::default());
+        }
         self.code_by_hash
             .get(&code_hash)
             .cloned()
@@ -140,6 +160,11 @@ impl Database for WitnessDatabase {
     }
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
+        // Absent accounts have no storage — return zero.
+        if self.absent_accounts.contains(&address) {
+            return Ok(U256::ZERO);
+        }
+
         let acct = self.accounts.get(&address).ok_or_else(|| {
             ProverError::MissingWitness(format!(
                 "account {address} not in witness (storage read)"
@@ -163,28 +188,44 @@ impl Database for WitnessDatabase {
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Bytes, address};
+    use alloy_primitives::address;
 
     use super::*;
 
     /// Test that accessing a missing account returns an error (not zero).
     #[test]
     fn test_missing_account_errors() {
-        let witness = ZoneStateWitness {
-            accounts: HashMap::default(),
-            state_root: B256::ZERO,
-        };
-
         // We can't verify proofs with an empty state root and no accounts,
         // so create the database directly for this unit test.
         let mut db = WitnessDatabase {
             accounts: HashMap::default(),
+            absent_accounts: HashSet::default(),
             code_by_hash: HashMap::default(),
             state_root: B256::ZERO,
         };
 
         let result = db.basic(address!("0x0000000000000000000000000000000000000001"));
         assert!(result.is_err());
+    }
+
+    /// Test that confirmed-absent accounts return Ok(None) instead of error.
+    #[test]
+    fn test_absent_account_returns_none() {
+        let addr = address!("0x0000000000000000000000000000000000000042");
+        let mut absent = HashSet::default();
+        absent.insert(addr);
+
+        let mut db = WitnessDatabase {
+            accounts: HashMap::default(),
+            absent_accounts: absent,
+            code_by_hash: HashMap::default(),
+            state_root: B256::ZERO,
+        };
+
+        // basic() returns Ok(None) for absent accounts.
+        assert_eq!(db.basic(addr).unwrap(), None);
+        // storage() returns zero for absent accounts.
+        assert_eq!(db.storage(addr, U256::from(1)).unwrap(), U256::ZERO);
     }
 
     /// Test that accessing a missing storage slot returns an error.
@@ -200,12 +241,13 @@ mod tests {
             VerifiedAccount {
                 info: AccountInfo::default(),
                 storage,
-                storage_root: mpt::empty_storage_root(),
+                _storage_root: mpt::empty_storage_root(),
             },
         );
 
         let mut db = WitnessDatabase {
             accounts,
+            absent_accounts: HashSet::default(),
             code_by_hash: HashMap::default(),
             state_root: B256::ZERO,
         };

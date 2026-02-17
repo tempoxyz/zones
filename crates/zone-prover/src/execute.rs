@@ -477,6 +477,9 @@ pub mod storage {
     /// TempoState slot 0: `tempoBlockHash` (bytes32).
     pub const TEMPO_STATE_BLOCK_HASH_SLOT: U256 = U256::ZERO;
 
+    /// TempoState slot 4: `tempoStateRoot` (bytes32).
+    pub const TEMPO_STATE_STATE_ROOT_SLOT: U256 = U256::from_limbs([4, 0, 0, 0]);
+
     /// TempoState slot 7: packed `(tempoBlockNumber, tempoGasLimit, tempoGasUsed, tempoTimestamp)`.
     /// `tempoBlockNumber` is the lowest uint64 (offset 0).
     pub const TEMPO_STATE_PACKED_SLOT: U256 = U256::from_limbs([7, 0, 0, 0]);

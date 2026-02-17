@@ -70,6 +70,25 @@ pub fn verify_storage_proof(
     Ok(())
 }
 
+/// Verify an account absence proof against the state root.
+///
+/// Verifies that the account at `address` does **not** exist in the state trie
+/// rooted at `state_root`. The proof is an exclusion proof (the path terminates
+/// at a branch/extension that diverges from the target key).
+pub fn verify_account_absence_proof(
+    state_root: B256,
+    address: alloy_primitives::Address,
+    proof: &[Bytes],
+) -> Result<(), ProverError> {
+    let key = Nibbles::unpack(keccak256(address));
+
+    // Passing `None` as expected_value verifies that the key is absent.
+    verify_proof(state_root, key, None, proof)
+        .map_err(|e| ProverError::InvalidProof(format!("absence proof for {address}: {e}")))?;
+
+    Ok(())
+}
+
 /// The empty storage trie root hash.
 pub fn empty_storage_root() -> B256 {
     alloy_trie::EMPTY_ROOT_HASH
