@@ -267,7 +267,10 @@ impl L1Subscriber {
             // starts before backfill so it may buffer blocks that were already
             // processed. Enqueuing them again would break chain continuity.
             if block_number <= last_enqueued {
-                debug!(block_number, last_enqueued, "Skipping already-enqueued L1 block");
+                debug!(
+                    block_number,
+                    last_enqueued, "Skipping already-enqueued L1 block"
+                );
                 continue;
             }
 

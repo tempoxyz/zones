@@ -9,7 +9,7 @@ use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
 use zone::abi::ZonePortal;
 
-use crate::utils::{self, ZoneTestNode, poll_until, DEFAULT_POLL};
+use crate::utils::{self, DEFAULT_POLL, ZoneTestNode, poll_until};
 
 const L1_WS_RPC_URL: &str = "wss://rpc.testnet.tempo.xyz";
 const L1_HTTP_RPC_URL: &str = "https://rpc.testnet.tempo.xyz";
@@ -49,11 +49,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
     let zone_token_address = utils::compute_tip20_address(zone_admin, utils::ZONE_TEST_TOKEN_SALT);
 
     // Start the zone node pointing at the existing portal on testnet
-    let zone = ZoneTestNode::start(
-        L1_WS_RPC_URL.to_string(),
-        portal_address,
-    )
-    .await?;
+    let zone = ZoneTestNode::start(L1_WS_RPC_URL.to_string(), portal_address).await?;
 
     // --- Zone setup: create the mint target token, grant system sender ISSUER_ROLE ---
 
@@ -101,7 +97,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
         .connect_http(L1_HTTP_RPC_URL.parse()?);
 
     let portal = ZonePortal::new(portal_address, &l1_provider);
-    let l1_token_address = portal.token().call().await?;
+    let l1_token_address = PATH_USD_ADDRESS;
     let fee = portal.calculateDepositFee().call().await?;
 
     let deposit_amount: u128 = fee + 1_000_000;
@@ -127,7 +123,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
 
     // Execute deposit on L1
     let deposit_receipt = portal
-        .deposit(recipient, deposit_amount, B256::ZERO)
+        .deposit(l1_token_address, recipient, deposit_amount, B256::ZERO)
         .send()
         .await?
         .get_receipt()

@@ -13,12 +13,12 @@
 //! are submitted as empty bytes. The L1 verifier contract must be configured to
 //! accept empty proofs for this to work.
 
+use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_provider::{DynProvider, Provider};
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{info, instrument, warn};
-use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
 
 /// EIP-2935 stores the last 8192 block hashes (~68 min at 500ms block time).
 /// Blocks older than this require ancestry mode.

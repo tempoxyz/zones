@@ -163,6 +163,12 @@ sol! {
             bytes calldata verifierConfig,
             bytes calldata proof
         ) external;
+
+        function enableToken(address token) external;
+
+        // -- View functions (token management) --
+
+        function isTokenEnabled(address token) external view returns (bool);
     }
 
     // ---------------------------------------------------------------
@@ -205,6 +211,7 @@ sol! {
         // -- State-changing functions --
 
         function requestWithdrawal(
+            address token,
             address to,
             uint128 amount,
             bytes32 memo,
