@@ -310,6 +310,8 @@ impl L1Subscriber {
 pub struct Deposit {
     /// L1 block number where the deposit was included.
     pub l1_block_number: u64,
+    /// TIP-20 token being deposited.
+    pub token: Address,
     /// Sender on L1.
     pub sender: Address,
     /// Recipient on the zone.
@@ -329,6 +331,7 @@ impl Deposit {
     pub fn from_event(event: DepositMade, l1_block_number: u64) -> Self {
         Self {
             l1_block_number,
+            token: event.token,
             sender: event.sender,
             to: event.to,
             amount: event.netAmount,
@@ -370,6 +373,7 @@ impl PendingDeposits {
                 (
                     abi::DepositType::Regular,
                     abi::Deposit {
+                        token: deposit.token,
                         sender: deposit.sender,
                         to: deposit.to,
                         amount: deposit.amount,
@@ -408,6 +412,7 @@ impl PendingDeposits {
                 (
                     abi::DepositType::Regular,
                     abi::Deposit {
+                        token: d.token,
                         sender: d.sender,
                         to: d.to,
                         amount: d.amount,
@@ -537,6 +542,7 @@ mod tests {
 
         let d1 = Deposit {
             l1_block_number: 1,
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000,
@@ -556,6 +562,7 @@ mod tests {
 
         let d2 = Deposit {
             l1_block_number: 2,
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000003"),
             to: address!("0x0000000000000000000000000000000000000004"),
             amount: 2000,
@@ -574,6 +581,7 @@ mod tests {
         let deposits = vec![
             Deposit {
                 l1_block_number: 1,
+                token: address!("0x0000000000000000000000000000000000001000"),
                 sender: address!("0x0000000000000000000000000000000000000001"),
                 to: address!("0x0000000000000000000000000000000000000002"),
                 amount: 1000,
@@ -583,6 +591,7 @@ mod tests {
             },
             Deposit {
                 l1_block_number: 2,
+                token: address!("0x0000000000000000000000000000000000001000"),
                 sender: address!("0x0000000000000000000000000000000000000003"),
                 to: address!("0x0000000000000000000000000000000000000004"),
                 amount: 2000,
@@ -615,6 +624,7 @@ mod tests {
 
         let deposits = vec![Deposit {
             l1_block_number: 1,
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 500,
@@ -636,6 +646,7 @@ mod tests {
 
         let d1 = Deposit {
             l1_block_number: 10,
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 100,
@@ -646,6 +657,7 @@ mod tests {
 
         let d2 = Deposit {
             l1_block_number: 11,
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000003"),
             to: address!("0x0000000000000000000000000000000000000004"),
             amount: 200,

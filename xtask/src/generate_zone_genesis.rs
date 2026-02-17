@@ -119,7 +119,7 @@ impl GenerateZoneGenesis {
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
         let zone_config_args =
-            (PATH_USD_ADDRESS, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
+            (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_config_bytecode,
@@ -136,7 +136,6 @@ impl GenerateZoneGenesis {
             ZONE_CONFIG_ADDRESS,
             self.tempo_portal,
             TEMPO_STATE_ADDRESS,
-            PATH_USD_ADDRESS,
         )
             .abi_encode_params();
         deploy_contract(
@@ -151,7 +150,7 @@ impl GenerateZoneGenesis {
         nonce += 1;
 
         let zone_outbox_bytecode = load_artifact(&self.specs_out, "ZoneOutbox")?;
-        let zone_outbox_args = (ZONE_CONFIG_ADDRESS, PATH_USD_ADDRESS).abi_encode_params();
+        let zone_outbox_args = (ZONE_CONFIG_ADDRESS,).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_outbox_bytecode,

@@ -22,7 +22,7 @@ sol! {
     }
 
     struct CreateZoneParams {
-        address token;
+        address initialToken;
         address sequencer;
         address verifier;
         ZoneParams zoneParams;
@@ -34,7 +34,7 @@ sol! {
             uint64 indexed zoneId,
             address indexed portal,
             address indexed messenger,
-            address token,
+            address initialToken,
             address sequencer,
             address verifier,
             bytes32 genesisBlockHash,
@@ -64,9 +64,9 @@ pub(crate) struct CreateZone {
     #[arg(long, default_value = "0x86A7Ca9816806B59C7172015D04F9C2EF5F5D8E0")]
     zone_factory: Address,
 
-    /// TIP-20 token address for the zone (same address on both Tempo and the zone L2).
+    /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
     #[arg(long)]
-    zone_token: Address,
+    initial_token: Address,
 
     /// Sequencer address that will operate the zone.
     #[arg(long)]
@@ -117,7 +117,7 @@ impl CreateZone {
         let current_block = provider.get_block_number().await?;
 
         let params = CreateZoneParams {
-            token: self.zone_token,
+            initialToken: self.initial_token,
             sequencer: self.sequencer,
             verifier,
             zoneParams: ZoneParams {
@@ -198,7 +198,7 @@ impl CreateZone {
         let zone_json = serde_json::json!({
             "zoneId": zone_id,
             "portal": format!("{portal}"),
-            "token": format!("{}", self.zone_token),
+            "initialToken": format!("{}", self.initial_token),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": confirm_header.inner.number,
         });
@@ -213,7 +213,7 @@ impl CreateZone {
         println!("Zone created successfully!");
         println!("  Zone ID: {zone_id}");
         println!("  Portal: {portal}");
-        println!("  Token: {}", self.zone_token);
+        println!("  Initial Token: {}", self.initial_token);
         println!("  Sequencer: {}", self.sequencer);
         println!("  Tempo anchor block: {}", confirm_header.inner.number);
         println!(
