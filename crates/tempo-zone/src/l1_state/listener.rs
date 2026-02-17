@@ -202,11 +202,11 @@ where
 pub fn spawn_l1_state_listener(
     config: L1StateListenerConfig,
     cache: SharedL1StateCache,
-    task_executor: impl reth_ethereum::tasks::TaskSpawner,
+    task_executor: reth_tasks::TaskExecutor,
 ) {
     let listener = L1StateListener::new(cache);
 
-    task_executor.spawn_critical(
+    task_executor.spawn_critical_task(
         "l1-state-listener",
         Box::pin(async move {
             loop {
@@ -226,11 +226,11 @@ pub fn spawn_l1_state_listener(
 pub fn spawn_l1_chain_notification_listener<C>(
     canon_state: C,
     cache: SharedL1StateCache,
-    task_executor: impl reth_ethereum::tasks::TaskSpawner,
+    task_executor: reth_tasks::TaskExecutor,
 ) where
     C: CanonStateSubscriptions + 'static,
 {
-    task_executor.spawn_critical(
+    task_executor.spawn_critical_task(
         "l1-chain-notification-listener",
         Box::pin(async move {
             let listener = L1ChainNotificationListener::new(canon_state, cache);

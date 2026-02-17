@@ -155,7 +155,7 @@ impl ZoneEvmConfig {
     /// Create a new zone EVM config with the given chain spec and L1 state provider.
     pub fn new(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
         let zone_factory = ZoneEvmFactory::new(l1_provider);
-        let inner = TempoEvmConfig::new_with_default_factory(chain_spec.clone());
+        let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
             inner,
@@ -178,6 +178,11 @@ impl ZoneEvmConfig {
         let runtime_handle = tokio::runtime::Handle::current();
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
         Self::new(chain_spec, l1_provider)
+    }
+
+    /// Returns the inner [`TempoEvmConfig`].
+    pub fn inner(&self) -> &TempoEvmConfig {
+        &self.inner
     }
 
     /// Returns the chain spec.

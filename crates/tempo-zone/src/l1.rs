@@ -52,14 +52,14 @@ impl L1Subscriber {
     pub fn spawn(
         config: L1SubscriberConfig,
         deposit_queue: DepositQueue,
-        task_executor: impl reth_ethereum::tasks::TaskSpawner,
+        task_executor: reth_tasks::TaskExecutor,
     ) {
         let subscriber = Self {
             config,
             deposit_queue,
         };
 
-        task_executor.spawn_critical(
+        task_executor.spawn_critical_task(
             "l1-deposit-subscriber",
             Box::pin(async move {
                 loop {

@@ -241,7 +241,7 @@ where
 
             ctx.node
                 .task_executor()
-                .spawn_critical("zone-engine", async move {
+                .spawn_critical_task("zone-engine", async move {
                     ZoneEngine::new(
                         provider,
                         payload_attributes_builder,
@@ -466,20 +466,19 @@ impl PayloadValidator<TempoPayloadTypes> for ZonePayloadValidator {
 #[non_exhaustive]
 pub struct ZonePoolBuilder;
 
-impl<Node> PoolBuilder<Node> for ZonePoolBuilder
+impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
     type Pool = TempoTransactionPool<Node::Provider>;
 
-    async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
+    async fn build_pool(self, ctx: &BuilderContext<Node>, evm_config: ZoneEvmConfig) -> eyre::Result<Self::Pool> {
         let mut pool_config = ctx.pool_config();
         pool_config.minimal_protocol_basefee = TempoHardfork::default().base_fee();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 
         let blob_store = InMemoryBlobStore::default();
-        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
-            .with_head_timestamp(ctx.head().timestamp)
+        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), evm_config.inner().clone())
             .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
             .with_local_transactions_config(pool_config.local_transactions_config.clone())
             .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
@@ -516,7 +515,7 @@ where
 
         spawn_maintenance_tasks(ctx, transaction_pool.clone(), &pool_config)?;
 
-        ctx.task_executor().spawn_critical(
+        ctx.task_executor().spawn_critical_task(
             "txpool maintenance (tempo)",
             tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.clone()),
         );

@@ -4,7 +4,7 @@ use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::{SolEvent, SolValue};
 use eyre::WrapErr;
-use reth_ethereum::tasks::TaskManager;
+use reth_tasks::Runtime;
 use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
 use reth_node_core::args::RpcServerArgs;
@@ -91,7 +91,7 @@ pub(crate) struct ZoneTestNode {
     deposit_queue: DepositQueue,
     l1_state_cache: SharedL1StateCache,
     _node_handle: Box<dyn TestNodeHandle>,
-    _tasks: TaskManager,
+    _runtime: Runtime,
 }
 
 impl ZoneTestNode {
@@ -326,7 +326,7 @@ impl ZoneTestNode {
         chain_id: u64,
         custom_genesis: Option<serde_json::Value>,
     ) -> eyre::Result<Self> {
-        let tasks = TaskManager::current();
+        let runtime = Runtime::with_existing_handle(tokio::runtime::Handle::current())?;
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))
@@ -362,7 +362,7 @@ impl ZoneTestNode {
         let l1_state_cache = zone_node.l1_state_cache();
 
         let node_handle = NodeBuilder::new(node_config)
-            .testing_node(tasks.executor())
+            .testing_node(runtime.clone())
             .node(zone_node)
             .launch_with_debug_capabilities()
             .await?;
@@ -380,7 +380,7 @@ impl ZoneTestNode {
             http_url,
             l1_state_cache,
             _node_handle: Box::new(node_handle),
-            _tasks: tasks,
+            _runtime: runtime,
         })
     }
 }
@@ -401,7 +401,7 @@ pub(crate) struct L1TestNode {
     http_url: url::Url,
     ws_url: url::Url,
     _node_handle: Box<dyn TestNodeHandle>,
-    _tasks: TaskManager,
+    _runtime: Runtime,
 }
 
 impl L1TestNode {
@@ -730,7 +730,7 @@ impl L1TestNode {
     pub(crate) async fn start_with(
         f: impl FnOnce(&mut NodeConfig<TempoChainSpec>),
     ) -> eyre::Result<Self> {
-        let tasks = TaskManager::current();
+        let runtime = Runtime::with_existing_handle(tokio::runtime::Handle::current())?;
 
         let genesis: serde_json::Value =
             serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
@@ -755,7 +755,7 @@ impl L1TestNode {
         f(&mut node_config);
 
         let node_handle = NodeBuilder::new(node_config)
-            .testing_node(tasks.executor())
+            .testing_node(runtime.clone())
             .node(tempo_node::node::TempoNode::default())
             .launch_with_debug_capabilities()
             .await?;
@@ -767,7 +767,7 @@ impl L1TestNode {
             http_url,
             ws_url,
             _node_handle: Box::new(node_handle),
-            _tasks: tasks,
+            _runtime: runtime,
         })
     }
 }
