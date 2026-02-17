@@ -51,6 +51,7 @@ alloy-evm.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
+alloy-signer.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -61,12 +62,20 @@ alloy-transport.workspace = true
 # revm
 revm.workspace = true
 
+# rpc
+axum.workspace = true
+
 # misc
+reqwest.workspace = true
+secp256k1.workspace = true
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 eyre.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
