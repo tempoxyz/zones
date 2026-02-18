@@ -21,6 +21,11 @@ pub mod header;
 pub mod mpt;
 pub mod sparse_mpt;
 pub mod tempo;
+/// Test utilities for building MPT proofs and zone state witnesses.
+///
+/// Available when the `test-utils` feature is enabled, or during `cargo test`.
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testutil;
 pub mod types;
 
 use alloy_primitives::{Address, B256, U256, keccak256, map::HashMap as PrimHashMap};
