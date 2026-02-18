@@ -132,6 +132,7 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
+#[allow(clippy::result_large_err)]
 fn parse_params<T: serde::de::DeserializeOwned>(
     raw: &str,
     id: &Value,
@@ -388,7 +389,8 @@ async fn handle_estimate_gas(
     api_result(
         id,
         "eth_estimateGas",
-        api.estimate_gas(request, block, state_override, auth.clone()).await,
+        api.estimate_gas(request, block, state_override, auth.clone())
+            .await,
     )
 }
 

@@ -486,7 +486,7 @@ mod tests {
 
         let qd = QueuedDeposit {
             depositType: DepositType::Regular,
-            depositData: deposit_data.clone(),
+            depositData: deposit_data,
         };
 
         println!(

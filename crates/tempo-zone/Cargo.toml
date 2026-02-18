@@ -67,7 +67,6 @@ axum.workspace = true
 
 # misc
 reqwest.workspace = true
-secp256k1.workspace = true
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 eyre.workspace = true
