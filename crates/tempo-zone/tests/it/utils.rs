@@ -722,9 +722,11 @@ impl L1TestNode {
 
         let l1_provider = self.dev_provider();
 
-        let artifact: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../docs/specs/out/ZoneFactory.sol/ZoneFactory.json"
-        ))?;
+        let artifact_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/out/ZoneFactory.sol/ZoneFactory.json");
+        let artifact: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(artifact_path)
+                .wrap_err("ZoneFactory artifact not found – run `forge build` in docs/specs")?,
+        )?;
         let bytecode_hex = artifact["bytecode"]["object"]
             .as_str()
             .ok_or_else(|| eyre::eyre!("missing bytecode in ZoneFactory artifact"))?;
@@ -817,9 +819,11 @@ impl L1TestNode {
 
         let l1_provider = self.dev_provider();
 
-        let artifact: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../../docs/specs/out/SwapAndDepositRouter.sol/SwapAndDepositRouter.json"
-        ))?;
+        let artifact_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/out/SwapAndDepositRouter.sol/SwapAndDepositRouter.json");
+        let artifact: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(artifact_path)
+                .wrap_err("SwapAndDepositRouter artifact not found – run `forge build` in docs/specs")?,
+        )?;
         let bytecode_hex = artifact["bytecode"]["object"]
             .as_str()
             .ok_or_else(|| eyre::eyre!("missing bytecode in SwapAndDepositRouter artifact"))?;
