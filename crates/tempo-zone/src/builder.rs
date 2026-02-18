@@ -180,8 +180,10 @@ where
         {
             Some(block) => block,
             None => {
-                debug!(target: "zone::payload", "No L1 block available, cancelling build");
-                return Ok(BuildOutcome::Cancelled);
+                debug!(target: "zone::payload", "No L1 block available, skipping build");
+                return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                    "no L1 block available in deposit queue",
+                )));
             }
         };
 
@@ -398,10 +400,10 @@ where
             EthBuiltPayload::new(attributes.payload_id(), sealed_block, total_fees, requests);
 
         drop(db);
-        Ok(BuildOutcome::Better {
-            payload,
-            cached_reads,
-        })
+        // Zone payloads are deterministic (one L1 block = one zone block), so freeze
+        // the payload to prevent reth from re-triggering try_build on the rebuild interval.
+        // Without this, the next rebuild attempt would find the deposit queue empty.
+        Ok(BuildOutcome::Freeze(payload))
     }
 
     fn on_missing_payload(
