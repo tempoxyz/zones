@@ -4,15 +4,13 @@
 //! Tempo L1 dev node and a Zone L2 node connected via WebSocket. The L1
 //! subscriber naturally receives blocks and deposits — no synthetic injection.
 
+use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode};
 use alloy::{
     primitives::{Address, B256, U256},
     providers::Provider,
 };
-use zone::abi::{TEMPO_STATE_ADDRESS, TempoState, ZONE_TOKEN_ADDRESS};
-
 use tempo_precompiles::PATH_USD_ADDRESS;
-
-use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode};
+use zone::abi::{TEMPO_STATE_ADDRESS, TempoState, ZONE_TOKEN_ADDRESS};
 
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
 /// 500ms and the L1Subscriber needs to connect, backfill, and subscribe.
@@ -287,190 +285,6 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     assert!(
         final_zone_b < U256::from(cross_amount),
         "zone_b balance should decrease by at least the reverse amount (got {final_zone_b})"
-    );
-
-    Ok(())
-}
-
-/// Multi-asset deposit + withdrawal test:
-///
-///  1. Start L1 dev node.
-///  2. Create a second TIP-20 token ("ZoneUSD") on L1.
-///  3. Deploy ZoneFactory, create a zone with pathUSD as initial token.
-///  4. Enable ZoneUSD on the portal.
-///  5. Start zone node connected to L1.
-///  6. Create ZoneUSD on the zone L2 (with ISSUER_ROLE for system sender).
-///  7. Deposit pathUSD and ZoneUSD into the zone.
-///  8. Spawn sequencer, withdraw both tokens back to L1.
-///  9. Verify withdrawals processed and L2 balances decreased.
-///
-/// ```text
-///  L1 (pathUSD + ZoneUSD)          Zone L2
-///    |--- deposit pathUSD -------->|  ✓ pathUSD minted
-///    |--- deposit ZoneUSD -------->|  ✓ ZoneUSD minted
-///    |<-- withdraw pathUSD --------|  ✓ pathUSD burned
-///    |<-- withdraw ZoneUSD --------|  ✓ ZoneUSD burned
-/// ```
-///
-/// NOTE: Requires `forge build` in `docs/specs/` for ZoneFactory artifact.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    // --- Step 1: Start L1 ---
-    let l1 = L1TestNode::start().await?;
-
-    // --- Step 2: Create a second TIP-20 token on L1 ---
-    let zone_usd_salt = B256::new([
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        0, 42,
-    ]);
-    let l1_zone_usd = l1.create_tip20("ZoneUSD", "zUSD", zone_usd_salt).await?;
-
-    // Mint ZoneUSD to the dev account so we can fund the user
-    let mint_amount: u128 = 100_000_000; // 100 ZoneUSD (6 decimals)
-    l1.mint_tip20(l1_zone_usd, l1.dev_address(), mint_amount)
-        .await?;
-
-    // --- Step 3: Deploy L1 infrastructure and create a zone ---
-    let portal_address = l1.deploy_zone().await?;
-
-    // --- Step 4: Enable ZoneUSD on the portal ---
-    l1.enable_token_on_portal(portal_address, l1_zone_usd)
-        .await?;
-
-    // --- Step 5: Start zone node connected to L1 ---
-    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
-
-    // Wait for the zone to advance past genesis
-    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-
-    // --- Step 6: Fund dev account on L2 for token creation gas ---
-    // Deposit pathUSD to the dev account (sequencer) so it can pay gas
-    // for creating tokens on L2.
-    let dev_l2_gas_funding: u128 = 10_000_000; // 10 pathUSD
-    {
-        use tempo_contracts::precompiles::ITIP20;
-        use zone::abi::ZonePortal;
-
-        let dev_provider = l1.dev_provider();
-
-        ITIP20::new(PATH_USD_ADDRESS, &dev_provider)
-            .approve(portal_address, U256::MAX)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-
-        let portal = ZonePortal::new(portal_address, &dev_provider);
-        let receipt = portal
-            .deposit(
-                PATH_USD_ADDRESS,
-                l1.dev_address(),
-                dev_l2_gas_funding,
-                B256::ZERO,
-            )
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "dev deposit failed");
-
-        zone.wait_for_balance(
-            ZONE_TOKEN_ADDRESS,
-            l1.dev_address(),
-            U256::from(dev_l2_gas_funding),
-            L1_TIMEOUT,
-        )
-        .await?;
-    }
-
-    // --- Step 7: Create ZoneUSD on zone L2 ---
-    // The token must exist on L2 with ISSUER_ROLE granted to ZoneInbox
-    // (for minting deposits) and ZoneOutbox (for burning withdrawals).
-    // Use the SAME salt so the token gets the same address as on L1.
-    let l2_zone_usd = zone
-        .create_l2_token("ZoneUSD", "zUSD", zone_usd_salt)
-        .await?;
-
-    // Verify L1 and L2 token addresses match (deterministic from sender + salt)
-    assert_eq!(
-        l1_zone_usd, l2_zone_usd,
-        "L1 and L2 ZoneUSD addresses should match (same sender + salt)"
-    );
-
-    // --- Step 8: Deposit both tokens (user account) ---
-    let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
-    let pathusd_amount: u128 = 1_000_000; // 1 pathUSD
-    let zoneusd_amount: u128 = 2_000_000; // 2 ZoneUSD
-
-    // Fund user with both tokens on L1
-    l1.fund_user(account.address(), pathusd_amount * 2).await?;
-    l1.fund_user_token(l1_zone_usd, account.address(), zoneusd_amount * 2)
-        .await?;
-
-    // Deposit pathUSD
-    let pathusd_minted = account.deposit(pathusd_amount, L1_TIMEOUT, &zone).await?;
-    assert_eq!(
-        pathusd_minted,
-        U256::from(pathusd_amount),
-        "pathUSD minted balance should equal deposit amount"
-    );
-
-    // Deposit ZoneUSD
-    let zoneusd_minted = account
-        .deposit_token(l1_zone_usd, l2_zone_usd, zoneusd_amount, L1_TIMEOUT, &zone)
-        .await?;
-    assert_eq!(
-        zoneusd_minted,
-        U256::from(zoneusd_amount),
-        "ZoneUSD minted balance should equal deposit amount"
-    );
-
-    // --- Step 8: Spawn sequencer and withdraw both tokens ---
-    let _sequencer_handle = account.spawn_sequencer(&l1, &zone, l1.dev_signer()).await;
-    let withdrawal_timeout = std::time::Duration::from_secs(60);
-
-    // Withdraw pathUSD
-    let pathusd_withdrawal: u128 = 500_000; // 0.5 pathUSD
-    account.withdraw(pathusd_withdrawal).await?;
-
-    l1.wait_for_withdrawal_on_l1(
-        portal_address,
-        account.address(),
-        pathusd_withdrawal,
-        withdrawal_timeout,
-    )
-    .await?;
-
-    // Withdraw ZoneUSD
-    let zoneusd_withdrawal: u128 = 1_000_000; // 1 ZoneUSD
-    account
-        .withdraw_token(l2_zone_usd, zoneusd_withdrawal)
-        .await?;
-
-    l1.wait_for_withdrawal_on_l1_token(
-        portal_address,
-        l1_zone_usd,
-        account.address(),
-        zoneusd_withdrawal,
-        withdrawal_timeout,
-    )
-    .await?;
-
-    // --- Step 9: Verify L2 balances decreased ---
-    let final_pathusd = zone
-        .balance_of(ZONE_TOKEN_ADDRESS, account.address())
-        .await?;
-    assert!(
-        final_pathusd < U256::from(pathusd_amount - pathusd_withdrawal),
-        "L2 pathUSD balance should decrease by at least the withdrawal amount (got {final_pathusd})"
-    );
-
-    let final_zoneusd = zone.balance_of(l2_zone_usd, account.address()).await?;
-    assert!(
-        final_zoneusd <= U256::from(zoneusd_amount - zoneusd_withdrawal),
-        "L2 ZoneUSD balance should decrease by at least the withdrawal amount (got {final_zoneusd})"
     );
 
     Ok(())

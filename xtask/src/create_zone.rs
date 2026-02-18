@@ -65,7 +65,8 @@ pub(crate) struct CreateZone {
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
-    #[arg(long)]
+    /// Defaults to pathUSD (0x20C0000000000000000000000000000000000000).
+    #[arg(long, default_value = "0x20C0000000000000000000000000000000000000")]
     initial_token: Address,
 
     /// Sequencer address that will operate the zone.

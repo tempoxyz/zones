@@ -73,7 +73,7 @@ max-approve-portal:
 
 [group('zone')]
 [doc('Sends a test deposit to the ZonePortal on L1 (moderato). Requires L1_RPC_URL and PRIVATE_KEY env vars. Run max-approve-portal first.')]
-send-deposit to amount="1000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
+send-deposit to amount="1000000" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
     #!/bin/bash
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
@@ -81,7 +81,7 @@ send-deposit to amount="1000000" memo="0x000000000000000000000000000000000000000
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
     HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     echo "Depositing {{amount}} to {{to}}..."
-    cast send "$PORTAL" "deposit(address,uint128,bytes32)" "{{to}}" "{{amount}}" "{{memo}}" \
+    cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "{{to}}" "{{amount}}" "{{memo}}" \
         --rpc-url "$HTTP_RPC" --private-key "$PK"
     echo "Deposit sent!"
 
@@ -106,7 +106,7 @@ create-zone name:
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
-        --zone-token "$ZONE_TOKEN_L1" \
+        --initial-token "$ZONE_TOKEN_L1" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$PK"
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
@@ -128,7 +128,6 @@ zone-up name reset="false" args="":
         exit 1
     fi
     PORTAL=$(jq -r '.portal' "$ZONE_JSON")
-    TOKEN=$(jq -r '.token' "$ZONE_JSON")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$ZONE_JSON")
     DATADIR="/tmp/tempo-zone-{{name}}"
     if [[ "{{reset}}" = "true" ]]; then
@@ -139,7 +138,6 @@ zone-up name reset="false" args="":
                       --chain "$GENESIS_JSON" \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
                       --l1.portal-address "$PORTAL" \
-                      --l1.token-address "$TOKEN" \
                       --l1.genesis-block-number "$ANCHOR_BLOCK" \
                       --http \
                       --http.addr 0.0.0.0 \
@@ -147,7 +145,7 @@ zone-up name reset="false" args="":
                       --http.api all \
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
-                      ${SEQUENCER_KEY:+--sequencer.key $SEQUENCER_KEY} \
+                      ${SEQUENCER_KEY:+--sequencer-key $SEQUENCER_KEY} \
                       {{args}}
 
 [group('zone')]
@@ -164,7 +162,7 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc="http:
 
 [group('zone')]
 [doc('Sends a withdrawal request on the zone (L2) back to Tempo L1. Requires PRIVATE_KEY env var. Run max-approve-outbox first.')]
-send-withdrawal to amount="1000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" rpc="http://localhost:8546":
+send-withdrawal to amount="1000000" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" rpc="http://localhost:8546":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -176,8 +174,8 @@ send-withdrawal to amount="1000000" memo="0x000000000000000000000000000000000000
     fi
     echo "Requesting withdrawal of {{amount}} to {{to}} (fallback: $FALLBACK)..."
     cast send "$OUTBOX" \
-        "requestWithdrawal(address,uint128,bytes32,uint64,address,bytes)" \
-        "{{to}}" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" \
+        "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes)" \
+        "{{token}}" "{{to}}" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" \
         --rpc-url "{{rpc}}" --private-key "$PK"
     echo "Withdrawal requested!"
 
@@ -186,16 +184,77 @@ send-withdrawal to amount="1000000" memo="0x000000000000000000000000000000000000
 check-balance account token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8546":
     @printf "Balance of {{account}}: " && cast call "{{token}}" "balanceOf(address)(uint256)" "{{account}}" --rpc-url "{{rpc}}"
 
-mod scripts
+[group('zone')]
+[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Requires L1_RPC_URL env var.')]
+deploy-zone name:
+    #!/bin/bash
+    set -euo pipefail
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    OUTPUT="generated/{{name}}"
 
-[group('dev')]
-tempo-dev-up: scripts::tempo-dev-up
-tempo-dev-down: scripts::tempo-dev-down
+    echo "============================================"
+    echo "  Deploying Zone: {{name}}"
+    echo "============================================"
+    echo ""
 
-[group('test')]
-feature-test: scripts::auto-7702-delegation  scripts::basic-transfer scripts::registrar-delegation scripts::create-tip20-token scripts::fee-amm
+    # Step 1: Generate a new sequencer keypair
+    echo "Step 1: Generating sequencer keypair..."
+    KEY_OUTPUT=$(cast wallet new 2>/dev/null)
+    SEQUENCER_ADDR=$(echo "$KEY_OUTPUT" | grep 'Address:' | awk '{print $2}')
+    SEQUENCER_KEY=$(echo "$KEY_OUTPUT" | grep 'Private key:' | awk '{print $3}')
+    echo "  Sequencer address: $SEQUENCER_ADDR"
+    echo ""
 
-fee-amm: scripts::fee-amm
+    # Step 2: Fund the sequencer on L1
+    echo "Step 2: Funding sequencer on L1 (via tempo_fundAddress)..."
+    cast rpc tempo_fundAddress "$SEQUENCER_ADDR" --rpc-url "$HTTP_RPC" > /dev/null 2>&1
+    echo "  Funded! Check: https://explore.moderato.tempo.xyz/address/$SEQUENCER_ADDR"
+    echo ""
+
+    # Step 3: Build Solidity specs
+    echo "Step 3: Building Solidity specs..."
+    (cd docs/specs && forge build --skip test) || true
+    echo ""
+
+    # Step 4: Create zone on L1 and generate genesis
+    echo "Step 4: Creating zone on L1 via ZoneFactory..."
+    mkdir -p "$OUTPUT"
+    cargo run -p tempo-xtask -- create-zone \
+        --output "$OUTPUT" \
+        --l1-rpc-url "$HTTP_RPC" \
+        --sequencer "$SEQUENCER_ADDR" \
+        --private-key "$SEQUENCER_KEY"
+    echo ""
+
+    # Step 5: Display summary
+    PORTAL=$(jq -r '.portal' "$OUTPUT/zone.json")
+    ZONE_ID=$(jq -r '.zoneId' "$OUTPUT/zone.json")
+    ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$OUTPUT/zone.json")
+
+    echo "============================================"
+    echo "  Zone Deployed Successfully!"
+    echo "============================================"
+    echo ""
+    echo "  Zone ID:         $ZONE_ID"
+    echo "  Zone Name:       {{name}}"
+    echo "  Portal:          $PORTAL"
+    echo "  Sequencer:       $SEQUENCER_ADDR"
+    echo "  Anchor Block:    $ANCHOR_BLOCK"
+    echo ""
+    echo "  Artifacts:       $OUTPUT/"
+    echo "  Genesis:         $OUTPUT/genesis.json"
+    echo "  Zone Metadata:   $OUTPUT/zone.json"
+    echo ""
+    echo "  Explorer:        https://explore.moderato.tempo.xyz/address/$PORTAL"
+    echo ""
+    echo "  ⚠️  SAVE YOUR SEQUENCER KEY:"
+    echo "  export SEQUENCER_KEY=$SEQUENCER_KEY"
+    echo ""
+    echo "  To start the zone node:"
+    echo "  export L1_RPC_URL=\"$L1_RPC\""
+    echo "  export SEQUENCER_KEY=\"$SEQUENCER_KEY\""
+    echo "  just zone-up {{name}}"
 
 # Docs commands
 [group('docs')]
