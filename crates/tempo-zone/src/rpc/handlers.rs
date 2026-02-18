@@ -132,6 +132,7 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
+#[allow(clippy::result_large_err)]
 fn parse_params<T: serde::de::DeserializeOwned>(
     raw: &str,
     id: &Value,

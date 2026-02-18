@@ -5,6 +5,7 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(unnameable_types)]
+#![allow(clippy::too_many_arguments)]
 
 use eyre as _;
 

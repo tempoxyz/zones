@@ -77,7 +77,6 @@ impl L1Subscriber {
     /// Reads `lastSyncedTempoBlockNumber` from the ZonePortal to determine where
     /// the zone left off. If the portal hasn't synced yet, falls back to
     /// `genesisTempoBlockNumber` so we scan from the portal's creation.
-
     async fn sync_to_l1_tip(
         &self,
         l1_provider: &impl Provider<TempoNetwork>,

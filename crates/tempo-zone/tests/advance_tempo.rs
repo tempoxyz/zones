@@ -160,7 +160,7 @@ fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
     // 1. TempoState(bytes headerRlp)
     let tempo_state_bytecode = load_artifact("TempoState");
     let tempo_state_args =
-        alloy_sol_types::SolValue::abi_encode_params(&(Bytes::from(dummy_header_rlp.clone()),));
+        alloy_sol_types::SolValue::abi_encode_params(&(Bytes::from(dummy_header_rlp),));
     deploy_contract(
         &mut evm,
         &tempo_state_bytecode,
@@ -261,7 +261,7 @@ fn advance_tempo_repro() {
                     output, gas_used, ..
                 } => {
                     if let Output::Call(data) = output {
-                        println!("config() returned: {}", data);
+                        println!("config() returned: {data}");
                     }
                     println!("config() gas_used: {gas_used}");
                 }
@@ -293,7 +293,7 @@ fn advance_tempo_repro() {
                 output, gas_used, ..
             } => {
                 if let Output::Call(data) = output {
-                    println!("tempoBlockHash() returned: {}", data);
+                    println!("tempoBlockHash() returned: {data}");
                 }
                 println!("tempoBlockHash() gas_used: {gas_used}");
             }
@@ -390,7 +390,7 @@ fn advance_tempo_repro() {
     let advance_result = evm.transact_system_call(
         sequencer,
         ZONE_INBOX_ADDRESS,
-        Bytes::from(advance_calldata.clone()),
+        Bytes::from(advance_calldata),
     );
     match &advance_result {
         Ok(result) => match &result.result {
@@ -398,7 +398,7 @@ fn advance_tempo_repro() {
                 output, gas_used, ..
             } => {
                 if let Output::Call(data) = output {
-                    println!("advanceTempo() SUCCESS, output: {}", data);
+                    println!("advanceTempo() SUCCESS, output: {data}");
                 }
                 println!("advanceTempo() gas_used: {gas_used}");
             }
@@ -410,10 +410,11 @@ fn advance_tempo_repro() {
                 if output.len() >= 4 {
                     let sel = &output[..4];
                     println!("  error selector: 0x{}", const_hex::encode(sel));
-                    if sel == [0x08, 0xc3, 0x79, 0xa0] && output.len() > 4 {
-                        if let Ok(msg) = <alloy_sol_types::sol_data::String as alloy_sol_types::SolType>::abi_decode(&output[4..]) {
-                            println!("  Error message: {msg}");
-                        }
+                    if sel == [0x08, 0xc3, 0x79, 0xa0]
+                        && output.len() > 4
+                        && let Ok(msg) = <alloy_sol_types::sol_data::String as alloy_sol_types::SolType>::abi_decode(&output[4..])
+                    {
+                        println!("  Error message: {msg}");
                     }
                 }
             }
