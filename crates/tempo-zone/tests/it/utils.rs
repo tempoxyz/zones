@@ -64,9 +64,12 @@ fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     ))
 }
 
-/// Dummy L1 WS URL used when no real L1 is needed.
-/// The L1Subscriber will fail to connect and retry in the background.
-const DUMMY_L1_WS_URL: &str = "ws://127.0.0.1:1";
+/// Dummy L1 URL used when no real L1 is needed.
+///
+/// Uses HTTP (not WS) because HTTP providers are lazy — they don't attempt a
+/// connection until the first request, so `L1StateProvider::new` succeeds
+/// without a running L1. The L1Subscriber will fail and retry in the background.
+const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
 
 /// Compute the TIP-20 token address for a given sender and salt.
 ///
@@ -413,7 +416,7 @@ impl ZoneTestNode {
     /// via [`L1Fixture::seed_l1_cache`] for TempoStateReader precompile reads.
     pub(crate) async fn start_local() -> eyre::Result<Self> {
         Self::launch(
-            DUMMY_L1_WS_URL.to_string(),
+            DUMMY_L1_URL.to_string(),
             Address::ZERO,
             None,
             next_unique_chain_id(),
@@ -426,7 +429,7 @@ impl ZoneTestNode {
     /// Useful for running multiple zone nodes in a single test — each needs
     /// a unique chain ID to avoid datadir collisions.
     pub(crate) async fn start_local_with_chain_id(chain_id: u64) -> eyre::Result<Self> {
-        Self::launch(DUMMY_L1_WS_URL.to_string(), Address::ZERO, None, chain_id).await
+        Self::launch(DUMMY_L1_URL.to_string(), Address::ZERO, None, chain_id).await
     }
 
     async fn launch(
