@@ -11228,6 +11228,7 @@ dependencies = [
  "reth-consensus",
  "reth-ethereum",
  "reth-tracing",
+ "rustls",
  "tempo-chainspec",
  "tokio",
  "tracing",

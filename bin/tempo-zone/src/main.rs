@@ -86,6 +86,11 @@ struct ZoneArgs {
 fn main() {
     reth_cli_util::sigsegv_handler::install();
 
+    // Install the default rustls CryptoProvider for WSS connections to L1.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls CryptoProvider");
+
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };

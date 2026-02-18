@@ -27,6 +27,9 @@ reth-tracing.workspace = true
 alloy-primitives.workspace = true
 alloy-signer-local.workspace = true
 
+# tls
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+
 # misc
 clap.workspace = true
 tokio.workspace = true
