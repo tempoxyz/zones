@@ -174,7 +174,7 @@ async fn test_block_access_control() -> eyre::Result<()> {
         .get("transactions")
         .expect("block should have transactions field");
     assert!(
-        txs.as_array().map_or(false, |a| a.is_empty()),
+        txs.as_array().is_some_and(|a| a.is_empty()),
         "non-sequencer block transactions should be empty (redacted)"
     );
     if let Some(bloom) = block.get("logsBloom").and_then(|b| b.as_str()) {
