@@ -46,6 +46,21 @@ pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
 ]);
 
+/// Read a Foundry artifact from `docs/specs/out` and return its deployment bytecode.
+///
+/// Requires `forge build` to have been run in `docs/specs`.
+fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
+    let specs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/out");
+    let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
+    let json = std::fs::read_to_string(&path)
+        .wrap_err_with(|| format!("{contract} artifact not found – run `forge build` in docs/specs"))?;
+    let artifact: serde_json::Value = serde_json::from_str(&json)?;
+    let hex_str = artifact["bytecode"]["object"]
+        .as_str()
+        .ok_or_else(|| eyre::eyre!("missing bytecode in {contract} artifact"))?;
+    Ok(alloy_primitives::Bytes::from(alloy_primitives::hex::decode(hex_str)?))
+}
+
 /// Dummy L1 WS URL used when no real L1 is needed.
 /// The L1Subscriber will fail to connect and retry in the background.
 const DUMMY_L1_WS_URL: &str = "ws://127.0.0.1:1";
@@ -717,20 +732,12 @@ impl L1TestNode {
     /// The factory constructor also deploys a Verifier internally.
     /// Returns the factory address for use with [`create_zone`](Self::create_zone).
     pub(crate) async fn deploy_zone_factory(&self) -> eyre::Result<Address> {
-        use alloy_primitives::{Bytes, TxKind, hex};
+        use alloy_primitives::TxKind;
         use alloy_rpc_types_eth::TransactionRequest;
 
         let l1_provider = self.dev_provider();
 
-        let artifact_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/out/ZoneFactory.sol/ZoneFactory.json");
-        let artifact: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(artifact_path)
-                .wrap_err("ZoneFactory artifact not found – run `forge build` in docs/specs")?,
-        )?;
-        let bytecode_hex = artifact["bytecode"]["object"]
-            .as_str()
-            .ok_or_else(|| eyre::eyre!("missing bytecode in ZoneFactory artifact"))?;
-        let bytecode = Bytes::from(hex::decode(bytecode_hex)?);
+        let bytecode = forge_bytecode("ZoneFactory")?;
 
         let mut deploy_tx = TransactionRequest::default().input(bytecode.into());
         deploy_tx.to = Some(TxKind::Create);
@@ -813,22 +820,14 @@ impl L1TestNode {
     /// The constructor takes `(address stablecoinDEX, address zoneFactory)`.
     /// We pass `Address::ZERO` for the DEX since both zones use the same token.
     pub(crate) async fn deploy_router(&self, factory_address: Address) -> eyre::Result<Address> {
-        use alloy_primitives::{Bytes, TxKind, hex};
+        use alloy_primitives::{Bytes, TxKind};
         use alloy_rpc_types_eth::TransactionRequest;
         use alloy_sol_types::SolValue;
 
         let l1_provider = self.dev_provider();
 
-        let artifact_path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/specs/out/SwapAndDepositRouter.sol/SwapAndDepositRouter.json");
-        let artifact: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(artifact_path)
-                .wrap_err("SwapAndDepositRouter artifact not found – run `forge build` in docs/specs")?,
-        )?;
-        let bytecode_hex = artifact["bytecode"]["object"]
-            .as_str()
-            .ok_or_else(|| eyre::eyre!("missing bytecode in SwapAndDepositRouter artifact"))?;
-        let mut deploy_bytes = hex::decode(bytecode_hex)?;
         // Constructor: constructor(address _stablecoinDEX, address _zoneFactory)
+        let mut deploy_bytes = forge_bytecode("SwapAndDepositRouter")?.to_vec();
         deploy_bytes.extend_from_slice(&(Address::ZERO, factory_address).abi_encode());
         let bytecode = Bytes::from(deploy_bytes);
 
