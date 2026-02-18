@@ -388,7 +388,8 @@ async fn handle_estimate_gas(
     api_result(
         id,
         "eth_estimateGas",
-        api.estimate_gas(request, block, state_override, auth.clone()).await,
+        api.estimate_gas(request, block, state_override, auth.clone())
+            .await,
     )
 }
 
