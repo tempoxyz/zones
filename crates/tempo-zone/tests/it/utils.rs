@@ -715,7 +715,7 @@ impl L1TestNode {
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
         use tempo_precompiles::PATH_USD_ADDRESS;
-        use zone::abi::{ZonePortal, ZONE_TOKEN_ADDRESS};
+        use zone::abi::{ZONE_TOKEN_ADDRESS, ZonePortal};
 
         let dev_provider = self.dev_provider();
         ITIP20::new(PATH_USD_ADDRESS, &dev_provider)
@@ -731,8 +731,13 @@ impl L1TestNode {
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "dev L2 gas deposit failed");
-        zone.wait_for_balance(ZONE_TOKEN_ADDRESS, self.dev_address(), U256::from(amount), timeout)
-            .await?;
+        zone.wait_for_balance(
+            ZONE_TOKEN_ADDRESS,
+            self.dev_address(),
+            U256::from(amount),
+            timeout,
+        )
+        .await?;
         Ok(())
     }
 
@@ -1668,7 +1673,9 @@ impl PrivateRpcTestCtx {
     pub(crate) async fn inject_empty_block(&mut self) -> eyre::Result<()> {
         let dq = self.zone.deposit_queue().clone();
         self.fixture.inject_empty_block(&dq);
-        self.zone.wait_for_tempo_block_number(1, DEFAULT_TIMEOUT).await?;
+        self.zone
+            .wait_for_tempo_block_number(1, DEFAULT_TIMEOUT)
+            .await?;
         Ok(())
     }
 
@@ -1680,7 +1687,9 @@ impl PrivateRpcTestCtx {
         recipient: Address,
         amount: u128,
     ) -> eyre::Result<()> {
-        let deposit = self.fixture.make_deposit(token, depositor, recipient, amount);
+        let deposit = self
+            .fixture
+            .make_deposit(token, depositor, recipient, amount);
         let dq = self.zone.deposit_queue().clone();
         self.fixture.inject_deposits(&dq, vec![deposit]);
         self.zone

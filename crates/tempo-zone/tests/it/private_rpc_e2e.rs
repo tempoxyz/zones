@@ -7,8 +7,10 @@
 //! - Block redaction (logsBloom zeroed, transactions cleared for non-sequencers)
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
-use alloy::primitives::{Address, address};
-use alloy::signers::local::PrivateKeySigner;
+use alloy::{
+    primitives::{Address, address},
+    signers::local::PrivateKeySigner,
+};
 use tempo_precompiles::PATH_USD_ADDRESS;
 
 use crate::utils::start_zone_with_private_rpc;
@@ -59,9 +61,7 @@ async fn test_public_methods() -> eyre::Result<()> {
     let user_signer = PrivateKeySigner::random();
 
     for method in ["eth_blockNumber", "eth_chainId", "eth_gasPrice"] {
-        let seq_resp = ctx
-            .call_as_sequencer(method, serde_json::json!([]))
-            .await?;
+        let seq_resp = ctx.call_as_sequencer(method, serde_json::json!([])).await?;
         assert!(
             seq_resp.get("result").is_some() && seq_resp.get("error").is_none(),
             "sequencer should succeed for {method}"
@@ -150,7 +150,9 @@ async fn test_block_access_control() -> eyre::Result<()> {
             &user_signer,
         )
         .await?;
-    let error = resp.get("error").expect("full=true should be rejected for user");
+    let error = resp
+        .get("error")
+        .expect("full=true should be rejected for user");
     assert_eq!(
         error["code"].as_i64().unwrap(),
         -32005,
@@ -168,7 +170,9 @@ async fn test_block_access_control() -> eyre::Result<()> {
     let block = resp.get("result").expect("should have result");
     assert!(!block.is_null(), "block should not be null");
 
-    let txs = block.get("transactions").expect("block should have transactions field");
+    let txs = block
+        .get("transactions")
+        .expect("block should have transactions field");
     assert!(
         txs.as_array().map_or(false, |a| a.is_empty()),
         "non-sequencer block transactions should be empty (redacted)"
@@ -183,10 +187,7 @@ async fn test_block_access_control() -> eyre::Result<()> {
 
     // Sequencer full=true → allowed
     let resp = ctx
-        .call_as_sequencer(
-            "eth_getBlockByNumber",
-            serde_json::json!(["latest", true]),
-        )
+        .call_as_sequencer("eth_getBlockByNumber", serde_json::json!(["latest", true]))
         .await?;
     assert!(
         resp.get("result").is_some() && resp.get("error").is_none(),
@@ -243,9 +244,7 @@ async fn test_method_tiers() -> eyre::Result<()> {
 
     // Disabled methods → -32006 for everyone (including sequencer)
     for method in ["eth_subscribe", "eth_mining", "eth_hashrate"] {
-        let resp = ctx
-            .call_as_sequencer(method, serde_json::json!([]))
-            .await?;
+        let resp = ctx.call_as_sequencer(method, serde_json::json!([])).await?;
         let error = resp
             .get("error")
             .unwrap_or_else(|| panic!("{method} should return error even for sequencer"));
@@ -260,7 +259,9 @@ async fn test_method_tiers() -> eyre::Result<()> {
     let resp = ctx
         .call_as_sequencer("eth_someNonexistentMethod", serde_json::json!([]))
         .await?;
-    let error = resp.get("error").expect("unknown method should return error");
+    let error = resp
+        .get("error")
+        .expect("unknown method should return error");
     assert_eq!(
         error["code"].as_i64().unwrap(),
         -32601,

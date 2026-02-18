@@ -1,6 +1,6 @@
+use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode};
 use alloy::{primitives::U256, providers::ProviderBuilder};
 use zone::abi::ZONE_TOKEN_ADDRESS;
-use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode};
 
 /// Longer timeout for real L1 tests.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -56,7 +56,11 @@ async fn test_shield_and_send() -> eyre::Result<()> {
 
     // Verify Bob starts with zero
     let bob_balance_before = zone.balance_of(ZONE_TOKEN_ADDRESS, bob_address).await?;
-    assert_eq!(bob_balance_before, U256::ZERO, "Bob should start with zero on L2");
+    assert_eq!(
+        bob_balance_before,
+        U256::ZERO,
+        "Bob should start with zero on L2"
+    );
 
     // Alice transfers on L2 using the TIP-20 transfer function
     let transfer_amount: u128 = 500_000; // 0.5 pathUSD

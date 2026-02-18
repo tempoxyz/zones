@@ -1,9 +1,9 @@
 //! Demo Flow 3: Cross-Zone Transfer
 
+use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode};
 use alloy::primitives::U256;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use zone::abi::ZONE_TOKEN_ADDRESS;
-use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode};
 
 /// Longer timeout for real L1 tests.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -71,10 +71,12 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
         .await;
 
     // Verify Bob starts with zero on zone_b
-    let bob_before = zone_b
-        .balance_of(ZONE_TOKEN_ADDRESS, bob_address)
-        .await?;
-    assert_eq!(bob_before, U256::ZERO, "Bob should start with zero on zone_b");
+    let bob_before = zone_b.balance_of(ZONE_TOKEN_ADDRESS, bob_address).await?;
+    assert_eq!(
+        bob_before,
+        U256::ZERO,
+        "Bob should start with zero on zone_b"
+    );
 
     // --- Step 6: Alice withdraws from zone_a → router → zone_b (for Bob) ---
     let cross_amount: u128 = 500_000; // 0.5 pathUSD
@@ -100,9 +102,7 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
         )
         .await?;
 
-    let bob_final = zone_b
-        .balance_of(ZONE_TOKEN_ADDRESS, bob_address)
-        .await?;
+    let bob_final = zone_b.balance_of(ZONE_TOKEN_ADDRESS, bob_address).await?;
     assert_eq!(
         bob_final,
         U256::from(cross_amount),

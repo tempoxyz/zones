@@ -4,13 +4,13 @@
 //! Tempo L1 dev node and a Zone L2 node connected via WebSocket. The L1
 //! subscriber naturally receives blocks and deposits — no synthetic injection.
 
+use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode};
 use alloy::{
     primitives::{Address, B256, U256},
     providers::Provider,
 };
 use tempo_precompiles::PATH_USD_ADDRESS;
 use zone::abi::{TEMPO_STATE_ADDRESS, TempoState, ZONE_TOKEN_ADDRESS};
-use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode};
 
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
 /// 500ms and the L1Subscriber needs to connect, backfill, and subscribe.
@@ -289,4 +289,3 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
 
     Ok(())
 }
-
