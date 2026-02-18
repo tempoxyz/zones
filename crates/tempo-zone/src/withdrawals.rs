@@ -418,7 +418,10 @@ mod tests {
     #[test]
     fn remaining_queue_all_consumed() {
         let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
-        assert_eq!(compute_remaining_queue(std::slice::from_ref(&w), 1), B256::ZERO);
+        assert_eq!(
+            compute_remaining_queue(std::slice::from_ref(&w), 1),
+            B256::ZERO
+        );
         assert_eq!(compute_remaining_queue(&[w], 5), B256::ZERO);
     }
 

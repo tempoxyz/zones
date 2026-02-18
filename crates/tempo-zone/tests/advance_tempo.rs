@@ -387,11 +387,8 @@ fn advance_tempo_repro() {
         const_hex::encode(&advance_calldata[..4])
     );
 
-    let advance_result = evm.transact_system_call(
-        sequencer,
-        ZONE_INBOX_ADDRESS,
-        Bytes::from(advance_calldata),
-    );
+    let advance_result =
+        evm.transact_system_call(sequencer, ZONE_INBOX_ADDRESS, Bytes::from(advance_calldata));
     match &advance_result {
         Ok(result) => match &result.result {
             ExecutionResult::Success {
