@@ -487,6 +487,7 @@ pub(crate) fn build_advance_tempo_tx(
         .iter()
         .map(|d| {
             let deposit = abi::Deposit {
+                token: d.token,
                 sender: d.sender,
                 to: d.to,
                 amount: d.amount,

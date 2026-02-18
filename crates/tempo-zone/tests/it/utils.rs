@@ -9,12 +9,18 @@ use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
 use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
-use std::{sync::Arc, sync::atomic::{AtomicU64, Ordering}, time::Duration};
+use std::{
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
 use zone::{Deposit, DepositQueue, SharedL1StateCache, ZoneNode};
 
-use alloy_provider::{Provider, ProviderBuilder};
+use alloy_provider::{Provider, ProviderBuilder, WalletProvider};
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_alloy::TempoNetwork;
@@ -37,8 +43,7 @@ pub(crate) const TEST_MNEMONIC: &str =
 
 /// Deterministic salt for the zone test token.
 pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-    0, 1,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
 ]);
 
 /// Dummy L1 WS URL used when no real L1 is needed.
@@ -102,7 +107,9 @@ impl ZoneTestNode {
 
     /// Returns an HTTP provider connected to this zone node.
     pub(crate) fn provider(&self) -> alloy_provider::DynProvider {
-        ProviderBuilder::new().connect_http(self.http_url.clone()).erased()
+        ProviderBuilder::new()
+            .connect_http(self.http_url.clone())
+            .erased()
     }
 
     /// Returns a handle to the deposit queue for injecting synthetic L1 blocks.
@@ -115,10 +122,13 @@ impl ZoneTestNode {
         &self.l1_state_cache
     }
 
-    /// Wait for a TIP-20 token balance to exceed `min_balance` on this zone.
+    /// Wait for a TIP-20 token balance to reach at least `min_balance` on this zone.
     ///
-    /// Polls the token's `balanceOf` until it exceeds `min_balance`, then
+    /// Polls the token's `balanceOf` until `balance >= min_balance`, then
     /// returns the observed balance. Useful for verifying deposit mints.
+    ///
+    /// **Important:** passing `U256::ZERO` returns immediately (any balance satisfies `>= 0`).
+    /// Use the expected post-deposit balance as `min_balance` to actually wait.
     pub(crate) async fn wait_for_balance(
         &self,
         token: Address,
@@ -151,27 +161,110 @@ impl ZoneTestNode {
         target: u64,
         timeout: Duration,
     ) -> eyre::Result<u64> {
-        use zone::abi::{TempoState, TEMPO_STATE_ADDRESS};
+        use zone::abi::{TEMPO_STATE_ADDRESS, TempoState};
 
         let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, self.provider());
-        poll_until(timeout, DEFAULT_POLL, &format!("tempoBlockNumber >= {target}"), || {
-            let tempo_state = &tempo_state;
-            async move {
-                let n = tempo_state.tempoBlockNumber().call().await?;
-                if n >= target {
-                    Ok(Some(n))
-                } else {
-                    Ok(None)
+        poll_until(
+            timeout,
+            DEFAULT_POLL,
+            &format!("tempoBlockNumber >= {target}"),
+            || {
+                let tempo_state = &tempo_state;
+                async move {
+                    let n = tempo_state.tempoBlockNumber().call().await?;
+                    if n >= target { Ok(Some(n)) } else { Ok(None) }
                 }
-            }
-        })
+            },
+        )
         .await
     }
 
     /// Read a TIP-20 token balance on this zone (single-shot, no polling).
     pub(crate) async fn balance_of(&self, token: Address, account: Address) -> eyre::Result<U256> {
         use tempo_contracts::precompiles::ITIP20;
-        Ok(ITIP20::new(token, self.provider()).balanceOf(account).call().await?)
+        Ok(ITIP20::new(token, self.provider())
+            .balanceOf(account)
+            .call()
+            .await?)
+    }
+
+    /// Create a TIP-20 token on the zone L2 and grant `ISSUER_ROLE` to system contracts.
+    ///
+    /// Grants `ISSUER_ROLE` to `ZoneInbox` (minting deposits via `advanceTempo`) and
+    /// `ZoneOutbox` (burning withdrawals). Must be done before deposits of this token
+    /// can be processed. Uses the dev account (mnemonic index 0) which is pre-funded
+    /// with pathUSD for gas.
+    ///
+    /// Returns the L2 token address.
+    pub(crate) async fn create_l2_token(
+        &self,
+        name: &str,
+        symbol: &str,
+        salt: B256,
+    ) -> eyre::Result<Address> {
+        use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+        use tempo_contracts::precompiles::{IRolesAuth, ITIP20Factory};
+        use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
+
+        let signer = MnemonicBuilder::<English>::default()
+            .phrase(TEST_MNEMONIC)
+            .build()
+            .expect("valid test mnemonic");
+        let provider = ProviderBuilder::new()
+            .wallet(signer)
+            .connect_http(self.http_url.clone());
+
+        // Create the token on L2
+        let factory = ITIP20Factory::new(TIP20_FACTORY_ADDRESS, &provider);
+        let receipt = factory
+            .createToken(
+                name.to_string(),
+                symbol.to_string(),
+                "USD".to_string(),
+                PATH_USD_ADDRESS,
+                provider.default_signer_address(),
+                salt,
+            )
+            .gas_price(TEMPO_T0_BASE_FEE as u128)
+            .gas(500_000)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L2 createToken failed");
+
+        let event = receipt
+            .inner
+            .logs()
+            .iter()
+            .find_map(|log| ITIP20Factory::TokenCreated::decode_log(&log.inner).ok())
+            .ok_or_else(|| eyre::eyre!("TokenCreated event not found on L2"))?;
+        let l2_token = event.token;
+
+        // Grant ISSUER_ROLE to ZoneInbox so advanceTempo can mint deposits
+        let roles = IRolesAuth::new(l2_token, &provider);
+        let receipt = roles
+            .grantRole(*ISSUER_ROLE, zone::abi::ZONE_INBOX_ADDRESS)
+            .gas_price(TEMPO_T0_BASE_FEE as u128)
+            .gas(300_000)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L2 grantRole (ZoneInbox) failed");
+
+        // Grant ISSUER_ROLE to ZoneOutbox so withdrawal burns work
+        let receipt = roles
+            .grantRole(*ISSUER_ROLE, zone::abi::ZONE_OUTBOX_ADDRESS)
+            .gas_price(TEMPO_T0_BASE_FEE as u128)
+            .gas(300_000)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L2 grantRole (ZoneOutbox) failed");
+
+        Ok(l2_token)
     }
 
     /// Wait for the zone L2 to finalize an L1 block beyond `after_block`.
@@ -187,7 +280,7 @@ impl ZoneTestNode {
         after_block: u64,
         timeout: Duration,
     ) -> eyre::Result<u64> {
-        use zone::abi::{TempoState, TEMPO_STATE_ADDRESS};
+        use zone::abi::{TEMPO_STATE_ADDRESS, TempoState};
 
         let provider = self.provider();
         let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, &provider);
@@ -196,16 +289,21 @@ impl ZoneTestNode {
             .address(TEMPO_STATE_ADDRESS)
             .event_signature(TempoState::TempoBlockFinalized::SIGNATURE_HASH);
 
-        poll_until(timeout, DEFAULT_POLL, "TempoBlockFinalized past target", || {
-            let provider = &provider;
-            let tempo_state = &tempo_state;
-            let filter = &filter;
-            async move {
-                // Check logs first — fast path when events already emitted
-                let logs = provider.get_logs(filter).await?;
-                for log in logs.iter().rev() {
-                    if let Ok(ev) = TempoState::TempoBlockFinalized::decode_log(&log.inner) {
-                        if ev.blockNumber > after_block {
+        poll_until(
+            timeout,
+            DEFAULT_POLL,
+            "TempoBlockFinalized past target",
+            || {
+                let provider = &provider;
+                let tempo_state = &tempo_state;
+                let filter = &filter;
+                async move {
+                    // Check logs first — fast path when events already emitted
+                    let logs = provider.get_logs(filter).await?;
+                    for log in logs.iter().rev() {
+                        if let Ok(ev) = TempoState::TempoBlockFinalized::decode_log(&log.inner)
+                            && ev.blockNumber > after_block
+                        {
                             // Confirm on-chain state matches
                             let on_chain = tempo_state.tempoBlockNumber().call().await?;
                             if on_chain >= ev.blockNumber {
@@ -213,18 +311,15 @@ impl ZoneTestNode {
                             }
                         }
                     }
+                    Ok(None)
                 }
-                Ok(None)
-            }
-        })
+            },
+        )
         .await
     }
 
     /// Start a zone node pointing at a real L1 WebSocket URL.
-    pub(crate) async fn start(
-        l1_ws_url: String,
-        portal_address: Address,
-    ) -> eyre::Result<Self> {
+    pub(crate) async fn start(l1_ws_url: String, portal_address: Address) -> eyre::Result<Self> {
         Self::launch(l1_ws_url, portal_address, None, next_unique_chain_id()).await
     }
 
@@ -239,8 +334,8 @@ impl ZoneTestNode {
         l1_ws_url: &url::Url,
         portal_address: Address,
     ) -> eyre::Result<Self> {
-        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_http(l1_http_url.clone());
+        let l1_provider =
+            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
 
         // Fetch the current L1 block header — this becomes the zone's TempoState genesis anchor.
         let block = l1_provider
@@ -299,7 +394,13 @@ impl ZoneTestNode {
     /// directly into the `deposit_queue`; the L1 state cache must be seeded
     /// via [`L1Fixture::seed_l1_cache`] for TempoStateReader precompile reads.
     pub(crate) async fn start_local() -> eyre::Result<Self> {
-        Self::launch(DUMMY_L1_WS_URL.to_string(), Address::ZERO, None, next_unique_chain_id()).await
+        Self::launch(
+            DUMMY_L1_WS_URL.to_string(),
+            Address::ZERO,
+            None,
+            next_unique_chain_id(),
+        )
+        .await
     }
 
     /// Start a self-contained zone node with a custom chain ID.
@@ -316,7 +417,14 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
     ) -> eyre::Result<Self> {
-        Self::launch_with_genesis(l1_ws_url, portal_address, genesis_tempo_block_number, chain_id, None).await
+        Self::launch_with_genesis(
+            l1_ws_url,
+            portal_address,
+            genesis_tempo_block_number,
+            chain_id,
+            None,
+        )
+        .await
     }
 
     async fn launch_with_genesis(
@@ -417,7 +525,9 @@ impl L1TestNode {
 
     /// Returns an unsigned HTTP provider connected to this L1 node.
     pub(crate) fn provider(&self) -> alloy_provider::DynProvider {
-        ProviderBuilder::new().connect_http(self.http_url.clone()).erased()
+        ProviderBuilder::new()
+            .connect_http(self.http_url.clone())
+            .erased()
     }
 
     /// Returns a signer for the pre-funded dev account.
@@ -479,7 +589,10 @@ impl L1TestNode {
     /// Read a TIP-20 token balance on L1 (single-shot, no polling).
     pub(crate) async fn balance_of(&self, token: Address, account: Address) -> eyre::Result<U256> {
         use tempo_contracts::precompiles::ITIP20;
-        Ok(ITIP20::new(token, self.provider()).balanceOf(account).call().await?)
+        Ok(ITIP20::new(token, self.provider())
+            .balanceOf(account)
+            .call()
+            .await?)
     }
 
     /// Wait for a TIP-20 token balance to reach at least `min_balance` on L1.
@@ -512,7 +625,10 @@ impl L1TestNode {
         use zone::abi::ZonePortal;
         let portal = ZonePortal::new(portal_address, self.provider());
         let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
-        eyre::ensure!(!events.is_empty(), "expected at least one BatchSubmitted event on L1");
+        eyre::ensure!(
+            !events.is_empty(),
+            "expected at least one BatchSubmitted event on L1"
+        );
         Ok(())
     }
 
@@ -525,9 +641,16 @@ impl L1TestNode {
     ) -> eyre::Result<()> {
         use zone::abi::ZonePortal;
         let portal = ZonePortal::new(portal_address, self.provider());
-        let events = portal.WithdrawalProcessed_filter().from_block(0).query().await?;
+        let events = portal
+            .WithdrawalProcessed_filter()
+            .from_block(0)
+            .query()
+            .await?;
         let found = events.iter().any(|(e, _)| e.to == to && e.amount == amount);
-        eyre::ensure!(found, "expected WithdrawalProcessed event for {to} with amount {amount}");
+        eyre::ensure!(
+            found,
+            "expected WithdrawalProcessed event for {to} with amount {amount}"
+        );
         Ok(())
     }
 
@@ -548,7 +671,7 @@ impl L1TestNode {
         self.create_zone(factory).await
     }
 
-    /// Wait for a withdrawal to be fully processed on L1.
+    /// Wait for a withdrawal to be fully processed on L1 (pathUSD).
     ///
     /// Polls the account's L1 token balance until it increases by at least
     /// `amount`, then asserts both `BatchSubmitted` and `WithdrawalProcessed`
@@ -561,11 +684,32 @@ impl L1TestNode {
         timeout: Duration,
     ) -> eyre::Result<()> {
         use tempo_precompiles::PATH_USD_ADDRESS;
-        let balance_before = self.balance_of(PATH_USD_ADDRESS, account).await?;
+        self.wait_for_withdrawal_on_l1_token(
+            portal_address,
+            PATH_USD_ADDRESS,
+            account,
+            amount,
+            timeout,
+        )
+        .await
+    }
+
+    /// Wait for a withdrawal of a specific token to be fully processed on L1.
+    pub(crate) async fn wait_for_withdrawal_on_l1_token(
+        &self,
+        portal_address: Address,
+        token: Address,
+        account: Address,
+        amount: u128,
+        timeout: Duration,
+    ) -> eyre::Result<()> {
+        let balance_before = self.balance_of(token, account).await?;
         let expected = balance_before + U256::from(amount);
-        self.wait_for_balance(PATH_USD_ADDRESS, account, expected, timeout).await?;
+        self.wait_for_balance(token, account, expected, timeout)
+            .await?;
         self.assert_batch_submitted(portal_address).await?;
-        self.assert_withdrawal_processed(portal_address, account, amount).await
+        self.assert_withdrawal_processed(portal_address, account, amount)
+            .await
     }
 
     /// Deploy the ZoneFactory contract on L1 from the Foundry artifact.
@@ -578,9 +722,9 @@ impl L1TestNode {
 
         let l1_provider = self.dev_provider();
 
-        let artifact: serde_json::Value = serde_json::from_str(
-            include_str!("../../../../docs/specs/out/ZoneFactory.sol/ZoneFactory.json"),
-        )?;
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/specs/out/ZoneFactory.sol/ZoneFactory.json"
+        ))?;
         let bytecode_hex = artifact["bytecode"]["object"]
             .as_str()
             .ok_or_else(|| eyre::eyre!("missing bytecode in ZoneFactory artifact"))?;
@@ -605,7 +749,8 @@ impl L1TestNode {
     /// Captures the current L1 header as the genesis anchor, then calls
     /// `createZone()` with pathUSD as the token and the dev account as sequencer.
     pub(crate) async fn create_zone(&self, factory_address: Address) -> eyre::Result<Address> {
-        self.create_zone_with_sequencer(factory_address, self.dev_address()).await
+        self.create_zone_with_sequencer(factory_address, self.dev_address())
+            .await
     }
 
     /// Create a zone on an existing ZoneFactory with a custom sequencer address.
@@ -614,15 +759,15 @@ impl L1TestNode {
         factory_address: Address,
         sequencer: Address,
     ) -> eyre::Result<Address> {
-        use zone::abi::ZoneFactory;
         use tempo_precompiles::PATH_USD_ADDRESS;
+        use zone::abi::ZoneFactory;
 
         let l1_provider = self.dev_provider();
         let factory = ZoneFactory::new(factory_address, &l1_provider);
 
         // Capture genesis anchor from the current L1 header
-        let l1_tempo_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_http(self.http_url.clone());
+        let l1_tempo_provider =
+            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(self.http_url.clone());
         let block = l1_tempo_provider
             .get_block_by_number(BlockNumberOrTag::Latest)
             .await?
@@ -672,9 +817,9 @@ impl L1TestNode {
 
         let l1_provider = self.dev_provider();
 
-        let artifact: serde_json::Value = serde_json::from_str(
-            include_str!("../../../../docs/specs/out/SwapAndDepositRouter.sol/SwapAndDepositRouter.json"),
-        )?;
+        let artifact: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../docs/specs/out/SwapAndDepositRouter.sol/SwapAndDepositRouter.json"
+        ))?;
         let bytecode_hex = artifact["bytecode"]["object"]
             .as_str()
             .ok_or_else(|| eyre::eyre!("missing bytecode in SwapAndDepositRouter artifact"))?;
@@ -704,10 +849,126 @@ impl L1TestNode {
         sequencer_b: Address,
     ) -> eyre::Result<(Address, Address, Address)> {
         let factory = self.deploy_zone_factory().await?;
-        let portal_a = self.create_zone_with_sequencer(factory, sequencer_a).await?;
-        let portal_b = self.create_zone_with_sequencer(factory, sequencer_b).await?;
+        let portal_a = self
+            .create_zone_with_sequencer(factory, sequencer_a)
+            .await?;
+        let portal_b = self
+            .create_zone_with_sequencer(factory, sequencer_b)
+            .await?;
         let router = self.deploy_router(factory).await?;
         Ok((portal_a, portal_b, router))
+    }
+
+    /// Create a new TIP-20 token on L1 via the factory precompile.
+    ///
+    /// Returns the new token's address.
+    pub(crate) async fn create_tip20(
+        &self,
+        name: &str,
+        symbol: &str,
+        salt: B256,
+    ) -> eyre::Result<Address> {
+        use alloy_sol_types::SolEvent;
+        use tempo_contracts::precompiles::ITIP20Factory;
+        use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS};
+
+        let provider = self.dev_provider();
+        let factory = ITIP20Factory::new(TIP20_FACTORY_ADDRESS, &provider);
+        let receipt = factory
+            .createToken(
+                name.to_string(),
+                symbol.to_string(),
+                "USD".to_string(),
+                PATH_USD_ADDRESS,
+                self.dev_address(),
+                salt,
+            )
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "createToken failed");
+
+        let event = receipt
+            .inner
+            .logs()
+            .iter()
+            .find_map(|log| ITIP20Factory::TokenCreated::decode_log(&log.inner).ok())
+            .ok_or_else(|| eyre::eyre!("TokenCreated event not found"))?;
+
+        Ok(event.token)
+    }
+
+    /// Enable a token on a ZonePortal (must be called by the sequencer).
+    pub(crate) async fn enable_token_on_portal(
+        &self,
+        portal_address: Address,
+        token: Address,
+    ) -> eyre::Result<()> {
+        use zone::abi::ZonePortal;
+        let provider = self.dev_provider();
+        let portal = ZonePortal::new(portal_address, &provider);
+        let receipt = portal
+            .enableToken(token)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "enableToken failed");
+        Ok(())
+    }
+
+    /// Transfer a specific TIP-20 token from the dev account to a recipient on L1.
+    pub(crate) async fn fund_user_token(
+        &self,
+        token: Address,
+        to: Address,
+        amount: u128,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+        let provider = self.dev_provider();
+        let receipt = ITIP20::new(token, &provider)
+            .transfer(to, U256::from(amount))
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "fund_user_token transfer failed");
+        Ok(())
+    }
+
+    /// Mint tokens on L1.
+    ///
+    /// The dev account must be the admin of the token (set during `createToken`).
+    /// Grants `ISSUER_ROLE` to self first (admin can grant roles), then mints.
+    pub(crate) async fn mint_tip20(
+        &self,
+        token: Address,
+        to: Address,
+        amount: u128,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::{IRolesAuth, ITIP20};
+        use tempo_precompiles::tip20::ISSUER_ROLE;
+
+        let provider = self.dev_provider();
+
+        // Admin can grant ISSUER_ROLE to self
+        let receipt = IRolesAuth::new(token, &provider)
+            .grantRole(*ISSUER_ROLE, self.dev_address())
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "grantRole ISSUER failed on L1");
+
+        let receipt = ITIP20::new(token, &provider)
+            .mint(to, U256::from(amount))
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "mint_tip20 failed");
+        Ok(())
     }
 
     /// Start an L1 dev node with the default configuration (500ms block time).
@@ -760,8 +1021,20 @@ impl L1TestNode {
             .launch_with_debug_capabilities()
             .await?;
 
-        let http_url = node_handle.node.rpc_server_handle().http_url().unwrap().parse().unwrap();
-        let ws_url = node_handle.node.rpc_server_handle().ws_url().unwrap().parse().unwrap();
+        let http_url = node_handle
+            .node
+            .rpc_server_handle()
+            .http_url()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let ws_url = node_handle
+            .node
+            .rpc_server_handle()
+            .ws_url()
+            .unwrap()
+            .parse()
+            .unwrap();
 
         Ok(Self {
             http_url,
@@ -837,7 +1110,8 @@ impl WithdrawalArgs {
 
         // SwapAndDepositRouter plaintext callback format:
         // (bool isEncrypted, address tokenOut, address targetPortal, address recipient, bytes32 memo, uint128 minAmountOut)
-        let callback_data = (false, token, target_portal, recipient, B256::ZERO, 0u128).abi_encode();
+        let callback_data =
+            (false, token, target_portal, recipient, B256::ZERO, 0u128).abi_encode();
 
         Self {
             amount,
@@ -865,8 +1139,6 @@ pub(crate) struct ZoneAccount {
     portal_address: Address,
     /// Whether we've already approved the portal to spend pathUSD on L1.
     l1_portal_approved: bool,
-    /// Whether we've already approved the ZoneOutbox to spend zone tokens on L2.
-    l2_outbox_approved: bool,
 }
 
 impl ZoneAccount {
@@ -892,7 +1164,7 @@ impl ZoneAccount {
             .erased();
 
         let l2_provider = ProviderBuilder::new()
-            .wallet(signer.clone())
+            .wallet(signer)
             .connect_http(zone.http_url().clone())
             .erased();
 
@@ -902,7 +1174,6 @@ impl ZoneAccount {
             l2_provider,
             portal_address,
             l1_portal_approved: false,
-            l2_outbox_approved: false,
         }
     }
 
@@ -911,10 +1182,10 @@ impl ZoneAccount {
         self.address
     }
 
-    /// Approve the ZonePortal to spend `amount` of `token` on L1, then deposit.
+    /// Approve the ZonePortal to spend pathUSD on L1, then deposit.
     ///
     /// Skips approval if already approved in this session.
-    /// Returns the L2 minted balance (polled until > 0).
+    /// Waits for the expected post-deposit balance on L2 and returns it.
     pub(crate) async fn deposit(
         &mut self,
         amount: u128,
@@ -923,7 +1194,7 @@ impl ZoneAccount {
     ) -> eyre::Result<U256> {
         use tempo_contracts::precompiles::ITIP20;
         use tempo_precompiles::PATH_USD_ADDRESS;
-        use zone::abi::{ZonePortal, ZONE_TOKEN_ADDRESS};
+        use zone::abi::{ZONE_TOKEN_ADDRESS, ZonePortal};
 
         if !self.l1_portal_approved {
             ITIP20::new(PATH_USD_ADDRESS, &self.l1_provider)
@@ -935,48 +1206,117 @@ impl ZoneAccount {
             self.l1_portal_approved = true;
         }
 
+        // Snapshot balance before deposit so we wait for the expected increase
+        let balance_before = zone.balance_of(ZONE_TOKEN_ADDRESS, self.address).await?;
+
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(self.address, amount, B256::ZERO)
+            .deposit(PATH_USD_ADDRESS, self.address, amount, B256::ZERO)
             .send()
             .await?
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "L1 deposit tx failed");
 
-        zone.wait_for_balance(ZONE_TOKEN_ADDRESS, self.address, U256::ZERO, timeout)
-            .await
+        zone.wait_for_balance(
+            ZONE_TOKEN_ADDRESS,
+            self.address,
+            balance_before + U256::from(amount),
+            timeout,
+        )
+        .await
+    }
+
+    /// Approve the ZonePortal to spend `amount` of a specific `token` on L1, then deposit.
+    ///
+    /// Unlike [`deposit`](Self::deposit), this allows depositing any enabled token.
+    /// The caller must ensure:
+    /// - The token is enabled on the portal (`enableToken`)
+    /// - The account has sufficient balance of `token` on L1
+    ///
+    /// Waits for the expected post-deposit balance on L2 and returns it.
+    pub(crate) async fn deposit_token(
+        &mut self,
+        token: Address,
+        l2_token: Address,
+        amount: u128,
+        timeout: Duration,
+        zone: &ZoneTestNode,
+    ) -> eyre::Result<U256> {
+        use tempo_contracts::precompiles::ITIP20;
+        use zone::abi::ZonePortal;
+
+        // Approve portal for this specific token
+        ITIP20::new(token, &self.l1_provider)
+            .approve(self.portal_address, U256::MAX)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+
+        // Snapshot balance before deposit so we wait for the expected increase
+        let balance_before = zone.balance_of(l2_token, self.address).await?;
+
+        let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
+        let receipt = portal
+            .deposit(token, self.address, amount, B256::ZERO)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L1 deposit tx failed");
+
+        zone.wait_for_balance(
+            l2_token,
+            self.address,
+            balance_before + U256::from(amount),
+            timeout,
+        )
+        .await
     }
 
     /// Approve the ZoneOutbox, then request a withdrawal on L2.
     ///
     /// Skips approval if already approved in this session.
-    pub(crate) async fn withdraw(
-        &mut self,
-        amount: u128,
-    ) -> eyre::Result<()> {
+    pub(crate) async fn withdraw(&mut self, amount: u128) -> eyre::Result<()> {
         self.withdraw_with(WithdrawalArgs::new(amount)).await
     }
 
     /// Approve the ZoneOutbox, then request a withdrawal on L2 with custom args.
     ///
     /// Skips approval if already approved in this session.
-    pub(crate) async fn withdraw_with(
+    /// Uses the default zone token (pathUSD / `ZONE_TOKEN_ADDRESS`).
+    pub(crate) async fn withdraw_with(&mut self, args: WithdrawalArgs) -> eyre::Result<()> {
+        use zone::abi::ZONE_TOKEN_ADDRESS;
+        self.withdraw_token_with(ZONE_TOKEN_ADDRESS, args).await
+    }
+
+    /// Approve the ZoneOutbox for a specific token, then request a withdrawal on L2.
+    pub(crate) async fn withdraw_token(
         &mut self,
+        token: Address,
+        amount: u128,
+    ) -> eyre::Result<()> {
+        self.withdraw_token_with(token, WithdrawalArgs::new(amount))
+            .await
+    }
+
+    /// Approve the ZoneOutbox for a specific token, then request a withdrawal on L2 with custom args.
+    pub(crate) async fn withdraw_token_with(
+        &mut self,
+        token: Address,
         args: WithdrawalArgs,
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
-        use zone::abi::{ZoneOutbox, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS};
+        use zone::abi::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
 
-        if !self.l2_outbox_approved {
-            ITIP20::new(ZONE_TOKEN_ADDRESS, &self.l2_provider)
-                .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-                .send()
-                .await?
-                .get_receipt()
-                .await?;
-            self.l2_outbox_approved = true;
-        }
+        // Approve outbox for this token
+        ITIP20::new(token, &self.l2_provider)
+            .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
 
         let to = args.to.unwrap_or(self.address);
         let fallback_recipient = args.fallback_recipient.unwrap_or(self.address);
@@ -984,6 +1324,7 @@ impl ZoneAccount {
         let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider);
         let receipt = outbox
             .requestWithdrawal(
+                token,
                 to,
                 args.amount,
                 args.memo,
@@ -1037,11 +1378,7 @@ pub(crate) async fn start_local_zone_with_fixture(
 /// Seed an existing L1Fixture's cache into a zone node's L1 state cache.
 ///
 /// Use when multiple zones share the same fixture timeline — call once per zone.
-pub(crate) fn seed_fixture_for_zone(
-    fixture: &L1Fixture,
-    zone: &ZoneTestNode,
-    seed_blocks: u64,
-) {
+pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, seed_blocks: u64) {
     fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, seed_blocks);
 }
 
@@ -1156,12 +1493,14 @@ impl L1Fixture {
     /// Create a [`Deposit`] tied to a specific L1 block number.
     pub(crate) fn make_deposit_for_block(
         l1_block_number: u64,
+        token: Address,
         sender: Address,
         to: Address,
         amount: u128,
     ) -> Deposit {
         Deposit {
             l1_block_number,
+            token,
             sender,
             to,
             amount,
@@ -1185,11 +1524,7 @@ impl L1Fixture {
     }
 
     /// Inject an L1 block with the given deposits into the queue.
-    pub(crate) fn inject_deposits(
-        &mut self,
-        queue: &DepositQueue,
-        deposits: Vec<Deposit>,
-    ) {
+    pub(crate) fn inject_deposits(&mut self, queue: &DepositQueue, deposits: Vec<Deposit>) {
         let header = self.next_header();
         queue.enqueue(header, deposits);
     }
@@ -1197,12 +1532,14 @@ impl L1Fixture {
     /// Create a [`Deposit`] for testing.
     pub(crate) fn make_deposit(
         &self,
+        token: Address,
         sender: Address,
         to: Address,
         amount: u128,
     ) -> Deposit {
         Deposit {
             l1_block_number: self.next_block_number,
+            token,
             sender,
             to,
             amount,

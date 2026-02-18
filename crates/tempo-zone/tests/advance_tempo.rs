@@ -172,15 +172,11 @@ fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
     );
     nonce += 1;
 
-    // 2. ZoneConfig(address zoneToken, address tempoPortal, address tempoState)
+    // 2. ZoneConfig(address tempoPortal, address tempoState)
     let zone_config_bytecode = load_artifact("ZoneConfig");
-    let zone_token = Address::repeat_byte(0xaa); // dummy
     let tempo_portal = Address::repeat_byte(0xbb); // dummy
-    let zone_config_args = alloy_sol_types::SolValue::abi_encode_params(&(
-        zone_token,
-        tempo_portal,
-        TEMPO_STATE_ADDRESS,
-    ));
+    let zone_config_args =
+        alloy_sol_types::SolValue::abi_encode_params(&(tempo_portal, TEMPO_STATE_ADDRESS));
     deploy_contract(
         &mut evm,
         &zone_config_bytecode,
@@ -192,13 +188,12 @@ fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
     );
     nonce += 1;
 
-    // 3. ZoneInbox(address config, address tempoPortal, address tempoState, address zoneToken)
+    // 3. ZoneInbox(address config, address tempoPortal, address tempoState)
     let zone_inbox_bytecode = load_artifact("ZoneInbox");
     let zone_inbox_args = alloy_sol_types::SolValue::abi_encode_params(&(
         ZONE_CONFIG_ADDRESS,
         tempo_portal,
         TEMPO_STATE_ADDRESS,
-        zone_token,
     ));
     deploy_contract(
         &mut evm,
@@ -211,10 +206,9 @@ fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
     );
     nonce += 1;
 
-    // 4. ZoneOutbox(address config, address zoneToken)
+    // 4. ZoneOutbox(address config)
     let zone_outbox_bytecode = load_artifact("ZoneOutbox");
-    let zone_outbox_args =
-        alloy_sol_types::SolValue::abi_encode_params(&(ZONE_CONFIG_ADDRESS, zone_token));
+    let zone_outbox_args = alloy_sol_types::SolValue::abi_encode_params(&(ZONE_CONFIG_ADDRESS,));
     deploy_contract(
         &mut evm,
         &zone_outbox_bytecode,
@@ -436,4 +430,3 @@ fn advance_tempo_repro() {
     // The test should not panic; we want to see the output
     println!("\n=== Test complete ===");
 }
-

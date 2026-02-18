@@ -6,12 +6,12 @@ sol! {
     /// ZonePortal contract on L1.
     #[sol(rpc)]
     contract ZonePortal {
-        // TODO: Rename to DepositEnqueued once the Solidity contract is updated.
         /// Event emitted when a deposit is made.
         #[derive(Debug)]
         event DepositMade(
             bytes32 indexed newCurrentDepositQueueHash,
             address indexed sender,
+            address token,
             address to,
             uint128 netAmount,
             uint128 fee,

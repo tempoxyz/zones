@@ -310,6 +310,7 @@ impl ZoneMonitor {
         Ok(events_with_order
             .into_iter()
             .map(|(_, event)| abi::Withdrawal {
+                token: event.token,
                 sender: event.sender,
                 to: event.to,
                 amount: event.amount,

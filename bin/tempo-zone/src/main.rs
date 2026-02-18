@@ -32,10 +32,6 @@ struct ZoneArgs {
     #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
     pub portal_address: Address,
 
-    /// TIP-20 token address to mint on deposit.
-    #[arg(long = "l1.token-address", env = "L1_TOKEN_ADDRESS")]
-    pub token_address: Address,
-
     /// Block building interval in milliseconds.
     #[arg(
         long = "block.interval-ms",

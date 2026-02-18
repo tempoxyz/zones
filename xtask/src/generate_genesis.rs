@@ -59,15 +59,12 @@ impl GenerateGenesis {
                             signing_key_dst.display()
                         )
                     })?;
-                    validator
-                        .signing_key
-                        .to_writer(file)
-                        .wrap_err_with(|| {
-                            format!(
-                                "failed writing ed25519 signing key to `{}`",
-                                signing_key_dst.display()
-                            )
-                        })?;
+                    validator.signing_key.to_writer(file).wrap_err_with(|| {
+                        format!(
+                            "failed writing ed25519 signing key to `{}`",
+                            signing_key_dst.display()
+                        )
+                    })?;
                 }
                 let signing_share_dst = validator.dst_signing_share(&output);
                 validator

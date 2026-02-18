@@ -32,9 +32,10 @@ pub const ZONE_CONFIG_ADDRESS: Address = address!("0x1c0000000000000000000000000
 pub const TEMPO_STATE_READER_ADDRESS: Address =
     address!("0x1c00000000000000000000000000000000000004");
 
-/// Zone token address on Zone L2 — pathUSD TIP20 precompile.
+/// Default zone token address on Zone L2 — pathUSD TIP20 precompile.
 ///
-/// The zone uses pathUSD as its native token: deposits mint pathUSD, withdrawals burn it.
+/// This is the initial token enabled at zone creation. With multi-asset support,
+/// additional TIP-20 tokens can be enabled via the portal's `enableToken()`.
 /// This is the same TIP20 precompile address as on Tempo L1, initialized in zone genesis
 /// with the TIP20Factory so that `is_valid_fee_token` passes for user transactions.
 pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
@@ -46,6 +47,7 @@ sol! {
 
     #[derive(Debug)]
     struct Withdrawal {
+        address token;
         address sender;
         address to;
         uint128 amount;
@@ -58,6 +60,7 @@ sol! {
 
     #[derive(Debug)]
     struct Deposit {
+        address token;
         address sender;
         address to;
         uint128 amount;
@@ -94,8 +97,10 @@ sol! {
         event DepositMade(
             bytes32 indexed newCurrentDepositQueueHash,
             address indexed sender,
+            address token,
             address to,
-            uint128 amount,
+            uint128 netAmount,
+            uint128 fee,
             bytes32 memo
         );
 
@@ -108,12 +113,13 @@ sol! {
         );
 
         #[derive(Debug)]
-        event WithdrawalProcessed(address indexed to, uint128 amount, bool callbackSuccess);
+        event WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess);
 
         #[derive(Debug)]
         event BounceBack(
             bytes32 indexed newCurrentDepositQueueHash,
             address indexed fallbackRecipient,
+            address token,
             uint128 amount
         );
 
@@ -126,7 +132,6 @@ sol! {
         // -- View functions --
 
         function zoneId() external view returns (uint64);
-        function token() external view returns (address);
         function sequencer() external view returns (address);
         function verifier() external view returns (address);
         function sequencerPubkey() external view returns (bytes32);
@@ -143,7 +148,7 @@ sol! {
 
         // -- State-changing functions --
 
-        function deposit(address to, uint128 amount, bytes32 memo)
+        function deposit(address token, address to, uint128 amount, bytes32 memo)
             external
             returns (bytes32 newCurrentDepositQueueHash);
 
@@ -158,6 +163,12 @@ sol! {
             bytes calldata verifierConfig,
             bytes calldata proof
         ) external;
+
+        function enableToken(address token) external;
+
+        // -- View functions (token management) --
+
+        function isTokenEnabled(address token) external view returns (bool);
     }
 
     // ---------------------------------------------------------------
@@ -172,6 +183,7 @@ sol! {
         event WithdrawalRequested(
             uint64 indexed withdrawalIndex,
             address indexed sender,
+            address token,
             address to,
             uint128 amount,
             uint128 fee,
@@ -199,6 +211,7 @@ sol! {
         // -- State-changing functions --
 
         function requestWithdrawal(
+            address token,
             address to,
             uint128 amount,
             bytes32 memo,
@@ -343,6 +356,7 @@ sol! {
             bytes32 indexed depositHash,
             address indexed sender,
             address indexed to,
+            address token,
             uint128 amount,
             bytes32 memo
         );
@@ -352,6 +366,7 @@ sol! {
             bytes32 indexed depositHash,
             address indexed sender,
             address indexed to,
+            address token,
             uint128 amount,
             bytes32 memo
         );
@@ -360,6 +375,7 @@ sol! {
         event EncryptedDepositFailed(
             bytes32 indexed depositHash,
             address indexed sender,
+            address token,
             uint128 amount
         );
 
@@ -377,7 +393,6 @@ sol! {
         function maxDepositsPerTempoBlock() external view returns (uint256);
         function tempoPortal() external view returns (address);
         function tempoState() external view returns (address);
-        function zoneToken() external view returns (address);
         function config() external view returns (address);
 
         function setMaxDepositsPerTempoBlock(uint256 _maxDepositsPerTempoBlock) external;
@@ -436,6 +451,7 @@ mod tests {
     #[test]
     fn test_deposit_abi_encode_vs_params() {
         let d = Deposit {
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
@@ -459,6 +475,7 @@ mod tests {
     fn test_queued_deposit_encoding() {
         // Test that the QueuedDeposit encoding matches what Solidity expects
         let deposit = Deposit {
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
@@ -518,6 +535,7 @@ mod tests {
         // Both Solidity and Rust must compute:
         //   keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
         let deposit = Deposit {
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
