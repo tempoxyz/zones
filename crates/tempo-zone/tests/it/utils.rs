@@ -52,13 +52,16 @@ pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
 fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
     let specs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
-    let json = std::fs::read_to_string(&path)
-        .wrap_err_with(|| format!("{contract} artifact not found – run `forge build` in docs/specs"))?;
+    let json = std::fs::read_to_string(&path).wrap_err_with(|| {
+        format!("{contract} artifact not found – run `forge build` in docs/specs")
+    })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
     let hex_str = artifact["bytecode"]["object"]
         .as_str()
         .ok_or_else(|| eyre::eyre!("missing bytecode in {contract} artifact"))?;
-    Ok(alloy_primitives::Bytes::from(alloy_primitives::hex::decode(hex_str)?))
+    Ok(alloy_primitives::Bytes::from(
+        alloy_primitives::hex::decode(hex_str)?,
+    ))
 }
 
 /// Dummy L1 WS URL used when no real L1 is needed.
