@@ -11,6 +11,7 @@ members = [
   "crates/tempo-zone",
   "crates/rpc",
   "crates/zone-prover",
+  "crates/zone-test-utils",
   "xtask",
 ]
 
@@ -95,6 +96,7 @@ tempo-primitives = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", 
 tempo-revm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
 tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
 zone-prover = { path = "crates/zone-prover" }
+zone-test-utils = { path = "crates/zone-test-utils" }
 
 # zones
 zone-rpc = { path = "crates/rpc" }

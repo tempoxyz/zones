@@ -13141,6 +13141,7 @@ dependencies = [
  "tracing",
  "url",
  "zone-prover",
+ "zone-test-utils",
 ]
 
 [[package]]
@@ -13164,6 +13165,26 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "zone-prover",
+ "zone-test-utils",
+]
+
+[[package]]
+name = "zone-test-utils"
+version = "1.0.0-rc.5"
+dependencies = [
+ "alloy-consensus",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-sol-types",
+ "const-hex",
+ "revm",
+ "serde",
+ "serde_json",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-primitives",
+ "tempo-revm",
 ]
 
 [[package]]

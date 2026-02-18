@@ -112,6 +112,7 @@ tempo-contracts.workspace = true
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+zone-test-utils.workspace = true
 
 [features]
 default = []

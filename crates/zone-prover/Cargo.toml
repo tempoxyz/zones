@@ -44,5 +44,9 @@ serde = ["dep:serde", "alloy-primitives/serde"]
 test-utils = []
 
 [dev-dependencies]
+alloy-consensus.workspace = true
+alloy-rlp.workspace = true
 alloy-trie = "0.9"
+tempo-primitives.workspace = true
 zone-prover = { path = ".", features = ["test-utils"] }
+zone-test-utils.workspace = true
