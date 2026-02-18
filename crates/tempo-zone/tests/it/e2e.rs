@@ -39,7 +39,12 @@ async fn test_deposit_via_queue_injection() -> eyre::Result<()> {
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
 
     let balance = zone
-        .wait_for_balance(PATH_USD_ADDRESS, recipient, U256::ZERO, DEFAULT_TIMEOUT)
+        .wait_for_balance(
+            PATH_USD_ADDRESS,
+            recipient,
+            U256::from(deposit_amount),
+            DEFAULT_TIMEOUT,
+        )
         .await?;
     assert_eq!(
         balance,
@@ -282,8 +287,13 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
 
     // Wait for the deposit to be processed
-    zone.wait_for_balance(PATH_USD_ADDRESS, recipient, U256::ZERO, DEFAULT_TIMEOUT)
-        .await?;
+    zone.wait_for_balance(
+        PATH_USD_ADDRESS,
+        recipient,
+        U256::from(deposit_amount),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
 
     // Query TempoAdvanced events from ZoneInbox
     let zone_inbox = ZoneInbox::new(ZONE_INBOX_ADDRESS, zone.provider());
