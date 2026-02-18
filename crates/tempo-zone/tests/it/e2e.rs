@@ -369,7 +369,7 @@ async fn test_large_deposit_batch() -> eyre::Result<()> {
     zone.wait_for_balance(
         PATH_USD_ADDRESS,
         last_recipient,
-        U256::ZERO,
+        U256::from(amount_each),
         DEFAULT_TIMEOUT,
     )
     .await?;
