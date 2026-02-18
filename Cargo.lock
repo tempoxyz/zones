@@ -14408,6 +14408,7 @@ dependencies = [
  "tempo-revm",
  "thiserror 2.0.18",
  "tracing",
+ "zone-prover",
 ]
 
 [[package]]

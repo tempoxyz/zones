@@ -41,3 +41,8 @@ tracing.workspace = true
 default = ["std"]
 std = []
 serde = ["dep:serde", "alloy-primitives/serde"]
+test-utils = []
+
+[dev-dependencies]
+alloy-trie = "0.9"
+zone-prover = { path = ".", features = ["test-utils"] }
