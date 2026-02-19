@@ -143,6 +143,11 @@ impl ConfigureEvm for TempoEvmConfig {
         parent: &TempoHeader,
         attributes: &Self::NextBlockEnvCtx,
     ) -> Result<EvmEnvFor<Self>, Self::Error> {
+        let base_fee_per_gas = attributes.base_fee_per_gas.unwrap_or_else(|| {
+            self.chain_spec()
+                .next_block_base_fee(parent, attributes.timestamp)
+                .unwrap_or_default()
+        });
         let EvmEnv { cfg_env, block_env } = EvmEnv::for_eth_next_block(
             parent,
             NextEvmEnvAttributes {
@@ -151,9 +156,7 @@ impl ConfigureEvm for TempoEvmConfig {
                 prev_randao: attributes.prev_randao,
                 gas_limit: attributes.gas_limit,
             },
-            self.chain_spec()
-                .next_block_base_fee(parent, attributes.timestamp)
-                .unwrap_or_default(),
+            base_fee_per_gas,
             self.chain_spec(),
             self.chain_spec().chain().id(),
             self.chain_spec()
@@ -324,6 +327,7 @@ mod tests {
             general_gas_limit: 10_000_000,
             shared_gas_limit: 3_000_000,
             timestamp_millis_part: 750,
+            base_fee_per_gas: Some(1337),
             subblock_fee_recipients: HashMap::new(),
         };
 
@@ -341,6 +345,7 @@ mod tests {
             Address::repeat_byte(0x02)
         );
         assert_eq!(evm_env.block_env.inner.gas_limit, 30_000_000);
+        assert_eq!(evm_env.block_env.inner.basefee, 1337);
 
         // Verify Tempo-specific field
         assert_eq!(evm_env.block_env.timestamp_millis_part, 750);
@@ -504,6 +509,7 @@ mod tests {
             general_gas_limit: 12_000_000,
             shared_gas_limit: 4_000_000,
             timestamp_millis_part: 999,
+            base_fee_per_gas: None,
             subblock_fee_recipients: subblock_fee_recipients.clone(),
         };
 

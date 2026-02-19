@@ -40,6 +40,8 @@ pub struct TempoNextBlockEnvAttributes {
     pub shared_gas_limit: u64,
     /// Milliseconds portion of the timestamp.
     pub timestamp_millis_part: u64,
+    /// Sequencer-specified base fee per gas override.
+    pub base_fee_per_gas: Option<u64>,
     /// Mapping from a subblock validator public key to the fee recipient configured.
     pub subblock_fee_recipients: HashMap<PartialValidatorKey, Address>,
 }
@@ -60,6 +62,7 @@ impl reth_rpc_eth_api::helpers::pending_block::BuildPendingEnv<tempo_primitives:
             general_gas_limit,
             shared_gas_limit,
             timestamp_millis_part: parent.timestamp_millis_part,
+            base_fee_per_gas: None,
             subblock_fee_recipients: Default::default(),
         }
     }

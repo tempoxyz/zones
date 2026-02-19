@@ -38,6 +38,8 @@ pub struct TempoPayloadBuilderAttributes {
     inner: EthPayloadBuilderAttributes,
     interrupt: InterruptHandle,
     timestamp_millis_part: u64,
+    /// Sequencer-specified base fee per gas for the next block, if provided.
+    base_fee_per_gas: Option<u64>,
     /// DKG ceremony data to include in the block's extra_data header field.
     ///
     /// This is empty when no DKG data is available (e.g., when the DKG manager
@@ -70,6 +72,7 @@ impl TempoPayloadBuilderAttributes {
             },
             interrupt: InterruptHandle::default(),
             timestamp_millis_part: millis,
+            base_fee_per_gas: None,
             extra_data,
             subblocks: Arc::new(subblocks),
         }
@@ -96,6 +99,17 @@ impl TempoPayloadBuilderAttributes {
         self.timestamp_millis_part
     }
 
+    /// Returns the sequencer-specified base fee per gas, if provided.
+    pub fn base_fee_per_gas(&self) -> Option<u64> {
+        self.base_fee_per_gas
+    }
+
+    /// Overrides the base fee per gas used for block building.
+    pub fn with_base_fee_per_gas(mut self, base_fee_per_gas: u64) -> Self {
+        self.base_fee_per_gas = Some(base_fee_per_gas);
+        self
+    }
+
     /// Returns the timestamp in milliseconds.
     pub fn timestamp_millis(&self) -> u64 {
         self.inner
@@ -119,6 +133,7 @@ impl From<EthPayloadBuilderAttributes> for TempoPayloadBuilderAttributes {
             inner,
             interrupt: InterruptHandle::default(),
             timestamp_millis_part: 0,
+            base_fee_per_gas: None,
             extra_data: Bytes::default(),
             subblocks: Arc::new(Vec::new),
         }
@@ -140,11 +155,13 @@ impl PayloadBuilderAttributes for TempoPayloadBuilderAttributes {
         let TempoPayloadAttributes {
             inner,
             timestamp_millis_part,
+            base_fee_per_gas,
         } = rpc_payload_attributes;
         Ok(Self {
             inner: EthPayloadBuilderAttributes::try_new(parent, inner, version)?,
             interrupt: InterruptHandle::default(),
             timestamp_millis_part,
+            base_fee_per_gas,
             extra_data: Bytes::default(),
             subblocks: Arc::new(Vec::new),
         })
@@ -192,6 +209,10 @@ pub struct TempoPayloadAttributes {
     /// Milliseconds portion of the timestamp.
     #[serde(with = "alloy_serde::quantity")]
     pub timestamp_millis_part: u64,
+
+    /// Sequencer-specified base fee per gas for the next block.
+    #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
+    pub base_fee_per_gas: Option<u64>,
 }
 
 impl PayloadAttributes for TempoPayloadAttributes {
@@ -422,6 +443,7 @@ mod tests {
 
         // Tempo-specific defaults
         assert_eq!(tempo_attrs.timestamp_millis_part(), 0);
+        assert_eq!(tempo_attrs.base_fee_per_gas(), None);
         assert_eq!(tempo_attrs.extra_data(), &Bytes::default());
         assert!(!tempo_attrs.is_interrupted());
         assert!(tempo_attrs.subblocks().is_empty());
@@ -438,6 +460,7 @@ mod tests {
                 parent_beacon_block_root: Some(B256::random()),
             },
             timestamp_millis_part: 750,
+            base_fee_per_gas: Some(1234),
         };
 
         let parent = B256::random();
@@ -449,6 +472,7 @@ mod tests {
         assert_eq!(attrs.timestamp(), 100);
         assert_eq!(attrs.timestamp_millis_part(), 750);
         assert_eq!(attrs.timestamp_millis(), 100_750);
+        assert_eq!(attrs.base_fee_per_gas(), Some(1234));
         assert_eq!(attrs.extra_data(), &Bytes::default());
         assert!(!attrs.is_interrupted());
     }
@@ -466,15 +490,18 @@ mod tests {
                 parent_beacon_block_root: Some(B256::random()),
             },
             timestamp_millis_part,
+            base_fee_per_gas: Some(42),
         };
 
         // Roundtrip
         let json = serde_json::to_string(&attrs).unwrap();
         assert!(json.contains("timestampMillisPart"));
+        assert!(json.contains("baseFeePerGas"));
 
         let deserialized: TempoPayloadAttributes = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.inner.timestamp, timestamp);
         assert_eq!(deserialized.timestamp_millis_part, timestamp_millis_part);
+        assert_eq!(deserialized.base_fee_per_gas, Some(42));
 
         // Deref works
         assert_eq!(attrs.timestamp, timestamp);
@@ -504,6 +531,7 @@ mod tests {
                 parent_beacon_block_root: Some(beacon_root),
             },
             timestamp_millis_part: 123,
+            base_fee_per_gas: Some(1),
         };
 
         // PayloadAttributes trait methods
@@ -522,6 +550,7 @@ mod tests {
                 parent_beacon_block_root: None,
             },
             timestamp_millis_part: 0,
+            base_fee_per_gas: None,
         };
         assert!(attrs_none.withdrawals().is_none());
         assert!(attrs_none.parent_beacon_block_root().is_none());

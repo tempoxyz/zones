@@ -216,8 +216,8 @@ fn build_evm_env(block: &ZoneBlock, chain_id: u64) -> EvmEnv<TempoHardfork, Temp
             number: U256::from(block.number),
             beneficiary: block.beneficiary,
             timestamp: U256::from(block.timestamp),
-            gas_limit: u64::MAX, // No gas limit enforcement in the prover
-            basefee: 0,
+            gas_limit: block.gas_limit,
+            basefee: block.base_fee_per_gas,
             ..Default::default()
         },
         timestamp_millis_part: 0,

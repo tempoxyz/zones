@@ -23,7 +23,7 @@ use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns}
 use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
 use std::{sync::Arc, time::Duration};
-use tempo_chainspec::spec::TempoChainSpec;
+use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
 use tempo_contracts::precompiles::{
     IRolesAuth,
     ITIP20::{self, ITIP20Instance},
@@ -329,6 +329,7 @@ fn default_attributes_generator(timestamp: u64) -> TempoPayloadBuilderAttributes
             parent_beacon_block_root: Some(alloy::primitives::B256::ZERO),
         },
         timestamp_millis_part: 0,
+        base_fee_per_gas: Some(TEMPO_BASE_FEE),
     };
 
     TempoPayloadBuilderAttributes::try_new(B256::ZERO, attributes, 0).unwrap()

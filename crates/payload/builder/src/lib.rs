@@ -328,6 +328,7 @@ where
                     general_gas_limit,
                     shared_gas_limit,
                     timestamp_millis_part: attributes.timestamp_millis_part(),
+                    base_fee_per_gas: attributes.base_fee_per_gas(),
                     subblock_fee_recipients,
                 },
             )

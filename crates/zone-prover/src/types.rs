@@ -132,6 +132,12 @@ pub struct ZoneBlock {
     /// Beneficiary (must match registered sequencer).
     pub beneficiary: Address,
 
+    /// Block gas limit.
+    pub gas_limit: u64,
+
+    /// Base fee per gas used for EVM execution.
+    pub base_fee_per_gas: u64,
+
     /// Expected state root after executing this block.
     /// Provided by the zone node (from `BlockBuilderOutcome`); the prover validates
     /// that EVM execution produces a consistent result.

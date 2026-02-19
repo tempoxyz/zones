@@ -319,6 +319,7 @@ impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
         TempoPayloadAttributes {
             inner,
             timestamp_millis_part,
+            base_fee_per_gas: Some(TEMPO_BASE_FEE),
         }
     }
 }

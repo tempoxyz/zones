@@ -189,6 +189,8 @@ where
             parent_hash: parent_header.hash(),
             timestamp: sealed_block.timestamp(),
             beneficiary: sealed_block.beneficiary(),
+            gas_limit: sealed_block.gas_limit(),
+            base_fee_per_gas: sealed_block.base_fee_per_gas().unwrap_or_default(),
             expected_state_root: sealed_block.state_root(),
             tempo_header_rlp: header_rlp.clone(),
             deposits,
@@ -409,6 +411,7 @@ where
                     general_gas_limit,
                     shared_gas_limit,
                     timestamp_millis_part: attributes.timestamp_millis_part(),
+                    base_fee_per_gas: attributes.base_fee_per_gas(),
                     subblock_fee_recipients: Default::default(),
                 },
             )
