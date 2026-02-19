@@ -67,6 +67,7 @@ impl ZoneTestNode {
         let l1_config = L1SubscriberConfig {
             l1_rpc_url: l1_ws_url,
             portal_address,
+            genesis_tempo_block_number: None,
         };
         // TODO: provide real L1 state config when integration tests use proofs
         let l1_state_provider_config = Default::default();

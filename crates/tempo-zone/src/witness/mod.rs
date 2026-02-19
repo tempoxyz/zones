@@ -31,4 +31,4 @@ pub use generator::{
 };
 pub use recording_db::{RecordedAccesses, RecordingDatabase};
 pub use recording_l1::{RecordedL1Read, RecordingL1StateProvider, SharedRecordedReads};
-pub use store::{BuiltBlockWitness, SharedWitnessStore, WitnessStore};
+pub use store::{AccessSnapshot, BuiltBlockWitness, SharedWitnessStore, WitnessStore};
