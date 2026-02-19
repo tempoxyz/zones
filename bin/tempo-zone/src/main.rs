@@ -136,7 +136,10 @@ fn main() {
                 sequencer: sequencer_addr.unwrap_or_default(),
             };
             let api: Arc<dyn zone::rpc::ZoneRpcApi> =
-                Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
+                Arc::new(zone::rpc::TempoZoneRpc::new(
+                    eth_handlers,
+                    std::collections::HashSet::from([zone::abi::ZONE_TOKEN_ADDRESS]),
+                ));
             let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
             info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 

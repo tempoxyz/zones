@@ -513,8 +513,10 @@ impl ZoneTestNode {
         // Build the real private RPC API while the handle is still concrete,
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
-        let rpc_api: Arc<dyn zone::rpc::ZoneRpcApi> =
-            Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
+        let rpc_api: Arc<dyn zone::rpc::ZoneRpcApi> = Arc::new(zone::rpc::TempoZoneRpc::new(
+            eth_handlers,
+            std::collections::HashSet::from([zone::abi::ZONE_TOKEN_ADDRESS]),
+        ));
 
         Ok(Self {
             deposit_queue,
