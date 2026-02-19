@@ -8,6 +8,8 @@
 
 use std::{sync::Arc, time::Duration};
 
+use alloy_provider::Provider;
+
 use alloy_primitives::Address;
 use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
@@ -16,7 +18,7 @@ use reth_ethereum::cli::Cli;
 use reth_ethereum::chainspec::EthChainSpec;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use zone::{ZoneNode, evm::ZoneEvmConfig};
+use zone::{ProofGenerator, ZoneNode, evm::ZoneEvmConfig};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -185,6 +187,24 @@ fn main() {
                 .http_url()
                 .expect("HTTP RPC server must be enabled for sequencer mode");
 
+            // Create a read-only L1 provider for the proof generator
+            // (separate from the walletted provider used for batch submission).
+            let l1_proof_provider = alloy_provider::ProviderBuilder::new_with_network::<
+                tempo_alloy::TempoNetwork,
+            >()
+            .connect(&args.l1_rpc_url)
+            .await
+            .expect("valid L1 RPC URL for proof generator")
+            .erased();
+
+            let proof_generator: Arc<dyn zone::BatchProofGenerator> =
+                Arc::new(ProofGenerator::new(
+                    handle.node.provider().clone(),
+                    witness_store.clone(),
+                    l1_proof_provider,
+                    sequencer_addr,
+                ));
+
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
                 l1_rpc_url: args.l1_rpc_url,
@@ -202,8 +222,7 @@ fn main() {
             let seq_handle = zone::spawn_zone_sequencer(
                 sequencer_config,
                 sequencer_signer,
-                witness_store.clone(),
-                sequencer_addr,
+                proof_generator,
             )
             .await;
 

@@ -67,6 +67,7 @@ alloy-transport.workspace = true
 revm.workspace = true
 
 # misc
+async-trait.workspace = true
 metrics.workspace = true
 aes-gcm.workspace = true
 k256.workspace = true
