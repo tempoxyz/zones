@@ -78,6 +78,9 @@ where
         prev_block_hash: B256,
         portal_withdrawal_queue_tail: u64,
     ) -> (alloy_primitives::Bytes, alloy_primitives::Bytes) {
+        // TODO(production): Replace soft proof (ABI-packed BatchOutput) with a
+        // real ZK proof (SP1) or TEE attestation (SGX/TDX).
+
         let empty = || {
             (
                 alloy_primitives::Bytes::new(),
@@ -273,6 +276,8 @@ where
         let groups = group_l1_reads_for_proof_fetch(l1_reads);
         let mut proofs = Vec::with_capacity(groups.len());
 
+        // TODO(perf): Fetch L1 proofs concurrently with futures::join_all and a
+        // concurrency limiter instead of sequential await.
         for ((tempo_block_number, account), slots) in &groups {
             debug!(
                 tempo_block_number,

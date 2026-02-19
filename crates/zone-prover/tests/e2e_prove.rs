@@ -3,7 +3,7 @@
 //! Constructs a minimal but complete `BatchWitness` with real MPT proofs,
 //! a single zone block, and exercises the full prover pipeline.
 
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use zone_prover::{
     prove_zone_batch,
     execute::{
@@ -14,7 +14,7 @@ use zone_prover::{
             ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
         },
     },
-    testutil::{TestAccount, build_zone_state_fixture},
+    testutil::{TestAccount, build_zone_state_fixture_with_absent, compute_state_root},
     types::*,
 };
 
@@ -37,10 +37,21 @@ fn pack_tempo_state(block_number: u64) -> U256 {
 /// Build the initial zone state for a minimal zone.
 ///
 /// Includes all predeploy accounts with their mandatory storage slots,
-/// plus the system transaction sender. No contract code is deployed — system
-/// txs will execute as no-op calls (target has no code → immediate success).
-fn build_initial_accounts() -> Vec<(Address, TestAccount)> {
+/// the system transaction sender, and the EIP-2935 history contract.
+fn build_initial_accounts(block_numbers: &[u64]) -> Vec<(Address, TestAccount)> {
     let tempo_block_number: u64 = 100;
+
+    // EIP-2935 storage slots needed by the prover's system call (one per block).
+    let history_slots: Vec<(U256, U256)> = block_numbers
+        .iter()
+        .filter(|&&n| n > 0)
+        .map(|&n| {
+            let slot = U256::from((n - 1) % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
+            (slot, U256::ZERO)
+        })
+        .collect();
+
+    let history_code = alloy_eips::eip2935::HISTORY_STORAGE_CODE.to_vec();
 
     vec![
         // TempoState — mandatory slots: blockHash(0), stateRoot(4), packed(7)
@@ -73,12 +84,23 @@ fn build_initial_accounts() -> Vec<(Address, TestAccount)> {
             TestAccount {
                 nonce: 1,
                 storage: vec![
-                    (ZONE_OUTBOX_LAST_BATCH_BASE_SLOT.into(), U256::ZERO), // withdrawalQueueHash
+                    (ZONE_OUTBOX_LAST_BATCH_BASE_SLOT.into(), U256::ZERO),
                     (
                         (ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1)).into(),
-                        U256::from(1), // withdrawalBatchIndex
+                        U256::from(1),
                     ),
                 ],
+                ..Default::default()
+            },
+        ),
+        // EIP-2935 blockhash history contract
+        (
+            alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+            TestAccount {
+                nonce: 1,
+                code_hash: keccak256(&history_code),
+                code: Some(history_code),
+                storage: history_slots,
                 ..Default::default()
             },
         ),
@@ -88,6 +110,28 @@ fn build_initial_accounts() -> Vec<(Address, TestAccount)> {
             TestAccount::default(),
         ),
     ]
+}
+
+/// Compute post-EIP-2935 accounts: apply the history storage write.
+fn apply_eip2935_writes(
+    accounts: &[(Address, TestAccount)],
+    block_number: u64,
+    parent_hash: B256,
+) -> Vec<(Address, TestAccount)> {
+    let mut result = accounts.to_vec();
+    let slot = U256::from((block_number - 1) % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
+    let value = U256::from_be_bytes(parent_hash.0);
+
+    if let Some((_, acct)) = result.iter_mut().find(|(a, _)| {
+        *a == alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS
+    }) {
+        if let Some((_, v)) = acct.storage.iter_mut().find(|(s, _)| *s == slot) {
+            *v = value;
+        } else {
+            acct.storage.push((slot, value));
+        }
+    }
+    result
 }
 
 /// Build the previous (genesis) zone block header.
@@ -107,29 +151,17 @@ fn build_genesis_header(state_root: B256) -> ZoneHeader {
 
 #[test]
 fn test_prove_zone_batch_minimal_block() {
-    // Step 1: Build initial zone state with real MPT proofs.
-    let initial_accounts = build_initial_accounts();
-    let fixture = build_zone_state_fixture(&initial_accounts);
+    let absent = [alloy_eips::eip4788::SYSTEM_ADDRESS];
+    let initial_accounts = build_initial_accounts(&[1]);
+    let fixture = build_zone_state_fixture_with_absent(&initial_accounts, &absent);
 
-    println!("Initial state root: {}", fixture.state_root);
-
-    // Step 2: Build the genesis header and compute its hash.
     let genesis_header = build_genesis_header(fixture.state_root);
     let genesis_hash = genesis_header.block_hash();
 
-    println!("Genesis header hash: {genesis_hash}");
+    // EIP-2935 writes genesis_hash to the history contract at slot 0.
+    let post_accounts = apply_eip2935_writes(&initial_accounts, 1, genesis_hash);
+    let expected_state_root = compute_state_root(&post_accounts);
 
-    // Step 3: Determine the expected post-execution state.
-    //
-    // With no contract code at ZoneOutbox, the finalizeWithdrawalBatch system
-    // tx is a no-op call. The only state change might be the system tx sender's
-    // nonce increment (depends on Tempo EVM config).
-    //
-    // We start by assuming no state change (expected_state_root == initial).
-    // If the prover reports a mismatch, we'll adjust.
-    let expected_state_root = fixture.state_root;
-
-    // Step 4: Construct the zone block.
     let zone_block = ZoneBlock {
         number: 1,
         parent_hash: genesis_hash,
@@ -143,7 +175,6 @@ fn test_prove_zone_batch_minimal_block() {
         transactions: vec![],
     };
 
-    // Step 5: Construct public inputs.
     let public_inputs = PublicInputs {
         prev_block_hash: genesis_hash,
         tempo_block_number: 100,
@@ -153,7 +184,6 @@ fn test_prove_zone_batch_minimal_block() {
         sequencer: SEQUENCER,
     };
 
-    // Step 6: Assemble the full BatchWitness.
     let witness = BatchWitness {
         public_inputs,
         chain_id: CHAIN_ID,
@@ -168,36 +198,8 @@ fn test_prove_zone_batch_minimal_block() {
         tempo_ancestry_headers: vec![],
     };
 
-    // Step 7: Run the prover.
-    let result = prove_zone_batch(witness);
+    let output = prove_zone_batch(witness).expect("prove_zone_batch should succeed");
 
-    match &result {
-        Ok(output) => {
-            println!("Prover succeeded!");
-            println!("  prev_block_hash: {}", output.block_transition.prev_block_hash);
-            println!("  next_block_hash: {}", output.block_transition.next_block_hash);
-            println!(
-                "  deposit prev: {}",
-                output.deposit_queue_transition.prev_processed_hash
-            );
-            println!(
-                "  deposit next: {}",
-                output.deposit_queue_transition.next_processed_hash
-            );
-            println!(
-                "  withdrawal_batch_index: {}",
-                output.last_batch.withdrawal_batch_index
-            );
-        }
-        Err(e) => {
-            println!("Prover FAILED: {e}");
-        }
-    }
-
-    // Assert success — if this fails, the error message tells us what to fix.
-    let output = result.expect("prove_zone_batch should succeed");
-
-    // Verify output.
     assert_eq!(output.block_transition.prev_block_hash, genesis_hash);
     assert_ne!(output.block_transition.next_block_hash, genesis_hash);
     assert_eq!(output.last_batch.withdrawal_batch_index, 1);
@@ -206,19 +208,23 @@ fn test_prove_zone_batch_minimal_block() {
 /// Two-block batch: a non-final block followed by a final block with finalize.
 #[test]
 fn test_prove_zone_batch_two_blocks() {
-    let initial_accounts = build_initial_accounts();
-    let fixture = build_zone_state_fixture(&initial_accounts);
+    let absent = [alloy_eips::eip4788::SYSTEM_ADDRESS];
+    let initial_accounts = build_initial_accounts(&[1, 2]);
+    let fixture = build_zone_state_fixture_with_absent(&initial_accounts, &absent);
 
     let genesis_header = build_genesis_header(fixture.state_root);
     let genesis_hash = genesis_header.block_hash();
 
-    // Block 1: non-final, no system txs, no user txs.
+    // Block 1: EIP-2935 writes genesis_hash to slot 0.
+    let post1 = apply_eip2935_writes(&initial_accounts, 1, genesis_hash);
+    let block1_state_root = compute_state_root(&post1);
+
     let block1 = ZoneBlock {
         number: 1,
         parent_hash: genesis_hash,
         timestamp: 1000,
         beneficiary: SEQUENCER,
-        expected_state_root: fixture.state_root, // no state changes
+        expected_state_root: block1_state_root,
         tempo_header_rlp: None,
         deposits: vec![],
         decryptions: vec![],
@@ -226,13 +232,10 @@ fn test_prove_zone_batch_two_blocks() {
         transactions: vec![],
     };
 
-    // Compute block 1's header and hash.
-    // We need the transactions_root and receipts_root for an empty block.
-    // An empty block has no transactions, so these are both EMPTY_ROOT_HASH.
     let block1_header = ZoneHeader {
         parent_hash: genesis_hash,
         beneficiary: SEQUENCER,
-        state_root: fixture.state_root,
+        state_root: block1_state_root,
         transactions_root: alloy_trie::EMPTY_ROOT_HASH,
         receipts_root: alloy_trie::EMPTY_ROOT_HASH,
         number: 1,
@@ -240,13 +243,16 @@ fn test_prove_zone_batch_two_blocks() {
     };
     let block1_hash = block1_header.block_hash();
 
-    // Block 2: final block with finalizeWithdrawalBatch.
+    // Block 2: EIP-2935 writes block1_hash to slot 1 (on top of block 1's state).
+    let post2 = apply_eip2935_writes(&post1, 2, block1_hash);
+    let block2_state_root = compute_state_root(&post2);
+
     let block2 = ZoneBlock {
         number: 2,
         parent_hash: block1_hash,
         timestamp: 2000,
         beneficiary: SEQUENCER,
-        expected_state_root: fixture.state_root, // still no state changes
+        expected_state_root: block2_state_root,
         tempo_header_rlp: None,
         deposits: vec![],
         decryptions: vec![],
@@ -279,7 +285,6 @@ fn test_prove_zone_batch_two_blocks() {
 
     let output = prove_zone_batch(witness).expect("two-block batch should succeed");
 
-    // Verify we executed 2 blocks: the next_block_hash should be block 2's hash.
     assert_eq!(output.block_transition.prev_block_hash, genesis_hash);
     assert_ne!(output.block_transition.next_block_hash, genesis_hash);
     assert_ne!(output.block_transition.next_block_hash, block1_hash);

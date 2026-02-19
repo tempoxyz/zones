@@ -174,6 +174,15 @@ impl<DB: Database<Error = ProviderError>> Database for RecordingDatabase<DB> {
 
     fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
         self.accesses.record_block_hash(number);
+        // EIP-2935: also record the corresponding storage slot in the history
+        // contract so the proof generator includes it in the zone state witness.
+        // This allows the prover's WitnessDatabase to serve block hashes from
+        // the same MPT proofs used for regular storage, avoiding a separate
+        // block hash witness field.
+        self.accesses.record_storage(
+            alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+            U256::from(number % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64),
+        );
         self.inner.block_hash(number)
     }
 }

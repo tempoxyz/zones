@@ -192,6 +192,8 @@ where
             expected_state_root: sealed_block.state_root(),
             tempo_header_rlp: header_rlp.clone(),
             deposits,
+            // TODO: Populate DecryptionData for encrypted deposits once the
+            // encryption/decryption pipeline is implemented.
             decryptions: vec![],
             finalize_withdrawal_batch_count: Some(U256::MAX),
             transactions: user_tx_bytes,
@@ -419,6 +421,9 @@ where
 
         // Set the L1 recording block index for this zone block.
         // Block index is 0-based within a batch; for single-block-per-build this is always 0.
+        // TODO(multi-block): Re-index zone_block_index in ProofGenerator when
+        // merging L1 reads across blocks. Currently always 0 because the builder
+        // produces one block at a time.
         self.evm_config.set_l1_recording_block_index(0);
 
         // Execute advanceTempo system transaction — exactly one per zone block.
@@ -500,6 +505,7 @@ where
             .number
             .try_into()
             .expect("block number fits u64");
+        // TODO: Support partial batch finalization instead of always finalizing all.
         let finalize_tx =
             crate::system_tx::build_finalize_withdrawal_batch_tx(U256::MAX, block_number);
         if let Err(err) = builder.execute_transaction(finalize_tx) {

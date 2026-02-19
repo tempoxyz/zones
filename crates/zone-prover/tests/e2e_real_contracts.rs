@@ -95,6 +95,18 @@ fn execute_on_cache_db(
     let mut evm = factory.create_evm(db, env);
     zone_test_utils::register_mock_tempo_state_reader(&mut evm);
 
+    // EIP-2935: store the parent block hash in the history contract.
+    if block.number > 0 {
+        let result = evm
+            .transact_system_call(
+                alloy_eips::eip4788::SYSTEM_ADDRESS,
+                alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+                block.parent_hash.0.into(),
+            )
+            .expect("EIP-2935 system call should succeed");
+        evm.db_mut().commit(result.state);
+    }
+
     // 1. advanceTempo (if block advances Tempo).
     if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
         let calldata = zone_prover::types::advanceTempoCall {
@@ -311,11 +323,12 @@ fn test_real_contracts_finalize_only() {
     };
 
     // Reference execution on CacheDB discovers all accessed slots and post-state.
-    let post_accounts = execute_on_cache_db(db, &zone_block, true);
+    let raw_post_accounts = execute_on_cache_db(db, &zone_block, true);
 
     // Discover all accessed storage slots and build the witness with them.
-    let accessed_slots = collect_accessed_slots(&post_accounts);
-    let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &[]);
+    let accessed_slots = collect_accessed_slots(&raw_post_accounts);
+    let absent = [alloy_eips::eip4788::SYSTEM_ADDRESS];
+    let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &absent);
 
     // The state root may differ from the placeholder if we added zero-valued slots.
     // Zero-valued slots don't appear in the MPT so the root should be the same.
@@ -328,7 +341,9 @@ fn test_real_contracts_finalize_only() {
     };
     let genesis_hash = genesis_header.block_hash();
 
-    // Compute expected post-state root from post-execution accounts.
+    // Filter phantom accounts (e.g., SYSTEM_ADDRESS) that CacheDB cached but that
+    // don't belong in the state trie, then compute the expected post-state root.
+    let post_accounts = filter_real_accounts(raw_post_accounts, &pre_accounts);
     let expected_state_root = compute_state_root(&post_accounts);
     println!("Expected post-state root: {expected_state_root}");
 
@@ -554,7 +569,7 @@ fn test_real_contracts_advance_and_finalize() {
     let accessed_slots = collect_accessed_slots(&raw_post_accounts);
     // The TempoStateReader precompile address doesn't exist as an account —
     // generate an MPT absence proof so the prover can confirm it's not in the trie.
-    let absent = [zone_test_utils::TEMPO_STATE_READER_ADDRESS];
+    let absent = [zone_test_utils::TEMPO_STATE_READER_ADDRESS, alloy_eips::eip4788::SYSTEM_ADDRESS];
     let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &absent);
 
     let genesis_header = ZoneHeader {

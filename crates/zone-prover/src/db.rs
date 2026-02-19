@@ -179,10 +179,30 @@ impl Database for WitnessDatabase {
         })
     }
 
-    fn block_hash(&mut self, _number: u64) -> Result<B256, Self::Error> {
-        // Zone blocks don't use BLOCKHASH across chains.
-        // Return zero for now; if needed, the witness can include block hashes.
-        Ok(B256::ZERO)
+    fn block_hash(&mut self, number: u64) -> Result<B256, Self::Error> {
+        // EIP-2935: read from the history storage contract in the witness.
+        // The zone node stores parent block hashes in this contract via the
+        // pre-execution system call, and the RecordingDatabase ensures the
+        // corresponding storage slot is included in the witness proofs.
+        //
+        // For intra-batch block hashes (blocks executed in the current batch
+        // whose writes haven't reached the witness DB), the caller should
+        // pre-populate the State's `block_hashes` cache before execution.
+        let slot = U256::from(number % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
+        let addr = alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS;
+
+        if self.absent_accounts.contains(&addr) {
+            return Ok(B256::ZERO);
+        }
+
+        match self.accounts.get(&addr) {
+            Some(acct) => {
+                let value = acct.storage.get(&slot).copied().unwrap_or(U256::ZERO);
+                Ok(B256::from(value.to_be_bytes()))
+            }
+            // 2935 contract not in witness — treat same as absent.
+            None => Ok(B256::ZERO),
+        }
     }
 }
 
