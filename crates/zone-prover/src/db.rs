@@ -200,8 +200,11 @@ impl Database for WitnessDatabase {
                 let value = acct.storage.get(&slot).copied().unwrap_or(U256::ZERO);
                 Ok(B256::from(value.to_be_bytes()))
             }
-            // 2935 contract not in witness — treat same as absent.
-            None => Ok(B256::ZERO),
+            // 2935 contract not in witness and not confirmed absent — hard error,
+            // consistent with the missing-witness invariant enforced by basic().
+            None => Err(ProverError::MissingWitness(format!(
+                "EIP-2935 history contract {addr} not in witness (block_hash({number}))"
+            ))),
         }
     }
 }
