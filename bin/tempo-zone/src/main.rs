@@ -117,12 +117,15 @@ fn main() {
             let sequencer_addr = sequencer_signer.as_ref().map(|s| s.address());
 
             // Extract k256::SecretKey for ECIES decryption of encrypted deposits.
-            let sequencer_secret_key: Option<k256::SecretKey> =
-                args.sequencer_key.as_ref().map(|key_hex| {
+            let sequencer_secret_key: k256::SecretKey = args
+                .sequencer_key
+                .as_ref()
+                .map(|key_hex| {
                     let bytes = const_hex::decode(key_hex.strip_prefix("0x").unwrap_or(key_hex))
                         .expect("invalid sequencer key hex");
                     k256::SecretKey::from_slice(&bytes).expect("invalid secp256k1 secret key")
-                });
+                })
+                .expect("--sequencer-key is required");
 
             let node = ZoneNode::new(
                 args.l1_rpc_url.clone(),

@@ -68,7 +68,8 @@ pub struct ZoneNode {
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
     sequencer: Option<alloy_primitives::Address>,
-    sequencer_key: Option<k256::SecretKey>,
+    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
+    sequencer_key: k256::SecretKey,
     portal_address: alloy_primitives::Address,
 }
 
@@ -87,7 +88,7 @@ impl ZoneNode {
         portal_address: alloy_primitives::Address,
         genesis_tempo_block_number: Option<u64>,
         sequencer: Option<alloy_primitives::Address>,
-        sequencer_key: Option<k256::SecretKey>,
+        sequencer_key: k256::SecretKey,
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
@@ -139,7 +140,7 @@ impl ZoneNode {
         deposit_queue: crate::DepositQueue,
         executor_builder: ZoneExecutorBuilder,
         sequencer: Option<alloy_primitives::Address>,
-        sequencer_key: Option<k256::SecretKey>,
+        sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
     ) -> ComponentsBuilder<
         N,

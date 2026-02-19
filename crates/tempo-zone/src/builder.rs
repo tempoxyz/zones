@@ -54,7 +54,7 @@ pub struct ZonePayloadFactory {
     deposit_queue: crate::DepositQueue,
     sequencer: Option<Address>,
     /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
-    sequencer_key: Option<k256::SecretKey>,
+    sequencer_key: k256::SecretKey,
     /// ZonePortal address on L1 — used as context in HKDF key derivation.
     portal_address: Address,
 }
@@ -63,7 +63,7 @@ impl ZonePayloadFactory {
     pub fn new(
         deposit_queue: crate::DepositQueue,
         sequencer: Option<Address>,
-        sequencer_key: Option<k256::SecretKey>,
+        sequencer_key: k256::SecretKey,
         portal_address: Address,
     ) -> Self {
         Self {
@@ -107,7 +107,7 @@ pub struct ZonePayloadBuilder<Provider> {
     evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
     _sequencer: Option<Address>,
-    sequencer_key: Option<k256::SecretKey>,
+    sequencer_key: k256::SecretKey,
     portal_address: Address,
 }
 
@@ -118,7 +118,7 @@ impl<Provider> ZonePayloadBuilder<Provider> {
         evm_config: ZoneEvmConfig,
         deposit_queue: crate::DepositQueue,
         sequencer: Option<Address>,
-        sequencer_key: Option<k256::SecretKey>,
+        sequencer_key: k256::SecretKey,
         portal_address: Address,
     ) -> Self {
         Self {
@@ -334,15 +334,10 @@ where
                 "advanceTempo header details"
             );
 
-            let sequencer_key = self.sequencer_key.as_ref().ok_or_else(|| {
-                PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                    "sequencer key is required for payload building",
-                ))
-            })?;
             let advance_tx = build_advance_tempo_tx(
                 &l1_block.header,
                 &l1_block.deposits,
-                sequencer_key,
+                &self.sequencer_key,
                 self.portal_address,
             );
             let mut reverted = false;

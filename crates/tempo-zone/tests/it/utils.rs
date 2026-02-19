@@ -363,13 +363,15 @@ impl ZoneTestNode {
         let (genesis, genesis_block_number) =
             build_l1_anchored_genesis(l1_http_url, portal_address).await?;
 
+        let throwaway_key =
+            k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         Self::launch_with_genesis(
             l1_ws_url.to_string(),
             portal_address,
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
-            None,
+            throwaway_key,
         )
         .await
     }
@@ -393,7 +395,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
-            Some(sequencer_key),
+            sequencer_key,
         )
         .await
     }
@@ -428,13 +430,16 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
     ) -> eyre::Result<Self> {
+        // Generate a throwaway key for tests that don't use encrypted deposits.
+        let throwaway_key =
+            k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         Self::launch_with_genesis(
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
             chain_id,
             None,
-            None,
+            throwaway_key,
         )
         .await
     }
@@ -445,7 +450,7 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
         custom_genesis: Option<Genesis>,
-        sequencer_key: Option<k256::SecretKey>,
+        sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
         let tasks = TaskManager::current();
 
