@@ -21,7 +21,7 @@ use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
 use zone::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents,
-    SharedL1StateCache, ZoneNode,
+    L1SubscriberConfig, SharedL1StateCache, ZoneNode, witness::SharedWitnessStore,
 };
 
 use alloy_provider::{Provider, ProviderBuilder};

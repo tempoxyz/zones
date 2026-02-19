@@ -86,6 +86,8 @@ pub struct ZoneNode {
     /// Optional pre-configured list of enabled token addresses. When set, the
     /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
+    /// Shared witness store for builder → monitor communication.
+    witness_store: crate::witness::SharedWitnessStore,
 }
 
 impl ZoneNode {
@@ -105,6 +107,7 @@ impl ZoneNode {
         sequencer: alloy_primitives::Address,
         sequencer_key: k256::SecretKey,
         l1_fetch_concurrency: usize,
+        witness_store: crate::witness::SharedWitnessStore,
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
@@ -136,6 +139,7 @@ impl ZoneNode {
             sequencer_key,
             portal_address,
             initial_tokens: None,
+            witness_store,
         }
     }
 
@@ -165,9 +169,17 @@ impl ZoneNode {
         self.policy_cache.clone()
     }
 
+    /// Get a clone of the shared witness store handle.
+    pub fn witness_store(&self) -> crate::witness::SharedWitnessStore {
+        self.witness_store.clone()
+    }
+
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         executor_builder: ZoneExecutorBuilder,
+        deposit_queue: crate::DepositQueue,
+        sequencer: alloy_primitives::Address,
+        witness_store: crate::witness::SharedWitnessStore,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -183,7 +195,11 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(executor_builder)
-            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory))
+            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
+                deposit_queue,
+                sequencer,
+                witness_store,
+            )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -457,7 +473,12 @@ where
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
         );
-        Self::components(executor_builder)
+        Self::components(
+            executor_builder,
+            self.deposit_queue.clone(),
+            self.sequencer,
+            self.witness_store.clone(),
+        )
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -570,7 +591,6 @@ where
             crate::l1_state::PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
         evm_config = evm_config.with_policy_provider(policy_provider);
         info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
-
 
         Ok(evm_config)
     }

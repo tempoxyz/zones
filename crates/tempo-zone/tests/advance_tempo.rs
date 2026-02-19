@@ -34,6 +34,7 @@ sol! {
 #[test]
 fn advance_tempo_repro() {
     let mut evm = zone_test_utils::setup_zone_evm_default();
+    zone_test_utils::register_mock_tempo_state_reader(&mut evm);
 
     // System txs use Address::ZERO which bypasses OnlySequencer in ZoneInbox/ZoneOutbox
     let sequencer = Address::ZERO;
@@ -217,6 +218,12 @@ fn advance_tempo_repro() {
         Err(e) => println!("advanceTempo() ERROR: {e:?}"),
     }
 
-    // The test should not panic; we want to see the output
+    // With the mock precompile registered, advanceTempo should now succeed.
+    let result = advance_result.expect("advanceTempo tx should not error");
+    assert!(
+        result.result.is_success(),
+        "advanceTempo should succeed with mock precompile, got: {:?}",
+        result.result,
+    );
     println!("\n=== Test complete ===");
 }

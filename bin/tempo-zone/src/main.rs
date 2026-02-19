@@ -143,6 +143,8 @@ fn main() {
                 k256::SecretKey::from_slice(&bytes).expect("invalid secp256k1 secret key")
             };
 
+            let witness_store: zone::witness::SharedWitnessStore = Default::default();
+
             let node = ZoneNode::new(
                 args.l1_rpc_url.clone(),
                 args.portal_address,
@@ -150,6 +152,7 @@ fn main() {
                 sequencer_addr,
                 sequencer_secret_key,
                 args.l1_fetch_concurrency,
+                witness_store.clone(),
             );
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
@@ -196,7 +199,13 @@ fn main() {
                 batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
             };
 
-            let seq_handle = zone::spawn_zone_sequencer(sequencer_config, sequencer_signer).await;
+            let seq_handle = zone::spawn_zone_sequencer(
+                sequencer_config,
+                sequencer_signer,
+                witness_store.clone(),
+                sequencer_addr,
+            )
+            .await;
 
             info!(
                 target: "reth::cli",

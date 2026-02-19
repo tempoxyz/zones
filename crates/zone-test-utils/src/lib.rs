@@ -18,6 +18,8 @@ pub const TEMPO_STATE_ADDRESS: Address = address!("0x1c0000000000000000000000000
 pub const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 pub const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
 pub const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
+pub const TEMPO_STATE_READER_ADDRESS: Address =
+    address!("0x1c00000000000000000000000000000000000004");
 
 pub const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
@@ -276,4 +278,56 @@ pub fn extract_db_accounts(db: &CacheDB<EmptyDB>) -> Vec<(Address, AccountSnapsh
         ));
     }
     accounts
+}
+
+/// Register a mock TempoStateReader precompile on a `TempoEvm`.
+///
+/// The mock returns `bytes32(0)` for `readStorageAt` and an array of zeros for
+/// `readStorageBatchAt`. This is sufficient for `advanceTempo` calls in tests
+/// where no real L1 data is needed (e.g., empty deposit queues).
+pub fn register_mock_tempo_state_reader<DB: alloy_evm::Database>(
+    evm: &mut TempoEvm<DB>,
+) {
+    use alloy_evm::precompiles::DynPrecompile;
+    use alloy_sol_types::SolCall;
+    use revm::precompile::{PrecompileId, PrecompileOutput};
+
+    alloy_sol_types::sol! {
+        function readStorageAt(address account, bytes32 slot, uint64 blockNumber) external view returns (bytes32);
+        function readStorageBatchAt(address account, bytes32[] calldata slots, uint64 blockNumber) external view returns (bytes32[] memory);
+    }
+
+    let mock = DynPrecompile::new_stateful(
+        PrecompileId::Custom("MockTempoStateReader".into()),
+        move |input| {
+            let data = input.data;
+            if data.len() < 4 {
+                return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+            }
+
+            let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
+
+            if selector == readStorageAtCall::SELECTOR {
+                let encoded =
+                    readStorageAtCall::abi_encode_returns(&alloy_primitives::B256::ZERO);
+                Ok(PrecompileOutput::new(400, encoded.into()))
+            } else if selector == readStorageBatchAtCall::SELECTOR {
+                let call = readStorageBatchAtCall::abi_decode(data)
+                    .map_err(|_| {
+                        revm::precompile::PrecompileError::other("ABI decode failed")
+                    })?;
+                let zeros = vec![alloy_primitives::B256::ZERO; call.slots.len()];
+                let encoded = readStorageBatchAtCall::abi_encode_returns(&zeros);
+                Ok(PrecompileOutput::new(
+                    200 + 200 * call.slots.len() as u64,
+                    encoded.into(),
+                ))
+            } else {
+                Ok(PrecompileOutput::new_reverted(0, Bytes::new()))
+            }
+        },
+    );
+
+    let (_, _, precompiles) = evm.components_mut();
+    precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| Some(mock));
 }

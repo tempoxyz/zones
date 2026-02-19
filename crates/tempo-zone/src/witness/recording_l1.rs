@@ -4,7 +4,7 @@
 //! during zone block execution. The recorded reads are used to build the
 //! [`BatchStateProof`] with deduplicated MPT node pool.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
 
 use alloy_primitives::{Address, B256};
 use eyre::Result;
@@ -35,13 +35,14 @@ pub type SharedRecordedReads = Arc<Mutex<Vec<RecordedL1Read>>>;
 /// every `get_storage` call in the shared [`RecordedL1Read`] collection.
 ///
 /// The `zone_block_index` is set by the caller before each zone block is executed
-/// and used to tag reads with the correct block index.
+/// and used to tag reads with the correct block index. It uses `AtomicU64` so it
+/// can be updated through `&self` (the provider is behind `Arc<dyn L1StorageReader>`).
 #[derive(Clone)]
 pub struct RecordingL1StateProvider {
     inner: Arc<dyn L1StorageReader>,
     reads: SharedRecordedReads,
-    /// Current zone block index (set before each block execution).
-    zone_block_index: u64,
+    /// Current zone block index, shared across all clones.
+    zone_block_index: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for RecordingL1StateProvider {
@@ -58,13 +59,16 @@ impl RecordingL1StateProvider {
         Self {
             inner,
             reads: Arc::new(Mutex::new(Vec::new())),
-            zone_block_index: 0,
+            zone_block_index: Arc::new(AtomicU64::new(0)),
         }
     }
 
     /// Set the current zone block index for tagging subsequent reads.
-    pub fn set_zone_block_index(&mut self, index: u64) {
-        self.zone_block_index = index;
+    ///
+    /// Uses atomic ordering so this can be called through `&self` (the provider
+    /// lives behind `Arc<dyn L1StorageReader>` in the EVM factory).
+    pub fn set_zone_block_index(&self, index: u64) {
+        self.zone_block_index.store(index, Ordering::Release);
     }
 
     /// Take all recorded reads, clearing the internal buffer.
@@ -88,7 +92,7 @@ impl L1StorageReader for RecordingL1StateProvider {
             .lock()
             .expect("recording lock poisoned")
             .push(RecordedL1Read {
-                zone_block_index: self.zone_block_index,
+                zone_block_index: self.zone_block_index.load(Ordering::Acquire),
                 tempo_block_number: block_number,
                 account: address,
                 slot,
