@@ -386,21 +386,49 @@ impl ZoneMonitor {
             return empty();
         }
 
-        // For the batch witness, use the first block's zone state witness and
-        // prev_block_header. Merge L1 reads from all blocks.
+        // For the batch witness, use the first block's prev_block_header.
+        // Each block's builder generates MPT proofs against its own parent
+        // state, but the prover needs all proofs against the INITIAL state
+        // (first block's parent). For single-block batches this is correct.
+        //
+        // For multi-block batches: accounts accessed by the first block have
+        // valid proofs. Accounts unique to later blocks have proofs against
+        // a different state root and will cause prover failure. In that case,
+        // the monitor falls back to empty proof (POC mode). Correct multi-block
+        // witness generation requires a second pass: collect all accessed
+        // accounts across all blocks, then generate a single witness against
+        // the initial state root.
         let first = &block_witnesses[0].1;
         let chain_id = first.chain_id;
         let prev_block_header = first.prev_block_header.clone();
-        let initial_zone_state = first.zone_state_witness.clone();
+        let mut initial_zone_state = first.zone_state_witness.clone();
 
         let mut all_l1_reads = Vec::new();
         let mut zone_blocks = Vec::new();
         let mut tempo_ancestry_headers = Vec::new();
 
-        for (_, bw) in &block_witnesses {
+        for (i, (_, bw)) in block_witnesses.iter().enumerate() {
             all_l1_reads.extend(bw.l1_reads.iter().cloned());
             zone_blocks.push(bw.zone_block.clone());
             tempo_ancestry_headers.push(bw.tempo_header_rlp.clone());
+
+            // Best-effort merge: accounts already in the first block's
+            // witness keep their valid proofs. New accounts from later blocks
+            // are included but may have proofs against a different state root.
+            if i > 0 {
+                for (addr, witness) in &bw.zone_state_witness.accounts {
+                    initial_zone_state
+                        .accounts
+                        .entry(*addr)
+                        .or_insert_with(|| witness.clone());
+                }
+                for (addr, proof) in &bw.zone_state_witness.absent_accounts {
+                    initial_zone_state
+                        .absent_accounts
+                        .entry(*addr)
+                        .or_insert_with(|| proof.clone());
+                }
+            }
         }
 
         // Fetch L1 eth_getProof responses for recorded reads.
@@ -420,12 +448,16 @@ impl ZoneMonitor {
             self.witness_generator
                 .generate_tempo_state_proof(&all_l1_reads, &l1_proofs);
 
-        // Construct public inputs from the batch data the monitor already computed.
+        // In direct mode (anchor == tempo), the anchor block hash is the hash
+        // of the Tempo header processed by the last advanceTempo in the batch.
+        let last_header_rlp = &block_witnesses.last().unwrap().1.tempo_header_rlp;
+        let anchor_block_hash = alloy_primitives::keccak256(last_header_rlp);
+
         let public_inputs = zone_prover::types::PublicInputs {
             prev_block_hash: self.prev_block_hash,
             tempo_block_number,
             anchor_block_number: tempo_block_number,
-            anchor_block_hash: B256::ZERO, // TODO: fill from L1
+            anchor_block_hash,
             expected_withdrawal_batch_index: self.portal_withdrawal_queue_tail,
             sequencer: self.witness_generator.sequencer(),
         };
@@ -450,9 +482,13 @@ impl ZoneMonitor {
                     withdrawal_queue_hash = %output.withdrawal_queue_hash,
                     "Proof generated successfully"
                 );
-                // TODO: serialize proof output into proof bytes
-                // For now, use empty bytes as the proof format is not yet defined.
-                empty()
+
+                // Encode the BatchOutput as proof bytes. This is the "soft proof"
+                // format: the raw output commitments ABI-packed so the L1 verifier
+                // can decode and validate them. When a real ZK backend is added,
+                // this will be replaced with the actual proof encoding.
+                let proof_bytes = encode_batch_output(&output);
+                (alloy_primitives::Bytes::new(), proof_bytes.into())
             }
             Err(e) => {
                 warn!(
@@ -652,4 +688,40 @@ pub fn spawn_zone_monitor(
             }
         }
     })
+}
+
+/// Encode a [`BatchOutput`] into proof bytes.
+///
+/// Soft-proof format: ABI-packed concatenation of the output commitment fields.
+/// The L1 verifier can decode this to validate the batch transition without a ZK proof.
+///
+/// Layout (256 bytes):
+/// - `[0..32]`   prev_block_hash
+/// - `[32..64]`  next_block_hash
+/// - `[64..96]`  prev_processed_deposit_hash
+/// - `[96..128]` next_processed_deposit_hash
+/// - `[128..160]` withdrawal_queue_hash
+/// - `[160..192]` withdrawal_batch_index (left-padded u64)
+fn encode_batch_output(output: &zone_prover::types::BatchOutput) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(192);
+    buf.extend_from_slice(output.block_transition.prev_block_hash.as_slice());
+    buf.extend_from_slice(output.block_transition.next_block_hash.as_slice());
+    buf.extend_from_slice(
+        output
+            .deposit_queue_transition
+            .prev_processed_hash
+            .as_slice(),
+    );
+    buf.extend_from_slice(
+        output
+            .deposit_queue_transition
+            .next_processed_hash
+            .as_slice(),
+    );
+    buf.extend_from_slice(output.withdrawal_queue_hash.as_slice());
+    buf.extend_from_slice(
+        &alloy_primitives::U256::from(output.last_batch.withdrawal_batch_index)
+            .to_be_bytes::<32>(),
+    );
+    buf
 }
