@@ -639,7 +639,11 @@ fn build_encrypted_deposit(
         let decryption = abi::DecryptionData {
             sharedSecret: proof.shared_secret,
             sharedSecretYParity: proof.shared_secret_y_parity,
-            to: Address::ZERO,
+            // Use the sender as fallback `to` instead of address(0). If on-chain
+            // AES-GCM somehow succeeds and the plaintext matches these values, the
+            // funds go back to the sender (equivalent to a refund) rather than being
+            // burned at address(0).
+            to: d.sender,
             memo: alloy_primitives::B256::ZERO,
             cpProof: abi::ChaumPedersenProof {
                 s: proof.cp_proof_s,
@@ -658,7 +662,7 @@ fn build_encrypted_deposit(
     let decryption = abi::DecryptionData {
         sharedSecret: alloy_primitives::B256::ZERO,
         sharedSecretYParity: 0x02,
-        to: Address::ZERO,
+        to: d.sender,
         memo: alloy_primitives::B256::ZERO,
         cpProof: abi::ChaumPedersenProof {
             s: alloy_primitives::B256::ZERO,
