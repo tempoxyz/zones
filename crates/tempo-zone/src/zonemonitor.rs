@@ -385,7 +385,7 @@ impl ZoneMonitor {
                 self.prev_zone_block_hash,
                 self.portal_withdrawal_queue_tail,
             )
-            .await;
+            .await?;
 
         let batch_data = BatchData {
             tempo_block_number: end_state.tempo_block_number,

@@ -326,7 +326,7 @@ fn test_witness_pipeline_single_block() {
     assert_eq!(store.len(), 1);
 
     // Take from store (mimicking ProofGenerator).
-    let block_witnesses = store.take_range(1, 1);
+    let block_witnesses = store.take_range(1, 1).expect("block 1 should exist");
     assert_eq!(block_witnesses.len(), 1);
     assert!(store.is_empty());
 
@@ -565,7 +565,7 @@ fn test_witness_pipeline_two_block_merge() {
 
     assert_eq!(store.len(), 2);
 
-    let block_witnesses = store.take_range(1, 2);
+    let block_witnesses = store.take_range(1, 2).expect("blocks 1-2 should exist");
     assert_eq!(block_witnesses.len(), 2);
     assert!(store.is_empty());
 

@@ -82,6 +82,12 @@ pub struct BuiltBlockWitness {
 ///
 /// Keyed by zone block number. The builder inserts after each block, and
 /// the monitor takes entries when submitting a batch.
+///
+/// TODO(production): Add a max entry cap or auto-pruning on insert. Currently,
+/// `prune_below` is only called by the proof generator. On nodes that don't
+/// generate proofs (validators, full nodes), the store will grow unbounded.
+/// Consider either a `max_size` limit that drops the oldest blocks on insert,
+/// or a periodic cleanup task independent of proof generation.
 #[derive(Debug, Default)]
 pub struct WitnessStore {
     blocks: BTreeMap<u64, BuiltBlockWitness>,
@@ -104,16 +110,20 @@ impl WitnessStore {
     /// Take witness data for a range of blocks `[from, to]`, removing them
     /// from the store. Returns entries in block-number order.
     ///
-    /// Missing blocks within the range are silently skipped; the caller
-    /// should check that the returned count matches the expected range.
-    pub fn take_range(&mut self, from: u64, to: u64) -> Vec<(u64, BuiltBlockWitness)> {
-        let mut result = Vec::new();
+    /// Returns an error if any block in the range is missing from the store.
+    pub fn take_range(&mut self, from: u64, to: u64) -> Result<Vec<(u64, BuiltBlockWitness)>, u64> {
+        // Pre-check that all blocks exist before removing any.
         for num in from..=to {
-            if let Some(w) = self.blocks.remove(&num) {
-                result.push((num, w));
+            if !self.blocks.contains_key(&num) {
+                return Err(num);
             }
         }
-        result
+        let mut result = Vec::with_capacity((to - from + 1) as usize);
+        for num in from..=to {
+            // Safe: pre-check above guarantees existence.
+            result.push((num, self.blocks.remove(&num).unwrap()));
+        }
+        Ok(result)
     }
 
     /// Number of blocks currently stored.

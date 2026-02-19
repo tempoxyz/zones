@@ -14,7 +14,7 @@ use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::Result;
 use reth_provider::StateProviderFactory;
 use tempo_alloy::TempoNetwork;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::witness::{
     AccessSnapshot, FetchedL1Proof, SharedWitnessStore, WitnessGenerator,
@@ -69,7 +69,8 @@ where
     /// 4. Fetches L1 `eth_getProof` responses for recorded Tempo state reads.
     /// 5. Assembles the [`BatchWitness`] and runs the prover.
     ///
-    /// Returns `(verifier_config, proof)` on success, or empty bytes on failure.
+    /// Returns `(verifier_config, proof)` on success, or an error if witness
+    /// data is missing or proof generation fails.
     pub async fn generate_batch_proof(
         &self,
         from: u64,
@@ -77,16 +78,9 @@ where
         tempo_block_number: u64,
         prev_block_hash: B256,
         portal_withdrawal_queue_tail: u64,
-    ) -> (alloy_primitives::Bytes, alloy_primitives::Bytes) {
+    ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
         // TODO(production): Replace soft proof (ABI-packed BatchOutput) with a
         // real ZK proof (SP1) or TEE attestation (SGX/TDX).
-
-        let empty = || {
-            (
-                alloy_primitives::Bytes::new(),
-                alloy_primitives::Bytes::new(),
-            )
-        };
 
         // Take witness data from the store for the block range, and prune
         // any stale entries below `from` (e.g., leftover from resyncs).
@@ -98,19 +92,12 @@ where
             if pruned > 0 {
                 debug!(pruned, from, "Pruned stale witness entries below batch start");
             }
-            store.take_range(from, to)
+            store.take_range(from, to).map_err(|missing_block| {
+                eyre::eyre!(
+                    "missing witness data for block {missing_block} in range [{from}, {to}]"
+                )
+            })?
         };
-
-        let expected_count = (to - from + 1) as usize;
-        if block_witnesses.len() != expected_count {
-            warn!(
-                from, to,
-                found = block_witnesses.len(),
-                expected = expected_count,
-                "Missing witness data for some blocks in range, using empty proof"
-            );
-            return empty();
-        }
 
         let first = &block_witnesses[0].1;
         let chain_id = first.chain_id;
@@ -139,50 +126,25 @@ where
         );
 
         // Open a state provider for S₀ (parent of the first block in the batch).
-        let state_provider = match self.provider.state_by_block_hash(s0_parent_hash) {
-            Ok(sp) => sp,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    %s0_parent_hash,
-                    "Failed to open state provider for S₀, using empty proof"
-                );
-                return empty();
-            }
-        };
+        let state_provider = self.provider.state_by_block_hash(s0_parent_hash)
+            .map_err(|e| eyre::eyre!(
+                "failed to open state provider for S₀ ({s0_parent_hash}): {e}"
+            ))?;
 
         let s0_state_root = prev_block_header.state_root;
 
         // Generate zone state witness via direct trie walk — no RPC.
-        let initial_zone_state = match self
+        let initial_zone_state = self
             .witness_generator
             .generate_zone_state_witness(
                 &*state_provider,
                 s0_state_root,
                 &merged_accesses.accounts,
                 &merged_accesses.storage,
-            ) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "Failed to generate zone state witness, using empty proof"
-                );
-                return empty();
-            }
-        };
+            )?;
 
         // Fetch L1 eth_getProof responses for recorded reads.
-        let l1_proofs = match self.fetch_l1_proofs(&all_l1_reads).await {
-            Ok(proofs) => proofs,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "Failed to fetch L1 proofs, using empty proof"
-                );
-                return empty();
-            }
-        };
+        let l1_proofs = self.fetch_l1_proofs(&all_l1_reads).await?;
 
         // Generate the Tempo state proof from recorded reads + fetched proofs.
         let tempo_state_proofs =
@@ -235,27 +197,18 @@ where
         );
 
         // Run the prover.
-        match zone_prover::prove_zone_batch(batch_witness) {
-            Ok(output) => {
-                info!(
-                    from, to,
-                    next_block_hash = %output.block_transition.next_block_hash,
-                    withdrawal_queue_hash = %output.withdrawal_queue_hash,
-                    "Proof generated successfully"
-                );
+        let output = zone_prover::prove_zone_batch(batch_witness)
+            .map_err(|e| eyre::eyre!("prove_zone_batch failed: {e}"))?;
 
-                let proof_bytes = encode_batch_output(&output);
-                (alloy_primitives::Bytes::new(), proof_bytes.into())
-            }
-            Err(e) => {
-                warn!(
-                    from, to,
-                    error = %e,
-                    "Proof generation failed, using empty proof"
-                );
-                empty()
-            }
-        }
+        info!(
+            from, to,
+            next_block_hash = %output.block_transition.next_block_hash,
+            withdrawal_queue_hash = %output.withdrawal_queue_hash,
+            "Proof generated successfully"
+        );
+
+        let proof_bytes = encode_batch_output(&output);
+        Ok((alloy_primitives::Bytes::new(), proof_bytes.into()))
     }
 
     /// Fetch `eth_getProof` responses from the Tempo L1 chain for all
@@ -328,7 +281,7 @@ pub trait BatchProofGenerator: Send + Sync {
         tempo_block_number: u64,
         prev_block_hash: B256,
         portal_withdrawal_queue_tail: u64,
-    ) -> (alloy_primitives::Bytes, alloy_primitives::Bytes);
+    ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)>;
 }
 
 #[async_trait::async_trait]
@@ -343,7 +296,7 @@ where
         tempo_block_number: u64,
         prev_block_hash: B256,
         portal_withdrawal_queue_tail: u64,
-    ) -> (alloy_primitives::Bytes, alloy_primitives::Bytes) {
+    ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
         ProofGenerator::generate_batch_proof(
             self,
             from,
