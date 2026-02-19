@@ -5,7 +5,7 @@
 //! to an account or storage slot NOT present in the witness is a hard error,
 //! preventing the prover from omitting non-zero state.
 
-use alloy_primitives::{Address, B256, U256, map::HashMap, KECCAK256_EMPTY};
+use alloy_primitives::{Address, B256, U256, keccak256, map::HashMap, KECCAK256_EMPTY};
 use alloy_primitives::map::HashSet;
 use revm::{
     Database,
@@ -63,6 +63,27 @@ impl WitnessDatabase {
             // The account proof verification below validates that this storage_root
             // is correct (it's part of the account RLP in the state trie).
             let storage_root = acct.storage_root;
+
+            // If bytecode is provided, enforce its hash matches the account proof.
+            if let Some(code) = &acct.code {
+                let actual_hash = keccak256(code.as_ref());
+                if actual_hash != acct.code_hash {
+                    return Err(ProverError::InvalidProof(format!(
+                        "code hash mismatch for account {addr}: expected={}, actual={actual_hash}",
+                        acct.code_hash,
+                    )));
+                }
+            }
+
+            // Enforce a 1:1 mapping between storage values and storage proofs.
+            if acct.storage.len() != acct.storage_proofs.len()
+                || acct.storage.keys().any(|slot| !acct.storage_proofs.contains_key(slot))
+                || acct.storage_proofs.keys().any(|slot| !acct.storage.contains_key(slot))
+            {
+                return Err(ProverError::InvalidProof(format!(
+                    "storage witness/proof mismatch for account {addr}"
+                )));
+            }
 
             // Verify the account proof against the state root.
             mpt::verify_account_proof(
@@ -214,6 +235,7 @@ mod tests {
     use alloy_primitives::address;
 
     use super::*;
+    use crate::testutil::{TestAccount, build_zone_state_fixture};
 
     /// Test that accessing a missing account returns an error (not zero).
     #[test]
@@ -280,5 +302,50 @@ mod tests {
 
         // Slot 2 does not — must error
         assert!(db.storage(addr, U256::from(2)).is_err());
+    }
+
+    #[test]
+    fn test_code_hash_mismatch_errors() {
+        let addr = address!("0x1000000000000000000000000000000000000000");
+        let code = vec![0x60, 0x00, 0x60, 0x00, 0x52];
+
+        let account = TestAccount {
+            nonce: 1,
+            balance: U256::from(1),
+            code_hash: keccak256(&code),
+            code: Some(code),
+            storage: vec![],
+        };
+
+        let fixture = build_zone_state_fixture(&[(addr, account)]);
+        let mut witness = fixture.witness;
+        witness
+            .accounts
+            .get_mut(&addr)
+            .expect("account present")
+            .code = Some(alloy_primitives::Bytes::from(vec![0x60, 0x01]));
+
+        let result = WitnessDatabase::from_witness(&witness);
+        assert!(matches!(result, Err(ProverError::InvalidProof(_))));
+    }
+
+    #[test]
+    fn test_storage_proof_completeness_errors() {
+        let addr = address!("0x2000000000000000000000000000000000000000");
+        let account = TestAccount {
+            nonce: 1,
+            balance: U256::from(1),
+            code_hash: KECCAK256_EMPTY,
+            code: None,
+            storage: vec![(U256::from(1), U256::from(42))],
+        };
+
+        let fixture = build_zone_state_fixture(&[(addr, account)]);
+        let mut witness = fixture.witness;
+        let acct = witness.accounts.get_mut(&addr).expect("account present");
+        acct.storage_proofs.remove(&U256::from(1));
+
+        let result = WitnessDatabase::from_witness(&witness);
+        assert!(matches!(result, Err(ProverError::InvalidProof(_))));
     }
 }
