@@ -73,8 +73,9 @@ pub struct BuiltBlockWitness {
     /// Zone chain ID for EVM configuration.
     pub chain_id: u64,
 
-    /// RLP-encoded Tempo header for ancestry verification.
-    pub tempo_header_rlp: Vec<u8>,
+    /// RLP-encoded Tempo header processed by `advanceTempo` in this block.
+    /// `None` if the block did not advance Tempo (binding carries over).
+    pub tempo_header_rlp: Option<Vec<u8>>,
 }
 
 /// Thread-safe store for per-block witness data.

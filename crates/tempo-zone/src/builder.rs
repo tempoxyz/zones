@@ -123,14 +123,18 @@ where
     /// The builder does NOT generate MPT proofs — that is deferred to the
     /// monitor, which merges accesses from all blocks in the batch and
     /// generates proofs against S₀ (the initial state root) in one shot.
+    /// Store witness data for a built zone block.
+    ///
+    /// `l1_block` and `header_rlp` are `Some` when the block executed
+    /// `advanceTempo`, `None` when it didn't (Tempo binding carries over).
     fn store_block_witness(
         &self,
         parent_header: &reth_primitives_traits::SealedHeader<TempoHeader>,
         sealed_block: &Arc<reth_primitives_traits::SealedBlock<tempo_primitives::Block>>,
         recorded_accesses: &crate::witness::RecordedAccesses,
         l1_reads: Vec<crate::witness::RecordedL1Read>,
-        l1_block: &crate::l1::L1BlockDeposits,
-        header_rlp: Vec<u8>,
+        l1_block: Option<&crate::l1::L1BlockDeposits>,
+        header_rlp: Option<Vec<u8>>,
     ) {
         use alloy_consensus::BlockHeader;
         use alloy_primitives::Bytes;
@@ -138,17 +142,21 @@ where
         use zone_prover::types::{DepositType, QueuedDeposit, ZoneBlock, ZoneHeader};
 
         let block_number = sealed_block.number();
+        let has_advance_tempo = header_rlp.is_some();
 
         let access_snapshot = crate::witness::AccessSnapshot {
             accounts: recorded_accesses.accessed_accounts(),
             storage: recorded_accesses.accessed_storage(),
         };
 
-        // Extract user transactions (skip advanceTempo at index 0 and
-        // finalizeWithdrawalBatch at the end).
+        // Extract user transactions by stripping system txs.
+        // With advanceTempo:    [advanceTempo, ...user_txs..., finalizeWdBatch]
+        // Without advanceTempo: [...user_txs..., finalizeWdBatch]
         let all_txs: Vec<_> = sealed_block.body().transactions().collect();
-        let user_tx_bytes: Vec<Vec<u8>> = if all_txs.len() >= 2 {
-            all_txs[1..all_txs.len() - 1]
+        let skip_front = if has_advance_tempo { 1 } else { 0 };
+        let skip_back = 1; // finalizeWithdrawalBatch is always last
+        let user_tx_bytes: Vec<Vec<u8>> = if all_txs.len() > skip_front + skip_back {
+            all_txs[skip_front..all_txs.len() - skip_back]
                 .iter()
                 .map(|tx| alloy_rlp::encode(*tx))
                 .collect()
@@ -156,23 +164,25 @@ where
             vec![]
         };
 
-        // Convert deposits from the L1 block to the prover's QueuedDeposit format.
         let deposits: Vec<QueuedDeposit> = l1_block
-            .deposits
-            .iter()
-            .map(|d| {
-                let deposit = crate::abi::Deposit {
-                    sender: d.sender,
-                    to: d.to,
-                    amount: d.amount,
-                    memo: d.memo,
-                };
-                QueuedDeposit {
-                    deposit_type: DepositType::Regular,
-                    deposit_data: Bytes::from(deposit.abi_encode()),
-                }
+            .map(|lb| {
+                lb.deposits
+                    .iter()
+                    .map(|d| {
+                        let deposit = crate::abi::Deposit {
+                            sender: d.sender,
+                            to: d.to,
+                            amount: d.amount,
+                            memo: d.memo,
+                        };
+                        QueuedDeposit {
+                            deposit_type: DepositType::Regular,
+                            deposit_data: Bytes::from(deposit.abi_encode()),
+                        }
+                    })
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         let zone_block = ZoneBlock {
             number: block_number,
@@ -180,7 +190,7 @@ where
             timestamp: sealed_block.timestamp(),
             beneficiary: sealed_block.beneficiary(),
             expected_state_root: sealed_block.state_root(),
-            tempo_header_rlp: Some(header_rlp.clone()),
+            tempo_header_rlp: header_rlp.clone(),
             deposits,
             decryptions: vec![],
             finalize_withdrawal_batch_count: Some(U256::MAX),
@@ -212,6 +222,7 @@ where
             chain_id,
             tempo_header_rlp: header_rlp,
         };
+
 
         let mut store = self.witness_store.lock().expect("witness store poisoned");
         store.insert(block_number, witness);
@@ -536,8 +547,8 @@ where
             &sealed_block,
             &recorded_accesses,
             l1_reads,
-            &l1_block,
-            header_rlp,
+            Some(&l1_block),
+            Some(header_rlp),
         );
 
         let payload =
