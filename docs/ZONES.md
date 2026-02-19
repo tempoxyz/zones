@@ -2,7 +2,7 @@
 
 Zones are L2 chains anchored to Tempo L1. Each zone has its own sequencer, genesis state, and portal contract on L1 that escrows deposits and processes withdrawals.
 
-**Explorer:** [explore.moderato.tempo.xyz](https://explore.moderato.tempo.xyz/)
+**Explorers:** [Moderato](https://explore.moderato.tempo.xyz/) · [Devnet](https://explore.devnet.tempo.xyz/)
 
 ## Quick Start (One Command)
 
@@ -33,10 +33,16 @@ This single command will:
 
 ### 1. Set the L1 RPC URL
 
-All zone commands need an L1 RPC URL. For moderato testnet:
+All zone commands need an L1 RPC URL.
 
+**Moderato testnet:**
 ```bash
 export L1_RPC_URL="wss://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
+```
+
+**Devnet:**
+```bash
+export L1_RPC_URL="wss://eng:bold-raman-silly-torvalds@rpc.devnet.tempoxyz.dev"
 ```
 
 ### 2. Generate a Sequencer Key
