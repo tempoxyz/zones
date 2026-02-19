@@ -628,8 +628,11 @@ fn build_encrypted_deposit(
 
     // Full decryption failed — try to at least provide a valid ECDH proof so the
     // contract can reach the refund path.
-    let proof =
-        ecies::compute_ecdh_proof(sequencer_key, &d.ephemeral_pubkey_x, d.ephemeral_pubkey_y_parity);
+    let proof = ecies::compute_ecdh_proof(
+        sequencer_key,
+        &d.ephemeral_pubkey_x,
+        d.ephemeral_pubkey_y_parity,
+    );
 
     if let Some(proof) = proof {
         warn!(

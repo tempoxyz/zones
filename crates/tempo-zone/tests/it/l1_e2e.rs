@@ -442,9 +442,11 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 ///  4. Fund depositor, call `depositEncrypted` on the portal — encrypting
 ///     (recipient, memo) to the sequencer's public key. The recipient is a
 ///     known key (mnemonic index 2) so we can withdraw later.
-///  5. Zone processes: ECIES decrypt → Chaum-Pedersen verify → AES-GCM → mint.
-///  6. Spawn sequencer tasks, recipient requests withdrawal on L2.
-///  7. Wait for batch submission + withdrawal processing on L1.
+///     The zone processes this automatically: ECIES decrypt → CP proof →
+///     AES-GCM verify → mint to recipient. `deposit_encrypted` waits for
+///     the L2 balance to confirm the full pipeline succeeded.
+///  5. Spawn sequencer tasks, recipient requests withdrawal on L2.
+///  6. Wait for batch submission + withdrawal processing on L1.
 ///
 /// ```text
 ///  L1                                       Zone L2
@@ -518,7 +520,7 @@ async fn test_encrypted_deposit_and_withdrawal() -> eyre::Result<()> {
         .deposit_encrypted(deposit_amount, recipient, B256::ZERO, L1_TIMEOUT, &zone)
         .await?;
 
-    // --- Step 5: Withdraw from the recipient's account on L2 ---
+    // --- Step 5: Spawn sequencer + withdraw from the recipient's account on L2 ---
     // Spawn sequencer after deposit to avoid L1 nonce races — the dev signer
     // is used by both fund_user and the sequencer's batch submitter.
     let _sequencer_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
@@ -529,7 +531,7 @@ async fn test_encrypted_deposit_and_withdrawal() -> eyre::Result<()> {
     let withdrawal_amount: u128 = 500_000; // 0.5 pathUSD
     recipient_account.withdraw(withdrawal_amount).await?;
 
-    // Wait for the withdrawal to be fully processed on L1
+    // --- Step 6: Wait for the withdrawal to be fully processed on L1 ---
     let withdrawal_timeout = std::time::Duration::from_secs(60);
     l1.wait_for_withdrawal_on_l1(
         portal_address,
