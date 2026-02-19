@@ -118,13 +118,14 @@ where
         let mut merged_accesses = AccessSnapshot::default();
         let mut all_l1_reads = Vec::new();
         let mut zone_blocks = Vec::new();
-        let mut tempo_ancestry_headers = Vec::new();
+        // Ancestry headers are only used in ancestry mode (anchor != tempo).
+        // For now we always use direct mode, so this stays empty.
+        let tempo_ancestry_headers: Vec<Vec<u8>> = vec![];
 
         for (_, bw) in &block_witnesses {
             merged_accesses.merge(&bw.access_snapshot);
             all_l1_reads.extend(bw.l1_reads.iter().cloned());
             zone_blocks.push(bw.zone_block.clone());
-            tempo_ancestry_headers.push(bw.tempo_header_rlp.clone());
         }
 
         info!(
@@ -187,8 +188,28 @@ where
 
         // In direct mode (anchor == tempo), the anchor block hash is the hash
         // of the Tempo header processed by the last advanceTempo in the batch.
-        let last_header_rlp = &block_witnesses.last().unwrap().1.tempo_header_rlp;
-        let anchor_block_hash = alloy_primitives::keccak256(last_header_rlp);
+        // If no block in the batch advanced Tempo, the binding carries over from
+        // the previous batch and we read the hash from the zone state witness.
+        let anchor_block_hash = block_witnesses
+            .iter()
+            .rev()
+            .find_map(|(_, bw)| bw.tempo_header_rlp.as_ref())
+            .map(|rlp| alloy_primitives::keccak256(rlp))
+            .unwrap_or_else(|| {
+                // No advanceTempo in this batch — read from the zone state witness.
+                // The initial_zone_state already includes TempoState slot 0 because
+                // the WitnessGenerator unconditionally adds it.
+                initial_zone_state
+                    .accounts
+                    .get(&zone_prover::execute::TEMPO_STATE_ADDRESS)
+                    .and_then(|acct| {
+                        acct.storage.get(
+                            &zone_prover::execute::storage::TEMPO_STATE_BLOCK_HASH_SLOT,
+                        )
+                    })
+                    .map(|v| B256::from(v.to_be_bytes()))
+                    .unwrap_or(B256::ZERO)
+            });
 
         let public_inputs = zone_prover::types::PublicInputs {
             prev_block_hash,

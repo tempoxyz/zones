@@ -283,7 +283,7 @@ fn test_witness_pipeline_single_block() {
         parent_block_hash: genesis_hash,
         l1_reads: vec![],
         chain_id: CHAIN_ID,
-        tempo_header_rlp: build_dummy_header_rlp(),
+        tempo_header_rlp: Some(build_dummy_header_rlp()),
     };
     store.insert(1, built_witness);
 
@@ -497,7 +497,7 @@ fn test_witness_pipeline_two_block_merge() {
             parent_block_hash: genesis_hash,
             l1_reads: vec![],
             chain_id: CHAIN_ID,
-            tempo_header_rlp: build_dummy_header_rlp(),
+            tempo_header_rlp: Some(build_dummy_header_rlp()),
         },
     );
     store.insert(
@@ -509,7 +509,7 @@ fn test_witness_pipeline_two_block_merge() {
             parent_block_hash: block1_hash,
             l1_reads: vec![],
             chain_id: CHAIN_ID,
-            tempo_header_rlp: build_dummy_header_rlp(),
+            tempo_header_rlp: Some(build_dummy_header_rlp()),
         },
     );
 
@@ -618,7 +618,7 @@ fn test_witness_store_pruning() {
         parent_block_hash: B256::ZERO,
         l1_reads: vec![],
         chain_id: CHAIN_ID,
-        tempo_header_rlp: vec![],
+        tempo_header_rlp: None,
     };
 
     let mut store = WitnessStore::default();
