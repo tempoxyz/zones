@@ -284,6 +284,8 @@ impl WitnessGenerator {
             ]);
 
         let block_id = BlockNumberOrTag::Number(state_block_number).into();
+        let keccak_empty = keccak256([]);
+        let empty_root = keccak256([0x80]); // keccak256(RLP("")) — empty MPT root
         let mut accounts = HashMap::default();
         let mut absent_accounts: HashMap<Address, Vec<Bytes>> = HashMap::default();
 
@@ -304,14 +306,27 @@ impl WitnessGenerator {
                 .await
                 .map_err(|e| eyre::eyre!("eth_getProof failed for {addr}: {e}"))?;
 
-            // Absent account: nonce 0, balance 0, empty code, empty storage root.
-            let keccak_empty = keccak256([]);
+            // Determine whether the account exists in the state trie.
+            //
+            // Post-EIP-161, an account is absent if ALL of:
+            //   - nonce == 0
+            //   - balance == 0
+            //   - code_hash is KECCAK_EMPTY or zero (no code deployed)
+            //   - storage_hash is EMPTY_ROOT_HASH or zero (no storage)
+            //
+            // Checking storage_hash is critical: an account created in genesis
+            // with storage but no code/balance would have a non-empty
+            // storage_hash and must be treated as present.
+            let has_code = proof_response.code_hash != keccak_empty
+                && proof_response.code_hash != B256::ZERO;
+            let has_storage = proof_response.storage_hash != empty_root
+                && proof_response.storage_hash != B256::ZERO;
             let is_absent = proof_response.nonce == 0
                 && proof_response.balance.is_zero()
-                && (proof_response.code_hash == keccak_empty
-                    || proof_response.code_hash == B256::ZERO);
+                && !has_code
+                && !has_storage;
 
-            if is_absent && !accessed_storage.contains_key(&addr) {
+            if is_absent {
                 absent_accounts.insert(addr, proof_response.account_proof);
                 continue;
             }
