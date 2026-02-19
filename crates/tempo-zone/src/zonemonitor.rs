@@ -496,10 +496,14 @@ impl ZoneMonitor {
 
     /// Generate a proof for the given block range.
     ///
-    /// Reads per-block witness data from the shared [`WitnessStore`], fetches
-    /// L1 `eth_getProof` responses, assembles the [`BatchWitness`], and runs
-    /// the prover. Returns `(verifier_config, proof)` on success, or empty
-    /// bytes on failure (falling back to POC mode).
+    /// 1. Takes per-block data from the [`WitnessStore`].
+    /// 2. Merges all [`AccessSnapshot`]s into a single union of accounts/storage.
+    /// 3. Generates Zone state MPT proofs against S₀ via `eth_getProof` on the
+    ///    Zone L2 RPC (block `from - 1`).
+    /// 4. Fetches L1 `eth_getProof` responses for recorded Tempo state reads.
+    /// 5. Assembles the [`BatchWitness`] and runs the prover.
+    ///
+    /// Returns `(verifier_config, proof)` on success, or empty bytes on failure.
     async fn generate_proof(
         &self,
         from: u64,
@@ -530,50 +534,57 @@ impl ZoneMonitor {
             return empty();
         }
 
-        // For the batch witness, use the first block's prev_block_header.
-        // Each block's builder generates MPT proofs against its own parent
-        // state, but the prover needs all proofs against the INITIAL state
-        // (first block's parent). For single-block batches this is correct.
-        //
-        // For multi-block batches: accounts accessed by the first block have
-        // valid proofs. Accounts unique to later blocks have proofs against
-        // a different state root and will cause prover failure. In that case,
-        // the monitor falls back to empty proof (POC mode). Correct multi-block
-        // witness generation requires a second pass: collect all accessed
-        // accounts across all blocks, then generate a single witness against
-        // the initial state root.
         let first = &block_witnesses[0].1;
         let chain_id = first.chain_id;
         let prev_block_header = first.prev_block_header.clone();
-        let mut initial_zone_state = first.zone_state_witness.clone();
 
+        // Merge access snapshots from ALL blocks into a single union.
+        // This ensures every account/slot touched by any block in the batch
+        // gets a proof against S₀.
+        let mut merged_accesses = crate::witness::AccessSnapshot::default();
         let mut all_l1_reads = Vec::new();
         let mut zone_blocks = Vec::new();
         let mut tempo_ancestry_headers = Vec::new();
 
-        for (i, (_, bw)) in block_witnesses.iter().enumerate() {
+        for (_, bw) in &block_witnesses {
+            merged_accesses.merge(&bw.access_snapshot);
             all_l1_reads.extend(bw.l1_reads.iter().cloned());
             zone_blocks.push(bw.zone_block.clone());
             tempo_ancestry_headers.push(bw.tempo_header_rlp.clone());
-
-            // Best-effort merge: accounts already in the first block's
-            // witness keep their valid proofs. New accounts from later blocks
-            // are included but may have proofs against a different state root.
-            if i > 0 {
-                for (addr, witness) in &bw.zone_state_witness.accounts {
-                    initial_zone_state
-                        .accounts
-                        .entry(*addr)
-                        .or_insert_with(|| witness.clone());
-                }
-                for (addr, proof) in &bw.zone_state_witness.absent_accounts {
-                    initial_zone_state
-                        .absent_accounts
-                        .entry(*addr)
-                        .or_insert_with(|| proof.clone());
-                }
-            }
         }
+
+        info!(
+            from, to,
+            accounts = merged_accesses.accounts.len(),
+            storage_accounts = merged_accesses.storage.len(),
+            "Merged access snapshots for batch, generating witness against S₀"
+        );
+
+        // Generate the zone state witness against S₀ (state at block `from - 1`).
+        // The first block's prev_block_header carries the state root of S₀.
+        let s0_block = from.saturating_sub(1);
+        let s0_state_root = prev_block_header.state_root;
+        let initial_zone_state = match self
+            .witness_generator
+            .generate_zone_state_witness_from_rpc(
+                &self.provider,
+                s0_block,
+                s0_state_root,
+                &merged_accesses.accounts,
+                &merged_accesses.storage,
+            )
+            .await
+        {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    s0_block,
+                    "Failed to generate zone state witness from RPC, using empty proof"
+                );
+                return empty();
+            }
+        };
 
         // Fetch L1 eth_getProof responses for recorded reads.
         let l1_proofs = match self.fetch_l1_proofs(&all_l1_reads).await {
@@ -627,10 +638,6 @@ impl ZoneMonitor {
                     "Proof generated successfully"
                 );
 
-                // Encode the BatchOutput as proof bytes. This is the "soft proof"
-                // format: the raw output commitments ABI-packed so the L1 verifier
-                // can decode and validate them. When a real ZK backend is added,
-                // this will be replaced with the actual proof encoding.
                 let proof_bytes = encode_batch_output(&output);
                 (alloy_primitives::Bytes::new(), proof_bytes.into())
             }

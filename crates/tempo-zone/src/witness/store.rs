@@ -1,26 +1,50 @@
 //! Per-block witness data store.
 //!
 //! The [`WitnessStore`] bridges the payload builder (which records state accesses
-//! during block execution and generates MPT proofs) and the zone monitor (which
-//! fetches L1 proofs, assembles the full [`BatchWitness`], and submits proofs
-//! to the ZonePortal).
+//! during block execution) and the zone monitor (which generates the zone state
+//! witness, fetches L1 proofs, assembles the full [`BatchWitness`], and submits
+//! proofs to the ZonePortal).
 //!
 //! ## Flow
 //!
-//! 1. **Builder** executes a zone block with recording enabled, generates the
-//!    [`ZoneStateWitness`], and calls [`WitnessStore::insert`].
-//! 2. **Monitor** processes a block range, calls [`WitnessStore::take_range`]
-//!    to consume the stored data, fetches L1 proofs, and assembles the
-//!    [`BatchWitness`] for proof generation.
+//! 1. **Builder** executes a zone block with recording enabled, snapshots the
+//!    accessed accounts/storage, and stores a [`BuiltBlockWitness`].
+//! 2. **Monitor** processes a block range, calls [`WitnessStore::take_range`],
+//!    merges all accessed accounts/storage into a union, generates MPT proofs
+//!    against the initial state root S₀ via `eth_getProof`, fetches L1 proofs,
+//!    and assembles the [`BatchWitness`] for proof generation.
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
-use zone_prover::types::{ZoneBlock, ZoneHeader, ZoneStateWitness};
+use alloy_primitives::{Address, B256, U256};
+use zone_prover::types::{ZoneBlock, ZoneHeader};
 
 use super::recording_l1::RecordedL1Read;
+
+/// Snapshot of all state accesses recorded during a single block execution.
+///
+/// Plain-data equivalent of [`RecordedAccesses`](super::RecordedAccesses)
+/// without the `Arc<Mutex<>>` interior — suitable for storage and transfer.
+#[derive(Debug, Clone, Default)]
+pub struct AccessSnapshot {
+    /// Accounts whose `basic()` was called.
+    pub accounts: BTreeSet<Address>,
+    /// Storage slots read per account.
+    pub storage: BTreeMap<Address, BTreeSet<U256>>,
+}
+
+impl AccessSnapshot {
+    /// Merge another snapshot into this one (union of all accesses).
+    pub fn merge(&mut self, other: &AccessSnapshot) {
+        self.accounts.extend(&other.accounts);
+        for (addr, slots) in &other.storage {
+            self.storage.entry(*addr).or_default().extend(slots);
+        }
+    }
+}
 
 /// Data captured during a single zone block build.
 ///
@@ -31,14 +55,17 @@ pub struct BuiltBlockWitness {
     /// Zone block in prover format (system txs + pool txs + deposits).
     pub zone_block: ZoneBlock,
 
-    /// Zone state witness with MPT proofs against the parent state root.
-    /// For single-block batches, this is the initial state for the batch.
-    /// For multi-block batches, only the first block's witness is used as
-    /// the batch's `initial_zone_state`.
-    pub zone_state_witness: ZoneStateWitness,
+    /// Snapshot of all EVM state accesses during this block's execution.
+    /// The monitor merges these across all blocks in the batch, then
+    /// generates MPT proofs against S₀ for the full union.
+    pub access_snapshot: AccessSnapshot,
 
     /// Previous block header (for block hash verification by the prover).
     pub prev_block_header: ZoneHeader,
+
+    /// Parent block hash — identifies the state root S_n this block was
+    /// built against. For the first block in a batch, this is S₀.
+    pub parent_block_hash: B256,
 
     /// L1 storage reads recorded during this block's execution.
     pub l1_reads: Vec<RecordedL1Read>,

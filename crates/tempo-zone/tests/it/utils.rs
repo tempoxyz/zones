@@ -414,6 +414,7 @@ impl ZoneTestNode {
         genesis.config.chain_id = chain_id;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
+
         let zone_node = ZoneNode::new(
             l1_ws_url,
             portal_address,

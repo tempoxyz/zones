@@ -97,6 +97,7 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
     evm_config: ZoneEvmConfig,
+
     witness_store: crate::witness::SharedWitnessStore,
 }
 
@@ -104,13 +105,12 @@ impl<Provider> ZonePayloadBuilder<Provider>
 where
     Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone,
 {
-    /// Generate the zone state witness and store it for the zone monitor.
+    /// Snapshot recorded state accesses and store them for the zone monitor.
     ///
-    /// Called after block execution while the parent state provider is still
-    /// available for MPT proof generation. On failure (e.g., proof generation
-    /// error), logs a warning but does not fail the block build — the block
-    /// is still valid, just without a proof.
-    fn generate_and_store_witness(
+    /// The builder does NOT generate MPT proofs — that is deferred to the
+    /// monitor, which merges accesses from all blocks in the batch and
+    /// generates proofs against S₀ (the initial state root) in one shot.
+    fn store_block_witness(
         &self,
         parent_header: &reth_primitives_traits::SealedHeader<TempoHeader>,
         sealed_block: &Arc<reth_primitives_traits::SealedBlock<tempo_primitives::Block>>,
@@ -126,42 +126,9 @@ where
 
         let block_number = sealed_block.number();
 
-        // Open a fresh state provider for the parent state (avoids lifetime
-        // entanglement with the execution database).
-        let witness_sp = match self.provider.state_by_block_hash(parent_header.hash()) {
-            Ok(sp) => sp,
-            Err(e) => {
-                warn!(
-                    target: "zone::witness",
-                    block_number, error = %e,
-                    "Failed to open state provider for witness generation"
-                );
-                return;
-            }
-        };
-
-        let state_root = parent_header.state_root();
-        let accessed_accounts = recorded_accesses.accessed_accounts();
-        let accessed_storage = recorded_accesses.accessed_storage();
-
-        let sequencer = alloy_primitives::Address::default();
-        let witness_gen = crate::witness::WitnessGenerator::new(crate::witness::WitnessGeneratorConfig { sequencer });
-
-        let zone_state_witness = match witness_gen.generate_zone_state_witness(
-            &*witness_sp,
-            state_root,
-            &accessed_accounts,
-            &accessed_storage,
-        ) {
-            Ok(w) => w,
-            Err(e) => {
-                warn!(
-                    target: "zone::witness",
-                    block_number, error = %e,
-                    "Failed to generate zone state witness"
-                );
-                return;
-            }
+        let access_snapshot = crate::witness::AccessSnapshot {
+            accounts: recorded_accesses.accessed_accounts(),
+            storage: recorded_accesses.accessed_storage(),
         };
 
         // Extract user transactions (skip advanceTempo at index 0 and
@@ -205,6 +172,7 @@ where
             transactions: user_tx_bytes,
         };
 
+        let state_root = parent_header.state_root();
         let prev_block_header = ZoneHeader {
             parent_hash: parent_header.parent_hash(),
             beneficiary: parent_header.beneficiary(),
@@ -222,8 +190,9 @@ where
 
         let witness = crate::witness::BuiltBlockWitness {
             zone_block,
-            zone_state_witness,
+            access_snapshot: access_snapshot.clone(),
             prev_block_header,
+            parent_block_hash: parent_header.hash(),
             l1_reads,
             chain_id,
             tempo_header_rlp: header_rlp,
@@ -235,9 +204,9 @@ where
         info!(
             target: "zone::witness",
             block_number,
-            accounts = accessed_accounts.len(),
-            storage_accounts = accessed_storage.len(),
-            "Stored witness data for prover"
+            accounts = access_snapshot.accounts.len(),
+            storage_accounts = access_snapshot.storage.len(),
+            "Stored block witness data (accesses only, proof generation deferred)"
         );
     }
 }
@@ -557,8 +526,8 @@ where
             "Built zone payload"
         );
 
-        // Generate witness data for the prover while we still have state provider access.
-        self.generate_and_store_witness(
+        // Store recorded accesses for the monitor to generate proofs later.
+        self.store_block_witness(
             &parent_header,
             &sealed_block,
             &recorded_accesses,
