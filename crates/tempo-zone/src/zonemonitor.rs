@@ -30,16 +30,13 @@ use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
-use tracing::{debug, error, info, instrument, warn};
+use tracing::{error, info, instrument, warn};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox},
     batch::{BatchData, BatchSubmitter},
+    proof::BatchProofGenerator,
     withdrawals::SharedWithdrawalStore,
-    witness::{
-        FetchedL1Proof, SharedWitnessStore, WitnessGenerator, WitnessGeneratorConfig,
-        group_l1_reads_for_proof_fetch,
-    },
 };
 
 /// Maximum number of times to retry a failed batch submission before resyncing.
@@ -106,32 +103,26 @@ pub struct ZoneMonitor {
     /// starts at 0 and increments each time a batch with a non-zero
     /// `withdrawal_queue_hash` is successfully submitted to L1.
     portal_withdrawal_queue_tail: u64,
-    /// Shared witness store — per-block witness data written by the builder
-    /// and consumed here for proof generation.
-    witness_store: SharedWitnessStore,
-    /// Shared L1 provider for fetching `eth_getProof` responses.
-    l1_provider: DynProvider<TempoNetwork>,
-    /// Witness generator for assembling `BatchWitness` from recorded accesses.
-    witness_generator: WitnessGenerator,
+    /// Node-internal proof generator — owns the witness store, state provider,
+    /// and L1 provider. The monitor calls a single method per batch.
+    proof_generator: Arc<dyn BatchProofGenerator>,
 }
 
 impl ZoneMonitor {
-    /// Create a new zone monitor with integrated batch submission and witness generation.
+    /// Create a new zone monitor with integrated batch submission.
     ///
     /// Builds a read-only HTTP provider (no wallet) pointed at the Zone L2 RPC,
     /// instantiates the on-chain contract handles, and creates a [`BatchSubmitter`]
     /// backed by the shared `l1_provider` for posting batches to the ZonePortal on L1.
     ///
-    /// The `witness_store` is shared with the [`ZonePayloadBuilder`] which writes
-    /// per-block witness data during block production. The `l1_provider` is used
-    /// both for batch submission and for fetching `eth_getProof` responses.
+    /// Proof generation is delegated entirely to the `proof_generator`, which runs
+    /// inside the node and has direct state provider access.
     pub async fn new(
         config: ZoneMonitorConfig,
         l1_provider: DynProvider<TempoNetwork>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
-        witness_store: SharedWitnessStore,
-        sequencer: Address,
+        proof_generator: Arc<dyn BatchProofGenerator>,
     ) -> Self {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_http(config.zone_rpc_url.parse().expect("valid Zone RPC URL"))
@@ -141,15 +132,12 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let batch_submitter = BatchSubmitter::new(config.portal_address, l1_provider.clone());
+        let batch_submitter = BatchSubmitter::new(config.portal_address, l1_provider);
 
         let prev_block_hash = batch_submitter
             .read_portal_block_hash()
             .await
             .expect("failed to read portal blockHash at startup");
-
-        let witness_generator =
-            WitnessGenerator::new(WitnessGeneratorConfig { sequencer });
 
         Self {
             config,
@@ -164,9 +152,7 @@ impl ZoneMonitor {
             prev_processed_deposit_hash: B256::ZERO,
             prev_block_hash,
             portal_withdrawal_queue_tail: 0,
-            witness_store,
-            l1_provider,
-            witness_generator,
+            proof_generator,
         }
     }
 
@@ -330,8 +316,16 @@ impl ZoneMonitor {
         // Attempt to generate a proof from the builder's witness data.
         // If witness data is unavailable (e.g., block was imported rather than
         // built locally), fall back to empty proof bytes (POC mode).
-        let (verifier_config, proof) =
-            self.generate_proof(from, to, tempo_block_number).await;
+        let (verifier_config, proof) = self
+            .proof_generator
+            .generate_batch_proof(
+                from,
+                to,
+                tempo_block_number,
+                self.prev_block_hash,
+                self.portal_withdrawal_queue_tail,
+            )
+            .await;
 
         let batch_data = BatchData {
             tempo_block_number,
@@ -348,217 +342,6 @@ impl ZoneMonitor {
         self.submit_batch_with_retry(&batch_data, to).await?;
 
         Ok(())
-    }
-
-    /// Generate a proof for the given block range.
-    ///
-    /// 1. Takes per-block data from the [`WitnessStore`].
-    /// 2. Merges all [`AccessSnapshot`]s into a single union of accounts/storage.
-    /// 3. Generates Zone state MPT proofs against S₀ via `eth_getProof` on the
-    ///    Zone L2 RPC (block `from - 1`).
-    /// 4. Fetches L1 `eth_getProof` responses for recorded Tempo state reads.
-    /// 5. Assembles the [`BatchWitness`] and runs the prover.
-    ///
-    /// Returns `(verifier_config, proof)` on success, or empty bytes on failure.
-    async fn generate_proof(
-        &self,
-        from: u64,
-        to: u64,
-        tempo_block_number: u64,
-    ) -> (alloy_primitives::Bytes, alloy_primitives::Bytes) {
-        let empty = || {
-            (
-                alloy_primitives::Bytes::new(),
-                alloy_primitives::Bytes::new(),
-            )
-        };
-
-        // Take witness data from the store for the block range.
-        let block_witnesses = {
-            let mut store = self.witness_store.lock().expect("witness store poisoned");
-            store.take_range(from, to)
-        };
-
-        let expected_count = (to - from + 1) as usize;
-        if block_witnesses.len() != expected_count {
-            warn!(
-                from, to,
-                found = block_witnesses.len(),
-                expected = expected_count,
-                "Missing witness data for some blocks in range, using empty proof"
-            );
-            return empty();
-        }
-
-        let first = &block_witnesses[0].1;
-        let chain_id = first.chain_id;
-        let prev_block_header = first.prev_block_header.clone();
-
-        // Merge access snapshots from ALL blocks into a single union.
-        // This ensures every account/slot touched by any block in the batch
-        // gets a proof against S₀.
-        let mut merged_accesses = crate::witness::AccessSnapshot::default();
-        let mut all_l1_reads = Vec::new();
-        let mut zone_blocks = Vec::new();
-        let mut tempo_ancestry_headers = Vec::new();
-
-        for (_, bw) in &block_witnesses {
-            merged_accesses.merge(&bw.access_snapshot);
-            all_l1_reads.extend(bw.l1_reads.iter().cloned());
-            zone_blocks.push(bw.zone_block.clone());
-            tempo_ancestry_headers.push(bw.tempo_header_rlp.clone());
-        }
-
-        info!(
-            from, to,
-            accounts = merged_accesses.accounts.len(),
-            storage_accounts = merged_accesses.storage.len(),
-            "Merged access snapshots for batch, generating witness against S₀"
-        );
-
-        // Generate the zone state witness against S₀ (state at block `from - 1`).
-        // The first block's prev_block_header carries the state root of S₀.
-        let s0_block = from.saturating_sub(1);
-        let s0_state_root = prev_block_header.state_root;
-        let initial_zone_state = match self
-            .witness_generator
-            .generate_zone_state_witness_from_rpc(
-                &self.provider,
-                s0_block,
-                s0_state_root,
-                &merged_accesses.accounts,
-                &merged_accesses.storage,
-            )
-            .await
-        {
-            Ok(w) => w,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    s0_block,
-                    "Failed to generate zone state witness from RPC, using empty proof"
-                );
-                return empty();
-            }
-        };
-
-        // Fetch L1 eth_getProof responses for recorded reads.
-        let l1_proofs = match self.fetch_l1_proofs(&all_l1_reads).await {
-            Ok(proofs) => proofs,
-            Err(e) => {
-                warn!(
-                    error = %e,
-                    "Failed to fetch L1 proofs, using empty proof"
-                );
-                return empty();
-            }
-        };
-
-        // Generate the Tempo state proof from recorded reads + fetched proofs.
-        let tempo_state_proofs =
-            self.witness_generator
-                .generate_tempo_state_proof(&all_l1_reads, &l1_proofs);
-
-        // In direct mode (anchor == tempo), the anchor block hash is the hash
-        // of the Tempo header processed by the last advanceTempo in the batch.
-        let last_header_rlp = &block_witnesses.last().unwrap().1.tempo_header_rlp;
-        let anchor_block_hash = alloy_primitives::keccak256(last_header_rlp);
-
-        let public_inputs = zone_prover::types::PublicInputs {
-            prev_block_hash: self.prev_block_hash,
-            tempo_block_number,
-            anchor_block_number: tempo_block_number,
-            anchor_block_hash,
-            expected_withdrawal_batch_index: self.portal_withdrawal_queue_tail,
-            sequencer: self.witness_generator.sequencer(),
-        };
-
-        // Assemble the complete batch witness.
-        let batch_witness = self.witness_generator.assemble_witness(
-            public_inputs,
-            chain_id,
-            prev_block_header,
-            zone_blocks,
-            initial_zone_state,
-            tempo_state_proofs,
-            tempo_ancestry_headers,
-        );
-
-        // Run the prover.
-        match zone_prover::prove_zone_batch(batch_witness) {
-            Ok(output) => {
-                info!(
-                    from, to,
-                    next_block_hash = %output.block_transition.next_block_hash,
-                    withdrawal_queue_hash = %output.withdrawal_queue_hash,
-                    "Proof generated successfully"
-                );
-
-                let proof_bytes = encode_batch_output(&output);
-                (alloy_primitives::Bytes::new(), proof_bytes.into())
-            }
-            Err(e) => {
-                warn!(
-                    from, to,
-                    error = %e,
-                    "Proof generation failed, using empty proof"
-                );
-                empty()
-            }
-        }
-    }
-
-    /// Fetch `eth_getProof` responses from the Tempo L1 chain for all
-    /// recorded L1 reads.
-    ///
-    /// Groups reads by `(tempo_block_number, account)` and issues one
-    /// `eth_getProof` RPC call per group.
-    async fn fetch_l1_proofs(
-        &self,
-        l1_reads: &[crate::witness::RecordedL1Read],
-    ) -> Result<Vec<FetchedL1Proof>> {
-        use alloy_rpc_types_eth::EIP1186AccountProofResponse;
-
-        if l1_reads.is_empty() {
-            return Ok(vec![]);
-        }
-
-        let groups = group_l1_reads_for_proof_fetch(l1_reads);
-        let mut proofs = Vec::with_capacity(groups.len());
-
-        for ((tempo_block_number, account), slots) in &groups {
-            debug!(
-                tempo_block_number,
-                %account,
-                slot_count = slots.len(),
-                "Fetching eth_getProof from Tempo L1"
-            );
-
-            let storage_keys: Vec<alloy_primitives::StorageKey> =
-                slots.iter().copied().map(Into::into).collect();
-
-            let proof_response: EIP1186AccountProofResponse = self
-                .l1_provider
-                .get_proof(
-                    *account,
-                    storage_keys,
-                )
-                .block_id(BlockNumberOrTag::Number(*tempo_block_number).into())
-                .await?;
-
-            proofs.push(FetchedL1Proof {
-                tempo_block_number: *tempo_block_number,
-                proof: proof_response,
-            });
-        }
-
-        info!(
-            proof_count = proofs.len(),
-            read_count = l1_reads.len(),
-            "Fetched L1 proofs for Tempo state reads"
-        );
-
-        Ok(proofs)
     }
 
     /// Submit a batch to L1 with retry logic.
@@ -669,14 +452,13 @@ impl ZoneMonitor {
 /// advances on successful submission.
 ///
 /// The `l1_provider` must already include the sequencer wallet for signing L1 transactions.
-/// The `witness_store` is shared with the builder for receiving per-block witness data.
+/// Proof generation is delegated to the `proof_generator`.
 pub fn spawn_zone_monitor(
     config: ZoneMonitorConfig,
     l1_provider: DynProvider<TempoNetwork>,
     withdrawal_store: SharedWithdrawalStore,
     withdrawal_notify: Arc<Notify>,
-    witness_store: SharedWitnessStore,
-    sequencer: Address,
+    proof_generator: Arc<dyn BatchProofGenerator>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut monitor = ZoneMonitor::new(
@@ -684,8 +466,7 @@ pub fn spawn_zone_monitor(
             l1_provider,
             withdrawal_store,
             withdrawal_notify,
-            witness_store,
-            sequencer,
+            proof_generator,
         )
         .await;
         loop {
@@ -695,40 +476,4 @@ pub fn spawn_zone_monitor(
             }
         }
     })
-}
-
-/// Encode a [`BatchOutput`] into proof bytes.
-///
-/// Soft-proof format: ABI-packed concatenation of the output commitment fields.
-/// The L1 verifier can decode this to validate the batch transition without a ZK proof.
-///
-/// Layout (256 bytes):
-/// - `[0..32]`   prev_block_hash
-/// - `[32..64]`  next_block_hash
-/// - `[64..96]`  prev_processed_deposit_hash
-/// - `[96..128]` next_processed_deposit_hash
-/// - `[128..160]` withdrawal_queue_hash
-/// - `[160..192]` withdrawal_batch_index (left-padded u64)
-fn encode_batch_output(output: &zone_prover::types::BatchOutput) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(192);
-    buf.extend_from_slice(output.block_transition.prev_block_hash.as_slice());
-    buf.extend_from_slice(output.block_transition.next_block_hash.as_slice());
-    buf.extend_from_slice(
-        output
-            .deposit_queue_transition
-            .prev_processed_hash
-            .as_slice(),
-    );
-    buf.extend_from_slice(
-        output
-            .deposit_queue_transition
-            .next_processed_hash
-            .as_slice(),
-    );
-    buf.extend_from_slice(output.withdrawal_queue_hash.as_slice());
-    buf.extend_from_slice(
-        &alloy_primitives::U256::from(output.last_batch.withdrawal_batch_index)
-            .to_be_bytes::<32>(),
-    );
-    buf
 }

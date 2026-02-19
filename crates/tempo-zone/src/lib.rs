@@ -18,6 +18,7 @@ mod executor;
 pub mod l1;
 pub mod l1_state;
 mod node;
+pub mod proof;
 pub mod system_tx;
 pub mod withdrawals;
 pub mod witness;
@@ -30,6 +31,7 @@ pub use l1::{
     L1SubscriberConfig, PendingDeposits,
 };
 pub use node::{ZoneExecutorBuilder, ZoneNode};
+pub use proof::{BatchProofGenerator, ProofGenerator};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use witness::{SharedWitnessStore, WitnessStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
@@ -75,9 +77,8 @@ pub struct ZoneSequencerHandle {
 ///
 /// This is the top-level POC entrypoint that starts:
 /// - **Zone monitor** — polls the Zone L2 for new blocks, extracts withdrawal events into the
-///   shared store, builds [`BatchData`], and submits each batch **synchronously** to the
-///   ZonePortal on Tempo L1 (with empty proof bytes). Local state only advances on
-///   successful submission.
+///   shared store, builds [`BatchData`], and submits each batch to the ZonePortal on Tempo L1.
+///   Proof generation is delegated to the `proof_generator`.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawal` for each pending withdrawal.
 ///
@@ -88,8 +89,7 @@ pub struct ZoneSequencerHandle {
 pub async fn spawn_zone_sequencer(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
-    witness_store: SharedWitnessStore,
-    sequencer: Address,
+    proof_generator: Arc<dyn BatchProofGenerator>,
 ) -> ZoneSequencerHandle {
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
@@ -132,8 +132,7 @@ pub async fn spawn_zone_sequencer(
         l1_provider,
         withdrawal_store,
         withdrawal_notify,
-        witness_store,
-        sequencer,
+        proof_generator,
     );
 
     ZoneSequencerHandle {
