@@ -14344,6 +14344,7 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-types",
  "alloy-transport",
+ "alloy-trie",
  "async-trait",
  "const-hex",
  "eyre",

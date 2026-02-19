@@ -85,9 +85,16 @@ where
             )
         };
 
-        // Take witness data from the store for the block range.
+        // Take witness data from the store for the block range, and prune
+        // any stale entries below `from` (e.g., leftover from resyncs).
         let block_witnesses = {
             let mut store = self.witness_store.lock().expect("witness store poisoned");
+            let before = store.len();
+            store.prune_below(from);
+            let pruned = before - store.len();
+            if pruned > 0 {
+                debug!(pruned, from, "Pruned stale witness entries below batch start");
+            }
             store.take_range(from, to)
         };
 

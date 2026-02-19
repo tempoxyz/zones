@@ -85,8 +85,10 @@ alloy-contract.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-sol-types.workspace = true
+alloy-trie = "0.9"
 const-hex.workspace = true
 reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
+zone-prover = { workspace = true, features = ["test-utils"] }
 reth-node-builder.workspace = true
 reth-node-core.workspace = true
 reth-rpc-builder.workspace = true
