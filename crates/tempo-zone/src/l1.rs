@@ -4,7 +4,7 @@
 //! from the ZonePortal contract for each block.
 
 use alloy_consensus::BlockHeader as _;
-use alloy_primitives::{Address, B256, keccak256};
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolValue};
@@ -19,8 +19,11 @@ use tempo_primitives::TempoHeader;
 use tracing::{debug, error, info, warn};
 
 use crate::{
-    abi,
-    bindings::ZonePortal::{self, DepositMade},
+    abi::{
+        self, EncryptedDeposit as AbiEncryptedDeposit,
+        EncryptedDepositPayload as AbiEncryptedDepositPayload,
+    },
+    bindings::ZonePortal::{self, DepositMade, EncryptedDepositMade},
 };
 
 /// Configuration for the L1 subscriber.
@@ -160,7 +163,7 @@ impl L1Subscriber {
                 .get_logs(&filter.clone().select(cursor..=end))
                 .await?;
 
-            let mut deposits_by_block: BTreeMap<u64, Vec<Deposit>> = BTreeMap::new();
+            let mut deposits_by_block: BTreeMap<u64, Vec<L1Deposit>> = BTreeMap::new();
             for log in logs {
                 let n = log
                     .block_number
@@ -248,7 +251,10 @@ impl L1Subscriber {
 
         let filter = Filter::new()
             .address(self.config.portal_address)
-            .event_signature(DepositMade::SIGNATURE_HASH);
+            .event_signature(vec![
+                DepositMade::SIGNATURE_HASH,
+                EncryptedDepositMade::SIGNATURE_HASH,
+            ]);
 
         self.sync_to_l1_tip(&http_provider, &filter).await?;
 
@@ -295,19 +301,31 @@ impl L1Subscriber {
                 .await?;
 
             // Parse deposit events from the logs
-            let deposits: Vec<Deposit> = logs
+            let deposits: Vec<L1Deposit> = logs
                 .into_iter()
                 .map(|log| self.parse_deposit(log, block_number))
                 .collect::<eyre::Result<_>>()?;
 
             for d in &deposits {
-                info!(
-                    l1_block = block_number,
-                    sender = %d.sender,
-                    to = %d.to,
-                    amount = %d.amount,
-                    "💰 Deposit from L1"
-                );
+                match d {
+                    L1Deposit::Regular(d) => {
+                        info!(
+                            l1_block = block_number,
+                            sender = %d.sender,
+                            to = %d.to,
+                            amount = %d.amount,
+                            "💰 Deposit from L1"
+                        );
+                    }
+                    L1Deposit::Encrypted(d) => {
+                        info!(
+                            l1_block = block_number,
+                            sender = %d.sender,
+                            amount = %d.amount,
+                            "🔒 Encrypted deposit from L1"
+                        );
+                    }
+                }
             }
 
             // Enqueue every block — even those without deposits — so the zone
@@ -322,10 +340,23 @@ impl L1Subscriber {
         Ok(())
     }
 
-    /// Parse a single log into a [`Deposit`].
-    fn parse_deposit(&self, log: Log, block_number: u64) -> eyre::Result<Deposit> {
-        let event = DepositMade::decode_log(&log.inner)?;
-        Ok(Deposit::from_event(event.data, block_number))
+    /// Parse a single log into an [`L1Deposit`].
+    fn parse_deposit(&self, log: Log, block_number: u64) -> eyre::Result<L1Deposit> {
+        if log.topic0() == Some(&DepositMade::SIGNATURE_HASH) {
+            let event = DepositMade::decode_log(&log.inner)?;
+            Ok(L1Deposit::Regular(Deposit::from_event(
+                event.data,
+                block_number,
+            )))
+        } else if log.topic0() == Some(&EncryptedDepositMade::SIGNATURE_HASH) {
+            let event = EncryptedDepositMade::decode_log(&log.inner)?;
+            Ok(L1Deposit::Encrypted(EncryptedDeposit::from_event(
+                event.data,
+                block_number,
+            )))
+        } else {
+            Err(eyre::eyre!("unknown deposit event topic"))
+        }
     }
 }
 
@@ -366,13 +397,113 @@ impl Deposit {
     }
 }
 
+/// An encrypted deposit extracted from L1.
+#[derive(Debug, Clone)]
+pub struct EncryptedDeposit {
+    /// L1 block number where the deposit was included.
+    pub l1_block_number: u64,
+    /// TIP-20 token being deposited.
+    pub token: Address,
+    /// Sender on L1.
+    pub sender: Address,
+    /// Net amount deposited (fee already deducted on L1).
+    pub amount: u128,
+    /// Fee paid on L1.
+    pub fee: u128,
+    /// Index of the encryption key used.
+    pub key_index: U256,
+    /// Ephemeral public key X coordinate.
+    pub ephemeral_pubkey_x: B256,
+    /// Ephemeral public key Y parity (0x02 or 0x03).
+    pub ephemeral_pubkey_y_parity: u8,
+    /// AES-256-GCM ciphertext.
+    pub ciphertext: Vec<u8>,
+    /// GCM nonce (12 bytes).
+    pub nonce: [u8; 12],
+    /// GCM authentication tag (16 bytes).
+    pub tag: [u8; 16],
+    /// New deposit queue hash after this deposit.
+    pub queue_hash: B256,
+}
+
+impl EncryptedDeposit {
+    /// Create a new encrypted deposit from an event and block number.
+    pub fn from_event(event: EncryptedDepositMade, l1_block_number: u64) -> Self {
+        Self {
+            l1_block_number,
+            token: event.token,
+            sender: event.sender,
+            amount: event.netAmount,
+            fee: event.fee,
+            key_index: event.keyIndex,
+            ephemeral_pubkey_x: event.ephemeralPubkeyX,
+            ephemeral_pubkey_y_parity: event.ephemeralPubkeyYParity,
+            ciphertext: event.ciphertext.to_vec(),
+            nonce: event.nonce.0,
+            tag: event.tag.0,
+            queue_hash: event.newCurrentDepositQueueHash,
+        }
+    }
+}
+
+/// A deposit from L1 — either regular (plaintext) or encrypted.
+#[derive(Debug, Clone)]
+pub enum L1Deposit {
+    /// A regular deposit with plaintext recipient and memo.
+    Regular(Deposit),
+    /// An encrypted deposit where recipient and memo are encrypted.
+    Encrypted(EncryptedDeposit),
+}
+
+impl L1Deposit {
+    /// Compute the next hash chain value: `keccak256(abi.encode(deposit, prevHash))`.
+    pub fn hash_chain(&self, prev_hash: B256) -> B256 {
+        match self {
+            Self::Regular(d) => keccak256(
+                (
+                    abi::DepositType::Regular,
+                    abi::Deposit {
+                        token: d.token,
+                        sender: d.sender,
+                        to: d.to,
+                        amount: d.amount,
+                        memo: d.memo,
+                    },
+                    prev_hash,
+                )
+                    .abi_encode(),
+            ),
+            Self::Encrypted(d) => keccak256(
+                (
+                    abi::DepositType::Encrypted,
+                    AbiEncryptedDeposit {
+                        token: d.token,
+                        sender: d.sender,
+                        amount: d.amount,
+                        keyIndex: d.key_index,
+                        encrypted: AbiEncryptedDepositPayload {
+                            ephemeralPubkeyX: d.ephemeral_pubkey_x,
+                            ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
+                            ciphertext: d.ciphertext.clone().into(),
+                            nonce: d.nonce.into(),
+                            tag: d.tag.into(),
+                        },
+                    },
+                    prev_hash,
+                )
+                    .abi_encode(),
+            ),
+        }
+    }
+}
+
 /// An L1 block's header paired with the deposits found in that block.
 #[derive(Debug, Clone)]
 pub struct L1BlockDeposits {
     /// The L1 block header.
     pub header: TempoHeader,
     /// Deposits extracted from this block.
-    pub deposits: Vec<Deposit>,
+    pub deposits: Vec<L1Deposit>,
 }
 
 /// Deposit queue hash chain state.
@@ -391,22 +522,9 @@ pub struct PendingDeposits {
 
 impl PendingDeposits {
     /// Append deposits from an L1 block to the queue and update the hash chain.
-    pub fn enqueue(&mut self, header: TempoHeader, deposits: Vec<Deposit>) {
+    pub fn enqueue(&mut self, header: TempoHeader, deposits: Vec<L1Deposit>) {
         for deposit in &deposits {
-            self.hash = keccak256(
-                (
-                    abi::DepositType::Regular,
-                    abi::Deposit {
-                        token: deposit.token,
-                        sender: deposit.sender,
-                        to: deposit.to,
-                        amount: deposit.amount,
-                        memo: deposit.memo,
-                    },
-                    self.hash,
-                )
-                    .abi_encode(),
-            );
+            self.hash = deposit.hash_chain(self.hash);
         }
         self.pending.push(L1BlockDeposits { header, deposits });
     }
@@ -429,23 +547,10 @@ impl PendingDeposits {
     }
 
     /// Compute a [`DepositQueueTransition`] for a batch of deposits starting from `prev_hash`
-    pub fn transition(prev_hash: B256, deposits: &[Deposit]) -> DepositQueueTransition {
+    pub fn transition(prev_hash: B256, deposits: &[L1Deposit]) -> DepositQueueTransition {
         let mut current = prev_hash;
         for d in deposits {
-            current = keccak256(
-                (
-                    abi::DepositType::Regular,
-                    abi::Deposit {
-                        token: d.token,
-                        sender: d.sender,
-                        to: d.to,
-                        amount: d.amount,
-                        memo: d.memo,
-                    },
-                    current,
-                )
-                    .abi_encode(),
-            );
+            current = d.hash_chain(current);
         }
         DepositQueueTransition {
             prev_processed_hash: prev_hash,
@@ -487,7 +592,7 @@ impl DepositQueue {
     }
 
     /// Enqueue an L1 block with its deposits and notify waiters.
-    pub fn enqueue(&self, header: TempoHeader, deposits: Vec<Deposit>) {
+    pub fn enqueue(&self, header: TempoHeader, deposits: Vec<L1Deposit>) {
         let mut queue = self.inner.lock().expect("deposit queue poisoned");
         queue.enqueue(header, deposits);
         drop(queue); // release lock before notifying
@@ -546,6 +651,7 @@ impl Default for DepositQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::abi::DepositType;
     use alloy_consensus::Header;
     use alloy_primitives::{FixedBytes, address};
 
@@ -564,7 +670,7 @@ mod tests {
         let mut queue = PendingDeposits::default();
         assert_eq!(queue.hash, B256::ZERO);
 
-        let d1 = Deposit {
+        let d1 = L1Deposit::Regular(Deposit {
             l1_block_number: 1,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
@@ -573,7 +679,7 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             queue_hash: B256::ZERO,
-        };
+        });
 
         queue.enqueue(make_test_header(1), vec![d1.clone()]);
         let hash_after_d1 = queue.hash;
@@ -584,7 +690,7 @@ mod tests {
         queue2.enqueue(make_test_header(1), vec![d1]);
         assert_eq!(hash_after_d1, queue2.hash);
 
-        let d2 = Deposit {
+        let d2 = L1Deposit::Regular(Deposit {
             l1_block_number: 2,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000003"),
@@ -593,7 +699,7 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             queue_hash: B256::ZERO,
-        };
+        });
 
         queue.enqueue(make_test_header(2), vec![d2]);
         let hash_after_d2 = queue.hash;
@@ -603,7 +709,7 @@ mod tests {
     #[test]
     fn test_process_deposits_transition() {
         let deposits = vec![
-            Deposit {
+            L1Deposit::Regular(Deposit {
                 l1_block_number: 1,
                 token: address!("0x0000000000000000000000000000000000001000"),
                 sender: address!("0x0000000000000000000000000000000000000001"),
@@ -612,8 +718,8 @@ mod tests {
                 fee: 0,
                 memo: B256::ZERO,
                 queue_hash: B256::ZERO,
-            },
-            Deposit {
+            }),
+            L1Deposit::Regular(Deposit {
                 l1_block_number: 2,
                 token: address!("0x0000000000000000000000000000000000001000"),
                 sender: address!("0x0000000000000000000000000000000000000003"),
@@ -622,7 +728,7 @@ mod tests {
                 fee: 0,
                 memo: B256::ZERO,
                 queue_hash: B256::ZERO,
-            },
+            }),
         ];
 
         let transition = PendingDeposits::transition(B256::ZERO, &deposits);
@@ -646,7 +752,7 @@ mod tests {
     fn test_queue_and_process_deposits_hashes_match() {
         let mut queue = PendingDeposits::default();
 
-        let deposits = vec![Deposit {
+        let deposits = vec![L1Deposit::Regular(Deposit {
             l1_block_number: 1,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
@@ -655,7 +761,7 @@ mod tests {
             fee: 0,
             memo: FixedBytes::from([0xABu8; 32]),
             queue_hash: B256::ZERO,
-        }];
+        })];
 
         queue.enqueue(make_test_header(1), deposits.clone());
 
@@ -668,7 +774,7 @@ mod tests {
     fn test_drain_returns_block_grouped_deposits() {
         let mut queue = PendingDeposits::default();
 
-        let d1 = Deposit {
+        let d1 = L1Deposit::Regular(Deposit {
             l1_block_number: 10,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
@@ -677,9 +783,9 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             queue_hash: B256::ZERO,
-        };
+        });
 
-        let d2 = Deposit {
+        let d2 = L1Deposit::Regular(Deposit {
             l1_block_number: 11,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000003"),
@@ -688,7 +794,7 @@ mod tests {
             fee: 0,
             memo: B256::ZERO,
             queue_hash: B256::ZERO,
-        };
+        });
 
         queue.enqueue(make_test_header(10), vec![d1]);
         queue.enqueue(make_test_header(11), vec![d2]);
@@ -702,5 +808,172 @@ mod tests {
 
         // After drain, pending is empty
         assert!(queue.drain().is_empty());
+    }
+
+    #[test]
+    fn test_encrypted_deposit_hash_chain() {
+        let token = address!("0x0000000000000000000000000000000000001000");
+        let sender = address!("0x0000000000000000000000000000000000001234");
+
+        let encrypted = EncryptedDeposit {
+            l1_block_number: 1,
+            token,
+            sender,
+            amount: 1_000_000,
+            fee: 0,
+            key_index: U256::ZERO,
+            ephemeral_pubkey_x: B256::with_last_byte(0xAA),
+            ephemeral_pubkey_y_parity: 0x02,
+            ciphertext: vec![0x42u8; 64],
+            nonce: [0x01; 12],
+            tag: [0x02; 16],
+            queue_hash: B256::ZERO,
+        };
+
+        // Compute via PendingDeposits (Rust implementation)
+        let transition =
+            PendingDeposits::transition(B256::ZERO, &[L1Deposit::Encrypted(encrypted.clone())]);
+
+        // Compute expected hash via direct Solidity-compatible encoding
+        let abi_encrypted = abi::EncryptedDeposit {
+            token: encrypted.token,
+            sender: encrypted.sender,
+            amount: encrypted.amount,
+            keyIndex: encrypted.key_index,
+            encrypted: abi::EncryptedDepositPayload {
+                ephemeralPubkeyX: encrypted.ephemeral_pubkey_x,
+                ephemeralPubkeyYParity: encrypted.ephemeral_pubkey_y_parity,
+                ciphertext: encrypted.ciphertext.clone().into(),
+                nonce: encrypted.nonce.into(),
+                tag: encrypted.tag.into(),
+            },
+        };
+        let expected = keccak256((DepositType::Encrypted, abi_encrypted, B256::ZERO).abi_encode());
+
+        assert_eq!(
+            transition.next_processed_hash, expected,
+            "encrypted deposit hash chain must match Solidity keccak256(abi.encode(Encrypted, deposit, prevHash))"
+        );
+        assert_ne!(
+            transition.next_processed_hash,
+            B256::ZERO,
+            "hash should be non-zero"
+        );
+    }
+
+    #[test]
+    fn test_mixed_deposit_hash_chain() {
+        let token = address!("0x0000000000000000000000000000000000001000");
+        let sender = address!("0x0000000000000000000000000000000000001111");
+        let recipient = address!("0x000000000000000000000000000000000000A11C");
+
+        let regular = Deposit {
+            l1_block_number: 1,
+            token,
+            sender,
+            to: recipient,
+            amount: 500_000,
+            fee: 0,
+            memo: B256::ZERO,
+            queue_hash: B256::ZERO,
+        };
+
+        let encrypted = EncryptedDeposit {
+            l1_block_number: 1,
+            token,
+            sender,
+            amount: 300_000,
+            fee: 0,
+            key_index: U256::from(1u64),
+            ephemeral_pubkey_x: B256::with_last_byte(0xBB),
+            ephemeral_pubkey_y_parity: 0x03,
+            ciphertext: vec![0x55u8; 64],
+            nonce: [0x0A; 12],
+            tag: [0x0B; 16],
+            queue_hash: B256::ZERO,
+        };
+
+        let deposits = vec![
+            L1Deposit::Regular(regular.clone()),
+            L1Deposit::Encrypted(encrypted.clone()),
+        ];
+
+        let transition = PendingDeposits::transition(B256::ZERO, &deposits);
+
+        // Manually compute expected chain
+        let hash_1 = keccak256(
+            (
+                DepositType::Regular,
+                abi::Deposit {
+                    token: regular.token,
+                    sender: regular.sender,
+                    to: regular.to,
+                    amount: regular.amount,
+                    memo: regular.memo,
+                },
+                B256::ZERO,
+            )
+                .abi_encode(),
+        );
+
+        let hash_2 = keccak256(
+            (
+                DepositType::Encrypted,
+                abi::EncryptedDeposit {
+                    token: encrypted.token,
+                    sender: encrypted.sender,
+                    amount: encrypted.amount,
+                    keyIndex: encrypted.key_index,
+                    encrypted: abi::EncryptedDepositPayload {
+                        ephemeralPubkeyX: encrypted.ephemeral_pubkey_x,
+                        ephemeralPubkeyYParity: encrypted.ephemeral_pubkey_y_parity,
+                        ciphertext: encrypted.ciphertext.into(),
+                        nonce: encrypted.nonce.into(),
+                        tag: encrypted.tag.into(),
+                    },
+                },
+                hash_1,
+            )
+                .abi_encode(),
+        );
+
+        assert_eq!(transition.prev_processed_hash, B256::ZERO);
+        assert_eq!(transition.next_processed_hash, hash_2);
+    }
+
+    #[test]
+    fn test_enqueue_and_transition_consistency() {
+        let token = address!("0x0000000000000000000000000000000000001000");
+        let sender = address!("0x0000000000000000000000000000000000001234");
+
+        let encrypted = EncryptedDeposit {
+            l1_block_number: 1,
+            token,
+            sender,
+            amount: 750_000,
+            fee: 0,
+            key_index: U256::from(2u64),
+            ephemeral_pubkey_x: B256::with_last_byte(0xCC),
+            ephemeral_pubkey_y_parity: 0x02,
+            ciphertext: vec![0x99u8; 64],
+            nonce: [0x03; 12],
+            tag: [0x04; 16],
+            queue_hash: B256::ZERO,
+        };
+
+        let deposits = vec![L1Deposit::Encrypted(encrypted)];
+
+        // Path 1: enqueue into PendingDeposits
+        let mut pending = PendingDeposits::default();
+        let header = make_test_header(1);
+        pending.enqueue(header, deposits.clone());
+
+        // Path 2: compute transition directly
+        let transition = PendingDeposits::transition(B256::ZERO, &deposits);
+
+        assert_eq!(
+            pending.hash, transition.next_processed_hash,
+            "enqueue and transition must produce the same hash"
+        );
     }
 }

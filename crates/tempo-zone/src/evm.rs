@@ -33,6 +33,9 @@ use crate::executor::ZoneBlockExecutor;
 use crate::{
     abi::TEMPO_STATE_READER_ADDRESS,
     l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache, TempoStateReader},
+    precompiles::{
+        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+    },
 };
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -50,7 +53,7 @@ impl ZoneEvmFactory {
         Self { l1_provider }
     }
 
-    fn register_precompile<DB: Database, I: Inspector<TempoCtx<DB>>>(
+    fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
         &self,
         mut evm: TempoEvm<DB, I>,
     ) -> TempoEvm<DB, I> {
@@ -58,6 +61,10 @@ impl ZoneEvmFactory {
         precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| {
             Some(TempoStateReader::create(self.l1_provider.clone()))
         });
+        precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
+            Some(ChaumPedersenVerify.into())
+        });
+        precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| Some(AesGcmDecrypt.into()));
         evm
     }
 }
@@ -79,9 +86,7 @@ impl EvmFactory for ZoneEvmFactory {
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let evm = TempoEvm::new(db, input);
-
-        // TODO: FIXME: clean this up to emualte tempo precompile setup
-        self.register_precompile(evm)
+        self.register_precompiles(evm)
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -91,7 +96,7 @@ impl EvmFactory for ZoneEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        self.register_precompile(evm)
+        self.register_precompiles(evm)
     }
 }
 

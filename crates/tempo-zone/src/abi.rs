@@ -67,6 +67,26 @@ sol! {
         bytes32 memo;
     }
 
+    /// Encrypted deposit payload (ECIES encrypted recipient and memo)
+    #[derive(Debug)]
+    struct EncryptedDepositPayload {
+        bytes32 ephemeralPubkeyX;
+        uint8 ephemeralPubkeyYParity;
+        bytes ciphertext;
+        bytes12 nonce;
+        bytes16 tag;
+    }
+
+    /// Encrypted deposit stored in the queue
+    #[derive(Debug)]
+    struct EncryptedDeposit {
+        address token;
+        address sender;
+        uint128 amount;
+        uint256 keyIndex;
+        EncryptedDepositPayload encrypted;
+    }
+
     #[derive(Debug)]
     struct BlockTransition {
         bytes32 prevBlockHash;
@@ -166,9 +186,28 @@ sol! {
 
         function enableToken(address token) external;
 
+        function depositEncrypted(
+            address token,
+            uint128 amount,
+            uint256 keyIndex,
+            EncryptedDepositPayload calldata encrypted
+        ) external returns (bytes32 newCurrentDepositQueueHash);
+
+        function setSequencerEncryptionKey(
+            bytes32 x,
+            uint8 yParity,
+            uint8 popV,
+            bytes32 popR,
+            bytes32 popS
+        ) external;
+
         // -- View functions (token management) --
 
         function isTokenEnabled(address token) external view returns (bool);
+
+        function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+
+        function encryptionKeyCount() external view returns (uint256);
     }
 
     // ---------------------------------------------------------------
@@ -272,7 +311,7 @@ sol! {
     // ---------------------------------------------------------------
 
     /// Deposit types for the unified deposit queue.
-    #[derive(Debug)]
+    #[derive(Debug, PartialEq, Eq)]
     enum DepositType {
         Regular,
         Encrypted,
