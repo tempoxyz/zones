@@ -87,6 +87,20 @@ pub fn execute_zone_block<DB: Database<Error = ProverError> + DatabaseCommit>(
         precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| Some(precompile));
     }
 
+    // EIP-2935: store the parent block hash in the history contract.
+    // This matches the pre-execution system call applied by the zone node's
+    // EthBlockExecutor so the prover produces the same state root.
+    if block.number > 0 {
+        let result = evm.transact_system_call(
+            alloy_eips::eip4788::SYSTEM_ADDRESS,
+            alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+            block.parent_hash.0.into(),
+        ).map_err(|e| {
+            ProverError::ExecutionError(format!("EIP-2935 blockhashes system call failed: {e:?}"))
+        })?;
+        evm.db_mut().commit(result.state);
+    }
+
     // Collect all transactions (as TempoTxEnvelope) and their execution results.
     let mut all_txs: Vec<TempoTxEnvelope> = Vec::new();
     let mut cumulative_gas_used: u64 = 0;

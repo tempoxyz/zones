@@ -16,6 +16,7 @@ alloy-primitives = { workspace = true, features = ["map"] }
 alloy-rlp.workspace = true
 alloy-sol-types.workspace = true
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-trie = "0.9"
 nybbles = "0.4"
@@ -45,6 +46,7 @@ test-utils = []
 
 [dev-dependencies]
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-rlp.workspace = true
 alloy-trie = "0.9"
 tempo-primitives.workspace = true

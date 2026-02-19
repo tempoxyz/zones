@@ -125,13 +125,9 @@ The monitor processes `[from, to]` where `to` can be arbitrarily far ahead of `f
 
 This could exhaust memory or time out. A configurable max batch size (e.g., 100 blocks) with chunking would prevent this.
 
-### 9. `BLOCKHASH` opcode returns zero
+### 9. ~~`BLOCKHASH` opcode returns zero~~ **RESOLVED**
 
-**Location**: `crates/zone-prover/src/db.rs:182-186`
-
-The prover's `WitnessDatabase::block_hash()` always returns `B256::ZERO`. If any user contract uses the `BLOCKHASH` opcode, the prover will return different results than the node (which returns real block hashes from reth's state). This creates a **state divergence** between the node and the prover.
-
-This is noted in a comment ("Return zero for now; if needed, the witness can include block hashes"), but it's a correctness issue if any contract on the zone uses `BLOCKHASH`.
+**Status**: Fixed. The EIP-2935 history storage contract is deployed in the zone genesis. The prover applies the EIP-2935 system call per block and reads block hashes from the 2935 contract's storage in the witness. For intra-batch blocks, the `State.block_hashes` cache is pre-populated. No separate block hash witness field is needed — block hashes are proven by the same MPT proofs used for storage.
 
 ### 10. `user_tx_bytes` extraction assumes fixed system tx positions
 

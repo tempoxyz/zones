@@ -13149,6 +13149,7 @@ name = "zone-prover"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-evm",
  "alloy-primitives",
  "alloy-rlp",
@@ -13173,6 +13174,7 @@ name = "zone-test-utils"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy-consensus",
+ "alloy-eips",
  "alloy-evm",
  "alloy-primitives",
  "alloy-rlp",

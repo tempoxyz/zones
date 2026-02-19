@@ -314,6 +314,8 @@ impl ZoneMonitor {
     /// withdrawals, we recompute the combined hash from the collected withdrawal structs.
     #[instrument(skip(self), fields(from, to))]
     async fn process_block_range(&mut self, from: u64, to: u64) -> Result<()> {
+        // TODO(production): Add a max batch size cap to prevent OOM on large
+        // block ranges (e.g., after a long outage). Chunk into sub-batches.
         let block_count = to - from + 1;
         info!(from, to, block_count, "Processing zone block range");
 

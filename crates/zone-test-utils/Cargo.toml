@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 # alloy
 alloy-consensus.workspace = true
+alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-primitives = { workspace = true, features = ["map"] }
 alloy-rlp.workspace = true

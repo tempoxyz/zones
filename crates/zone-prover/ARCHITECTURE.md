@@ -67,6 +67,15 @@ prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverError>
 
 Implements revm's `Database` trait. Constructed from `ZoneStateWitness` by verifying every account and storage MPT proof against the state root. **Critical invariant**: any access to an account or slot not present in the witness is a hard `MissingWitness` error — the prover never silently returns zero for unwitnessed state.
 
+#### Block Hash Resolution (EIP-2935)
+
+The `BLOCKHASH` opcode is served via the EIP-2935 history storage contract rather than a separate witness field. The contract at `HISTORY_STORAGE_ADDRESS` stores block hashes in a ring buffer (slot = `block_number % 8191`). The prover's flow:
+
+1. **Pre-execution**: The prover applies the EIP-2935 system call each block, writing `parent_hash` to the contract's storage (matching the node's `apply_pre_execution_changes()`).
+2. **Intra-batch cache**: Before each block, the parent hash is inserted into `State.block_hashes` so that `BLOCKHASH(N-1)` hits the cache instead of the underlying WitnessDatabase (the journal write from the system call isn't visible to `Database::block_hash()`).
+3. **Historical lookups**: For blocks before the batch, `WitnessDatabase::block_hash(n)` reads from the 2935 contract's storage in the initial witness.
+4. **Recording**: The node's `RecordingDatabase::block_hash(n)` additionally records a storage access to `(HISTORY_STORAGE_ADDRESS, n % 8191)`, ensuring the slot enters the access snapshot and witness proofs.
+
 ### TempoStateAccessor (`tempo.rs`)
 
 Replaces the node's RPC-based `TempoStateReader` precompile with a proof-backed accessor. Each L1 storage read triggers a full MPT verification chain: account proof against the L1 state root, then storage proof against the account's storage root. All proof nodes are shared through a deduplicated pool (`node_pool`) to avoid redundant hashing.

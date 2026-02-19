@@ -40,10 +40,14 @@ fn snapshot_to_test_account(snap: &zone_test_utils::AccountSnapshot) -> TestAcco
 }
 
 /// Execute a zone block on a CacheDB to discover all state accesses.
+///
+/// Applies the EIP-2935 blockhash system call before other transactions
+/// to match the prover's behavior. Returns the post-accounts AND the
+/// CacheDB so callers can chain sequential blocks.
 fn reference_execute(
     db: revm::database::CacheDB<revm::database::EmptyDB>,
     block: &ZoneBlock,
-) -> Vec<(Address, TestAccount)> {
+) -> (Vec<(Address, TestAccount)>, revm::database::CacheDB<revm::database::EmptyDB>) {
     use alloy_evm::{Evm, EvmEnv, EvmFactory};
     use alloy_sol_types::SolCall;
     use revm::{DatabaseCommit, context::BlockEnv};
@@ -72,6 +76,19 @@ fn reference_execute(
     let mut evm = factory.create_evm(db, env);
     register_mock_tempo_state_reader(&mut evm);
 
+    // EIP-2935: store parent block hash in the history contract, matching the
+    // prover's pre-execution system call.
+    if block.number > 0 {
+        let result = evm
+            .transact_system_call(
+                alloy_eips::eip4788::SYSTEM_ADDRESS,
+                alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+                block.parent_hash.0.into(),
+            )
+            .expect("EIP-2935 system call should succeed");
+        evm.db_mut().commit(result.state);
+    }
+
     if let Some(count) = block.finalize_withdrawal_batch_count {
         let calldata = finalizeWithdrawalBatchCall {
             count,
@@ -91,7 +108,7 @@ fn reference_execute(
     }
 
     let (post_db, _) = evm.finish();
-    post_db
+    let accounts = post_db
         .cache
         .accounts
         .iter()
@@ -111,7 +128,8 @@ fn reference_execute(
                 },
             )
         })
-        .collect()
+        .collect();
+    (accounts, post_db)
 }
 
 fn filter_real_accounts(
@@ -131,7 +149,10 @@ fn filter_real_accounts(
 }
 
 /// Collect (address, slot) pairs from post-execution accounts + mandatory prover slots.
-fn collect_accessed_slots(post_accounts: &[(Address, TestAccount)]) -> Vec<(Address, U256)> {
+fn collect_accessed_slots(
+    post_accounts: &[(Address, TestAccount)],
+    block_numbers: &[u64],
+) -> Vec<(Address, U256)> {
     let mut slots: Vec<(Address, U256)> = post_accounts
         .iter()
         .flat_map(|(addr, acct)| acct.storage.iter().map(move |(slot, _)| (*addr, *slot)))
@@ -149,6 +170,18 @@ fn collect_accessed_slots(post_accounts: &[(Address, TestAccount)]) -> Vec<(Addr
     for (addr, slot) in mandatory {
         if !slots.iter().any(|(a, s)| *a == addr && *s == slot) {
             slots.push((addr, slot));
+        }
+    }
+
+    // EIP-2935: the prover writes `parent_hash` to the history contract for
+    // each block. Include the storage slot so the WitnessDatabase has it.
+    let history_addr = alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS;
+    for &block_num in block_numbers {
+        if block_num > 0 {
+            let slot = U256::from((block_num - 1) % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
+            if !slots.iter().any(|(a, s)| *a == history_addr && *s == slot) {
+                slots.push((history_addr, slot));
+            }
         }
     }
 
@@ -238,9 +271,9 @@ fn test_witness_pipeline_single_block() {
     };
 
     // Reference execution discovers all accessed accounts/storage.
-    let raw_post = reference_execute(db, &zone_block);
-    let accessed_slots = collect_accessed_slots(&raw_post);
-    let absent = [TEMPO_STATE_READER_ADDRESS];
+    let (raw_post, _post_db) = reference_execute(db, &zone_block);
+    let accessed_slots = collect_accessed_slots(&raw_post, &[zone_block.number]);
+    let absent = [TEMPO_STATE_READER_ADDRESS, alloy_eips::eip4788::SYSTEM_ADDRESS];
     let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &absent);
 
     let genesis_header = ZoneHeader {
@@ -358,14 +391,14 @@ fn test_witness_pipeline_single_block() {
 
 /// Two-block pipeline test: verifies AccessSnapshot merging across blocks.
 ///
-/// Block 1 is a non-final block (no system tx), block 2 is final with
+/// Block 1 is a non-final block (EIP-2935 only), block 2 is final with
 /// finalizeWithdrawalBatch. The merged access snapshot should be the union
 /// of both blocks' accesses.
 #[test]
 fn test_witness_pipeline_two_block_merge() {
     use zone::witness::{AccessSnapshot, BuiltBlockWitness, WitnessGeneratorConfig, WitnessGenerator, WitnessStore};
 
-    let db = {
+    let make_db = || {
         let mut evm = setup_zone_evm(CHAIN_ID);
         use revm::state::AccountInfo;
         if !evm.db_mut().cache.accounts.contains_key(&Address::ZERO) {
@@ -375,26 +408,18 @@ fn test_witness_pipeline_two_block_merge() {
         db
     };
 
-    let pre_accounts: Vec<(Address, TestAccount)> = extract_db_accounts(&db)
+    let db_discovery = make_db();
+    let pre_accounts: Vec<(Address, TestAccount)> = extract_db_accounts(&db_discovery)
         .into_iter()
         .map(|(addr, snap)| (addr, snapshot_to_test_account(&snap)))
         .collect();
 
-    let placeholder_root = compute_state_root(&pre_accounts);
-    let genesis_header = ZoneHeader {
-        parent_hash: B256::ZERO,
-        beneficiary: SEQUENCER,
-        state_root: placeholder_root,
-        transactions_root: alloy_trie::EMPTY_ROOT_HASH,
-        receipts_root: alloy_trie::EMPTY_ROOT_HASH,
-        number: 0,
-        timestamp: 0,
-    };
+    let absent = [TEMPO_STATE_READER_ADDRESS, alloy_eips::eip4788::SYSTEM_ADDRESS];
 
-    // Block 1: non-final, no system txs.
-    let block1 = ZoneBlock {
+    // Discovery pass: run both blocks to find all accessed slots.
+    let block1_disc = ZoneBlock {
         number: 1,
-        parent_hash: genesis_header.block_hash(),
+        parent_hash: B256::ZERO,
         timestamp: 1000,
         beneficiary: SEQUENCER,
         tempo_header_rlp: None,
@@ -402,24 +427,11 @@ fn test_witness_pipeline_two_block_merge() {
         decryptions: vec![],
         finalize_withdrawal_batch_count: None,
         transactions: vec![],
-        expected_state_root: placeholder_root,
+        expected_state_root: B256::ZERO,
     };
-
-    let block1_header = ZoneHeader {
-        parent_hash: genesis_header.block_hash(),
-        beneficiary: SEQUENCER,
-        state_root: placeholder_root,
-        transactions_root: alloy_trie::EMPTY_ROOT_HASH,
-        receipts_root: alloy_trie::EMPTY_ROOT_HASH,
-        number: 1,
-        timestamp: 1000,
-    };
-    let block1_hash = block1_header.block_hash();
-
-    // Block 2: final, with finalizeWithdrawalBatch.
-    let block2 = ZoneBlock {
+    let block2_disc = ZoneBlock {
         number: 2,
-        parent_hash: block1_hash,
+        parent_hash: B256::ZERO,
         timestamp: 2000,
         beneficiary: SEQUENCER,
         tempo_header_rlp: None,
@@ -430,53 +442,88 @@ fn test_witness_pipeline_two_block_merge() {
         expected_state_root: B256::ZERO,
     };
 
-    // Reference execution for block 2 (final block with system tx).
-    let raw_post = reference_execute(db, &block2);
-    let accessed_slots = collect_accessed_slots(&raw_post);
-    let absent = [TEMPO_STATE_READER_ADDRESS];
-    let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &absent);
+    let (block1_post_disc, db_after1) = reference_execute(db_discovery, &block1_disc);
+    let (block2_post_disc, _) = reference_execute(db_after1, &block2_disc);
+
+    let block1_slots = collect_accessed_slots(&block1_post_disc, &[1]);
+    let block2_slots = collect_accessed_slots(&block2_post_disc, &[1, 2]);
+    let mut all_slots = block1_slots.clone();
+    for s in &block2_slots {
+        if !all_slots.contains(s) {
+            all_slots.push(*s);
+        }
+    }
+
+    let fixture = build_witness_with_accessed_slots(&pre_accounts, &all_slots, &absent);
 
     let genesis_header = ZoneHeader {
+        parent_hash: B256::ZERO,
+        beneficiary: SEQUENCER,
         state_root: fixture.state_root,
-        ..genesis_header
+        transactions_root: alloy_trie::EMPTY_ROOT_HASH,
+        receipts_root: alloy_trie::EMPTY_ROOT_HASH,
+        number: 0,
+        timestamp: 0,
     };
     let genesis_hash = genesis_header.block_hash();
 
-    let post_accounts = filter_real_accounts(raw_post, &pre_accounts);
-    let expected_state_root = compute_state_root(&post_accounts);
-
+    // Final pass: run both blocks with correct parent hashes.
+    let db_final = make_db();
     let block1 = ZoneBlock {
         parent_hash: genesis_hash,
-        expected_state_root: fixture.state_root,
-        ..block1
+        ..block1_disc
     };
+
+    let (block1_post, db_after1) = reference_execute(db_final, &block1);
+    let block1_accounts = filter_real_accounts(block1_post, &pre_accounts);
+    let block1_state_root = compute_state_root(&block1_accounts);
+
     let block1_header = ZoneHeader {
         parent_hash: genesis_hash,
-        state_root: fixture.state_root,
-        ..block1_header
+        beneficiary: SEQUENCER,
+        state_root: block1_state_root,
+        transactions_root: alloy_trie::EMPTY_ROOT_HASH,
+        receipts_root: alloy_trie::EMPTY_ROOT_HASH,
+        number: 1,
+        timestamp: 1000,
     };
     let block1_hash = block1_header.block_hash();
+
     let block2 = ZoneBlock {
         parent_hash: block1_hash,
-        expected_state_root,
+        ..block2_disc
+    };
+    let (block2_post, _) = reference_execute(db_after1, &block2);
+    let block2_accounts = filter_real_accounts(block2_post, &pre_accounts);
+    let block2_state_root = compute_state_root(&block2_accounts);
+
+    let block1 = ZoneBlock {
+        expected_state_root: block1_state_root,
+        ..block1
+    };
+    let block2 = ZoneBlock {
+        expected_state_root: block2_state_root,
         ..block2
     };
 
     // Build access snapshots for each block.
-    // Block 1 just touches the pre-state accounts.
     let snap1 = {
         let mut accounts = BTreeSet::new();
+        let mut storage: BTreeMap<Address, BTreeSet<U256>> = BTreeMap::new();
+        for (addr, slot) in &block1_slots {
+            accounts.insert(*addr);
+            storage.entry(*addr).or_default().insert(*slot);
+        }
         for (addr, _) in &pre_accounts {
             accounts.insert(*addr);
         }
-        AccessSnapshot { accounts, storage: BTreeMap::new() }
+        AccessSnapshot { accounts, storage }
     };
 
-    // Block 2 touches the same accounts + storage from execution.
     let snap2 = {
         let mut accounts = BTreeSet::new();
         let mut storage: BTreeMap<Address, BTreeSet<U256>> = BTreeMap::new();
-        for (addr, slot) in &accessed_slots {
+        for (addr, slot) in &block2_slots {
             accounts.insert(*addr);
             storage.entry(*addr).or_default().insert(*slot);
         }
@@ -515,7 +562,6 @@ fn test_witness_pipeline_two_block_merge() {
 
     assert_eq!(store.len(), 2);
 
-    // Take range and merge (as ProofGenerator does).
     let block_witnesses = store.take_range(1, 2);
     assert_eq!(block_witnesses.len(), 2);
     assert!(store.is_empty());
@@ -525,7 +571,6 @@ fn test_witness_pipeline_two_block_merge() {
         merged.merge(&bw.access_snapshot);
     }
 
-    // Merged should contain the union.
     assert!(merged.accounts.len() >= snap1.accounts.len());
     assert!(merged.accounts.len() >= snap2.accounts.len());
 

@@ -232,6 +232,22 @@ pub fn setup_zone_evm(chain_id: u64) -> TempoEvm<CacheDB<EmptyDB>> {
         nonce,
     );
 
+    // Deploy EIP-2935 blockhash history contract (predeploy, not via CREATE).
+    {
+        let code = alloy_eips::eip2935::HISTORY_STORAGE_CODE.clone();
+        let code_hash = alloy_primitives::keccak256(&code);
+        let bytecode = revm::bytecode::Bytecode::new_raw(code);
+        evm.db_mut().insert_account_info(
+            alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+            AccountInfo {
+                nonce: 1,
+                code_hash,
+                code: Some(bytecode),
+                ..Default::default()
+            },
+        );
+    }
+
     evm
 }
 

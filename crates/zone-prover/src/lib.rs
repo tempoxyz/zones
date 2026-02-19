@@ -208,6 +208,15 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
             )));
         }
 
+        // EIP-2935: pre-populate the State's block_hashes cache so BLOCKHASH
+        // for intra-batch blocks returns the correct hash. The EIP-2935
+        // system call writes parent_hash to the journal, but block_hash()
+        // bypasses the journal and reads from the underlying WitnessDatabase.
+        // Entries inserted here persist across blocks (State doesn't clear them).
+        if block.number > 0 {
+            current_state.block_hashes.insert(block.number - 1, prev_block_hash);
+        }
+
         // Update Tempo block number and state root if this block advances Tempo.
         if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
             current_tempo_block_number =
