@@ -363,8 +363,7 @@ impl ZoneTestNode {
         let (genesis, genesis_block_number) =
             build_l1_anchored_genesis(l1_http_url, portal_address).await?;
 
-        let throwaway_key =
-            k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         Self::launch_with_genesis(
             l1_ws_url.to_string(),
             portal_address,
@@ -431,8 +430,7 @@ impl ZoneTestNode {
         chain_id: u64,
     ) -> eyre::Result<Self> {
         // Generate a throwaway key for tests that don't use encrypted deposits.
-        let throwaway_key =
-            k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         Self::launch_with_genesis(
             l1_ws_url,
             portal_address,
