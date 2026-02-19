@@ -122,6 +122,12 @@ pub struct ZoneBlock {
     /// Beneficiary (must match registered sequencer)
     pub beneficiary: Address,
 
+    /// Block gas limit.
+    pub gas_limit: u64,
+
+    /// Base fee per gas used for EVM execution.
+    pub base_fee_per_gas: u64,
+
     /// Tempo header RLP used by the call (ZoneInbox.advanceTempo).
     /// If None, the block does not advance Tempo and the binding carries over.
     pub tempo_header_rlp: Option<Vec<u8>>,
