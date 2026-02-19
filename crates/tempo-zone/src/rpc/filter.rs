@@ -53,9 +53,7 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
 
     let caller_word = B256::left_padding_from(caller.as_slice());
 
-    if *topic0 == TRANSFER_TOPIC
-        || *topic0 == APPROVAL_TOPIC
-        || *topic0 == TRANSFER_WITH_MEMO_TOPIC
+    if *topic0 == TRANSFER_TOPIC || *topic0 == APPROVAL_TOPIC || *topic0 == TRANSFER_WITH_MEMO_TOPIC
     {
         // topic1 or topic2 must match caller
         topics.get(1) == Some(&caller_word) || topics.get(2) == Some(&caller_word)
@@ -78,8 +76,7 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
 pub fn filter_logs(logs: Vec<Log>, caller: &Address) -> Vec<Log> {
     logs.into_iter()
         .filter(|log| {
-            log.topic0()
-                .is_some_and(|t| WHITELISTED_TOPICS.contains(t))
+            log.topic0().is_some_and(|t| WHITELISTED_TOPICS.contains(t))
                 && is_caller_eligible(log, caller)
         })
         .collect()
@@ -215,11 +212,7 @@ mod tests {
         let spender = address!("0x0000000000000000000000000000000000000002");
         let log = make_log(
             Address::ZERO,
-            vec![
-                APPROVAL_TOPIC,
-                caller_word(&caller),
-                caller_word(&spender),
-            ],
+            vec![APPROVAL_TOPIC, caller_word(&caller), caller_word(&spender)],
         );
         assert!(is_caller_eligible(&log, &caller));
     }
