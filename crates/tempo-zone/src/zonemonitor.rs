@@ -318,6 +318,17 @@ impl ZoneMonitor {
         // Attempt to generate a proof from the builder's witness data.
         // If witness data is unavailable (e.g., block was imported rather than
         // built locally), fall back to empty proof bytes (POC mode).
+        let portal_withdrawal_batch_index = self
+            .batch_submitter
+            .read_portal_withdrawal_batch_index()
+            .await?;
+        let expected_withdrawal_batch_index = portal_withdrawal_batch_index
+            .checked_add(1)
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "portal withdrawalBatchIndex overflow: {portal_withdrawal_batch_index}"
+                )
+            })?;
         let (verifier_config, proof) = self
             .proof_generator
             .generate_batch_proof(
@@ -325,7 +336,7 @@ impl ZoneMonitor {
                 to,
                 tempo_block_number,
                 self.prev_block_hash,
-                self.portal_withdrawal_queue_tail,
+                expected_withdrawal_batch_index,
             )
             .await?;
 

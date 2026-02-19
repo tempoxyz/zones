@@ -77,7 +77,7 @@ where
         to: u64,
         tempo_block_number: u64,
         prev_block_hash: B256,
-        portal_withdrawal_queue_tail: u64,
+        expected_withdrawal_batch_index: u64,
     ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
         // TODO(production): Replace soft proof (ABI-packed BatchOutput) with a
         // real ZK proof (SP1) or TEE attestation (SGX/TDX).
@@ -181,7 +181,7 @@ where
             tempo_block_number,
             anchor_block_number: tempo_block_number,
             anchor_block_hash,
-            expected_withdrawal_batch_index: portal_withdrawal_queue_tail,
+            expected_withdrawal_batch_index,
             sequencer: self.witness_generator.sequencer(),
         };
 
@@ -280,7 +280,7 @@ pub trait BatchProofGenerator: Send + Sync {
         to: u64,
         tempo_block_number: u64,
         prev_block_hash: B256,
-        portal_withdrawal_queue_tail: u64,
+        expected_withdrawal_batch_index: u64,
     ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)>;
 }
 
@@ -295,7 +295,7 @@ where
         to: u64,
         tempo_block_number: u64,
         prev_block_hash: B256,
-        portal_withdrawal_queue_tail: u64,
+        expected_withdrawal_batch_index: u64,
     ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
         ProofGenerator::generate_batch_proof(
             self,
@@ -303,7 +303,7 @@ where
             to,
             tempo_block_number,
             prev_block_hash,
-            portal_withdrawal_queue_tail,
+            expected_withdrawal_batch_index,
         )
         .await
     }

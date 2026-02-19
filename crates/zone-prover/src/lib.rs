@@ -307,6 +307,15 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
     // Read the last batch from the post-execution state.
     let last_batch = read_last_batch_from_db(&mut current_state)?;
 
+    // Bind the prover to the expected withdrawal batch index supplied by the portal.
+    if last_batch.withdrawal_batch_index != witness.public_inputs.expected_withdrawal_batch_index {
+        return Err(ProverError::InconsistentState(format!(
+            "withdrawalBatchIndex {} does not match expected {}",
+            last_batch.withdrawal_batch_index,
+            witness.public_inputs.expected_withdrawal_batch_index,
+        )));
+    }
+
     // Validate TempoState binding.
     // Read TempoState.tempoBlockNumber() from post-execution zone state.
     let packed_slot = read_storage_from_db(
