@@ -49,6 +49,14 @@ pub struct ZoneStateFixture {
 pub fn build_storage_trie_with_proofs(
     entries: &[(U256, U256)],
 ) -> (B256, std::collections::HashMap<U256, Vec<Bytes>>) {
+    // Collect proof targets for all slots (including zero-valued ones).
+    let mut targets: Vec<Nibbles> = entries
+        .iter()
+        .map(|(slot, _)| Nibbles::unpack(keccak256(B256::from(slot.to_be_bytes()))))
+        .collect();
+    targets.sort();
+    targets.dedup();
+
     // Filter out zero values (they're absence proofs in the storage trie).
     let mut sorted: Vec<(Nibbles, U256, Vec<u8>)> = entries
         .iter()
@@ -62,11 +70,9 @@ pub fn build_storage_trie_with_proofs(
         .collect();
     sorted.sort_by(|a, b| a.0.cmp(&b.0));
 
-    if sorted.is_empty() {
+    if targets.is_empty() {
         return (EMPTY_ROOT_HASH, Default::default());
     }
-
-    let targets: Vec<Nibbles> = sorted.iter().map(|(k, _, _)| k.clone()).collect();
     let retainer = ProofRetainer::new(targets);
     let mut builder = HashBuilder::default().with_proof_retainer(retainer);
 
@@ -78,9 +84,10 @@ pub fn build_storage_trie_with_proofs(
     let proof_nodes = builder.take_proof_nodes();
 
     let mut slot_proofs = std::collections::HashMap::new();
-    for (key, slot, _) in &sorted {
+    for (slot, _value) in entries {
+        let key = Nibbles::unpack(keccak256(B256::from(slot.to_be_bytes())));
         let nodes: Vec<Bytes> = proof_nodes
-            .matching_nodes_sorted(key)
+            .matching_nodes_sorted(&key)
             .into_iter()
             .map(|(_, b)| b)
             .collect();
@@ -235,13 +242,18 @@ pub fn build_zone_state_fixture_with_absent(
         .iter()
         .map(|(addr, acct)| {
             let storage_root = storage_roots[addr];
+            let code_hash = acct
+                .code
+                .as_ref()
+                .map(|c| keccak256(c.as_slice()))
+                .unwrap_or(acct.code_hash);
             (
                 *addr,
                 TrieAccount {
                     nonce: acct.nonce,
                     balance: acct.balance,
                     storage_root,
-                    code_hash: acct.code_hash,
+                    code_hash,
                 },
             )
         })
@@ -268,12 +280,18 @@ pub fn build_zone_state_fixture_with_absent(
 
         let code = acct.code.as_ref().map(|c| Bytes::copy_from_slice(c));
 
+        let code_hash = acct
+            .code
+            .as_ref()
+            .map(|c| keccak256(c.as_slice()))
+            .unwrap_or(acct.code_hash);
+
         witness_accounts.insert(
             *addr,
             AccountWitness {
                 nonce: acct.nonce,
                 balance: acct.balance,
-                code_hash: acct.code_hash,
+                code_hash,
                 storage_root: *storage_root,
                 code,
                 storage,
@@ -316,13 +334,18 @@ pub fn compute_state_root(accounts: &[(Address, TestAccount)]) -> B256 {
     let trie_accounts: Vec<(Address, TrieAccount)> = accounts
         .iter()
         .map(|(addr, acct)| {
+            let code_hash = acct
+                .code
+                .as_ref()
+                .map(|c| keccak256(c.as_slice()))
+                .unwrap_or(acct.code_hash);
             (
                 *addr,
                 TrieAccount {
                     nonce: acct.nonce,
                     balance: acct.balance,
                     storage_root: storage_roots[addr],
-                    code_hash: acct.code_hash,
+                    code_hash,
                 },
             )
         })
