@@ -1,9 +1,6 @@
 //! [`ZoneRpcApi`] implementation backed by reth's EthApi.
 
-use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use alloy_consensus::transaction::SignerRecoverable;
 use alloy_eips::eip2718::Decodable2718;
@@ -67,17 +64,14 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
     /// After bumping reth, use its `ActiveFilters` API to periodically sync this
     /// map and remove entries for filters that no longer exist on the reth side.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
-    /// Set of enabled TIP-20 token addresses for log filtering.
-    enabled_tokens: HashSet<Address>,
 }
 
 impl<Api: EthApiTypes> TempoZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
-    pub fn new(eth: EthHandlers<Api>, enabled_tokens: HashSet<Address>) -> Self {
+    pub fn new(eth: EthHandlers<Api>) -> Self {
         Self {
             eth,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
-            enabled_tokens,
         }
     }
 
@@ -388,16 +382,11 @@ where
                 return to_raw(&logs);
             }
 
-            if self.enabled_tokens.is_empty() {
-                let empty: Vec<alloy_rpc_types_eth::Log> = vec![];
-                return to_raw(&empty);
-            }
-
-            super::filter::scope_filter(&mut filter, &self.enabled_tokens);
+            super::filter::scope_filter(&mut filter);
             let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
                 .await
                 .map_err(internal)?;
-            let filtered = super::filter::filter_logs(logs, &auth.caller, &self.enabled_tokens);
+            let filtered = super::filter::filter_logs(logs, &auth.caller);
             to_raw(&filtered)
         })
     }
@@ -405,7 +394,7 @@ where
     fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             if !auth.is_sequencer {
-                super::filter::scope_filter(&mut filter, &self.enabled_tokens);
+                super::filter::scope_filter(&mut filter);
             }
             let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
                 .await
@@ -428,7 +417,7 @@ where
                 return to_raw(&logs);
             }
 
-            let filtered = super::filter::filter_logs(logs, &auth.caller, &self.enabled_tokens);
+            let filtered = super::filter::filter_logs(logs, &auth.caller);
             to_raw(&filtered)
         })
     }
@@ -445,8 +434,7 @@ where
 
             match changes {
                 FilterChanges::Logs(logs) => {
-                    let filtered =
-                        super::filter::filter_logs(logs, &auth.caller, &self.enabled_tokens);
+                    let filtered = super::filter::filter_logs(logs, &auth.caller);
                     to_raw(&FilterChanges::<
                         alloy_rpc_types_eth::Transaction<TempoTxEnvelope>,
                     >::Logs(filtered))

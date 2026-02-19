@@ -4,8 +4,6 @@
 //! the caller's address appears in an eligible indexed topic position for that
 //! event type. This prevents users from observing other users' token activity.
 
-use std::collections::HashSet;
-
 use alloy_primitives::{Address, B256, b256};
 use alloy_rpc_types_eth::{Filter, FilterSet, Log};
 
@@ -55,7 +53,9 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
 
     let caller_word = B256::left_padding_from(caller.as_slice());
 
-    if *topic0 == TRANSFER_TOPIC || *topic0 == APPROVAL_TOPIC || *topic0 == TRANSFER_WITH_MEMO_TOPIC
+    if *topic0 == TRANSFER_TOPIC
+        || *topic0 == APPROVAL_TOPIC
+        || *topic0 == TRANSFER_WITH_MEMO_TOPIC
     {
         // topic1 or topic2 must match caller
         topics.get(1) == Some(&caller_word) || topics.get(2) == Some(&caller_word)
@@ -69,58 +69,34 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
 
 /// Filters logs to only those the caller is allowed to see.
 ///
-/// A log is included only when **all** of the following hold:
-/// 1. The log was emitted by one of the `enabled_tokens`.
-/// 2. Its topic0 is one of the [`WHITELISTED_TOPICS`].
-/// 3. The `caller` is eligible per [`is_caller_eligible`].
-pub fn filter_logs(
-    logs: Vec<Log>,
-    caller: &Address,
-    enabled_tokens: &HashSet<Address>,
-) -> Vec<Log> {
+/// A log is included only when **both** of the following hold:
+/// 1. Its topic0 is one of the [`WHITELISTED_TOPICS`].
+/// 2. The `caller` is eligible per [`is_caller_eligible`].
+///
+/// TODO: once the enabled-token registry is plumbed through, also filter
+/// by emitting contract address (only logs from enabled TIP-20 tokens).
+pub fn filter_logs(logs: Vec<Log>, caller: &Address) -> Vec<Log> {
     logs.into_iter()
         .filter(|log| {
-            enabled_tokens.contains(&log.address())
-                && log.topic0().is_some_and(|t| WHITELISTED_TOPICS.contains(t))
+            log.topic0()
+                .is_some_and(|t| WHITELISTED_TOPICS.contains(t))
                 && is_caller_eligible(log, caller)
         })
         .collect()
 }
 
-/// Scopes a user-supplied filter to only match enabled token addresses and
-/// whitelisted TIP-20 event topics.
+/// Scopes a user-supplied filter to only match whitelisted TIP-20 event topics.
 ///
-/// - **Address**: intersects the user's requested addresses with `enabled_tokens`.
-///   If the user omitted the address, restricts to all enabled tokens.
-///   If the intersection is empty, sets the address to a dummy that will match nothing.
-/// - **Topic0**: intersects the user's requested topic0 with [`WHITELISTED_TOPICS`].
-///   If the user omitted topic0, restricts to the whitelisted set.
-///   If the intersection is empty, sets topic0 to a dummy that will match nothing.
+/// Intersects the user's requested topic0 with [`WHITELISTED_TOPICS`].
+/// If the user omitted topic0, restricts to the whitelisted set.
+/// If the intersection is empty, sets topic0 to a dummy that will match nothing.
 ///
 /// The post-filter in [`filter_logs`] remains the actual privacy enforcement;
 /// this pre-filter reduces DB scan volume and timing side-channels.
-pub fn scope_filter(filter: &mut Filter, enabled_tokens: &HashSet<Address>) {
-    // --- Address scoping ---
-    let user_addrs: Vec<Address> = filter.address.iter().copied().collect();
-
-    let scoped_addrs: Vec<Address> = if user_addrs.is_empty() {
-        // User didn't specify — restrict to all enabled tokens
-        enabled_tokens.iter().copied().collect()
-    } else {
-        // Intersect user's requested addresses with enabled tokens
-        user_addrs
-            .into_iter()
-            .filter(|a| enabled_tokens.contains(a))
-            .collect()
-    };
-
-    if scoped_addrs.is_empty() {
-        // No matching addresses — use a dummy address that will never match
-        filter.address = FilterSet::from(Address::ZERO);
-    } else {
-        filter.address = FilterSet::from(scoped_addrs);
-    }
-
+///
+/// TODO: once the enabled-token registry is plumbed through, also scope the
+/// filter's `address` field to only match enabled TIP-20 token addresses.
+pub fn scope_filter(filter: &mut Filter) {
     // --- Topic0 scoping ---
     let user_topic0: Vec<B256> = filter.topics[0].iter().copied().collect();
 
@@ -239,7 +215,11 @@ mod tests {
         let spender = address!("0x0000000000000000000000000000000000000002");
         let log = make_log(
             Address::ZERO,
-            vec![APPROVAL_TOPIC, caller_word(&caller), caller_word(&spender)],
+            vec![
+                APPROVAL_TOPIC,
+                caller_word(&caller),
+                caller_word(&spender),
+            ],
         );
         assert!(is_caller_eligible(&log, &caller));
     }
@@ -314,7 +294,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // is_caller_eligible — Mint
+    // is_caller_eligible — Mint / Burn
     // ---------------------------------------------------------------
 
     #[test]
@@ -332,10 +312,6 @@ mod tests {
         assert!(!is_caller_eligible(&log, &caller));
     }
 
-    // ---------------------------------------------------------------
-    // is_caller_eligible — Burn
-    // ---------------------------------------------------------------
-
     #[test]
     fn burn_eligible_as_burner() {
         let caller = address!("0x0000000000000000000000000000000000000001");
@@ -352,7 +328,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // is_caller_eligible — unknown topic
+    // is_caller_eligible — unknown / empty topic
     // ---------------------------------------------------------------
 
     #[test]
@@ -384,10 +360,6 @@ mod tests {
             zone_token,
             vec![TRANSFER_TOPIC, caller_word(&caller), caller_word(&other)],
         );
-        let wrong_address = make_log(
-            other,
-            vec![TRANSFER_TOPIC, caller_word(&caller), caller_word(&other)],
-        );
         let wrong_topic = make_log(
             zone_token,
             vec![B256::with_last_byte(0x01), caller_word(&caller)],
@@ -397,9 +369,8 @@ mod tests {
             vec![TRANSFER_TOPIC, caller_word(&other), caller_word(&other)],
         );
 
-        let logs = vec![eligible.clone(), wrong_address, wrong_topic, not_eligible];
-        let enabled = HashSet::from([zone_token]);
-        let result = filter_logs(logs, &caller, &enabled);
+        let logs = vec![eligible.clone(), wrong_topic, not_eligible];
+        let result = filter_logs(logs, &caller);
 
         assert_eq!(result.len(), 1);
         assert_eq!(result[0], eligible);
@@ -407,39 +378,9 @@ mod tests {
 
     #[test]
     fn filter_logs_empty_input() {
-        let zone_token = address!("0x000000000000000000000000000000000000aaaa");
         let caller = address!("0x0000000000000000000000000000000000000001");
-        let enabled = HashSet::from([zone_token]);
-        let result = filter_logs(vec![], &caller, &enabled);
+        let result = filter_logs(vec![], &caller);
         assert!(result.is_empty());
-    }
-
-    #[test]
-    fn filter_logs_multi_asset() {
-        let token_a = address!("0x000000000000000000000000000000000000aaaa");
-        let token_b = address!("0x000000000000000000000000000000000000bbbb");
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
-        let enabled = HashSet::from([token_a, token_b]);
-
-        let log_a = make_log(
-            token_a,
-            vec![TRANSFER_TOPIC, caller_word(&caller), caller_word(&other)],
-        );
-        let log_b = make_log(token_b, vec![MINT_TOPIC, caller_word(&caller)]);
-        let log_unknown = make_log(
-            address!("0x000000000000000000000000000000000000cccc"),
-            vec![TRANSFER_TOPIC, caller_word(&caller), caller_word(&other)],
-        );
-
-        let result = filter_logs(
-            vec![log_a.clone(), log_b.clone(), log_unknown],
-            &caller,
-            &enabled,
-        );
-        assert_eq!(result.len(), 2);
-        assert_eq!(result[0], log_a);
-        assert_eq!(result[1], log_b);
     }
 
     // ---------------------------------------------------------------
@@ -447,57 +388,9 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn scope_filter_no_user_address() {
-        let token_a = address!("0x000000000000000000000000000000000000aaaa");
-        let token_b = address!("0x000000000000000000000000000000000000bbbb");
-        let enabled = HashSet::from([token_a, token_b]);
-        let mut filter = Filter::default();
-        scope_filter(&mut filter, &enabled);
-        // Should set address to all enabled tokens
-        assert!(filter.address.contains(&token_a));
-        assert!(filter.address.contains(&token_b));
-        assert_eq!(filter.address.len(), 2);
-    }
-
-    #[test]
-    fn scope_filter_intersects_user_address() {
-        let token_a = address!("0x000000000000000000000000000000000000aaaa");
-        let token_b = address!("0x000000000000000000000000000000000000bbbb");
-        let outsider = address!("0x0000000000000000000000000000000000000001");
-        let enabled = HashSet::from([token_a, token_b]);
-        let mut filter = Filter {
-            address: FilterSet::from(vec![token_a, outsider]),
-            ..Default::default()
-        };
-        scope_filter(&mut filter, &enabled);
-        // Only token_a survives the intersection
-        assert!(filter.address.contains(&token_a));
-        assert!(!filter.address.contains(&outsider));
-        assert_eq!(filter.address.len(), 1);
-    }
-
-    #[test]
-    fn scope_filter_empty_intersection() {
-        let token_a = address!("0x000000000000000000000000000000000000aaaa");
-        let outsider = address!("0x0000000000000000000000000000000000000001");
-        let enabled = HashSet::from([token_a]);
-        let mut filter = Filter {
-            address: FilterSet::from(outsider),
-            ..Default::default()
-        };
-        scope_filter(&mut filter, &enabled);
-        // Should fall back to dummy Address::ZERO
-        assert_eq!(filter.address, FilterSet::from(Address::ZERO));
-    }
-
-    #[test]
     fn scope_filter_scopes_topic0() {
-        let token_a = address!("0x000000000000000000000000000000000000aaaa");
-        let enabled = HashSet::from([token_a]);
         let mut filter = Filter::default();
-        // User doesn't specify topic0
-        scope_filter(&mut filter, &enabled);
-        // Should restrict topic0 to all whitelisted topics
+        scope_filter(&mut filter);
         for topic in &WHITELISTED_TOPICS {
             assert!(filter.topics[0].contains(topic));
         }
@@ -506,16 +399,21 @@ mod tests {
 
     #[test]
     fn scope_filter_intersects_topic0() {
-        let token_a = address!("0x000000000000000000000000000000000000aaaa");
-        let enabled = HashSet::from([token_a]);
         let bogus_topic = B256::with_last_byte(0xff);
         let mut filter = Filter::default();
-        // User requests TRANSFER_TOPIC and a bogus topic
         filter.topics[0] = FilterSet::from(vec![TRANSFER_TOPIC, bogus_topic]);
-        scope_filter(&mut filter, &enabled);
-        // Only TRANSFER_TOPIC survives
+        scope_filter(&mut filter);
         assert!(filter.topics[0].contains(&TRANSFER_TOPIC));
         assert!(!filter.topics[0].contains(&bogus_topic));
         assert_eq!(filter.topics[0].len(), 1);
+    }
+
+    #[test]
+    fn scope_filter_empty_intersection() {
+        let bogus = B256::with_last_byte(0xff);
+        let mut filter = Filter::default();
+        filter.topics[0] = FilterSet::from(bogus);
+        scope_filter(&mut filter);
+        assert_eq!(filter.topics[0], FilterSet::from(B256::ZERO));
     }
 }
