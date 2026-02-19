@@ -9,7 +9,7 @@
 //! Requires Foundry artifacts: run `forge build --skip test` in `docs/specs/`.
 
 use alloy_evm::Evm;
-use alloy_primitives::{Address, B256, U256, keccak256, map::HashMap};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256, map::HashMap};
 use revm::{
     DatabaseCommit,
     database::{CacheDB, EmptyDB},
@@ -18,7 +18,7 @@ use revm::{
 use zone_prover::{
     execute,
     prove_zone_batch,
-    testutil::{TestAccount, build_zone_state_fixture, compute_state_root},
+    testutil::{TestAccount, build_zone_state_fixture_with_absent, compute_state_root},
     types::*,
 };
 use zone_test_utils::{extract_db_accounts, setup_zone_evm, build_dummy_header_rlp};
@@ -93,6 +93,7 @@ fn execute_on_cache_db(
     let env = EvmEnv { cfg_env, block_env };
     let factory = TempoEvmFactory::default();
     let mut evm = factory.create_evm(db, env);
+    zone_test_utils::register_mock_tempo_state_reader(&mut evm);
 
     // 1. advanceTempo (if block advances Tempo).
     if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
@@ -192,11 +193,15 @@ fn deploy_zone_contracts() -> CacheDB<EmptyDB> {
 /// `accessed_slots` contains (address, slot) pairs for every slot accessed during the
 /// reference execution. Zero-valued slots are included in the witness `storage` map
 /// so the prover can read them, but only non-zero slots get MPT storage proofs.
+///
+/// `absent_addresses` are addresses accessed during execution that don't exist in
+/// the pre-state (e.g., the TempoStateReader precompile). The fixture will include
+/// MPT absence proofs for these.
 fn build_witness_with_accessed_slots(
     pre_accounts: &[(Address, TestAccount)],
     accessed_slots: &[(Address, U256)],
+    absent_addresses: &[Address],
 ) -> zone_prover::testutil::ZoneStateFixture {
-    // Merge accessed zero-valued slots into the pre-accounts.
     let mut enriched: Vec<(Address, TestAccount)> = pre_accounts.to_vec();
 
     for (addr, slot) in accessed_slots {
@@ -207,7 +212,30 @@ fn build_witness_with_accessed_slots(
         }
     }
 
-    build_zone_state_fixture(&enriched)
+    build_zone_state_fixture_with_absent(&enriched, absent_addresses)
+}
+
+/// Filter post-execution accounts to only include accounts that should appear
+/// in the state trie.
+///
+/// CacheDB caches ALL accessed accounts, including ones that were merely loaded
+/// (e.g., precompile addresses, STATICCALL targets). These "phantom" empty
+/// accounts shouldn't appear in the state trie. We keep an account if it was
+/// in the initial pre-state OR if it's non-empty (has nonce, balance, or code).
+fn filter_real_accounts(
+    post_accounts: Vec<(Address, TestAccount)>,
+    pre_accounts: &[(Address, TestAccount)],
+) -> Vec<(Address, TestAccount)> {
+    post_accounts
+        .into_iter()
+        .filter(|(addr, acct)| {
+            let in_pre = pre_accounts.iter().any(|(a, _)| a == addr);
+            let is_non_empty = acct.nonce > 0
+                || !acct.balance.is_zero()
+                || acct.code_hash != alloy_primitives::KECCAK256_EMPTY;
+            in_pre || is_non_empty
+        })
+        .collect()
 }
 
 /// Collect all (address, slot) pairs from the post-execution CacheDB,
@@ -287,7 +315,7 @@ fn test_real_contracts_finalize_only() {
 
     // Discover all accessed storage slots and build the witness with them.
     let accessed_slots = collect_accessed_slots(&post_accounts);
-    let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots);
+    let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &[]);
 
     // The state root may differ from the placeholder if we added zero-valued slots.
     // Zero-valued slots don't appear in the MPT so the root should be the same.
@@ -374,16 +402,88 @@ fn test_real_contracts_finalize_only() {
     assert_ne!(output.block_transition.next_block_hash, genesis_hash);
 }
 
+/// Build L1 state proof data for the prover's TempoStateReader precompile.
+///
+/// Creates a minimal fake L1 state trie containing the `tempoPortal` account
+/// (empty storage, no code). Returns the L1 state root and the `BatchStateProof`
+/// with account and storage proofs so the prover can verify the `readStorageAt`
+/// call that `advanceTempo` makes.
+fn build_l1_state_proof(
+    tempo_portal: Address,
+    tempo_block_number: u64,
+    zone_block_index: u64,
+    deposit_queue_hash_slot: U256,
+) -> (B256, BatchStateProof) {
+    use alloy_trie::{EMPTY_ROOT_HASH, HashBuilder, TrieAccount, proof::ProofRetainer};
+    use nybbles::Nibbles;
+
+    // The tempoPortal account exists on L1 with empty storage (slot 4 = 0).
+    let l1_account = TrieAccount {
+        nonce: 0,
+        balance: U256::ZERO,
+        storage_root: EMPTY_ROOT_HASH,
+        code_hash: alloy_primitives::KECCAK256_EMPTY,
+    };
+
+    // Build L1 state trie with the single account.
+    let key = Nibbles::unpack(keccak256(tempo_portal));
+    let mut encoded = Vec::new();
+    alloy_rlp::Encodable::encode(&l1_account, &mut encoded);
+
+    let retainer = ProofRetainer::new(vec![key.clone()]);
+    let mut builder = HashBuilder::default().with_proof_retainer(retainer);
+    builder.add_leaf(key.clone(), &encoded);
+
+    let l1_state_root = builder.root();
+    let proof_nodes = builder.take_proof_nodes();
+
+    // Collect account proof nodes and add them to the node pool.
+    let account_proof_bytes: Vec<Bytes> = proof_nodes
+        .matching_nodes_sorted(&key)
+        .into_iter()
+        .map(|(_, b)| b)
+        .collect();
+
+    let mut node_pool = HashMap::default();
+    let mut account_path_hashes = Vec::new();
+    for node in &account_proof_bytes {
+        let hash = keccak256(node.as_ref());
+        node_pool.insert(hash, node.to_vec());
+        account_path_hashes.push(hash);
+    }
+
+    // Storage proof for slot 4 in an empty trie is empty (absence proof).
+    let batch_proof = BatchStateProof {
+        node_pool,
+        reads: vec![L1StateRead {
+            zone_block_index,
+            tempo_block_number,
+            account: tempo_portal,
+            slot: deposit_queue_hash_slot,
+            storage_path: vec![], // empty trie → no proof nodes needed
+            value: U256::ZERO,
+        }],
+        account_proofs: vec![L1AccountProof {
+            tempo_block_number,
+            account: tempo_portal,
+            nonce: 0,
+            balance: U256::ZERO,
+            storage_root: EMPTY_ROOT_HASH,
+            code_hash: alloy_primitives::KECCAK256_EMPTY,
+            account_path: account_path_hashes,
+        }],
+    };
+
+    (l1_state_root, batch_proof)
+}
+
 /// Single-block test: advanceTempo + finalizeWithdrawalBatch with real contracts.
 ///
 /// Exercises both system transactions with real TempoState and ZoneInbox bytecode.
 /// TempoState storage is mutated by finalizeTempo (called internally by advanceTempo).
-///
-/// IGNORED: advanceTempo currently reverts with real contracts (known issue,
-/// see `crates/tempo-zone/tests/advance_tempo.rs`). Enable once the Solidity
-/// contracts are fixed.
+/// A mock TempoStateReader precompile is used for the reference CacheDB execution,
+/// while the prover uses its own proof-based precompile with L1 state proofs.
 #[test]
-#[ignore]
 fn test_real_contracts_advance_and_finalize() {
     let db = deploy_zone_contracts();
 
@@ -409,10 +509,21 @@ fn test_real_contracts_advance_and_finalize() {
     let genesis_tempo_rlp = build_dummy_header_rlp();
     let genesis_tempo_hash = keccak256(&genesis_tempo_rlp);
 
+    // Build L1 state proofs for the precompile. The contract reads
+    // PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT (slot 4) from tempoPortal.
+    let tempo_portal = alloy_primitives::Address::repeat_byte(0xbb);
+    let deposit_queue_slot = U256::from(4);
+    let new_tempo_block_number = 1u64;
+    let (l1_state_root, tempo_state_proofs) =
+        build_l1_state_proof(tempo_portal, new_tempo_block_number, 0, deposit_queue_slot);
+
+    // Set the Tempo header's state root to the L1 state root so the prover's
+    // precompile can verify account and storage proofs against it.
     let next_tempo_header = tempo_primitives::TempoHeader {
         inner: alloy_consensus::Header {
             number: 1,
             parent_hash: genesis_tempo_hash,
+            state_root: l1_state_root,
             ..Default::default()
         },
         ..Default::default()
@@ -437,11 +548,14 @@ fn test_real_contracts_advance_and_finalize() {
         expected_state_root: B256::ZERO,
     };
 
-    // Reference execution.
-    let post_accounts = execute_on_cache_db(db, &zone_block, true);
+    // Reference execution (with mock precompile for TempoStateReader).
+    let raw_post_accounts = execute_on_cache_db(db, &zone_block, true);
 
-    let accessed_slots = collect_accessed_slots(&post_accounts);
-    let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots);
+    let accessed_slots = collect_accessed_slots(&raw_post_accounts);
+    // The TempoStateReader precompile address doesn't exist as an account —
+    // generate an MPT absence proof so the prover can confirm it's not in the trie.
+    let absent = [zone_test_utils::TEMPO_STATE_READER_ADDRESS];
+    let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &absent);
 
     let genesis_header = ZoneHeader {
         state_root: fixture.state_root,
@@ -449,6 +563,9 @@ fn test_real_contracts_advance_and_finalize() {
     };
     let genesis_hash = genesis_header.block_hash();
 
+    // Filter out phantom accounts that CacheDB cached but that don't belong in
+    // the state trie (e.g., the precompile address loaded during STATICCALL).
+    let post_accounts = filter_real_accounts(raw_post_accounts, &pre_accounts);
     let expected_state_root = compute_state_root(&post_accounts);
     println!("Expected post-state root: {expected_state_root}");
 
@@ -458,7 +575,6 @@ fn test_real_contracts_advance_and_finalize() {
         ..zone_block
     };
 
-    let new_tempo_block_number = 1u64;
     let new_tempo_block_hash = keccak256(&next_tempo_rlp);
 
     let outbox_wbi = find_storage_value(
@@ -483,11 +599,7 @@ fn test_real_contracts_advance_and_finalize() {
         prev_block_header: genesis_header,
         zone_blocks: vec![zone_block],
         initial_zone_state: fixture.witness,
-        tempo_state_proofs: BatchStateProof {
-            node_pool: HashMap::default(),
-            reads: vec![],
-            account_proofs: vec![],
-        },
+        tempo_state_proofs,
         tempo_ancestry_headers: vec![],
     };
 

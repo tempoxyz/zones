@@ -66,6 +66,8 @@ pub struct ZoneNode {
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
     sequencer: Option<alloy_primitives::Address>,
+    /// Shared witness store for builder → monitor communication.
+    witness_store: crate::witness::SharedWitnessStore,
 }
 
 impl ZoneNode {
@@ -82,6 +84,7 @@ impl ZoneNode {
         l1_state_listener_config: L1StateListenerConfig,
         l1_state_cache: SharedL1StateCache,
         sequencer: Option<alloy_primitives::Address>,
+        witness_store: crate::witness::SharedWitnessStore,
     ) -> Self {
         Self {
             deposit_queue,
@@ -90,7 +93,13 @@ impl ZoneNode {
             l1_state_listener_config,
             l1_state_cache,
             sequencer,
+            witness_store,
         }
+    }
+
+    /// Get a clone of the shared witness store handle.
+    pub fn witness_store(&self) -> crate::witness::SharedWitnessStore {
+        self.witness_store.clone()
     }
 
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
@@ -98,6 +107,7 @@ impl ZoneNode {
         deposit_queue: crate::DepositQueue,
         executor_builder: ZoneExecutorBuilder,
         sequencer: Option<alloy_primitives::Address>,
+        witness_store: crate::witness::SharedWitnessStore,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -116,6 +126,7 @@ impl ZoneNode {
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
                 deposit_queue,
                 sequencer,
+                witness_store,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -267,7 +278,12 @@ where
             self.l1_state_listener_config.clone(),
             self.l1_state_cache.clone(),
         );
-        Self::components(self.deposit_queue.clone(), executor_builder, self.sequencer)
+        Self::components(
+            self.deposit_queue.clone(),
+            executor_builder,
+            self.sequencer,
+            self.witness_store.clone(),
+        )
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -373,8 +389,11 @@ where
             ctx.task_executor().clone(),
         );
 
-        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), std::sync::Arc::new(l1_provider));
-        info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader precompile");
+        let evm_config = ZoneEvmConfig::new_with_recording(
+            ctx.chain_spec(),
+            std::sync::Arc::new(l1_provider),
+        );
+        info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader precompile (recording enabled)");
         Ok(evm_config)
     }
 }

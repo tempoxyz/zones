@@ -134,12 +134,88 @@ pub fn build_state_trie_with_proofs(
     (root, addr_proofs)
 }
 
+/// Build a state trie and return proofs for both present and absent addresses.
+///
+/// This extends [`build_state_trie_with_proofs`] by also collecting proof nodes
+/// for addresses that do NOT appear in the trie (absence proofs). The `HashBuilder`'s
+/// `ProofRetainer` naturally produces the necessary proof path for absent keys.
+pub fn build_state_trie_with_absence_proofs(
+    accounts: &[(Address, TrieAccount)],
+    absent_addresses: &[Address],
+) -> (B256, std::collections::HashMap<Address, Vec<Bytes>>) {
+    let mut sorted: Vec<(Nibbles, Address, Vec<u8>)> = accounts
+        .iter()
+        .map(|(addr, acct)| {
+            let key = Nibbles::unpack(keccak256(*addr));
+            let mut enc = Vec::new();
+            alloy_rlp::Encodable::encode(acct, &mut enc);
+            (key, *addr, enc)
+        })
+        .collect();
+    sorted.sort_by(|a, b| a.0.cmp(&b.0));
+
+    // Collect proof targets for both present and absent addresses.
+    let mut targets: Vec<Nibbles> = sorted.iter().map(|(k, _, _)| k.clone()).collect();
+    for addr in absent_addresses {
+        targets.push(Nibbles::unpack(keccak256(*addr)));
+    }
+    targets.sort();
+    targets.dedup();
+
+    if sorted.is_empty() && absent_addresses.is_empty() {
+        return (EMPTY_ROOT_HASH, Default::default());
+    }
+
+    let retainer = ProofRetainer::new(targets);
+    let mut builder = HashBuilder::default().with_proof_retainer(retainer);
+
+    for (key, _, value) in &sorted {
+        builder.add_leaf(key.clone(), value);
+    }
+
+    let root = builder.root();
+    let proof_nodes = builder.take_proof_nodes();
+
+    let mut addr_proofs = std::collections::HashMap::new();
+    for (key, addr, _) in &sorted {
+        let nodes: Vec<Bytes> = proof_nodes
+            .matching_nodes_sorted(key)
+            .into_iter()
+            .map(|(_, b)| b)
+            .collect();
+        addr_proofs.insert(*addr, nodes);
+    }
+    for addr in absent_addresses {
+        let key = Nibbles::unpack(keccak256(*addr));
+        let nodes: Vec<Bytes> = proof_nodes
+            .matching_nodes_sorted(&key)
+            .into_iter()
+            .map(|(_, b)| b)
+            .collect();
+        addr_proofs.insert(*addr, nodes);
+    }
+
+    (root, addr_proofs)
+}
+
 /// Build a complete `ZoneStateFixture` from a map of address→TestAccount.
 ///
 /// This builds real MPT proofs for every account and every storage slot,
 /// suitable for feeding into `prove_zone_batch`.
 pub fn build_zone_state_fixture(
     accounts: &[(Address, TestAccount)],
+) -> ZoneStateFixture {
+    build_zone_state_fixture_with_absent(accounts, &[])
+}
+
+/// Build a complete `ZoneStateFixture` with additional absence proofs.
+///
+/// Like [`build_zone_state_fixture`], but also generates MPT absence proofs for
+/// `absent_addresses` — addresses that the EVM will access but that don't exist
+/// in the state (e.g., the TempoStateReader precompile address).
+pub fn build_zone_state_fixture_with_absent(
+    accounts: &[(Address, TestAccount)],
+    absent_addresses: &[Address],
 ) -> ZoneStateFixture {
     // Step 1: Build storage tries for each account.
     let mut storage_roots = std::collections::HashMap::new();
@@ -171,8 +247,9 @@ pub fn build_zone_state_fixture(
         })
         .collect();
 
-    // Step 3: Build the state trie.
-    let (state_root, addr_proofs) = build_state_trie_with_proofs(&trie_accounts);
+    // Step 3: Build the state trie with proof targets for both present and absent accounts.
+    let (state_root, addr_proofs) =
+        build_state_trie_with_absence_proofs(&trie_accounts, absent_addresses);
 
     // Step 4: Assemble ZoneStateWitness.
     let mut witness_accounts = HashMap::default();
@@ -206,11 +283,19 @@ pub fn build_zone_state_fixture(
         );
     }
 
+    // Build absence proofs for requested addresses.
+    let mut absent_accounts = HashMap::default();
+    for addr in absent_addresses {
+        if let Some(proof) = addr_proofs.get(addr) {
+            absent_accounts.insert(*addr, proof.clone());
+        }
+    }
+
     ZoneStateFixture {
         state_root,
         witness: ZoneStateWitness {
             accounts: witness_accounts,
-            absent_accounts: HashMap::default(),
+            absent_accounts,
             state_root,
         },
         storage_roots,

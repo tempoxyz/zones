@@ -74,6 +74,11 @@ impl WitnessGenerator {
         Self { config }
     }
 
+    /// Returns the sequencer address from the config.
+    pub fn sequencer(&self) -> Address {
+        self.config.sequencer
+    }
+
     /// Generate a [`ZoneStateWitness`] from recorded state accesses.
     ///
     /// Uses [`StateProofProvider::proof()`] to generate real MPT proofs for each

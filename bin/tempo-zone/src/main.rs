@@ -128,6 +128,7 @@ fn main() {
                 ..Default::default()
             };
             let l1_state_cache = SharedL1StateCache::new(HashSet::from([args.portal_address]));
+            let witness_store: zone::witness::SharedWitnessStore = Default::default();
             let node = ZoneNode::new(
                 deposits,
                 l1_config,
@@ -135,6 +136,7 @@ fn main() {
                 l1_state_listener_config,
                 l1_state_cache,
                 sequencer_addr,
+                witness_store.clone(),
             );
 
             // NOTE: `--dev` is no longer needed for block production — the ZoneEngine
@@ -167,7 +169,13 @@ fn main() {
                     zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 };
 
-                let seq_handle = zone::spawn_zone_sequencer(sequencer_config, signer).await;
+                let seq_handle = zone::spawn_zone_sequencer(
+                    sequencer_config,
+                    signer,
+                    witness_store.clone(),
+                    sequencer_addr,
+                )
+                .await;
 
                 info!(
                     target: "reth::cli",

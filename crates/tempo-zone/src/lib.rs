@@ -31,6 +31,7 @@ pub use l1::{
 };
 pub use node::{ZoneExecutorBuilder, ZoneNode};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
+pub use witness::{SharedWitnessStore, WitnessStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 
 use std::{sync::Arc, time::Duration};
@@ -87,6 +88,8 @@ pub struct ZoneSequencerHandle {
 pub async fn spawn_zone_sequencer(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
+    witness_store: SharedWitnessStore,
+    sequencer: Address,
 ) -> ZoneSequencerHandle {
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
@@ -129,6 +132,8 @@ pub async fn spawn_zone_sequencer(
         l1_provider,
         withdrawal_store,
         withdrawal_notify,
+        witness_store,
+        sequencer,
     );
 
     ZoneSequencerHandle {

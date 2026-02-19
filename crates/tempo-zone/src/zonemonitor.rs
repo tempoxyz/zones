@@ -30,12 +30,16 @@ use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
-use tracing::{error, info, instrument, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox},
     batch::{BatchData, BatchSubmitter},
     withdrawals::SharedWithdrawalStore,
+    witness::{
+        FetchedL1Proof, SharedWitnessStore, WitnessGenerator, WitnessGeneratorConfig,
+        group_l1_reads_for_proof_fetch,
+    },
 };
 
 /// Maximum number of times to retry a failed batch submission before resyncing.
@@ -102,19 +106,32 @@ pub struct ZoneMonitor {
     /// starts at 0 and increments each time a batch with a non-zero
     /// `withdrawal_queue_hash` is successfully submitted to L1.
     portal_withdrawal_queue_tail: u64,
+    /// Shared witness store — per-block witness data written by the builder
+    /// and consumed here for proof generation.
+    witness_store: SharedWitnessStore,
+    /// Shared L1 provider for fetching `eth_getProof` responses.
+    l1_provider: DynProvider<TempoNetwork>,
+    /// Witness generator for assembling `BatchWitness` from recorded accesses.
+    witness_generator: WitnessGenerator,
 }
 
 impl ZoneMonitor {
-    /// Create a new zone monitor with integrated batch submission.
+    /// Create a new zone monitor with integrated batch submission and witness generation.
     ///
     /// Builds a read-only HTTP provider (no wallet) pointed at the Zone L2 RPC,
     /// instantiates the on-chain contract handles, and creates a [`BatchSubmitter`]
     /// backed by the shared `l1_provider` for posting batches to the ZonePortal on L1.
+    ///
+    /// The `witness_store` is shared with the [`ZonePayloadBuilder`] which writes
+    /// per-block witness data during block production. The `l1_provider` is used
+    /// both for batch submission and for fetching `eth_getProof` responses.
     pub async fn new(
         config: ZoneMonitorConfig,
         l1_provider: DynProvider<TempoNetwork>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
+        witness_store: SharedWitnessStore,
+        sequencer: Address,
     ) -> Self {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_http(config.zone_rpc_url.parse().expect("valid Zone RPC URL"))
@@ -124,12 +141,15 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let batch_submitter = BatchSubmitter::new(config.portal_address, l1_provider);
+        let batch_submitter = BatchSubmitter::new(config.portal_address, l1_provider.clone());
 
         let prev_block_hash = batch_submitter
             .read_portal_block_hash()
             .await
             .expect("failed to read portal blockHash at startup");
+
+        let witness_generator =
+            WitnessGenerator::new(WitnessGeneratorConfig { sequencer });
 
         Self {
             config,
@@ -144,6 +164,9 @@ impl ZoneMonitor {
             prev_processed_deposit_hash: B256::ZERO,
             prev_block_hash,
             portal_withdrawal_queue_tail: 0,
+            witness_store,
+            l1_provider,
+            witness_generator,
         }
     }
 
@@ -304,17 +327,12 @@ impl ZoneMonitor {
 
         // --- 5. Build and submit BatchData ---
         //
-        // Proof generation is not yet wired up (requires the recording wrappers
-        // in ZonePayloadBuilder to capture state accesses during block building,
-        // then feeding those into WitnessGenerator + prove_zone_batch). For now,
-        // we submit with empty proof bytes (POC mode).
-        //
-        // When proof generation is enabled, the flow will be:
-        //   1. Collect recorded state accesses from the builder (RecordingDatabase)
-        //   2. Collect recorded L1 reads from the TempoStateReader (RecordingL1StateProvider)
-        //   3. Use WitnessGenerator to assemble a BatchWitness
-        //   4. Call zone_prover::prove_zone_batch(witness) to get BatchOutput + proof
-        //   5. Include the proof bytes in BatchData
+        // Attempt to generate a proof from the builder's witness data.
+        // If witness data is unavailable (e.g., block was imported rather than
+        // built locally), fall back to empty proof bytes (POC mode).
+        let (verifier_config, proof) =
+            self.generate_proof(from, to, tempo_block_number).await;
+
         let batch_data = BatchData {
             tempo_block_number,
             prev_block_hash: self.prev_block_hash,
@@ -322,14 +340,182 @@ impl ZoneMonitor {
             prev_processed_deposit_hash: self.prev_processed_deposit_hash,
             next_processed_deposit_hash,
             withdrawal_queue_hash,
-            verifier_config: alloy_primitives::Bytes::new(),
-            proof: alloy_primitives::Bytes::new(),
+            verifier_config,
+            proof,
         };
 
         // Submit — state only advances on success.
         self.submit_batch_with_retry(&batch_data, to).await?;
 
         Ok(())
+    }
+
+    /// Generate a proof for the given block range.
+    ///
+    /// Reads per-block witness data from the shared [`WitnessStore`], fetches
+    /// L1 `eth_getProof` responses, assembles the [`BatchWitness`], and runs
+    /// the prover. Returns `(verifier_config, proof)` on success, or empty
+    /// bytes on failure (falling back to POC mode).
+    async fn generate_proof(
+        &self,
+        from: u64,
+        to: u64,
+        tempo_block_number: u64,
+    ) -> (alloy_primitives::Bytes, alloy_primitives::Bytes) {
+        let empty = || {
+            (
+                alloy_primitives::Bytes::new(),
+                alloy_primitives::Bytes::new(),
+            )
+        };
+
+        // Take witness data from the store for the block range.
+        let block_witnesses = {
+            let mut store = self.witness_store.lock().expect("witness store poisoned");
+            store.take_range(from, to)
+        };
+
+        let expected_count = (to - from + 1) as usize;
+        if block_witnesses.len() != expected_count {
+            warn!(
+                from, to,
+                found = block_witnesses.len(),
+                expected = expected_count,
+                "Missing witness data for some blocks in range, using empty proof"
+            );
+            return empty();
+        }
+
+        // For the batch witness, use the first block's zone state witness and
+        // prev_block_header. Merge L1 reads from all blocks.
+        let first = &block_witnesses[0].1;
+        let chain_id = first.chain_id;
+        let prev_block_header = first.prev_block_header.clone();
+        let initial_zone_state = first.zone_state_witness.clone();
+
+        let mut all_l1_reads = Vec::new();
+        let mut zone_blocks = Vec::new();
+        let mut tempo_ancestry_headers = Vec::new();
+
+        for (_, bw) in &block_witnesses {
+            all_l1_reads.extend(bw.l1_reads.iter().cloned());
+            zone_blocks.push(bw.zone_block.clone());
+            tempo_ancestry_headers.push(bw.tempo_header_rlp.clone());
+        }
+
+        // Fetch L1 eth_getProof responses for recorded reads.
+        let l1_proofs = match self.fetch_l1_proofs(&all_l1_reads).await {
+            Ok(proofs) => proofs,
+            Err(e) => {
+                warn!(
+                    error = %e,
+                    "Failed to fetch L1 proofs, using empty proof"
+                );
+                return empty();
+            }
+        };
+
+        // Generate the Tempo state proof from recorded reads + fetched proofs.
+        let tempo_state_proofs =
+            self.witness_generator
+                .generate_tempo_state_proof(&all_l1_reads, &l1_proofs);
+
+        // Construct public inputs from the batch data the monitor already computed.
+        let public_inputs = zone_prover::types::PublicInputs {
+            prev_block_hash: self.prev_block_hash,
+            tempo_block_number,
+            anchor_block_number: tempo_block_number,
+            anchor_block_hash: B256::ZERO, // TODO: fill from L1
+            expected_withdrawal_batch_index: self.portal_withdrawal_queue_tail,
+            sequencer: self.witness_generator.sequencer(),
+        };
+
+        // Assemble the complete batch witness.
+        let batch_witness = self.witness_generator.assemble_witness(
+            public_inputs,
+            chain_id,
+            prev_block_header,
+            zone_blocks,
+            initial_zone_state,
+            tempo_state_proofs,
+            tempo_ancestry_headers,
+        );
+
+        // Run the prover.
+        match zone_prover::prove_zone_batch(batch_witness) {
+            Ok(output) => {
+                info!(
+                    from, to,
+                    next_block_hash = %output.block_transition.next_block_hash,
+                    withdrawal_queue_hash = %output.withdrawal_queue_hash,
+                    "Proof generated successfully"
+                );
+                // TODO: serialize proof output into proof bytes
+                // For now, use empty bytes as the proof format is not yet defined.
+                empty()
+            }
+            Err(e) => {
+                warn!(
+                    from, to,
+                    error = %e,
+                    "Proof generation failed, using empty proof"
+                );
+                empty()
+            }
+        }
+    }
+
+    /// Fetch `eth_getProof` responses from the Tempo L1 chain for all
+    /// recorded L1 reads.
+    ///
+    /// Groups reads by `(tempo_block_number, account)` and issues one
+    /// `eth_getProof` RPC call per group.
+    async fn fetch_l1_proofs(
+        &self,
+        l1_reads: &[crate::witness::RecordedL1Read],
+    ) -> Result<Vec<FetchedL1Proof>> {
+        use alloy_rpc_types_eth::EIP1186AccountProofResponse;
+
+        if l1_reads.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let groups = group_l1_reads_for_proof_fetch(l1_reads);
+        let mut proofs = Vec::with_capacity(groups.len());
+
+        for ((tempo_block_number, account), slots) in &groups {
+            debug!(
+                tempo_block_number,
+                %account,
+                slot_count = slots.len(),
+                "Fetching eth_getProof from Tempo L1"
+            );
+
+            let storage_keys: Vec<alloy_primitives::StorageKey> =
+                slots.iter().copied().map(Into::into).collect();
+
+            let proof_response: EIP1186AccountProofResponse = self
+                .l1_provider
+                .get_proof(
+                    *account,
+                    storage_keys,
+                )
+                .block_id(BlockNumberOrTag::Number(*tempo_block_number).into())
+                .await?;
+
+            proofs.push(FetchedL1Proof {
+                tempo_block_number: *tempo_block_number,
+                proof: proof_response,
+            });
+        }
+
+        info!(
+            proof_count = proofs.len(),
+            read_count = l1_reads.len(),
+            "Fetched L1 proofs for Tempo state reads"
+        );
+
+        Ok(proofs)
     }
 
     /// Submit a batch to L1 with retry logic.
@@ -440,15 +626,25 @@ impl ZoneMonitor {
 /// advances on successful submission.
 ///
 /// The `l1_provider` must already include the sequencer wallet for signing L1 transactions.
+/// The `witness_store` is shared with the builder for receiving per-block witness data.
 pub fn spawn_zone_monitor(
     config: ZoneMonitorConfig,
     l1_provider: DynProvider<TempoNetwork>,
     withdrawal_store: SharedWithdrawalStore,
     withdrawal_notify: Arc<Notify>,
+    witness_store: SharedWitnessStore,
+    sequencer: Address,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut monitor =
-            ZoneMonitor::new(config, l1_provider, withdrawal_store, withdrawal_notify).await;
+        let mut monitor = ZoneMonitor::new(
+            config,
+            l1_provider,
+            withdrawal_store,
+            withdrawal_notify,
+            witness_store,
+            sequencer,
+        )
+        .await;
         loop {
             if let Err(e) = monitor.run().await {
                 error!(error = %e, "Zone monitor failed, restarting in 5s");

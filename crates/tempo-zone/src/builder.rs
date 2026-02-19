@@ -29,8 +29,8 @@ use tempo_chainspec::spec::TempoChainSpec;
 use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tracing::{debug, error, info, warn};
-
 use crate::evm::ZoneEvmConfig;
+use crate::witness::{WitnessGenerator, WitnessGeneratorConfig};
 use tempo_payload_types::TempoPayloadBuilderAttributes;
 use tempo_primitives::{TempoHeader, TempoPrimitives};
 use tempo_transaction_pool::TempoTransactionPool;
@@ -43,13 +43,19 @@ use super::node::ZoneNode;
 pub struct ZonePayloadFactory {
     deposit_queue: crate::DepositQueue,
     sequencer: Option<Address>,
+    witness_store: crate::witness::SharedWitnessStore,
 }
 
 impl ZonePayloadFactory {
-    pub fn new(deposit_queue: crate::DepositQueue, sequencer: Option<Address>) -> Self {
+    pub fn new(
+        deposit_queue: crate::DepositQueue,
+        sequencer: Option<Address>,
+        witness_store: crate::witness::SharedWitnessStore,
+    ) -> Self {
         Self {
             deposit_queue,
             sequencer,
+            witness_store,
         }
     }
 }
@@ -72,7 +78,8 @@ where
             provider: ctx.provider().clone(),
             evm_config,
             deposit_queue: self.deposit_queue,
-            _sequencer: self.sequencer,
+            sequencer: self.sequencer,
+            witness_store: self.witness_store,
         })
     }
 }
@@ -83,7 +90,8 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
-    _sequencer: Option<Address>,
+    sequencer: Option<Address>,
+    witness_store: crate::witness::SharedWitnessStore,
 }
 
 impl<Provider> ZonePayloadBuilder<Provider> {
@@ -93,14 +101,160 @@ impl<Provider> ZonePayloadBuilder<Provider> {
         evm_config: ZoneEvmConfig,
         deposit_queue: crate::DepositQueue,
         sequencer: Option<Address>,
+        witness_store: crate::witness::SharedWitnessStore,
     ) -> Self {
         Self {
             pool,
             provider,
             evm_config,
             deposit_queue,
-            _sequencer: sequencer,
+            sequencer,
+            witness_store,
         }
+    }
+}
+
+impl<Provider> ZonePayloadBuilder<Provider>
+where
+    Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone,
+{
+    /// Generate the zone state witness and store it for the zone monitor.
+    ///
+    /// Called after block execution while the parent state provider is still
+    /// available for MPT proof generation. On failure (e.g., proof generation
+    /// error), logs a warning but does not fail the block build — the block
+    /// is still valid, just without a proof.
+    fn generate_and_store_witness(
+        &self,
+        parent_header: &reth_primitives_traits::SealedHeader<TempoHeader>,
+        sealed_block: &Arc<reth_primitives_traits::SealedBlock<tempo_primitives::Block>>,
+        recorded_accesses: &crate::witness::RecordedAccesses,
+        l1_reads: Vec<crate::witness::RecordedL1Read>,
+        l1_block: &crate::l1::L1BlockDeposits,
+        header_rlp: Vec<u8>,
+    ) {
+        use alloy_consensus::BlockHeader;
+        use alloy_primitives::Bytes;
+        use alloy_sol_types::SolValue;
+        use zone_prover::types::{DepositType, QueuedDeposit, ZoneBlock, ZoneHeader};
+
+        let block_number = sealed_block.number();
+
+        // Open a fresh state provider for the parent state (avoids lifetime
+        // entanglement with the execution database).
+        let witness_sp = match self.provider.state_by_block_hash(parent_header.hash()) {
+            Ok(sp) => sp,
+            Err(e) => {
+                warn!(
+                    target: "zone::witness",
+                    block_number, error = %e,
+                    "Failed to open state provider for witness generation"
+                );
+                return;
+            }
+        };
+
+        let state_root = parent_header.state_root();
+        let accessed_accounts = recorded_accesses.accessed_accounts();
+        let accessed_storage = recorded_accesses.accessed_storage();
+
+        let sequencer = self.sequencer.unwrap_or_default();
+        let witness_gen = WitnessGenerator::new(WitnessGeneratorConfig { sequencer });
+
+        let zone_state_witness = match witness_gen.generate_zone_state_witness(
+            &*witness_sp,
+            state_root,
+            &accessed_accounts,
+            &accessed_storage,
+        ) {
+            Ok(w) => w,
+            Err(e) => {
+                warn!(
+                    target: "zone::witness",
+                    block_number, error = %e,
+                    "Failed to generate zone state witness"
+                );
+                return;
+            }
+        };
+
+        // Extract user transactions (skip advanceTempo at index 0 and
+        // finalizeWithdrawalBatch at the end).
+        let all_txs: Vec<_> = sealed_block.body().transactions().collect();
+        let user_tx_bytes: Vec<Vec<u8>> = if all_txs.len() >= 2 {
+            all_txs[1..all_txs.len() - 1]
+                .iter()
+                .map(|tx| alloy_rlp::encode(*tx))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        // Convert deposits from the L1 block to the prover's QueuedDeposit format.
+        let deposits: Vec<QueuedDeposit> = l1_block
+            .deposits
+            .iter()
+            .map(|d| {
+                let deposit = crate::abi::Deposit {
+                    sender: d.sender,
+                    to: d.to,
+                    amount: d.amount,
+                    memo: d.memo,
+                };
+                QueuedDeposit {
+                    deposit_type: DepositType::Regular,
+                    deposit_data: Bytes::from(deposit.abi_encode()),
+                }
+            })
+            .collect();
+
+        let zone_block = ZoneBlock {
+            number: block_number,
+            parent_hash: parent_header.hash(),
+            timestamp: sealed_block.timestamp(),
+            beneficiary: sealed_block.beneficiary(),
+            expected_state_root: sealed_block.state_root(),
+            tempo_header_rlp: Some(header_rlp.clone()),
+            deposits,
+            decryptions: vec![],
+            finalize_withdrawal_batch_count: Some(U256::MAX),
+            transactions: user_tx_bytes,
+        };
+
+        let prev_block_header = ZoneHeader {
+            parent_hash: parent_header.parent_hash(),
+            beneficiary: parent_header.beneficiary(),
+            state_root,
+            transactions_root: parent_header.transactions_root(),
+            receipts_root: parent_header.receipts_root(),
+            number: parent_header.number(),
+            timestamp: parent_header.timestamp(),
+        };
+
+        let chain_id = {
+            use reth_chainspec::EthChainSpec;
+            self.provider.chain_spec().chain().id()
+        };
+
+        let witness = crate::witness::BuiltBlockWitness {
+            zone_block,
+            zone_state_witness,
+            prev_block_header,
+            l1_reads,
+            chain_id,
+            tempo_header_rlp: header_rlp,
+        };
+
+        let mut store = self.witness_store.lock().expect("witness store poisoned");
+        store.insert(block_number, witness);
+
+        info!(
+            target: "zone::witness",
+            block_number,
+            accounts = accessed_accounts.len(),
+            storage_accounts = accessed_storage.len(),
+            "Stored witness data for prover"
+        );
     }
 }
 
@@ -284,10 +438,13 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
+        // Set the L1 recording block index for this zone block.
+        // Block index is 0-based within a batch; for single-block-per-build this is always 0.
+        self.evm_config.set_l1_recording_block_index(0);
+
         // Execute advanceTempo system transaction — exactly one per zone block.
+        let header_rlp = alloy_rlp::encode(&l1_block.header);
         {
-            // Log header details for debugging chain continuity
-            let header_rlp = alloy_rlp::encode(&l1_block.header);
             info!(
                 target: "zone::payload",
                 l1_block_number = l1_block.header.inner.number,
@@ -384,14 +541,14 @@ where
         let sealed_block = Arc::new(block.sealed_block().clone());
         let elapsed = start.elapsed();
 
-        // Log witness generation statistics.
-        // The recorded_accesses handle captured all EVM state reads during
-        // block execution. In a full prover integration, these would be
-        // forwarded to the WitnessGenerator.
+        // Collect recorded L1 reads from the precompile wrapper.
+        let l1_reads = self.evm_config.take_l1_reads().unwrap_or_default();
+
         debug!(
             target: "zone::payload",
             accounts = recorded_accesses.accessed_accounts().len(),
             storage_accounts = recorded_accesses.accessed_storage().len(),
+            l1_reads = l1_reads.len(),
             "Recorded state accesses for witness generation"
         );
 
@@ -403,6 +560,16 @@ where
             tx_count = sealed_block.body().transactions.len(),
             ?elapsed,
             "Built zone payload"
+        );
+
+        // Generate witness data for the prover while we still have state provider access.
+        self.generate_and_store_witness(
+            &parent_header,
+            &sealed_block,
+            &recorded_accesses,
+            l1_reads,
+            &l1_block,
+            header_rlp,
         );
 
         let payload =

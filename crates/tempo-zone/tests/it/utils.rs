@@ -7,7 +7,7 @@ use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
 use std::{sync::Arc, time::Duration};
 use tempo_chainspec::spec::TempoChainSpec;
-use zone::{DepositQueue, L1SubscriberConfig, ZoneNode};
+use zone::{DepositQueue, L1SubscriberConfig, ZoneNode, witness::SharedWitnessStore};
 
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
@@ -68,7 +68,21 @@ impl ZoneTestNode {
             l1_rpc_url: l1_ws_url,
             portal_address,
         };
-        let zone_node = ZoneNode::new(deposit_queue.clone(), token_address, l1_config);
+        // TODO: provide real L1 state config when integration tests use proofs
+        let l1_state_provider_config = Default::default();
+        let l1_state_listener_config = Default::default();
+        let l1_state_cache = Default::default();
+        let witness_store: SharedWitnessStore = Default::default();
+        let _ = token_address; // TODO: wire token address into genesis
+        let zone_node = ZoneNode::new(
+            deposit_queue.clone(),
+            l1_config,
+            l1_state_provider_config,
+            l1_state_listener_config,
+            l1_state_cache,
+            None,
+            witness_store,
+        );
 
         let mut node_config = NodeConfig::new(Arc::new(chain_spec))
             .with_unused_ports()

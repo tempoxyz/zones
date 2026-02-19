@@ -36,6 +36,7 @@ use crate::{
         L1StateProvider, L1StateProviderConfig, L1StorageReader, SharedL1StateCache,
         TempoStateReader,
     },
+    witness::{RecordingL1StateProvider, SharedRecordedReads},
 };
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -160,6 +161,14 @@ pub struct ZoneEvmConfig {
     inner: TempoEvmConfig,
     zone_factory: ZoneEvmFactory,
     block_assembler: ZoneBlockAssembler,
+    /// Shared handle for L1 read recordings. Present when the L1 reader is
+    /// wrapped in a [`RecordingL1StateProvider`] (normal sequencer operation).
+    /// `None` for CLI subcommands that don't produce proofs.
+    #[allow(dead_code)]
+    recorded_l1_reads: Option<SharedRecordedReads>,
+    /// Handle to the recording provider for setting `zone_block_index`.
+    /// Stored as `Arc` so the builder can call `set_zone_block_index`.
+    recording_l1_provider: Option<Arc<RecordingL1StateProvider>>,
 }
 
 impl ZoneEvmConfig {
@@ -172,6 +181,47 @@ impl ZoneEvmConfig {
             inner,
             zone_factory,
             block_assembler,
+            recorded_l1_reads: None,
+            recording_l1_provider: None,
+        }
+    }
+
+    /// Create a new zone EVM config with recording enabled.
+    ///
+    /// Wraps the given L1 reader in a [`RecordingL1StateProvider`] so all
+    /// `TempoStateReader` precompile reads are captured for witness generation.
+    pub fn new_with_recording(
+        chain_spec: Arc<TempoChainSpec>,
+        l1_reader: Arc<dyn L1StorageReader>,
+    ) -> Self {
+        let recording = Arc::new(RecordingL1StateProvider::new(l1_reader));
+        let recorded_reads = recording.recorded_reads();
+        let zone_factory = ZoneEvmFactory::new(recording.clone() as Arc<dyn L1StorageReader>);
+        let inner = TempoEvmConfig::new_with_default_factory(chain_spec.clone());
+        let block_assembler = ZoneBlockAssembler::new(chain_spec);
+        Self {
+            inner,
+            zone_factory,
+            block_assembler,
+            recorded_l1_reads: Some(recorded_reads),
+            recording_l1_provider: Some(recording),
+        }
+    }
+
+    /// Take all recorded L1 reads since the last call, clearing the buffer.
+    ///
+    /// Returns `None` if recording is not enabled (CLI subcommands).
+    pub fn take_l1_reads(&self) -> Option<Vec<crate::witness::RecordedL1Read>> {
+        self.recording_l1_provider.as_ref().map(|p| p.take_reads())
+    }
+
+    /// Set the zone block index for subsequent L1 read recordings.
+    ///
+    /// Must be called before each zone block execution so reads are
+    /// tagged with the correct block index in the batch.
+    pub fn set_l1_recording_block_index(&self, index: u64) {
+        if let Some(p) = &self.recording_l1_provider {
+            p.set_zone_block_index(index);
         }
     }
 
