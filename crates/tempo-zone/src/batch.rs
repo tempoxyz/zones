@@ -281,6 +281,12 @@ impl BatchSubmitter {
         }
         Ok(())
     }
+
+    /// Read the current `withdrawalBatchIndex` from the ZonePortal on L1.
+    pub async fn read_portal_withdrawal_batch_index(&self) -> Result<u64> {
+        let index = self.portal.withdrawalBatchIndex().call().await?;
+        Ok(index)
+    }
 }
 
 /// How the batch submitter should anchor `tempoBlockNumber` for EIP-2935

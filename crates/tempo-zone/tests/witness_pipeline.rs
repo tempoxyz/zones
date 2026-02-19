@@ -418,7 +418,6 @@ fn test_witness_pipeline_two_block_merge() {
         .into_iter()
         .map(|(addr, snap)| (addr, snapshot_to_test_account(&snap)))
         .collect();
-
     let absent = [TEMPO_STATE_READER_ADDRESS, alloy_eips::eip4788::SYSTEM_ADDRESS];
 
     // Discovery pass: run both blocks to find all accessed slots.
@@ -691,6 +690,7 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
             AccountInfo {
                 nonce: 0,
                 balance: U256::ZERO,
+                code_hash: alloy_primitives::KECCAK256_EMPTY,
                 ..Default::default()
             },
         );
@@ -831,6 +831,12 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
         .into_iter()
         .map(|(addr, snap)| (addr, snapshot_to_test_account(&snap)))
         .collect();
+    // Ensure the user account is treated as an EOA for EIP-3607 checks.
+    let mut pre_accounts = pre_accounts;
+    if let Some((_, acct)) = pre_accounts.iter_mut().find(|(addr, _)| *addr == user_address) {
+        acct.code_hash = alloy_primitives::KECCAK256_EMPTY;
+        acct.code = None;
+    }
 
     // Build a discovery block with all transactions.
     let block_disc = ZoneBlock {
@@ -1225,6 +1231,11 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
     };
 
     let (raw_post, _) = reference_execute_full(db_final, &zone_block, true);
+    let mut raw_post = raw_post;
+    if let Some((_, acct)) = raw_post.iter_mut().find(|(addr, _)| *addr == user_address) {
+        acct.code_hash = alloy_primitives::KECCAK256_EMPTY;
+        acct.code = None;
+    }
     let post_accounts = filter_real_accounts(raw_post, &pre_accounts);
     let expected_state_root = compute_state_root(&post_accounts);
 
@@ -1268,7 +1279,7 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
         },
     );
 
-    let block_witnesses = store.take_range(1, 1);
+    let block_witnesses = store.take_range(1, 1).expect("block 1 should exist");
     assert_eq!(block_witnesses.len(), 1);
 
     let mut merged = AccessSnapshot::default();

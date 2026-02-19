@@ -207,6 +207,64 @@ fn test_prove_zone_batch_minimal_block() {
     assert_eq!(output.last_batch.withdrawal_batch_index, 1);
 }
 
+#[test]
+fn test_prove_zone_batch_rejects_withdrawal_batch_index_mismatch() {
+    let absent = [alloy_eips::eip4788::SYSTEM_ADDRESS];
+    let initial_accounts = build_initial_accounts(&[1]);
+    let fixture = build_zone_state_fixture_with_absent(&initial_accounts, &absent);
+
+    let genesis_header = build_genesis_header(fixture.state_root);
+    let genesis_hash = genesis_header.block_hash();
+
+    // EIP-2935 writes genesis_hash to the history contract at slot 0.
+    let post_accounts = apply_eip2935_writes(&initial_accounts, 1, genesis_hash);
+    let expected_state_root = compute_state_root(&post_accounts);
+
+    let zone_block = ZoneBlock {
+        number: 1,
+        parent_hash: genesis_hash,
+        timestamp: 1000,
+        beneficiary: SEQUENCER,
+        gas_limit: u64::MAX,
+        base_fee_per_gas: 0,
+        expected_state_root,
+        tempo_header_rlp: None,
+        deposits: vec![],
+        decryptions: vec![],
+        finalize_withdrawal_batch_count: Some(U256::ZERO),
+        transactions: vec![],
+    };
+
+    let public_inputs = PublicInputs {
+        prev_block_hash: genesis_hash,
+        tempo_block_number: 100,
+        anchor_block_number: 100,
+        anchor_block_hash: B256::from(U256::from(0xdead)),
+        expected_withdrawal_batch_index: 2,
+        sequencer: SEQUENCER,
+    };
+
+    let witness = BatchWitness {
+        public_inputs,
+        chain_id: CHAIN_ID,
+        prev_block_header: genesis_header,
+        zone_blocks: vec![zone_block],
+        initial_zone_state: fixture.witness,
+        tempo_state_proofs: BatchStateProof {
+            node_pool: alloy_primitives::map::HashMap::default(),
+            reads: vec![],
+            account_proofs: vec![],
+        },
+        tempo_ancestry_headers: vec![],
+    };
+
+    let result = prove_zone_batch(witness);
+    assert!(
+        matches!(result, Err(ProverError::InconsistentState(_))),
+        "expected inconsistent state error, got {result:?}"
+    );
+}
+
 /// Two-block batch: a non-final block followed by a final block with finalize.
 #[test]
 fn test_prove_zone_batch_two_blocks() {
