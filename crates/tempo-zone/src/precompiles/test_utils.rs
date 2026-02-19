@@ -19,9 +19,10 @@ pub(crate) fn assert_cp_proof_valid(
     ephemeral_pub: &AffinePoint,
     sequencer_pub: &AffinePoint,
 ) {
-    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.cp_proof_s.0.into());
-    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.cp_proof_c.0.into());
-    let shared_pt = recover_point(&dec.shared_secret.0, dec.shared_secret_y_parity).unwrap();
+    let s = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof_s.0.into());
+    let c = <Scalar as Reduce<k256::U256>>::reduce_bytes(&dec.proof.cp_proof_c.0.into());
+    let shared_pt =
+        recover_point(&dec.proof.shared_secret.0, dec.proof.shared_secret_y_parity).unwrap();
 
     let r1 = ProjectivePoint::GENERATOR * s - ProjectivePoint::from(*sequencer_pub) * c;
     let r2 = ProjectivePoint::from(*ephemeral_pub) * s - ProjectivePoint::from(shared_pt) * c;

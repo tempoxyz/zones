@@ -334,10 +334,15 @@ where
                 "advanceTempo header details"
             );
 
+            let sequencer_key = self.sequencer_key.as_ref().ok_or_else(|| {
+                PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                    "sequencer key is required for payload building",
+                ))
+            })?;
             let advance_tx = build_advance_tempo_tx(
                 &l1_block.header,
                 &l1_block.deposits,
-                self.sequencer_key.as_ref(),
+                sequencer_key,
                 self.portal_address,
             );
             let mut reverted = false;
@@ -551,6 +556,120 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     )
 }
 
+/// Build the [`QueuedDeposit`](abi::QueuedDeposit) and [`DecryptionData`](abi::DecryptionData) for
+/// an encrypted deposit.
+///
+/// The on-chain `ZoneInbox` contract requires a valid Chaum-Pedersen proof before attempting
+/// AES-GCM decryption. If we provided zeroed `DecryptionData`, the contract would revert with
+/// `InvalidSharedSecretProof` instead of reaching the refund path. Therefore:
+///
+/// 1. **Happy path**: Full ECIES decryption succeeds — provide the real shared secret, CP proof,
+///    and decrypted `to`/`memo`. The contract verifies everything and mints to the recipient.
+/// 2. **Garbage ciphertext**: ECDH + CP proof succeed but AES-GCM decryption fails (corrupted
+///    ciphertext, wrong plaintext length, etc.). We provide the valid proof with placeholder
+///    `to`/`memo`. On-chain, AES-GCM re-decryption will also fail (or the plaintext won't match
+///    the claimed `to`/`memo`), so the contract takes the refund path: minting back to the sender
+///    and emitting `EncryptedDepositFailed`.
+/// 3. **Invalid ephemeral pubkey**: The point cannot be recovered from the x-coordinate, so no
+///    ECDH or CP proof is possible. We fall back to zeroed `DecryptionData`, which will cause the
+///    contract to revert. In practice this is **unreachable** because `ZonePortal.depositEncrypted`
+///    validates the ephemeral pubkey on L1 (`_isValidSecp256k1X` + parity check) before accepting
+///    the deposit into the queue.
+fn build_encrypted_deposit(
+    d: &crate::l1::EncryptedDeposit,
+    sequencer_key: &k256::SecretKey,
+    portal_address: Address,
+) -> (abi::QueuedDeposit, abi::DecryptionData) {
+    let queued = abi::QueuedDeposit {
+        depositType: abi::DepositType::Encrypted,
+        depositData: Bytes::from(
+            abi::EncryptedDeposit {
+                token: d.token,
+                sender: d.sender,
+                amount: d.amount,
+                keyIndex: d.key_index,
+                encrypted: abi::EncryptedDepositPayload {
+                    ephemeralPubkeyX: d.ephemeral_pubkey_x,
+                    ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
+                    ciphertext: d.ciphertext.clone().into(),
+                    nonce: d.nonce.into(),
+                    tag: d.tag.into(),
+                },
+            }
+            .abi_encode(),
+        ),
+    };
+
+    // Attempt full decryption first.
+    let dec = ecies::decrypt_deposit(
+        sequencer_key,
+        &d.ephemeral_pubkey_x,
+        d.ephemeral_pubkey_y_parity,
+        &d.ciphertext,
+        &d.nonce,
+        &d.tag,
+        portal_address,
+        d.key_index,
+    );
+
+    if let Some(dec) = dec {
+        let decryption = abi::DecryptionData {
+            sharedSecret: dec.proof.shared_secret,
+            sharedSecretYParity: dec.proof.shared_secret_y_parity,
+            to: dec.to,
+            memo: dec.memo,
+            cpProof: abi::ChaumPedersenProof {
+                s: dec.proof.cp_proof_s,
+                c: dec.proof.cp_proof_c,
+            },
+        };
+        return (queued, decryption);
+    }
+
+    // Full decryption failed — try to at least provide a valid ECDH proof so the
+    // contract can reach the refund path.
+    let proof =
+        ecies::compute_ecdh_proof(sequencer_key, &d.ephemeral_pubkey_x, d.ephemeral_pubkey_y_parity);
+
+    if let Some(proof) = proof {
+        warn!(
+            target: "zone::payload",
+            sender = %d.sender,
+            amount = %d.amount,
+            "Encrypted deposit decryption failed, providing valid proof for on-chain refund"
+        );
+        let decryption = abi::DecryptionData {
+            sharedSecret: proof.shared_secret,
+            sharedSecretYParity: proof.shared_secret_y_parity,
+            to: Address::ZERO,
+            memo: alloy_primitives::B256::ZERO,
+            cpProof: abi::ChaumPedersenProof {
+                s: proof.cp_proof_s,
+                c: proof.cp_proof_c,
+            },
+        };
+        return (queued, decryption);
+    }
+
+    warn!(
+        target: "zone::payload",
+        sender = %d.sender,
+        amount = %d.amount,
+        "Encrypted deposit has invalid ephemeral pubkey, using zeroed DecryptionData"
+    );
+    let decryption = abi::DecryptionData {
+        sharedSecret: alloy_primitives::B256::ZERO,
+        sharedSecretYParity: 0x02,
+        to: Address::ZERO,
+        memo: alloy_primitives::B256::ZERO,
+        cpProof: abi::ChaumPedersenProof {
+            s: alloy_primitives::B256::ZERO,
+            c: alloy_primitives::B256::ZERO,
+        },
+    };
+    (queued, decryption)
+}
+
 /// Build the `advanceTempo(header, deposits, decryptions)` system transaction.
 ///
 /// This must be called **once per L1 block** at the start of a zone block (before user txs).
@@ -565,7 +684,7 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
 pub fn build_advance_tempo_tx(
     header: &TempoHeader,
     deposits: &[L1Deposit],
-    sequencer_key: Option<&k256::SecretKey>,
+    sequencer_key: &k256::SecretKey,
     portal_address: Address,
 ) -> Recovered<TempoTxEnvelope> {
     // RLP-encode the Tempo header
@@ -591,69 +710,10 @@ pub fn build_advance_tempo_tx(
                 });
             }
             L1Deposit::Encrypted(d) => {
-                let encrypted = abi::EncryptedDeposit {
-                    token: d.token,
-                    sender: d.sender,
-                    amount: d.amount,
-                    keyIndex: d.key_index,
-                    encrypted: abi::EncryptedDepositPayload {
-                        ephemeralPubkeyX: d.ephemeral_pubkey_x,
-                        ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
-                        ciphertext: d.ciphertext.clone().into(),
-                        nonce: d.nonce.into(),
-                        tag: d.tag.into(),
-                    },
-                };
-                queued_deposits.push(abi::QueuedDeposit {
-                    depositType: abi::DepositType::Encrypted,
-                    depositData: Bytes::from(encrypted.abi_encode()),
-                });
-
-                // Decrypt the encrypted deposit using the sequencer's private key.
-                // If no key is available or decryption fails, use placeholder values —
-                // the ZoneInbox contract will bounce funds back to sender on failure.
-                let dec = sequencer_key.and_then(|key| {
-                    ecies::decrypt_deposit(
-                        key,
-                        &d.ephemeral_pubkey_x,
-                        d.ephemeral_pubkey_y_parity,
-                        &d.ciphertext,
-                        &d.nonce,
-                        &d.tag,
-                        portal_address,
-                        d.key_index,
-                    )
-                });
-
-                if let Some(dec) = dec {
-                    decryptions.push(abi::DecryptionData {
-                        sharedSecret: dec.shared_secret,
-                        sharedSecretYParity: dec.shared_secret_y_parity,
-                        to: dec.to,
-                        memo: dec.memo,
-                        cpProof: abi::ChaumPedersenProof {
-                            s: dec.cp_proof_s,
-                            c: dec.cp_proof_c,
-                        },
-                    });
-                } else {
-                    warn!(
-                        target: "zone::payload",
-                        sender = %d.sender,
-                        amount = %d.amount,
-                        "Encrypted deposit decryption failed, using placeholder DecryptionData"
-                    );
-                    decryptions.push(abi::DecryptionData {
-                        sharedSecret: alloy_primitives::B256::ZERO,
-                        sharedSecretYParity: 0x02,
-                        to: alloy_primitives::Address::ZERO,
-                        memo: alloy_primitives::B256::ZERO,
-                        cpProof: abi::ChaumPedersenProof {
-                            s: alloy_primitives::B256::ZERO,
-                            c: alloy_primitives::B256::ZERO,
-                        },
-                    });
-                }
+                let (queued, decryption) =
+                    build_encrypted_deposit(d, sequencer_key, portal_address);
+                queued_deposits.push(queued);
+                decryptions.push(decryption);
             }
         }
     }
@@ -738,9 +798,11 @@ mod tests {
 
         let deposits = vec![L1Deposit::Regular(regular), L1Deposit::Encrypted(encrypted)];
 
-        // Build the system transaction (no sequencer key → placeholder DecryptionData)
+        // Build the system transaction with a dummy sequencer key
         let portal_address = address!("0x0000000000000000000000000000000000000001");
-        let recovered_tx = super::build_advance_tempo_tx(&header, &deposits, None, portal_address);
+        let seq_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid key");
+        let recovered_tx =
+            super::build_advance_tempo_tx(&header, &deposits, &seq_key, portal_address);
 
         // Decode the calldata to verify structure.
         // Recovered<TempoTxEnvelope> → deref → TempoTxEnvelope::Legacy(Signed<TxLegacy>)

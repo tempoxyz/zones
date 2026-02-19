@@ -19,20 +19,75 @@ use super::{
 /// Plaintext size for encrypted deposits: 20 bytes (address) + 32 bytes (memo) + 12 bytes (padding).
 pub const ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE: usize = 64;
 
-/// Result of sequencer-side ECIES decryption of an encrypted deposit.
+/// Result of sequencer-side ECDH + Chaum-Pedersen proof derivation.
+///
+/// This is always producible as long as the ephemeral public key is valid
+/// (on the secp256k1 curve). It does **not** depend on AES-GCM decryption
+/// succeeding, so the sequencer can always provide a valid proof to the
+/// on-chain contract — enabling the refund path for garbage ciphertext
+/// instead of reverting with `InvalidSharedSecretProof`.
 #[derive(Debug, Clone)]
-pub struct DecryptedDeposit {
+pub struct EcdhProofResult {
     /// ECDH shared secret (x-coordinate of `privSeq * ephemeralPub`).
     pub shared_secret: B256,
     /// Y parity of the shared secret point (0x02 or 0x03).
     pub shared_secret_y_parity: u8,
+    /// Chaum-Pedersen proof of correct shared secret derivation.
+    pub cp_proof_s: B256,
+    pub cp_proof_c: B256,
+}
+
+/// Result of sequencer-side ECIES decryption of an encrypted deposit.
+#[derive(Debug, Clone)]
+pub struct DecryptedDeposit {
+    /// ECDH shared secret and Chaum-Pedersen proof.
+    pub proof: EcdhProofResult,
     /// Decrypted recipient address.
     pub to: Address,
     /// Decrypted memo.
     pub memo: B256,
-    /// Chaum-Pedersen proof of correct shared secret derivation.
-    pub cp_proof_s: B256,
-    pub cp_proof_c: B256,
+}
+
+/// Compute ECDH shared secret and Chaum-Pedersen proof for an encrypted deposit.
+///
+/// This succeeds as long as the ephemeral public key is a valid secp256k1 point.
+/// It does **not** attempt AES-GCM decryption, so it can always provide the
+/// on-chain contract with a valid proof — enabling the refund path for deposits
+/// with garbage ciphertext instead of reverting.
+///
+/// Returns `None` only if the ephemeral public key cannot be recovered (invalid point).
+pub fn compute_ecdh_proof(
+    sequencer_privkey: &k256::SecretKey,
+    ephemeral_pub_x: &B256,
+    ephemeral_pub_y_parity: u8,
+) -> Option<EcdhProofResult> {
+    // 1. Recover ephemeral public key
+    let ephemeral_pub = recover_point(&ephemeral_pub_x.0, ephemeral_pub_y_parity)?;
+
+    // 2. ECDH: sharedSecretPoint = privSeq * ephemeralPub
+    let priv_scalar: Scalar = *sequencer_privkey.to_nonzero_scalar();
+    let shared_secret_proj = ProjectivePoint::from(ephemeral_pub) * priv_scalar;
+    let shared_secret_affine = AffinePoint::from(shared_secret_proj);
+
+    let ss_encoded = shared_secret_affine.to_encoded_point(true);
+    let shared_secret_x: [u8; 32] = ss_encoded.x()?.as_slice().try_into().ok()?;
+    let shared_secret_y_parity = ss_encoded.as_bytes()[0]; // 0x02 or 0x03
+
+    // 3. Generate Chaum-Pedersen proof
+    let sequencer_pub = AffinePoint::from(ProjectivePoint::GENERATOR * priv_scalar);
+    let (s, c) = generate_chaum_pedersen_proof(
+        &priv_scalar,
+        &ephemeral_pub,
+        &shared_secret_affine,
+        &sequencer_pub,
+    );
+
+    Some(EcdhProofResult {
+        shared_secret: B256::from(shared_secret_x),
+        shared_secret_y_parity,
+        cp_proof_s: B256::from(s.to_repr().as_ref()),
+        cp_proof_c: B256::from(c.to_repr().as_ref()),
+    })
 }
 
 /// Perform ECIES decryption of an encrypted deposit using the sequencer's private key.
@@ -55,51 +110,23 @@ pub fn decrypt_deposit(
     portal_address: Address,
     key_index: alloy_primitives::U256,
 ) -> Option<DecryptedDeposit> {
-    // 1. Recover ephemeral public key
-    let ephemeral_pub = recover_point(&ephemeral_pub_x.0, ephemeral_pub_y_parity)?;
+    let proof = compute_ecdh_proof(sequencer_privkey, ephemeral_pub_x, ephemeral_pub_y_parity)?;
 
-    // 2. ECDH: sharedSecretPoint = privSeq * ephemeralPub
-    let priv_scalar: Scalar = *sequencer_privkey.to_nonzero_scalar();
-    let shared_secret_proj = ProjectivePoint::from(ephemeral_pub) * priv_scalar;
-    let shared_secret_affine = AffinePoint::from(shared_secret_proj);
-
-    let ss_encoded = shared_secret_affine.to_encoded_point(true);
-    let shared_secret_x: [u8; 32] = ss_encoded.x()?.as_slice().try_into().ok()?;
-    let shared_secret_y_parity = ss_encoded.as_bytes()[0]; // 0x02 or 0x03
-
-    // 3. HKDF-SHA256: derive AES key
-    // Must match the Solidity implementation in ZoneInbox._hkdfSha256
+    // HKDF-SHA256: derive AES key
     let info = hkdf_info(&portal_address, &key_index, ephemeral_pub_x);
-    let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
+    let aes_key = hkdf_sha256(&proof.shared_secret.0, b"ecies-aes-key", &info);
 
-    // 4. AES-256-GCM decrypt
+    // AES-256-GCM decrypt
     let (plaintext, valid) = decrypt_aes_gcm(&aes_key, nonce, ciphertext, &[], tag);
     if !valid || plaintext.len() != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE {
         return None;
     }
 
-    // 5. Parse plaintext: [address(20)][memo(32)][padding(12)]
+    // Parse plaintext: [address(20)][memo(32)][padding(12)]
     let to = Address::from_slice(&plaintext[..20]);
     let memo = B256::from_slice(&plaintext[20..52]);
 
-    // 6. Generate Chaum-Pedersen proof
-    let sequencer_pub = AffinePoint::from(ProjectivePoint::GENERATOR * priv_scalar);
-
-    let (s, c) = generate_chaum_pedersen_proof(
-        &priv_scalar,
-        &ephemeral_pub,
-        &shared_secret_affine,
-        &sequencer_pub,
-    );
-
-    Some(DecryptedDeposit {
-        shared_secret: B256::from(shared_secret_x),
-        shared_secret_y_parity,
-        to,
-        memo,
-        cp_proof_s: B256::from(s.to_repr().as_ref()),
-        cp_proof_c: B256::from(c.to_repr().as_ref()),
-    })
+    Some(DecryptedDeposit { proof, to, memo })
 }
 
 /// Result of client-side ECIES encryption for a deposit.
