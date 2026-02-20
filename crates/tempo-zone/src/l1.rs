@@ -435,7 +435,10 @@ impl PendingDeposits {
         }
         let block_hash = keccak256(alloy_rlp::encode(&header));
         self.pending.push(L1BlockDeposits { header, deposits });
-        self.last_enqueued = Some(NumHash { number: block_number, hash: block_hash });
+        self.last_enqueued = Some(NumHash {
+            number: block_number,
+            hash: block_hash,
+        });
     }
 
     /// Take the next pending L1 block (oldest first).
