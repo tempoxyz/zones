@@ -23,7 +23,29 @@ This single command will:
 
 > ⚠️ **Save your sequencer key** — it's printed before the node starts. You'll need it to restart the node later.
 
-Once running, see [Interact with the Zone](#6-interact-with-the-zone) to deposit, withdraw, and check balances.
+Once running, generate a user wallet and deposit some tokens:
+
+```bash
+# Generate a wallet
+cast wallet new
+# Save the private key and address
+export PRIVATE_KEY="0x<your-wallet-private-key>"
+ADDR=$(cast wallet address "$PRIVATE_KEY")
+
+# Fund the wallet on L1 (testnet faucet)
+HTTP_RPC=$(echo "$L1_RPC_URL" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+cast rpc tempo_fundAddress "$ADDR" --rpc-url "$HTTP_RPC"
+
+# Approve the portal and deposit tokens to the zone
+export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
+just max-approve-portal
+just send-deposit 1000000
+
+# Check your balance on the zone (wait a few seconds for the deposit to land)
+just check-balance "$ADDR"
+```
+
+See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and private RPC usage.
 
 To restart the zone later:
 
