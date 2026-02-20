@@ -124,6 +124,9 @@ fn main() {
 
             // Disable peer discovery — the zone node has no peering.
             builder.config_mut().network.discovery.disable_discovery = true;
+            // Disable the auth (Engine API) server — the zone node derives blocks
+            // from L1, so no external consensus client or Engine API is needed.
+            builder.config_mut().rpc.disable_auth_server = true;
 
             // Parse the sequencer key early so we can derive the address for block building.
             // The signer is kept for later use when spawning sequencer background tasks.
