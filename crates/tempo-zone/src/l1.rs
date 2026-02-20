@@ -85,22 +85,15 @@ impl L1Subscriber {
     ) -> eyre::Result<()> {
         let tip = l1_provider.get_block_number().await?;
 
-        // When genesis_tempo_block_number is set and portal is Address::ZERO,
-        // skip portal queries entirely — no portal is deployed.
+        // When genesis_tempo_block_number is set via CLI, always use it as the
+        // starting point. The portal's `lastSyncedTempoBlockNumber` tracks batch
+        // submissions and may be ahead of where the zone chain actually is
+        // (e.g. after a restart where batches were submitted but the zone has
+        // no local blocks yet). The zone engine needs ALL L1 blocks from genesis
+        // to maintain chain continuity.
         let from = if let Some(genesis) = self.config.genesis_tempo_block_number {
-            if self.config.portal_address.is_zero() {
-                info!(genesis, "Using genesis block number override (no portal)");
-                genesis + 1
-            } else {
-                let portal = ZonePortal::new(self.config.portal_address, l1_provider);
-                let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
-                if last_synced > 0 {
-                    last_synced + 1
-                } else {
-                    info!(genesis, "Using CLI genesis block number override");
-                    genesis + 1
-                }
-            }
+            info!(genesis, "Using CLI genesis block number override");
+            genesis + 1
         } else {
             if self.config.portal_address.is_zero() {
                 warn!(

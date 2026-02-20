@@ -73,16 +73,19 @@ max-approve-portal:
 
 [group('zone')]
 [doc('Sends a test deposit to the ZonePortal on L1 (moderato). Requires L1_RPC_URL and PRIVATE_KEY env vars. Run max-approve-portal first.')]
-send-deposit to amount="1000000" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
+send-deposit amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
     #!/bin/bash
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
-    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
-    echo "Depositing {{amount}} to {{to}}..."
-    cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "{{to}}" "{{amount}}" "{{memo}}" \
-        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    TO="{{to}}"
+    if [[ -z "$TO" ]]; then
+        TO=$(cast wallet address "$PK")
+    fi
+    echo "Depositing {{amount}} to $TO..."
+    cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" \
+        --rpc-url "$RPC" --private-key "$PK"
     echo "Deposit sent!"
 
 [group('zone')]
@@ -112,8 +115,8 @@ create-zone name:
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
 
 [group('zone')]
-[doc('Starts a Tempo Zone L2 node, subscribing to L1 deposits. Pass the zone name used in create-zone.')]
-zone-up name reset="false" args="":
+[doc('Starts a Tempo Zone L2 node, subscribing to L1 deposits. Pass the zone name used in create-zone. Use profile=release for production.')]
+zone-up name reset="false" profile="dev" args="":
     #!/bin/bash
     set -euo pipefail
     ZONE_DIR="generated/{{name}}"
@@ -133,7 +136,13 @@ zone-up name reset="false" args="":
     if [[ "{{reset}}" = "true" ]]; then
         rm -rf "$DATADIR" || true
     fi
-    cargo run --bin tempo-zone -- \
+    PROFILE_FLAG=""
+    if [[ "{{profile}}" == "release" ]]; then
+        PROFILE_FLAG="--release"
+    elif [[ "{{profile}}" != "dev" ]]; then
+        PROFILE_FLAG="--profile {{profile}}"
+    fi
+    cargo run $PROFILE_FLAG --bin tempo-zone -- \
                       node \
                       --chain "$GENESIS_JSON" \
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
@@ -157,26 +166,29 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc="http:
     OUTBOX="0x1c00000000000000000000000000000000000002"
     echo "Approving ZoneOutbox for max zone tokens..."
     cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
-        --rpc-url "{{rpc}}" --private-key "$PK"
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 100000
     echo "Approved!"
 
 [group('zone')]
 [doc('Sends a withdrawal request on the zone (L2) back to Tempo L1. Requires PRIVATE_KEY env var. Run max-approve-outbox first.')]
-send-withdrawal to amount="1000000" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" rpc="http://localhost:8546":
+send-withdrawal amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" rpc="http://localhost:8546":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     OUTBOX="0x1c00000000000000000000000000000000000002"
-    # Default fallback-recipient to sender if not provided
+    TO="{{to}}"
+    if [[ -z "$TO" ]]; then
+        TO=$(cast wallet address "$PK")
+    fi
     FALLBACK="{{fallback-recipient}}"
     if [[ -z "$FALLBACK" ]]; then
-        FALLBACK=$(cast wallet address "$PK")
+        FALLBACK="$TO"
     fi
-    echo "Requesting withdrawal of {{amount}} to {{to}} (fallback: $FALLBACK)..."
+    echo "Requesting withdrawal of {{amount}} to $TO (fallback: $FALLBACK)..."
     cast send "$OUTBOX" \
         "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes)" \
-        "{{token}}" "{{to}}" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" \
-        --rpc-url "{{rpc}}" --private-key "$PK"
+        "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" \
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000
     echo "Withdrawal requested!"
 
 [group('zone')]
@@ -251,10 +263,26 @@ deploy-zone name:
     echo "  ⚠️  SAVE YOUR SEQUENCER KEY:"
     echo "  export SEQUENCER_KEY=$SEQUENCER_KEY"
     echo ""
-    echo "  To start the zone node:"
-    echo "  export L1_RPC_URL=\"$L1_RPC\""
-    echo "  export SEQUENCER_KEY=\"$SEQUENCER_KEY\""
-    echo "  just zone-up {{name}}"
+
+    # Step 6: Build and start the zone node
+    echo "Step 6: Building and starting zone node (release)..."
+    echo ""
+    cargo build --bin tempo-zone --release
+    DATADIR="/tmp/tempo-zone-{{name}}"
+    rm -rf "$DATADIR" || true
+    exec cargo run --release --bin tempo-zone -- \
+                      node \
+                      --chain "$OUTPUT/genesis.json" \
+                      --l1.rpc-url "$L1_RPC" \
+                      --l1.portal-address "$PORTAL" \
+                      --l1.genesis-block-number "$ANCHOR_BLOCK" \
+                      --http \
+                      --http.addr 0.0.0.0 \
+                      --http.port 8546 \
+                      --http.api all \
+                      --datadir "$DATADIR" \
+                      --log.file.directory "$DATADIR/logs" \
+                      --sequencer-key "$SEQUENCER_KEY"
 
 # Docs commands
 [group('docs')]
