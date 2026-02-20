@@ -226,6 +226,13 @@ impl GenerateZoneGenesis {
             })
             .collect();
 
+        // Include Address::ZERO in genesis so it exists in the state trie.
+        // System transactions use this address as the sender, and TIP-20 burn
+        // transfers to it. Without a trie entry, the parallel state root task
+        // (sparse trie) can diverge when this account is touched and then
+        // cleared under EIP-161 state-clear rules.
+        genesis_alloc.entry(Address::ZERO).or_default().nonce = Some(1);
+
         if let Some(sequencer) = self.sequencer {
             genesis_alloc.entry(sequencer).or_default().balance =
                 U256::from(1_000_000_000_000_000_000_000u128);
