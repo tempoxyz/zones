@@ -26,10 +26,7 @@ impl ReceiptBuilder for ZoneReceiptBuilder {
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
 
-    fn build_receipt<E: Evm>(
-        &self,
-        ctx: ReceiptBuilderCtx<'_, TempoTxType, E>,
-    ) -> Self::Receipt {
+    fn build_receipt<E: Evm>(&self, ctx: ReceiptBuilderCtx<'_, TempoTxType, E>) -> Self::Receipt {
         let ReceiptBuilderCtx {
             tx_type,
             result,
@@ -95,10 +92,7 @@ where
         self.inner.execute_transaction_without_commit(tx)
     }
 
-    fn commit_transaction(
-        &mut self,
-        output: Self::Result,
-    ) -> Result<u64, BlockExecutionError> {
+    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
         let gas_used = self.inner.commit_transaction(output)?;
 
         // Collect revert logs (same as Tempo L1 executor).

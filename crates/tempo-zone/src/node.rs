@@ -473,7 +473,11 @@ where
 {
     type Pool = TempoTransactionPool<Node::Provider>;
 
-    async fn build_pool(self, ctx: &BuilderContext<Node>, _evm_config: ZoneEvmConfig) -> eyre::Result<Self::Pool> {
+    async fn build_pool(
+        self,
+        ctx: &BuilderContext<Node>,
+        _evm_config: ZoneEvmConfig,
+    ) -> eyre::Result<Self::Pool> {
         let mut pool_config = ctx.pool_config();
         pool_config.minimal_protocol_basefee = TempoHardfork::default().base_fee();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
@@ -484,16 +488,16 @@ where
             ctx.provider().clone(),
             tempo_evm_config,
         )
-            .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-            .with_local_transactions_config(pool_config.local_transactions_config.clone())
-            .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-            .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-            .disable_balance_check()
-            .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-            .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            .with_custom_tx_type(TempoTxType::AA as u8)
-            .no_eip4844()
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+        .with_local_transactions_config(pool_config.local_transactions_config.clone())
+        .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+        .disable_balance_check()
+        .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+        .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+        .with_custom_tx_type(TempoTxType::AA as u8)
+        .no_eip4844()
+        .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
         let aa_2d_config = AA2dPoolConfig {
             price_bump_config: pool_config.price_bumps,
