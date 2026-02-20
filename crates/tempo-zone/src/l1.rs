@@ -4,6 +4,7 @@
 //! from the ZonePortal contract for each block.
 
 use alloy_consensus::BlockHeader as _;
+use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
@@ -124,6 +125,24 @@ impl L1Subscriber {
                 info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
                 on_chain + 1
             }
+        };
+
+        // If we already have blocks in the deposit queue (e.g. from a previous
+        // `start()` that failed mid-stream), skip past them to avoid re-enqueueing
+        // duplicates that would break chain continuity in the payload builder.
+        let from = if let Some(last) = self.deposit_queue.last_enqueued() {
+            let adjusted = last.number + 1;
+            if adjusted > from {
+                info!(
+                    portal_from = from,
+                    queue_last = last.number,
+                    adjusted_from = adjusted,
+                    "Skipping blocks already in deposit queue"
+                );
+            }
+            from.max(adjusted)
+        } else {
+            from
         };
 
         if from > tip {
@@ -256,7 +275,8 @@ impl L1Subscriber {
         // when the WebSocket subscription skips blocks.
         let mut last_enqueued: u64 = self
             .deposit_queue
-            .last_enqueued_block()
+            .last_enqueued()
+            .map(|nh| nh.number)
             .unwrap_or(http_provider.get_block_number().await?);
 
         while let Some(header) = stream.next().await {
@@ -387,11 +407,16 @@ pub struct PendingDeposits {
     pub hash: B256,
     /// Pending L1 blocks with their deposits, not yet processed by the zone
     pub pending: Vec<L1BlockDeposits>,
+    /// Highest L1 block ever enqueued (number + hash). Survives `pop_next` /
+    /// `drain` so that reconnecting subscribers know where the queue left off,
+    /// even if the engine has already consumed the blocks.
+    pub last_enqueued: Option<NumHash>,
 }
 
 impl PendingDeposits {
     /// Append deposits from an L1 block to the queue and update the hash chain.
     pub fn enqueue(&mut self, header: TempoHeader, deposits: Vec<Deposit>) {
+        let block_number = header.inner.number;
         for deposit in &deposits {
             self.hash = keccak256(
                 (
@@ -408,7 +433,12 @@ impl PendingDeposits {
                     .abi_encode(),
             );
         }
+        let block_hash = keccak256(alloy_rlp::encode(&header));
         self.pending.push(L1BlockDeposits { header, deposits });
+        self.last_enqueued = Some(NumHash {
+            number: block_number,
+            hash: block_hash,
+        });
     }
 
     /// Take the next pending L1 block (oldest first).
@@ -521,14 +551,15 @@ impl DepositQueue {
         &self.notify
     }
 
-    /// Returns the block number of the most recently enqueued L1 block, if any.
-    pub fn last_enqueued_block(&self) -> Option<u64> {
+    /// Returns the most recently enqueued L1 block (number + hash), if any.
+    ///
+    /// This is a high-water mark that survives `pop_next` / `drain`, so it
+    /// reflects the last block ever enqueued — not just what's still pending.
+    pub fn last_enqueued(&self) -> Option<NumHash> {
         self.inner
             .lock()
             .expect("deposit queue poisoned")
-            .pending
-            .last()
-            .map(|b| b.header.inner.number)
+            .last_enqueued
     }
 
     /// Lock the inner queue directly (for backward compat where needed).
@@ -702,5 +733,42 @@ mod tests {
 
         // After drain, pending is empty
         assert!(queue.drain().is_empty());
+    }
+
+    #[test]
+    fn test_last_enqueued_survives_pop_and_drain() {
+        let queue = DepositQueue::new();
+
+        // Initially empty
+        assert!(queue.last_enqueued().is_none());
+
+        queue.enqueue(make_test_header(100), vec![]);
+        queue.enqueue(make_test_header(101), vec![]);
+        queue.enqueue(make_test_header(102), vec![]);
+
+        let last = queue.last_enqueued().unwrap();
+        assert_eq!(last.number, 102);
+
+        // Pop all blocks — last_enqueued must still report 102
+        assert!(queue.pop_next().is_some());
+        assert!(queue.pop_next().is_some());
+        assert!(queue.pop_next().is_some());
+        assert!(queue.pop_next().is_none());
+
+        let last = queue.last_enqueued().unwrap();
+        assert_eq!(last.number, 102, "last_enqueued must survive pop_next");
+
+        // Enqueue more, then drain — last_enqueued must still track
+        queue.enqueue(make_test_header(200), vec![]);
+        queue.enqueue(make_test_header(201), vec![]);
+        assert_eq!(queue.last_enqueued().unwrap().number, 201);
+
+        let drained = queue.lock().unwrap().drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(
+            queue.last_enqueued().unwrap().number,
+            201,
+            "last_enqueued must survive drain"
+        );
     }
 }
