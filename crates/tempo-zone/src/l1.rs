@@ -268,31 +268,84 @@ impl L1Subscriber {
 
         info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
 
-        let mut last_enqueued: u64 = self
-            .deposit_queue
-            .last_enqueued()
-            .map(|nh| nh.number)
-            .unwrap_or(tip_after_sub);
+        let mut last_enqueued: Option<NumHash> = self.deposit_queue.last_enqueued();
+        // When we have no queue state yet, track the tip number so gap
+        // detection can still fire on the first real block.
+        let mut last_enqueued_number: u64 =
+            last_enqueued.map_or(tip_after_sub, |nh| nh.number);
 
         while let Some(header) = stream.next().await {
             let block_number = header.number();
+            let tempo_header = header.as_ref().clone();
+            let block_hash = keccak256(alloy_rlp::encode(&tempo_header));
+            let parent_hash = tempo_header.inner.parent_hash;
 
-            // Skip blocks already enqueued during backfill. The WS subscription
-            // starts before backfill so it may buffer blocks that were already
-            // processed. Enqueuing them again would break chain continuity.
-            if block_number <= last_enqueued {
-                debug!(
-                    block_number,
-                    last_enqueued, "Skipping already-enqueued L1 block"
-                );
-                continue;
+            // Happy path: block extends our chain by exactly one.
+            let extends_chain = last_enqueued
+                .is_some_and(|tip| block_number == tip.number + 1 && parent_hash == tip.hash);
+
+            if !extends_chain {
+                // Duplicate — skip silently.
+                if last_enqueued.is_some_and(|tip| {
+                    block_number == tip.number && block_hash == tip.hash
+                }) {
+                    debug!(block_number, "Skipping duplicate L1 block");
+                    continue;
+                }
+
+                // Block at or below our tip — skip if we have no hash to
+                // validate against (initial state before first enqueue).
+                if block_number <= last_enqueued_number && last_enqueued.is_none() {
+                    debug!(block_number, last_enqueued_number, "Skipping already-enqueued L1 block");
+                    continue;
+                }
+
+                // Anything else that doesn't extend the chain is a reorg or
+                // gap. Purge stale entries at or above the divergence point
+                // and let gap detection + backfill re-sync canonically.
+                if block_number <= last_enqueued_number
+                    || last_enqueued.is_some_and(|tip| {
+                        block_number == tip.number + 1 && parent_hash != tip.hash
+                    })
+                {
+                    let purge_from = if block_number <= last_enqueued_number {
+                        block_number
+                    } else {
+                        // parent mismatch at tip — tip itself was reorged
+                        last_enqueued_number
+                    };
+
+                    warn!(
+                        purge_from,
+                        block_number,
+                        last_enqueued_number,
+                        "L1 reorg detected in deposit subscriber, purging stale entries"
+                    );
+
+                    let mut queue =
+                        self.deposit_queue.lock().expect("deposit queue poisoned");
+                    let before = queue.pending.len();
+                    queue.pending.retain(|e| e.header.inner.number < purge_from);
+                    let purged = before - queue.pending.len();
+                    queue.last_enqueued =
+                        queue.pending.last().map(|e| NumHash {
+                            number: e.header.inner.number,
+                            hash: keccak256(alloy_rlp::encode(&e.header)),
+                        });
+                    last_enqueued = queue.last_enqueued;
+                    last_enqueued_number =
+                        last_enqueued.map_or(purge_from.saturating_sub(1), |nh| nh.number);
+
+                    warn!(purged, new_tip = last_enqueued_number, "Stale entries purged");
+                }
+                // Fall through to gap detection + enqueue
             }
 
             // Detect gaps: if the subscription skipped blocks, backfill them.
             // Each skipped block must be enqueued (even without deposits) to
             // maintain chain continuity for advanceTempo.
-            if block_number > last_enqueued + 1 {
-                let gap_from = last_enqueued + 1;
+            if block_number > last_enqueued_number + 1 {
+                let gap_from = last_enqueued_number + 1;
                 let gap_to = block_number - 1;
                 warn!(
                     gap_from,
@@ -328,10 +381,13 @@ impl L1Subscriber {
 
             // Enqueue every block — even those without deposits — so the zone
             // sees a strict sequential chain for advanceTempo.
-            self.deposit_queue
-                .enqueue(header.as_ref().clone(), deposits);
+            self.deposit_queue.enqueue(tempo_header, deposits);
 
-            last_enqueued = block_number;
+            last_enqueued = Some(NumHash {
+                number: block_number,
+                hash: block_hash,
+            });
+            last_enqueued_number = block_number;
         }
 
         warn!("L1 block subscription stream ended");
