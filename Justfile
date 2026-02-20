@@ -1,6 +1,7 @@
 cross_compile := "false"
 cargo_build_binary := if cross_compile == "true" { "cross" } else { "cargo" }
 act_debug_mode := env("ACT", "false")
+zone_rpc := env("ZONE_RPC_URL", "http://localhost:8546")
 
 [group('deps')]
 install-cross:
@@ -161,7 +162,7 @@ zone-up name reset="false" profile="dev" args="":
 
 [group('zone')]
 [doc('Approves the ZoneOutbox to spend max zone tokens on L2. Requires PRIVATE_KEY env var.')]
-max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8546":
+max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -173,7 +174,7 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc="http:
 
 [group('zone')]
 [doc('Sends a withdrawal request on the zone (L2) back to Tempo L1. Requires PRIVATE_KEY env var. Run max-approve-outbox first.')]
-send-withdrawal amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" rpc="http://localhost:8546":
+send-withdrawal amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -195,7 +196,7 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
 
 [group('zone')]
 [doc('Checks TIP-20 token balance for an account on the zone (port 8546)')]
-check-balance account token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8546":
+check-balance account token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
     @printf "Balance of {{account}}: " && cast call "{{token}}" "balanceOf(address)(uint256)" "{{account}}" --rpc-url "{{rpc}}"
 
 [group('zone')]
