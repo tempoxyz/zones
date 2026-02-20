@@ -33,8 +33,7 @@ export PRIVATE_KEY="0x<your-wallet-private-key>"
 ADDR=$(cast wallet address "$PRIVATE_KEY")
 
 # Fund the wallet on L1 (testnet faucet)
-HTTP_RPC=$(echo "$L1_RPC_URL" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
-cast rpc tempo_fundAddress "$ADDR" --rpc-url "$HTTP_RPC"
+cast rpc tempo_fundAddress "$ADDR" --rpc-url "$L1_RPC_URL"
 
 # Approve the portal and deposit tokens to the zone
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
