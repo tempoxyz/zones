@@ -22,10 +22,11 @@ use reth_node_builder::{
     },
 };
 use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock};
-use reth_provider::{ChainSpecProvider, EthStorage};
+use reth_provider::ChainSpecProvider;
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
+use reth_storage_api::EmptyBodyStorage;
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
@@ -164,7 +165,7 @@ impl ZoneNode {
 impl NodeTypes for ZoneNode {
     type Primitives = TempoPrimitives;
     type ChainSpec = TempoChainSpec;
-    type Storage = EthStorage<TempoTxEnvelope, TempoHeader>;
+    type Storage = EmptyBodyStorage<TempoTxEnvelope, TempoHeader>;
     type Payload = TempoPayloadTypes;
 }
 
