@@ -265,13 +265,13 @@ impl WithdrawalProcessor {
                 slot = head_val,
                 index = i,
                 total = withdrawals.len(),
+                token = %withdrawal.token,
                 to = %withdrawal.to,
                 amount = %withdrawal.amount,
                 fee = %withdrawal.fee,
                 has_callback = withdrawal.gasLimit > 0,
                 is_last,
-                remaining_queue = %remaining_queue,
-                "Submitting processWithdrawal to L1"
+                "📤 Submitting withdrawal to L1"
             );
 
             let call = self
@@ -321,9 +321,10 @@ impl WithdrawalProcessor {
                                 slot = head_val,
                                 index = i,
                                 %tx_hash,
+                                token = %withdrawal.token,
                                 to = %withdrawal.to,
                                 amount = %withdrawal.amount,
-                                "processWithdrawal confirmed on L1"
+                                "✅ Withdrawal confirmed on L1"
                             );
                         }
                         Err(e) => {
