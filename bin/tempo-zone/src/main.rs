@@ -119,8 +119,11 @@ fn main() {
 
     // TODO:
     if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
-        .run_with_components::<ZoneNode>(components, async move |builder, args| {
+        .run_with_components::<ZoneNode>(components, async move |mut builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
+
+            // Disable peer discovery — the zone node has no peering.
+            builder.config_mut().network.discovery.disable_discovery = true;
 
             // Parse the sequencer key early so we can derive the address for block building.
             // The signer is kept for later use when spawning sequencer background tasks.
