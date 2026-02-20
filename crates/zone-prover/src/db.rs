@@ -5,8 +5,10 @@
 //! to an account or storage slot NOT present in the witness is a hard error,
 //! preventing the prover from omitting non-zero state.
 
-use alloy_primitives::{Address, B256, U256, keccak256, map::HashMap, KECCAK256_EMPTY};
-use alloy_primitives::map::HashSet;
+use alloy_primitives::{
+    Address, B256, KECCAK256_EMPTY, U256, keccak256,
+    map::{HashMap, HashSet},
+};
 use revm::{
     Database,
     state::{AccountInfo, Bytecode},
@@ -77,8 +79,14 @@ impl WitnessDatabase {
 
             // Enforce a 1:1 mapping between storage values and storage proofs.
             if acct.storage.len() != acct.storage_proofs.len()
-                || acct.storage.keys().any(|slot| !acct.storage_proofs.contains_key(slot))
-                || acct.storage_proofs.keys().any(|slot| !acct.storage.contains_key(slot))
+                || acct
+                    .storage
+                    .keys()
+                    .any(|slot| !acct.storage_proofs.contains_key(slot))
+                || acct
+                    .storage_proofs
+                    .keys()
+                    .any(|slot| !acct.storage.contains_key(slot))
             {
                 return Err(ProverError::InvalidProof(format!(
                     "storage witness/proof mismatch for account {addr}"
@@ -107,9 +115,10 @@ impl WitnessDatabase {
                 balance: acct.balance,
                 nonce: acct.nonce,
                 code_hash: acct.code_hash,
-                code: acct.code.as_ref().map(|c| {
-                    Bytecode::new_raw(alloy_primitives::Bytes::copy_from_slice(c))
-                }),
+                code: acct
+                    .code
+                    .as_ref()
+                    .map(|c| Bytecode::new_raw(alloy_primitives::Bytes::copy_from_slice(c))),
             };
 
             // Index code by hash.
@@ -172,12 +181,9 @@ impl Database for WitnessDatabase {
         if code_hash == KECCAK256_EMPTY {
             return Ok(Bytecode::default());
         }
-        self.code_by_hash
-            .get(&code_hash)
-            .cloned()
-            .ok_or_else(|| {
-                ProverError::MissingWitness(format!("code hash {code_hash} not in witness"))
-            })
+        self.code_by_hash.get(&code_hash).cloned().ok_or_else(|| {
+            ProverError::MissingWitness(format!("code hash {code_hash} not in witness"))
+        })
     }
 
     fn storage(&mut self, address: Address, index: U256) -> Result<U256, Self::Error> {
@@ -187,9 +193,7 @@ impl Database for WitnessDatabase {
         }
 
         let acct = self.accounts.get(&address).ok_or_else(|| {
-            ProverError::MissingWitness(format!(
-                "account {address} not in witness (storage read)"
-            ))
+            ProverError::MissingWitness(format!("account {address} not in witness (storage read)"))
         })?;
 
         // Storage slots must be in the witness. Missing = error, not zero.
@@ -218,7 +222,11 @@ impl Database for WitnessDatabase {
 
         match self.accounts.get(&addr) {
             Some(acct) => {
-                let value = acct.storage.get(&slot).copied().unwrap_or(U256::ZERO);
+                let value = acct.storage.get(&slot).copied().ok_or_else(|| {
+                    ProverError::MissingWitness(format!(
+                        "EIP-2935 slot {slot} missing in witness for block_hash({number})"
+                    ))
+                })?;
                 Ok(B256::from(value.to_be_bytes()))
             }
             // 2935 contract not in witness and not confirmed absent — hard error,

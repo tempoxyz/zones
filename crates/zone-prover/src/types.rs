@@ -299,7 +299,7 @@ pub struct BatchStateProof {
 /// One entry per unique `(tempo_block_number, account)` pair. Contains the
 /// account's trie data and the proof path from `tempoStateRoot` to the
 /// account leaf in the L1 state trie.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct L1AccountProof {
     /// The Tempo block number this proof was retrieved at.
@@ -326,7 +326,7 @@ pub struct L1AccountProof {
 
 /// A single Tempo L1 state read with a storage proof path through the
 /// deduplicated node pool.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct L1StateRead {
     /// Which zone block performed this read.

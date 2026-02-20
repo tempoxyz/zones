@@ -4,9 +4,10 @@
 //! accessor that verifies Tempo L1 storage reads against the deduplicated MPT
 //! node pool in [`BatchStateProof`].
 
-use alloy_primitives::{Address, B256, Bytes, U256, map::HashMap};
 use alloy_evm::precompiles::DynPrecompile;
+use alloy_primitives::{Address, B256, Bytes, U256, map::HashMap};
 use alloy_sol_types::{SolCall, SolError};
+use alloy_trie::EMPTY_ROOT_HASH;
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 
 use crate::{
@@ -42,7 +43,7 @@ struct AccountProofKey {
 }
 
 /// Indexed account proof data for MPT verification.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AccountProofEntry {
     nonce: u64,
     balance: U256,
@@ -78,7 +79,7 @@ pub struct TempoStateAccessor {
 }
 
 /// A pre-verified read entry.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReadEntry {
     /// Expected Tempo block number for this read.
     tempo_block_number: u64,
@@ -108,16 +109,23 @@ impl TempoStateAccessor {
                 tempo_block_number: ap.tempo_block_number,
                 account: ap.account,
             };
-            account_proof_index.insert(
-                key,
-                AccountProofEntry {
-                    nonce: ap.nonce,
-                    balance: ap.balance,
-                    storage_root: ap.storage_root,
-                    code_hash: ap.code_hash,
-                    account_path: ap.account_path.clone(),
-                },
-            );
+            let candidate = AccountProofEntry {
+                nonce: ap.nonce,
+                balance: ap.balance,
+                storage_root: ap.storage_root,
+                code_hash: ap.code_hash,
+                account_path: ap.account_path.clone(),
+            };
+            if let Some(existing) = account_proof_index.get(&key) {
+                if existing != &candidate {
+                    return Err(ProverError::InvalidProof(format!(
+                        "conflicting duplicate account proof for tempo_block={} account={}",
+                        ap.tempo_block_number, ap.account
+                    )));
+                }
+            } else {
+                account_proof_index.insert(key, candidate);
+            }
         }
 
         // Phase 3: Index reads for fast lookup.
@@ -128,14 +136,21 @@ impl TempoStateAccessor {
                 account: read.account,
                 slot: read.slot,
             };
-            read_index.insert(
-                key,
-                ReadEntry {
-                    tempo_block_number: read.tempo_block_number,
-                    storage_path: read.storage_path.clone(),
-                    value: read.value,
-                },
-            );
+            let candidate = ReadEntry {
+                tempo_block_number: read.tempo_block_number,
+                storage_path: read.storage_path.clone(),
+                value: read.value,
+            };
+            if let Some(existing) = read_index.get(&key) {
+                if existing != &candidate {
+                    return Err(ProverError::InvalidProof(format!(
+                        "conflicting duplicate read for zone_block_index={} account={} slot={}",
+                        read.zone_block_index, read.account, read.slot
+                    )));
+                }
+            } else {
+                read_index.insert(key, candidate);
+            }
         }
 
         Ok(Self {
@@ -151,11 +166,7 @@ impl TempoStateAccessor {
     ///
     /// Called before block execution to record which Tempo block
     /// is currently active for a given zone block.
-    pub fn bind_block(
-        &mut self,
-        zone_block_index: u64,
-        tempo_block_number: u64,
-    ) {
+    pub fn bind_block(&mut self, zone_block_index: u64, tempo_block_number: u64) {
         self.block_bindings
             .insert(zone_block_index, tempo_block_number);
     }
@@ -164,11 +175,7 @@ impl TempoStateAccessor {
     ///
     /// Called alongside `bind_block` to record which `tempoStateRoot`
     /// is active for each zone block, enabling L1 proof verification.
-    pub fn bind_state_root(
-        &mut self,
-        zone_block_index: u64,
-        tempo_state_root: B256,
-    ) {
+    pub fn bind_state_root(&mut self, zone_block_index: u64, tempo_state_root: B256) {
         self.state_root_bindings
             .insert(zone_block_index, tempo_state_root);
     }
@@ -199,20 +206,22 @@ impl TempoStateAccessor {
             slot,
         };
 
-        let entry = self.read_index.get(&key).ok_or(
-            ProverError::TempoReadNotFound {
+        let entry = self
+            .read_index
+            .get(&key)
+            .ok_or(ProverError::TempoReadNotFound {
                 block_index: zone_block_index,
                 account,
                 slot,
-            },
-        )?;
+            })?;
 
         // Verify the read is bound to the correct Tempo block.
-        let &bound_block = self.block_bindings.get(&zone_block_index).ok_or(
-            ProverError::InconsistentState(format!(
-                "no block binding for zone_block_index={zone_block_index}"
-            )),
-        )?;
+        let &bound_block =
+            self.block_bindings
+                .get(&zone_block_index)
+                .ok_or(ProverError::InconsistentState(format!(
+                    "no block binding for zone_block_index={zone_block_index}"
+                )))?;
         if entry.tempo_block_number != bound_block {
             return Err(ProverError::InconsistentState(format!(
                 "Tempo read at block_index={zone_block_index} expects tempo_block={}, \
@@ -232,23 +241,22 @@ impl TempoStateAccessor {
             tempo_block_number: entry.tempo_block_number,
             account,
         };
-        let ap = self.account_proof_index.get(&ap_key).ok_or(
-            ProverError::InvalidProof(format!(
+        let ap = self
+            .account_proof_index
+            .get(&ap_key)
+            .ok_or(ProverError::InvalidProof(format!(
                 "no account proof for tempo_block={} account={account}",
                 entry.tempo_block_number,
-            )),
-        )?;
+            )))?;
 
         // Reconstitute account proof nodes from the verified pool.
-        let account_proof_nodes = reconstitute_proof(
-            &ap.account_path,
-            &self.verified_nodes,
-        ).map_err(|e| ProverError::InvalidProof(format!(
-            "account proof reconstitution: {e}"
-        )))?;
+        let account_proof_nodes = reconstitute_proof(&ap.account_path, &self.verified_nodes)
+            .map_err(|e| ProverError::InvalidProof(format!("account proof reconstitution: {e}")))?;
 
-        // Verify account exists in L1 state trie.
-        mpt::verify_account_proof(
+        // Verify account proof: inclusion (normal) or absence (account not present).
+        // Absent-account reads are valid in eth_getStorageAt semantics and must
+        // return zero.
+        let storage_root = match mpt::verify_account_proof(
             tempo_state_root,
             account,
             ap.nonce,
@@ -256,23 +264,35 @@ impl TempoStateAccessor {
             ap.storage_root,
             ap.code_hash,
             &account_proof_nodes,
-        )?;
+        ) {
+            Ok(()) => ap.storage_root,
+            Err(inclusion_err) => {
+                mpt::verify_account_absence_proof(tempo_state_root, account, &account_proof_nodes)
+                    .map_err(|absence_err| {
+                        ProverError::InvalidProof(format!(
+                            "account proof invalid for account={account} tempo_block={}: \
+                         inclusion failed ({inclusion_err}); absence failed ({absence_err})",
+                            entry.tempo_block_number
+                        ))
+                    })?;
+
+                if !entry.value.is_zero() {
+                    return Err(ProverError::InvalidProof(format!(
+                        "absent account {account} at tempo_block={} must return zero, got {}",
+                        entry.tempo_block_number, entry.value
+                    )));
+                }
+
+                EMPTY_ROOT_HASH
+            }
+        };
 
         // Reconstitute storage proof nodes.
-        let storage_proof_nodes = reconstitute_proof(
-            &entry.storage_path,
-            &self.verified_nodes,
-        ).map_err(|e| ProverError::InvalidProof(format!(
-            "storage proof reconstitution: {e}"
-        )))?;
+        let storage_proof_nodes = reconstitute_proof(&entry.storage_path, &self.verified_nodes)
+            .map_err(|e| ProverError::InvalidProof(format!("storage proof reconstitution: {e}")))?;
 
         // Verify the storage slot value.
-        mpt::verify_storage_proof(
-            ap.storage_root,
-            slot,
-            entry.value,
-            &storage_proof_nodes,
-        )?;
+        mpt::verify_storage_proof(storage_root, slot, entry.value, &storage_proof_nodes)?;
 
         Ok(entry.value)
     }
@@ -322,13 +342,23 @@ pub fn prover_tempo_state_precompile(
 
             if selector == readStorageAtCall::SELECTOR {
                 handle_single_slot(
-                    &read_index, &block_bindings, &state_root_bindings,
-                    &account_proof_index, &verified_nodes, block_idx, data,
+                    &read_index,
+                    &block_bindings,
+                    &state_root_bindings,
+                    &account_proof_index,
+                    &verified_nodes,
+                    block_idx,
+                    data,
                 )
             } else if selector == readStorageBatchAtCall::SELECTOR {
                 handle_multi_slot(
-                    &read_index, &block_bindings, &state_root_bindings,
-                    &account_proof_index, &verified_nodes, block_idx, data,
+                    &read_index,
+                    &block_bindings,
+                    &state_root_bindings,
+                    &account_proof_index,
+                    &verified_nodes,
+                    block_idx,
+                    data,
                 )
             } else {
                 Ok(PrecompileOutput::new_reverted(0, Bytes::new()))
@@ -357,14 +387,12 @@ fn handle_single_slot(
         slot: U256::from_be_bytes(call.slot.0),
     };
 
-    let entry = read_index
-        .get(&key)
-        .ok_or_else(|| {
-            PrecompileError::other(format!(
-                "Tempo read not in proof set: block={block_idx} account={} slot={}",
-                call.account, call.slot
-            ))
-        })?;
+    let entry = read_index.get(&key).ok_or_else(|| {
+        PrecompileError::other(format!(
+            "Tempo read not in proof set: block={block_idx} account={} slot={}",
+            call.account, call.slot
+        ))
+    })?;
 
     // Validate block binding (must always be set before execution).
     let &bound_block = block_bindings.get(&block_idx).ok_or_else(|| {
@@ -416,14 +444,12 @@ fn handle_multi_slot(
             slot: U256::from_be_bytes(slot.0),
         };
 
-        let entry = read_index
-            .get(&key)
-            .ok_or_else(|| {
-                PrecompileError::other(format!(
-                    "Tempo batch read not in proof set: block={block_idx} account={} slot={}",
-                    call.account, slot
-                ))
-            })?;
+        let entry = read_index.get(&key).ok_or_else(|| {
+            PrecompileError::other(format!(
+                "Tempo batch read not in proof set: block={block_idx} account={} slot={}",
+                call.account, slot
+            ))
+        })?;
 
         let &bound_block = block_bindings.get(&block_idx).ok_or_else(|| {
             PrecompileError::other(format!("no block binding for block_idx={block_idx}"))
@@ -466,9 +492,7 @@ fn verify_read_proof(
 ) -> PrecompileResult {
     // State root binding must exist — it is set before block execution.
     let &tempo_state_root = state_root_bindings.get(&block_idx).ok_or_else(|| {
-        PrecompileError::other(format!(
-            "no state root binding for block_idx={block_idx}"
-        ))
+        PrecompileError::other(format!("no state root binding for block_idx={block_idx}"))
     })?;
 
     let ap_key = AccountProofKey {
@@ -482,19 +506,41 @@ fn verify_read_proof(
         ))
     })?;
 
-    // Reconstitute and verify account proof.
+    // Reconstitute and verify account proof (inclusion or absence).
     let account_proof_nodes = reconstitute_proof(&ap.account_path, verified_nodes)
         .map_err(|e| PrecompileError::other(format!("account proof: {e}")))?;
-    mpt::verify_account_proof(
-        tempo_state_root, account,
-        ap.nonce, ap.balance, ap.storage_root, ap.code_hash,
+    let storage_root = match mpt::verify_account_proof(
+        tempo_state_root,
+        account,
+        ap.nonce,
+        ap.balance,
+        ap.storage_root,
+        ap.code_hash,
         &account_proof_nodes,
-    ).map_err(|e| PrecompileError::other(format!("account proof invalid: {e}")))?;
+    ) {
+        Ok(()) => ap.storage_root,
+        Err(inclusion_err) => {
+            mpt::verify_account_absence_proof(tempo_state_root, account, &account_proof_nodes)
+                .map_err(|absence_err| {
+                    PrecompileError::other(format!(
+                        "account proof invalid: inclusion failed ({inclusion_err}); \
+                         absence failed ({absence_err})"
+                    ))
+                })?;
+            if !entry.value.is_zero() {
+                return Err(PrecompileError::other(format!(
+                    "absent account {account} must return zero, got {}",
+                    entry.value
+                )));
+            }
+            EMPTY_ROOT_HASH
+        }
+    };
 
     // Reconstitute and verify storage proof.
     let storage_proof_nodes = reconstitute_proof(&entry.storage_path, verified_nodes)
         .map_err(|e| PrecompileError::other(format!("storage proof: {e}")))?;
-    mpt::verify_storage_proof(ap.storage_root, slot, entry.value, &storage_proof_nodes)
+    mpt::verify_storage_proof(storage_root, slot, entry.value, &storage_proof_nodes)
         .map_err(|e| PrecompileError::other(format!("storage proof invalid: {e}")))?;
 
     Ok(PrecompileOutput::new(0, Bytes::new()))
@@ -516,4 +562,186 @@ fn reconstitute_proof(
                 .ok_or_else(|| format!("node {hash} not in verified pool"))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_primitives::{Address, B256, KECCAK256_EMPTY, U256, keccak256, map::HashMap};
+    use alloy_trie::{EMPTY_ROOT_HASH, HashBuilder, TrieAccount, proof::ProofRetainer};
+    use nybbles::Nibbles;
+
+    use super::TempoStateAccessor;
+    use crate::types::{BatchStateProof, L1AccountProof, L1StateRead, ProverError};
+
+    fn build_absent_account_batch_proof(
+        absent_account: Address,
+        slot: U256,
+        tempo_block_number: u64,
+        zone_block_index: u64,
+    ) -> (B256, BatchStateProof) {
+        let existing = Address::with_last_byte(0x01);
+        let existing_key = Nibbles::unpack(keccak256(existing));
+        let absent_key = Nibbles::unpack(keccak256(absent_account));
+
+        let existing_account = TrieAccount {
+            nonce: 1,
+            balance: U256::from(1),
+            storage_root: EMPTY_ROOT_HASH,
+            code_hash: KECCAK256_EMPTY,
+        };
+        let mut encoded = Vec::new();
+        alloy_rlp::Encodable::encode(&existing_account, &mut encoded);
+
+        let retainer = ProofRetainer::new(vec![existing_key.clone(), absent_key.clone()]);
+        let mut builder = HashBuilder::default().with_proof_retainer(retainer);
+        builder.add_leaf(existing_key, &encoded);
+
+        let state_root = builder.root();
+        let proof_nodes = builder.take_proof_nodes();
+
+        let account_proof_nodes: Vec<alloy_primitives::Bytes> = proof_nodes
+            .matching_nodes_sorted(&absent_key)
+            .into_iter()
+            .map(|(_, b)| b)
+            .collect();
+
+        let mut node_pool = HashMap::default();
+        let mut account_path = Vec::new();
+        for node in &account_proof_nodes {
+            let hash = keccak256(node.as_ref());
+            node_pool.insert(hash, node.to_vec());
+            account_path.push(hash);
+        }
+
+        let batch_proof = BatchStateProof {
+            node_pool,
+            reads: vec![L1StateRead {
+                zone_block_index,
+                tempo_block_number,
+                account: absent_account,
+                slot,
+                storage_path: vec![],
+                value: U256::ZERO,
+            }],
+            account_proofs: vec![L1AccountProof {
+                tempo_block_number,
+                account: absent_account,
+                nonce: 0,
+                balance: U256::ZERO,
+                storage_root: EMPTY_ROOT_HASH,
+                code_hash: KECCAK256_EMPTY,
+                account_path,
+            }],
+        };
+
+        (state_root, batch_proof)
+    }
+
+    #[test]
+    fn test_absent_account_read_returns_zero() {
+        let absent = Address::with_last_byte(0xAA);
+        let slot = U256::from(4);
+        let tempo_block_number = 123u64;
+        let zone_block_index = 0u64;
+
+        let (state_root, proof) =
+            build_absent_account_batch_proof(absent, slot, tempo_block_number, zone_block_index);
+
+        let mut accessor = TempoStateAccessor::from_proofs(&proof).expect("proofs should index");
+        accessor.bind_block(zone_block_index, tempo_block_number);
+        accessor.bind_state_root(zone_block_index, state_root);
+
+        let value = accessor
+            .read_storage(zone_block_index, absent, slot)
+            .expect("absent account read should verify as zero");
+        assert_eq!(value, U256::ZERO);
+    }
+
+    #[test]
+    fn test_absent_account_non_zero_read_is_rejected() {
+        let absent = Address::with_last_byte(0xAB);
+        let slot = U256::from(4);
+        let tempo_block_number = 456u64;
+        let zone_block_index = 0u64;
+
+        let (state_root, mut proof) =
+            build_absent_account_batch_proof(absent, slot, tempo_block_number, zone_block_index);
+        proof.reads[0].value = U256::from(1);
+
+        let mut accessor = TempoStateAccessor::from_proofs(&proof).expect("proofs should index");
+        accessor.bind_block(zone_block_index, tempo_block_number);
+        accessor.bind_state_root(zone_block_index, state_root);
+
+        let err = accessor
+            .read_storage(zone_block_index, absent, slot)
+            .expect_err("non-zero read for absent account must fail");
+        assert!(matches!(err, ProverError::InvalidProof(_)));
+    }
+
+    #[test]
+    fn test_conflicting_duplicate_account_proof_rejected() {
+        let account = Address::with_last_byte(0x11);
+        let proof = BatchStateProof {
+            node_pool: HashMap::default(),
+            reads: vec![],
+            account_proofs: vec![
+                L1AccountProof {
+                    tempo_block_number: 1,
+                    account,
+                    nonce: 0,
+                    balance: U256::ZERO,
+                    storage_root: EMPTY_ROOT_HASH,
+                    code_hash: KECCAK256_EMPTY,
+                    account_path: vec![],
+                },
+                L1AccountProof {
+                    tempo_block_number: 1,
+                    account,
+                    nonce: 1,
+                    balance: U256::ZERO,
+                    storage_root: EMPTY_ROOT_HASH,
+                    code_hash: KECCAK256_EMPTY,
+                    account_path: vec![],
+                },
+            ],
+        };
+
+        let err = TempoStateAccessor::from_proofs(&proof)
+            .err()
+            .expect("conflicting duplicate account proofs must fail");
+        assert!(matches!(err, ProverError::InvalidProof(_)));
+    }
+
+    #[test]
+    fn test_conflicting_duplicate_read_rejected() {
+        let account = Address::with_last_byte(0x12);
+        let slot = U256::from(7);
+        let proof = BatchStateProof {
+            node_pool: HashMap::default(),
+            reads: vec![
+                L1StateRead {
+                    zone_block_index: 0,
+                    tempo_block_number: 1,
+                    account,
+                    slot,
+                    storage_path: vec![],
+                    value: U256::ZERO,
+                },
+                L1StateRead {
+                    zone_block_index: 0,
+                    tempo_block_number: 2,
+                    account,
+                    slot,
+                    storage_path: vec![],
+                    value: U256::from(1),
+                },
+            ],
+            account_proofs: vec![],
+        };
+
+        let err = TempoStateAccessor::from_proofs(&proof)
+            .err()
+            .expect("conflicting duplicate reads must fail");
+        assert!(matches!(err, ProverError::InvalidProof(_)));
+    }
 }
