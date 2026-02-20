@@ -61,6 +61,8 @@ pub struct ZoneSequencerConfig {
     pub zone_rpc_url: String,
     /// How often the zone monitor polls for new L2 blocks.
     pub zone_poll_interval: Duration,
+    /// Maximum time to accumulate zone blocks before submitting a batch to L1.
+    pub batch_interval: Duration,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -117,6 +119,7 @@ pub async fn spawn_zone_sequencer(
         tempo_state_address: config.tempo_state_address,
         zone_rpc_url: config.zone_rpc_url,
         poll_interval: config.zone_poll_interval,
+        batch_interval: config.batch_interval,
         portal_address: config.portal_address,
     };
 

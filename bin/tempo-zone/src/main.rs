@@ -61,6 +61,15 @@ struct ZoneArgs {
     )]
     pub zone_poll_interval_secs: u64,
 
+    /// Maximum time (in seconds) to accumulate zone blocks before submitting a
+    /// batch to L1. Batches are flushed early when withdrawals are pending.
+    #[arg(
+        long = "zone.batch-interval-secs",
+        env = "ZONE_BATCH_INTERVAL_SECS",
+        default_value = "60"
+    )]
+    pub zone_batch_interval_secs: u64,
+
     /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(
         long = "withdrawal-poll-interval-secs",
@@ -161,6 +170,7 @@ fn main() {
                     tempo_state_address: zone::abi::TEMPO_STATE_ADDRESS,
                     zone_rpc_url: args.zone_rpc_url,
                     zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
+                    batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
                 };
 
                 let seq_handle = zone::spawn_zone_sequencer(sequencer_config, signer).await;
