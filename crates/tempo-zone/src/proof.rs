@@ -17,8 +17,8 @@ use tempo_alloy::TempoNetwork;
 use tracing::{debug, info};
 
 use crate::witness::{
-    AccessSnapshot, FetchedL1Proof, SharedWitnessStore, WitnessGenerator,
-    WitnessGeneratorConfig, group_l1_reads_for_proof_fetch, RecordedL1Read,
+    AccessSnapshot, FetchedL1Proof, RecordedL1Read, SharedWitnessStore, WitnessGenerator,
+    WitnessGeneratorConfig, group_l1_reads_for_proof_fetch,
 };
 
 /// Node-internal proof generation service.
@@ -49,8 +49,7 @@ where
         l1_provider: DynProvider<TempoNetwork>,
         sequencer: alloy_primitives::Address,
     ) -> Self {
-        let witness_generator =
-            WitnessGenerator::new(WitnessGeneratorConfig { sequencer });
+        let witness_generator = WitnessGenerator::new(WitnessGeneratorConfig { sequencer });
         Self {
             provider,
             witness_store,
@@ -90,7 +89,10 @@ where
             store.prune_below(from);
             let pruned = before - store.len();
             if pruned > 0 {
-                debug!(pruned, from, "Pruned stale witness entries below batch start");
+                debug!(
+                    pruned,
+                    from, "Pruned stale witness entries below batch start"
+                );
             }
             store.take_range(from, to).map_err(|missing_block| {
                 eyre::eyre!(
@@ -119,37 +121,38 @@ where
         }
 
         info!(
-            from, to,
+            from,
+            to,
             accounts = merged_accesses.accounts.len(),
             storage_accounts = merged_accesses.storage.len(),
             "Merged access snapshots, generating zone state witness via local trie"
         );
 
         // Open a state provider for S₀ (parent of the first block in the batch).
-        let state_provider = self.provider.state_by_block_hash(s0_parent_hash)
-            .map_err(|e| eyre::eyre!(
-                "failed to open state provider for S₀ ({s0_parent_hash}): {e}"
-            ))?;
+        let state_provider = self
+            .provider
+            .state_by_block_hash(s0_parent_hash)
+            .map_err(|e| {
+                eyre::eyre!("failed to open state provider for S₀ ({s0_parent_hash}): {e}")
+            })?;
 
         let s0_state_root = prev_block_header.state_root;
 
         // Generate zone state witness via direct trie walk — no RPC.
-        let initial_zone_state = self
-            .witness_generator
-            .generate_zone_state_witness(
-                &*state_provider,
-                s0_state_root,
-                &merged_accesses.accounts,
-                &merged_accesses.storage,
-            )?;
+        let initial_zone_state = self.witness_generator.generate_zone_state_witness(
+            &*state_provider,
+            s0_state_root,
+            &merged_accesses.accounts,
+            &merged_accesses.storage,
+        )?;
 
         // Fetch L1 eth_getProof responses for recorded reads.
         let l1_proofs = self.fetch_l1_proofs(&all_l1_reads).await?;
 
         // Generate the Tempo state proof from recorded reads + fetched proofs.
-        let tempo_state_proofs =
-            self.witness_generator
-                .generate_tempo_state_proof(&all_l1_reads, &l1_proofs);
+        let tempo_state_proofs = self
+            .witness_generator
+            .generate_tempo_state_proof(&all_l1_reads, &l1_proofs)?;
 
         // In direct mode (anchor == tempo), the anchor block hash is the hash
         // of the Tempo header processed by the last advanceTempo in the batch.
@@ -168,9 +171,8 @@ where
                     .accounts
                     .get(&zone_prover::execute::TEMPO_STATE_ADDRESS)
                     .and_then(|acct| {
-                        acct.storage.get(
-                            &zone_prover::execute::storage::TEMPO_STATE_BLOCK_HASH_SLOT,
-                        )
+                        acct.storage
+                            .get(&zone_prover::execute::storage::TEMPO_STATE_BLOCK_HASH_SLOT)
                     })
                     .map(|v| B256::from(v.to_be_bytes()))
                     .unwrap_or(B256::ZERO)
@@ -216,10 +218,7 @@ where
     ///
     /// Groups reads by `(tempo_block_number, account)` and issues one
     /// `eth_getProof` RPC call per group.
-    async fn fetch_l1_proofs(
-        &self,
-        l1_reads: &[RecordedL1Read],
-    ) -> Result<Vec<FetchedL1Proof>> {
+    async fn fetch_l1_proofs(&self, l1_reads: &[RecordedL1Read]) -> Result<Vec<FetchedL1Proof>> {
         use alloy_rpc_types_eth::EIP1186AccountProofResponse;
 
         if l1_reads.is_empty() {
@@ -244,10 +243,7 @@ where
 
             let proof_response: EIP1186AccountProofResponse = self
                 .l1_provider
-                .get_proof(
-                    *account,
-                    storage_keys,
-                )
+                .get_proof(*account, storage_keys)
                 .block_id(BlockNumberOrTag::Number(*tempo_block_number).into())
                 .await?;
 
@@ -339,8 +335,7 @@ fn encode_batch_output(output: &zone_prover::types::BatchOutput) -> Vec<u8> {
     );
     buf.extend_from_slice(output.withdrawal_queue_hash.as_slice());
     buf.extend_from_slice(
-        &alloy_primitives::U256::from(output.last_batch.withdrawal_batch_index)
-            .to_be_bytes::<32>(),
+        &alloy_primitives::U256::from(output.last_batch.withdrawal_batch_index).to_be_bytes::<32>(),
     );
     buf
 }

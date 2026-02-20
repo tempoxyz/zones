@@ -29,14 +29,13 @@ use zone_prover::{
     execute::{
         TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
         storage::{
-            TEMPO_STATE_BLOCK_HASH_SLOT, TEMPO_STATE_PACKED_SLOT,
-            TEMPO_STATE_STATE_ROOT_SLOT, ZONE_INBOX_PROCESSED_HASH_SLOT,
-            ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
+            TEMPO_STATE_BLOCK_HASH_SLOT, TEMPO_STATE_PACKED_SLOT, TEMPO_STATE_STATE_ROOT_SLOT,
+            ZONE_INBOX_PROCESSED_HASH_SLOT, ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
         },
     },
     types::{
-        AccountWitness, BatchStateProof, BatchWitness, L1AccountProof, L1StateRead,
-        PublicInputs, ZoneBlock, ZoneHeader, ZoneStateWitness,
+        AccountWitness, BatchStateProof, BatchWitness, L1AccountProof, L1StateRead, PublicInputs,
+        ZoneBlock, ZoneHeader, ZoneStateWitness,
     },
 };
 
@@ -140,16 +139,13 @@ impl WitnessGenerator {
             // Collect storage slots as B256 keys for the proof request.
             let slot_keys: Vec<B256> = accessed_storage
                 .get(&addr)
-                .map(|slots| {
-                    slots.iter().map(|s| B256::from(s.to_be_bytes())).collect()
-                })
+                .map(|slots| slots.iter().map(|s| B256::from(s.to_be_bytes())).collect())
                 .unwrap_or_default();
 
             // Generate MPT proofs via the state provider's trie.
             // TrieInput::default() means no overlay — proofs are against the
             // committed state that `state_provider` represents.
-            let account_proof_result =
-                state_provider.proof(TrieInput::default(), addr, &slot_keys);
+            let account_proof_result = state_provider.proof(TrieInput::default(), addr, &slot_keys);
 
             let acct_proof = account_proof_result
                 .map_err(|e| eyre::eyre!("MPT proof generation failed for {addr}: {e}"))?;
@@ -164,10 +160,7 @@ impl WitnessGenerator {
 
             let nonce = acct_proof.info.as_ref().map_or(0, |a| a.nonce);
             let balance = acct_proof.info.as_ref().map_or(U256::ZERO, |a| a.balance);
-            let code_hash_from_proof = acct_proof
-                .info
-                .as_ref()
-                .and_then(|a| a.bytecode_hash);
+            let code_hash_from_proof = acct_proof.info.as_ref().and_then(|a| a.bytecode_hash);
             let storage_root = acct_proof.storage_root;
             let proof_nodes = acct_proof.proof;
 
@@ -252,11 +245,8 @@ impl WitnessGenerator {
         &self,
         recorded_reads: &[RecordedL1Read],
         l1_proofs: &[FetchedL1Proof],
-    ) -> BatchStateProof {
+    ) -> eyre::Result<BatchStateProof> {
         let mut node_pool: HashMap<B256, Vec<u8>> = HashMap::default();
-
-        // Pre-compute account proof hashes, keyed by (block_number, account).
-        let mut account_proof_hashes: BTreeMap<(u64, Address), Vec<B256>> = BTreeMap::new();
 
         // Pre-compute storage proof hashes, keyed by (block_number, account, slot_b256).
         let mut storage_proof_hashes: BTreeMap<(u64, Address, B256), Vec<B256>> = BTreeMap::new();
@@ -278,20 +268,29 @@ impl WitnessGenerator {
                     hash
                 })
                 .collect();
-            account_proof_hashes.insert((block_num, proof.address), acct_hashes.clone());
 
             // Build L1AccountProof from the eth_getProof response.
-            account_proofs_map
-                .entry((block_num, proof.address))
-                .or_insert_with(|| L1AccountProof {
-                    tempo_block_number: block_num,
-                    account: proof.address,
-                    nonce: proof.nonce,
-                    balance: proof.balance,
-                    storage_root: proof.storage_hash,
-                    code_hash: proof.code_hash,
-                    account_path: acct_hashes,
-                });
+            let key = (block_num, proof.address);
+            let candidate = L1AccountProof {
+                tempo_block_number: block_num,
+                account: proof.address,
+                nonce: proof.nonce,
+                balance: proof.balance,
+                storage_root: proof.storage_hash,
+                code_hash: proof.code_hash,
+                account_path: acct_hashes,
+            };
+            if let Some(existing) = account_proofs_map.get(&key) {
+                if existing != &candidate {
+                    return Err(eyre::eyre!(
+                        "conflicting duplicate L1 account proof for tempo_block={} account={}",
+                        block_num,
+                        proof.address
+                    ));
+                }
+            } else {
+                account_proofs_map.insert(key, candidate);
+            }
 
             // Add storage proof nodes to the pool.
             for sp in &proof.storage_proof {
@@ -305,33 +304,57 @@ impl WitnessGenerator {
                         hash
                     })
                     .collect();
-                storage_proof_hashes.insert((block_num, proof.address, slot_b256), sp_hashes);
+                let key = (block_num, proof.address, slot_b256);
+                if let Some(existing) = storage_proof_hashes.get(&key) {
+                    if existing != &sp_hashes {
+                        return Err(eyre::eyre!(
+                            "conflicting duplicate L1 storage proof for tempo_block={} account={} slot={}",
+                            block_num,
+                            proof.address,
+                            slot_b256
+                        ));
+                    }
+                } else {
+                    storage_proof_hashes.insert(key, sp_hashes);
+                }
             }
         }
 
         // Build reads with storage_path only (account proof is separate).
-        let reads: Vec<L1StateRead> = recorded_reads
-            .iter()
-            .map(|r| {
-                // Only the storage proof hashes for this specific slot.
-                let storage_path = storage_proof_hashes
-                    .get(&(r.tempo_block_number, r.account, r.slot))
-                    .cloned()
-                    .unwrap_or_default();
+        let mut reads: Vec<L1StateRead> = Vec::with_capacity(recorded_reads.len());
+        for r in recorded_reads {
+            if !account_proofs_map.contains_key(&(r.tempo_block_number, r.account)) {
+                return Err(eyre::eyre!(
+                    "missing L1 account proof for tempo_block={} account={}",
+                    r.tempo_block_number,
+                    r.account
+                ));
+            }
 
-                L1StateRead {
-                    zone_block_index: r.zone_block_index,
-                    tempo_block_number: r.tempo_block_number,
-                    account: r.account,
-                    slot: U256::from_be_bytes(r.slot.0),
-                    storage_path,
-                    value: U256::from_be_bytes(r.value.0),
-                }
-            })
-            .collect();
+            // Only the storage proof hashes for this specific slot.
+            let storage_path = storage_proof_hashes
+                .get(&(r.tempo_block_number, r.account, r.slot))
+                .cloned()
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "missing L1 storage proof for tempo_block={} account={} slot={}",
+                        r.tempo_block_number,
+                        r.account,
+                        r.slot
+                    )
+                })?;
 
-        let account_proofs: Vec<L1AccountProof> =
-            account_proofs_map.into_values().collect();
+            reads.push(L1StateRead {
+                zone_block_index: r.zone_block_index,
+                tempo_block_number: r.tempo_block_number,
+                account: r.account,
+                slot: U256::from_be_bytes(r.slot.0),
+                storage_path,
+                value: U256::from_be_bytes(r.value.0),
+            });
+        }
+
+        let account_proofs: Vec<L1AccountProof> = account_proofs_map.into_values().collect();
 
         info!(
             reads = reads.len(),
@@ -343,7 +366,11 @@ impl WitnessGenerator {
             node_pool.len(),
         );
 
-        BatchStateProof { node_pool, reads, account_proofs }
+        Ok(BatchStateProof {
+            node_pool,
+            reads,
+            account_proofs,
+        })
     }
 
     /// Assemble a complete [`BatchWitness`] from all components.
