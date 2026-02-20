@@ -60,6 +60,7 @@ just zone-up my-zone false release
 - [Rust toolchain](https://rustup.rs/)
 - [Foundry](https://book.getfoundry.sh/getting-started/installation) (`cast`, `forge`)
 - [`just`](https://github.com/casey/just#packages)
+- [`jq`](https://jqlang.github.io/jq/download/)
 
 ### 1. Set the L1 RPC URL
 
@@ -155,52 +156,45 @@ The zone node stores data in `/tmp/tempo-zone-<name>/`.
 
 ### 6. Interact with the Zone
 
-#### Check balance on the zone
+#### Create and fund a user wallet
+
+The `just` commands below sign transactions with `PRIVATE_KEY`. Generate a wallet and fund it on L1 via the testnet faucet:
 
 ```bash
-just check-balance <address>
-# or with a custom token and rpc (positional args):
-just check-balance <address> <token> <rpc>
+cast wallet new
+export PRIVATE_KEY="0x<your-wallet-private-key>"
+ADDR=$(cast wallet address "$PRIVATE_KEY")
+cast rpc tempo_fundAddress "$ADDR" --rpc-url "$L1_RPC_URL"
 ```
 
 #### Deposit from L1 to Zone
 
-First, approve the portal to spend your tokens:
+Approve the portal to spend your tokens, then deposit:
 
 ```bash
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 just max-approve-portal
+just send-deposit 1000000                       # deposit to your own address
+just send-deposit 1000000 <recipient-address>   # deposit to a specific address
 ```
 
-Then send a deposit (pathUSD by default):
+#### Check balance on the zone
 
 ```bash
-just send-deposit 1000000                       # deposit 1M pathUSD to your own address
-just send-deposit 1000000 <recipient-address>   # deposit 1M pathUSD to a specific address
+just check-balance "$ADDR"
 ```
 
 #### Withdraw from Zone to L1
 
-First, approve the outbox:
+Approve the outbox, then request a withdrawal:
 
 ```bash
 just max-approve-outbox
+just send-withdrawal 1000000                       # withdraw to your own address
+just send-withdrawal 1000000 <recipient-address>   # withdraw to a specific address
 ```
 
-Then request a withdrawal:
-
-```bash
-just send-withdrawal 1000000                       # withdraw 1M to your own address
-just send-withdrawal 1000000 <recipient-address>   # withdraw 1M to a specific address
-```
-
-The sequencer detects the withdrawal, includes it in the next batch submission to L1, and then processes it on L1 automatically.
-
-#### Check balance on Zone L2
-
-```bash
-just check-balance <address>
-```
+The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
 
 #### Check balance via Private RPC
 
