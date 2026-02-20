@@ -40,7 +40,7 @@ export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 just max-approve-portal
 just send-deposit 1000000
 
-# Check your balance on the zone (wait a few seconds for the deposit to land)
+# Check your balance on the zone
 just check-balance "$ADDR"
 ```
 
