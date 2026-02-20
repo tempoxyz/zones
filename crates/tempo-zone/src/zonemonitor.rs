@@ -56,8 +56,12 @@ pub struct ZoneMonitorConfig {
     pub tempo_state_address: Address,
     /// Zone L2 RPC URL (HTTP).
     pub zone_rpc_url: String,
-    /// How often to poll for new zone blocks.
+    /// How often to poll the zone L2 for new blocks (cheap RPC call).
     pub poll_interval: Duration,
+    /// Maximum time to accumulate zone blocks before submitting a batch to L1.
+    /// Blocks are aggregated during this window to reduce L1 tx count.
+    /// A batch is submitted early if pending withdrawals are detected.
+    pub batch_interval: Duration,
     /// ZonePortal contract address on Tempo L1.
     pub portal_address: Address,
 }
@@ -177,6 +181,11 @@ impl ZoneMonitor {
     }
 
     /// Run the monitor loop. This method never returns under normal operation.
+    ///
+    /// Polls the zone L2 frequently (`poll_interval`) but only submits a batch
+    /// to L1 when:
+    /// - The `batch_interval` deadline has elapsed, OR
+    /// - Pending withdrawals are detected (flush immediately for user experience)
     #[instrument(skip_all, fields(
         outbox = %self.config.outbox_address,
         inbox = %self.config.inbox_address,
@@ -184,25 +193,63 @@ impl ZoneMonitor {
     pub async fn run(&mut self) -> Result<()> {
         info!(
             zone_rpc = %self.config.zone_rpc_url,
+            batch_interval = ?self.config.batch_interval,
+            poll_interval = ?self.config.poll_interval,
             "Zone monitor started"
         );
 
+        let mut poll = tokio::time::interval(self.config.poll_interval);
+        let mut batch_deadline = tokio::time::Instant::now();
+
         loop {
-            match self.provider.get_block_number().await {
-                Ok(latest) => {
-                    if latest > self.last_processed_block {
-                        let from = self.last_processed_block + 1;
-                        if let Err(e) = self.process_block_range(from, latest).await {
-                            error!(from, to = latest, error = %e, "Failed to process zone block range");
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(error = %e, "Failed to query zone L2 block number");
-                }
+            poll.tick().await;
+
+            let Ok(latest) = self.provider.get_block_number().await else {
+                continue;
+            };
+            if latest <= self.last_processed_block {
+                continue;
             }
 
-            tokio::time::sleep(self.config.poll_interval).await;
+            let deadline_elapsed = tokio::time::Instant::now() >= batch_deadline;
+            // Skip the eth_getLogs call when we'd submit anyway.
+            if !deadline_elapsed && !self.has_pending_withdrawals(latest).await {
+                continue;
+            }
+
+            let from = self.last_processed_block + 1;
+            if let Err(e) = self.process_block_range(from, latest).await {
+                error!(from, to = latest, error = %e, "Failed to process zone block range");
+                continue;
+            }
+
+            batch_deadline = tokio::time::Instant::now() + self.config.batch_interval;
+        }
+    }
+
+    /// Check if any zone blocks since `last_processed_block` contain finalized
+    /// withdrawal batches that need to be submitted to L1.
+    ///
+    /// `pendingWithdrawalsCount()` is always 0 on committed blocks because
+    /// `finalizeWithdrawalBatch` runs as the last tx in every zone block. The
+    /// correct signal is `BatchFinalized` events with non-zero withdrawal hashes.
+    async fn has_pending_withdrawals(&self, latest_block: u64) -> bool {
+        let from = self.last_processed_block + 1;
+        match self
+            .outbox
+            .BatchFinalized_filter()
+            .from_block(from)
+            .to_block(latest_block)
+            .query()
+            .await
+        {
+            Ok(events) => events
+                .iter()
+                .any(|(event, _)| !event.withdrawalQueueHash.is_zero()),
+            Err(e) => {
+                warn!(error = %e, "Failed to check for finalized withdrawal batches");
+                false
+            }
         }
     }
 
