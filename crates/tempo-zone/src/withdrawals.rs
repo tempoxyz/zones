@@ -274,8 +274,9 @@ impl WithdrawalProcessor {
                 "Submitting processWithdrawal to L1"
             );
 
-            let call =
-                self.portal.processWithdrawal(withdrawal.clone(), remaining_queue);
+            let call = self
+                .portal
+                .processWithdrawal(withdrawal.clone(), remaining_queue);
 
             // When the withdrawal has a callback (`gasLimit > 0`), we must
             // override `eth_estimateGas` because the estimate only covers the
