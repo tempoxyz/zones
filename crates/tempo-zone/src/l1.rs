@@ -195,10 +195,10 @@ impl L1Subscriber {
             for block_number in cursor..=end {
                 let deposits = deposits_by_block.remove(&block_number).unwrap_or_default();
                 if !deposits.is_empty() {
-                    debug!(
+                    info!(
                         block = block_number,
                         count = deposits.len(),
-                        "Backfill deposits"
+                        "💰 Backfill deposits"
                     );
                 }
                 let header_resp = l1_provider
@@ -216,7 +216,7 @@ impl L1Subscriber {
             cursor = end + 1;
         }
 
-        info!(to, "Backfill complete");
+        info!(from, to, blocks = to - from + 1, "Backfill complete");
         Ok(())
     }
 
@@ -323,10 +323,12 @@ impl L1Subscriber {
             for d in &deposits {
                 info!(
                     l1_block = block_number,
+                    token = %d.token,
                     sender = %d.sender,
                     to = %d.to,
                     amount = %d.amount,
-                    "💰 Deposit from L1"
+                    fee = %d.fee,
+                    "💰 Deposit detected on L1"
                 );
             }
 

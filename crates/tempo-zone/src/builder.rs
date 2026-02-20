@@ -230,13 +230,14 @@ where
             "Including advanceTempo system tx (chain continuity OK)"
         );
         for deposit in &l1_block.deposits {
-            debug!(
+            info!(
                 target: "zone::payload",
+                l1_block = l1_block.header.inner.number,
+                token = %deposit.token,
                 sender = %deposit.sender,
                 to = %deposit.to,
                 amount = %deposit.amount,
-                l1_block = l1_block.header.inner.number,
-                "Deposit -> advanceTempo"
+                "💰 Deposit included in advanceTempo"
             );
         }
 

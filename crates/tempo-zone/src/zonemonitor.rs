@@ -261,7 +261,7 @@ impl ZoneMonitor {
                 count = all_withdrawals.len(),
                 finalized_batches = finalized_hashes.len(),
                 withdrawal_queue_hash = %withdrawal_queue_hash,
-                "Collected withdrawals across block range"
+                "📤 Collected withdrawal requests from zone"
             );
         }
 
