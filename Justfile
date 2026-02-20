@@ -132,6 +132,7 @@ zone-up name reset="false" profile="dev" args="":
     fi
     PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$ZONE_JSON")
+    ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
     DATADIR="/tmp/tempo-zone-{{name}}"
     if [[ "{{reset}}" = "true" ]]; then
         rm -rf "$DATADIR" || true
@@ -148,6 +149,7 @@ zone-up name reset="false" profile="dev" args="":
                       --l1.rpc-url "${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}" \
                       --l1.portal-address "$PORTAL" \
                       --l1.genesis-block-number "$ANCHOR_BLOCK" \
+                      --zone.id "$ZONE_ID" \
                       --http \
                       --http.addr 0.0.0.0 \
                       --http.port 8546 \
@@ -195,6 +197,63 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
 [doc('Checks TIP-20 token balance for an account on the zone (port 8546)')]
 check-balance account token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8546":
     @printf "Balance of {{account}}: " && cast call "{{token}}" "balanceOf(address)(uint256)" "{{account}}" --rpc-url "{{rpc}}"
+
+[group('zone')]
+[doc('Generates a signed auth token for the private zone RPC. Requires PRIVATE_KEY env var. Reads zone metadata from generated/<name>/zone.json.')]
+zone-auth-token name:
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    ZONE_JSON="generated/{{name}}/zone.json"
+    if [[ ! -f "$ZONE_JSON" ]]; then
+        echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
+    PORTAL=$(jq -r '.portal' "$ZONE_JSON")
+    GENESIS_JSON="generated/{{name}}/genesis.json"
+    CHAIN_ID=$(jq -r '.config.chainId' "$GENESIS_JSON")
+    NOW=$(date +%s)
+    EXPIRES=$((NOW + 600))
+    MAGIC="54656d706f5a6f6e655250430000000000000000000000000000000000000000"
+    VERSION="00"
+    ZONE_ID_HEX=$(printf '%016x' "$ZONE_ID")
+    CHAIN_ID_HEX=$(printf '%016x' "$CHAIN_ID")
+    PORTAL_HEX=$(echo "$PORTAL" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
+    ISSUED_HEX=$(printf '%016x' "$NOW")
+    EXPIRES_HEX=$(printf '%016x' "$EXPIRES")
+    FIELDS="${VERSION}${ZONE_ID_HEX}${CHAIN_ID_HEX}${PORTAL_HEX}${ISSUED_HEX}${EXPIRES_HEX}"
+    DIGEST=$(cast keccak "0x${MAGIC}${FIELDS}")
+    SIG=$(cast wallet sign --no-hash "$DIGEST" --private-key "$PK")
+    SIG_HEX=$(echo "$SIG" | sed 's/0x//')
+    echo "${SIG_HEX}${FIELDS}"
+
+[group('zone')]
+[doc('Checks TIP-20 token balance via the private RPC (with auth token). Requires PRIVATE_KEY env var.')]
+check-balance-private name token="0x20C0000000000000000000000000000000000000" rpc="http://localhost:8544":
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    ACCOUNT=$(cast wallet address "$PK")
+    TOKEN=$(just zone-auth-token {{name}})
+    ACCOUNT_LOWER=$(echo "$ACCOUNT" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
+    RESULT=$(curl -s -X POST "{{rpc}}" \
+        -H "Content-Type: application/json" \
+        -H "x-authorization-token: ${TOKEN}" \
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"from\":\"$ACCOUNT\",\"to\":\"{{token}}\",\"data\":\"0x70a08231000000000000000000000000${ACCOUNT_LOWER}\"}],\"id\":1}")
+    RAW=$(echo "$RESULT" | jq -r '.result // empty')
+    ERROR=$(echo "$RESULT" | jq -r '.error.message // empty')
+    if [[ -n "$ERROR" ]]; then
+        echo "RPC error: $ERROR"
+        exit 1
+    fi
+    if [[ -z "$RAW" ]]; then
+        echo "No result from RPC"
+        echo "$RESULT"
+        exit 1
+    fi
+    BALANCE=$(cast --to-dec "$RAW")
+    echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
 [doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Requires L1_RPC_URL env var.')]
@@ -276,6 +335,7 @@ deploy-zone name:
                       --l1.rpc-url "$L1_RPC" \
                       --l1.portal-address "$PORTAL" \
                       --l1.genesis-block-number "$ANCHOR_BLOCK" \
+                      --zone.id "$ZONE_ID" \
                       --http \
                       --http.addr 0.0.0.0 \
                       --http.port 8546 \

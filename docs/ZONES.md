@@ -23,7 +23,28 @@ This single command will:
 
 > ⚠️ **Save your sequencer key** — it's printed before the node starts. You'll need it to restart the node later.
 
-Once running, see [Interact with the Zone](#6-interact-with-the-zone) to deposit, withdraw, and check balances.
+Once running, generate a user wallet and deposit some tokens:
+
+```bash
+# Generate a wallet
+cast wallet new
+# Save the private key and address
+export PRIVATE_KEY="0x<your-wallet-private-key>"
+ADDR=$(cast wallet address "$PRIVATE_KEY")
+
+# Fund the wallet on L1 (testnet faucet)
+cast rpc tempo_fundAddress "$ADDR" --rpc-url "$L1_RPC_URL"
+
+# Approve the portal and deposit tokens to the zone
+export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
+just max-approve-portal
+just send-deposit 1000000
+
+# Check your balance on the zone (wait a few seconds for the deposit to land)
+just check-balance "$ADDR"
+```
+
+See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and private RPC usage.
 
 To restart the zone later:
 
@@ -181,6 +202,22 @@ The sequencer detects the withdrawal, includes it in the next batch submission t
 just check-balance <address>
 ```
 
+#### Check balance via Private RPC
+
+The private RPC (port 8544) requires a signed auth token derived from your private key. This ensures only the account owner can query their own balance.
+
+```bash
+# Check your balance (generates auth token automatically)
+just check-balance-private my-zone
+
+# Generate a reusable auth token (valid for 10 minutes)
+TOKEN=$(just zone-auth-token my-zone)
+curl -s http://localhost:8544 \
+  -H "Content-Type: application/json" \
+  -H "x-authorization-token: $TOKEN" \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+```
+
 #### Check portal status on L1
 
 ```bash
@@ -231,6 +268,7 @@ graph TB
 | `--l1.rpc-url` | (required) | L1 WebSocket RPC URL |
 | `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
 | `--l1.genesis-block-number` | (from zone.json) | L1 block when the zone was created |
+| `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth) |
 | `--sequencer-key` | (optional) | Sequencer private key for block production |
 | `--block.interval-ms` | 250 | Block building interval |
 | `--zone.batch-interval-secs` | 60 | Max seconds to accumulate zone blocks before submitting a batch to L1 |
@@ -260,3 +298,5 @@ graph TB
 | `just max-approve-outbox` | Approve outbox to spend tokens on zone |
 | `just send-withdrawal [to]` | Withdraw tokens from zone to L1 (defaults to sender) |
 | `just check-balance <addr>` | Check token balance on the zone |
+| `just zone-auth-token <name>` | Generate a signed private RPC auth token (10 min TTL) |
+| `just check-balance-private <name>` | Check balance via the private RPC (auto-generates auth token) |

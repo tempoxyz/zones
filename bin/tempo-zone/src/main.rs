@@ -83,6 +83,11 @@ struct ZoneArgs {
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
     pub l1_genesis_block_number: Option<u64>,
 
+    /// Zone ID for the private RPC auth token validation.
+    /// Must match the zone's on-chain ID from ZoneFactory.
+    #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
+    pub zone_id: u64,
+
     /// Port for the private zone RPC server (0 for OS-assigned).
     #[arg(
         long = "private-rpc.port",
@@ -139,7 +144,7 @@ fn main() {
             let eth_handlers = handle.node.eth_handlers().clone();
             let private_rpc_config = zone::rpc::PrivateRpcConfig {
                 listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
-                zone_id: 0, // TODO: hardcoded for now
+                zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
                 zone_portal: args.portal_address,
                 sequencer: sequencer_addr.unwrap_or_default(),
