@@ -160,6 +160,44 @@ fn parse_params<T: serde::de::DeserializeOwned>(
         .map_err(|_| JsonRpcResponse::error(id.clone(), JsonRpcError::invalid_params(msg)))
 }
 
+/// Parse `eth_call` / `eth_estimateGas` params: `[request, block?, stateOverride?]`.
+fn parse_call_params(
+    raw: &str,
+    id: &Value,
+) -> Result<
+    (
+        TempoTransactionRequest,
+        Option<BlockId>,
+        Option<StateOverride>,
+    ),
+    JsonRpcResponse,
+> {
+    let err = || {
+        JsonRpcResponse::error(
+            id.clone(),
+            JsonRpcError::invalid_params("expected [request, block?, stateOverride?]"),
+        )
+    };
+    let mut arr: Vec<Value> = serde_json::from_str(raw).map_err(|_| err())?;
+    if arr.is_empty() {
+        return Err(err());
+    }
+    let request = serde_json::from_value(arr.remove(0)).map_err(|_| err())?;
+    let block = arr
+        .first()
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|_| err())?
+        .flatten();
+    let state_override = arr
+        .get(1)
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|_| err())?
+        .flatten();
+    Ok((request, block, state_override))
+}
+
 /// Convert an API result into a JSON-RPC response, logging failures.
 fn api_result(
     id: Value,
@@ -361,16 +399,10 @@ async fn handle_call(
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
-    let (request, block, state_override) =
-        match parse_params::<(
-            TempoTransactionRequest,
-            Option<BlockId>,
-            Option<StateOverride>,
-        )>(raw, &id, "expected [request, block?, stateOverride?]")
-        {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
+    let (request, block, state_override) = match parse_call_params(raw, &id) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     if !auth.is_sequencer && state_override.is_some() {
         return JsonRpcResponse::error(
@@ -394,16 +426,10 @@ async fn handle_estimate_gas(
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
-    let (request, block, state_override) =
-        match parse_params::<(
-            TempoTransactionRequest,
-            Option<BlockId>,
-            Option<StateOverride>,
-        )>(raw, &id, "expected [request, block?, stateOverride?]")
-        {
-            Ok(v) => v,
-            Err(resp) => return resp,
-        };
+    let (request, block, state_override) = match parse_call_params(raw, &id) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
 
     if !auth.is_sequencer && state_override.is_some() {
         return JsonRpcResponse::error(
