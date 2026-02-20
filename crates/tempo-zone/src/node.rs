@@ -4,7 +4,6 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use alloy_primitives::U256;
-use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
@@ -22,7 +21,7 @@ use reth_node_builder::{
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock, SealedHeader};
+use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock};
 use reth_provider::{ChainSpecProvider, EthStorage};
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
@@ -32,7 +31,10 @@ use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoChainSpec};
 use tempo_evm::TempoEvmConfig;
-use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
+use tempo_node::{
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, node::TempoPayloadAttributesBuilder,
+    rpc::TempoReceiptConverter,
+};
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
@@ -235,7 +237,7 @@ where
         {
             let provider = ctx.node.provider().clone();
             let payload_attributes_builder =
-                ZonePayloadAttributesBuilder::new(provider.chain_spec());
+                TempoPayloadAttributesBuilder::new(provider.chain_spec());
             let to_engine = ctx.beacon_engine_handle.clone();
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
@@ -326,42 +328,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for ZoneNode {
         chain_spec: &Self::ChainSpec,
     ) -> impl PayloadAttributesBuilder<<Self::Payload as PayloadTypes>::PayloadAttributes, TempoHeader>
     {
-        ZonePayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
-    }
-}
-
-/// Payload attributes builder for Zone.
-#[derive(Debug)]
-#[non_exhaustive]
-struct ZonePayloadAttributesBuilder {
-    inner: LocalPayloadAttributesBuilder<TempoChainSpec>,
-}
-
-impl ZonePayloadAttributesBuilder {
-    fn new(chain_spec: Arc<TempoChainSpec>) -> Self {
-        Self {
-            inner: LocalPayloadAttributesBuilder::new(chain_spec).without_increasing_timestamp(),
-        }
-    }
-}
-
-impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
-    for ZonePayloadAttributesBuilder
-{
-    fn build(&self, parent: &SealedHeader<TempoHeader>) -> TempoPayloadAttributes {
-        let mut inner = self.inner.build(parent);
-        inner.suggested_fee_recipient = alloy_primitives::Address::ZERO;
-
-        let timestamp_millis_part = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-            % 1000;
-
-        TempoPayloadAttributes {
-            inner,
-            timestamp_millis_part,
-        }
+        TempoPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
     }
 }
 
