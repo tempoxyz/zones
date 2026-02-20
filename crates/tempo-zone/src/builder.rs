@@ -254,6 +254,7 @@ where
                 L1Deposit::Regular(d) => {
                     debug!(
                         target: "zone::payload",
+                        token = %d.token,
                         sender = %d.sender,
                         to = %d.to,
                         amount = %d.amount,
@@ -264,6 +265,7 @@ where
                 L1Deposit::Encrypted(d) => {
                     debug!(
                         target: "zone::payload",
+                        token = %d.token,
                         sender = %d.sender,
                         amount = %d.amount,
                         key_index = %d.key_index,

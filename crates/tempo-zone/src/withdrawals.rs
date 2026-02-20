@@ -265,20 +265,47 @@ impl WithdrawalProcessor {
                 slot = head_val,
                 index = i,
                 total = withdrawals.len(),
+                token = %withdrawal.token,
                 to = %withdrawal.to,
                 amount = %withdrawal.amount,
                 fee = %withdrawal.fee,
                 has_callback = withdrawal.gasLimit > 0,
                 is_last,
-                remaining_queue = %remaining_queue,
-                "Submitting processWithdrawal to L1"
+                "📤 Submitting withdrawal to L1"
             );
 
-            let tx_result = self
+            let call = self
                 .portal
-                .processWithdrawal(withdrawal.clone(), remaining_queue)
-                .send()
-                .await;
+                .processWithdrawal(withdrawal.clone(), remaining_queue);
+
+            // When the withdrawal has a callback (`gasLimit > 0`), we must
+            // override `eth_estimateGas` because the estimate only covers the
+            // revert / bounce-back path, which is much cheaper than the happy
+            // path where the callback actually executes.
+            //
+            // The tx gas limit is composed of three parts:
+            //
+            //   txGas = gasLimit + CALLBACK_OVERHEAD + eip150_cushion
+            //
+            // 1. `gasLimit`          — gas the user requested for their callback.
+            // 2. `CALLBACK_OVERHEAD` — fixed cost for the portal + messenger
+            //    logic that runs *around* the callback: queue dequeue & hash
+            //    verification, TIP-20 transferFrom (~500k), messenger relay
+            //    setup, fee payment, event emission, and the bounce-back path
+            //    if the callback reverts.
+            // 3. EIP-150 cushion     — the 63/64 forwarding rule means the
+            //    caller must hold back 1/64 of remaining gas. To guarantee
+            //    the inner CALL receives at least `gasLimit`, the outer frame
+            //    needs an extra `ceil(gasLimit / 63)`.
+            let call = if withdrawal.gasLimit > 0 {
+                const CALLBACK_OVERHEAD: u64 = 1_000_000;
+                let eip150_cushion = withdrawal.gasLimit.div_ceil(63);
+                call.gas(withdrawal.gasLimit + CALLBACK_OVERHEAD + eip150_cushion)
+            } else {
+                call
+            };
+
+            let tx_result = call.send().await;
 
             match tx_result {
                 Ok(pending) => {
@@ -294,9 +321,10 @@ impl WithdrawalProcessor {
                                 slot = head_val,
                                 index = i,
                                 %tx_hash,
+                                token = %withdrawal.token,
                                 to = %withdrawal.to,
                                 amount = %withdrawal.amount,
-                                "processWithdrawal confirmed on L1"
+                                "✅ Withdrawal confirmed on L1"
                             );
                         }
                         Err(e) => {

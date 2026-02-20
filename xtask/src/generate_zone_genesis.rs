@@ -13,7 +13,7 @@ use reth_evm::{
             result::{ExecutionResult, Output},
         },
         database::{CacheDB, EmptyDB},
-        state::AccountInfo,
+        state::{AccountInfo, Bytecode},
     },
 };
 use std::{
@@ -21,10 +21,19 @@ use std::{
     path::{Path, PathBuf},
 };
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TEMPO_T0_BASE_FEE};
+use tempo_contracts::{
+    ARACHNID_CREATE2_FACTORY_ADDRESS, CREATEX_ADDRESS, MULTICALL3_ADDRESS, PERMIT2_ADDRESS,
+    PERMIT2_SALT, SAFE_DEPLOYER_ADDRESS,
+    contracts::{ARACHNID_CREATE2_FACTORY_BYTECODE, CreateX, Multicall3, SafeDeployer},
+};
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_precompiles::{
     PATH_USD_ADDRESS,
+    account_keychain::AccountKeychain,
+    nonce::NonceManager,
+    stablecoin_dex::StablecoinDEX,
     storage::StorageCtx,
+    tip_fee_manager::TipFeeManager,
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
     tip403_registry::TIP403Registry,
@@ -42,6 +51,8 @@ const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const TEMPO_STATE_READER_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000004");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+const ALPHA_USD_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000001");
+const BETA_USD_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000002");
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct GenerateZoneGenesis {
@@ -95,12 +106,20 @@ impl GenerateZoneGenesis {
             },
         );
 
-        // Initialize TIP403Registry, TIP20Factory, and pathUSD — required so the Tempo EVM
-        // handler can validate fee tokens for user transactions on the zone.
-        // This mirrors the L1 genesis setup.
+        // Initialize all precompiles and deploy standard contracts to match the
+        // L1 genesis setup. The zone EVM uses the same TempoEvmFactory, so all
+        // precompiles must be initialized for user transactions to work correctly.
+        deploy_arachnid_create2_factory(&mut evm);
+        deploy_permit2(&mut evm)?;
+
         initialize_tip403_registry(&mut evm)?;
         initialize_tip20_factory(&mut evm)?;
-        create_path_usd_token(&mut evm, self.sequencer)?;
+        create_path_usd_token(&mut evm)?;
+        create_extra_tokens(&mut evm)?;
+        initialize_fee_manager(&mut evm)?;
+        initialize_stablecoin_dex(&mut evm)?;
+        initialize_nonce_manager(&mut evm)?;
+        initialize_account_keychain(&mut evm)?;
 
         let tempo_state_bytecode = load_artifact(&self.specs_out, "TempoState")?;
         let tempo_state_args = (Bytes::from(header_rlp),).abi_encode_params();
@@ -222,6 +241,39 @@ impl GenerateZoneGenesis {
                 (*address, genesis_account)
             })
             .collect();
+
+        // Include Address::ZERO in genesis so it exists in the state trie.
+        // System transactions use this address as the sender, and TIP-20 burn
+        // transfers to it. Without a trie entry, the parallel state root task
+        // (sparse trie) can diverge when this account is touched and then
+        // cleared under EIP-161 state-clear rules.
+        genesis_alloc.entry(Address::ZERO).or_default().nonce = Some(1);
+
+        // Deploy standard utility contracts matching L1 genesis.
+        genesis_alloc.insert(
+            MULTICALL3_ADDRESS,
+            GenesisAccount {
+                code: Some(Bytes::from_static(&Multicall3::DEPLOYED_BYTECODE)),
+                nonce: Some(1),
+                ..Default::default()
+            },
+        );
+        genesis_alloc.insert(
+            CREATEX_ADDRESS,
+            GenesisAccount {
+                code: Some(Bytes::from_static(&CreateX::DEPLOYED_BYTECODE)),
+                nonce: Some(1),
+                ..Default::default()
+            },
+        );
+        genesis_alloc.insert(
+            SAFE_DEPLOYER_ADDRESS,
+            GenesisAccount {
+                code: Some(Bytes::from_static(&SafeDeployer::DEPLOYED_BYTECODE)),
+                nonce: Some(1),
+                ..Default::default()
+            },
+        );
 
         if let Some(sequencer) = self.sequencer {
             genesis_alloc.entry(sequencer).or_default().balance =
@@ -363,6 +415,40 @@ fn deploy_contract(
     Ok(())
 }
 
+/// Deploys the Arachnid CREATE2 factory by directly inserting it into the EVM state.
+fn deploy_arachnid_create2_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) {
+    println!("Deploying Arachnid CREATE2 factory at {ARACHNID_CREATE2_FACTORY_ADDRESS}");
+    evm.db_mut().insert_account_info(
+        ARACHNID_CREATE2_FACTORY_ADDRESS,
+        AccountInfo {
+            code: Some(Bytecode::new_raw(ARACHNID_CREATE2_FACTORY_BYTECODE)),
+            nonce: 0,
+            ..Default::default()
+        },
+    );
+}
+
+/// Deploys Permit2 contract via the Arachnid CREATE2 factory.
+fn deploy_permit2(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let bytecode = &tempo_contracts::Permit2::BYTECODE;
+    let calldata: Bytes = PERMIT2_SALT
+        .as_slice()
+        .iter()
+        .chain(bytecode.iter())
+        .copied()
+        .collect();
+
+    println!("Deploying Permit2 via CREATE2 to {PERMIT2_ADDRESS}");
+    let result =
+        evm.transact_system_call(Address::ZERO, ARACHNID_CREATE2_FACTORY_ADDRESS, calldata)?;
+    if !result.result.is_success() {
+        return Err(eyre!("Permit2 deployment failed: {:?}", result));
+    }
+    evm.db_mut().commit(result.state);
+    println!("Permit2 deployed successfully at {PERMIT2_ADDRESS}");
+    Ok(())
+}
+
 /// Initialize the TIP403Registry precompile (required for fee token transfer checks).
 fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
@@ -396,10 +482,7 @@ fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
 /// This mirrors the L1 genesis setup: the Tempo EVM handler defaults to pathUSD
 /// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
 /// Without this, user transactions on the zone revert with `InvalidFeeToken`.
-fn create_path_usd_token(
-    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
-    sequencer: Option<Address>,
-) -> eyre::Result<()> {
+fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let admin = DEPLOYER;
 
     let ctx = evm.ctx_mut();
@@ -435,21 +518,119 @@ fn create_path_usd_token(
                 },
             )?;
 
-            // If a sequencer is specified, mint some pathUSD for gas fees
-            if let Some(sequencer) = sequencer {
-                token.mint(
-                    admin,
-                    ITIP20::mintCall {
-                        to: sequencer,
-                        amount: U256::from(1_000_000_000_000u128), // 1M pathUSD (6 decimals)
-                    },
-                )?;
-            }
-
             Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
         },
     )?;
 
     println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
+    Ok(())
+}
+
+/// Create AlphaUSD and BetaUSD tokens at their reserved TIP20 addresses,
+/// mirroring the L1 genesis setup.
+fn create_extra_tokens(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let admin = DEPLOYER;
+
+    for (address, name) in [
+        (ALPHA_USD_ADDRESS, "AlphaUSD"),
+        (BETA_USD_ADDRESS, "BetaUSD"),
+    ] {
+        let ctx = evm.ctx_mut();
+        StorageCtx::enter_evm(
+            &mut ctx.journaled_state,
+            &ctx.block,
+            &ctx.cfg,
+            &ctx.tx,
+            || {
+                TIP20Factory::new().create_token_reserved_address(
+                    address,
+                    name,
+                    name,
+                    "USD",
+                    PATH_USD_ADDRESS,
+                    admin,
+                )?;
+
+                let mut token = TIP20Token::from_address(address)?;
+                token.grant_role_internal(admin, *ISSUER_ROLE)?;
+                token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
+                token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
+                token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
+
+                token.set_supply_cap(
+                    admin,
+                    ITIP20::setSupplyCapCall {
+                        newSupplyCap: U256::from(u128::MAX),
+                    },
+                )?;
+
+                Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
+            },
+        )?;
+
+        println!("Created {name} token at {address}");
+    }
+
+    Ok(())
+}
+
+/// Initialize the TipFeeManager precompile.
+fn initialize_fee_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        || {
+            let mut fee_manager = TipFeeManager::new();
+            fee_manager
+                .initialize()
+                .expect("Could not init fee manager");
+        },
+    );
+    println!("Initialized TipFeeManager");
+    Ok(())
+}
+
+/// Initialize the StablecoinDEX precompile.
+fn initialize_stablecoin_dex(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        || StablecoinDEX::new().initialize(),
+    )?;
+    println!("Initialized StablecoinDEX");
+    Ok(())
+}
+
+/// Initialize the NonceManager precompile.
+fn initialize_nonce_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        || NonceManager::new().initialize(),
+    )?;
+    println!("Initialized NonceManager");
+    Ok(())
+}
+
+/// Initialize the AccountKeychain precompile.
+fn initialize_account_keychain(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        || AccountKeychain::new().initialize(),
+    )?;
+    println!("Initialized AccountKeychain");
     Ok(())
 }

@@ -160,7 +160,7 @@ impl ZoneEvmConfig {
     /// Create a new zone EVM config with the given chain spec and L1 state provider.
     pub fn new(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
         let zone_factory = ZoneEvmFactory::new(l1_provider);
-        let inner = TempoEvmConfig::new_with_default_factory(chain_spec.clone());
+        let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
             inner,

@@ -1,17 +1,19 @@
 //! [`ZoneRpcApi`] implementation backed by reth's EthApi.
 
+use std::{collections::HashMap, sync::Arc};
+
 use alloy_consensus::transaction::SignerRecoverable;
 use alloy_eips::eip2718::Decodable2718;
 use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U256};
 use alloy_rpc_types_eth::{
-    Block, BlockId, BlockNumberOrTag, BlockTransactions,
+    Block, BlockId, BlockNumberOrTag, BlockTransactions, Filter, FilterChanges, FilterId,
     state::{EvmOverrides, StateOverride},
 };
 use reth_rpc::EthFilter;
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
-    EthApiTypes,
+    EthApiTypes, EthFilterApiServer,
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use tempo_alloy::{
@@ -19,6 +21,7 @@ use tempo_alloy::{
     rpc::{TempoHeaderResponse, TempoTransactionRequest},
 };
 use tempo_primitives::TempoTxEnvelope;
+use tokio::sync::Mutex;
 
 use super::{
     auth::AuthContext,
@@ -54,18 +57,48 @@ type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHe
 /// [`classify_method`]: super::types::classify_method
 pub struct TempoZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
+    /// Maps filter IDs to the authenticated account that created them.
+    /// Ensures filters can only be accessed by their creator.
+    ///
+    /// TODO: entries are never cleaned up when reth reaps stale filters internally.
+    /// After bumping reth, use its `ActiveFilters` API to periodically sync this
+    /// map and remove entries for filters that no longer exist on the reth side.
+    filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
 }
 
 impl<Api: EthApiTypes> TempoZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
     pub fn new(eth: EthHandlers<Api>) -> Self {
-        Self { eth }
+        Self {
+            eth,
+            filter_owners: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Returns a reference to the inner [`EthFilter`] handler.
     #[allow(dead_code)]
     pub fn filter(&self) -> &EthFilter<Api> {
         &self.eth.filter
+    }
+
+    /// Verify that the filter belongs to the authenticated caller.
+    ///
+    /// Returns `Ok(())` if the caller owns the filter or is the sequencer.
+    /// Returns an error indistinguishable from "filter not found" to avoid
+    /// leaking filter existence to non-owners.
+    async fn ensure_filter_owner(
+        &self,
+        id: &FilterId,
+        auth: &AuthContext,
+    ) -> Result<(), JsonRpcError> {
+        if auth.is_sequencer {
+            return Ok(());
+        }
+        let owners = self.filter_owners.lock().await;
+        match owners.get(id) {
+            Some(owner) if *owner == auth.caller => Ok(()),
+            _ => Err(JsonRpcError::invalid_params("filter not found")),
+        }
     }
 }
 
@@ -336,6 +369,115 @@ where
             let result = EthTransactions::fill_transaction(&self.eth.api, request)
                 .await
                 .map_err(internal)?;
+            to_raw(&result)
+        })
+    }
+
+    fn get_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            if auth.is_sequencer {
+                let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
+                    .await
+                    .map_err(internal)?;
+                return to_raw(&logs);
+            }
+
+            super::filter::scope_filter(&mut filter);
+            let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
+                .await
+                .map_err(internal)?;
+            let filtered = super::filter::filter_logs(logs, &auth.caller);
+            to_raw(&filtered)
+        })
+    }
+
+    fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            if !auth.is_sequencer {
+                super::filter::scope_filter(&mut filter);
+            }
+            let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
+                .await
+                .map_err(internal)?;
+            self.filter_owners
+                .lock()
+                .await
+                .insert(id.clone(), auth.caller);
+            to_raw(&id)
+        })
+    }
+
+    fn get_filter_logs(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            self.ensure_filter_owner(&id, &auth).await?;
+
+            let logs = self.eth.filter.filter_logs(id).await.map_err(internal)?;
+
+            if auth.is_sequencer {
+                return to_raw(&logs);
+            }
+
+            let filtered = super::filter::filter_logs(logs, &auth.caller);
+            to_raw(&filtered)
+        })
+    }
+
+    fn get_filter_changes(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            self.ensure_filter_owner(&id, &auth).await?;
+
+            let changes = self.eth.filter.filter_changes(id).await.map_err(internal)?;
+
+            if auth.is_sequencer {
+                return to_raw(&changes);
+            }
+
+            match changes {
+                FilterChanges::Logs(logs) => {
+                    let filtered = super::filter::filter_logs(logs, &auth.caller);
+                    to_raw(&FilterChanges::<
+                        alloy_rpc_types_eth::Transaction<TempoTxEnvelope>,
+                    >::Logs(filtered))
+                }
+                FilterChanges::Hashes(hashes) => to_raw(&FilterChanges::<
+                    alloy_rpc_types_eth::Transaction<TempoTxEnvelope>,
+                >::Hashes(hashes)),
+                // Pending transaction filters are disabled — return empty if one somehow exists
+                FilterChanges::Transactions(_) => to_raw(
+                    &FilterChanges::<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>>::Empty,
+                ),
+                FilterChanges::Empty => to_raw(
+                    &FilterChanges::<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>>::Empty,
+                ),
+            }
+        })
+    }
+
+    fn new_block_filter(&self, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            let id = EthFilterApiServer::new_block_filter(&self.eth.filter)
+                .await
+                .map_err(internal)?;
+            self.filter_owners
+                .lock()
+                .await
+                .insert(id.clone(), auth.caller);
+            to_raw(&id)
+        })
+    }
+
+    fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            self.ensure_filter_owner(&id, &auth).await?;
+
+            let result = EthFilterApiServer::uninstall_filter(&self.eth.filter, id.clone())
+                .await
+                .map_err(internal)?;
+
+            if result {
+                self.filter_owners.lock().await.remove(&id);
+            }
+
             to_raw(&result)
         })
     }

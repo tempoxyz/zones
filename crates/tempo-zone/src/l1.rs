@@ -4,6 +4,7 @@
 //! from the ZonePortal contract for each block.
 
 use alloy_consensus::BlockHeader as _;
+use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
@@ -87,22 +88,15 @@ impl L1Subscriber {
     ) -> eyre::Result<()> {
         let tip = l1_provider.get_block_number().await?;
 
-        // When genesis_tempo_block_number is set and portal is Address::ZERO,
-        // skip portal queries entirely — no portal is deployed.
+        // When genesis_tempo_block_number is set via CLI, always use it as the
+        // starting point. The portal's `lastSyncedTempoBlockNumber` tracks batch
+        // submissions and may be ahead of where the zone chain actually is
+        // (e.g. after a restart where batches were submitted but the zone has
+        // no local blocks yet). The zone engine needs ALL L1 blocks from genesis
+        // to maintain chain continuity.
         let from = if let Some(genesis) = self.config.genesis_tempo_block_number {
-            if self.config.portal_address.is_zero() {
-                info!(genesis, "Using genesis block number override (no portal)");
-                genesis + 1
-            } else {
-                let portal = ZonePortal::new(self.config.portal_address, l1_provider);
-                let last_synced = portal.lastSyncedTempoBlockNumber().call().await?;
-                if last_synced > 0 {
-                    last_synced + 1
-                } else {
-                    info!(genesis, "Using CLI genesis block number override");
-                    genesis + 1
-                }
-            }
+            info!(genesis, "Using CLI genesis block number override");
+            genesis + 1
         } else {
             if self.config.portal_address.is_zero() {
                 warn!(
@@ -127,6 +121,24 @@ impl L1Subscriber {
                 info!(genesis = on_chain, "Using portal's genesisTempoBlockNumber");
                 on_chain + 1
             }
+        };
+
+        // If we already have blocks in the deposit queue (e.g. from a previous
+        // `start()` that failed mid-stream), skip past them to avoid re-enqueueing
+        // duplicates that would break chain continuity in the payload builder.
+        let from = if let Some(last) = self.deposit_queue.last_enqueued() {
+            let adjusted = last.number + 1;
+            if adjusted > from {
+                info!(
+                    portal_from = from,
+                    queue_last = last.number,
+                    adjusted_from = adjusted,
+                    "Skipping blocks already in deposit queue"
+                );
+            }
+            from.max(adjusted)
+        } else {
+            from
         };
 
         if from > tip {
@@ -179,10 +191,10 @@ impl L1Subscriber {
             for block_number in cursor..=end {
                 let deposits = deposits_by_block.remove(&block_number).unwrap_or_default();
                 if !deposits.is_empty() {
-                    debug!(
+                    info!(
                         block = block_number,
                         count = deposits.len(),
-                        "Backfill deposits"
+                        "💰 Backfill deposits"
                     );
                 }
                 let header_resp = l1_provider
@@ -200,29 +212,19 @@ impl L1Subscriber {
             cursor = end + 1;
         }
 
-        info!(to, "Backfill complete");
+        info!(from, to, blocks = to - from + 1, "Backfill complete");
         Ok(())
-    }
-
-    /// Derive an HTTP URL from the configured WSS URL for RPC calls that don't
-    /// need a subscription (backfilling, one-off reads).
-    fn http_url(&self) -> String {
-        self.config
-            .l1_rpc_url
-            .replacen("wss://", "https://", 1)
-            .replacen("ws://", "http://", 1)
     }
 
     /// Start the L1 subscriber.
     ///
-    /// Syncs to the current L1 tip on startup using HTTP, then subscribes to
-    /// new blocks via WebSocket.
+    /// Connects via WebSocket, backfills to the current tip, then subscribes
+    /// to new blocks.
     pub async fn start(self) -> eyre::Result<()> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
         let url: url::Url = self.config.l1_rpc_url.parse()?;
 
-        // Connect WS first so subscription captures blocks during backfill.
         let mut ws = WsConnect::new(self.config.l1_rpc_url.clone());
 
         if !url.username().is_empty() {
@@ -230,24 +232,11 @@ impl L1Subscriber {
             ws = ws.with_auth(auth);
         }
 
-        let ws_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_ws(ws)
             .await?;
 
         info!("Connected to L1 node");
-
-        // Subscribe before backfilling so we don't miss blocks between
-        // sync_to_l1_tip finishing and the stream starting.
-        let sub = ws_provider.subscribe_blocks().await?;
-        let mut stream = sub.into_stream();
-
-        info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
-
-        // Use HTTP for backfilling — more reliable than hammering a WebSocket
-        // with hundreds of sequential requests.
-        let http_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_http(self.http_url().parse()?)
-            .erased();
 
         let filter = Filter::new()
             .address(self.config.portal_address)
@@ -256,14 +245,40 @@ impl L1Subscriber {
                 EncryptedDepositMade::SIGNATURE_HASH,
             ]);
 
-        self.sync_to_l1_tip(&http_provider, &filter).await?;
+        // Backfill to the current tip before subscribing. Subscribing first
+        // would buffer block notifications during the (potentially long)
+        // backfill, risking backpressure deadlocks on the WS transport.
+        self.sync_to_l1_tip(&provider, &filter).await?;
 
-        // Track the last enqueued block so we can detect and backfill gaps
-        // when the WebSocket subscription skips blocks.
+        // Subscribe after backfill, then catch up any blocks produced during
+        // the backfill window.
+        let sub = provider.subscribe_blocks().await?;
+        let mut stream = sub.into_stream();
+        let tip_after_sub = provider.get_block_number().await?;
+
+        let last_backfilled = self
+            .deposit_queue
+            .last_enqueued()
+            .map(|nh| nh.number)
+            .unwrap_or(tip_after_sub);
+
+        if tip_after_sub > last_backfilled {
+            info!(
+                from = last_backfilled + 1,
+                to = tip_after_sub,
+                "Catching up blocks produced during backfill"
+            );
+            self.backfill(&provider, &filter, last_backfilled + 1, tip_after_sub)
+                .await?;
+        }
+
+        info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
+
         let mut last_enqueued: u64 = self
             .deposit_queue
-            .last_enqueued_block()
-            .unwrap_or(http_provider.get_block_number().await?);
+            .last_enqueued()
+            .map(|nh| nh.number)
+            .unwrap_or(tip_after_sub);
 
         while let Some(header) = stream.next().await {
             let block_number = header.number();
@@ -291,12 +306,11 @@ impl L1Subscriber {
                     skipped = gap_to - gap_from + 1,
                     "Gap detected in L1 subscription, backfilling"
                 );
-                self.backfill(&http_provider, &filter, gap_from, gap_to)
-                    .await?;
+                self.backfill(&provider, &filter, gap_from, gap_to).await?;
             }
 
-            // Fetch deposit logs for this block via HTTP
-            let logs = http_provider
+            // Fetch deposit logs for this block.
+            let logs = provider
                 .get_logs(&filter.clone().select(block_number))
                 .await?;
 
@@ -311,6 +325,7 @@ impl L1Subscriber {
                     L1Deposit::Regular(d) => {
                         info!(
                             l1_block = block_number,
+                            token = %d.token,
                             sender = %d.sender,
                             to = %d.to,
                             amount = %d.amount,
@@ -320,6 +335,7 @@ impl L1Subscriber {
                     L1Deposit::Encrypted(d) => {
                         info!(
                             l1_block = block_number,
+                            token = %d.token,
                             sender = %d.sender,
                             amount = %d.amount,
                             "🔒 Encrypted deposit from L1"
@@ -518,15 +534,25 @@ pub struct PendingDeposits {
     pub hash: B256,
     /// Pending L1 blocks with their deposits, not yet processed by the zone
     pub pending: Vec<L1BlockDeposits>,
+    /// Highest L1 block ever enqueued (number + hash). Survives `pop_next` /
+    /// `drain` so that reconnecting subscribers know where the queue left off,
+    /// even if the engine has already consumed the blocks.
+    pub last_enqueued: Option<NumHash>,
 }
 
 impl PendingDeposits {
     /// Append deposits from an L1 block to the queue and update the hash chain.
     pub fn enqueue(&mut self, header: TempoHeader, deposits: Vec<L1Deposit>) {
+        let block_number = header.inner.number;
         for deposit in &deposits {
             self.hash = deposit.hash_chain(self.hash);
         }
+        let block_hash = keccak256(alloy_rlp::encode(&header));
         self.pending.push(L1BlockDeposits { header, deposits });
+        self.last_enqueued = Some(NumHash {
+            number: block_number,
+            hash: block_hash,
+        });
     }
 
     /// Take the next pending L1 block (oldest first).
@@ -626,14 +652,15 @@ impl DepositQueue {
         &self.notify
     }
 
-    /// Returns the block number of the most recently enqueued L1 block, if any.
-    pub fn last_enqueued_block(&self) -> Option<u64> {
+    /// Returns the most recently enqueued L1 block (number + hash), if any.
+    ///
+    /// This is a high-water mark that survives `pop_next` / `drain`, so it
+    /// reflects the last block ever enqueued — not just what's still pending.
+    pub fn last_enqueued(&self) -> Option<NumHash> {
         self.inner
             .lock()
             .expect("deposit queue poisoned")
-            .pending
-            .last()
-            .map(|b| b.header.inner.number)
+            .last_enqueued
     }
 
     /// Lock the inner queue directly (for backward compat where needed).
@@ -974,6 +1001,43 @@ mod tests {
         assert_eq!(
             pending.hash, transition.next_processed_hash,
             "enqueue and transition must produce the same hash"
+        );
+    }
+
+    #[test]
+    fn test_last_enqueued_survives_pop_and_drain() {
+        let queue = DepositQueue::new();
+
+        // Initially empty
+        assert!(queue.last_enqueued().is_none());
+
+        queue.enqueue(make_test_header(100), vec![]);
+        queue.enqueue(make_test_header(101), vec![]);
+        queue.enqueue(make_test_header(102), vec![]);
+
+        let last = queue.last_enqueued().unwrap();
+        assert_eq!(last.number, 102);
+
+        // Pop all blocks — last_enqueued must still report 102
+        assert!(queue.pop_next().is_some());
+        assert!(queue.pop_next().is_some());
+        assert!(queue.pop_next().is_some());
+        assert!(queue.pop_next().is_none());
+
+        let last = queue.last_enqueued().unwrap();
+        assert_eq!(last.number, 102, "last_enqueued must survive pop_next");
+
+        // Enqueue more, then drain — last_enqueued must still track
+        queue.enqueue(make_test_header(200), vec![]);
+        queue.enqueue(make_test_header(201), vec![]);
+        assert_eq!(queue.last_enqueued().unwrap().number, 201);
+
+        let drained = queue.lock().unwrap().drain();
+        assert_eq!(drained.len(), 2);
+        assert_eq!(
+            queue.last_enqueued().unwrap().number,
+            201,
+            "last_enqueued must survive drain"
         );
     }
 }

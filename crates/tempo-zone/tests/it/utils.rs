@@ -1711,6 +1711,7 @@ pub(crate) async fn spawn_sequencer(
         tempo_state_address: TEMPO_STATE_ADDRESS,
         zone_rpc_url: zone.http_url().to_string(),
         zone_poll_interval: Duration::from_millis(500),
+        batch_interval: Duration::from_millis(500),
     };
 
     zone::spawn_zone_sequencer(config, sequencer_signer).await

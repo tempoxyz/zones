@@ -4,7 +4,7 @@
 //! which performs typed privacy redactions internally before serialization.
 
 use alloy_primitives::{Address, B256, Bytes};
-use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, state::StateOverride};
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, state::StateOverride};
 use serde_json::{Value, value::RawValue};
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tracing::warn;
@@ -129,6 +129,24 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     ///
     /// Same `from`-enforcement as [`call`](Self::call).
     fn fill_transaction(&self, request: TempoTransactionRequest, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `eth_getLogs(filter)` — returns logs matching the filter, scoped to the caller.
+    fn get_logs(&self, filter: Filter, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `eth_newFilter(filter)` — creates a new log filter, scoped to the caller.
+    fn new_filter(&self, filter: Filter, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `eth_getFilterLogs(id)` — returns all logs for a filter.
+    fn get_filter_logs(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `eth_getFilterChanges(id)` — returns new logs since last poll.
+    fn get_filter_changes(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `eth_newBlockFilter` — creates a new block filter.
+    fn new_block_filter(&self, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `eth_uninstallFilter(id)` — removes a filter.
+    fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_>;
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
@@ -140,6 +158,41 @@ fn parse_params<T: serde::de::DeserializeOwned>(
 ) -> Result<T, JsonRpcResponse> {
     serde_json::from_str(raw)
         .map_err(|_| JsonRpcResponse::error(id.clone(), JsonRpcError::invalid_params(msg)))
+}
+
+/// Params for `eth_call` / `eth_estimateGas`: `[request, block?, stateOverride?]`.
+///
+/// Supports 1–3 element arrays with null-as-absent semantics for trailing optionals.
+struct CallParams(
+    TempoTransactionRequest,
+    Option<BlockId>,
+    Option<StateOverride>,
+);
+
+impl<'de> serde::Deserialize<'de> for CallParams {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Vis;
+        impl<'de> serde::de::Visitor<'de> for Vis {
+            type Value = CallParams;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("[request, block?, stateOverride?]")
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
+                let request = seq
+                    .next_element()?
+                    .ok_or_else(|| serde::de::Error::invalid_length(0, &self))?;
+                let block = seq.next_element::<Option<BlockId>>()?.flatten();
+                let state_override = seq.next_element::<Option<StateOverride>>()?.flatten();
+                Ok(CallParams(request, block, state_override))
+            }
+        }
+        deserializer.deserialize_seq(Vis)
+    }
 }
 
 /// Convert an API result into a JSON-RPC response, logging failures.
@@ -229,6 +282,14 @@ pub async fn dispatch(
         "eth_fillTransaction" => handle_fill_transaction(id, raw, auth, api).await,
         "eth_sendRawTransaction" => handle_send_raw_transaction(id, raw, auth, api).await,
         "eth_sendRawTransactionSync" => handle_send_raw_transaction_sync(id, raw, auth, api).await,
+
+        // Log & filter queries
+        "eth_getLogs" => handle_get_logs(id, raw, auth, api).await,
+        "eth_newFilter" => handle_new_filter(id, raw, auth, api).await,
+        "eth_getFilterLogs" => handle_get_filter_logs(id, raw, auth, api).await,
+        "eth_getFilterChanges" => handle_get_filter_changes(id, raw, auth, api).await,
+        "eth_newBlockFilter" => handle_new_block_filter(id, auth, api).await,
+        "eth_uninstallFilter" => handle_uninstall_filter(id, raw, auth, api).await,
         _ => {
             // Method is whitelisted but not yet implemented via direct API
             JsonRpcResponse::error(
@@ -335,13 +396,8 @@ async fn handle_call(
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
-    let (request, block, state_override) =
-        match parse_params::<(
-            TempoTransactionRequest,
-            Option<BlockId>,
-            Option<StateOverride>,
-        )>(raw, &id, "expected [request, block?, stateOverride?]")
-        {
+    let CallParams(request, block, state_override) =
+        match parse_params(raw, &id, "expected [request, block?, stateOverride?]") {
             Ok(v) => v,
             Err(resp) => return resp,
         };
@@ -368,13 +424,8 @@ async fn handle_estimate_gas(
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
-    let (request, block, state_override) =
-        match parse_params::<(
-            TempoTransactionRequest,
-            Option<BlockId>,
-            Option<StateOverride>,
-        )>(raw, &id, "expected [request, block?, stateOverride?]")
-        {
+    let CallParams(request, block, state_override) =
+        match parse_params(raw, &id, "expected [request, block?, stateOverride?]") {
             Ok(v) => v,
             Err(resp) => return resp,
         };
@@ -513,5 +564,109 @@ async fn handle_get_transaction_count(
         "eth_getTransactionCount",
         api.get_transaction_count(address, block, auth.clone())
             .await,
+    )
+}
+
+/// Handle `eth_getLogs`.
+async fn handle_get_logs(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let (filter,) = match parse_params::<(Filter,)>(raw, &id, "expected [filter]") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    api_result(id, "eth_getLogs", api.get_logs(filter, auth.clone()).await)
+}
+
+/// Handle `eth_newFilter`.
+async fn handle_new_filter(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let (filter,) = match parse_params::<(Filter,)>(raw, &id, "expected [filter]") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    api_result(
+        id,
+        "eth_newFilter",
+        api.new_filter(filter, auth.clone()).await,
+    )
+}
+
+/// Handle `eth_getFilterLogs`.
+async fn handle_get_filter_logs(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let (filter_id,) = match parse_params::<(FilterId,)>(raw, &id, "expected [filterId]") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    api_result(
+        id,
+        "eth_getFilterLogs",
+        api.get_filter_logs(filter_id, auth.clone()).await,
+    )
+}
+
+/// Handle `eth_getFilterChanges`.
+async fn handle_get_filter_changes(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let (filter_id,) = match parse_params::<(FilterId,)>(raw, &id, "expected [filterId]") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    api_result(
+        id,
+        "eth_getFilterChanges",
+        api.get_filter_changes(filter_id, auth.clone()).await,
+    )
+}
+
+/// Handle `eth_newBlockFilter`.
+async fn handle_new_block_filter(
+    id: Value,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    api_result(
+        id,
+        "eth_newBlockFilter",
+        api.new_block_filter(auth.clone()).await,
+    )
+}
+
+/// Handle `eth_uninstallFilter`.
+async fn handle_uninstall_filter(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let (filter_id,) = match parse_params::<(FilterId,)>(raw, &id, "expected [filterId]") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    api_result(
+        id,
+        "eth_uninstallFilter",
+        api.uninstall_filter(filter_id, auth.clone()).await,
     )
 }

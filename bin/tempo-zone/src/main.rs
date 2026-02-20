@@ -62,6 +62,15 @@ struct ZoneArgs {
     )]
     pub zone_poll_interval_secs: u64,
 
+    /// Maximum time (in seconds) to accumulate zone blocks before submitting a
+    /// batch to L1. Batches are flushed early when withdrawals are pending.
+    #[arg(
+        long = "zone.batch-interval-secs",
+        env = "ZONE_BATCH_INTERVAL_SECS",
+        default_value = "60"
+    )]
+    pub zone_batch_interval_secs: u64,
+
     /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(
         long = "withdrawal-poll-interval-secs",
@@ -74,6 +83,11 @@ struct ZoneArgs {
     /// `genesisTempoBlockNumber` is 0 (not created via ZoneFactory).
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
     pub l1_genesis_block_number: Option<u64>,
+
+    /// Zone ID for the private RPC auth token validation.
+    /// Must match the zone's on-chain ID from ZoneFactory.
+    #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
+    pub zone_id: u64,
 
     /// Port for the private zone RPC server (0 for OS-assigned).
     #[arg(
@@ -142,7 +156,7 @@ fn main() {
             let eth_handlers = handle.node.eth_handlers().clone();
             let private_rpc_config = zone::rpc::PrivateRpcConfig {
                 listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
-                zone_id: 0, // TODO: hardcoded for now
+                zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
                 zone_portal: args.portal_address,
                 sequencer: sequencer_addr.unwrap_or_default(),
@@ -173,6 +187,7 @@ fn main() {
                     tempo_state_address: zone::abi::TEMPO_STATE_ADDRESS,
                     zone_rpc_url: args.zone_rpc_url,
                     zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
+                    batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
                 };
 
                 let seq_handle = zone::spawn_zone_sequencer(sequencer_config, signer).await;
