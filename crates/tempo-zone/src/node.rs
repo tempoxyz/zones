@@ -32,8 +32,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoChainSpec};
 use tempo_evm::TempoEvmConfig;
 use tempo_node::{
-    DEFAULT_AA_VALID_AFTER_MAX_SECS,
-    node::TempoPayloadAttributesBuilder,
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, node::TempoPayloadAttributesBuilder,
     rpc::TempoReceiptConverter,
 };
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
