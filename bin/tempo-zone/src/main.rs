@@ -204,6 +204,19 @@ fn main() {
                 });
             }
 
+            // Ensure all unpersisted blocks are flushed when the node exits.
+            let engine_shutdown = handle.node.engine_shutdown.clone();
+            handle.node.task_executor.spawn_critical_with_graceful_shutdown_signal(
+                "zone-engine-shutdown",
+                |shutdown| async move {
+                    let _guard = shutdown.await;
+                    info!(target: "reth::cli", "Shutdown signal received — flushing engine state");
+                    if let Some(done) = engine_shutdown.shutdown() {
+                        let _ = done.await;
+                    }
+                },
+            );
+
             handle.node_exit_future.await?;
             Ok(())
         })
