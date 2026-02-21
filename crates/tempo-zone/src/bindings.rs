@@ -18,6 +18,22 @@ sol! {
             bytes32 memo
         );
 
+        /// Event emitted when an encrypted deposit is made.
+        #[derive(Debug)]
+        event EncryptedDepositMade(
+            bytes32 indexed newCurrentDepositQueueHash,
+            address indexed sender,
+            address token,
+            uint128 netAmount,
+            uint128 fee,
+            uint256 keyIndex,
+            bytes32 ephemeralPubkeyX,
+            uint8 ephemeralPubkeyYParity,
+            bytes ciphertext,
+            bytes12 nonce,
+            bytes16 tag
+        );
+
         /// Last synced Tempo block number.
         function lastSyncedTempoBlockNumber() external view returns (uint64);
 

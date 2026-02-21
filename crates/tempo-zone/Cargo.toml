@@ -25,7 +25,6 @@ tempo-alloy = { workspace = true, features = ["tempo-compat"] }
 # reth
 reth-basic-payload-builder.workspace = true
 reth-chainspec.workspace = true
-reth-engine-local.workspace = true
 reth-errors.workspace = true
 reth-eth-wire-types.workspace = true
 reth-ethereum.workspace = true
@@ -66,6 +65,10 @@ revm.workspace = true
 axum.workspace = true
 
 # misc
+aes-gcm.workspace = true
+k256.workspace = true
+rand.workspace = true
+sha2.workspace = true
 reqwest.workspace = true
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
@@ -81,6 +84,7 @@ tracing.workspace = true
 [dev-dependencies]
 alloy = { workspace = true, features = [
     "full",
+    "genesis",
     "providers",
     "signers",
     "signer-local",

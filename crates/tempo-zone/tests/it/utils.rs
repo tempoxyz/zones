@@ -1,3 +1,4 @@
+use alloy::genesis::Genesis;
 use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_rlp::Encodable;
@@ -18,7 +19,7 @@ use std::{
 };
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
-use zone::{Deposit, DepositQueue, SharedL1StateCache, ZoneNode};
+use zone::{Deposit, DepositQueue, EncryptedDeposit, L1Deposit, SharedL1StateCache, ZoneNode};
 
 use alloy_provider::{Provider, ProviderBuilder, WalletProvider};
 use alloy_rpc_types_eth::BlockNumberOrTag;
@@ -353,56 +354,39 @@ impl ZoneTestNode {
     /// Start a zone node connected to a real L1, generating genesis from the L1's
     /// current block header.
     ///
-    /// Fetches the L1's latest block header, patches the zone-test-genesis.json
-    /// TempoState `tempoBlockHash` slot to match `keccak256(rlp(l1_header))`,
-    /// and starts the zone with the L1Subscriber configured to begin from that block.
+    /// See [`build_l1_anchored_genesis`] for details on how the genesis is patched.
     pub(crate) async fn start_from_l1(
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,
         portal_address: Address,
     ) -> eyre::Result<Self> {
-        let l1_provider =
-            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
+        let (genesis, genesis_block_number) =
+            build_l1_anchored_genesis(l1_http_url, portal_address).await?;
 
-        // Fetch the current L1 block header — this becomes the zone's TempoState genesis anchor.
-        let block = l1_provider
-            .get_block_by_number(BlockNumberOrTag::Latest)
-            .await?
-            .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
-        let l1_header: &TempoHeader = block.header.as_ref();
-        let genesis_block_number = l1_header.inner.number;
+        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        Self::launch_with_genesis(
+            l1_ws_url.to_string(),
+            portal_address,
+            Some(genesis_block_number),
+            next_unique_chain_id(),
+            Some(genesis),
+            throwaway_key,
+        )
+        .await
+    }
 
-        // Compute keccak256(rlp(header)) — this is what TempoState stores as tempoBlockHash.
-        let mut rlp_buf = Vec::new();
-        l1_header.encode(&mut rlp_buf);
-        let l1_genesis_hash = keccak256(&rlp_buf);
-
-        // Patch the zone test genesis: update TempoState's tempoBlockHash (slot 0) and
-        // tempoBlockNumber in slot 7 (packed with other fields).
-        let mut genesis: serde_json::Value =
-            serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))?;
-
-        let tempo_state = genesis["alloc"]["0x1c00000000000000000000000000000000000000"]["storage"]
-            .as_object_mut()
-            .ok_or_else(|| eyre::eyre!("TempoState storage not found in genesis"))?;
-
-        // Slot 0 = tempoBlockHash
-        tempo_state.insert(
-            "0x0000000000000000000000000000000000000000000000000000000000000000".to_string(),
-            serde_json::Value::String(format!("{l1_genesis_hash:#x}")),
-        );
-
-        // Slot 7 = packed (tempoBlockNumber:u64 | tempoGasLimit:u64 | tempoGasUsed:u64 | tempoTimestamp:u64)
-        // Solidity packs consecutive uint64 fields left-to-right starting from the lowest bits.
-        let new_slot7 = alloy_primitives::U256::from(l1_header.inner.number)
-            | (alloy_primitives::U256::from(l1_header.inner.gas_limit) << 64)
-            | (alloy_primitives::U256::from(l1_header.inner.gas_used) << 128)
-            | (alloy_primitives::U256::from(l1_header.inner.timestamp) << 192);
-        let slot7_key = "0x0000000000000000000000000000000000000000000000000000000000000007";
-        tempo_state.insert(
-            slot7_key.to_string(),
-            serde_json::Value::String(format!("{new_slot7:#066x}")),
-        );
+    /// Start a zone node connected to a real L1, with a sequencer key for ECIES decryption.
+    ///
+    /// Same as [`start_from_l1`] but passes the sequencer key through to `ZoneNode::new`
+    /// so the payload builder can decrypt encrypted deposits.
+    pub(crate) async fn start_from_l1_with_sequencer_key(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+        sequencer_key: k256::SecretKey,
+    ) -> eyre::Result<Self> {
+        let (genesis, genesis_block_number) =
+            build_l1_anchored_genesis(l1_http_url, portal_address).await?;
 
         Self::launch_with_genesis(
             l1_ws_url.to_string(),
@@ -410,6 +394,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
+            sequencer_key,
         )
         .await
     }
@@ -444,12 +429,15 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
     ) -> eyre::Result<Self> {
+        // Generate a throwaway key for tests that don't use encrypted deposits.
+        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         Self::launch_with_genesis(
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
             chain_id,
             None,
+            throwaway_key,
         )
         .await
     }
@@ -459,7 +447,8 @@ impl ZoneTestNode {
         portal_address: Address,
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
-        custom_genesis: Option<serde_json::Value>,
+        custom_genesis: Option<Genesis>,
+        sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
         let tasks = TaskManager::current();
 
@@ -467,14 +456,15 @@ impl ZoneTestNode {
             serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))
                 .expect("valid zone test genesis")
         });
-        genesis["config"]["chainId"] = serde_json::Value::from(chain_id);
-        let chain_spec = TempoChainSpec::from_genesis(serde_json::from_value(genesis)?);
+        genesis.config.chain_id = chain_id;
+        let chain_spec = TempoChainSpec::from_genesis(genesis);
 
         let zone_node = ZoneNode::new(
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
-            None, // sequencer
+            None, // sequencer address
+            sequencer_key,
         );
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
@@ -988,6 +978,53 @@ impl L1TestNode {
         Ok(())
     }
 
+    /// Set the sequencer encryption key on the ZonePortal.
+    ///
+    /// The sequencer must sign a proof-of-possession with the encryption key's
+    /// private key. The POP message is `keccak256(abi.encode(portalAddress, x, yParity))`.
+    pub(crate) async fn set_sequencer_encryption_key(
+        &self,
+        portal_address: Address,
+        encryption_key: &k256::SecretKey,
+    ) -> eyre::Result<()> {
+        use alloy_signer::SignerSync;
+        use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
+        use zone::abi::ZonePortal;
+
+        // Derive public key coordinates
+        let scalar: Scalar = *encryption_key.to_nonzero_scalar();
+        let pub_point = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
+        let encoded = pub_point.to_encoded_point(true);
+        let x = B256::from_slice(encoded.x().unwrap().as_slice());
+        let y_parity: u8 = encoded.as_bytes()[0]; // 0x02 or 0x03
+
+        // Build POP message matching Solidity: keccak256(abi.encode(address(this), x, yParity))
+        // yParity is uint8 in Solidity, which abi.encode pads to 32 bytes — use U256
+        let message = keccak256((portal_address, x, U256::from(y_parity)).abi_encode());
+
+        // Sign with the encryption key (not the sequencer's Ethereum key)
+        let enc_key_bytes = B256::from_slice(&encryption_key.to_bytes());
+        let pop_signer = alloy_signer_local::PrivateKeySigner::from_bytes(&enc_key_bytes)?;
+        let sig = pop_signer.sign_hash_sync(&message)?;
+
+        // ecrecover expects v = 27 or 28
+        let pop_v = sig.v() as u8 + 27;
+        let pop_r = B256::from(sig.r().to_be_bytes::<32>());
+        let pop_s = B256::from(sig.s().to_be_bytes::<32>());
+
+        // Call setSequencerEncryptionKey as the sequencer (dev account)
+        let dev_provider = self.dev_provider();
+        let portal = ZonePortal::new(portal_address, &dev_provider);
+        let receipt = portal
+            .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "setSequencerEncryptionKey failed");
+        Ok(())
+    }
+
     /// Transfer a specific TIP-20 token from the dev account to a recipient on L1.
     pub(crate) async fn fund_user_token(
         &self,
@@ -1113,6 +1150,127 @@ impl L1TestNode {
             _tasks: tasks,
         })
     }
+}
+
+/// Build a zone test genesis anchored to a real L1 block.
+///
+/// The base `zone-test-genesis.json` is a standalone genesis with:
+/// - TempoState anchored at block 0 with a zero block hash
+/// - ZoneInbox compiled with `tempoPortal = Address::ZERO` (Solidity immutable)
+///
+/// When connecting to a real L1, two things must be patched:
+///
+/// 1. **TempoState storage** — `tempoBlockHash` (slot 0) and the packed header fields
+///    in slot 7 must reflect the L1 block that serves as the zone's genesis anchor.
+///    Without this, `finalizeTempo` rejects the first L1 block for parent hash mismatch.
+///
+/// 2. **ZoneInbox bytecode** — the `tempoPortal` immutable (embedded in deployed bytecode
+///    as `PUSH32` instructions) must be replaced with the real portal address. Without this,
+///    `readTempoStorageSlot` reads L1 state from `Address::ZERO` instead of the portal,
+///    causing `_readEncryptionKey` to revert with `InvalidSharedSecretProof`.
+///
+/// Returns `(genesis, genesis_block_number)`.
+async fn build_l1_anchored_genesis(
+    l1_http_url: &url::Url,
+    portal_address: Address,
+) -> eyre::Result<(Genesis, u64)> {
+    use alloy_primitives::address;
+
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
+
+    let block = l1_provider
+        .get_block_by_number(BlockNumberOrTag::Latest)
+        .await?
+        .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
+    let l1_header: &TempoHeader = block.header.as_ref();
+    let genesis_block_number = l1_header.inner.number;
+
+    let mut rlp_buf = Vec::new();
+    l1_header.encode(&mut rlp_buf);
+    let l1_genesis_hash = keccak256(&rlp_buf);
+
+    let mut genesis: Genesis =
+        serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))?;
+
+    // --- Patch 1: TempoState storage ---
+    // TempoState is at 0x1c00...0000
+    let tempo_state_addr = address!("0x1c00000000000000000000000000000000000000");
+    let tempo_state_account = genesis
+        .alloc
+        .get_mut(&tempo_state_addr)
+        .ok_or_else(|| eyre::eyre!("TempoState not found in genesis alloc"))?;
+    let storage = tempo_state_account
+        .storage
+        .get_or_insert_with(Default::default);
+
+    // Slot 0 = tempoBlockHash
+    storage.insert(B256::ZERO, l1_genesis_hash);
+
+    // Slot 7 = packed (tempoBlockNumber:u64 | tempoGasLimit:u64 | tempoGasUsed:u64 | tempoTimestamp:u64)
+    let new_slot7: U256 = U256::from(l1_header.inner.number)
+        | (U256::from(l1_header.inner.gas_limit) << 64)
+        | (U256::from(l1_header.inner.gas_used) << 128)
+        | (U256::from(l1_header.inner.timestamp) << 192);
+    storage.insert(
+        B256::from(U256::from(7).to_be_bytes()),
+        B256::from(new_slot7.to_be_bytes()),
+    );
+
+    // --- Patch 2: Portal address immutables in ZoneInbox and ZoneConfig ---
+    // Solidity immutables are baked into deployed bytecode as `PUSH32 <value>`.
+    // The default genesis has tempoPortal = Address::ZERO. We replace the 32-byte
+    // zero-padded needle at the byte level. Both ZoneInbox (0x...0001) and
+    // ZoneConfig (0x...0003) have `tempoPortal` as an immutable.
+    if !portal_address.is_zero() {
+        let needle = [0u8; 32]; // Address::ZERO left-padded to 32 bytes
+        let mut replacement = [0u8; 32];
+        replacement[12..].copy_from_slice(portal_address.as_slice());
+
+        let contracts_to_patch: &[(Address, usize)] = &[
+            (address!("0x1c00000000000000000000000000000000000001"), 4), // ZoneInbox
+            (address!("0x1c00000000000000000000000000000000000003"), 5), // ZoneConfig
+        ];
+
+        for &(addr, expected_count) in contracts_to_patch {
+            let account = genesis
+                .alloc
+                .get_mut(&addr)
+                .unwrap_or_else(|| panic!("contract {addr} missing in genesis alloc"));
+            if let Some(code) = &account.code {
+                let mut buf = code.to_vec();
+                let count = patch_bytes(&mut buf, &needle, &replacement);
+                assert_eq!(
+                    count, expected_count,
+                    "expected {expected_count} tempoPortal immutable(s) in {addr}, found {count} \
+                     — contract bytecode may have changed, update expected_count"
+                );
+                account.code = Some(buf.into());
+            }
+        }
+    }
+
+    Ok((genesis, genesis_block_number))
+}
+
+/// Replace all non-overlapping occurrences of `needle` with `replacement` in `buf`.
+///
+/// Both must have the same length. Returns the number of replacements made.
+fn patch_bytes(buf: &mut [u8], needle: &[u8], replacement: &[u8]) -> usize {
+    assert_eq!(needle.len(), replacement.len());
+    let len = needle.len();
+    let mut count = 0;
+    let mut i = 0;
+    while i + len <= buf.len() {
+        if buf[i..i + len] == *needle {
+            buf[i..i + len].copy_from_slice(replacement);
+            count += 1;
+            i += len;
+        } else {
+            i += 1;
+        }
+    }
+    count
 }
 
 /// Poll an async condition until it returns `Some(T)` or the timeout expires.
@@ -1247,6 +1405,39 @@ impl ZoneAccount {
         }
     }
 
+    /// Create a `ZoneAccount` with a custom signer.
+    ///
+    /// Unlike [`from_l1_and_zone`](Self::from_l1_and_zone) which uses the L1's
+    /// user signer, this allows creating an account with any private key —
+    /// useful when the account was funded via encrypted deposit to a specific
+    /// recipient.
+    pub(crate) fn with_signer(
+        signer: alloy_signer_local::PrivateKeySigner,
+        l1: &L1TestNode,
+        zone: &ZoneTestNode,
+        portal_address: Address,
+    ) -> Self {
+        let address = signer.address();
+
+        let l1_provider = ProviderBuilder::new()
+            .wallet(signer.clone())
+            .connect_http(l1.http_url().clone())
+            .erased();
+
+        let l2_provider = ProviderBuilder::new()
+            .wallet(signer)
+            .connect_http(zone.http_url().clone())
+            .erased();
+
+        Self {
+            address,
+            l1_provider,
+            l2_provider,
+            portal_address,
+            l1_portal_approved: false,
+        }
+    }
+
     /// The account's address.
     pub(crate) fn address(&self) -> Address {
         self.address
@@ -1345,6 +1536,96 @@ impl ZoneAccount {
         .await
     }
 
+    /// Approve portal + call `depositEncrypted` on L1 with properly ECIES-encrypted payload.
+    ///
+    /// Performs ECIES encryption client-side (matching what a real depositor would do):
+    /// 1. Read the sequencer's encryption key from the portal
+    /// 2. Generate an ephemeral key pair
+    /// 3. ECDH → HKDF → AES-256-GCM encrypt (to, memo)
+    /// 4. Call `depositEncrypted` on the portal
+    /// 5. Wait for the zone to mint tokens to the decrypted recipient
+    pub(crate) async fn deposit_encrypted(
+        &mut self,
+        amount: u128,
+        recipient: Address,
+        memo: B256,
+        timeout: Duration,
+        zone: &ZoneTestNode,
+    ) -> eyre::Result<U256> {
+        use tempo_contracts::precompiles::ITIP20;
+        use tempo_precompiles::PATH_USD_ADDRESS;
+        use zone::{
+            abi::{EncryptedDepositPayload, ZONE_TOKEN_ADDRESS, ZonePortal},
+            precompiles::ecies,
+        };
+
+        let portal_address = self.portal_address;
+
+        // Approve portal if needed
+        if !self.l1_portal_approved {
+            ITIP20::new(PATH_USD_ADDRESS, &self.l1_provider)
+                .approve(portal_address, U256::MAX)
+                .send()
+                .await?
+                .get_receipt()
+                .await?;
+            self.l1_portal_approved = true;
+        }
+
+        // Read sequencer encryption key and its index from portal
+        let portal = ZonePortal::new(portal_address, &self.l1_provider);
+        let key_result = portal.sequencerEncryptionKey().call().await?;
+        let key_count = portal.encryptionKeyCount().call().await?;
+        eyre::ensure!(
+            key_count > U256::ZERO,
+            "no encryption key registered on portal"
+        );
+        let key_index = key_count - U256::from(1);
+
+        // ECIES encrypt (to, memo) to sequencer's public key
+        let enc = ecies::encrypt_deposit(
+            &key_result.x,
+            key_result.yParity,
+            recipient,
+            memo,
+            portal_address,
+            key_index,
+        )
+        .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
+
+        // Snapshot balance before deposit
+        let balance_before = zone.balance_of(ZONE_TOKEN_ADDRESS, recipient).await?;
+
+        // Call depositEncrypted on portal
+        let receipt = portal
+            .depositEncrypted(
+                PATH_USD_ADDRESS,
+                amount,
+                key_index,
+                EncryptedDepositPayload {
+                    ephemeralPubkeyX: enc.eph_pub_x,
+                    ephemeralPubkeyYParity: enc.eph_pub_y_parity,
+                    ciphertext: enc.ciphertext.into(),
+                    nonce: alloy_primitives::FixedBytes(enc.nonce),
+                    tag: alloy_primitives::FixedBytes(enc.tag),
+                },
+            )
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L1 depositEncrypted tx failed");
+
+        // Wait for the zone to process the encrypted deposit and mint to recipient
+        zone.wait_for_balance(
+            ZONE_TOKEN_ADDRESS,
+            recipient,
+            balance_before + U256::from(amount),
+            timeout,
+        )
+        .await
+    }
+
     /// Approve the ZoneOutbox, then request a withdrawal on L2.
     ///
     /// Skips approval if already approved in this session.
@@ -1410,30 +1691,30 @@ impl ZoneAccount {
 
         Ok(())
     }
+}
 
-    /// Spawn the zone sequencer background tasks using the given L1 signer.
-    pub(crate) async fn spawn_sequencer(
-        &self,
-        l1: &L1TestNode,
-        zone: &ZoneTestNode,
-        sequencer_signer: alloy_signer_local::PrivateKeySigner,
-    ) -> zone::ZoneSequencerHandle {
-        use zone::abi::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+/// Spawn the zone sequencer background tasks (batch submitter + withdrawal processor).
+pub(crate) async fn spawn_sequencer(
+    l1: &L1TestNode,
+    zone: &ZoneTestNode,
+    portal_address: Address,
+    sequencer_signer: alloy_signer_local::PrivateKeySigner,
+) -> zone::ZoneSequencerHandle {
+    use zone::abi::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
-        let config = zone::ZoneSequencerConfig {
-            portal_address: self.portal_address,
-            l1_rpc_url: l1.http_url().to_string(),
-            withdrawal_poll_interval: Duration::from_millis(500),
-            outbox_address: ZONE_OUTBOX_ADDRESS,
-            inbox_address: ZONE_INBOX_ADDRESS,
-            tempo_state_address: TEMPO_STATE_ADDRESS,
-            zone_rpc_url: zone.http_url().to_string(),
-            zone_poll_interval: Duration::from_millis(500),
-            batch_interval: Duration::from_millis(500),
-        };
+    let config = zone::ZoneSequencerConfig {
+        portal_address,
+        l1_rpc_url: l1.http_url().to_string(),
+        withdrawal_poll_interval: Duration::from_millis(500),
+        outbox_address: ZONE_OUTBOX_ADDRESS,
+        inbox_address: ZONE_INBOX_ADDRESS,
+        tempo_state_address: TEMPO_STATE_ADDRESS,
+        zone_rpc_url: zone.http_url().to_string(),
+        zone_poll_interval: Duration::from_millis(500),
+        batch_interval: Duration::from_millis(500),
+    };
 
-        zone::spawn_zone_sequencer(config, sequencer_signer).await
-    }
+    zone::spawn_zone_sequencer(config, sequencer_signer).await
 }
 
 /// Start a local zone node with an L1Fixture already seeded for `seed_blocks` blocks.
@@ -1833,8 +2114,8 @@ impl L1Fixture {
         num_blocks: u64,
     ) {
         let mut cache = cache.write();
-        // Slot 4 = PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT — starts at zero
         let deposit_queue_hash_slot = B256::with_last_byte(4);
+
         for block in 0..=num_blocks {
             // Sequencer slot (0) — not actually read if msg.sender == address(0),
             // but seed it to be safe.
@@ -1888,7 +2169,8 @@ impl L1Fixture {
         queue: &DepositQueue,
         deposits: Vec<Deposit>,
     ) {
-        queue.enqueue(block.header.clone(), deposits);
+        let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
+        queue.enqueue(block.header.clone(), l1_deposits);
     }
 
     /// Create a [`Deposit`] tied to a specific L1 block number.
@@ -1927,7 +2209,39 @@ impl L1Fixture {
     /// Inject an L1 block with the given deposits into the queue.
     pub(crate) fn inject_deposits(&mut self, queue: &DepositQueue, deposits: Vec<Deposit>) {
         let header = self.next_header();
+        let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
+        queue.enqueue(header, l1_deposits);
+    }
+
+    /// Inject an L1 block with mixed regular and encrypted deposits.
+    #[allow(dead_code)]
+    pub(crate) fn inject_l1_deposits(&mut self, queue: &DepositQueue, deposits: Vec<L1Deposit>) {
+        let header = self.next_header();
         queue.enqueue(header, deposits);
+    }
+
+    /// Create an [`EncryptedDeposit`] for testing with dummy ECIES parameters.
+    #[allow(dead_code)]
+    pub(crate) fn make_encrypted_deposit(
+        &self,
+        token: Address,
+        sender: Address,
+        amount: u128,
+    ) -> EncryptedDeposit {
+        EncryptedDeposit {
+            l1_block_number: self.next_block_number,
+            token,
+            sender,
+            amount,
+            fee: 0,
+            key_index: alloy_primitives::U256::ZERO,
+            ephemeral_pubkey_x: B256::ZERO,
+            ephemeral_pubkey_y_parity: 0x02,
+            ciphertext: vec![0u8; 64], // ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE = 64
+            nonce: [0u8; 12],
+            tag: [0u8; 16],
+            queue_hash: B256::ZERO,
+        }
     }
 
     /// Create a [`Deposit`] for testing.
@@ -1946,6 +2260,69 @@ impl L1Fixture {
             amount,
             fee: 0,
             memo: B256::ZERO,
+            queue_hash: B256::ZERO,
+        }
+    }
+
+    /// Create an [`EncryptedDeposit`] with proper ECIES encryption against the
+    /// sequencer's real public key.
+    ///
+    /// Uses a deterministic ephemeral key for reproducibility.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
+    pub(crate) fn make_real_encrypted_deposit(
+        &self,
+        sequencer_pub: &k256::AffinePoint,
+        portal_address: Address,
+        key_index: alloy_primitives::U256,
+        token: Address,
+        sender: Address,
+        recipient: Address,
+        amount: u128,
+        memo: B256,
+    ) -> EncryptedDeposit {
+        use k256::{ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
+        use sha2::{Digest, Sha256};
+        use zone::precompiles::ecies::{
+            build_plaintext, compressed_x_and_parity, encrypt_plaintext, hkdf_sha256,
+        };
+
+        // Deterministic ephemeral key for reproducibility
+        let eph_bytes: [u8; 32] = Sha256::digest(b"test-ephemeral-key-for-e2e").into();
+        let eph_key = k256::SecretKey::from_slice(&eph_bytes).expect("valid ephemeral key");
+        let eph_scalar: Scalar = *eph_key.to_nonzero_scalar();
+        let eph_pub = k256::AffinePoint::from(ProjectivePoint::GENERATOR * eph_scalar);
+        let (eph_pub_x, eph_pub_y_parity) = compressed_x_and_parity(&eph_pub);
+
+        // ECDH: shared = eph_scalar * sequencer_pub
+        let shared_proj = ProjectivePoint::from(*sequencer_pub) * eph_scalar;
+        let shared_affine = k256::AffinePoint::from(shared_proj);
+        let ss_enc = shared_affine.to_encoded_point(true);
+        let shared_secret_x: [u8; 32] = ss_enc.x().unwrap().as_slice().try_into().unwrap();
+
+        // HKDF-SHA256 key derivation (matching ecies.rs)
+        let mut info = Vec::with_capacity(84);
+        info.extend_from_slice(portal_address.as_slice());
+        info.extend_from_slice(&key_index.to_be_bytes::<32>());
+        info.extend_from_slice(&eph_pub_x.0);
+        let aes_key = hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
+
+        // Build and encrypt plaintext (deterministic zero nonce)
+        let plaintext = build_plaintext(&recipient, &memo);
+        let (ciphertext, nonce, tag) = encrypt_plaintext(&aes_key, &plaintext);
+
+        EncryptedDeposit {
+            l1_block_number: self.next_block_number,
+            token,
+            sender,
+            amount,
+            fee: 0,
+            key_index,
+            ephemeral_pubkey_x: eph_pub_x,
+            ephemeral_pubkey_y_parity: eph_pub_y_parity,
+            ciphertext,
+            nonce,
+            tag,
             queue_hash: B256::ZERO,
         }
     }

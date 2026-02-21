@@ -1,6 +1,6 @@
 //! Multi-asset zone deposit and withdrawal.
 
-use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode};
+use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::{B256, U256};
 
 /// Longer timeout for real L1 tests.
@@ -100,7 +100,7 @@ async fn test_multiasset_deposit_and_withdraw() -> eyre::Result<()> {
     );
 
     // --- Step 6: Spawn zone sequencer (batch submitter + withdrawal processor) ---
-    let _sequencer_handle = account.spawn_sequencer(&l1, &zone, l1.dev_signer()).await;
+    let _sequencer_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
     let withdrawal_timeout = std::time::Duration::from_secs(60);
 
     // Withdraw AlphaUSD

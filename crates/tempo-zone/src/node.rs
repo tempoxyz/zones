@@ -4,7 +4,6 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use alloy_primitives::U256;
-use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
@@ -22,17 +21,21 @@ use reth_node_builder::{
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock, SealedHeader};
-use reth_provider::{ChainSpecProvider, EthStorage};
+use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock};
+use reth_provider::ChainSpecProvider;
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
+use reth_storage_api::EmptyBodyStorage;
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoChainSpec};
 use tempo_evm::TempoEvmConfig;
-use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
+use tempo_node::{
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, node::TempoPayloadAttributesBuilder,
+    rpc::TempoReceiptConverter,
+};
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
@@ -69,6 +72,9 @@ pub struct ZoneNode {
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
     sequencer: Option<alloy_primitives::Address>,
+    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
+    sequencer_key: k256::SecretKey,
+    portal_address: alloy_primitives::Address,
 }
 
 impl ZoneNode {
@@ -86,6 +92,7 @@ impl ZoneNode {
         portal_address: alloy_primitives::Address,
         genesis_tempo_block_number: Option<u64>,
         sequencer: Option<alloy_primitives::Address>,
+        sequencer_key: k256::SecretKey,
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
@@ -115,6 +122,8 @@ impl ZoneNode {
             l1_state_listener_config,
             l1_state_cache,
             sequencer,
+            sequencer_key,
+            portal_address,
         }
     }
 
@@ -135,6 +144,8 @@ impl ZoneNode {
         deposit_queue: crate::DepositQueue,
         executor_builder: ZoneExecutorBuilder,
         sequencer: Option<alloy_primitives::Address>,
+        sequencer_key: k256::SecretKey,
+        portal_address: alloy_primitives::Address,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -153,6 +164,8 @@ impl ZoneNode {
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
                 deposit_queue,
                 sequencer,
+                sequencer_key,
+                portal_address,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -162,7 +175,7 @@ impl ZoneNode {
 impl NodeTypes for ZoneNode {
     type Primitives = TempoPrimitives;
     type ChainSpec = TempoChainSpec;
-    type Storage = EthStorage<TempoTxEnvelope, TempoHeader>;
+    type Storage = EmptyBodyStorage<TempoTxEnvelope, TempoHeader>;
     type Payload = TempoPayloadTypes;
 }
 
@@ -235,7 +248,7 @@ where
         {
             let provider = ctx.node.provider().clone();
             let payload_attributes_builder =
-                ZonePayloadAttributesBuilder::new(provider.chain_spec());
+                TempoPayloadAttributesBuilder::new(provider.chain_spec());
             let to_engine = ctx.beacon_engine_handle.clone();
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
@@ -304,7 +317,13 @@ where
             self.l1_state_listener_config.clone(),
             self.l1_state_cache.clone(),
         );
-        Self::components(self.deposit_queue.clone(), executor_builder, self.sequencer)
+        Self::components(
+            self.deposit_queue.clone(),
+            executor_builder,
+            self.sequencer,
+            self.sequencer_key.clone(),
+            self.portal_address,
+        )
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -326,42 +345,7 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for ZoneNode {
         chain_spec: &Self::ChainSpec,
     ) -> impl PayloadAttributesBuilder<<Self::Payload as PayloadTypes>::PayloadAttributes, TempoHeader>
     {
-        ZonePayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
-    }
-}
-
-/// Payload attributes builder for Zone.
-#[derive(Debug)]
-#[non_exhaustive]
-struct ZonePayloadAttributesBuilder {
-    inner: LocalPayloadAttributesBuilder<TempoChainSpec>,
-}
-
-impl ZonePayloadAttributesBuilder {
-    fn new(chain_spec: Arc<TempoChainSpec>) -> Self {
-        Self {
-            inner: LocalPayloadAttributesBuilder::new(chain_spec).without_increasing_timestamp(),
-        }
-    }
-}
-
-impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
-    for ZonePayloadAttributesBuilder
-{
-    fn build(&self, parent: &SealedHeader<TempoHeader>) -> TempoPayloadAttributes {
-        let mut inner = self.inner.build(parent);
-        inner.suggested_fee_recipient = alloy_primitives::Address::ZERO;
-
-        let timestamp_millis_part = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-            % 1000;
-
-        TempoPayloadAttributes {
-            inner,
-            timestamp_millis_part,
-        }
+        TempoPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
     }
 }
 
