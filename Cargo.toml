@@ -77,10 +77,8 @@ codegen-units = 1
 # tempo (from upstream)
 tempo-alloy = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0" }
 tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0", default-features = false }
-tempo-commonware-node-config = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0", default-features = false }
 tempo-consensus = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0", default-features = false }
 tempo-contracts = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0", default-features = false }
-tempo-dkg-onchain-artifacts = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0", default-features = false }
 tempo-evm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0", default-features = false }
 tempo-node = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0" }
 tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0", default-features = false }
