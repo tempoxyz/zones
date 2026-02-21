@@ -2219,23 +2219,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-broadcast"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ffa29e885815ceb4e9ac4e1cb840aa96fb5493ad0c3ea5ac401212385137736"
-dependencies = [
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-p2p",
- "commonware-runtime",
- "commonware-utils",
- "prometheus-client",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "commonware-codec"
 version = "2026.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2248,34 +2231,6 @@ dependencies = [
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "thiserror 2.0.18",
-]
-
-[[package]]
-name = "commonware-consensus"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0ec7c97f3cb71e54a24a12af393d063d4daacf17ffcb69d79b9b519e5d19bafe"
-dependencies = [
- "bytes",
- "cfg-if",
- "commonware-broadcast",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-p2p",
- "commonware-parallel",
- "commonware-resolver",
- "commonware-runtime",
- "commonware-storage",
- "commonware-utils",
- "futures",
- "pin-project",
- "prometheus-client",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "rand_distr",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -2351,32 +2306,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "commonware-p2p"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9b3035f95ed50d7c440f0fbab6593409226bb42dfe105235975f6751e44051bf"
-dependencies = [
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-runtime",
- "commonware-stream",
- "commonware-utils",
- "either",
- "futures",
- "num-bigint",
- "num-integer",
- "num-rational",
- "num-traits",
- "prometheus-client",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "rand_distr",
- "thiserror 2.0.18",
- "tracing",
-]
-
-[[package]]
 name = "commonware-parallel"
 version = "2026.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2385,27 +2314,6 @@ dependencies = [
  "cfg-if",
  "commonware-macros",
  "rayon",
-]
-
-[[package]]
-name = "commonware-resolver"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "247e2bca77b21f598178b0194b519560616136222f8b10d4aa8cf801a6de91eb"
-dependencies = [
- "bytes",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-p2p",
- "commonware-runtime",
- "commonware-stream",
- "commonware-utils",
- "futures",
- "prometheus-client",
- "rand 0.8.5",
- "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -2444,50 +2352,6 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber 0.3.22",
-]
-
-[[package]]
-name = "commonware-storage"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31db25d40fcdf233e93dfec1749e0d7ee7b1dcdd9507f31f9f445fa98972ab8c"
-dependencies = [
- "anyhow",
- "bytes",
- "cfg-if",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-parallel",
- "commonware-runtime",
- "commonware-utils",
- "futures",
- "futures-util",
- "prometheus-client",
- "rayon",
- "thiserror 2.0.18",
- "tracing",
- "zstd",
-]
-
-[[package]]
-name = "commonware-stream"
-version = "2026.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30e6e61b311c4d65b16cfc70076e1d560fa1cf8975cc9afbe293501bf4814aad"
-dependencies = [
- "chacha20poly1305",
- "commonware-codec",
- "commonware-cryptography",
- "commonware-macros",
- "commonware-runtime",
- "commonware-utils",
- "futures",
- "rand 0.8.5",
- "rand_core 0.6.4",
- "thiserror 2.0.18",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]
@@ -2564,19 +2428,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
 dependencies = [
  "crossbeam-utils",
-]
-
-[[package]]
-name = "console"
-version = "0.16.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "03e45a4a8926227e4197636ba97a9fc9b00477e9f4bd711395687c5f0734bec4"
-dependencies = [
- "encode_unicode",
- "libc",
- "once_cell",
- "unicode-width 0.2.0",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3439,12 +3290,6 @@ dependencies = [
  "subtle",
  "zeroize",
 ]
-
-[[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "enr"
@@ -4590,20 +4435,6 @@ dependencies = [
  "hashbrown 0.16.1",
  "serde",
  "serde_core",
-]
-
-[[package]]
-name = "indicatif"
-version = "0.18.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "25470f23803092da7d239834776d653104d551bc4d7eacaf31e6837854b8e9eb"
-dependencies = [
- "console",
- "portable-atomic",
- "rayon",
- "unicode-width 0.2.0",
- "unit-prefix",
- "web-time",
 ]
 
 [[package]]
@@ -6707,16 +6538,6 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
  "serde",
-]
-
-[[package]]
-name = "rand_distr"
-version = "0.4.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "32cb0b9bc82b0a0876c2dd994a7e7a2683d3e7390ca40e6886785ef0c7e3ee31"
-dependencies = [
- "num-traits",
- "rand 0.8.5",
 ]
 
 [[package]]
@@ -10895,17 +10716,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tempo-commonware-node-config"
-version = "1.2.0"
-source = "git+https://github.com/tempoxyz/tempo?tag=v1.2.0#ed3c63970b51449b05c8447e7b3c0e68d704521f"
-dependencies = [
- "commonware-codec",
- "commonware-cryptography",
- "const-hex",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "tempo-consensus"
 version = "1.2.0"
 source = "git+https://github.com/tempoxyz/tempo?tag=v1.2.0#ed3c63970b51449b05c8447e7b3c0e68d704521f"
@@ -10929,18 +10739,6 @@ dependencies = [
  "alloy-contract",
  "alloy-primitives",
  "alloy-sol-types",
-]
-
-[[package]]
-name = "tempo-dkg-onchain-artifacts"
-version = "1.2.0"
-source = "git+https://github.com/tempoxyz/tempo?tag=v1.2.0#ed3c63970b51449b05c8447e7b3c0e68d704521f"
-dependencies = [
- "bytes",
- "commonware-codec",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-utils",
 ]
 
 [[package]]
@@ -11191,34 +10989,18 @@ name = "tempo-xtask"
 version = "1.0.0-rc.5"
 dependencies = [
  "alloy",
- "alloy-consensus",
- "alloy-primitives",
  "alloy-rlp",
  "clap",
- "commonware-codec",
- "commonware-consensus",
- "commonware-cryptography",
- "commonware-math",
- "commonware-utils",
  "const-hex",
  "eyre",
- "indicatif",
- "itertools 0.14.0",
- "rand 0.8.5",
- "rayon",
  "reth-evm",
- "reth-network-peers",
- "secp256k1 0.30.0",
  "serde",
  "serde_json",
  "tempo-alloy",
  "tempo-chainspec",
- "tempo-commonware-node-config",
  "tempo-contracts",
- "tempo-dkg-onchain-artifacts",
  "tempo-evm",
  "tempo-precompiles",
- "tempo-primitives",
  "tempo-revm",
  "tokio",
 ]
@@ -11989,12 +11771,6 @@ name = "unicode-xid"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebc1c04c71510c7f702b52b7c350734c9ff1295c464a03335b00bb84fc54f853"
-
-[[package]]
-name = "unit-prefix"
-version = "0.5.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "81e544489bf3d8ef66c953931f56617f423cd4b5494be343d9b9d3dda037b9a3"
 
 [[package]]
 name = "universal-hash"
