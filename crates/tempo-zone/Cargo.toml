@@ -65,6 +65,10 @@ revm.workspace = true
 axum.workspace = true
 
 # misc
+aes-gcm.workspace = true
+k256.workspace = true
+rand.workspace = true
+sha2.workspace = true
 reqwest.workspace = true
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
@@ -80,6 +84,7 @@ tracing.workspace = true
 [dev-dependencies]
 alloy = { workspace = true, features = [
     "full",
+    "genesis",
     "providers",
     "signers",
     "signer-local",

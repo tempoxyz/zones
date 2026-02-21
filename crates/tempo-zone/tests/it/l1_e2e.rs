@@ -4,7 +4,7 @@
 //! Tempo L1 dev node and a Zone L2 node connected via WebSocket. The L1
 //! subscriber naturally receives blocks and deposits — no synthetic injection.
 
-use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode};
+use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::{
     primitives::{Address, B256, U256},
     providers::Provider,
@@ -118,7 +118,7 @@ async fn test_deposit_via_real_l1() -> eyre::Result<()> {
     );
 
     // Spawn zone sequencer (batch submitter + withdrawal processor)
-    let _sequencer_handle = account.spawn_sequencer(&l1, &zone, l1.dev_signer()).await;
+    let _sequencer_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     // Request withdrawal on L2
     let withdrawal_amount: u128 = 500_000; // 0.5 pathUSD
@@ -200,13 +200,8 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
         .await?;
 
     // Spawn sequencers for both zones
-    let _seq_a = account_a
-        .spawn_sequencer(&l1, &zone_a, seq_a_signer.clone())
-        .await;
-    let account_b = ZoneAccount::from_l1_and_zone(&l1, &zone_b, portal_b);
-    let _seq_b = account_b
-        .spawn_sequencer(&l1, &zone_b, seq_b_signer.clone())
-        .await;
+    let _seq_a = spawn_sequencer(&l1, &zone_a, portal_a, seq_a_signer.clone()).await;
+    let _seq_b = spawn_sequencer(&l1, &zone_b, portal_b, seq_b_signer.clone()).await;
 
     // --- Step 5: Cross-zone withdrawal: zone_a → router → zone_b ---
     let cross_amount: u128 = 400_000; // 0.4 pathUSD
@@ -391,7 +386,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
     );
 
     // --- Step 9: Spawn sequencer and withdraw both tokens ---
-    let _sequencer_handle = account.spawn_sequencer(&l1, &zone, l1.dev_signer()).await;
+    let _sequencer_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
     let withdrawal_timeout = std::time::Duration::from_secs(60);
 
     // Withdraw pathUSD
@@ -435,6 +430,116 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
         final_zoneusd <= U256::from(zoneusd_amount - zoneusd_withdrawal),
         "L2 ZoneUSD balance should decrease by at least the withdrawal amount (got {final_zoneusd})"
     );
+
+    Ok(())
+}
+
+/// Full encrypted deposit + withdrawal flow:
+///
+///  1. Start L1 dev node, deploy ZoneFactory + create zone.
+///  2. Generate sequencer encryption key, start zone with sequencer key.
+///  3. Register encryption key on the portal via `setSequencerEncryptionKey`.
+///  4. Fund depositor, call `depositEncrypted` on the portal — encrypting
+///     (recipient, memo) to the sequencer's public key. The recipient is a
+///     known key (mnemonic index 2) so we can withdraw later.
+///     The zone processes this automatically: ECIES decrypt → CP proof →
+///     AES-GCM verify → mint to recipient. `deposit_encrypted` waits for
+///     the L2 balance to confirm the full pipeline succeeded.
+///  5. Spawn sequencer tasks, recipient requests withdrawal on L2.
+///  6. Wait for batch submission + withdrawal processing on L1.
+///
+/// ```text
+///  L1                                       Zone L2
+///   │                                         │
+///   │  setSequencerEncryptionKey              │
+///   │                                         │
+///   │  depositEncrypted ─────────►    │
+///   │                                         │
+///   │               ECIES decrypt             │
+///   │               + CP proof                │
+///   │                   │                    │
+///   │                   ▼                    │
+///   │            advanceTempo                 │
+///   │                   │                    │
+///   │                   ▼                    │
+///   │            CP ✓ + AES decrypt           │
+///   │            → mint to recipient         │
+///   │                                         │
+///   │   ◄──── requestWithdrawal ───── │
+///   │   ◄──── submitBatch ────────  │
+///   │   processWithdrawal                     │
+///   │            → tokens to L1              │
+/// ```
+///
+/// NOTE: Requires `forge build` in `docs/specs/` for ZoneFactory artifact.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_encrypted_deposit_and_withdrawal() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    // Generate sequencer encryption key (deterministic for test reproducibility)
+    use sha2::{Digest, Sha256};
+    let enc_key_bytes: [u8; 32] = Sha256::digest(b"test-sequencer-encryption-key-l1-e2e").into();
+    let encryption_key = k256::SecretKey::from_slice(&enc_key_bytes).expect("valid key");
+
+    // --- Step 1: Start L1 + deploy zone ---
+    let l1 = L1TestNode::start().await?;
+    let portal_address = l1.deploy_zone().await?;
+
+    // --- Step 2: Start zone with sequencer key ---
+    // Must start the zone BEFORE registering the encryption key, so the zone's
+    // genesis anchor captures the current L1 block. The encryption key registration
+    // and deposit happen in subsequent L1 blocks that the zone processes naturally.
+    let zone = ZoneTestNode::start_from_l1_with_sequencer_key(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        encryption_key.clone(),
+    )
+    .await?;
+
+    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+
+    // --- Step 3: Register encryption key on portal ---
+    // This produces an L1 block that the zone will process via L1Subscriber.
+    l1.set_sequencer_encryption_key(portal_address, &encryption_key)
+        .await?;
+
+    // --- Step 4: Encrypted deposit to a recipient we control ---
+    // Use mnemonic index 2 as the recipient so we have keys for withdrawal.
+    let recipient_signer = l1.signer_at(2);
+    let recipient = recipient_signer.address();
+
+    let mut depositor = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
+    let deposit_amount: u128 = 1_000_000; // 1 pathUSD
+
+    l1.fund_user(depositor.address(), deposit_amount).await?;
+
+    // deposit_encrypted waits for `balance >= deposit_amount` on L2, so success
+    // here proves the full ECIES pipeline worked (decrypt → CP verify → AES → mint).
+    depositor
+        .deposit_encrypted(deposit_amount, recipient, B256::ZERO, L1_TIMEOUT, &zone)
+        .await?;
+
+    // --- Step 5: Spawn sequencer + withdraw from the recipient's account on L2 ---
+    // Spawn sequencer after deposit to avoid L1 nonce races — the dev signer
+    // is used by both fund_user and the sequencer's batch submitter.
+    let _sequencer_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+
+    let mut recipient_account =
+        ZoneAccount::with_signer(recipient_signer, &l1, &zone, portal_address);
+
+    let withdrawal_amount: u128 = 500_000; // 0.5 pathUSD
+    recipient_account.withdraw(withdrawal_amount).await?;
+
+    // --- Step 6: Wait for the withdrawal to be fully processed on L1 ---
+    let withdrawal_timeout = std::time::Duration::from_secs(60);
+    l1.wait_for_withdrawal_on_l1(
+        portal_address,
+        recipient,
+        withdrawal_amount,
+        withdrawal_timeout,
+    )
+    .await?;
 
     Ok(())
 }

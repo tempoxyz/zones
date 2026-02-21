@@ -40,7 +40,8 @@ struct ZoneArgs {
     )]
     pub block_interval_ms: u64,
 
-    /// TODO:
+    /// Sequencer private key (hex, with or without 0x prefix).
+    /// Used for block building and ECIES decryption of encrypted deposits.
     #[arg(long = "sequencer-key", env = "SEQUENCER_KEY")]
     pub sequencer_key: Option<String>,
 
@@ -117,7 +118,6 @@ fn main() {
         )
     };
 
-    // TODO:
     if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
         .run_with_components::<ZoneNode>(components, async move |mut builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
@@ -136,11 +136,23 @@ fn main() {
                 });
             let sequencer_addr = sequencer_signer.as_ref().map(|s| s.address());
 
+            // Extract k256::SecretKey for ECIES decryption of encrypted deposits.
+            let sequencer_secret_key: k256::SecretKey = args
+                .sequencer_key
+                .as_ref()
+                .map(|key_hex| {
+                    let bytes = const_hex::decode(key_hex.strip_prefix("0x").unwrap_or(key_hex))
+                        .expect("invalid sequencer key hex");
+                    k256::SecretKey::from_slice(&bytes).expect("invalid secp256k1 secret key")
+                })
+                .expect("--sequencer-key is required");
+
             let node = ZoneNode::new(
                 args.l1_rpc_url.clone(),
                 args.portal_address,
                 args.l1_genesis_block_number,
                 sequencer_addr,
+                sequencer_secret_key,
             );
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;

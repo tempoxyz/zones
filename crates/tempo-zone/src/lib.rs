@@ -12,13 +12,14 @@ use eyre as _;
 pub mod abi;
 pub mod batch;
 pub mod bindings;
-mod builder;
+pub mod builder;
 pub mod engine;
 pub mod evm;
 mod executor;
 pub mod l1;
 pub mod l1_state;
 mod node;
+pub mod precompiles;
 pub mod rpc;
 pub mod withdrawals;
 pub mod zonemonitor;
@@ -26,8 +27,8 @@ pub mod zonemonitor;
 pub use batch::{BatchData, BatchSubmitter};
 pub use engine::ZoneEngine;
 pub use l1::{
-    Deposit, DepositQueue, DepositQueueTransition, L1BlockDeposits, L1Subscriber,
-    L1SubscriberConfig, PendingDeposits,
+    Deposit, DepositQueue, DepositQueueTransition, EncryptedDeposit, L1BlockDeposits, L1Deposit,
+    L1Subscriber, L1SubscriberConfig, PendingDeposits,
 };
 pub use l1_state::SharedL1StateCache;
 pub use node::{ZoneExecutorBuilder, ZoneNode};

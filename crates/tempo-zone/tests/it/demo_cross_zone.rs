@@ -1,6 +1,6 @@
 //! Demo Flow 3: Cross-Zone Transfer
 
-use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode};
+use crate::utils::{L1TestNode, WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::U256;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use zone::abi::ZONE_TOKEN_ADDRESS;
@@ -62,13 +62,8 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
     alice.deposit(deposit_amount, L1_TIMEOUT, &zone_a).await?;
 
     // --- Step 5: Spawn sequencers for both zones ---
-    let _seq_a = alice
-        .spawn_sequencer(&l1, &zone_a, seq_a_signer.clone())
-        .await;
-    let account_b = ZoneAccount::from_l1_and_zone(&l1, &zone_b, portal_b);
-    let _seq_b = account_b
-        .spawn_sequencer(&l1, &zone_b, seq_b_signer.clone())
-        .await;
+    let _seq_a = spawn_sequencer(&l1, &zone_a, portal_a, seq_a_signer.clone()).await;
+    let _seq_b = spawn_sequencer(&l1, &zone_b, portal_b, seq_b_signer.clone()).await;
 
     // Verify Bob starts with zero on zone_b
     let bob_before = zone_b.balance_of(ZONE_TOKEN_ADDRESS, bob_address).await?;

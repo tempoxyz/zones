@@ -72,6 +72,9 @@ pub struct ZoneNode {
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
     sequencer: Option<alloy_primitives::Address>,
+    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
+    sequencer_key: k256::SecretKey,
+    portal_address: alloy_primitives::Address,
 }
 
 impl ZoneNode {
@@ -89,6 +92,7 @@ impl ZoneNode {
         portal_address: alloy_primitives::Address,
         genesis_tempo_block_number: Option<u64>,
         sequencer: Option<alloy_primitives::Address>,
+        sequencer_key: k256::SecretKey,
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
@@ -118,6 +122,8 @@ impl ZoneNode {
             l1_state_listener_config,
             l1_state_cache,
             sequencer,
+            sequencer_key,
+            portal_address,
         }
     }
 
@@ -138,6 +144,8 @@ impl ZoneNode {
         deposit_queue: crate::DepositQueue,
         executor_builder: ZoneExecutorBuilder,
         sequencer: Option<alloy_primitives::Address>,
+        sequencer_key: k256::SecretKey,
+        portal_address: alloy_primitives::Address,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -156,6 +164,8 @@ impl ZoneNode {
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
                 deposit_queue,
                 sequencer,
+                sequencer_key,
+                portal_address,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -307,7 +317,13 @@ where
             self.l1_state_listener_config.clone(),
             self.l1_state_cache.clone(),
         );
-        Self::components(self.deposit_queue.clone(), executor_builder, self.sequencer)
+        Self::components(
+            self.deposit_queue.clone(),
+            executor_builder,
+            self.sequencer,
+            self.sequencer_key.clone(),
+            self.portal_address,
+        )
     }
 
     fn add_ons(&self) -> Self::AddOns {
