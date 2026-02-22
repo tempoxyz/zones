@@ -243,7 +243,10 @@ where
             use reth_storage_api::StateProviderFactory;
             let sp = ctx.node.provider().latest()?;
             let slot7 = sp
-                .storage(crate::abi::TEMPO_STATE_ADDRESS, crate::abi::TEMPO_PACKED_SLOT)
+                .storage(
+                    crate::abi::TEMPO_STATE_ADDRESS,
+                    crate::abi::TEMPO_PACKED_SLOT,
+                )
                 .unwrap_or_default()
                 .unwrap_or_default();
             let tempo_block_number = (slot7 & U256::from(u64::MAX)).to::<u64>();

@@ -43,7 +43,7 @@ struct ZoneArgs {
     /// Sequencer private key (hex, with or without 0x prefix).
     /// Used for block building and ECIES decryption of encrypted deposits.
     #[arg(long = "sequencer-key", env = "SEQUENCER_KEY")]
-    pub sequencer_key: Option<String>,
+    pub sequencer_key: String,
 
     /// Zone L2 HTTP RPC URL for the zone monitor to poll.
     /// Only used when sequencer mode is enabled.
@@ -128,24 +128,18 @@ fn main() {
             // from L1, so no external consensus client or Engine API is needed.
             builder.config_mut().rpc.disable_auth_server = true;
 
-            // Parse the sequencer key early so we can derive the address for block building.
-            // The signer is kept for later use when spawning sequencer background tasks.
-            let sequencer_signer: Option<alloy_signer_local::PrivateKeySigner> =
-                args.sequencer_key.as_ref().map(|key_hex| {
-                    key_hex.parse().expect("invalid sequencer private key")
-                });
-            let sequencer_addr = sequencer_signer.as_ref().map(|s| s.address());
+            // Parse the sequencer key to derive the address for block building
+            // and the k256 secret key for ECIES decryption of encrypted deposits.
+            let sequencer_signer: alloy_signer_local::PrivateKeySigner =
+                args.sequencer_key.parse().expect("invalid sequencer private key");
+            let sequencer_addr = sequencer_signer.address();
 
-            // Extract k256::SecretKey for ECIES decryption of encrypted deposits.
-            let sequencer_secret_key: k256::SecretKey = args
-                .sequencer_key
-                .as_ref()
-                .map(|key_hex| {
-                    let bytes = const_hex::decode(key_hex.strip_prefix("0x").unwrap_or(key_hex))
-                        .expect("invalid sequencer key hex");
-                    k256::SecretKey::from_slice(&bytes).expect("invalid secp256k1 secret key")
-                })
-                .expect("--sequencer-key is required");
+            let key_hex = &args.sequencer_key;
+            let sequencer_secret_key: k256::SecretKey = {
+                let bytes = const_hex::decode(key_hex.strip_prefix("0x").unwrap_or(key_hex))
+                    .expect("invalid sequencer key hex");
+                k256::SecretKey::from_slice(&bytes).expect("invalid secp256k1 secret key")
+            };
 
             let node = ZoneNode::new(
                 args.l1_rpc_url.clone(),
@@ -165,56 +159,52 @@ fn main() {
                 zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
                 zone_portal: args.portal_address,
-                sequencer: sequencer_addr.unwrap_or_default(),
+                sequencer: sequencer_addr,
             };
             let api: Arc<dyn zone::rpc::ZoneRpcApi> =
                 Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
             let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
             info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 
-            // Spawn sequencer background tasks if a sequencer key is provided.
-            if let Some(signer) = sequencer_signer {
-                let sequencer_addr = signer.address();
+            // Spawn sequencer background tasks.
+            info!(
+                target: "reth::cli",
+                %sequencer_addr,
+                "Starting sequencer background tasks"
+            );
 
-                info!(
-                    target: "reth::cli",
-                    %sequencer_addr,
-                    "Starting sequencer background tasks"
-                );
+            let sequencer_config = zone::ZoneSequencerConfig {
+                portal_address: args.portal_address,
+                l1_rpc_url: args.l1_rpc_url,
+                withdrawal_poll_interval: Duration::from_secs(
+                    args.poll_interval_secs,
+                ),
+                outbox_address: zone::abi::ZONE_OUTBOX_ADDRESS,
+                inbox_address: zone::abi::ZONE_INBOX_ADDRESS,
+                tempo_state_address: zone::abi::TEMPO_STATE_ADDRESS,
+                zone_rpc_url: args.zone_rpc_url,
+                zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
+                batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
+            };
 
-                let sequencer_config = zone::ZoneSequencerConfig {
-                    portal_address: args.portal_address,
-                    l1_rpc_url: args.l1_rpc_url,
-                    withdrawal_poll_interval: Duration::from_secs(
-                        args.poll_interval_secs,
-                    ),
-                    outbox_address: zone::abi::ZONE_OUTBOX_ADDRESS,
-                    inbox_address: zone::abi::ZONE_INBOX_ADDRESS,
-                    tempo_state_address: zone::abi::TEMPO_STATE_ADDRESS,
-                    zone_rpc_url: args.zone_rpc_url,
-                    zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
-                    batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
-                };
+            let seq_handle = zone::spawn_zone_sequencer(sequencer_config, sequencer_signer).await;
 
-                let seq_handle = zone::spawn_zone_sequencer(sequencer_config, signer).await;
+            info!(
+                target: "reth::cli",
+                "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
+            );
 
-                info!(
-                    target: "reth::cli",
-                    "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
-                );
-
-                // If any sequencer task exits, log it.
-                tokio::spawn(async move {
-                    tokio::select! {
-                        res = seq_handle.withdrawal_handle => {
-                            tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
-                        }
-                        res = seq_handle.monitor_handle => {
-                            tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
-                        }
+            // If any sequencer task exits, log it.
+            tokio::spawn(async move {
+                tokio::select! {
+                    res = seq_handle.withdrawal_handle => {
+                        tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
                     }
-                });
-            }
+                    res = seq_handle.monitor_handle => {
+                        tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
+                    }
+                }
+            });
 
             // Ensure all unpersisted blocks are flushed when the node exits.
             let engine_shutdown = handle.node.engine_shutdown.clone();

@@ -163,14 +163,20 @@ where
         let (stored_l1_block_hash, expected_tempo_block_number) = {
             let sp = self.provider.state_by_block_hash(parent_header.hash())?;
             let hash = sp
-                .storage(crate::abi::TEMPO_STATE_ADDRESS, crate::abi::TEMPO_BLOCK_HASH_SLOT)
+                .storage(
+                    crate::abi::TEMPO_STATE_ADDRESS,
+                    crate::abi::TEMPO_BLOCK_HASH_SLOT,
+                )
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .map(|v| alloy_primitives::B256::from(v.to_be_bytes()))
                 .unwrap_or_default();
             // tempoBlockNumber is at slot 7, offset 0 (packed as lowest uint64 in the slot,
             // alongside tempoGasLimit, tempoGasUsed, tempoTimestamp)
             let slot7 = sp
-                .storage(crate::abi::TEMPO_STATE_ADDRESS, crate::abi::TEMPO_PACKED_SLOT)
+                .storage(
+                    crate::abi::TEMPO_STATE_ADDRESS,
+                    crate::abi::TEMPO_PACKED_SLOT,
+                )
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .unwrap_or_default();
             // Extract lowest 8 bytes (uint64 at offset 0)
