@@ -47,15 +47,6 @@ use tracing::{debug, error, info, warn};
 
 use super::node::ZoneNode;
 
-/// TempoState storage slot for `tempoBlockHash` (slot 0).
-const TEMPO_BLOCK_HASH_SLOT: alloy_primitives::B256 = alloy_primitives::B256::ZERO;
-/// TempoState storage slot for packed `(tempoBlockNumber, tempoGasLimit, tempoGasUsed, tempoTimestamp)` (slot 7).
-const TEMPO_PACKED_SLOT: alloy_primitives::B256 = {
-    let mut bytes = [0u8; 32];
-    bytes[31] = 7;
-    alloy_primitives::B256::new(bytes)
-};
-
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
@@ -172,14 +163,14 @@ where
         let (stored_l1_block_hash, expected_tempo_block_number) = {
             let sp = self.provider.state_by_block_hash(parent_header.hash())?;
             let hash = sp
-                .storage(crate::abi::TEMPO_STATE_ADDRESS, TEMPO_BLOCK_HASH_SLOT)
+                .storage(crate::abi::TEMPO_STATE_ADDRESS, crate::abi::TEMPO_BLOCK_HASH_SLOT)
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .map(|v| alloy_primitives::B256::from(v.to_be_bytes()))
                 .unwrap_or_default();
             // tempoBlockNumber is at slot 7, offset 0 (packed as lowest uint64 in the slot,
             // alongside tempoGasLimit, tempoGasUsed, tempoTimestamp)
             let slot7 = sp
-                .storage(crate::abi::TEMPO_STATE_ADDRESS, TEMPO_PACKED_SLOT)
+                .storage(crate::abi::TEMPO_STATE_ADDRESS, crate::abi::TEMPO_PACKED_SLOT)
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .unwrap_or_default();
             // Extract lowest 8 bytes (uint64 at offset 0)
