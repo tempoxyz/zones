@@ -18,6 +18,16 @@ pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
 /// TempoState predeploy address on Zone L2.
 pub const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 
+/// TempoState storage slot for `tempoBlockHash` (slot 0).
+pub const TEMPO_BLOCK_HASH_SLOT: B256 = B256::ZERO;
+
+/// TempoState storage slot for packed `(tempoBlockNumber, tempoGasLimit, tempoGasUsed, tempoTimestamp)` (slot 7).
+pub const TEMPO_PACKED_SLOT: B256 = {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 7;
+    B256::new(bytes)
+};
+
 /// ZoneInbox predeploy address on Zone L2.
 pub const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
 
@@ -145,8 +155,11 @@ sol! {
 
         // -- Errors --
 
+        #[derive(Debug)]
         error NotSequencer();
+        #[derive(Debug)]
         error InvalidProof();
+        #[derive(Debug)]
         error InvalidTempoBlockNumber();
 
         // -- View functions --
@@ -454,6 +467,16 @@ sol! {
             uint128 amount,
             bytes calldata data
         ) external returns (bytes4);
+    }
+}
+
+impl std::fmt::Display for ZonePortal::ZonePortalErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSequencer(_) => f.write_str("NotSequencer"),
+            Self::InvalidProof(_) => f.write_str("InvalidProof"),
+            Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
+        }
     }
 }
 

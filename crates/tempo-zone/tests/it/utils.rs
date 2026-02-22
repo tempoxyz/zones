@@ -463,7 +463,7 @@ impl ZoneTestNode {
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
-            None, // sequencer address
+            Address::ZERO, // sequencer address (overridden by sequencer_key)
             sequencer_key,
         );
 

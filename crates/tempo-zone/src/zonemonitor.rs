@@ -33,6 +33,8 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tracing::{error, info, instrument, warn};
 
+use alloy_sol_types::{ContractError, SolInterface as _};
+
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
     batch::{BatchData, BatchSubmitter},
@@ -93,14 +95,14 @@ pub struct ZoneMonitor {
     /// Notifier for the withdrawal processor — signalled after each successful
     /// batch submission so it can process newly enqueued withdrawal slots.
     withdrawal_notify: Arc<Notify>,
-    /// Last **Zone L2** block number that was fully processed.
-    last_processed_block: u64,
+    /// Last **Zone L2** block number that was successfully submitted to L1.
+    last_submitted_zone_block: u64,
     /// Deposit queue hash from the previous block, used to construct the
     /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
     prev_processed_deposit_hash: B256,
     /// Previous zone block hash, used as `prev_block_hash` in [`BatchData`].
     /// Initialized from the portal's on-chain `blockHash()` at startup.
-    prev_block_hash: B256,
+    prev_zone_block_hash: B256,
     /// Tracks the portal's withdrawal queue tail position.
     /// The withdrawal store keys must match the portal's queue slot indices
     /// (not the L2 outbox's internal `withdrawalBatchIndex`). This counter is
@@ -145,7 +147,7 @@ impl ZoneMonitor {
             genesis_tempo_block_number,
         );
 
-        let (prev_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
+        let (prev_zone_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
             batch_submitter.read_portal_block_hash(),
             batch_submitter.read_portal_withdrawal_queue_tail(),
         )
@@ -158,7 +160,7 @@ impl ZoneMonitor {
             .unwrap_or(B256::ZERO);
 
         info!(
-            %prev_block_hash,
+            %prev_zone_block_hash,
             %prev_processed_deposit_hash,
             portal_withdrawal_queue_tail,
             "Initialized from portal state"
@@ -173,9 +175,9 @@ impl ZoneMonitor {
             withdrawal_store,
             batch_submitter,
             withdrawal_notify,
-            last_processed_block: 0,
+            last_submitted_zone_block: 0,
             prev_processed_deposit_hash,
-            prev_block_hash,
+            prev_zone_block_hash,
             portal_withdrawal_queue_tail,
         }
     }
@@ -204,22 +206,22 @@ impl ZoneMonitor {
         loop {
             poll.tick().await;
 
-            let Ok(latest) = self.provider.get_block_number().await else {
+            let Ok(latest_zone_block) = self.provider.get_block_number().await else {
                 continue;
             };
-            if latest <= self.last_processed_block {
+            if latest_zone_block <= self.last_submitted_zone_block {
                 continue;
             }
 
             let deadline_elapsed = tokio::time::Instant::now() >= batch_deadline;
             // Skip the eth_getLogs call when we'd submit anyway.
-            if !deadline_elapsed && !self.has_pending_withdrawals(latest).await {
+            if !deadline_elapsed && !self.has_pending_withdrawals(latest_zone_block).await {
                 continue;
             }
 
-            let from = self.last_processed_block + 1;
-            if let Err(e) = self.process_block_range(from, latest).await {
-                error!(from, to = latest, error = %e, "Failed to process zone block range");
+            let from = self.last_submitted_zone_block + 1;
+            if let Err(e) = self.process_block_range(from, latest_zone_block).await {
+                error!(from, to = latest_zone_block, error = %e, "Failed to process zone block range");
                 continue;
             }
 
@@ -227,14 +229,14 @@ impl ZoneMonitor {
         }
     }
 
-    /// Check if any zone blocks since `last_processed_block` contain finalized
+    /// Check if any zone blocks since `last_submitted_zone_block` contain finalized
     /// withdrawal batches that need to be submitted to L1.
     ///
     /// `pendingWithdrawalsCount()` is always 0 on committed blocks because
     /// `finalizeWithdrawalBatch` runs as the last tx in every zone block. The
     /// correct signal is `BatchFinalized` events with non-zero withdrawal hashes.
     async fn has_pending_withdrawals(&self, latest_block: u64) -> bool {
-        let from = self.last_processed_block + 1;
+        let from = self.last_submitted_zone_block + 1;
         match self
             .outbox
             .BatchFinalized_filter()
@@ -315,7 +317,7 @@ impl ZoneMonitor {
         // --- 4. Build and submit BatchData ---
         let batch_data = BatchData {
             tempo_block_number: end_state.tempo_block_number,
-            prev_block_hash: self.prev_block_hash,
+            prev_block_hash: self.prev_zone_block_hash,
             next_block_hash: end_state.block_hash,
             prev_processed_deposit_hash: self.prev_processed_deposit_hash,
             next_processed_deposit_hash: end_state.processed_deposit_hash,
@@ -418,23 +420,23 @@ impl ZoneMonitor {
     /// backoff retry.
     ///
     /// On success:
-    /// - Advances `prev_block_hash`, `prev_processed_deposit_hash`, and
-    ///   `last_processed_block` to reflect the submitted range.
+    /// - Advances `prev_zone_block_hash`, `prev_processed_deposit_hash`, and
+    ///   `last_submitted_zone_block` to reflect the submitted range.
     /// - Increments `portal_withdrawal_queue_tail` if the batch included withdrawals.
     /// - Notifies the [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor)
     ///   so it can finalize newly enqueued withdrawal slots.
     ///
     /// On failure (after [`MAX_RETRIES`] attempts with [`INITIAL_RETRY_DELAY`]
-    /// doubling each time): resyncs `prev_block_hash` and
+    /// doubling each time): resyncs `prev_zone_block_hash` and
     /// `portal_withdrawal_queue_tail` from the portal and skips this block range
     /// so the monitor can continue.
     async fn submit_batch_with_retry(
         &mut self,
         batch_data: &BatchData,
-        last_block_number: u64,
+        last_zone_block: u64,
         withdrawals: Vec<abi::Withdrawal>,
     ) -> Result<()> {
-        // Preflight: verify prev_block_hash matches portal state.
+        // Preflight: verify prev_zone_block_hash matches portal state.
         match self.batch_submitter.read_portal_block_hash().await {
             Ok(portal_hash) if portal_hash != batch_data.prev_block_hash => {
                 warn!(
@@ -456,9 +458,9 @@ impl ZoneMonitor {
         for attempt in 1..=MAX_RETRIES {
             match self.batch_submitter.submit_batch(batch_data).await {
                 Ok(tx_hash) => {
-                    let blocks_in_batch = last_block_number - self.last_processed_block;
+                    let blocks_in_batch = last_zone_block - self.last_submitted_zone_block;
                     info!(
-                        last_block_number,
+                        last_zone_block,
                         blocks_in_batch,
                         tempo_block_number = batch_data.tempo_block_number,
                         %tx_hash,
@@ -467,9 +469,9 @@ impl ZoneMonitor {
                     );
 
                     // Only advance local state on success.
-                    self.prev_block_hash = batch_data.next_block_hash;
+                    self.prev_zone_block_hash = batch_data.next_block_hash;
                     self.prev_processed_deposit_hash = batch_data.next_processed_deposit_hash;
-                    self.last_processed_block = last_block_number;
+                    self.last_submitted_zone_block = last_zone_block;
 
                     // Store withdrawals and advance portal queue tail if this batch had withdrawals.
                     if !batch_data.withdrawal_queue_hash.is_zero() {
@@ -505,9 +507,11 @@ impl ZoneMonitor {
                         tokio::time::sleep(delay).await;
                         delay *= 2;
                     } else {
+                        let revert_reason = decode_portal_revert(&e);
                         error!(
                             error = %e,
-                            last_block_number,
+                            revert_reason,
+                            last_zone_block,
                             tempo_block_number = batch_data.tempo_block_number,
                             prev_block_hash = %batch_data.prev_block_hash,
                             next_block_hash = %batch_data.next_block_hash,
@@ -524,15 +528,15 @@ impl ZoneMonitor {
         Ok(())
     }
 
-    /// Resync `prev_block_hash`, `prev_processed_deposit_hash`, and
+    /// Resync `prev_zone_block_hash`, `prev_processed_deposit_hash`, and
     /// `portal_withdrawal_queue_tail` from on-chain state.
     ///
     /// Called after exhausting retries or when a preflight hash mismatch is
     /// detected, so subsequent batches start from the portal's actual state
-    /// rather than stale local values. Does NOT advance `last_processed_block`
+    /// rather than stale local values. Does NOT advance `last_submitted_zone_block`
     /// — the same block range will be retried on the next poll cycle.
     async fn resync_from_portal(&mut self) {
-        let old_hash = self.prev_block_hash;
+        let old_hash = self.prev_zone_block_hash;
         let old_tail = self.portal_withdrawal_queue_tail;
         match tokio::try_join!(
             self.batch_submitter.read_portal_block_hash(),
@@ -555,7 +559,7 @@ impl ZoneMonitor {
                     %deposit_hash,
                     "Resynced from portal and zone state"
                 );
-                self.prev_block_hash = portal_hash;
+                self.prev_zone_block_hash = portal_hash;
                 self.portal_withdrawal_queue_tail = portal_tail;
                 self.prev_processed_deposit_hash = deposit_hash;
             }
@@ -592,6 +596,20 @@ pub fn spawn_zone_monitor(
             }
         }
     })
+}
+
+/// Try to decode a ZonePortal revert reason from an eyre error chain.
+///
+/// Extracts hex-encoded revert data from the error's display string and decodes
+/// it using alloy's `ContractError`, which handles standard `Revert(string)`,
+/// `Panic(uint256)`, and ZonePortal custom errors (`NotSequencer`, etc.).
+fn decode_portal_revert(err: &eyre::Report) -> Option<String> {
+    let msg = format!("{err}");
+    let start = msg.find("data: \"0x")? + "data: \"".len();
+    let end = msg[start..].find('"')? + start;
+    let bytes = alloy_primitives::hex::decode(&msg[start..end]).ok()?;
+    let error = ContractError::<ZonePortal::ZonePortalErrors>::abi_decode(&bytes).ok()?;
+    Some(error.to_string())
 }
 
 /// Zone L2 state read at the last block of a processed range, used to populate

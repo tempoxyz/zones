@@ -71,7 +71,7 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
-    sequencer: Option<alloy_primitives::Address>,
+    sequencer: alloy_primitives::Address,
     /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
     sequencer_key: k256::SecretKey,
     portal_address: alloy_primitives::Address,
@@ -91,7 +91,7 @@ impl ZoneNode {
         l1_rpc_url: String,
         portal_address: alloy_primitives::Address,
         genesis_tempo_block_number: Option<u64>,
-        sequencer: Option<alloy_primitives::Address>,
+        sequencer: alloy_primitives::Address,
         sequencer_key: k256::SecretKey,
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
@@ -100,6 +100,7 @@ impl ZoneNode {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
+            local_tempo_block_number: 0, // resolved at launch from local state
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -143,7 +144,7 @@ impl ZoneNode {
     pub fn components<N>(
         deposit_queue: crate::DepositQueue,
         executor_builder: ZoneExecutorBuilder,
-        sequencer: Option<alloy_primitives::Address>,
+        sequencer: alloy_primitives::Address,
         sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
     ) -> ComponentsBuilder<
@@ -235,7 +236,24 @@ where
         Identity,
     > as NodeAddOns<N>>::Handle;
 
-    async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+    async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+        // Read the zone's current tempoBlockNumber from local state so the L1
+        // subscriber knows exactly where to resume backfill.
+        {
+            use reth_storage_api::StateProviderFactory;
+            let sp = ctx.node.provider().latest()?;
+            let slot7 = sp
+                .storage(
+                    crate::abi::TEMPO_STATE_ADDRESS,
+                    crate::abi::TEMPO_PACKED_SLOT,
+                )
+                .unwrap_or_default()
+                .unwrap_or_default();
+            let tempo_block_number = (slot7 & U256::from(u64::MAX)).to::<u64>();
+            self.l1_config.local_tempo_block_number = tempo_block_number;
+            info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
+        }
+
         // Spawn L1 deposit subscriber
         L1Subscriber::spawn(
             self.l1_config,

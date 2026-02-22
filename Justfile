@@ -157,7 +157,7 @@ zone-up name reset="false" profile="dev" args="":
                       --http.api all \
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
-                      ${SEQUENCER_KEY:+--sequencer-key $SEQUENCER_KEY} \
+                      --sequencer-key "${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}" \
                       {{args}}
 
 [group('zone')]
