@@ -470,6 +470,16 @@ sol! {
     }
 }
 
+impl std::fmt::Display for ZonePortal::ZonePortalErrors {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotSequencer(_) => f.write_str("NotSequencer"),
+            Self::InvalidProof(_) => f.write_str("InvalidProof"),
+            Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
+        }
+    }
+}
+
 impl Withdrawal {
     /// Compute the withdrawal queue hash for a slice of withdrawals.
     ///

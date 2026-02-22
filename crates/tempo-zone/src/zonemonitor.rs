@@ -33,7 +33,7 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tracing::{error, info, instrument, warn};
 
-use alloy_sol_types::SolError;
+use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
@@ -507,13 +507,10 @@ impl ZoneMonitor {
                         tokio::time::sleep(delay).await;
                         delay *= 2;
                     } else {
-                        let revert = decode_portal_error(&e);
-                        let revert_reason = revert.as_ref().map_or("unknown", |r| r.reason);
-                        let revert_data = revert.as_ref().map_or("", |r| r.raw.as_str());
+                        let revert_reason = decode_portal_revert(&e);
                         error!(
                             error = %e,
                             revert_reason,
-                            revert_data,
                             last_zone_block,
                             tempo_block_number = batch_data.tempo_block_number,
                             prev_block_hash = %batch_data.prev_block_hash,
@@ -601,37 +598,18 @@ pub fn spawn_zone_monitor(
     })
 }
 
-/// Decoded revert information from a ZonePortal contract call.
-struct RevertInfo {
-    /// Human-readable error name, or "unknown" if the selector is unrecognized.
-    reason: &'static str,
-    /// Raw hex-encoded revert data (e.g. `0x53e2827c`).
-    raw: String,
-}
-
-/// Try to decode a ZonePortal contract error from an eyre error chain.
+/// Try to decode a ZonePortal revert reason from an eyre error chain.
 ///
-/// Extracts hex-encoded revert data (e.g. `data: "0x53e2827c"`) from the error's
-/// display string and matches the 4-byte selector against known ZonePortal errors.
-fn decode_portal_error(err: &eyre::Report) -> Option<RevertInfo> {
+/// Extracts hex-encoded revert data from the error's display string and decodes
+/// it using alloy's `ContractError`, which handles standard `Revert(string)`,
+/// `Panic(uint256)`, and ZonePortal custom errors (`NotSequencer`, etc.).
+fn decode_portal_revert(err: &eyre::Report) -> Option<String> {
     let msg = format!("{err}");
-    let marker = "data: \"0x";
-    let start = msg.find(marker)? + "data: \"".len();
+    let start = msg.find("data: \"0x")? + "data: \"".len();
     let end = msg[start..].find('"')? + start;
-    let raw = msg[start..end].to_string();
-    let bytes = alloy_primitives::hex::decode(&raw).ok()?;
-    let reason = if bytes.len() >= 4 {
-        let selector: [u8; 4] = bytes[..4].try_into().ok()?;
-        match selector {
-            ZonePortal::NotSequencer::SELECTOR => "NotSequencer",
-            ZonePortal::InvalidProof::SELECTOR => "InvalidProof",
-            ZonePortal::InvalidTempoBlockNumber::SELECTOR => "InvalidTempoBlockNumber",
-            _ => "unknown",
-        }
-    } else {
-        "unknown"
-    };
-    Some(RevertInfo { reason, raw })
+    let bytes = alloy_primitives::hex::decode(&msg[start..end]).ok()?;
+    let error = ContractError::<ZonePortal::ZonePortalErrors>::abi_decode(&bytes).ok()?;
+    Some(error.to_string())
 }
 
 /// Zone L2 state read at the last block of a processed range, used to populate
