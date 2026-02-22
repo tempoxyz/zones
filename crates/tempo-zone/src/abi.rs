@@ -145,8 +145,11 @@ sol! {
 
         // -- Errors --
 
+        #[derive(Debug)]
         error NotSequencer();
+        #[derive(Debug)]
         error InvalidProof();
+        #[derive(Debug)]
         error InvalidTempoBlockNumber();
 
         // -- View functions --

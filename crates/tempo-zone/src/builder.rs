@@ -47,12 +47,21 @@ use tracing::{debug, error, info, warn};
 
 use super::node::ZoneNode;
 
+/// TempoState storage slot for `tempoBlockHash` (slot 0).
+const TEMPO_BLOCK_HASH_SLOT: alloy_primitives::B256 = alloy_primitives::B256::ZERO;
+/// TempoState storage slot for packed `(tempoBlockNumber, tempoGasLimit, tempoGasUsed, tempoTimestamp)` (slot 7).
+const TEMPO_PACKED_SLOT: alloy_primitives::B256 = {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 7;
+    alloy_primitives::B256::new(bytes)
+};
+
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZonePayloadFactory {
     deposit_queue: crate::DepositQueue,
-    sequencer: Option<Address>,
+    sequencer: Address,
     /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
     sequencer_key: k256::SecretKey,
     /// ZonePortal address on L1 — used as context in HKDF key derivation.
@@ -62,7 +71,7 @@ pub struct ZonePayloadFactory {
 impl ZonePayloadFactory {
     pub fn new(
         deposit_queue: crate::DepositQueue,
-        sequencer: Option<Address>,
+        sequencer: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
     ) -> Self {
@@ -106,7 +115,7 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
-    _sequencer: Option<Address>,
+    _sequencer: Address,
     sequencer_key: k256::SecretKey,
     portal_address: Address,
 }
@@ -117,7 +126,7 @@ impl<Provider> ZonePayloadBuilder<Provider> {
         provider: Provider,
         evm_config: ZoneEvmConfig,
         deposit_queue: crate::DepositQueue,
-        sequencer: Option<Address>,
+        sequencer: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
     ) -> Self {
@@ -160,20 +169,17 @@ where
 
         // Read the current tempoBlockHash and tempoBlockNumber from TempoState storage
         // to validate the next L1 block we process is the expected successor.
-        let (tempo_block_hash, expected_l1_number) = {
+        let (stored_l1_block_hash, expected_tempo_block_number) = {
             let sp = self.provider.state_by_block_hash(parent_header.hash())?;
             let hash = sp
-                .storage(
-                    crate::abi::TEMPO_STATE_ADDRESS,
-                    alloy_primitives::B256::ZERO,
-                )
+                .storage(crate::abi::TEMPO_STATE_ADDRESS, TEMPO_BLOCK_HASH_SLOT)
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .map(|v| alloy_primitives::B256::from(v.to_be_bytes()))
                 .unwrap_or_default();
             // tempoBlockNumber is at slot 7, offset 0 (packed as lowest uint64 in the slot,
             // alongside tempoGasLimit, tempoGasUsed, tempoTimestamp)
             let slot7 = sp
-                .storage(crate::abi::TEMPO_STATE_ADDRESS, U256::from(7).into())
+                .storage(crate::abi::TEMPO_STATE_ADDRESS, TEMPO_PACKED_SLOT)
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .unwrap_or_default();
             // Extract lowest 8 bytes (uint64 at offset 0)
@@ -184,20 +190,15 @@ where
 
         info!(
             target: "zone::payload",
-            %tempo_block_hash,
-            expected_l1_number,
+            %stored_l1_block_hash,
+            expected_tempo_block_number,
             "TempoState current state"
         );
 
         // Take exactly one L1 block per zone block — advanceTempo advances Tempo state
         // by exactly one block, maintaining sequential chain continuity.
         // The ZoneEngine ensures an L1 block is queued before triggering a build.
-        let l1_block = match self
-            .deposit_queue
-            .lock()
-            .expect("deposit queue poisoned")
-            .pop_next()
-        {
+        let l1_block = match self.deposit_queue.pop_next() {
             Some(block) => block,
             None => {
                 debug!(target: "zone::payload", "No L1 block available, skipping build");
@@ -209,25 +210,25 @@ where
 
         // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
         // and its parent hash must match the stored tempoBlockHash.
-        if l1_block.header.inner.number != expected_l1_number {
+        if l1_block.header.inner.number != expected_tempo_block_number {
             error!(
                 target: "zone::payload",
                 got = l1_block.header.inner.number,
-                expected = expected_l1_number,
+                expected = expected_tempo_block_number,
                 "L1 block number mismatch — chain continuity broken"
             );
             return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
                 format!(
                     "L1 block number mismatch: got {} expected {}",
-                    l1_block.header.inner.number, expected_l1_number
+                    l1_block.header.inner.number, expected_tempo_block_number
                 ),
             )));
         }
-        if l1_block.header.inner.parent_hash != tempo_block_hash {
+        if l1_block.header.inner.parent_hash != stored_l1_block_hash {
             error!(
                 target: "zone::payload",
                 got = %l1_block.header.inner.parent_hash,
-                expected = %tempo_block_hash,
+                expected = %stored_l1_block_hash,
                 l1_block = l1_block.header.inner.number,
                 "L1 parent hash mismatch — chain continuity broken"
             );
@@ -236,7 +237,7 @@ where
                     "L1 parent hash mismatch at block {}: got {} expected {}",
                     l1_block.header.inner.number,
                     l1_block.header.inner.parent_hash,
-                    tempo_block_hash
+                    stored_l1_block_hash
                 ),
             )));
         }
@@ -326,12 +327,12 @@ where
         // Execute advanceTempo system transaction — exactly one per zone block.
         {
             // Log header details for debugging chain continuity
-            let header_rlp = alloy_rlp::encode(&l1_block.header);
+            let header_rlp = alloy_rlp::encode(l1_block.header.header());
             info!(
                 target: "zone::payload",
-                l1_block_number = l1_block.header.inner.number,
-                l1_parent_hash = %l1_block.header.inner.parent_hash,
-                l1_block_hash = %alloy_primitives::keccak256(&header_rlp),
+                l1_block_number = l1_block.header.number(),
+                l1_parent_hash = %l1_block.header.parent_hash(),
+                l1_block_hash = %l1_block.header.hash(),
                 header_rlp_len = header_rlp.len(),
                 "advanceTempo header details"
             );
@@ -475,6 +476,8 @@ where
 
         info!(
             number = sealed_block.number(),
+            l1_block = l1_block.header.number(),
+            l1_hash = ?l1_block.header.hash(),
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
