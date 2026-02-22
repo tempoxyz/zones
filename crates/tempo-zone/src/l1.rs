@@ -1958,7 +1958,7 @@ mod tests {
 
         let h10 = make_test_header(10);
         let h10_hash = header_hash(&h10);
-        queue.enqueue(h10.clone(), vec![]);
+        queue.enqueue(h10, vec![]);
 
         let h11 = make_chained_header(11, h10_hash);
         queue.enqueue(h11.clone(), vec![]);
