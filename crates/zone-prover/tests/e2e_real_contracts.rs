@@ -16,12 +16,11 @@ use revm::{
     state::AccountInfo,
 };
 use zone_prover::{
-    execute,
-    prove_zone_batch,
+    execute, prove_zone_batch,
     testutil::{TestAccount, build_zone_state_fixture_with_absent, compute_state_root},
     types::*,
 };
-use zone_test_utils::{extract_db_accounts, setup_zone_evm, build_dummy_header_rlp};
+use zone_test_utils::{build_dummy_header_rlp, extract_db_accounts, setup_zone_evm};
 
 const CHAIN_ID: u64 = 13371;
 const SEQUENCER: Address = Address::ZERO;
@@ -70,8 +69,8 @@ fn execute_on_cache_db(
     use alloy_evm::{EvmEnv, EvmFactory};
     use alloy_sol_types::SolCall;
     use revm::context::BlockEnv;
-    use tempo_evm::evm::TempoEvmFactory;
     use tempo_chainspec::hardfork::TempoHardfork;
+    use tempo_evm::evm::TempoEvmFactory;
     use tempo_revm::TempoBlockEnv;
 
     let block_env = TempoBlockEnv {
@@ -165,11 +164,7 @@ fn execute_on_cache_db(
         .map(|(addr, acct)| {
             let info = &acct.info;
             let code = info.code.as_ref().map(|c| c.bytes().to_vec());
-            let storage: Vec<(U256, U256)> = acct
-                .storage
-                .iter()
-                .map(|(k, v)| (*k, *v))
-                .collect();
+            let storage: Vec<(U256, U256)> = acct.storage.iter().map(|(k, v)| (*k, *v)).collect();
             (
                 *addr,
                 TestAccount {
@@ -261,12 +256,30 @@ fn collect_accessed_slots(post_accounts: &[(Address, TestAccount)]) -> Vec<(Addr
     // The prover reads these mandatory slots before/after block execution
     // in prove_zone_batch (not inside execute_zone_block).
     let mandatory = [
-        (execute::TEMPO_STATE_ADDRESS, execute::storage::TEMPO_STATE_BLOCK_HASH_SLOT),
-        (execute::TEMPO_STATE_ADDRESS, execute::storage::TEMPO_STATE_STATE_ROOT_SLOT),
-        (execute::TEMPO_STATE_ADDRESS, execute::storage::TEMPO_STATE_PACKED_SLOT),
-        (execute::ZONE_INBOX_ADDRESS, execute::storage::ZONE_INBOX_PROCESSED_HASH_SLOT),
-        (execute::ZONE_OUTBOX_ADDRESS, execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT),
-        (execute::ZONE_OUTBOX_ADDRESS, execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1)),
+        (
+            execute::TEMPO_STATE_ADDRESS,
+            execute::storage::TEMPO_STATE_BLOCK_HASH_SLOT,
+        ),
+        (
+            execute::TEMPO_STATE_ADDRESS,
+            execute::storage::TEMPO_STATE_STATE_ROOT_SLOT,
+        ),
+        (
+            execute::TEMPO_STATE_ADDRESS,
+            execute::storage::TEMPO_STATE_PACKED_SLOT,
+        ),
+        (
+            execute::ZONE_INBOX_ADDRESS,
+            execute::storage::ZONE_INBOX_PROCESSED_HASH_SLOT,
+        ),
+        (
+            execute::ZONE_OUTBOX_ADDRESS,
+            execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
+        ),
+        (
+            execute::ZONE_OUTBOX_ADDRESS,
+            execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1),
+        ),
     ];
 
     for (addr, slot) in mandatory {
@@ -360,8 +373,7 @@ fn test_real_contracts_finalize_only() {
         execute::TEMPO_STATE_ADDRESS,
         execute::storage::TEMPO_STATE_PACKED_SLOT,
     );
-    let tempo_block_number =
-        execute::storage::extract_tempo_block_number(tempo_packed);
+    let tempo_block_number = execute::storage::extract_tempo_block_number(tempo_packed);
 
     let tempo_block_hash = B256::from(
         find_storage_value(
@@ -573,7 +585,10 @@ fn test_real_contracts_advance_and_finalize() {
     let accessed_slots = collect_accessed_slots(&raw_post_accounts);
     // The TempoStateReader precompile address doesn't exist as an account —
     // generate an MPT absence proof so the prover can confirm it's not in the trie.
-    let absent = [zone_test_utils::TEMPO_STATE_READER_ADDRESS, alloy_eips::eip4788::SYSTEM_ADDRESS];
+    let absent = [
+        zone_test_utils::TEMPO_STATE_READER_ADDRESS,
+        alloy_eips::eip4788::SYSTEM_ADDRESS,
+    ];
     let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &absent);
 
     let genesis_header = ZoneHeader {
@@ -622,8 +637,8 @@ fn test_real_contracts_advance_and_finalize() {
         tempo_ancestry_headers: vec![],
     };
 
-    let output = prove_zone_batch(witness)
-        .expect("prove_zone_batch with advanceTempo should succeed");
+    let output =
+        prove_zone_batch(witness).expect("prove_zone_batch with advanceTempo should succeed");
 
     println!("Prover succeeded with advanceTempo!");
     println!(

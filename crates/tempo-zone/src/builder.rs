@@ -213,7 +213,6 @@ where
             tempo_header_rlp: header_rlp,
         };
 
-
         let mut store = self.witness_store.lock().expect("witness store poisoned");
         store.insert(block_number, witness);
 

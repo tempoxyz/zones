@@ -16,14 +16,13 @@ use alloy_evm::Evm;
 use alloy_primitives::{Address, B256, U256};
 use std::collections::{BTreeMap, BTreeSet};
 use zone_prover::{
-    execute,
-    prove_zone_batch,
+    execute, prove_zone_batch,
     testutil::{TestAccount, build_zone_state_fixture_with_absent, compute_state_root},
     types::*,
 };
 use zone_test_utils::{
-    TEMPO_STATE_READER_ADDRESS, extract_db_accounts, setup_zone_evm, build_dummy_header_rlp,
-    register_mock_tempo_state_reader,
+    TEMPO_STATE_READER_ADDRESS, build_dummy_header_rlp, extract_db_accounts,
+    register_mock_tempo_state_reader, setup_zone_evm,
 };
 
 // Used by test_witness_pipeline_advance_user_tx_finalize
@@ -50,7 +49,10 @@ fn snapshot_to_test_account(snap: &zone_test_utils::AccountSnapshot) -> TestAcco
 fn reference_execute(
     db: revm::database::CacheDB<revm::database::EmptyDB>,
     block: &ZoneBlock,
-) -> (Vec<(Address, TestAccount)>, revm::database::CacheDB<revm::database::EmptyDB>) {
+) -> (
+    Vec<(Address, TestAccount)>,
+    revm::database::CacheDB<revm::database::EmptyDB>,
+) {
     use alloy_evm::{Evm, EvmEnv, EvmFactory};
     use alloy_sol_types::SolCall;
     use revm::{DatabaseCommit, context::BlockEnv};
@@ -118,8 +120,7 @@ fn reference_execute(
         .map(|(addr, acct)| {
             let info = &acct.info;
             let code = info.code.as_ref().map(|c| c.bytes().to_vec());
-            let storage: Vec<(U256, U256)> =
-                acct.storage.iter().map(|(k, v)| (*k, *v)).collect();
+            let storage: Vec<(U256, U256)> = acct.storage.iter().map(|(k, v)| (*k, *v)).collect();
             (
                 *addr,
                 TestAccount {
@@ -162,12 +163,30 @@ fn collect_accessed_slots(
         .collect();
 
     let mandatory = [
-        (execute::TEMPO_STATE_ADDRESS, execute::storage::TEMPO_STATE_BLOCK_HASH_SLOT),
-        (execute::TEMPO_STATE_ADDRESS, execute::storage::TEMPO_STATE_STATE_ROOT_SLOT),
-        (execute::TEMPO_STATE_ADDRESS, execute::storage::TEMPO_STATE_PACKED_SLOT),
-        (execute::ZONE_INBOX_ADDRESS, execute::storage::ZONE_INBOX_PROCESSED_HASH_SLOT),
-        (execute::ZONE_OUTBOX_ADDRESS, execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT),
-        (execute::ZONE_OUTBOX_ADDRESS, execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1)),
+        (
+            execute::TEMPO_STATE_ADDRESS,
+            execute::storage::TEMPO_STATE_BLOCK_HASH_SLOT,
+        ),
+        (
+            execute::TEMPO_STATE_ADDRESS,
+            execute::storage::TEMPO_STATE_STATE_ROOT_SLOT,
+        ),
+        (
+            execute::TEMPO_STATE_ADDRESS,
+            execute::storage::TEMPO_STATE_PACKED_SLOT,
+        ),
+        (
+            execute::ZONE_INBOX_ADDRESS,
+            execute::storage::ZONE_INBOX_PROCESSED_HASH_SLOT,
+        ),
+        (
+            execute::ZONE_OUTBOX_ADDRESS,
+            execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
+        ),
+        (
+            execute::ZONE_OUTBOX_ADDRESS,
+            execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1),
+        ),
     ];
 
     for (addr, slot) in mandatory {
@@ -181,7 +200,8 @@ fn collect_accessed_slots(
     let history_addr = alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS;
     for &block_num in block_numbers {
         if block_num > 0 {
-            let slot = U256::from((block_num - 1) % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
+            let slot =
+                U256::from((block_num - 1) % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
             if !slots.iter().any(|(a, s)| *a == history_addr && *s == slot) {
                 slots.push((history_addr, slot));
             }
@@ -219,7 +239,10 @@ fn find_storage_value(
         .iter()
         .find(|(a, _)| *a == target_addr)
         .and_then(|(_, acct)| {
-            acct.storage.iter().find(|(s, _)| *s == slot).map(|(_, v)| *v)
+            acct.storage
+                .iter()
+                .find(|(s, _)| *s == slot)
+                .map(|(_, v)| *v)
         })
         .unwrap_or(U256::ZERO)
 }
@@ -231,13 +254,16 @@ fn find_storage_value(
 /// produces a valid proof.
 #[test]
 fn test_witness_pipeline_single_block() {
-    use zone::witness::{AccessSnapshot, BuiltBlockWitness, WitnessGeneratorConfig, WitnessGenerator, WitnessStore};
+    use zone::witness::{
+        AccessSnapshot, BuiltBlockWitness, WitnessGenerator, WitnessGeneratorConfig, WitnessStore,
+    };
 
     let db = {
         let mut evm = setup_zone_evm(CHAIN_ID);
         use revm::state::AccountInfo;
         if !evm.db_mut().cache.accounts.contains_key(&Address::ZERO) {
-            evm.db_mut().insert_account_info(Address::ZERO, AccountInfo::default());
+            evm.db_mut()
+                .insert_account_info(Address::ZERO, AccountInfo::default());
         }
         let (db, _) = evm.finish();
         db
@@ -278,7 +304,10 @@ fn test_witness_pipeline_single_block() {
     // Reference execution discovers all accessed accounts/storage.
     let (raw_post, _post_db) = reference_execute(db, &zone_block);
     let accessed_slots = collect_accessed_slots(&raw_post, &[zone_block.number]);
-    let absent = [TEMPO_STATE_READER_ADDRESS, alloy_eips::eip4788::SYSTEM_ADDRESS];
+    let absent = [
+        TEMPO_STATE_READER_ADDRESS,
+        alloy_eips::eip4788::SYSTEM_ADDRESS,
+    ];
     let fixture = build_witness_with_accessed_slots(&pre_accounts, &accessed_slots, &absent);
 
     let genesis_header = ZoneHeader {
@@ -339,7 +368,9 @@ fn test_witness_pipeline_single_block() {
     }
 
     // Assemble using WitnessGenerator.
-    let witness_gen = WitnessGenerator::new(WitnessGeneratorConfig { sequencer: SEQUENCER });
+    let witness_gen = WitnessGenerator::new(WitnessGeneratorConfig {
+        sequencer: SEQUENCER,
+    });
 
     let tempo_packed = find_storage_value(
         &pre_accounts,
@@ -401,13 +432,16 @@ fn test_witness_pipeline_single_block() {
 /// of both blocks' accesses.
 #[test]
 fn test_witness_pipeline_two_block_merge() {
-    use zone::witness::{AccessSnapshot, BuiltBlockWitness, WitnessGeneratorConfig, WitnessGenerator, WitnessStore};
+    use zone::witness::{
+        AccessSnapshot, BuiltBlockWitness, WitnessGenerator, WitnessGeneratorConfig, WitnessStore,
+    };
 
     let make_db = || {
         let mut evm = setup_zone_evm(CHAIN_ID);
         use revm::state::AccountInfo;
         if !evm.db_mut().cache.accounts.contains_key(&Address::ZERO) {
-            evm.db_mut().insert_account_info(Address::ZERO, AccountInfo::default());
+            evm.db_mut()
+                .insert_account_info(Address::ZERO, AccountInfo::default());
         }
         let (db, _) = evm.finish();
         db
@@ -418,7 +452,10 @@ fn test_witness_pipeline_two_block_merge() {
         .into_iter()
         .map(|(addr, snap)| (addr, snapshot_to_test_account(&snap)))
         .collect();
-    let absent = [TEMPO_STATE_READER_ADDRESS, alloy_eips::eip4788::SYSTEM_ADDRESS];
+    let absent = [
+        TEMPO_STATE_READER_ADDRESS,
+        alloy_eips::eip4788::SYSTEM_ADDRESS,
+    ];
 
     // Discovery pass: run both blocks to find all accessed slots.
     let block1_disc = ZoneBlock {
@@ -583,7 +620,9 @@ fn test_witness_pipeline_two_block_merge() {
     assert!(merged.accounts.len() >= snap2.accounts.len());
 
     // Assemble and prove.
-    let witness_gen = WitnessGenerator::new(WitnessGeneratorConfig { sequencer: SEQUENCER });
+    let witness_gen = WitnessGenerator::new(WitnessGeneratorConfig {
+        sequencer: SEQUENCER,
+    });
 
     let tempo_packed = find_storage_value(
         &pre_accounts,
@@ -629,8 +668,7 @@ fn test_witness_pipeline_two_block_merge() {
         vec![],
     );
 
-    let output = prove_zone_batch(batch_witness)
-        .expect("two-block pipeline should succeed");
+    let output = prove_zone_batch(batch_witness).expect("two-block pipeline should succeed");
 
     assert_eq!(output.block_transition.prev_block_hash, genesis_hash);
     assert_ne!(output.block_transition.next_block_hash, genesis_hash);
@@ -673,9 +711,8 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
     };
 
     // User account: use a deterministic private key for reproducibility.
-    let user_signing_key = alloy_primitives::b256!(
-        "ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80"
-    );
+    let user_signing_key =
+        alloy_primitives::b256!("ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80");
     let user_signer = alloy_signer_local::PrivateKeySigner::from_bytes(&user_signing_key)
         .expect("valid private key");
     let user_address = user_signer.address();
@@ -743,8 +780,9 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
 
     // Build a minimal fake L1 state trie for the TempoStateReader precompile.
     let (l1_state_root, tempo_state_proofs) = {
-        use alloy_trie::{EMPTY_ROOT_HASH, HashBuilder, TrieAccount, proof::ProofRetainer};
-        use alloy_trie::nybbles::Nibbles;
+        use alloy_trie::{
+            EMPTY_ROOT_HASH, HashBuilder, TrieAccount, nybbles::Nibbles, proof::ProofRetainer,
+        };
 
         let l1_account = TrieAccount {
             nonce: 0,
@@ -833,7 +871,10 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
         .collect();
     // Ensure the user account is treated as an EOA for EIP-3607 checks.
     let mut pre_accounts = pre_accounts;
-    if let Some((_, acct)) = pre_accounts.iter_mut().find(|(addr, _)| *addr == user_address) {
+    if let Some((_, acct)) = pre_accounts
+        .iter_mut()
+        .find(|(addr, _)| *addr == user_address)
+    {
         acct.code_hash = alloy_primitives::KECCAK256_EMPTY;
         acct.code = None;
     }
@@ -933,11 +974,10 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
             let recovered = envelope
                 .try_into_recovered()
                 .expect("signature recovery should succeed");
-            let tx_env =
-                <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
-                    recovered.inner(),
-                    recovered.signer(),
-                );
+            let tx_env = <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
+                recovered.inner(),
+                recovered.signer(),
+            );
             let revm::context::result::ResultAndState { result, state } =
                 evm.transact_raw(tx_env).expect("user tx should succeed");
             assert!(result.is_success(), "user tx failed: {:?}", result);
@@ -996,14 +1036,12 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
     let (raw_post_disc, disc_accounts, disc_storage) = {
         use alloy_evm::{Evm, EvmEnv, EvmFactory, FromRecoveredTx};
         use revm::{DatabaseCommit, context::BlockEnv};
+        use std::{cell::RefCell, rc::Rc};
         use tempo_chainspec::hardfork::TempoHardfork;
         use tempo_evm::evm::TempoEvmFactory;
         use tempo_revm::{TempoBlockEnv, TempoTxEnv};
-        use std::cell::RefCell;
-        use std::rc::Rc;
 
-        let accessed_accts: Rc<RefCell<BTreeSet<Address>>> =
-            Rc::new(RefCell::new(BTreeSet::new()));
+        let accessed_accts: Rc<RefCell<BTreeSet<Address>>> = Rc::new(RefCell::new(BTreeSet::new()));
         let accessed_stor: Rc<RefCell<BTreeMap<Address, BTreeSet<U256>>>> =
             Rc::new(RefCell::new(BTreeMap::new()));
 
@@ -1048,10 +1086,7 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
             }
         }
         impl revm::database_interface::DatabaseCommit for TrackingDb {
-            fn commit(
-                &mut self,
-                changes: revm::state::EvmState,
-            ) {
+            fn commit(&mut self, changes: revm::state::EvmState) {
                 self.inner.commit(changes)
             }
         }
@@ -1120,14 +1155,11 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
             let envelope: TempoTxEnvelope =
                 alloy_rlp::Decodable::decode(&mut raw_tx.as_slice()).expect("valid tx rlp");
             use reth_primitives_traits::SignerRecoverable;
-            let recovered = envelope
-                .try_into_recovered()
-                .expect("signature recovery");
-            let tx_env =
-                <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
-                    recovered.inner(),
-                    recovered.signer(),
-                );
+            let recovered = envelope.try_into_recovered().expect("signature recovery");
+            let tx_env = <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
+                recovered.inner(),
+                recovered.signer(),
+            );
             let revm::context::result::ResultAndState { result, state } =
                 evm.transact_raw(tx_env).expect("user tx should succeed");
             assert!(result.is_success(), "user tx failed: {:?}", result);
@@ -1161,8 +1193,7 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
             .iter()
             .map(|(addr, acct)| {
                 let info = &acct.info;
-                let code: Option<Vec<u8>> =
-                    info.code.as_ref().map(|c| c.bytes().to_vec());
+                let code: Option<Vec<u8>> = info.code.as_ref().map(|c| c.bytes().to_vec());
                 let storage: Vec<(U256, U256)> =
                     acct.storage.iter().map(|(k, v)| (*k, *v)).collect();
                 (
@@ -1199,9 +1230,7 @@ fn test_witness_pipeline_advance_user_tx_finalize() {
         call_target,
     ];
     for addr in &disc_accounts {
-        if !pre_accounts.iter().any(|(a, _)| a == addr)
-            && !absent_vec.contains(addr)
-        {
+        if !pre_accounts.iter().any(|(a, _)| a == addr) && !absent_vec.contains(addr) {
             absent_vec.push(*addr);
         }
     }

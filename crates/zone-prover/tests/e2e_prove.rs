@@ -5,15 +5,14 @@
 
 use alloy_primitives::{Address, B256, U256, keccak256};
 use zone_prover::{
-    prove_zone_batch,
     execute::{
         self,
         storage::{
-            TEMPO_STATE_BLOCK_HASH_SLOT, TEMPO_STATE_PACKED_SLOT,
-            TEMPO_STATE_STATE_ROOT_SLOT, ZONE_INBOX_PROCESSED_HASH_SLOT,
-            ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
+            TEMPO_STATE_BLOCK_HASH_SLOT, TEMPO_STATE_PACKED_SLOT, TEMPO_STATE_STATE_ROOT_SLOT,
+            ZONE_INBOX_PROCESSED_HASH_SLOT, ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
         },
     },
+    prove_zone_batch,
     testutil::{TestAccount, build_zone_state_fixture_with_absent, compute_state_root},
     types::*,
 };
@@ -62,7 +61,10 @@ fn build_initial_accounts(block_numbers: &[u64]) -> Vec<(Address, TestAccount)> 
                 storage: vec![
                     (TEMPO_STATE_BLOCK_HASH_SLOT.into(), U256::from(0xdead)),
                     (TEMPO_STATE_STATE_ROOT_SLOT.into(), U256::from(0xcafe)),
-                    (TEMPO_STATE_PACKED_SLOT.into(), pack_tempo_state(tempo_block_number)),
+                    (
+                        TEMPO_STATE_PACKED_SLOT.into(),
+                        pack_tempo_state(tempo_block_number),
+                    ),
                 ],
                 ..Default::default()
             },
@@ -72,9 +74,7 @@ fn build_initial_accounts(block_numbers: &[u64]) -> Vec<(Address, TestAccount)> 
             execute::ZONE_INBOX_ADDRESS,
             TestAccount {
                 nonce: 1,
-                storage: vec![
-                    (ZONE_INBOX_PROCESSED_HASH_SLOT.into(), U256::ZERO),
-                ],
+                storage: vec![(ZONE_INBOX_PROCESSED_HASH_SLOT.into(), U256::ZERO)],
                 ..Default::default()
             },
         ),
@@ -105,10 +105,7 @@ fn build_initial_accounts(block_numbers: &[u64]) -> Vec<(Address, TestAccount)> 
             },
         ),
         // System tx sender (Address::ZERO) — accessed as tx caller
-        (
-            SYSTEM_SENDER,
-            TestAccount::default(),
-        ),
+        (SYSTEM_SENDER, TestAccount::default()),
     ]
 }
 
@@ -122,9 +119,10 @@ fn apply_eip2935_writes(
     let slot = U256::from((block_number - 1) % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
     let value = U256::from_be_bytes(parent_hash.0);
 
-    if let Some((_, acct)) = result.iter_mut().find(|(a, _)| {
-        *a == alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS
-    }) {
+    if let Some((_, acct)) = result
+        .iter_mut()
+        .find(|(a, _)| *a == alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS)
+    {
         if let Some((_, v)) = acct.storage.iter_mut().find(|(s, _)| *s == slot) {
             *v = value;
         } else {

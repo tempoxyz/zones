@@ -65,7 +65,11 @@ impl RecordedAccesses {
 
     /// Record an account access.
     fn record_account(&self, address: Address) {
-        self.inner.lock().expect("poisoned").accounts.insert(address);
+        self.inner
+            .lock()
+            .expect("poisoned")
+            .accounts
+            .insert(address);
     }
 
     /// Record a storage slot access.

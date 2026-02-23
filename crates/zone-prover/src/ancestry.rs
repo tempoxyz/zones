@@ -53,9 +53,7 @@ pub fn verify_tempo_ancestry_chain(
         // Extract parent hash from the RLP-encoded header.
         // The parent hash is the first field in the header list.
         let parent_hash = extract_parent_hash_from_rlp(header_rlp).map_err(|e| {
-            ProverError::RlpDecode(format!(
-                "ancestry header {expected_number}: {e}"
-            ))
+            ProverError::RlpDecode(format!("ancestry header {expected_number}: {e}"))
         })?;
 
         // Verify parent hash chain continuity.
@@ -88,8 +86,8 @@ pub fn verify_tempo_ancestry_chain(
 /// The parent hash is the first field of the inner header.
 pub(crate) fn extract_parent_hash_from_rlp(header_rlp: &[u8]) -> Result<B256, String> {
     // Decode the outer list.
-    let outer_payload = decode_rlp_list_payload(header_rlp)
-        .map_err(|e| format!("outer list: {e}"))?;
+    let outer_payload =
+        decode_rlp_list_payload(header_rlp).map_err(|e| format!("outer list: {e}"))?;
 
     // Skip the first 3 wrapper fields (general_gas_limit, shared_gas_limit, timestamp_millis_part).
     let mut offset = 0;
@@ -101,12 +99,11 @@ pub(crate) fn extract_parent_hash_from_rlp(header_rlp: &[u8]) -> Result<B256, St
 
     // The 4th item is the inner Ethereum header (a list).
     let inner_rlp = &outer_payload[offset..];
-    let inner_payload = decode_rlp_list_payload(inner_rlp)
-        .map_err(|e| format!("inner list: {e}"))?;
+    let inner_payload =
+        decode_rlp_list_payload(inner_rlp).map_err(|e| format!("inner list: {e}"))?;
 
     // The first field of the inner header is parentHash (32 bytes).
-    decode_rlp_bytes32(inner_payload)
-        .map_err(|e| format!("parentHash: {e}"))
+    decode_rlp_bytes32(inner_payload).map_err(|e| format!("parentHash: {e}"))
 }
 
 /// Decode an RLP list and return its payload (the bytes after the list prefix).
@@ -193,8 +190,8 @@ fn rlp_item_total_length(data: &[u8]) -> Result<usize, &'static str> {
 /// `[parentHash, ommersHash, beneficiary, **stateRoot**, transactionsRoot, ...]`
 pub(crate) fn extract_state_root_from_rlp(header_rlp: &[u8]) -> Result<B256, String> {
     // Decode the outer list.
-    let outer_payload = decode_rlp_list_payload(header_rlp)
-        .map_err(|e| format!("outer list: {e}"))?;
+    let outer_payload =
+        decode_rlp_list_payload(header_rlp).map_err(|e| format!("outer list: {e}"))?;
 
     // Skip the first 3 wrapper fields (general_gas_limit, shared_gas_limit, timestamp_millis_part).
     let mut offset = 0;
@@ -206,8 +203,8 @@ pub(crate) fn extract_state_root_from_rlp(header_rlp: &[u8]) -> Result<B256, Str
 
     // The 4th item is the inner Ethereum header (a list).
     let inner_rlp = &outer_payload[offset..];
-    let inner_payload = decode_rlp_list_payload(inner_rlp)
-        .map_err(|e| format!("inner list: {e}"))?;
+    let inner_payload =
+        decode_rlp_list_payload(inner_rlp).map_err(|e| format!("inner list: {e}"))?;
 
     // Skip the first 3 fields (parentHash, ommersHash, beneficiary) to reach stateRoot.
     let mut inner_offset = 0;
@@ -225,8 +222,7 @@ pub(crate) fn extract_state_root_from_rlp(header_rlp: &[u8]) -> Result<B256, Str
     }
 
     // The 4th field is the state root (bytes32).
-    decode_rlp_bytes32(&inner_payload[inner_offset..])
-        .map_err(|e| format!("stateRoot: {e}"))
+    decode_rlp_bytes32(&inner_payload[inner_offset..]).map_err(|e| format!("stateRoot: {e}"))
 }
 
 /// Extract the block number from an RLP-encoded Tempo header.
@@ -239,8 +235,8 @@ pub(crate) fn extract_state_root_from_rlp(header_rlp: &[u8]) -> Result<B256, Str
 ///  receiptsRoot, logsBloom, difficulty, **number**, ...]`
 pub(crate) fn extract_block_number_from_rlp(header_rlp: &[u8]) -> Result<u64, String> {
     // Decode the outer list.
-    let outer_payload = decode_rlp_list_payload(header_rlp)
-        .map_err(|e| format!("outer list: {e}"))?;
+    let outer_payload =
+        decode_rlp_list_payload(header_rlp).map_err(|e| format!("outer list: {e}"))?;
 
     // Skip the first 3 wrapper fields (general_gas_limit, shared_gas_limit, timestamp_millis_part).
     let mut offset = 0;
@@ -252,8 +248,8 @@ pub(crate) fn extract_block_number_from_rlp(header_rlp: &[u8]) -> Result<u64, St
 
     // The 4th item is the inner Ethereum header (a list).
     let inner_rlp = &outer_payload[offset..];
-    let inner_payload = decode_rlp_list_payload(inner_rlp)
-        .map_err(|e| format!("inner list: {e}"))?;
+    let inner_payload =
+        decode_rlp_list_payload(inner_rlp).map_err(|e| format!("inner list: {e}"))?;
 
     // Skip the first 8 fields to reach `number` (index 8).
     let mut inner_offset = 0;
@@ -271,8 +267,7 @@ pub(crate) fn extract_block_number_from_rlp(header_rlp: &[u8]) -> Result<u64, St
     }
 
     // The 9th field is the block number (U256, variable-length big-endian integer).
-    decode_rlp_u64(&inner_payload[inner_offset..])
-        .map_err(|e| format!("block number: {e}"))
+    decode_rlp_u64(&inner_payload[inner_offset..]).map_err(|e| format!("block number: {e}"))
 }
 
 /// Decode a u64 from the start of an RLP payload.
