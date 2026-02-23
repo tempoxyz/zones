@@ -214,11 +214,13 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
         FALLBACK="$TO"
     fi
     echo "Requesting withdrawal of {{amount}} to $TO (fallback: $FALLBACK)..."
-    L2_TX=$(cast send "$OUTBOX" \
+    L2_OUTPUT=$(cast send "$OUTBOX" \
         "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes)" \
         "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json | jq -r '.transactionHash')
-    echo "Withdrawal requested on L2! tx: $L2_TX"
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
+    L2_TX=$(echo "$L2_OUTPUT" | jq -r '.transactionHash')
+    L2_BLOCK=$(echo "$L2_OUTPUT" | jq -r '.blockNumber')
+    echo "Withdrawal requested on L2! tx: $L2_TX (block $(printf '%d' "$L2_BLOCK"))"
 
     # Wait for the withdrawal to be processed on L1
     L1_RPC="${L1_RPC_URL:-}"
