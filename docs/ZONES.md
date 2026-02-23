@@ -21,7 +21,7 @@ This single command will:
 5. Generate the zone's `genesis.json` and `zone.json`
 6. Build and start the zone node
 
-> ⚠️ **Save your sequencer key** — it's printed before the node starts. You'll need it to restart the node later.
+> The sequencer key is saved in `generated/<name>/zone.json` — `zone-up` reads it automatically.
 
 Once running, generate a user wallet and deposit some tokens:
 
@@ -49,7 +49,6 @@ See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and priv
 To restart the zone later:
 
 ```bash
-export SEQUENCER_KEY="0x<your-sequencer-private-key>"
 just zone-up my-zone false release
 ```
 
@@ -178,6 +177,29 @@ just send-deposit 1000000                       # deposit to your own address
 just send-deposit 1000000 <recipient-address>   # deposit to a specific address
 ```
 
+#### Encrypted Deposit (Private Recipient)
+
+Encrypted deposits hide the recipient address and memo on-chain using ECIES encryption to the sequencer's public key. Only the sequencer can decrypt them during block building.
+
+```bash
+# The sequencer must first register their encryption key (done automatically by deploy-zone)
+# For manual setup:
+cargo run -p tempo-xtask -- set-encryption-key \
+  --portal "$L1_PORTAL_ADDRESS" \
+  --private-key "$SEQUENCER_KEY"
+
+# Send an encrypted deposit
+just send-deposit-encrypted 1000000                       # to your own address
+just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
+```
+
+Set `ZONE_RPC_URL` to poll the zone for processing confirmation:
+
+```bash
+export ZONE_RPC_URL="http://localhost:8546"
+just send-deposit-encrypted 1000000
+```
+
 #### Check balance on the zone
 
 ```bash
@@ -289,8 +311,10 @@ graph TB
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal` | Approve portal to spend tokens on L1 |
 | `just send-deposit [to]` | Deposit tokens from L1 to zone (defaults to sender) |
+| `just send-deposit-encrypted [to]` | Encrypted deposit — hides recipient and memo on-chain |
 | `just max-approve-outbox` | Approve outbox to spend tokens on zone |
 | `just send-withdrawal [to]` | Withdraw tokens from zone to L1 (defaults to sender) |
 | `just check-balance <addr>` | Check token balance on the zone |
 | `just zone-auth-token <name>` | Generate a signed private RPC auth token (10 min TTL) |
 | `just check-balance-private <name>` | Check balance via the private RPC (auto-generates auth token) |
+| `just zone-info <id-or-portal>` | Fetch zone metadata from ZoneFactory |
