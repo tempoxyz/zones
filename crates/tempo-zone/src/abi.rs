@@ -217,6 +217,10 @@ sol! {
         // -- View functions (token management) --
 
         function isTokenEnabled(address token) external view returns (bool);
+        function enabledTokenCount() external view returns (uint256);
+        function enabledTokenAt(uint256 index) external view returns (address);
+        function zoneGasRate() external view returns (uint128);
+        function pendingSequencer() external view returns (address);
 
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
 
@@ -358,6 +362,19 @@ sol! {
     //  ZoneFactory — deployed on Tempo L1
     // ---------------------------------------------------------------
 
+    #[derive(Debug)]
+    struct ZoneInfo {
+        uint64 zoneId;
+        address portal;
+        address messenger;
+        address initialToken;
+        address sequencer;
+        address verifier;
+        bytes32 genesisBlockHash;
+        bytes32 genesisTempoBlockHash;
+        uint64 genesisTempoBlockNumber;
+    }
+
     #[sol(rpc)]
     contract ZoneFactory {
         struct ZoneParams {
@@ -385,6 +402,8 @@ sol! {
         );
         function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
         function verifier() external view returns (address);
+        function zones(uint64 zoneId) external view returns (ZoneInfo memory);
+        function zoneCount() external view returns (uint64);
         function isZonePortal(address portal) external view returns (bool);
         function isZoneMessenger(address messenger) external view returns (bool);
     }
