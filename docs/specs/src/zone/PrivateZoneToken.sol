@@ -15,8 +15,8 @@ import { IZoneConfig, ZONE_INBOX, ZONE_OUTBOX } from "./IZone.sol";
  *   1. **Balance privacy**: balanceOf() is restricted to the account owner and sequencer.
  *   2. **Allowance privacy**: allowance() is restricted to the owner, spender, and sequencer.
  *   3. **Fixed gas**: All transfer-family calls and approve() cost exactly FIXED_TRANSFER_GAS.
- *   4. **System mint/burn**: ZoneInbox can mint (deposits), ZoneOutbox can burn (withdrawals),
- *      without requiring the standard ISSUER_ROLE.
+ *   4. **System mint/burn**: ZoneInbox is the sole mint authority (deposits), ZoneOutbox is
+ *      the sole burn authority (withdrawals). ISSUER_ROLE is not used on zones.
  *
  * All other TIP-20 behavior (transfer logic, approval logic, events, roles, TIP-403 enforcement,
  * pause controls, rewards) is identical to the standard TIP-20 spec.
@@ -155,67 +155,33 @@ abstract contract PrivateZoneToken {
 
     /**
      * @notice Mint tokens to `to`.
-     * @dev On Tempo, mint() requires the caller to have ISSUER_ROLE. On a privacy zone,
-     *      mint is additionally callable by the ZoneInbox system contract (for deposit
-     *      processing). The ZoneInbox needs to mint when:
+     * @dev On a zone, only ZoneInbox can mint. The ZoneInbox mints when:
      *        - A regular deposit is processed (mint to recipient)
      *        - An encrypted deposit is successfully decrypted (mint to decrypted recipient)
-     *        - An encrypted deposit fails decryption (refund mint to sender)
+     *        - An encrypted deposit fails decryption (mint to sender's address on zone)
      *
-     *      Access: ISSUER_ROLE holders OR ZoneInbox (0x1c...0001).
+     *      Access: ZoneInbox (0x1c...0001) only.
      *      Gas: standard (not fixed) — only the sequencer calls this.
      */
     function mint(address to, uint256 amount) external {
-        _requireMintAuth();
+        if (msg.sender != ZONE_INBOX) revert Unauthorized();
         revert(); // precompile stub
     }
 
     /**
      * @notice Burn tokens from `from`.
-     * @dev On Tempo, burn() requires the caller to have ISSUER_ROLE. On a privacy zone,
-     *      burn is additionally callable by the ZoneOutbox system contract (for withdrawal
-     *      processing). The ZoneOutbox flow is:
+     * @dev On a zone, only ZoneOutbox can burn. The ZoneOutbox flow is:
      *        1. User approves ZoneOutbox to spend (amount + fee)
      *        2. ZoneOutbox calls transferFrom(user, self, amount + fee)
      *        3. ZoneOutbox calls burn(self, amount + fee)
      *      The burned tokens are released on Tempo when the withdrawal is processed.
      *
-     *      Access: ISSUER_ROLE holders OR ZoneOutbox (0x1c...0002).
+     *      Access: ZoneOutbox (0x1c...0002) only.
      *      Gas: standard (not fixed) — only the sequencer/outbox calls this.
      */
     function burn(address from, uint256 amount) external {
-        _requireBurnAuth();
+        if (msg.sender != ZONE_OUTBOX) revert Unauthorized();
         revert(); // precompile stub
-    }
-
-    /**
-     * @dev Check that the caller is authorized to mint.
-     *      On a privacy zone, this is: ISSUER_ROLE OR ZoneInbox.
-     *
-     *      Note: On a zone, no external party typically holds ISSUER_ROLE (the zone token
-     *      is a bridged representation). The system contracts are the primary minters/burners.
-     *      ISSUER_ROLE is preserved for forward compatibility.
-     */
-    function _requireMintAuth() internal view {
-        if (
-            msg.sender != ZONE_INBOX
-            // && !hasRole(ISSUER_ROLE, msg.sender)  // standard role check preserved
-        ) {
-            revert Unauthorized();
-        }
-    }
-
-    /**
-     * @dev Check that the caller is authorized to burn.
-     *      On a privacy zone, this is: ISSUER_ROLE OR ZoneOutbox.
-     */
-    function _requireBurnAuth() internal view {
-        if (
-            msg.sender != ZONE_OUTBOX
-            // && !hasRole(ISSUER_ROLE, msg.sender)  // standard role check preserved
-        ) {
-            revert Unauthorized();
-        }
     }
 
     /*//////////////////////////////////////////////////////////////
