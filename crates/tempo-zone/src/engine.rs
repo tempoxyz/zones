@@ -20,8 +20,6 @@ use tracing::error;
 
 use crate::DepositQueue;
 
-// TODO: FIXME: this module needs to be cleaned up
-
 /// Engine that drives L2 block production on L1 events
 #[derive(Debug)]
 pub struct ZoneEngine<T: PayloadTypes, B> {
@@ -93,7 +91,7 @@ where
                 }
                 // Periodic FCU heartbeat
                 _ = fcu_interval.tick() => {
-                    // Also check if there are pending blocks (in case we missed a notify)
+                    // Also check if there are confirmed blocks (in case we missed a notify)
                     if self.deposit_queue.pending_count() > 0 {
                         self.advance_all_available().await;
                     } else if let Err(e) = self.update_forkchoice_state().await {
@@ -104,13 +102,15 @@ where
         }
     }
 
-    /// Advance the chain for ALL available L1 blocks in the queue.
+    /// Advance the chain for all available L1 blocks in the queue.
     ///
     /// This is the key difference from `LocalMiner`: during catch-up, this
     /// processes blocks as fast as the EVM can execute them, with no timer
     /// delays between blocks.
+    ///
+    /// Reorg safety is handled upstream by the L1 subscriber, which only
+    /// enqueues blocks once they are confirmed by a successor.
     async fn advance_all_available(&mut self) {
-        // Keep advancing as long as there are L1 blocks queued
         while self.deposit_queue.pending_count() > 0 {
             if let Err(e) = self.advance().await {
                 error!(target: "zone::engine", "Error advancing the chain: {:?}", e);

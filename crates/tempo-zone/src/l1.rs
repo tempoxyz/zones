@@ -244,32 +244,67 @@ impl L1Subscriber {
     /// deposits — is enqueued so the zone engine sees a strict sequential
     /// chain.
     ///
+    /// Live-streamed blocks are buffered one block behind: a block is only
+    /// flushed to the deposit queue once the next block arrives with a
+    /// matching parent hash, proving the buffered block is canonical. This
+    /// prevents the zone from committing to an L1 tip that gets reorged away.
+    ///
     /// Callers should retry on error (see [`Self::spawn`]).
     pub async fn run(self) -> eyre::Result<()> {
         let provider = self.connect().await?;
 
         // Backfill to the current tip before subscribing.
+        // Backfilled blocks are historical and considered confirmed.
         self.sync_to_l1_tip(&provider).await?;
 
         let sub = provider.subscribe_blocks().await?;
         let mut stream = sub.into_stream();
         info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
 
+        // Confirmation buffer: holds the latest unconfirmed L1 block.
+        // A block is only flushed to the deposit queue once the NEXT block
+        // arrives with a matching parent hash, proving the buffered block
+        // is on the canonical chain.
+        let mut unconfirmed_tip: Option<(SealedHeader<TempoHeader>, Vec<L1Deposit>)> = None;
+
         while let Some(header) = stream.next().await {
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-
             let deposits = self.fetch_deposits(&provider, block_number).await?;
 
-            match self.deposit_queue.try_enqueue(sealed, deposits) {
-                EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
-                EnqueueOutcome::NeedBackfill { from, to } => {
-                    // Gap detected — backfill fills the missing range and also
-                    // enqueues the current block (included in from..=block_number).
-                    warn!(from, to, block_number, "Gap in L1 blocks, backfilling");
-                    self.backfill(&provider, from, block_number).await?;
+            // If we have a buffered tip, check if the new block confirms it.
+            if let Some((tip_header, tip_deposits)) = unconfirmed_tip.take() {
+                if sealed.parent_hash() == tip_header.hash() {
+                    // Confirmed — flush the buffered tip to the queue.
+                    let tip_number = tip_header.number();
+                    match self.deposit_queue.try_enqueue(tip_header, tip_deposits) {
+                        EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
+                        EnqueueOutcome::NeedBackfill { from, to: _ } => {
+                            // Gap between queue head and confirmed tip — backfill
+                            // the missing range including the tip (re-fetched from
+                            // the provider since try_enqueue consumed ownership).
+                            warn!(
+                                from,
+                                tip = tip_number,
+                                "Backfilling gap before confirmed tip"
+                            );
+                            self.backfill(&provider, from, tip_number).await?;
+                        }
+                    }
+                } else {
+                    // Reorg — discard the buffered tip (it was on the wrong fork).
+                    warn!(
+                        discarded_block = tip_header.number(),
+                        discarded_hash = %tip_header.hash(),
+                        new_block = block_number,
+                        new_parent = %sealed.parent_hash(),
+                        "Discarding unconfirmed L1 block (reorg)"
+                    );
                 }
             }
+
+            // Buffer the new block as unconfirmed tip.
+            unconfirmed_tip = Some((sealed, deposits));
         }
 
         warn!("L1 block subscription stream ended");
@@ -2115,7 +2150,7 @@ mod tests {
         queue.enqueue(h10, vec![]);
 
         let h11 = make_chained_header(11, h10_hash);
-        let h11_hash = header_hash(&h11);
+        let _h11_hash = header_hash(&h11);
         queue.enqueue(h11, vec![]);
 
         // Engine consumes both blocks
@@ -2168,7 +2203,7 @@ mod tests {
         let mut queue = PendingDeposits::default();
 
         let h10 = make_test_header(10);
-        let h10_hash = header_hash(&h10);
+        let _h10_hash = header_hash(&h10);
         queue.enqueue(h10, vec![]);
         queue.pop_next().unwrap();
 
