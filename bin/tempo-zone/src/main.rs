@@ -45,15 +45,6 @@ struct ZoneArgs {
     #[arg(long = "sequencer-key", env = "SEQUENCER_KEY")]
     pub sequencer_key: String,
 
-    /// Zone L2 HTTP RPC URL for the zone monitor to poll.
-    /// Only used when sequencer mode is enabled.
-    #[arg(
-        long = "zone.rpc-url",
-        env = "ZONE_RPC_URL",
-        default_value = "http://localhost:8546"
-    )]
-    pub zone_rpc_url: String,
-
     /// How often (in seconds) the zone monitor polls for new L2 blocks.
     #[arg(
         long = "zone.poll-interval-secs",
@@ -173,6 +164,12 @@ fn main() {
                 "Starting sequencer background tasks"
             );
 
+            let zone_rpc_url = handle
+                .node
+                .rpc_server_handle()
+                .http_url()
+                .expect("HTTP RPC server must be enabled for sequencer mode");
+
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
                 l1_rpc_url: args.l1_rpc_url,
@@ -182,7 +179,7 @@ fn main() {
                 outbox_address: zone::abi::ZONE_OUTBOX_ADDRESS,
                 inbox_address: zone::abi::ZONE_INBOX_ADDRESS,
                 tempo_state_address: zone::abi::TEMPO_STATE_ADDRESS,
-                zone_rpc_url: args.zone_rpc_url,
+                zone_rpc_url,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
             };
