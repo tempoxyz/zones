@@ -325,9 +325,7 @@ impl ZoneMonitor {
         let expected_withdrawal_batch_index = portal_withdrawal_batch_index
             .checked_add(1)
             .ok_or_else(|| {
-                eyre::eyre!(
-                    "portal withdrawalBatchIndex overflow: {portal_withdrawal_batch_index}"
-                )
+                eyre::eyre!("portal withdrawalBatchIndex overflow: {portal_withdrawal_batch_index}")
             })?;
         let (verifier_config, proof) = self
             .proof_generator

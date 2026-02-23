@@ -39,8 +39,8 @@ use crate::{
     sparse_mpt::SparseTrie,
     tempo::TempoStateAccessor,
     types::{
-        BatchOutput, BatchWitness, BlockTransition, DepositQueueTransition,
-        LastBatch, LastBatchCommitment, ProverError, ZoneHeader,
+        BatchOutput, BatchWitness, BlockTransition, DepositQueueTransition, LastBatch,
+        LastBatchCommitment, ProverError, ZoneHeader,
     },
 };
 
@@ -103,8 +103,10 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
     // and visible to subsequent transactions and post-execution reads.
     // Enable bundle update tracking so we can extract per-block state changes
     // for sparse MPT state root computation.
-    let mut current_state: State<WitnessDatabase> =
-        State::builder().with_database(witness_db).with_bundle_update().build();
+    let mut current_state: State<WitnessDatabase> = State::builder()
+        .with_database(witness_db)
+        .with_bundle_update()
+        .build();
 
     // Read the initial deposit queue hash from the zone state.
     let deposit_prev = read_storage_from_db(
@@ -214,20 +216,22 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
         // bypasses the journal and reads from the underlying WitnessDatabase.
         // Entries inserted here persist across blocks (State doesn't clear them).
         if block.number > 0 {
-            current_state.block_hashes.insert(block.number - 1, prev_block_hash);
+            current_state
+                .block_hashes
+                .insert(block.number - 1, prev_block_hash);
         }
 
         // Update Tempo block number and state root if this block advances Tempo.
         if let Some(tempo_header_rlp) = &block.tempo_header_rlp {
-            current_tempo_block_number =
-                ancestry::extract_block_number_from_rlp(tempo_header_rlp).map_err(|e| {
+            current_tempo_block_number = ancestry::extract_block_number_from_rlp(tempo_header_rlp)
+                .map_err(|e| {
                     ProverError::RlpDecode(format!(
                         "block {} tempo header block number: {e}",
                         block.number,
                     ))
                 })?;
-            current_tempo_state_root =
-                ancestry::extract_state_root_from_rlp(tempo_header_rlp).map_err(|e| {
+            current_tempo_state_root = ancestry::extract_state_root_from_rlp(tempo_header_rlp)
+                .map_err(|e| {
                     ProverError::RlpDecode(format!(
                         "block {} tempo header state root: {e}",
                         block.number,
@@ -253,15 +257,13 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, ProverErro
 
         // Merge the execution transitions into the bundle and extract the
         // per-block BundleState (account + storage changes).
-        current_state.merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
+        current_state
+            .merge_transitions(revm::database::states::bundle_state::BundleRetention::Reverts);
         let bundle = current_state.take_bundle();
 
         // Compute the new state root from bundle changes + sparse tries.
-        let state_root = compute_state_root_from_bundle(
-            &bundle,
-            &mut state_trie,
-            &mut storage_tries,
-        )?;
+        let state_root =
+            compute_state_root_from_bundle(&bundle, &mut state_trie, &mut storage_tries)?;
 
         // Verify the computed state root matches the expected value.
         if state_root != block.expected_state_root {
@@ -419,13 +421,12 @@ fn compute_state_root_from_bundle(
         }
 
         // Compute the new storage root for this account.
-        let storage_trie = storage_tries
-            .entry(*addr)
-            .or_insert_with(SparseTrie::empty);
+        let storage_trie = storage_tries.entry(*addr).or_insert_with(SparseTrie::empty);
 
-        let has_storage_changes = account.storage.iter().any(|(_, slot)| {
-            slot.present_value != slot.previous_or_original_value
-        });
+        let has_storage_changes = account
+            .storage
+            .iter()
+            .any(|(_, slot)| slot.present_value != slot.previous_or_original_value);
 
         if has_storage_changes || account.status.was_destroyed() {
             for (slot_key, slot) in &account.storage {

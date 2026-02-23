@@ -258,7 +258,8 @@ impl L1Subscriber {
                     skipped = gap_to - gap_from + 1,
                     "Gap detected in L1 subscription, backfilling"
                 );
-                self.backfill(&http_provider, &filter, gap_from, gap_to).await?;
+                self.backfill(&http_provider, &filter, gap_from, gap_to)
+                    .await?;
             }
 
             // Fetch deposit logs for this block via HTTP

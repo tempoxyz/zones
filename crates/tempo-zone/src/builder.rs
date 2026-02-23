@@ -3,6 +3,7 @@
 //! Builds zone blocks by executing `advanceTempo` system transactions (one per L1 block)
 //! followed by pool transactions and a withdrawal batch finalization.
 
+use crate::evm::ZoneEvmConfig;
 use alloy_primitives::{Address, U256};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -28,11 +29,10 @@ use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
 use tempo_evm::TempoNextBlockEnvAttributes;
-use tracing::{debug, error, info, warn};
-use crate::evm::ZoneEvmConfig;
 use tempo_payload_types::TempoPayloadBuilderAttributes;
 use tempo_primitives::{TempoHeader, TempoPrimitives};
 use tempo_transaction_pool::TempoTransactionPool;
+use tracing::{debug, error, info, warn};
 
 use super::node::ZoneNode;
 
@@ -226,7 +226,6 @@ where
             chain_id,
             tempo_header_rlp: header_rlp,
         };
-
 
         let mut store = self.witness_store.lock().expect("witness store poisoned");
         store.insert(block_number, witness);

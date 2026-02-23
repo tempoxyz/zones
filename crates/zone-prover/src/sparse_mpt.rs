@@ -22,7 +22,10 @@ use std::collections::BTreeMap;
 
 use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable;
-use alloy_trie::{EMPTY_ROOT_HASH, HashBuilder, nodes::{RlpNode, TrieNode}};
+use alloy_trie::{
+    EMPTY_ROOT_HASH, HashBuilder,
+    nodes::{RlpNode, TrieNode},
+};
 use nybbles::Nibbles;
 
 use crate::types::{AccountWitness, ProverError, ZoneStateWitness};
@@ -80,8 +83,7 @@ impl SparseTrie {
                 .skip(1) // skip the branch entry itself
                 .next()
                 .map_or(false, |(next_key, _)| {
-                    next_key.len() > bk.len()
-                        && bk.common_prefix_length(next_key) == bk.len()
+                    next_key.len() > bk.len() && bk.common_prefix_length(next_key) == bk.len()
                 });
             if has_descendant {
                 entries.remove(&bk);
@@ -393,7 +395,10 @@ mod tests {
     /// and per-address proofs.
     fn build_state_trie_with_proofs(
         accounts: &[(alloy_primitives::Address, TrieAccount)],
-    ) -> (B256, std::collections::HashMap<alloy_primitives::Address, Vec<Bytes>>) {
+    ) -> (
+        B256,
+        std::collections::HashMap<alloy_primitives::Address, Vec<Bytes>>,
+    ) {
         // Sort entries by trie key.
         let mut sorted: Vec<(Nibbles, alloy_primitives::Address, Vec<u8>)> = accounts
             .iter()
@@ -437,7 +442,11 @@ mod tests {
     fn build_state_trie_with_absence_proof(
         accounts: &[(alloy_primitives::Address, TrieAccount)],
         absent_addr: alloy_primitives::Address,
-    ) -> (B256, Vec<Bytes>, std::collections::HashMap<alloy_primitives::Address, Vec<Bytes>>) {
+    ) -> (
+        B256,
+        Vec<Bytes>,
+        std::collections::HashMap<alloy_primitives::Address, Vec<Bytes>>,
+    ) {
         let mut sorted: Vec<(Nibbles, alloy_primitives::Address, Vec<u8>)> = accounts
             .iter()
             .map(|(addr, acct)| {
@@ -562,7 +571,11 @@ mod tests {
             proofs.push((key, proof.as_slice()));
         }
         let sparse = SparseTrie::from_proofs(&proofs).expect("from_proofs should succeed");
-        assert_eq!(sparse.root(), storage_root, "sparse trie root must match original");
+        assert_eq!(
+            sparse.root(),
+            storage_root,
+            "sparse trie root must match original"
+        );
     }
 
     /// Verify that a state trie built from proofs produces the same root.
@@ -576,29 +589,37 @@ mod tests {
             (U256::from(0), U256::from(100)),
             (U256::from(1), U256::from(200)),
         ]);
-        let (storage_root_b, _) = build_storage_trie_with_proofs(&[
-            (U256::from(5), U256::from(500)),
-        ]);
+        let (storage_root_b, _) =
+            build_storage_trie_with_proofs(&[(U256::from(5), U256::from(500))]);
 
         let accounts = vec![
-            (addr_a, TrieAccount {
-                nonce: 1,
-                balance: U256::from(1000),
-                storage_root: storage_root_a,
-                code_hash: alloy_primitives::KECCAK256_EMPTY,
-            }),
-            (addr_b, TrieAccount {
-                nonce: 0,
-                balance: U256::from(2000),
-                storage_root: storage_root_b,
-                code_hash: alloy_primitives::KECCAK256_EMPTY,
-            }),
-            (addr_c, TrieAccount {
-                nonce: 5,
-                balance: U256::ZERO,
-                storage_root: EMPTY_ROOT_HASH,
-                code_hash: alloy_primitives::KECCAK256_EMPTY,
-            }),
+            (
+                addr_a,
+                TrieAccount {
+                    nonce: 1,
+                    balance: U256::from(1000),
+                    storage_root: storage_root_a,
+                    code_hash: alloy_primitives::KECCAK256_EMPTY,
+                },
+            ),
+            (
+                addr_b,
+                TrieAccount {
+                    nonce: 0,
+                    balance: U256::from(2000),
+                    storage_root: storage_root_b,
+                    code_hash: alloy_primitives::KECCAK256_EMPTY,
+                },
+            ),
+            (
+                addr_c,
+                TrieAccount {
+                    nonce: 5,
+                    balance: U256::ZERO,
+                    storage_root: EMPTY_ROOT_HASH,
+                    code_hash: alloy_primitives::KECCAK256_EMPTY,
+                },
+            ),
         ];
 
         let (state_root, addr_proofs) = build_state_trie_with_proofs(&accounts);
@@ -626,7 +647,11 @@ mod tests {
             proofs.push((key, proof.as_slice()));
         }
         let sparse = SparseTrie::from_proofs(&proofs).expect("from_proofs should succeed");
-        assert_eq!(sparse.root(), state_root, "sparse state trie root must match");
+        assert_eq!(
+            sparse.root(),
+            state_root,
+            "sparse state trie root must match"
+        );
     }
 
     /// Verify that mutating the sparse trie (update balance, remove account)
@@ -656,11 +681,7 @@ mod tests {
             code_hash: alloy_primitives::KECCAK256_EMPTY,
         };
 
-        let initial = vec![
-            (addr_a, acct_a),
-            (addr_b, acct_b),
-            (addr_c, acct_c),
-        ];
+        let initial = vec![(addr_a, acct_a), (addr_b, acct_b), (addr_c, acct_c)];
 
         let (_initial_root, addr_proofs) = build_state_trie_with_proofs(&initial);
 
@@ -689,13 +710,14 @@ mod tests {
         sparse.remove_leaf(&key_c);
 
         // Build a fresh trie with the expected state: modified addr_a + addr_b.
-        let expected = vec![
-            (addr_a, modified_a),
-            (addr_b, acct_b),
-        ];
+        let expected = vec![(addr_a, modified_a), (addr_b, acct_b)];
         let (expected_root, _) = build_state_trie_with_proofs(&expected);
 
-        assert_eq!(sparse.root(), expected_root, "mutated sparse root must match fresh build");
+        assert_eq!(
+            sparse.root(),
+            expected_root,
+            "mutated sparse root must match fresh build"
+        );
     }
 
     /// Verify that storage trie mutations (add slot, remove slot, update slot)
@@ -734,7 +756,11 @@ mod tests {
             (U256::from(1), U256::from(999)),
         ];
         let (expected_root, _) = build_storage_trie_with_proofs(&expected_entries);
-        assert_eq!(sparse.root(), expected_root, "mutated storage root must match");
+        assert_eq!(
+            sparse.root(),
+            expected_root,
+            "mutated storage root must match"
+        );
     }
 
     /// Integration: build ZoneStateWitness with real proofs, verify
@@ -749,36 +775,41 @@ mod tests {
             (U256::from(0), U256::from(100)),
             (U256::from(7), U256::from(777)),
         ];
-        let (storage_root_a, storage_proofs_a) =
-            build_storage_trie_with_proofs(&storage_a_entries);
+        let (storage_root_a, storage_proofs_a) = build_storage_trie_with_proofs(&storage_a_entries);
 
         // Build storage for addr_b.
         let storage_b_entries = vec![(U256::from(3), U256::from(333))];
-        let (storage_root_b, storage_proofs_b) =
-            build_storage_trie_with_proofs(&storage_b_entries);
+        let (storage_root_b, storage_proofs_b) = build_storage_trie_with_proofs(&storage_b_entries);
 
         // Build state trie.
         let accounts = vec![
-            (addr_a, TrieAccount {
-                nonce: 1,
-                balance: U256::from(1000),
-                storage_root: storage_root_a,
-                code_hash: alloy_primitives::KECCAK256_EMPTY,
-            }),
-            (addr_b, TrieAccount {
-                nonce: 0,
-                balance: U256::from(2000),
-                storage_root: storage_root_b,
-                code_hash: alloy_primitives::KECCAK256_EMPTY,
-            }),
+            (
+                addr_a,
+                TrieAccount {
+                    nonce: 1,
+                    balance: U256::from(1000),
+                    storage_root: storage_root_a,
+                    code_hash: alloy_primitives::KECCAK256_EMPTY,
+                },
+            ),
+            (
+                addr_b,
+                TrieAccount {
+                    nonce: 0,
+                    balance: U256::from(2000),
+                    storage_root: storage_root_b,
+                    code_hash: alloy_primitives::KECCAK256_EMPTY,
+                },
+            ),
         ];
         let (state_root, addr_proofs) = build_state_trie_with_proofs(&accounts);
 
         // Construct ZoneStateWitness.
         let mut witness_accounts = alloy_primitives::map::HashMap::default();
-        for ((addr, acct), (storage_entries, storage_proofs)) in accounts.iter().zip(
-            [(&storage_a_entries, &storage_proofs_a), (&storage_b_entries, &storage_proofs_b)]
-        ) {
+        for ((addr, acct), (storage_entries, storage_proofs)) in accounts.iter().zip([
+            (&storage_a_entries, &storage_proofs_a),
+            (&storage_b_entries, &storage_proofs_b),
+        ]) {
             let mut storage = alloy_primitives::map::HashMap::default();
             for (slot, value) in storage_entries.iter() {
                 storage.insert(*slot, *value);
@@ -787,16 +818,19 @@ mod tests {
             for (slot, proof) in storage_proofs {
                 sp_map.insert(*slot, proof.clone());
             }
-            witness_accounts.insert(*addr, AccountWitness {
-                nonce: acct.nonce,
-                balance: acct.balance,
-                code_hash: acct.code_hash,
-                storage_root: acct.storage_root,
-                code: None,
-                storage,
-                account_proof: addr_proofs.get(addr).unwrap().clone(),
-                storage_proofs: sp_map,
-            });
+            witness_accounts.insert(
+                *addr,
+                AccountWitness {
+                    nonce: acct.nonce,
+                    balance: acct.balance,
+                    code_hash: acct.code_hash,
+                    storage_root: acct.storage_root,
+                    code: None,
+                    storage,
+                    account_proof: addr_proofs.get(addr).unwrap().clone(),
+                    storage_proofs: sp_map,
+                },
+            );
         }
 
         let witness = ZoneStateWitness {
@@ -812,8 +846,16 @@ mod tests {
         // Test build_storage_trie returns correct roots for each account.
         for (addr, acct) in &witness.accounts {
             let st = build_storage_trie(acct).expect("build_storage_trie should succeed");
-            let expected = if *addr == addr_a { storage_root_a } else { storage_root_b };
-            assert_eq!(st.root(), expected, "storage trie root for {addr} must match");
+            let expected = if *addr == addr_a {
+                storage_root_a
+            } else {
+                storage_root_b
+            };
+            assert_eq!(
+                st.root(),
+                expected,
+                "storage trie root for {addr} must match"
+            );
         }
     }
 
@@ -852,16 +894,19 @@ mod tests {
             sp_map.insert(*slot, proof.clone());
         }
         let mut accts = alloy_primitives::map::HashMap::default();
-        accts.insert(addr, AccountWitness {
-            nonce: 10,
-            balance: U256::from(5000),
-            code_hash: alloy_primitives::KECCAK256_EMPTY,
-            storage_root,
-            code: None,
-            storage,
-            account_proof: addr_proofs.get(&addr).unwrap().clone(),
-            storage_proofs: sp_map,
-        });
+        accts.insert(
+            addr,
+            AccountWitness {
+                nonce: 10,
+                balance: U256::from(5000),
+                code_hash: alloy_primitives::KECCAK256_EMPTY,
+                storage_root,
+                code: None,
+                storage,
+                account_proof: addr_proofs.get(&addr).unwrap().clone(),
+                storage_proofs: sp_map,
+            },
+        );
 
         let witness = ZoneStateWitness {
             accounts: accts,
@@ -874,7 +919,10 @@ mod tests {
             .expect("from_witness should succeed with valid proofs");
 
         // Check basic account info.
-        let info = db.basic(addr).expect("basic should succeed").expect("account exists");
+        let info = db
+            .basic(addr)
+            .expect("basic should succeed")
+            .expect("account exists");
         assert_eq!(info.nonce, 10);
         assert_eq!(info.balance, U256::from(5000));
 
@@ -908,10 +956,7 @@ mod tests {
         };
 
         let (state_root, absence_proof, addr_proofs) =
-            build_state_trie_with_absence_proof(
-                &[(addr_existing, acct)],
-                addr_absent,
-            );
+            build_state_trie_with_absence_proof(&[(addr_existing, acct)], addr_absent);
 
         // Verify the absence proof.
         crate::mpt::verify_account_absence_proof(state_root, addr_absent, &absence_proof)
@@ -919,16 +964,19 @@ mod tests {
 
         // Build ZoneStateWitness with the absent account.
         let mut accts = alloy_primitives::map::HashMap::default();
-        accts.insert(addr_existing, AccountWitness {
-            nonce: 1,
-            balance: U256::from(100),
-            code_hash: alloy_primitives::KECCAK256_EMPTY,
-            storage_root: EMPTY_ROOT_HASH,
-            code: None,
-            storage: alloy_primitives::map::HashMap::default(),
-            account_proof: addr_proofs.get(&addr_existing).unwrap().clone(),
-            storage_proofs: alloy_primitives::map::HashMap::default(),
-        });
+        accts.insert(
+            addr_existing,
+            AccountWitness {
+                nonce: 1,
+                balance: U256::from(100),
+                code_hash: alloy_primitives::KECCAK256_EMPTY,
+                storage_root: EMPTY_ROOT_HASH,
+                code: None,
+                storage: alloy_primitives::map::HashMap::default(),
+                account_proof: addr_proofs.get(&addr_existing).unwrap().clone(),
+                storage_proofs: alloy_primitives::map::HashMap::default(),
+            },
+        );
 
         let mut absent = alloy_primitives::map::HashMap::default();
         absent.insert(addr_absent, absence_proof);
@@ -940,8 +988,7 @@ mod tests {
         };
 
         // WitnessDatabase should accept both existing and absent accounts.
-        let mut db = WitnessDatabase::from_witness(&witness)
-            .expect("from_witness should succeed");
+        let mut db = WitnessDatabase::from_witness(&witness).expect("from_witness should succeed");
 
         // Existing account returns info.
         let info = db.basic(addr_existing).unwrap().unwrap();

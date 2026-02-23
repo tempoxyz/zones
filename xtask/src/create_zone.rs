@@ -205,8 +205,7 @@ impl CreateZone {
         let zone_json_path = self.output.join("zone.json");
         std::fs::write(
             &zone_json_path,
-            serde_json::to_string_pretty(&zone_json)
-                .wrap_err("failed encoding zone.json")?,
+            serde_json::to_string_pretty(&zone_json).wrap_err("failed encoding zone.json")?,
         )
         .wrap_err("failed writing zone.json")?;
 

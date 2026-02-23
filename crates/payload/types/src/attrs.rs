@@ -211,7 +211,11 @@ pub struct TempoPayloadAttributes {
     pub timestamp_millis_part: u64,
 
     /// Sequencer-specified base fee per gas for the next block.
-    #[serde(default, skip_serializing_if = "Option::is_none", with = "alloy_serde::quantity::opt")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "alloy_serde::quantity::opt"
+    )]
     pub base_fee_per_gas: Option<u64>,
 }
 

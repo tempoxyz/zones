@@ -390,10 +390,8 @@ where
             ctx.task_executor().clone(),
         );
 
-        let evm_config = ZoneEvmConfig::new_with_recording(
-            ctx.chain_spec(),
-            std::sync::Arc::new(l1_provider),
-        );
+        let evm_config =
+            ZoneEvmConfig::new_with_recording(ctx.chain_spec(), std::sync::Arc::new(l1_provider));
         info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader precompile (recording enabled)");
         Ok(evm_config)
     }

@@ -4,7 +4,10 @@
 //! during zone block execution. The recorded reads are used to build the
 //! [`BatchStateProof`] with deduplicated MPT node pool.
 
-use std::sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+};
 
 use alloy_primitives::{Address, B256};
 use eyre::Result;
@@ -73,9 +76,7 @@ impl RecordingL1StateProvider {
 
     /// Take all recorded reads, clearing the internal buffer.
     pub fn take_reads(&self) -> Vec<RecordedL1Read> {
-        std::mem::take(
-            &mut *self.reads.lock().expect("recording lock poisoned"),
-        )
+        std::mem::take(&mut *self.reads.lock().expect("recording lock poisoned"))
     }
 
     /// Get a reference to the shared recorded reads.

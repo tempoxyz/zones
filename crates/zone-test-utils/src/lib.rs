@@ -301,9 +301,7 @@ pub fn extract_db_accounts(db: &CacheDB<EmptyDB>) -> Vec<(Address, AccountSnapsh
 /// The mock returns `bytes32(0)` for `readStorageAt` and an array of zeros for
 /// `readStorageBatchAt`. This is sufficient for `advanceTempo` calls in tests
 /// where no real L1 data is needed (e.g., empty deposit queues).
-pub fn register_mock_tempo_state_reader<DB: alloy_evm::Database>(
-    evm: &mut TempoEvm<DB>,
-) {
+pub fn register_mock_tempo_state_reader<DB: alloy_evm::Database>(evm: &mut TempoEvm<DB>) {
     use alloy_evm::precompiles::DynPrecompile;
     use alloy_sol_types::SolCall;
     use revm::precompile::{PrecompileId, PrecompileOutput};
@@ -324,14 +322,11 @@ pub fn register_mock_tempo_state_reader<DB: alloy_evm::Database>(
             let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
 
             if selector == readStorageAtCall::SELECTOR {
-                let encoded =
-                    readStorageAtCall::abi_encode_returns(&alloy_primitives::B256::ZERO);
+                let encoded = readStorageAtCall::abi_encode_returns(&alloy_primitives::B256::ZERO);
                 Ok(PrecompileOutput::new(400, encoded.into()))
             } else if selector == readStorageBatchAtCall::SELECTOR {
                 let call = readStorageBatchAtCall::abi_decode(data)
-                    .map_err(|_| {
-                        revm::precompile::PrecompileError::other("ABI decode failed")
-                    })?;
+                    .map_err(|_| revm::precompile::PrecompileError::other("ABI decode failed"))?;
                 let zeros = vec![alloy_primitives::B256::ZERO; call.slots.len()];
                 let encoded = readStorageBatchAtCall::abi_encode_returns(&zeros);
                 Ok(PrecompileOutput::new(

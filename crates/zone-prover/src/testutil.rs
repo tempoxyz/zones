@@ -209,9 +209,7 @@ pub fn build_state_trie_with_absence_proofs(
 ///
 /// This builds real MPT proofs for every account and every storage slot,
 /// suitable for feeding into `prove_zone_batch`.
-pub fn build_zone_state_fixture(
-    accounts: &[(Address, TestAccount)],
-) -> ZoneStateFixture {
+pub fn build_zone_state_fixture(accounts: &[(Address, TestAccount)]) -> ZoneStateFixture {
     build_zone_state_fixture_with_absent(accounts, &[])
 }
 
