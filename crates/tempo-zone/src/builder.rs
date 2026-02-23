@@ -195,42 +195,15 @@ where
         // Take exactly one L1 block per zone block — advanceTempo advances Tempo state
         // by exactly one block, maintaining sequential chain continuity.
         // The ZoneEngine ensures an L1 block is queued before triggering a build.
-        //
-        // Skip stale blocks that the zone has already processed (can happen after
-        // an L1 reorg re-enqueues consumed blocks before the queue's
-        // `last_processed` floor takes effect). Capped to avoid CPU spin under
-        // pathological conditions.
-        const MAX_STALE_SKIPS: usize = 64;
         let l1_block = {
             let mut queue = self.deposit_queue.lock();
-            let mut skipped = 0;
-            loop {
-                let Some(block) = queue.pop_next() else {
-                    debug!(target: "zone::payload", "No L1 block available, skipping build");
-                    return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                        "no L1 block available in deposit queue",
-                    )));
-                };
-                if block.header.inner.number < expected_tempo_block_number {
-                    skipped += 1;
-                    warn!(
-                        target: "zone::payload",
-                        got = block.header.inner.number,
-                        expected = expected_tempo_block_number,
-                        skipped,
-                        "Skipping stale L1 block (already processed)"
-                    );
-                    if skipped >= MAX_STALE_SKIPS {
-                        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                            format!(
-                                "too many stale L1 blocks in queue ({skipped} skipped, expected {expected_tempo_block_number})",
-                            ),
-                        )));
-                    }
-                    continue;
-                }
-                break block;
-            }
+            let Some(block) = queue.pop_next() else {
+                debug!(target: "zone::payload", "No L1 block available, skipping build");
+                return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                    "no L1 block available in deposit queue",
+                )));
+            };
+            block
         };
 
         // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
