@@ -155,6 +155,11 @@ zone-up name reset="false" profile="dev" args="":
     PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$ZONE_JSON")
     ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
+    SEQ_KEY="${SEQUENCER_KEY:-$(jq -r '.sequencerKey // empty' "$ZONE_JSON")}"
+    if [[ -z "$SEQ_KEY" ]]; then
+        echo "Error: SEQUENCER_KEY env var not set and not found in $ZONE_JSON" >&2
+        exit 1
+    fi
     DATADIR="/tmp/tempo-zone-{{name}}"
     if [[ "{{reset}}" = "true" ]]; then
         rm -rf "$DATADIR" || true
@@ -178,7 +183,7 @@ zone-up name reset="false" profile="dev" args="":
                       --http.api all \
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
-                      --sequencer-key "${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}" \
+                      --sequencer-key "$SEQ_KEY" \
                       {{args}}
 
 [group('zone')]
@@ -345,6 +350,11 @@ deploy-zone name:
         --private-key "$SEQUENCER_KEY"
     echo ""
 
+    # Save sequencer key into zone.json for later use
+    jq --arg sk "$SEQUENCER_KEY" --arg sa "$SEQUENCER_ADDR" \
+        '. + {sequencerKey: $sk, sequencerAddress: $sa}' "$OUTPUT/zone.json" > "$OUTPUT/zone.json.tmp" \
+        && mv "$OUTPUT/zone.json.tmp" "$OUTPUT/zone.json"
+
     PORTAL=$(jq -r '.portal' "$OUTPUT/zone.json")
     ZONE_ID=$(jq -r '.zoneId' "$OUTPUT/zone.json")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$OUTPUT/zone.json")
@@ -374,8 +384,7 @@ deploy-zone name:
     echo ""
     echo "  Explorer:        https://explore.moderato.tempo.xyz/address/$PORTAL"
     echo ""
-    echo "  ⚠️  SAVE YOUR SEQUENCER KEY:"
-    echo "  export SEQUENCER_KEY=$SEQUENCER_KEY"
+    echo "  Sequencer key saved to $OUTPUT/zone.json"
     echo ""
 
     # Step 7: Build and start the zone node
