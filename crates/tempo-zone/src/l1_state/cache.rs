@@ -26,6 +26,7 @@
 
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256};
+use derive_more::{Deref, DerefMut};
 use parking_lot::RwLock;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -120,7 +121,7 @@ impl L1StateCache {
 }
 
 /// Shared handle to the L1 state cache.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Deref, DerefMut)]
 pub struct SharedL1StateCache(Arc<RwLock<L1StateCache>>);
 
 impl Default for SharedL1StateCache {
@@ -132,14 +133,6 @@ impl Default for SharedL1StateCache {
 impl SharedL1StateCache {
     pub fn new(tracked_contracts: HashSet<Address>) -> Self {
         Self(Arc::new(RwLock::new(L1StateCache::new(tracked_contracts))))
-    }
-
-    pub fn read(&self) -> parking_lot::RwLockReadGuard<'_, L1StateCache> {
-        self.0.read()
-    }
-
-    pub fn write(&self) -> parking_lot::RwLockWriteGuard<'_, L1StateCache> {
-        self.0.write()
     }
 }
 

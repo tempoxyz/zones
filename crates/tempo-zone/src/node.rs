@@ -4,7 +4,6 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use alloy_primitives::U256;
-use reth_engine_local::LocalPayloadAttributesBuilder;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
@@ -22,25 +21,32 @@ use reth_node_builder::{
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock, SealedHeader};
-use reth_provider::{ChainSpecProvider, EthStorage};
+use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock};
+use reth_provider::ChainSpecProvider;
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
+use reth_storage_api::EmptyBodyStorage;
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::{TEMPO_BASE_FEE, TempoChainSpec};
-use tempo_node::{DEFAULT_AA_VALID_AFTER_MAX_SECS, rpc::TempoReceiptConverter};
+use tempo_chainspec::{hardfork::TempoHardfork, spec::TempoChainSpec};
+use tempo_evm::TempoEvmConfig;
+use tempo_node::{
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, node::TempoPayloadAttributesBuilder,
+    rpc::TempoReceiptConverter,
+};
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
-use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
+use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType, TEMPO_BASE_FEE};
 use tempo_transaction_pool::{
-    AA2dPool, AA2dPoolConfig, TempoTransactionPool, amm::AmmLiquidityCache,
-    validator::TempoTransactionValidator,
+    AA2dPool, AA2dPoolConfig, TempoTransactionPool,
+    amm::AmmLiquidityCache,
+    validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tracing::{debug, info};
 
 use crate::{
+    ZoneEngine,
     evm::ZoneEvmConfig,
     l1::L1Subscriber,
     l1_state::{
@@ -65,27 +71,55 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
-    sequencer: Option<alloy_primitives::Address>,
+    sequencer: alloy_primitives::Address,
+    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
+    sequencer_key: k256::SecretKey,
+    portal_address: alloy_primitives::Address,
     /// Shared witness store for builder → monitor communication.
     witness_store: crate::witness::SharedWitnessStore,
 }
 
 impl ZoneNode {
-    /// Create a new zone node with a deposit queue, L1 subscriber config,
-    /// and L1 state infrastructure configs.
+    /// Create a new zone node from minimal configuration.
+    ///
+    /// Internally constructs the [`DepositQueue`], [`L1SubscriberConfig`],
+    /// [`L1StateProviderConfig`], [`L1StateListenerConfig`], and [`SharedL1StateCache`]
+    /// from the provided parameters — callers don't need to know about these internals.
     ///
     /// The L1 subscriber is spawned automatically as part of the node lifecycle via
     /// [`ZoneAddOns::launch_add_ons`], ensuring it cannot be accidentally omitted.
     /// The L1 state listener is spawned by [`ZoneExecutorBuilder`] during EVM construction.
     pub fn new(
-        deposit_queue: crate::DepositQueue,
-        l1_config: crate::L1SubscriberConfig,
-        l1_state_provider_config: L1StateProviderConfig,
-        l1_state_listener_config: L1StateListenerConfig,
-        l1_state_cache: SharedL1StateCache,
-        sequencer: Option<alloy_primitives::Address>,
-        witness_store: crate::witness::SharedWitnessStore,
+        l1_rpc_url: String,
+        portal_address: alloy_primitives::Address,
+        genesis_tempo_block_number: Option<u64>,
+        sequencer: alloy_primitives::Address,
+        sequencer_key: k256::SecretKey,
     ) -> Self {
+        let deposit_queue = crate::DepositQueue::default();
+
+        let l1_config = crate::L1SubscriberConfig {
+            l1_rpc_url: l1_rpc_url.clone(),
+            portal_address,
+            genesis_tempo_block_number,
+            local_tempo_block_number: 0, // resolved at launch from local state
+        };
+
+        let l1_state_provider_config = L1StateProviderConfig {
+            l1_rpc_url: l1_rpc_url.clone(),
+            ..Default::default()
+        };
+
+        let l1_state_listener_config = L1StateListenerConfig {
+            l1_ws_url: l1_rpc_url,
+            ..Default::default()
+        };
+
+        let l1_state_cache =
+            SharedL1StateCache::new(std::collections::HashSet::from([portal_address]));
+
+        let witness_store: crate::witness::SharedWitnessStore = Default::default();
+
         Self {
             deposit_queue,
             l1_config,
@@ -93,6 +127,8 @@ impl ZoneNode {
             l1_state_listener_config,
             l1_state_cache,
             sequencer,
+            sequencer_key,
+            portal_address,
             witness_store,
         }
     }
@@ -102,11 +138,25 @@ impl ZoneNode {
         self.witness_store.clone()
     }
 
+    /// Returns a clone of the deposit queue handle for external use (e.g. sequencer tasks).
+    pub fn deposit_queue(&self) -> crate::DepositQueue {
+        self.deposit_queue.clone()
+    }
+
+    /// Returns a clone of the shared L1 state cache handle.
+    ///
+    /// Allows pre-populating the cache for testing scenarios where no real L1 is available.
+    pub fn l1_state_cache(&self) -> SharedL1StateCache {
+        self.l1_state_cache.clone()
+    }
+
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         deposit_queue: crate::DepositQueue,
         executor_builder: ZoneExecutorBuilder,
-        sequencer: Option<alloy_primitives::Address>,
+        sequencer: alloy_primitives::Address,
+        sequencer_key: k256::SecretKey,
+        portal_address: alloy_primitives::Address,
         witness_store: crate::witness::SharedWitnessStore,
     ) -> ComponentsBuilder<
         N,
@@ -126,6 +176,8 @@ impl ZoneNode {
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
                 deposit_queue,
                 sequencer,
+                sequencer_key,
+                portal_address,
                 witness_store,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
@@ -136,7 +188,7 @@ impl ZoneNode {
 impl NodeTypes for ZoneNode {
     type Primitives = TempoPrimitives;
     type ChainSpec = TempoChainSpec;
-    type Storage = EthStorage<TempoTxEnvelope, TempoHeader>;
+    type Storage = EmptyBodyStorage<TempoTxEnvelope, TempoHeader>;
     type Payload = TempoPayloadTypes;
 }
 
@@ -196,7 +248,24 @@ where
         Identity,
     > as NodeAddOns<N>>::Handle;
 
-    async fn launch_add_ons(self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+    async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
+        // Read the zone's current tempoBlockNumber from local state so the L1
+        // subscriber knows exactly where to resume backfill.
+        {
+            use reth_storage_api::StateProviderFactory;
+            let sp = ctx.node.provider().latest()?;
+            let slot7 = sp
+                .storage(
+                    crate::abi::TEMPO_STATE_ADDRESS,
+                    crate::abi::TEMPO_PACKED_SLOT,
+                )
+                .unwrap_or_default()
+                .unwrap_or_default();
+            let tempo_block_number = (slot7 & U256::from(u64::MAX)).to::<u64>();
+            self.l1_config.local_tempo_block_number = tempo_block_number;
+            info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
+        }
+
         // Spawn L1 deposit subscriber
         L1Subscriber::spawn(
             self.l1_config,
@@ -208,8 +277,8 @@ where
         // Spawn the ZoneEngine — L1-event-driven block production
         {
             let provider = ctx.node.provider().clone();
-            let chain_spec = ctx.node.provider().chain_spec();
-            let payload_attributes_builder = ZonePayloadAttributesBuilder::new(chain_spec);
+            let payload_attributes_builder =
+                TempoPayloadAttributesBuilder::new(provider.chain_spec());
             let to_engine = ctx.beacon_engine_handle.clone();
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
@@ -217,7 +286,7 @@ where
             ctx.node
                 .task_executor()
                 .spawn_critical("zone-engine", async move {
-                    crate::engine::ZoneEngine::new(
+                    ZoneEngine::new(
                         provider,
                         payload_attributes_builder,
                         to_engine,
@@ -282,6 +351,8 @@ where
             self.deposit_queue.clone(),
             executor_builder,
             self.sequencer,
+            self.sequencer_key.clone(),
+            self.portal_address,
             self.witness_store.clone(),
         )
     }
@@ -313,13 +384,13 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for ZoneNode {
 #[derive(Debug)]
 #[non_exhaustive]
 struct ZonePayloadAttributesBuilder {
-    inner: LocalPayloadAttributesBuilder<TempoChainSpec>,
+    inner: TempoPayloadAttributesBuilder,
 }
 
 impl ZonePayloadAttributesBuilder {
     fn new(chain_spec: Arc<TempoChainSpec>) -> Self {
         Self {
-            inner: LocalPayloadAttributesBuilder::new(chain_spec).without_increasing_timestamp(),
+            inner: TempoPayloadAttributesBuilder::new(chain_spec),
         }
     }
 }
@@ -328,20 +399,9 @@ impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
     for ZonePayloadAttributesBuilder
 {
     fn build(&self, parent: &SealedHeader<TempoHeader>) -> TempoPayloadAttributes {
-        let mut inner = self.inner.build(parent);
-        inner.suggested_fee_recipient = alloy_primitives::Address::ZERO;
-
-        let timestamp_millis_part = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as u64
-            % 1000;
-
-        TempoPayloadAttributes {
-            inner,
-            timestamp_millis_part,
-            base_fee_per_gas: Some(TEMPO_BASE_FEE),
-        }
+        let mut attrs = self.inner.build(parent);
+        attrs.base_fee_per_gas = Some(TEMPO_BASE_FEE);
+        attrs
     }
 }
 
@@ -382,7 +442,7 @@ where
             self.l1_state_cache.clone(),
             runtime_handle,
         )
-        .await;
+        .await?;
 
         spawn_l1_state_listener(
             self.l1_state_listener_config,
@@ -448,34 +508,43 @@ impl PayloadValidator<TempoPayloadTypes> for ZonePayloadValidator {
 #[non_exhaustive]
 pub struct ZonePoolBuilder;
 
-impl<Node> PoolBuilder<Node> for ZonePoolBuilder
+impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
     type Pool = TempoTransactionPool<Node::Provider>;
 
-    async fn build_pool(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::Pool> {
+    async fn build_pool(
+        self,
+        ctx: &BuilderContext<Node>,
+        _evm_config: ZoneEvmConfig,
+    ) -> eyre::Result<Self::Pool> {
         let mut pool_config = ctx.pool_config();
-        pool_config.minimal_protocol_basefee = TEMPO_BASE_FEE;
+        pool_config.minimal_protocol_basefee = TempoHardfork::default().base_fee();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
 
         let blob_store = InMemoryBlobStore::default();
-        let validator = TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone())
-            .with_head_timestamp(ctx.head().timestamp)
-            .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-            .with_local_transactions_config(pool_config.local_transactions_config.clone())
-            .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-            .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-            .disable_balance_check()
-            .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-            .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-            .with_custom_tx_type(TempoTxType::AA as u8)
-            .no_eip4844()
-            .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        let tempo_evm_config = TempoEvmConfig::new(ctx.chain_spec());
+        let validator = TransactionValidationTaskExecutor::eth_builder(
+            ctx.provider().clone(),
+            tempo_evm_config,
+        )
+        .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+        .with_local_transactions_config(pool_config.local_transactions_config.clone())
+        .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+        .disable_balance_check()
+        .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+        .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+        .with_custom_tx_type(TempoTxType::AA as u8)
+        .no_eip4844()
+        .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
         let aa_2d_config = AA2dPoolConfig {
             price_bump_config: pool_config.price_bumps,
-            aa_2d_limit: pool_config.pending_limit,
+            pending_limit: pool_config.pending_limit,
+            queued_limit: pool_config.queued_limit,
+            ..Default::default()
         };
         let aa_2d_pool = AA2dPool::new(aa_2d_config);
         let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;
@@ -484,6 +553,7 @@ where
             TempoTransactionValidator::new(
                 v,
                 DEFAULT_AA_VALID_AFTER_MAX_SECS,
+                DEFAULT_MAX_TEMPO_AUTHORIZATIONS,
                 amm_liquidity_cache.clone(),
             )
         });
@@ -495,21 +565,9 @@ where
 
         spawn_maintenance_tasks(ctx, transaction_pool.clone(), &pool_config)?;
 
-        let task_pool = transaction_pool.clone();
-        let task_provider = ctx.provider().clone();
         ctx.task_executor().spawn_critical(
-            "txpool maintenance (protocol) - evict expired AA txs",
-            tempo_transaction_pool::maintain::evict_expired_aa_txs(task_pool, task_provider),
-        );
-
-        ctx.task_executor().spawn_critical(
-            "txpool maintenance - 2d nonce AA txs",
-            tempo_transaction_pool::maintain::maintain_2d_nonce_pool(transaction_pool.clone()),
-        );
-
-        ctx.task_executor().spawn_critical(
-            "txpool maintenance - amm liquidity cache",
-            tempo_transaction_pool::maintain::maintain_amm_cache(transaction_pool.clone()),
+            "txpool maintenance (tempo)",
+            tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.clone()),
         );
 
         info!(target: "reth::cli", "Transaction pool initialized");

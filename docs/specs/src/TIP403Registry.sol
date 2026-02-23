@@ -19,7 +19,10 @@ contract TIP403Registry is ITIP403Registry {
                       GENERAL POLICY ADMINISTRATION
     //////////////////////////////////////////////////////////////*/
 
-    function createPolicy(address admin, PolicyType policyType)
+    function createPolicy(
+        address admin,
+        PolicyType policyType
+    )
         public
         returns (uint64 newPolicyId)
     {

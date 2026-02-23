@@ -5,15 +5,42 @@
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
 
 use alloy_evm::{
-    Database,
+    Database, Evm,
     block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
-    eth::EthBlockExecutor,
+    eth::{
+        EthBlockExecutor, EthTxResult,
+        receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
+    },
 };
-use reth_revm::{Inspector, State, context::result::ResultAndState};
+use reth_revm::{Inspector, State};
 use tempo_chainspec::TempoChainSpec;
-use tempo_evm::{TempoBlockExecutionCtx, TempoHaltReason, TempoReceiptBuilder, evm::TempoEvm};
-use tempo_primitives::{TempoReceipt, TempoTxEnvelope};
+use tempo_evm::{TempoBlockExecutionCtx, evm::TempoEvm};
+use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::evm::TempoContext;
+
+/// Local receipt builder for zone execution, mirrors the upstream `TempoReceiptBuilder`.
+#[derive(Debug, Clone, Copy, Default)]
+struct ZoneReceiptBuilder;
+
+impl ReceiptBuilder for ZoneReceiptBuilder {
+    type Transaction = TempoTxEnvelope;
+    type Receipt = TempoReceipt;
+
+    fn build_receipt<E: Evm>(&self, ctx: ReceiptBuilderCtx<'_, TempoTxType, E>) -> Self::Receipt {
+        let ReceiptBuilderCtx {
+            tx_type,
+            result,
+            cumulative_gas_used,
+            ..
+        } = ctx;
+        TempoReceipt {
+            tx_type,
+            success: result.is_success(),
+            cumulative_gas_used,
+            logs: result.into_logs(),
+        }
+    }
+}
 
 /// Simplified block executor for zone nodes.
 ///
@@ -24,7 +51,7 @@ pub(crate) struct ZoneBlockExecutor<'a, DB: Database, I> {
         'a,
         TempoEvm<&'a mut State<DB>, I>,
         &'a TempoChainSpec,
-        TempoReceiptBuilder,
+        ZoneReceiptBuilder,
     >,
 }
 
@@ -39,12 +66,7 @@ where
         chain_spec: &'a TempoChainSpec,
     ) -> Self {
         Self {
-            inner: EthBlockExecutor::new(
-                evm,
-                ctx.inner,
-                chain_spec,
-                TempoReceiptBuilder::default(),
-            ),
+            inner: EthBlockExecutor::new(evm, ctx.inner, chain_spec, ZoneReceiptBuilder),
         }
     }
 }
@@ -57,6 +79,7 @@ where
     type Transaction = TempoTxEnvelope;
     type Receipt = TempoReceipt;
     type Evm = TempoEvm<&'a mut State<DB>, I>;
+    type Result = EthTxResult<<Self::Evm as Evm>::HaltReason, TempoTxType>;
 
     fn apply_pre_execution_changes(&mut self) -> Result<(), BlockExecutionError> {
         self.inner.apply_pre_execution_changes()
@@ -65,16 +88,12 @@ where
     fn execute_transaction_without_commit(
         &mut self,
         tx: impl ExecutableTx<Self>,
-    ) -> Result<ResultAndState<TempoHaltReason>, BlockExecutionError> {
+    ) -> Result<Self::Result, BlockExecutionError> {
         self.inner.execute_transaction_without_commit(tx)
     }
 
-    fn commit_transaction(
-        &mut self,
-        output: ResultAndState<TempoHaltReason>,
-        tx: impl ExecutableTx<Self>,
-    ) -> Result<u64, BlockExecutionError> {
-        let gas_used = self.inner.commit_transaction(output, &tx)?;
+    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
+        let gas_used = self.inner.commit_transaction(output)?;
 
         // Collect revert logs (same as Tempo L1 executor).
         let logs = self.inner.evm.take_revert_logs();
@@ -106,5 +125,9 @@ where
 
     fn evm(&self) -> &Self::Evm {
         self.inner.evm()
+    }
+
+    fn receipts(&self) -> &[Self::Receipt] {
+        self.inner.receipts()
     }
 }

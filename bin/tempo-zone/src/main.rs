@@ -6,7 +6,7 @@
 
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration};
 
 use alloy_provider::Provider;
 
@@ -15,13 +15,10 @@ use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 
+use reth_ethereum::chainspec::EthChainSpec;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use zone::{
-    DepositQueue, L1SubscriberConfig, ProofGenerator, ZoneNode,
-    evm::ZoneEvmConfig,
-    l1_state::{L1StateListenerConfig, L1StateProviderConfig, SharedL1StateCache},
-};
+use zone::{ProofGenerator, ZoneNode, evm::ZoneEvmConfig};
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
@@ -37,10 +34,6 @@ struct ZoneArgs {
     #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
     pub portal_address: Address,
 
-    /// TIP-20 token address to mint on deposit.
-    #[arg(long = "l1.token-address", env = "L1_TOKEN_ADDRESS")]
-    pub token_address: Address,
-
     /// Block building interval in milliseconds.
     #[arg(
         long = "block.interval-ms",
@@ -49,22 +42,10 @@ struct ZoneArgs {
     )]
     pub block_interval_ms: u64,
 
-    // ---------------------------------------------------------------
-    //  Sequencer-mode arguments (optional — enable with --sequencer.key)
-    // ---------------------------------------------------------------
-    /// Sequencer private key (hex). When set, enables sequencer background tasks
-    /// (batch submission, withdrawal processing, zone monitoring).
-    #[arg(long = "sequencer.key", env = "SEQUENCER_KEY")]
-    pub sequencer_key: Option<String>,
-
-    /// Zone L2 HTTP RPC URL for the zone monitor to poll.
-    /// Only used when sequencer mode is enabled.
-    #[arg(
-        long = "zone.rpc-url",
-        env = "ZONE_RPC_URL",
-        default_value = "http://localhost:8546"
-    )]
-    pub zone_rpc_url: String,
+    /// Sequencer private key (hex, with or without 0x prefix).
+    /// Used for block building and ECIES decryption of encrypted deposits.
+    #[arg(long = "sequencer-key", env = "SEQUENCER_KEY")]
+    pub sequencer_key: String,
 
     /// How often (in seconds) the zone monitor polls for new L2 blocks.
     #[arg(
@@ -74,9 +55,18 @@ struct ZoneArgs {
     )]
     pub zone_poll_interval_secs: u64,
 
+    /// Maximum time (in seconds) to accumulate zone blocks before submitting a
+    /// batch to L1. Batches are flushed early when withdrawals are pending.
+    #[arg(
+        long = "zone.batch-interval-secs",
+        env = "ZONE_BATCH_INTERVAL_SECS",
+        default_value = "60"
+    )]
+    pub zone_batch_interval_secs: u64,
+
     /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(
-        long = "withdrawal.poll-interval-secs",
+        long = "withdrawal-poll-interval-secs",
         env = "WITHDRAWAL_POLL_INTERVAL_SECS",
         default_value = "5"
     )]
@@ -86,10 +76,28 @@ struct ZoneArgs {
     /// `genesisTempoBlockNumber` is 0 (not created via ZoneFactory).
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
     pub l1_genesis_block_number: Option<u64>,
+
+    /// Zone ID for the private RPC auth token validation.
+    /// Must match the zone's on-chain ID from ZoneFactory.
+    #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
+    pub zone_id: u64,
+
+    /// Port for the private zone RPC server (0 for OS-assigned).
+    #[arg(
+        long = "private-rpc.port",
+        env = "PRIVATE_RPC_PORT",
+        default_value_t = 8544
+    )]
+    pub private_rpc_port: u16,
 }
 
 fn main() {
     reth_cli_util::sigsegv_handler::install();
+
+    // Install the default rustls CryptoProvider for WSS connections to L1.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls CryptoProvider");
 
     // Enable backtraces unless a RUST_BACKTRACE value has already been explicitly provided.
     if std::env::var_os("RUST_BACKTRACE").is_none() {
@@ -104,59 +112,59 @@ fn main() {
     };
 
     if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
-        .run_with_components::<ZoneNode>(components, async move |builder, args| {
+        .run_with_components::<ZoneNode>(components, async move |mut builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
-            // Parse the sequencer key early so we can derive the address for block building.
-            // The signer is kept for later use when spawning sequencer background tasks.
-            let sequencer_signer: Option<alloy_signer_local::PrivateKeySigner> =
-                args.sequencer_key.as_ref().map(|key_hex| {
-                    key_hex.parse().expect("invalid sequencer private key")
-                });
-            let sequencer_addr = sequencer_signer.as_ref().map(|s| s.address());
+            // Disable peer discovery — the zone node has no peering.
+            builder.config_mut().network.discovery.disable_discovery = true;
+            // Disable the auth (Engine API) server — the zone node derives blocks
+            // from L1, so no external consensus client or Engine API is needed.
+            builder.config_mut().rpc.disable_auth_server = true;
 
-            let deposits = DepositQueue::default();
-            let l1_config = L1SubscriberConfig {
-                l1_rpc_url: args.l1_rpc_url.clone(),
-                portal_address: args.portal_address,
-                genesis_tempo_block_number: args.l1_genesis_block_number,
+            // Parse the sequencer key to derive the address for block building
+            // and the k256 secret key for ECIES decryption of encrypted deposits.
+            let sequencer_signer: alloy_signer_local::PrivateKeySigner =
+                args.sequencer_key.parse().expect("invalid sequencer private key");
+            let sequencer_addr = sequencer_signer.address();
+
+            let key_hex = &args.sequencer_key;
+            let sequencer_secret_key: k256::SecretKey = {
+                let bytes = const_hex::decode(key_hex.strip_prefix("0x").unwrap_or(key_hex))
+                    .expect("invalid sequencer key hex");
+                k256::SecretKey::from_slice(&bytes).expect("invalid secp256k1 secret key")
             };
-            let l1_state_provider_config = L1StateProviderConfig {
-                l1_rpc_url: args.l1_rpc_url.clone(),
-                ..Default::default()
-            };
-            let l1_state_listener_config = L1StateListenerConfig {
-                l1_ws_url: args.l1_rpc_url.clone(),
-                ..Default::default()
-            };
-            let l1_state_cache = SharedL1StateCache::new(HashSet::from([args.portal_address]));
-            let witness_store: zone::witness::SharedWitnessStore = Default::default();
             let node = ZoneNode::new(
-                deposits,
-                l1_config,
-                l1_state_provider_config,
-                l1_state_listener_config,
-                l1_state_cache,
+                args.l1_rpc_url.clone(),
+                args.portal_address,
+                args.l1_genesis_block_number,
                 sequencer_addr,
-                witness_store.clone(),
+                sequencer_secret_key,
             );
+            let witness_store = node.witness_store();
 
-            // NOTE: `--dev` is no longer needed for block production — the ZoneEngine
-            // (spawned from ZoneAddOns::launch_add_ons) handles L1-driven block building.
-            // We keep `launch_with_debug_capabilities()` for its debug RPC features.
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
-
             info!(target: "reth::cli", "Tempo Zone node started");
 
-            // Spawn sequencer background tasks if a sequencer key is provided.
-            if let Some(signer) = sequencer_signer {
-                let sequencer_addr = signer.address();
+            // Launch the private zone RPC server.
+            let eth_handlers = handle.node.eth_handlers().clone();
+            let private_rpc_config = zone::rpc::PrivateRpcConfig {
+                listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
+                zone_id: args.zone_id,
+                chain_id: handle.node.chain_spec().chain().id(),
+                zone_portal: args.portal_address,
+                sequencer: sequencer_addr,
+            };
+            let api: Arc<dyn zone::rpc::ZoneRpcApi> =
+                Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
+            let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
+            info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 
-                info!(
-                    target: "reth::cli",
-                    %sequencer_addr,
-                    "Starting sequencer background tasks"
-                );
+            // Spawn sequencer background tasks.
+            info!(
+                target: "reth::cli",
+                %sequencer_addr,
+                "Starting sequencer background tasks"
+            );
 
                 // Create a read-only L1 provider for the proof generator
                 // (separate from the walletted provider used for batch submission).
@@ -168,51 +176,67 @@ fn main() {
                 .expect("valid L1 RPC URL for proof generator")
                 .erased();
 
-                let proof_generator: Arc<dyn zone::BatchProofGenerator> =
-                    Arc::new(ProofGenerator::new(
-                        handle.node.provider().clone(),
-                        witness_store.clone(),
-                        l1_proof_provider,
-                        sequencer_addr,
-                    ));
+            let proof_generator: Arc<dyn zone::BatchProofGenerator> =
+                Arc::new(ProofGenerator::new(
+                    handle.node.provider().clone(),
+                    witness_store.clone(),
+                    l1_proof_provider,
+                    sequencer_addr,
+                ));
 
-                let sequencer_config = zone::ZoneSequencerConfig {
-                    portal_address: args.portal_address,
-                    l1_rpc_url: args.l1_rpc_url,
-                    withdrawal_poll_interval: Duration::from_secs(
-                        args.poll_interval_secs,
-                    ),
-                    outbox_address: zone::abi::ZONE_OUTBOX_ADDRESS,
-                    inbox_address: zone::abi::ZONE_INBOX_ADDRESS,
-                    tempo_state_address: zone::abi::TEMPO_STATE_ADDRESS,
-                    zone_rpc_url: args.zone_rpc_url,
-                    zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
-                };
+            let zone_rpc_url = handle
+                .node
+                .rpc_server_handle()
+                .http_url()
+                .expect("HTTP RPC server must be enabled for sequencer mode");
 
-                let seq_handle = zone::spawn_zone_sequencer(
-                    sequencer_config,
-                    signer,
-                    proof_generator,
-                )
-                .await;
+            let sequencer_config = zone::ZoneSequencerConfig {
+                portal_address: args.portal_address,
+                l1_rpc_url: args.l1_rpc_url,
+                withdrawal_poll_interval: Duration::from_secs(
+                    args.poll_interval_secs,
+                ),
+                outbox_address: zone::abi::ZONE_OUTBOX_ADDRESS,
+                inbox_address: zone::abi::ZONE_INBOX_ADDRESS,
+                tempo_state_address: zone::abi::TEMPO_STATE_ADDRESS,
+                zone_rpc_url,
+                zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
+                batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
+            };
 
-                info!(
-                    target: "reth::cli",
-                    "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
-                );
+            let seq_handle =
+                zone::spawn_zone_sequencer(sequencer_config, sequencer_signer, proof_generator)
+                    .await;
 
-                // If any sequencer task exits, log it.
-                tokio::spawn(async move {
-                    tokio::select! {
-                        res = seq_handle.withdrawal_handle => {
-                            tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
-                        }
-                        res = seq_handle.monitor_handle => {
-                            tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
-                        }
+            info!(
+                target: "reth::cli",
+                "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
+            );
+
+            // If any sequencer task exits, log it.
+            tokio::spawn(async move {
+                tokio::select! {
+                    res = seq_handle.withdrawal_handle => {
+                        tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
                     }
-                });
-            }
+                    res = seq_handle.monitor_handle => {
+                        tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
+                    }
+                }
+            });
+
+            // Ensure all unpersisted blocks are flushed when the node exits.
+            let engine_shutdown = handle.node.engine_shutdown.clone();
+            handle.node.task_executor.spawn_critical_with_graceful_shutdown_signal(
+                "zone-engine-shutdown",
+                |shutdown| async move {
+                    let _guard = shutdown.await;
+                    info!(target: "reth::cli", "Shutdown signal received — flushing engine state");
+                    if let Some(done) = engine_shutdown.shutdown() {
+                        let _ = done.await;
+                    }
+                },
+            );
 
             handle.node_exit_future.await?;
             Ok(())

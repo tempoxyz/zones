@@ -4,24 +4,15 @@ use alloy::{
     signers::local::{MnemonicBuilder, PrivateKeySigner},
     sol_types::SolEvent,
 };
-use alloy_sol_types::sol;
-use tempo_chainspec::spec::TEMPO_BASE_FEE;
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{IRolesAuth, ITIP20, ITIP20Factory};
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
+use zone::abi::ZonePortal;
 
-use crate::utils::{self, ZoneTestNode};
+use crate::utils::{self, DEFAULT_POLL, ZoneTestNode, poll_until};
 
 const L1_WS_RPC_URL: &str = "wss://rpc.testnet.tempo.xyz";
 const L1_HTTP_RPC_URL: &str = "https://rpc.testnet.tempo.xyz";
-
-sol! {
-    #[sol(rpc)]
-    interface IZonePortal {
-        function deposit(address to, uint128 amount, bytes32 memo) external returns (bytes32);
-        function calculateDepositFee() external view returns (uint128 fee);
-        function token() external view returns (address);
-    }
-}
 
 /// Fund an address on L1 via the testnet faucet (`tempo_fundAddress`).
 async fn fund_l1_wallet(address: Address) -> eyre::Result<()> {
@@ -58,18 +49,13 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
     let zone_token_address = utils::compute_tip20_address(zone_admin, utils::ZONE_TEST_TOKEN_SALT);
 
     // Start the zone node pointing at the existing portal on testnet
-    let zone = ZoneTestNode::start(
-        L1_WS_RPC_URL.to_string(),
-        portal_address,
-        zone_token_address,
-    )
-    .await?;
+    let zone = ZoneTestNode::start(L1_WS_RPC_URL.to_string(), portal_address).await?;
 
     // --- Zone setup: create the mint target token, grant system sender ISSUER_ROLE ---
 
     let zone_provider = ProviderBuilder::new()
         .wallet(zone_wallet)
-        .connect_http(zone.http_url.clone());
+        .connect_http(zone.http_url().clone());
 
     let factory = ITIP20Factory::new(TIP20_FACTORY_ADDRESS, zone_provider.clone());
     let receipt = factory
@@ -81,7 +67,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
             zone_admin,
             utils::ZONE_TEST_TOKEN_SALT,
         )
-        .gas_price(TEMPO_BASE_FEE as u128)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(500_000)
         .send()
         .await?
@@ -97,7 +83,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
     // System tx sender (Address::ZERO) needs ISSUER_ROLE to mint deposits
     roles
         .grantRole(*ISSUER_ROLE, Address::ZERO)
-        .gas_price(TEMPO_BASE_FEE as u128)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
         .gas(300_000)
         .send()
         .await?
@@ -110,15 +96,15 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
         .wallet(l1_signer)
         .connect_http(L1_HTTP_RPC_URL.parse()?);
 
-    let portal = IZonePortal::new(portal_address, l1_provider.clone());
-    let l1_token_address = portal.token().call().await?;
+    let portal = ZonePortal::new(portal_address, &l1_provider);
+    let l1_token_address = PATH_USD_ADDRESS;
     let fee = portal.calculateDepositFee().call().await?;
 
     let deposit_amount: u128 = fee + 1_000_000;
     let expected_net = deposit_amount - fee;
 
     // Approve portal to transfer our L1 tokens
-    let l1_token = ITIP20::new(l1_token_address, l1_provider.clone());
+    let l1_token = ITIP20::new(l1_token_address, &l1_provider);
     l1_token
         .approve(portal_address, U256::from(deposit_amount))
         .send()
@@ -137,7 +123,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
 
     // Execute deposit on L1
     let deposit_receipt = portal
-        .deposit(recipient, deposit_amount, B256::ZERO)
+        .deposit(l1_token_address, recipient, deposit_amount, B256::ZERO)
         .send()
         .await?
         .get_receipt()
@@ -146,33 +132,33 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
 
     // --- Poll zone for the minted balance ---
 
-    let timeout = std::time::Duration::from_secs(5);
-    let poll_interval = std::time::Duration::from_millis(500);
-    let start = std::time::Instant::now();
+    let minted = poll_until(
+        std::time::Duration::from_secs(5),
+        DEFAULT_POLL,
+        "deposit mint on zone",
+        || {
+            let zone_token = &zone_token;
+            async move {
+                let balance_now = zone_token
+                    .balanceOf(recipient)
+                    .call()
+                    .await
+                    .unwrap_or(U256::ZERO);
+                if balance_now > balance_before {
+                    Ok(Some(balance_now - balance_before))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
 
-    loop {
-        if start.elapsed() > timeout {
-            panic!("timed out waiting for deposit mint on zone (waited {timeout:?})");
-        }
-
-        let balance_now = zone_token
-            .balanceOf(recipient)
-            .call()
-            .await
-            .unwrap_or(U256::ZERO);
-
-        if balance_now > balance_before {
-            let minted = balance_now - balance_before;
-            assert_eq!(
-                minted,
-                U256::from(expected_net),
-                "minted amount should equal net deposit (deposit {deposit_amount} - fee {fee})",
-            );
-            break;
-        }
-
-        tokio::time::sleep(poll_interval).await;
-    }
+    assert_eq!(
+        minted,
+        U256::from(expected_net),
+        "minted amount should equal net deposit (deposit {deposit_amount} - fee {fee})",
+    );
 
     Ok(())
 }

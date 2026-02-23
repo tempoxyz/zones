@@ -36,6 +36,9 @@ use crate::{
         L1StateProvider, L1StateProviderConfig, L1StorageReader, SharedL1StateCache,
         TempoStateReader,
     },
+    precompiles::{
+        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+    },
     witness::{RecordingL1StateProvider, SharedRecordedReads},
 };
 
@@ -64,7 +67,7 @@ impl ZoneEvmFactory {
         Self { l1_reader }
     }
 
-    fn register_precompile<DB: Database, I: Inspector<TempoCtx<DB>>>(
+    fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
         &self,
         mut evm: TempoEvm<DB, I>,
     ) -> TempoEvm<DB, I> {
@@ -72,6 +75,10 @@ impl ZoneEvmFactory {
         precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| {
             Some(TempoStateReader::create(self.l1_reader.clone()))
         });
+        precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
+            Some(ChaumPedersenVerify.into())
+        });
+        precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| Some(AesGcmDecrypt.into()));
         evm
     }
 }
@@ -93,7 +100,7 @@ impl EvmFactory for ZoneEvmFactory {
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let evm = TempoEvm::new(db, input);
-        self.register_precompile(evm)
+        self.register_precompiles(evm)
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -103,7 +110,7 @@ impl EvmFactory for ZoneEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        self.register_precompile(evm)
+        self.register_precompiles(evm)
     }
 }
 
@@ -175,7 +182,7 @@ impl ZoneEvmConfig {
     /// Create a new zone EVM config with the given chain spec and L1 storage reader.
     pub fn new(chain_spec: Arc<TempoChainSpec>, l1_reader: Arc<dyn L1StorageReader>) -> Self {
         let zone_factory = ZoneEvmFactory::new(l1_reader);
-        let inner = TempoEvmConfig::new_with_default_factory(chain_spec.clone());
+        let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
             inner,
@@ -197,7 +204,7 @@ impl ZoneEvmConfig {
         let recording = Arc::new(RecordingL1StateProvider::new(l1_reader));
         let recorded_reads = recording.recorded_reads();
         let zone_factory = ZoneEvmFactory::new(recording.clone() as Arc<dyn L1StorageReader>);
-        let inner = TempoEvmConfig::new_with_default_factory(chain_spec.clone());
+        let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
             inner,
@@ -312,6 +319,7 @@ impl ConfigureEvm for ZoneEvmConfig {
                 ommers: &[],
                 withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
                 extra_data: block.header().extra_data().clone(),
+                tx_count_hint: Some(block.body().transactions.len()),
             },
             general_gas_limit: 0,
             shared_gas_limit: 0,

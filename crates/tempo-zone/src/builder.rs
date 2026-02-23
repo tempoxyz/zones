@@ -3,8 +3,16 @@
 //! Builds zone blocks by executing `advanceTempo` system transactions (one per L1 block)
 //! followed by pool transactions and a withdrawal batch finalization.
 
-use crate::evm::ZoneEvmConfig;
-use alloy_primitives::{Address, U256};
+use crate::{
+    abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
+    evm::ZoneEvmConfig,
+    l1::L1Deposit,
+    precompiles::ecies,
+};
+use alloy_consensus::{Signed, TxLegacy};
+use alloy_primitives::{Address, Bytes, U256};
+use alloy_rlp::Encodable;
+use alloy_sol_types::{SolCall, SolValue};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -18,7 +26,7 @@ use reth_node_api::FullNodeTypes;
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::PayloadBuilderAttributes;
-use reth_primitives_traits::AlloyBlockHeader as _;
+use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
@@ -27,10 +35,13 @@ use reth_transaction_pool::{
 };
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
-use tempo_consensus::{TEMPO_GENERAL_GAS_DIVISOR, TEMPO_SHARED_GAS_DIVISOR};
+use tempo_consensus::TEMPO_SHARED_GAS_DIVISOR;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::TempoPayloadBuilderAttributes;
-use tempo_primitives::{TempoHeader, TempoPrimitives};
+use tempo_primitives::{
+    TempoHeader, TempoPrimitives, TempoTxEnvelope,
+    transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
+};
 use tempo_transaction_pool::TempoTransactionPool;
 use tracing::{debug, error, info, warn};
 
@@ -41,19 +52,27 @@ use super::node::ZoneNode;
 #[non_exhaustive]
 pub struct ZonePayloadFactory {
     deposit_queue: crate::DepositQueue,
-    sequencer: Option<Address>,
+    sequencer: Address,
+    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
+    sequencer_key: k256::SecretKey,
+    /// ZonePortal address on L1 — used as context in HKDF key derivation.
+    portal_address: Address,
     witness_store: crate::witness::SharedWitnessStore,
 }
 
 impl ZonePayloadFactory {
     pub fn new(
         deposit_queue: crate::DepositQueue,
-        sequencer: Option<Address>,
+        sequencer: Address,
+        sequencer_key: k256::SecretKey,
+        portal_address: Address,
         witness_store: crate::witness::SharedWitnessStore,
     ) -> Self {
         Self {
             deposit_queue,
             sequencer,
+            sequencer_key,
+            portal_address,
             witness_store,
         }
     }
@@ -77,7 +96,9 @@ where
             provider: ctx.provider().clone(),
             evm_config,
             deposit_queue: self.deposit_queue,
-            sequencer: self.sequencer,
+            _sequencer: self.sequencer,
+            sequencer_key: self.sequencer_key,
+            portal_address: self.portal_address,
             witness_store: self.witness_store,
         })
     }
@@ -89,8 +110,9 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
-    #[allow(dead_code)]
-    sequencer: Option<Address>,
+    _sequencer: Address,
+    sequencer_key: k256::SecretKey,
+    portal_address: Address,
     witness_store: crate::witness::SharedWitnessStore,
 }
 
@@ -100,7 +122,9 @@ impl<Provider> ZonePayloadBuilder<Provider> {
         provider: Provider,
         evm_config: ZoneEvmConfig,
         deposit_queue: crate::DepositQueue,
-        sequencer: Option<Address>,
+        sequencer: Address,
+        sequencer_key: k256::SecretKey,
+        portal_address: Address,
         witness_store: crate::witness::SharedWitnessStore,
     ) -> Self {
         Self {
@@ -108,7 +132,9 @@ impl<Provider> ZonePayloadBuilder<Provider> {
             provider,
             evm_config,
             deposit_queue,
-            sequencer,
+            _sequencer: sequencer,
+            sequencer_key,
+            portal_address,
             witness_store,
         }
     }
@@ -139,7 +165,9 @@ where
         use alloy_consensus::BlockHeader;
         use alloy_primitives::Bytes;
         use alloy_sol_types::SolValue;
-        use zone_prover::types::{DepositType, QueuedDeposit, ZoneBlock, ZoneHeader};
+        use zone_prover::types::{
+            ChaumPedersenProof, DecryptionData, DepositType, QueuedDeposit, ZoneBlock, ZoneHeader,
+        };
 
         let block_number = sealed_block.number();
         let has_advance_tempo = header_rlp.is_some();
@@ -164,25 +192,49 @@ where
             vec![]
         };
 
-        let deposits: Vec<QueuedDeposit> = l1_block
-            .map(|lb| {
-                lb.deposits
+        let (deposits, decryptions): (Vec<QueuedDeposit>, Vec<DecryptionData>) =
+            if let Some(lb) = l1_block {
+                let mut decryptions = Vec::new();
+                let deposits = lb
+                    .deposits
                     .iter()
-                    .map(|d| {
-                        let deposit = crate::abi::Deposit {
-                            sender: d.sender,
-                            to: d.to,
-                            amount: d.amount,
-                            memo: d.memo,
-                        };
-                        QueuedDeposit {
-                            deposit_type: DepositType::Regular,
-                            deposit_data: Bytes::from(deposit.abi_encode()),
+                    .map(|d| match d {
+                        L1Deposit::Regular(d) => {
+                            let deposit = crate::abi::Deposit {
+                                sender: d.sender,
+                                to: d.to,
+                                amount: d.amount,
+                                memo: d.memo,
+                            };
+                            QueuedDeposit {
+                                deposit_type: DepositType::Regular,
+                                deposit_data: Bytes::from(deposit.abi_encode()),
+                            }
+                        }
+                        L1Deposit::Encrypted(d) => {
+                            let (queued, decryption) =
+                                build_encrypted_deposit(d, &self.sequencer_key, self.portal_address);
+                            decryptions.push(DecryptionData {
+                                shared_secret: decryption.sharedSecret,
+                                shared_secret_y_parity: decryption.sharedSecretYParity,
+                                to: decryption.to,
+                                memo: decryption.memo,
+                                cp_proof: ChaumPedersenProof {
+                                    s: decryption.cpProof.s,
+                                    c: decryption.cpProof.c,
+                                },
+                            });
+                            QueuedDeposit {
+                                deposit_type: DepositType::Encrypted,
+                                deposit_data: Bytes::from(queued.abi_encode()),
+                            }
                         }
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
+                    .collect();
+                (deposits, decryptions)
+            } else {
+                (Vec::new(), Vec::new())
+            };
 
         let zone_block = ZoneBlock {
             number: block_number,
@@ -194,9 +246,7 @@ where
             expected_state_root: sealed_block.state_root(),
             tempo_header_rlp: header_rlp.clone(),
             deposits,
-            // TODO: Populate DecryptionData for encrypted deposits once the
-            // encryption/decryption pipeline is implemented.
-            decryptions: vec![],
+            decryptions,
             finalize_withdrawal_batch_count: Some(U256::MAX),
             transactions: user_tx_bytes,
         };
@@ -267,12 +317,12 @@ where
 
         // Read the current tempoBlockHash and tempoBlockNumber from TempoState storage
         // to validate the next L1 block we process is the expected successor.
-        let (tempo_block_hash, expected_l1_number) = {
+        let (stored_l1_block_hash, expected_tempo_block_number) = {
             let sp = self.provider.state_by_block_hash(parent_header.hash())?;
             let hash = sp
                 .storage(
                     crate::abi::TEMPO_STATE_ADDRESS,
-                    alloy_primitives::B256::ZERO,
+                    crate::abi::TEMPO_BLOCK_HASH_SLOT,
                 )
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .map(|v| alloy_primitives::B256::from(v.to_be_bytes()))
@@ -280,7 +330,10 @@ where
             // tempoBlockNumber is at slot 7, offset 0 (packed as lowest uint64 in the slot,
             // alongside tempoGasLimit, tempoGasUsed, tempoTimestamp)
             let slot7 = sp
-                .storage(crate::abi::TEMPO_STATE_ADDRESS, U256::from(7).into())
+                .storage(
+                    crate::abi::TEMPO_STATE_ADDRESS,
+                    crate::abi::TEMPO_PACKED_SLOT,
+                )
                 .map_err(|e| PayloadBuilderError::Internal(e.into()))?
                 .unwrap_or_default();
             // Extract lowest 8 bytes (uint64 at offset 0)
@@ -291,48 +344,46 @@ where
 
         info!(
             target: "zone::payload",
-            %tempo_block_hash,
-            expected_l1_number,
+            %stored_l1_block_hash,
+            expected_tempo_block_number,
             "TempoState current state"
         );
 
         // Take exactly one L1 block per zone block — advanceTempo advances Tempo state
         // by exactly one block, maintaining sequential chain continuity.
         // The ZoneEngine ensures an L1 block is queued before triggering a build.
-        let l1_block = match self
-            .deposit_queue
-            .lock()
-            .expect("deposit queue poisoned")
-            .pop_next()
-        {
-            Some(block) => block,
-            None => {
-                debug!(target: "zone::payload", "No L1 block available, cancelling build");
-                return Ok(BuildOutcome::Cancelled);
-            }
+        let l1_block = {
+            let mut queue = self.deposit_queue.lock();
+            let Some(block) = queue.pop_next() else {
+                debug!(target: "zone::payload", "No L1 block available, skipping build");
+                return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                    "no L1 block available in deposit queue",
+                )));
+            };
+            block
         };
 
         // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
         // and its parent hash must match the stored tempoBlockHash.
-        if l1_block.header.inner.number != expected_l1_number {
+        if l1_block.header.inner.number != expected_tempo_block_number {
             error!(
                 target: "zone::payload",
                 got = l1_block.header.inner.number,
-                expected = expected_l1_number,
+                expected = expected_tempo_block_number,
                 "L1 block number mismatch — chain continuity broken"
             );
             return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
                 format!(
                     "L1 block number mismatch: got {} expected {}",
-                    l1_block.header.inner.number, expected_l1_number
+                    l1_block.header.inner.number, expected_tempo_block_number
                 ),
             )));
         }
-        if l1_block.header.inner.parent_hash != tempo_block_hash {
+        if l1_block.header.inner.parent_hash != stored_l1_block_hash {
             error!(
                 target: "zone::payload",
                 got = %l1_block.header.inner.parent_hash,
-                expected = %tempo_block_hash,
+                expected = %stored_l1_block_hash,
                 l1_block = l1_block.header.inner.number,
                 "L1 parent hash mismatch — chain continuity broken"
             );
@@ -341,7 +392,7 @@ where
                     "L1 parent hash mismatch at block {}: got {} expected {}",
                     l1_block.header.inner.number,
                     l1_block.header.inner.parent_hash,
-                    tempo_block_hash
+                    stored_l1_block_hash
                 ),
             )));
         }
@@ -350,19 +401,36 @@ where
 
         info!(
             target: "zone::payload",
+            zone_block = parent_header.number() + 1,
             l1_block = l1_block.header.inner.number,
             deposits = total_deposits,
             "Including advanceTempo system tx (chain continuity OK)"
         );
         for deposit in &l1_block.deposits {
-            debug!(
-                target: "zone::payload",
-                sender = %deposit.sender,
-                to = %deposit.to,
-                amount = %deposit.amount,
-                l1_block = l1_block.header.inner.number,
-                "Deposit -> advanceTempo"
-            );
+            match deposit {
+                L1Deposit::Regular(d) => {
+                    debug!(
+                        target: "zone::payload",
+                        token = %d.token,
+                        sender = %d.sender,
+                        to = %d.to,
+                        amount = %d.amount,
+                        l1_block = l1_block.header.inner.number,
+                        "Regular deposit -> advanceTempo"
+                    );
+                }
+                L1Deposit::Encrypted(d) => {
+                    debug!(
+                        target: "zone::payload",
+                        token = %d.token,
+                        sender = %d.sender,
+                        amount = %d.amount,
+                        key_index = %d.key_index,
+                        l1_block = l1_block.header.inner.number,
+                        "Encrypted deposit -> advanceTempo"
+                    );
+                }
+            }
         }
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
@@ -386,8 +454,7 @@ where
 
         let block_gas_limit = parent_header.gas_limit();
         let shared_gas_limit = block_gas_limit / TEMPO_SHARED_GAS_DIVISOR;
-        let non_shared_gas_limit = block_gas_limit - shared_gas_limit;
-        let general_gas_limit = non_shared_gas_limit / TEMPO_GENERAL_GAS_DIVISOR;
+        let general_gas_limit = 0;
 
         let mut cumulative_gas_used = 0u64;
         let total_fees = U256::ZERO;
@@ -431,25 +498,55 @@ where
         // Execute advanceTempo system transaction — exactly one per zone block.
         let header_rlp = alloy_rlp::encode(&l1_block.header);
         {
+            // Log header details for debugging chain continuity
             info!(
                 target: "zone::payload",
-                l1_block_number = l1_block.header.inner.number,
-                l1_parent_hash = %l1_block.header.inner.parent_hash,
-                l1_block_hash = %alloy_primitives::keccak256(&header_rlp),
+                l1_block_number = l1_block.header.number(),
+                l1_parent_hash = %l1_block.header.parent_hash(),
+                l1_block_hash = %l1_block.header.hash(),
                 header_rlp_len = header_rlp.len(),
                 "advanceTempo header details"
             );
 
-            let advance_tx =
-                crate::system_tx::build_advance_tempo_tx(&l1_block.header, &l1_block.deposits);
-            if let Err(err) = builder.execute_transaction(advance_tx) {
-                error!(
-                    ?err,
-                    l1_block = l1_block.header.inner.number,
-                    deposits = l1_block.deposits.len(),
-                    "advanceTempo system tx failed"
-                );
-                return Err(PayloadBuilderError::evm(err));
+            let advance_tx = build_advance_tempo_tx(
+                &l1_block.header,
+                &l1_block.deposits,
+                &self.sequencer_key,
+                self.portal_address,
+            );
+            let mut reverted = false;
+            match builder.execute_transaction_with_result_closure(advance_tx, |result| {
+                if !result.is_success() {
+                    let revert_data = result.output().cloned().unwrap_or_default();
+                    error!(
+                        target: "zone::payload",
+                        l1_block = l1_block.header.inner.number,
+                        deposits = l1_block.deposits.len(),
+                        is_halt = result.is_halt(),
+                        revert_data = %revert_data,
+                        "advanceTempo system tx reverted on-chain"
+                    );
+                    reverted = true;
+                }
+            }) {
+                Ok(_) if reverted => {
+                    return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                        format!(
+                            "advanceTempo reverted at L1 block {}",
+                            l1_block.header.inner.number
+                        ),
+                    )));
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    error!(
+                        ?err,
+                        l1_block = l1_block.header.inner.number,
+                        deposits = l1_block.deposits.len(),
+                        "advanceTempo system tx failed"
+                    );
+                    return Err(PayloadBuilderError::evm(err));
+                }
             }
         }
 
@@ -461,12 +558,13 @@ where
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
 
         while let Some(pool_tx) = best_txs.next() {
-            if cumulative_gas_used + pool_tx.gas_limit() > non_shared_gas_limit {
+            let gas_limit_left = block_gas_limit.saturating_sub(shared_gas_limit);
+            if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
                 best_txs.mark_invalid(
                     &pool_tx,
                     &InvalidPoolTransactionError::ExceedsGasLimit(
                         pool_tx.gas_limit(),
-                        non_shared_gas_limit - cumulative_gas_used,
+                        gas_limit_left.saturating_sub(cumulative_gas_used),
                     ),
                 );
                 continue;
@@ -508,11 +606,31 @@ where
             .try_into()
             .expect("block number fits u64");
         // TODO: Support partial batch finalization instead of always finalizing all.
-        let finalize_tx =
-            crate::system_tx::build_finalize_withdrawal_batch_tx(U256::MAX, block_number);
-        if let Err(err) = builder.execute_transaction(finalize_tx) {
-            error!(?err, "finalizeWithdrawalBatch system tx failed");
-            return Err(PayloadBuilderError::evm(err));
+        let finalize_tx = build_finalize_withdrawal_batch_tx(U256::MAX, block_number);
+        let mut finalize_reverted = false;
+        match builder.execute_transaction_with_result_closure(finalize_tx, |result| {
+            if !result.is_success() {
+                let revert_data = result.output().cloned().unwrap_or_default();
+                error!(
+                    target: "zone::payload",
+                    block_number,
+                    is_halt = result.is_halt(),
+                    revert_data = %revert_data,
+                    "finalizeWithdrawalBatch system tx reverted on-chain"
+                );
+                finalize_reverted = true;
+            }
+        }) {
+            Ok(_) if finalize_reverted => {
+                return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                    format!("finalizeWithdrawalBatch reverted at zone block {block_number}"),
+                )));
+            }
+            Ok(_) => {}
+            Err(err) => {
+                error!(?err, "finalizeWithdrawalBatch system tx failed");
+                return Err(PayloadBuilderError::evm(err));
+            }
         }
 
         let BlockBuilderOutcome {
@@ -541,6 +659,8 @@ where
 
         info!(
             number = sealed_block.number(),
+            l1_block = l1_block.header.number(),
+            l1_hash = ?l1_block.header.hash(),
             hash = ?sealed_block.hash(),
             gas_used = sealed_block.gas_used(),
             deposits = total_deposits,
@@ -563,10 +683,10 @@ where
             EthBuiltPayload::new(attributes.payload_id(), sealed_block, total_fees, requests);
 
         drop(db);
-        Ok(BuildOutcome::Better {
-            payload,
-            cached_reads,
-        })
+        // Zone payloads are deterministic (one L1 block = one zone block), so freeze
+        // the payload to prevent reth from re-triggering try_build on the rebuild interval.
+        // Without this, the next rebuild attempt would find the deposit queue empty.
+        Ok(BuildOutcome::Freeze(payload))
     }
 
     fn on_missing_payload(
@@ -588,5 +708,334 @@ where
         ))?
         .into_payload()
         .ok_or_else(|| PayloadBuilderError::MissingPayload)
+    }
+}
+
+/// Build the `finalizeWithdrawalBatch(count)` system transaction.
+///
+/// This must be the **last** transaction in every zone block. It calls
+/// [`ZoneOutbox.finalizeWithdrawalBatch`](crate::abi::ZoneOutbox) which:
+/// - Collects up to `count` pending withdrawals
+/// - Builds the withdrawal hash chain (oldest outermost)
+/// - Increments `withdrawalBatchIndex`
+/// - Writes `_lastBatch` to state for proof access
+/// - Emits `BatchFinalized`
+///
+/// Pass `u256::MAX` to batch all pending withdrawals. `block_number` must match the current zone
+/// block number.
+pub(crate) fn build_finalize_withdrawal_batch_tx(
+    count: U256,
+    block_number: u64,
+) -> Recovered<TempoTxEnvelope> {
+    let calldata = abi::ZoneOutbox::finalizeWithdrawalBatchCall {
+        count,
+        blockNumber: block_number,
+    }
+    .abi_encode();
+
+    let tx = TxLegacy {
+        chain_id: None,
+        nonce: 0,
+        gas_price: 0,
+        gas_limit: 0,
+        to: ZONE_OUTBOX_ADDRESS.into(),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+
+    Recovered::new_unchecked(
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
+        TEMPO_SYSTEM_TX_SENDER,
+    )
+}
+
+/// Build the [`QueuedDeposit`](abi::QueuedDeposit) and [`DecryptionData`](abi::DecryptionData) for
+/// an encrypted deposit.
+///
+/// The on-chain `ZoneInbox` contract requires a valid Chaum-Pedersen proof before attempting
+/// AES-GCM decryption. If we provided zeroed `DecryptionData`, the contract would revert with
+/// `InvalidSharedSecretProof` instead of reaching the refund path. Therefore:
+///
+/// 1. **Happy path**: Full ECIES decryption succeeds — provide the real shared secret, CP proof,
+///    and decrypted `to`/`memo`. The contract verifies everything and mints to the recipient.
+/// 2. **Garbage ciphertext**: ECDH + CP proof succeed but AES-GCM decryption fails (corrupted
+///    ciphertext, wrong plaintext length, etc.). We provide the valid proof with placeholder
+///    `to`/`memo`. On-chain, AES-GCM re-decryption will also fail (or the plaintext won't match
+///    the claimed `to`/`memo`), so the contract takes the refund path: minting back to the sender
+///    and emitting `EncryptedDepositFailed`.
+/// 3. **Invalid ephemeral pubkey**: The point cannot be recovered from the x-coordinate, so no
+///    ECDH or CP proof is possible. We fall back to zeroed `DecryptionData`, which will cause the
+///    contract to revert. In practice this is **unreachable** because `ZonePortal.depositEncrypted`
+///    validates the ephemeral pubkey on L1 (`_isValidSecp256k1X` + parity check) before accepting
+///    the deposit into the queue.
+fn build_encrypted_deposit(
+    d: &crate::l1::EncryptedDeposit,
+    sequencer_key: &k256::SecretKey,
+    portal_address: Address,
+) -> (abi::QueuedDeposit, abi::DecryptionData) {
+    let queued = abi::QueuedDeposit {
+        depositType: abi::DepositType::Encrypted,
+        depositData: Bytes::from(
+            abi::EncryptedDeposit {
+                token: d.token,
+                sender: d.sender,
+                amount: d.amount,
+                keyIndex: d.key_index,
+                encrypted: abi::EncryptedDepositPayload {
+                    ephemeralPubkeyX: d.ephemeral_pubkey_x,
+                    ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
+                    ciphertext: d.ciphertext.clone().into(),
+                    nonce: d.nonce.into(),
+                    tag: d.tag.into(),
+                },
+            }
+            .abi_encode(),
+        ),
+    };
+
+    // Attempt full decryption first.
+    let dec = ecies::decrypt_deposit(
+        sequencer_key,
+        &d.ephemeral_pubkey_x,
+        d.ephemeral_pubkey_y_parity,
+        &d.ciphertext,
+        &d.nonce,
+        &d.tag,
+        portal_address,
+        d.key_index,
+    );
+
+    if let Some(dec) = dec {
+        let decryption = abi::DecryptionData {
+            sharedSecret: dec.proof.shared_secret,
+            sharedSecretYParity: dec.proof.shared_secret_y_parity,
+            to: dec.to,
+            memo: dec.memo,
+            cpProof: abi::ChaumPedersenProof {
+                s: dec.proof.cp_proof_s,
+                c: dec.proof.cp_proof_c,
+            },
+        };
+        return (queued, decryption);
+    }
+
+    // Full decryption failed — try to at least provide a valid ECDH proof so the
+    // contract can reach the refund path.
+    let proof = ecies::compute_ecdh_proof(
+        sequencer_key,
+        &d.ephemeral_pubkey_x,
+        d.ephemeral_pubkey_y_parity,
+    );
+
+    if let Some(proof) = proof {
+        warn!(
+            target: "zone::payload",
+            sender = %d.sender,
+            amount = %d.amount,
+            "Encrypted deposit decryption failed, providing valid proof for on-chain refund"
+        );
+        let decryption = abi::DecryptionData {
+            sharedSecret: proof.shared_secret,
+            sharedSecretYParity: proof.shared_secret_y_parity,
+            // Use the sender as fallback `to` instead of address(0). If on-chain
+            // AES-GCM somehow succeeds and the plaintext matches these values, the
+            // funds go back to the sender (equivalent to a refund) rather than being
+            // burned at address(0).
+            to: d.sender,
+            memo: alloy_primitives::B256::ZERO,
+            cpProof: abi::ChaumPedersenProof {
+                s: proof.cp_proof_s,
+                c: proof.cp_proof_c,
+            },
+        };
+        return (queued, decryption);
+    }
+
+    warn!(
+        target: "zone::payload",
+        sender = %d.sender,
+        amount = %d.amount,
+        "Encrypted deposit has invalid ephemeral pubkey, using zeroed DecryptionData"
+    );
+    let decryption = abi::DecryptionData {
+        sharedSecret: alloy_primitives::B256::ZERO,
+        sharedSecretYParity: 0x02,
+        to: d.sender,
+        memo: alloy_primitives::B256::ZERO,
+        cpProof: abi::ChaumPedersenProof {
+            s: alloy_primitives::B256::ZERO,
+            c: alloy_primitives::B256::ZERO,
+        },
+    };
+    (queued, decryption)
+}
+
+/// Build the `advanceTempo(header, deposits, decryptions)` system transaction.
+///
+/// This must be called **once per L1 block** at the start of a zone block (before user txs).
+/// It calls [`ZoneInbox.advanceTempo`](crate::abi::ZoneInbox) which atomically:
+/// - Advances the zone's view of Tempo by processing the L1 block header
+/// - Processes deposits from the queue (minting zone tokens to recipients)
+/// - Validates the deposit hash chain against Tempo state
+///
+/// Regular deposits are wrapped as `QueuedDeposit` with `DepositType::Regular`.
+/// Encrypted deposits are wrapped with `DepositType::Encrypted` and paired with
+/// `DecryptionData` entries that the sequencer provides after decrypting.
+pub fn build_advance_tempo_tx(
+    header: &TempoHeader,
+    deposits: &[L1Deposit],
+    sequencer_key: &k256::SecretKey,
+    portal_address: Address,
+) -> Recovered<TempoTxEnvelope> {
+    // RLP-encode the Tempo header
+    let mut header_rlp = Vec::new();
+    header.encode(&mut header_rlp);
+
+    let mut queued_deposits: Vec<abi::QueuedDeposit> = Vec::new();
+    let mut decryptions: Vec<abi::DecryptionData> = Vec::new();
+
+    for d in deposits {
+        match d {
+            L1Deposit::Regular(d) => {
+                let deposit = abi::Deposit {
+                    token: d.token,
+                    sender: d.sender,
+                    to: d.to,
+                    amount: d.amount,
+                    memo: d.memo,
+                };
+                queued_deposits.push(abi::QueuedDeposit {
+                    depositType: abi::DepositType::Regular,
+                    depositData: Bytes::from(deposit.abi_encode()),
+                });
+            }
+            L1Deposit::Encrypted(d) => {
+                let (queued, decryption) =
+                    build_encrypted_deposit(d, sequencer_key, portal_address);
+                queued_deposits.push(queued);
+                decryptions.push(decryption);
+            }
+        }
+    }
+
+    let calldata = abi::ZoneInbox::advanceTempoCall {
+        header: Bytes::from(header_rlp),
+        deposits: queued_deposits,
+        decryptions,
+    }
+    .abi_encode();
+
+    let tx = TxLegacy {
+        chain_id: None,
+        nonce: 0,
+        gas_price: 0,
+        gas_limit: 0,
+        to: ZONE_INBOX_ADDRESS.into(),
+        value: U256::ZERO,
+        input: calldata.into(),
+    };
+
+    Recovered::new_unchecked(
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
+        TEMPO_SYSTEM_TX_SENDER,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use alloy_consensus::Header;
+    use alloy_primitives::{B256, U256, address};
+    use alloy_sol_types::SolCall;
+    use tempo_primitives::TempoHeader;
+
+    use crate::{
+        abi::{DepositType, ZoneInbox},
+        l1::{Deposit, EncryptedDeposit, L1Deposit},
+    };
+
+    /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
+    /// deposit types. The calldata should include `QueuedDeposit` entries with the
+    /// correct `DepositType` discriminator and `DecryptionData` for encrypted deposits.
+    #[test]
+    fn test_build_advance_tempo_tx_with_encrypted_deposit() {
+        let token = address!("0x0000000000000000000000000000000000001000");
+        let sender = address!("0x0000000000000000000000000000000000001234");
+        let recipient = address!("0x0000000000000000000000000000000000005678");
+
+        let header = TempoHeader {
+            inner: Header {
+                number: 1,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let regular = Deposit {
+            l1_block_number: 1,
+            token,
+            sender,
+            to: recipient,
+            amount: 500_000,
+            fee: 0,
+            memo: B256::ZERO,
+            queue_hash: B256::ZERO,
+        };
+
+        let encrypted = EncryptedDeposit {
+            l1_block_number: 1,
+            token,
+            sender,
+            amount: 300_000,
+            fee: 0,
+            key_index: U256::ZERO,
+            ephemeral_pubkey_x: B256::with_last_byte(0xDD),
+            ephemeral_pubkey_y_parity: 0x02,
+            ciphertext: vec![0xAA; 64],
+            nonce: [0x05; 12],
+            tag: [0x06; 16],
+            queue_hash: B256::ZERO,
+        };
+
+        let deposits = vec![L1Deposit::Regular(regular), L1Deposit::Encrypted(encrypted)];
+
+        // Build the system transaction with a dummy sequencer key
+        let portal_address = address!("0x0000000000000000000000000000000000000001");
+        let seq_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid key");
+        let recovered_tx =
+            super::build_advance_tempo_tx(&header, &deposits, &seq_key, portal_address);
+
+        // Decode the calldata to verify structure.
+        // Recovered<TempoTxEnvelope> → deref → TempoTxEnvelope::Legacy(Signed<TxLegacy>)
+        let envelope = recovered_tx.inner();
+        let input = match envelope {
+            tempo_primitives::TempoTxEnvelope::Legacy(signed) => &signed.tx().input,
+            _ => panic!("expected Legacy tx"),
+        };
+        let decoded = ZoneInbox::advanceTempoCall::abi_decode(input)
+            .expect("calldata should decode as advanceTempo");
+
+        // Should have 2 queued deposits
+        assert_eq!(decoded.deposits.len(), 2, "should have 2 queued deposits");
+
+        // First should be Regular
+        assert_eq!(
+            decoded.deposits[0].depositType,
+            DepositType::Regular,
+            "first deposit should be Regular"
+        );
+
+        // Second should be Encrypted
+        assert_eq!(
+            decoded.deposits[1].depositType,
+            DepositType::Encrypted,
+            "second deposit should be Encrypted"
+        );
+
+        // Should have exactly 1 DecryptionData (one per encrypted deposit)
+        assert_eq!(
+            decoded.decryptions.len(),
+            1,
+            "should have 1 DecryptionData for the encrypted deposit"
+        );
     }
 }

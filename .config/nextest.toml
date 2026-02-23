@@ -1,6 +1,10 @@
-[profile.default]
+[profile.ci]
+fail-fast = false
+retries = 2
+test-threads = "num-cpus"
 
-[[profile.default.overrides]]
-filter = "test(can_restart_after_joining_from_snapshot)"
-slow-timeout = { period = "60s", terminate-after = 4 }
-success-output = "final"
+# Integration tests spin up full reth nodes — limit concurrency to avoid
+# resource contention and flaky timeouts on CI runners.
+[[profile.ci.overrides]]
+filter = "test(/^(e2e|l1_e2e)::/) | test(advance_tempo)"
+threads-required = 4

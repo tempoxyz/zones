@@ -26,7 +26,6 @@ zone-prover.workspace = true
 # reth
 reth-basic-payload-builder.workspace = true
 reth-chainspec.workspace = true
-reth-engine-local.workspace = true
 reth-errors.workspace = true
 reth-eth-wire-types.workspace = true
 reth-ethereum.workspace = true
@@ -53,6 +52,7 @@ alloy-evm.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
+alloy-signer.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -63,18 +63,31 @@ alloy-transport.workspace = true
 # revm
 revm.workspace = true
 
+# rpc
+axum.workspace = true
+
 # misc
 async-trait.workspace = true
+aes-gcm.workspace = true
+k256.workspace = true
+rand.workspace = true
+sha2.workspace = true
+reqwest.workspace = true
 url = "2"
+derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 eyre.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
 alloy = { workspace = true, features = [
     "full",
+    "genesis",
     "providers",
     "signers",
     "signer-local",

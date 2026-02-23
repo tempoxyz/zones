@@ -30,9 +30,13 @@ alloy-signer-local.workspace = true
 
 # tempo (networking)
 tempo-alloy = { workspace = true, features = ["tempo-compat"] }
+# tls
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
 # misc
 clap.workspace = true
+const-hex.workspace = true
+k256.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

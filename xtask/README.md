@@ -4,4 +4,5 @@ A polyfill to perform various operations on the codebase.
 
 Subcommands currently supported:
 
-+ `generate-config`: generates a set of validators to run a local network.
++ `create-zone`: creates a new zone on Tempo L1 via the ZoneFactory contract.
++ `generate-zone-genesis`: generates a zone L2 genesis file.

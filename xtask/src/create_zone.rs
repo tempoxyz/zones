@@ -12,7 +12,7 @@ use alloy_rlp::Encodable;
 use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TEMPO_BASE_FEE;
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 
 sol! {
     struct ZoneParams {
@@ -22,7 +22,7 @@ sol! {
     }
 
     struct CreateZoneParams {
-        address token;
+        address initialToken;
         address sequencer;
         address verifier;
         ZoneParams zoneParams;
@@ -34,7 +34,7 @@ sol! {
             uint64 indexed zoneId,
             address indexed portal,
             address indexed messenger,
-            address token,
+            address initialToken,
             address sequencer,
             address verifier,
             bytes32 genesisBlockHash,
@@ -61,12 +61,14 @@ pub(crate) struct CreateZone {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    #[arg(long, default_value = "0x86A7Ca9816806B59C7172015D04F9C2EF5F5D8E0")]
+    /// Default is the ZoneFactory deployed on moderato.
+    #[arg(long, default_value = "0x8F3F0d21D01648d9373B3688CAc91b5253D3874C")]
     zone_factory: Address,
 
-    /// TIP-20 token address for the zone (same address on both Tempo and the zone L2).
-    #[arg(long)]
-    zone_token: Address,
+    /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
+    /// Defaults to pathUSD (0x20C0000000000000000000000000000000000000).
+    #[arg(long, default_value = "0x20C0000000000000000000000000000000000000")]
+    initial_token: Address,
 
     /// Sequencer address that will operate the zone.
     #[arg(long)]
@@ -81,7 +83,7 @@ pub(crate) struct CreateZone {
     chain_id: u64,
 
     /// Base fee per gas for the zone L2.
-    #[arg(long, default_value_t = TEMPO_BASE_FEE.into())]
+    #[arg(long, default_value_t = TEMPO_T0_BASE_FEE.into())]
     base_fee_per_gas: u128,
 
     /// Genesis block gas limit for the zone L2.
@@ -103,7 +105,8 @@ impl CreateZone {
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
-            .connect_http(self.l1_rpc_url.parse()?);
+            .connect(&self.l1_rpc_url)
+            .await?;
 
         let factory = ZoneFactory::new(self.zone_factory, &provider);
         println!("Fetching verifier address from ZoneFactory...");
@@ -117,7 +120,7 @@ impl CreateZone {
         let current_block = provider.get_block_number().await?;
 
         let params = CreateZoneParams {
-            token: self.zone_token,
+            initialToken: self.initial_token,
             sequencer: self.sequencer,
             verifier,
             zoneParams: ZoneParams {
@@ -198,7 +201,7 @@ impl CreateZone {
         let zone_json = serde_json::json!({
             "zoneId": zone_id,
             "portal": format!("{portal}"),
-            "token": format!("{}", self.zone_token),
+            "initialToken": format!("{}", self.initial_token),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": confirm_header.inner.number,
         });
@@ -212,7 +215,7 @@ impl CreateZone {
         println!("Zone created successfully!");
         println!("  Zone ID: {zone_id}");
         println!("  Portal: {portal}");
-        println!("  Token: {}", self.zone_token);
+        println!("  Initial Token: {}", self.initial_token);
         println!("  Sequencer: {}", self.sequencer);
         println!("  Tempo anchor block: {}", confirm_header.inner.number);
         println!(

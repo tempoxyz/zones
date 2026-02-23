@@ -79,19 +79,24 @@ impl L1StateProvider {
         config: L1StateProviderConfig,
         cache: SharedL1StateCache,
         runtime_handle: tokio::runtime::Handle,
-    ) -> Self {
+    ) -> Result<Self> {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect(&config.l1_rpc_url)
             .await
-            .expect("valid L1 RPC URL")
+            .map_err(|e| {
+                eyre::eyre!(
+                    "Failed to connect L1 state provider at {}: {e}",
+                    config.l1_rpc_url
+                )
+            })?
             .erased();
 
-        Self {
+        Ok(Self {
             request_timeout: config.request_timeout,
             cache,
             provider,
             runtime_handle,
-        }
+        })
     }
 
     /// Create a provider from pre-constructed components.

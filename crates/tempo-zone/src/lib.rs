@@ -5,13 +5,14 @@
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(unnameable_types)]
+#![allow(clippy::too_many_arguments)]
 
 use eyre as _;
 
 pub mod abi;
 pub mod batch;
 pub mod bindings;
-mod builder;
+pub mod builder;
 pub mod engine;
 pub mod evm;
 mod executor;
@@ -19,7 +20,9 @@ pub mod l1;
 pub mod l1_state;
 mod node;
 pub mod proof;
-pub mod system_tx;
+pub mod precompiles;
+pub mod rpc;
+pub mod proof;
 pub mod withdrawals;
 pub mod witness;
 pub mod zonemonitor;
@@ -27,9 +30,10 @@ pub mod zonemonitor;
 pub use batch::{BatchData, BatchSubmitter};
 pub use engine::ZoneEngine;
 pub use l1::{
-    Deposit, DepositQueue, DepositQueueTransition, L1BlockDeposits, L1Subscriber,
-    L1SubscriberConfig, PendingDeposits,
+    Deposit, DepositQueue, DepositQueueTransition, EncryptedDeposit, EnqueueOutcome,
+    L1BlockDeposits, L1Deposit, L1Subscriber, L1SubscriberConfig, PendingDeposits,
 };
+pub use l1_state::SharedL1StateCache;
 pub use node::{ZoneExecutorBuilder, ZoneNode};
 pub use proof::{BatchProofGenerator, ProofGenerator};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
@@ -63,6 +67,8 @@ pub struct ZoneSequencerConfig {
     pub zone_rpc_url: String,
     /// How often the zone monitor polls for new L2 blocks.
     pub zone_poll_interval: Duration,
+    /// Maximum time to accumulate zone blocks before submitting a batch to L1.
+    pub batch_interval: Duration,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -95,6 +101,7 @@ pub async fn spawn_zone_sequencer(
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
     let wallet = alloy_network::EthereumWallet::from(signer);
+    // FIXME: dyn provider, check if not needed
     let l1_provider: DynProvider<TempoNetwork> =
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
@@ -118,6 +125,7 @@ pub async fn spawn_zone_sequencer(
         tempo_state_address: config.tempo_state_address,
         zone_rpc_url: config.zone_rpc_url,
         poll_interval: config.zone_poll_interval,
+        batch_interval: config.batch_interval,
         portal_address: config.portal_address,
     };
 

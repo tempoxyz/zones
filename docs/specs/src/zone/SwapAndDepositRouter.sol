@@ -7,7 +7,6 @@ import {
     EncryptedDepositPayload,
     IWithdrawalReceiver,
     IZoneFactory,
-    IZoneMessenger,
     IZonePortal
 } from "./IZone.sol";
 
@@ -52,6 +51,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /// @dev Implements IWithdrawalReceiver. Only callable by registered zone messengers.
     ///      The messenger has already transferred tokens to this router.
     ///      On failure, the entire callback reverts, triggering bounce-back to source zone.
+    /// @param tokenIn The TIP-20 token received from the source zone withdrawal
     /// @param amount The amount of tokens transferred
     /// @param data ABI-encoded callbackData (see format below)
     /// @return selector The function selector to confirm successful handling
@@ -62,6 +62,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     /// Note: minAmountOut is ignored for same-token transfers (no swap)
     function onWithdrawalReceived(
         address, /* sender */
+        address tokenIn,
         uint128 amount,
         bytes calldata data
     )
@@ -71,8 +72,6 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
         if (!zoneFactory.isZoneMessenger(msg.sender)) {
             revert UnauthorizedMessenger();
         }
-
-        address tokenIn = IZoneMessenger(msg.sender).token();
 
         bool isEncrypted = abi.decode(data, (bool));
 
@@ -92,7 +91,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
 
             IERC20(tokenOut).approve(targetPortal, amountOut);
-            IZonePortal(targetPortal).depositEncrypted(amountOut, keyIndex, encrypted);
+            IZonePortal(targetPortal).depositEncrypted(tokenOut, amountOut, keyIndex, encrypted);
         } else {
             (, // skip isEncrypted
                 address tokenOut,
@@ -107,7 +106,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
 
             IERC20(tokenOut).approve(targetPortal, amountOut);
-            IZonePortal(targetPortal).deposit(recipient, amountOut, memo);
+            IZonePortal(targetPortal).deposit(tokenOut, recipient, amountOut, memo);
         }
 
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
@@ -117,11 +116,12 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
                            INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Validate the target portal is registered and the token is enabled on it
     function _validateTarget(address targetPortal, address tokenOut) internal view {
         if (!zoneFactory.isZonePortal(targetPortal)) {
             revert InvalidTargetPortal();
         }
-        if (IZonePortal(targetPortal).token() != tokenOut) {
+        if (!IZonePortal(targetPortal).isTokenEnabled(tokenOut)) {
             revert InvalidToken();
         }
     }

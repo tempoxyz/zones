@@ -13,45 +13,35 @@ workspace = true
 [dependencies]
 tempo-alloy.workspace = true
 tempo-chainspec.workspace = true
+zone = { path = "../crates/tempo-zone" }
 tempo-contracts.workspace = true
-tempo-commonware-node-config.workspace = true
-tempo-dkg-onchain-artifacts.workspace = true
 tempo-evm.workspace = true
 tempo-precompiles.workspace = true
-tempo-primitives.workspace = true
 tempo-revm.workspace = true
 
 alloy = { workspace = true, features = [
   "contract",
   "genesis",
   "providers",
+  "provider-ws",
   "reqwest",
   "reqwest-rustls-tls",
+  "rpc-types",
   "signers",
   "signer-local",
   "signer-mnemonic",
-  "rand",
   "sol-types",
-  "getrandom",
 ] }
-alloy-consensus.workspace = true
-alloy-primitives.workspace = true
 alloy-rlp.workspace = true
-clap = { version = "4.5.45", features = ["derive"] }
-commonware-codec.workspace = true
-commonware-consensus.workspace = true
-commonware-cryptography.workspace = true
-commonware-math.workspace = true
-commonware-utils.workspace = true
+clap = { version = "4.5.45", features = ["derive", "env"] }
 const-hex.workspace = true
 eyre.workspace = true
-indicatif = { workspace = true, features = ["rayon"] }
-itertools.workspace = true
-rand.workspace = true
-rayon.workspace = true
 reth-evm.workspace = true
-reth-network-peers = { workspace = true, features = ["secp256k1"] }
-secp256k1 = { workspace = true, features = ["rand"] }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+
+# crypto (for encryption key registration)
+k256.workspace = true

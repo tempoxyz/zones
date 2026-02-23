@@ -6,16 +6,32 @@ sol! {
     /// ZonePortal contract on L1.
     #[sol(rpc)]
     contract ZonePortal {
-        // TODO: Rename to DepositEnqueued once the Solidity contract is updated.
         /// Event emitted when a deposit is made.
         #[derive(Debug)]
         event DepositMade(
             bytes32 indexed newCurrentDepositQueueHash,
             address indexed sender,
+            address token,
             address to,
             uint128 netAmount,
             uint128 fee,
             bytes32 memo
+        );
+
+        /// Event emitted when an encrypted deposit is made.
+        #[derive(Debug)]
+        event EncryptedDepositMade(
+            bytes32 indexed newCurrentDepositQueueHash,
+            address indexed sender,
+            address token,
+            uint128 netAmount,
+            uint128 fee,
+            uint256 keyIndex,
+            bytes32 ephemeralPubkeyX,
+            uint8 ephemeralPubkeyYParity,
+            bytes ciphertext,
+            bytes12 nonce,
+            bytes16 tag
         );
 
         /// Last synced Tempo block number.

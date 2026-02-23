@@ -157,8 +157,8 @@ pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count:
 ///
 /// ## POC limitations
 ///
-/// - Transactions are submitted to L1 but the processor does not wait for confirmation receipts
-///   in a production-ready way. Failures are logged and the processor continues.
+/// - Transactions are submitted sequentially and the processor waits for each confirmation.
+///   On failure, processing stops and remaining withdrawals are retried on the next cycle.
 /// - The portal automatically pays the processing fee to the sequencer; this processor does not
 ///   handle fee accounting.
 pub struct WithdrawalProcessor {
@@ -265,30 +265,81 @@ impl WithdrawalProcessor {
                 slot = head_val,
                 index = i,
                 total = withdrawals.len(),
+                token = %withdrawal.token,
                 to = %withdrawal.to,
                 amount = %withdrawal.amount,
                 fee = %withdrawal.fee,
                 has_callback = withdrawal.gasLimit > 0,
                 is_last,
-                remaining_queue = %remaining_queue,
-                "Submitting processWithdrawal to L1"
+                "📤 Submitting withdrawal to L1"
             );
 
-            match self
+            let call = self
                 .portal
-                .processWithdrawal(withdrawal.clone(), remaining_queue)
-                .send()
-                .await
-            {
+                .processWithdrawal(withdrawal.clone(), remaining_queue);
+
+            // When the withdrawal has a callback (`gasLimit > 0`), we must
+            // override `eth_estimateGas` because the estimate only covers the
+            // revert / bounce-back path, which is much cheaper than the happy
+            // path where the callback actually executes.
+            //
+            // The tx gas limit is composed of three parts:
+            //
+            //   txGas = gasLimit + CALLBACK_OVERHEAD + eip150_cushion
+            //
+            // 1. `gasLimit`          — gas the user requested for their callback.
+            // 2. `CALLBACK_OVERHEAD` — fixed cost for the portal + messenger
+            //    logic that runs *around* the callback: queue dequeue & hash
+            //    verification, TIP-20 transferFrom (~500k), messenger relay
+            //    setup, fee payment, event emission, and the bounce-back path
+            //    if the callback reverts.
+            // 3. EIP-150 cushion     — the 63/64 forwarding rule means the
+            //    caller must hold back 1/64 of remaining gas. To guarantee
+            //    the inner CALL receives at least `gasLimit`, the outer frame
+            //    needs an extra `ceil(gasLimit / 63)`.
+            let call = if withdrawal.gasLimit > 0 {
+                const CALLBACK_OVERHEAD: u64 = 1_000_000;
+                let eip150_cushion = withdrawal.gasLimit.div_ceil(63);
+                call.gas(withdrawal.gasLimit + CALLBACK_OVERHEAD + eip150_cushion)
+            } else {
+                call
+            };
+
+            let tx_result = call.send().await;
+
+            match tx_result {
                 Ok(pending) => {
-                    info!(
-                        slot = head_val,
-                        index = i,
-                        tx_hash = %pending.tx_hash(),
-                        to = %withdrawal.to,
-                        amount = %withdrawal.amount,
-                        "processWithdrawal tx submitted to L1"
-                    );
+                    let tx_hash = *pending.tx_hash();
+                    match pending
+                        .with_required_confirmations(1)
+                        .with_timeout(Some(std::time::Duration::from_secs(30)))
+                        .watch()
+                        .await
+                    {
+                        Ok(_) => {
+                            info!(
+                                slot = head_val,
+                                index = i,
+                                %tx_hash,
+                                token = %withdrawal.token,
+                                to = %withdrawal.to,
+                                amount = %withdrawal.amount,
+                                "✅ Withdrawal confirmed on L1"
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                slot = head_val,
+                                index = i,
+                                %tx_hash,
+                                to = %withdrawal.to,
+                                amount = %withdrawal.amount,
+                                error = %e,
+                                "processWithdrawal tx not confirmed, stopping batch processing"
+                            );
+                            return Ok(());
+                        }
+                    }
                 }
                 Err(e) => {
                     error!(
@@ -297,12 +348,14 @@ impl WithdrawalProcessor {
                         to = %withdrawal.to,
                         amount = %withdrawal.amount,
                         error = %e,
-                        "processWithdrawal tx failed"
+                        "processWithdrawal tx failed to send, stopping batch processing"
                     );
+                    return Ok(());
                 }
             }
         }
 
+        // All withdrawals in this slot confirmed — safe to remove.
         self.store.lock().remove_batch(head_val);
 
         info!(
@@ -346,6 +399,7 @@ mod tests {
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
+            token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to,
             amount,
@@ -365,7 +419,7 @@ mod tests {
     #[test]
     fn single_withdrawal_queue_hash() {
         let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
-        let hash = abi::Withdrawal::queue_hash(&[w.clone()]);
+        let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
 
         let expected = keccak256((w, EMPTY_SENTINEL).abi_encode());
         assert_eq!(hash, expected);
@@ -392,7 +446,10 @@ mod tests {
     #[test]
     fn remaining_queue_all_consumed() {
         let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
-        assert_eq!(compute_remaining_queue(&[w.clone()], 1), B256::ZERO);
+        assert_eq!(
+            compute_remaining_queue(std::slice::from_ref(&w), 1),
+            B256::ZERO
+        );
         assert_eq!(compute_remaining_queue(&[w], 5), B256::ZERO);
     }
 
@@ -426,5 +483,28 @@ mod tests {
         store.remove_batch(0);
         assert!(!store.has_batch(0));
         assert_eq!(store.batch_count(), 0);
+    }
+
+    #[test]
+    fn store_slot_index_must_match_portal_tail() {
+        // Demonstrates that withdrawals must be stored under the portal's actual
+        // queue tail index. If the monitor starts with tail=0 but the portal is
+        // at tail=5, withdrawals end up in slot 0 while the withdrawal processor
+        // looks for them in slot 5.
+        let mut store = WithdrawalStore::new();
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 100);
+
+        // Simulate storing under the wrong slot (tail=0 when portal is at 5).
+        store.add_withdrawal(0, w.clone());
+        assert!(store.has_batch(0));
+        assert!(
+            !store.has_batch(5),
+            "withdrawal processor would look at slot 5 and find nothing"
+        );
+
+        // Correct: store under the portal's actual tail.
+        let portal_tail = 5u64;
+        store.add_withdrawal(portal_tail, w);
+        assert!(store.has_batch(portal_tail));
     }
 }
