@@ -2,6 +2,7 @@ cross_compile := "false"
 cargo_build_binary := if cross_compile == "true" { "cross" } else { "cargo" }
 act_debug_mode := env("ACT", "false")
 zone_rpc := env("ZONE_RPC_URL", "http://localhost:8546")
+zone_http_port := env("ZONE_HTTP_PORT", "8546")
 
 [group('deps')]
 install-cross:
@@ -173,7 +174,7 @@ zone-up name reset="false" profile="dev" args="":
                       --zone.id "$ZONE_ID" \
                       --http \
                       --http.addr 0.0.0.0 \
-                      --http.port 8546 \
+                      --http.port {{zone_http_port}} \
                       --http.api all \
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
@@ -392,7 +393,7 @@ deploy-zone name:
                       --zone.id "$ZONE_ID" \
                       --http \
                       --http.addr 0.0.0.0 \
-                      --http.port 8546 \
+                      --http.port {{zone_http_port}} \
                       --http.api all \
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
