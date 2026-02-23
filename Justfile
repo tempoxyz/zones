@@ -85,9 +85,29 @@ send-deposit amount="1000000" to="" token="0x20C00000000000000000000000000000000
         TO=$(cast wallet address "$PK")
     fi
     echo "Depositing {{amount}} to $TO..."
-    cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" \
-        --rpc-url "$RPC" --private-key "$PK"
+    TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" \
+        --rpc-url "$RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
     echo "Deposit sent!"
+    echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
+
+[group('zone')]
+[doc('Sends an encrypted deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
+send-deposit-encrypted amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    TO="{{to}}"
+    if [[ -z "$TO" ]]; then
+        TO=$(cast wallet address "$PK")
+    fi
+    ARGS="--amount {{amount}} --token {{token}} --memo {{memo}} --to $TO --zone-rpc-url {{rpc}}"
+    cargo run -p tempo-xtask -- encrypted-deposit --private-key "$PK" $ARGS
+
+[group('zone')]
+[doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...).')]
+zone-info identifier:
+    cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
 [doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
@@ -188,11 +208,36 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
         FALLBACK="$TO"
     fi
     echo "Requesting withdrawal of {{amount}} to $TO (fallback: $FALLBACK)..."
-    cast send "$OUTBOX" \
+    L2_TX=$(cast send "$OUTBOX" \
         "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes)" \
         "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000
-    echo "Withdrawal requested!"
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json | jq -r '.transactionHash')
+    echo "Withdrawal requested on L2! tx: $L2_TX"
+
+    # Wait for the withdrawal to be processed on L1
+    L1_RPC="${L1_RPC_URL:-}"
+    PORTAL="${L1_PORTAL_ADDRESS:-}"
+    if [[ -z "$L1_RPC" || -z "$PORTAL" ]]; then
+        echo "Set L1_RPC_URL and L1_PORTAL_ADDRESS env vars to wait for L1 processing."
+        exit 0
+    fi
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    FROM_BLOCK=$(cast block-number --rpc-url "$HTTP_RPC")
+    echo "Waiting for withdrawal to be processed on L1 (from block $FROM_BLOCK)..."
+    while true; do
+        LOGS=$(cast logs --address "$PORTAL" --from-block "$FROM_BLOCK" --rpc-url "$HTTP_RPC" \
+            "WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess)" \
+            "$TO" --json 2>/dev/null || echo "[]")
+        if [[ "$LOGS" != "[]" && "$LOGS" != "" && "$LOGS" != "null" ]]; then
+            L1_TX=$(echo "$LOGS" | jq -r '.[-1].transactionHash')
+            L1_BLOCK=$(echo "$LOGS" | jq -r '.[-1].blockNumber')
+            L1_BLOCK_DEC=$(printf '%d' "$L1_BLOCK")
+            echo "Withdrawal processed on L1! (block $L1_BLOCK_DEC)"
+            echo "Explorer: https://explore.moderato.tempo.xyz/tx/$L1_TX"
+            break
+        fi
+        sleep 0.25
+    done
 
 [group('zone')]
 [doc('Checks TIP-20 token balance for an account on the zone (port 8546)')]
@@ -299,11 +344,19 @@ deploy-zone name:
         --private-key "$SEQUENCER_KEY"
     echo ""
 
-    # Step 5: Display summary
     PORTAL=$(jq -r '.portal' "$OUTPUT/zone.json")
     ZONE_ID=$(jq -r '.zoneId' "$OUTPUT/zone.json")
     ANCHOR_BLOCK=$(jq -r '.tempoAnchorBlock' "$OUTPUT/zone.json")
 
+    # Step 5: Register sequencer encryption key on the portal
+    echo "Step 5: Registering sequencer encryption key on ZonePortal..."
+    cargo run -p tempo-xtask -- set-encryption-key \
+        --l1-rpc-url "$HTTP_RPC" \
+        --portal "$PORTAL" \
+        --private-key "$SEQUENCER_KEY"
+    echo ""
+
+    # Step 6: Display summary
     echo "============================================"
     echo "  Zone Deployed Successfully!"
     echo "============================================"
@@ -324,8 +377,8 @@ deploy-zone name:
     echo "  export SEQUENCER_KEY=$SEQUENCER_KEY"
     echo ""
 
-    # Step 6: Build and start the zone node
-    echo "Step 6: Building and starting zone node (release)..."
+    # Step 7: Build and start the zone node
+    echo "Step 7: Building and starting zone node (release)..."
     echo ""
     cargo build --bin tempo-zone --release
     DATADIR="/tmp/tempo-zone-{{name}}"

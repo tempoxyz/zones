@@ -244,6 +244,7 @@ where
 
         info!(
             target: "zone::payload",
+            zone_block = parent_header.number() + 1,
             l1_block = l1_block.header.inner.number,
             deposits = total_deposits,
             "Including advanceTempo system tx (chain continuity OK)"

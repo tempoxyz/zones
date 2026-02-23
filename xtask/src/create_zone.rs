@@ -105,7 +105,8 @@ impl CreateZone {
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
-            .connect_http(self.l1_rpc_url.parse()?);
+            .connect(&self.l1_rpc_url)
+            .await?;
 
         let factory = ZoneFactory::new(self.zone_factory, &provider);
         println!("Fetching verifier address from ZoneFactory...");

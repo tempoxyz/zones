@@ -10993,7 +10993,9 @@ dependencies = [
  "clap",
  "const-hex",
  "eyre",
+ "k256",
  "reth-evm",
+ "rustls",
  "serde",
  "serde_json",
  "tempo-alloy",
@@ -11003,6 +11005,7 @@ dependencies = [
  "tempo-precompiles",
  "tempo-revm",
  "tokio",
+ "zone",
 ]
 
 [[package]]
