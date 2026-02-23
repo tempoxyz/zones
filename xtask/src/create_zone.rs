@@ -61,7 +61,8 @@ pub(crate) struct CreateZone {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    #[arg(long, default_value = "0xb2D823504d3caa517e9cB42017404f316e0f8312")]
+    /// Default is the ZoneFactory deployed on moderato.
+    #[arg(long, default_value = "0x8F3F0d21D01648d9373B3688CAc91b5253D3874C")]
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).

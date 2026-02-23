@@ -244,32 +244,67 @@ impl L1Subscriber {
     /// deposits — is enqueued so the zone engine sees a strict sequential
     /// chain.
     ///
+    /// Live-streamed blocks are buffered one block behind: a block is only
+    /// flushed to the deposit queue once the next block arrives with a
+    /// matching parent hash, proving the buffered block is canonical. This
+    /// prevents the zone from committing to an L1 tip that gets reorged away.
+    ///
     /// Callers should retry on error (see [`Self::spawn`]).
     pub async fn run(self) -> eyre::Result<()> {
         let provider = self.connect().await?;
 
         // Backfill to the current tip before subscribing.
+        // Backfilled blocks are historical and considered confirmed.
         self.sync_to_l1_tip(&provider).await?;
 
         let sub = provider.subscribe_blocks().await?;
         let mut stream = sub.into_stream();
         info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
 
+        // Confirmation buffer: holds the latest unconfirmed L1 block.
+        // A block is only flushed to the deposit queue once the NEXT block
+        // arrives with a matching parent hash, proving the buffered block
+        // is on the canonical chain.
+        let mut unconfirmed_tip: Option<(SealedHeader<TempoHeader>, Vec<L1Deposit>)> = None;
+
         while let Some(header) = stream.next().await {
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-
             let deposits = self.fetch_deposits(&provider, block_number).await?;
 
-            match self.deposit_queue.try_enqueue(sealed, deposits) {
-                EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
-                EnqueueOutcome::NeedBackfill { from, to } => {
-                    // Gap detected — backfill fills the missing range and also
-                    // enqueues the current block (included in from..=block_number).
-                    warn!(from, to, block_number, "Gap in L1 blocks, backfilling");
-                    self.backfill(&provider, from, block_number).await?;
+            // If we have a buffered tip, check if the new block confirms it.
+            if let Some((tip_header, tip_deposits)) = unconfirmed_tip.take() {
+                if sealed.parent_hash() == tip_header.hash() {
+                    // Confirmed — flush the buffered tip to the queue.
+                    let tip_number = tip_header.number();
+                    match self.deposit_queue.try_enqueue(tip_header, tip_deposits) {
+                        EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
+                        EnqueueOutcome::NeedBackfill { from, to: _ } => {
+                            // Gap between queue head and confirmed tip — backfill
+                            // the missing range including the tip (re-fetched from
+                            // the provider since try_enqueue consumed ownership).
+                            warn!(
+                                from,
+                                tip = tip_number,
+                                "Backfilling gap before confirmed tip"
+                            );
+                            self.backfill(&provider, from, tip_number).await?;
+                        }
+                    }
+                } else {
+                    // Reorg — discard the buffered tip (it was on the wrong fork).
+                    warn!(
+                        discarded_block = tip_header.number(),
+                        discarded_hash = %tip_header.hash(),
+                        new_block = block_number,
+                        new_parent = %sealed.parent_hash(),
+                        "Discarding unconfirmed L1 block (reorg)"
+                    );
                 }
             }
+
+            // Buffer the new block as unconfirmed tip.
+            unconfirmed_tip = Some((sealed, deposits));
         }
 
         warn!("L1 block subscription stream ended");
@@ -527,13 +562,17 @@ pub struct PendingDeposits {
     /// Deposit hash chain value after applying all pending deposits. Advances
     /// as new deposits are enqueued and rolls back to `processed_head_hash`
     /// when blocks are purged.
-    pub enqueued_head_hash: B256,
+    enqueued_head_hash: B256,
     /// Pending L1 blocks with their deposits, not yet processed by the zone
-    pub pending: Vec<L1BlockDeposits>,
+    pending: Vec<L1BlockDeposits>,
     /// Highest L1 block ever enqueued (number + hash). Survives `pop_next` /
     /// `drain` so that reconnecting subscribers know where the queue left off,
     /// even if the engine has already consumed the blocks.
-    pub last_enqueued: Option<NumHash>,
+    last_enqueued: Option<NumHash>,
+    /// Last L1 block consumed by the engine via `pop_next` or `drain`.
+    /// Used as a floor during reorg backfill to prevent re-offering blocks
+    /// the zone has already built into zone blocks.
+    last_processed: Option<NumHash>,
 }
 
 impl Default for PendingDeposits {
@@ -543,6 +582,7 @@ impl Default for PendingDeposits {
             enqueued_head_hash: B256::ZERO,
             pending: Vec::new(),
             last_enqueued: None,
+            last_processed: None,
         }
     }
 }
@@ -606,6 +646,22 @@ impl PendingDeposits {
                         to: block_number - 1,
                     };
                 }
+            } else if let Some(processed) = self.last_processed {
+                // last_enqueued was cleared (reorg of consumed block) but we
+                // know what the engine already consumed. Use it as a floor to
+                // prevent re-offering blocks the zone already built on.
+                if block_number <= processed.number {
+                    return EnqueueOutcome::Duplicate;
+                }
+                if block_number > processed.number + 1 {
+                    return EnqueueOutcome::NeedBackfill {
+                        from: processed.number + 1,
+                        to: block_number - 1,
+                    };
+                }
+                // Immediate successor of a consumed block. Accept regardless
+                // of parent hash — the parent was reorged but the zone already
+                // committed to it. The builder will detect the hash mismatch.
             }
             self.append(header, deposits);
             return EnqueueOutcome::Accepted;
@@ -704,6 +760,14 @@ impl PendingDeposits {
         } else {
             let block = self.pending.remove(0);
             self.processed_head_hash = block.queue_hash_after;
+            // Keep last_processed monotonic — never regress the floor.
+            let num_hash = block.header.num_hash();
+            if self
+                .last_processed
+                .is_none_or(|lp| num_hash.number > lp.number)
+            {
+                self.last_processed = Some(num_hash);
+            }
             Some(block)
         }
     }
@@ -712,6 +776,14 @@ impl PendingDeposits {
     pub fn drain(&mut self) -> Vec<L1BlockDeposits> {
         if let Some(last) = self.pending.last() {
             self.processed_head_hash = last.queue_hash_after;
+            // Keep last_processed monotonic — never regress the floor.
+            let num_hash = last.header.num_hash();
+            if self
+                .last_processed
+                .is_none_or(|lp| num_hash.number > lp.number)
+            {
+                self.last_processed = Some(num_hash);
+            }
         }
         std::mem::take(&mut self.pending)
     }
@@ -726,6 +798,42 @@ impl PendingDeposits {
             prev_processed_hash: prev_hash,
             next_processed_hash: current,
         }
+    }
+
+    /// Returns the deposit hash chain value after all enqueued deposits.
+    pub fn enqueued_head_hash(&self) -> B256 {
+        self.enqueued_head_hash
+    }
+
+    /// Returns the number of pending L1 blocks.
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Returns a reference to the pending block at the given index.
+    pub fn pending_block(&self, idx: usize) -> Option<&L1BlockDeposits> {
+        self.pending.get(idx)
+    }
+
+    /// Returns a slice of all pending L1 block deposits.
+    pub fn pending_blocks(&self) -> &[L1BlockDeposits] {
+        &self.pending
+    }
+
+    /// Returns the most recently enqueued L1 block (number + hash), if any.
+    pub fn last_enqueued(&self) -> Option<NumHash> {
+        self.last_enqueued
+    }
+
+    /// Clears the `last_enqueued` anchor. Used when a reorg invalidates
+    /// the consumed block that `last_enqueued` pointed to.
+    pub fn clear_last_enqueued(&mut self) {
+        self.last_enqueued = None;
+    }
+
+    /// Returns the last L1 block consumed by the engine.
+    pub fn last_processed(&self) -> Option<NumHash> {
+        self.last_processed
     }
 }
 
@@ -790,7 +898,7 @@ impl DepositQueue {
 
     /// Returns the number of pending L1 blocks.
     pub fn pending_count(&self) -> usize {
-        self.inner.lock().pending.len()
+        self.inner.lock().pending_len()
     }
 
     /// Wait until an L1 block is available.
@@ -808,7 +916,7 @@ impl DepositQueue {
     /// This is a high-water mark that survives `pop_next` / `drain`, so it
     /// reflects the last block ever enqueued — not just what's still pending.
     pub fn last_enqueued(&self) -> Option<NumHash> {
-        self.inner.lock().last_enqueued
+        self.inner.lock().last_enqueued()
     }
 
     /// Lock the inner queue directly.
@@ -863,7 +971,7 @@ mod tests {
     #[test]
     fn test_deposit_queue_hash_chain() {
         let mut queue = PendingDeposits::default();
-        assert_eq!(queue.enqueued_head_hash, B256::ZERO);
+        assert_eq!(queue.enqueued_head_hash(), B256::ZERO);
 
         let d1 = L1Deposit::Regular(Deposit {
             l1_block_number: 1,
@@ -877,7 +985,7 @@ mod tests {
         });
 
         queue.enqueue(make_test_header(1), vec![d1.clone()]);
-        let hash_after_d1 = queue.enqueued_head_hash;
+        let hash_after_d1 = queue.enqueued_head_hash();
         assert_ne!(hash_after_d1, B256::ZERO);
 
         // Verify hash is deterministic
@@ -897,7 +1005,7 @@ mod tests {
         });
 
         queue.enqueue(make_test_header(2), vec![d2]);
-        let hash_after_d2 = queue.enqueued_head_hash;
+        let hash_after_d2 = queue.enqueued_head_hash();
         assert_ne!(hash_after_d2, hash_after_d1);
     }
 
@@ -962,7 +1070,7 @@ mod tests {
 
         let transition = PendingDeposits::transition(B256::ZERO, &deposits);
 
-        assert_eq!(queue.enqueued_head_hash, transition.next_processed_hash);
+        assert_eq!(queue.enqueued_head_hash(), transition.next_processed_hash);
     }
 
     #[test]
@@ -1236,7 +1344,7 @@ mod tests {
             EnqueueOutcome::Accepted
         ));
 
-        assert_eq!(queue.pending.len(), 2);
+        assert_eq!(queue.pending_len(), 2);
     }
 
     #[test]
@@ -1299,7 +1407,7 @@ mod tests {
             EnqueueOutcome::Accepted
         ));
 
-        assert_eq!(queue.pending.len(), 3);
+        assert_eq!(queue.pending_len(), 3);
 
         // Reorg at height 11 — use a different header (different gas_limit makes the hash different)
         let mut h2_reorg = make_chained_header(11, h1_hash);
@@ -1310,9 +1418,9 @@ mod tests {
         ));
 
         // Blocks 12 and the old 11 should be purged, replaced by new 11
-        assert_eq!(queue.pending.len(), 2);
-        assert_eq!(queue.pending[0].header.number(), 10);
-        assert_eq!(queue.pending[1].header.number(), 11);
+        assert_eq!(queue.pending_len(), 2);
+        assert_eq!(queue.pending_block(0).unwrap().header.number(), 10);
+        assert_eq!(queue.pending_block(1).unwrap().header.number(), 11);
     }
 
     #[test]
@@ -1364,7 +1472,7 @@ mod tests {
             queue.try_enqueue(seal(h1), vec![d1]),
             EnqueueOutcome::Accepted
         ));
-        let hash_after_h1 = queue.enqueued_head_hash;
+        let hash_after_h1 = queue.enqueued_head_hash();
 
         let h2 = make_chained_header(11, h1_hash);
         let d2 = L1Deposit::Regular(Deposit {
@@ -1383,7 +1491,7 @@ mod tests {
         ));
 
         // Hash advanced past h1
-        assert_ne!(queue.enqueued_head_hash, hash_after_h1);
+        assert_ne!(queue.enqueued_head_hash(), hash_after_h1);
 
         // Now reorg at height 11 — different header
         let mut h2_reorg = make_chained_header(11, h1_hash);
@@ -1394,7 +1502,7 @@ mod tests {
         ));
 
         // Hash should have rolled back to after h1 (since h2_reorg has no deposits)
-        assert_eq!(queue.enqueued_head_hash, hash_after_h1);
+        assert_eq!(queue.enqueued_head_hash(), hash_after_h1);
     }
 
     fn make_deposit(block: u64, amount: u128) -> L1Deposit {
@@ -1425,25 +1533,25 @@ mod tests {
         let h3 = make_chained_header(3, h2_hash);
         queue.enqueue(h3, vec![make_deposit(3, 300)]);
 
-        let hash_after_all = queue.enqueued_head_hash;
+        let hash_after_all = queue.enqueued_head_hash();
 
         // Pop block 1
         let popped = queue.pop_next().unwrap();
         assert_eq!(popped.header.number(), 1);
         assert_eq!(queue.processed_head_hash, popped.queue_hash_after);
 
-        // queue.enqueued_head_hash hasn't changed
-        assert_eq!(queue.enqueued_head_hash, hash_after_all);
+        // queue.enqueued_head_hash() hasn't changed
+        assert_eq!(queue.enqueued_head_hash(), hash_after_all);
 
         // Recompute expected hash from processed_head_hash + remaining deposits (blocks 2, 3)
         let remaining_deposits: Vec<L1Deposit> = queue
-            .pending
+            .pending_blocks()
             .iter()
             .flat_map(|b| b.deposits.clone())
             .collect();
         let transition =
             PendingDeposits::transition(queue.processed_head_hash, &remaining_deposits);
-        assert_eq!(transition.next_processed_hash, queue.enqueued_head_hash);
+        assert_eq!(transition.next_processed_hash, queue.enqueued_head_hash());
     }
 
     #[test]
@@ -1472,9 +1580,9 @@ mod tests {
         // Pop blocks 1 and 2
         queue.pop_next().unwrap();
         queue.pop_next().unwrap();
-        assert_eq!(queue.pending.len(), 3); // blocks 3, 4, 5
+        assert_eq!(queue.pending_len(), 3); // blocks 3, 4, 5
 
-        let hash_after_block3 = queue.pending[0].queue_hash_after;
+        let hash_after_block3 = queue.pending_block(0).unwrap().queue_hash_after;
 
         // Trigger purge at block 4: different header at height 4
         let mut h4_reorg = make_chained_header(4, h3_hash);
@@ -1485,12 +1593,12 @@ mod tests {
         ));
 
         // Pending should have blocks 3 and new-4
-        assert_eq!(queue.pending.len(), 2);
-        assert_eq!(queue.pending[0].header.number(), 3);
-        assert_eq!(queue.pending[1].header.number(), 4);
+        assert_eq!(queue.pending_len(), 2);
+        assert_eq!(queue.pending_block(0).unwrap().header.number(), 3);
+        assert_eq!(queue.pending_block(1).unwrap().header.number(), 4);
 
         // New block 4 has no deposits, so hash == hash after block 3's deposits
-        assert_eq!(queue.enqueued_head_hash, hash_after_block3);
+        assert_eq!(queue.enqueued_head_hash(), hash_after_block3);
     }
 
     #[test]
@@ -1512,7 +1620,7 @@ mod tests {
         let popped = queue.pop_next().unwrap();
         let base_after_pop = popped.queue_hash_after;
         assert_eq!(queue.processed_head_hash, base_after_pop);
-        assert_eq!(queue.pending.len(), 2); // blocks 2, 3
+        assert_eq!(queue.pending_len(), 2); // blocks 2, 3
 
         // Purge from block 2 by enqueueing a different block 2
         let mut h2_reorg = make_chained_header(2, B256::with_last_byte(0xFF));
@@ -1523,8 +1631,8 @@ mod tests {
         assert!(matches!(outcome, EnqueueOutcome::Accepted));
 
         // After purge and re-anchor, pending has just the new block 2
-        assert_eq!(queue.pending.len(), 1);
-        assert_eq!(queue.pending[0].header.number(), 2);
+        assert_eq!(queue.pending_len(), 1);
+        assert_eq!(queue.pending_block(0).unwrap().header.number(), 2);
 
         // processed_head_hash should still be what it was after popping block 1
         assert_eq!(queue.processed_head_hash, base_after_pop);
@@ -1558,8 +1666,8 @@ mod tests {
             EnqueueOutcome::Accepted
         ));
 
-        let hash_before = queue.enqueued_head_hash;
-        let len_before = queue.pending.len();
+        let hash_before = queue.enqueued_head_hash();
+        let len_before = queue.pending_len();
 
         // Re-deliver block 3 (same sealed header) => Duplicate
         assert!(matches!(
@@ -1567,8 +1675,8 @@ mod tests {
             EnqueueOutcome::Duplicate
         ));
 
-        assert_eq!(queue.enqueued_head_hash, hash_before);
-        assert_eq!(queue.pending.len(), len_before);
+        assert_eq!(queue.enqueued_head_hash(), hash_before);
+        assert_eq!(queue.pending_len(), len_before);
     }
 
     #[test]
@@ -1589,11 +1697,12 @@ mod tests {
 
         // Block 2 has no deposits => queue_hash_before == queue_hash_after
         assert_eq!(
-            queue.pending[1].queue_hash_before, queue.pending[1].queue_hash_after,
+            queue.pending_block(1).unwrap().queue_hash_before,
+            queue.pending_block(1).unwrap().queue_hash_after,
             "zero-deposit block must not change queue hash"
         );
 
-        let hash_after_all_original = queue.enqueued_head_hash;
+        let hash_after_all_original = queue.enqueued_head_hash();
 
         // Purge at block 2 (different header) — purges blocks 2, 3
         let mut h2_reorg = make_chained_header(2, h1_hash);
@@ -1605,10 +1714,10 @@ mod tests {
         ));
 
         // After purge, only block 1 and new block 2 remain
-        assert_eq!(queue.pending.len(), 2);
-        let hash_after_block1 = queue.pending[0].queue_hash_after;
+        assert_eq!(queue.pending_len(), 2);
+        let hash_after_block1 = queue.pending_block(0).unwrap().queue_hash_after;
         // New block 2 has no deposits so hash == hash after block 1
-        assert_eq!(queue.enqueued_head_hash, hash_after_block1);
+        assert_eq!(queue.enqueued_head_hash(), hash_after_block1);
 
         // Re-enqueue new block 3 with same deposits as original
         let h3_new = make_chained_header(3, h2_reorg_hash);
@@ -1620,7 +1729,8 @@ mod tests {
         // The hash should match original because the deposit content and
         // chain of hashes are identical (both block 2 variants had no deposits)
         assert_eq!(
-            queue.enqueued_head_hash, hash_after_all_original,
+            queue.enqueued_head_hash(),
+            hash_after_all_original,
             "hash should be identical when deposit content is the same"
         );
     }
@@ -1647,8 +1757,8 @@ mod tests {
         // Drain everything
         queue.pop_next().unwrap();
         queue.pop_next().unwrap();
-        assert!(queue.pending.is_empty());
-        assert_eq!(queue.last_enqueued.unwrap().number, 11);
+        assert!(queue.pending_len() == 0);
+        assert_eq!(queue.last_enqueued().unwrap().number, 11);
 
         // Block 12 arrives with wrong parent — consumed block 11 was reorged
         let h3_bad = make_chained_header(12, B256::with_last_byte(0xDE));
@@ -1663,22 +1773,29 @@ mod tests {
 
         // last_enqueued must be cleared so backfill can re-enqueue block 11
         assert!(
-            queue.last_enqueued.is_none(),
+            queue.last_enqueued().is_none(),
             "last_enqueued must be cleared after parent mismatch on drained queue"
         );
 
-        // Backfill can now enqueue the reorged block 11 as a fresh anchor
+        // Backfill tries to re-enqueue the reorged block 11 — must be Duplicate
+        // because last_processed knows block 11 was already consumed by the engine.
         let h2_reorg = make_test_header(11);
         let h2_reorg_hash = header_hash(&h2_reorg);
-        queue.enqueue(h2_reorg, vec![]);
-        assert_eq!(queue.last_enqueued.unwrap().number, 11);
+        assert!(matches!(
+            queue.try_enqueue(seal(h2_reorg), vec![]),
+            EnqueueOutcome::Duplicate
+        ));
 
-        // And block 12 can follow
+        // Block 12 on the new chain is accepted as the immediate successor
+        // of the consumed window (parent hash mismatch is expected here —
+        // the builder will detect it).
         let h3 = make_chained_header(12, h2_reorg_hash);
         assert!(matches!(
             queue.try_enqueue(seal(h3), vec![]),
             EnqueueOutcome::Accepted
         ));
+        assert_eq!(queue.pending_len(), 1);
+        assert_eq!(queue.pending_block(0).unwrap().header.number(), 12);
     }
 
     #[test]
@@ -1707,7 +1824,7 @@ mod tests {
 
         // Pop only block 10
         queue.pop_next().unwrap();
-        assert_eq!(queue.pending.len(), 2); // blocks 11, 12
+        assert_eq!(queue.pending_len(), 2); // blocks 11, 12
 
         // Block 13 with wrong parent — this is a normal parent mismatch on the
         // non-empty queue path, should purge block 12 and request backfill
@@ -1734,7 +1851,7 @@ mod tests {
 
         // Drain
         queue.pop_next().unwrap();
-        assert!(queue.pending.is_empty());
+        assert!(queue.pending_len() == 0);
 
         // Wrong parent → NeedBackfill
         let h2_bad = make_chained_header(11, B256::with_last_byte(0xFF));
@@ -1749,8 +1866,8 @@ mod tests {
             queue.try_enqueue(seal(h2_good), vec![make_deposit(11, 500)]),
             EnqueueOutcome::Accepted
         ));
-        assert_eq!(queue.pending.len(), 1);
-        assert_eq!(queue.pending[0].header.number(), 11);
+        assert_eq!(queue.pending_len(), 1);
+        assert_eq!(queue.pending_block(0).unwrap().header.number(), 11);
     }
 
     #[test]
@@ -1798,7 +1915,7 @@ mod tests {
         // Drain everything
         queue.pop_next().unwrap();
         queue.pop_next().unwrap();
-        assert!(queue.pending.is_empty());
+        assert!(queue.pending_len() == 0);
 
         // Re-deliver block 10 or 11 — should be Duplicate
         assert!(matches!(
@@ -1837,10 +1954,11 @@ mod tests {
             "processed_head_hash must not change on NeedBackfill"
         );
         assert_eq!(
-            queue.enqueued_head_hash, base,
+            queue.enqueued_head_hash(),
+            base,
             "enqueued_head_hash must not change on NeedBackfill"
         );
-        assert!(queue.pending.is_empty());
+        assert!(queue.pending_len() == 0);
     }
 
     #[test]
@@ -1854,8 +1972,8 @@ mod tests {
 
         // Drain
         queue.pop_next().unwrap();
-        assert!(queue.pending.is_empty());
-        assert_eq!(queue.last_enqueued.unwrap().number, 10);
+        assert!(queue.pending_len() == 0);
+        assert_eq!(queue.last_enqueued().unwrap().number, 10);
 
         // Re-deliver same block 10 — must be Duplicate, last_enqueued preserved
         assert!(matches!(
@@ -1863,7 +1981,7 @@ mod tests {
             EnqueueOutcome::Duplicate
         ));
         assert_eq!(
-            queue.last_enqueued.unwrap().number,
+            queue.last_enqueued().unwrap().number,
             10,
             "last_enqueued must not be cleared on Duplicate"
         );
@@ -1882,8 +2000,8 @@ mod tests {
         let h2 = make_chained_header(11, h1_hash);
         queue.enqueue(h2.clone(), vec![make_deposit(11, 200)]);
 
-        let hash_before = queue.enqueued_head_hash;
-        let len_before = queue.pending.len();
+        let hash_before = queue.enqueued_head_hash();
+        let len_before = queue.pending_len();
 
         // Re-enqueue both — should be Duplicate, no state change
         assert!(matches!(
@@ -1894,8 +2012,8 @@ mod tests {
             queue.try_enqueue(seal(h2), vec![make_deposit(11, 200)]),
             EnqueueOutcome::Duplicate
         ));
-        assert_eq!(queue.enqueued_head_hash, hash_before);
-        assert_eq!(queue.pending.len(), len_before);
+        assert_eq!(queue.enqueued_head_hash(), hash_before);
+        assert_eq!(queue.pending_len(), len_before);
     }
 
     #[test]
@@ -1907,7 +2025,7 @@ mod tests {
         let h10 = make_test_header(10);
         let h10_hash = header_hash(&h10);
         queue.enqueue(h10, vec![make_deposit(10, 100)]);
-        let hash_after_10 = queue.enqueued_head_hash;
+        let hash_after_10 = queue.enqueued_head_hash();
 
         let h11 = make_chained_header(11, h10_hash);
         let h11_hash = header_hash(&h11);
@@ -1920,7 +2038,7 @@ mod tests {
         let h13 = make_chained_header(13, h12_hash);
         queue.enqueue(h13, vec![make_deposit(13, 400)]);
 
-        assert_eq!(queue.pending.len(), 4);
+        assert_eq!(queue.pending_len(), 4);
 
         // Reorg at block 11 — new header with same parent but different content
         let mut h11_reorg = make_chained_header(11, h10_hash);
@@ -1933,13 +2051,13 @@ mod tests {
         ));
 
         // Blocks 12, 13 purged; now have 10 + new 11
-        assert_eq!(queue.pending.len(), 2);
-        assert_eq!(queue.pending[0].header.number(), 10);
-        assert_eq!(queue.pending[1].header.number(), 11);
-        assert_eq!(queue.last_enqueued.unwrap().number, 11);
+        assert_eq!(queue.pending_len(), 2);
+        assert_eq!(queue.pending_block(0).unwrap().header.number(), 10);
+        assert_eq!(queue.pending_block(1).unwrap().header.number(), 11);
+        assert_eq!(queue.last_enqueued().unwrap().number, 11);
 
         // Hash should differ from original because deposit content changed
-        assert_ne!(queue.enqueued_head_hash, hash_after_10);
+        assert_ne!(queue.enqueued_head_hash(), hash_after_10);
 
         // Can continue building on the new fork
         let h12_new = make_chained_header(12, h11_reorg_hash);
@@ -1947,7 +2065,7 @@ mod tests {
             queue.try_enqueue(seal(h12_new), vec![]),
             EnqueueOutcome::Accepted
         ));
-        assert_eq!(queue.pending.len(), 3);
+        assert_eq!(queue.pending_len(), 3);
     }
 
     #[test]
@@ -1972,6 +2090,227 @@ mod tests {
             queue.try_enqueue(seal(h11), vec![]),
             EnqueueOutcome::Duplicate
         ));
-        assert_eq!(queue.last_enqueued.unwrap().number, 11);
+        assert_eq!(queue.last_enqueued().unwrap().number, 11);
+    }
+
+    // --- last_processed floor tests ---
+
+    #[test]
+    fn test_pop_sets_last_processed() {
+        let mut queue = PendingDeposits::default();
+
+        assert!(queue.last_processed().is_none());
+
+        let h1 = make_test_header(10);
+        let h1_hash = header_hash(&h1);
+        queue.enqueue(h1, vec![]);
+
+        let h2 = make_chained_header(11, h1_hash);
+        queue.enqueue(h2, vec![]);
+
+        let popped = queue.pop_next().unwrap();
+        assert_eq!(queue.last_processed().unwrap().number, 10);
+        assert_eq!(queue.last_processed().unwrap().hash, popped.header.hash());
+
+        queue.pop_next().unwrap();
+        assert_eq!(queue.last_processed().unwrap().number, 11);
+    }
+
+    #[test]
+    fn test_drain_sets_last_processed() {
+        let mut queue = PendingDeposits::default();
+
+        let h1 = make_test_header(10);
+        let h1_hash = header_hash(&h1);
+        queue.enqueue(h1, vec![]);
+
+        let h2 = make_chained_header(11, h1_hash);
+        queue.enqueue(h2, vec![]);
+
+        let drained = queue.drain();
+        assert_eq!(queue.last_processed().unwrap().number, 11);
+        assert_eq!(
+            queue.last_processed().unwrap().hash,
+            drained.last().unwrap().header.hash()
+        );
+    }
+
+    #[test]
+    fn test_reorg_of_consumed_block_skips_stale_during_backfill() {
+        // Simulates the exact production bug:
+        // 1. Blocks 10, 11 enqueued and consumed (popped)
+        // 2. L1 reorgs at block 11 — new block 12 arrives with wrong parent
+        // 3. try_enqueue clears last_enqueued, returns NeedBackfill{11, 11}
+        // 4. Backfill re-enqueues NEW block 11 — must be Duplicate (already consumed)
+        // 5. Backfill enqueues NEW block 12 — must be Accepted
+        let mut queue = PendingDeposits::default();
+
+        let h10 = make_test_header(10);
+        let h10_hash = header_hash(&h10);
+        queue.enqueue(h10, vec![]);
+
+        let h11 = make_chained_header(11, h10_hash);
+        let _h11_hash = header_hash(&h11);
+        queue.enqueue(h11, vec![]);
+
+        // Engine consumes both blocks
+        queue.pop_next().unwrap(); // block 10
+        queue.pop_next().unwrap(); // block 11
+        assert!(queue.pending_len() == 0);
+        assert_eq!(queue.last_processed().unwrap().number, 11);
+        assert_eq!(queue.last_enqueued().unwrap().number, 11);
+
+        // New block 12 arrives with parent pointing to NEW (reorged) block 11
+        let h12_new = make_chained_header(12, B256::with_last_byte(0xDE));
+        match queue.try_enqueue(seal(h12_new), vec![]) {
+            EnqueueOutcome::NeedBackfill { from, to } => {
+                assert_eq!(from, 11);
+                assert_eq!(to, 11);
+            }
+            other => panic!("expected NeedBackfill, got {other:?}"),
+        }
+        // last_enqueued cleared by the parent mismatch path
+        assert!(queue.last_enqueued().is_none());
+
+        // Backfill: try to re-enqueue NEW block 11 — must be Duplicate
+        // because last_processed knows block 11 was already consumed
+        let mut h11_reorg = make_test_header(11);
+        h11_reorg.inner.gas_limit = 999;
+        let h11_reorg_hash = header_hash(&h11_reorg);
+        assert!(matches!(
+            queue.try_enqueue(seal(h11_reorg), vec![]),
+            EnqueueOutcome::Duplicate
+        ));
+
+        // Backfill: enqueue NEW block 12 — must be Accepted
+        // (immediate successor of consumed block, parent hash mismatch is
+        // expected and will be caught by the builder)
+        let h12 = make_chained_header(12, h11_reorg_hash);
+        assert!(matches!(
+            queue.try_enqueue(seal(h12), vec![]),
+            EnqueueOutcome::Accepted
+        ));
+
+        // Queue now has exactly one block: NEW block 12
+        assert_eq!(queue.pending_len(), 1);
+        assert_eq!(queue.pending_block(0).unwrap().header.number(), 12);
+    }
+
+    #[test]
+    fn test_consumed_reorg_gap_uses_last_processed_floor() {
+        // After consuming blocks and clearing last_enqueued, a block arriving
+        // with a gap should use last_processed as the floor.
+        let mut queue = PendingDeposits::default();
+
+        let h10 = make_test_header(10);
+        let _h10_hash = header_hash(&h10);
+        queue.enqueue(h10, vec![]);
+        queue.pop_next().unwrap();
+
+        // Simulate last_enqueued being cleared (reorg path)
+        queue.clear_last_enqueued();
+
+        // Block 13 arrives — gap from 11..12
+        let h13 = make_test_header(13);
+        match queue.try_enqueue(seal(h13), vec![]) {
+            EnqueueOutcome::NeedBackfill { from, to } => {
+                assert_eq!(from, 11); // last_processed.number + 1
+                assert_eq!(to, 12);
+            }
+            other => panic!("expected NeedBackfill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_builder_skips_stale_blocks_in_queue() {
+        // Simulates the builder's perspective: queue contains a stale block
+        // (number < expected) followed by the correct block. The builder
+        // should skip the stale one and use the correct one.
+        let queue = DepositQueue::new();
+
+        // Enqueue block 10 (stale — zone already processed it)
+        let h10 = make_test_header(10);
+        let h10_hash = header_hash(&h10);
+        queue.enqueue(h10, vec![]);
+
+        // Enqueue block 11 (the one the builder actually needs)
+        let h11 = make_chained_header(11, h10_hash);
+        queue.enqueue(h11, vec![]);
+
+        // Builder expects block 11 (tempoBlockNumber=10, expected=11).
+        // Pop loop should skip block 10 and return block 11.
+        let expected = 11u64;
+        let l1_block = loop {
+            let block = queue.pop_next().expect("queue should not be empty");
+            if block.header.number() < expected {
+                continue;
+            }
+            break block;
+        };
+        assert_eq!(l1_block.header.number(), 11);
+    }
+
+    #[test]
+    fn test_reorg_consumed_then_continue_on_new_chain() {
+        // Full end-to-end scenario: reorg of consumed block, backfill skips it,
+        // zone gets the correct next block. Subsequent blocks also work.
+        let mut queue = PendingDeposits::default();
+
+        // Build a 3-block chain: 100, 101, 102
+        let h100 = make_test_header(100);
+        let h100_hash = header_hash(&h100);
+        queue.enqueue(h100, vec![]);
+
+        let h101 = make_chained_header(101, h100_hash);
+        let h101_hash = header_hash(&h101);
+        queue.enqueue(h101, vec![]);
+
+        let h102 = make_chained_header(102, h101_hash);
+        queue.enqueue(h102, vec![]);
+
+        // Engine consumes all 3
+        queue.pop_next().unwrap();
+        queue.pop_next().unwrap();
+        queue.pop_next().unwrap();
+        assert_eq!(queue.last_processed().unwrap().number, 102);
+
+        // L1 reorgs at 102: new block 103 has different parent
+        let new_parent = B256::with_last_byte(0xAA);
+        let h103 = make_chained_header(103, new_parent);
+        match queue.try_enqueue(seal(h103), vec![]) {
+            EnqueueOutcome::NeedBackfill { from, to } => {
+                assert_eq!(from, 102);
+                assert_eq!(to, 102);
+            }
+            other => panic!("expected NeedBackfill, got {other:?}"),
+        }
+
+        // Backfill: re-enqueue NEW block 102 → Duplicate (consumed)
+        let mut h102_new = make_test_header(102);
+        h102_new.inner.gas_limit = 42;
+        let h102_new_hash = header_hash(&h102_new);
+        assert!(matches!(
+            queue.try_enqueue(seal(h102_new), vec![]),
+            EnqueueOutcome::Duplicate
+        ));
+
+        // Backfill: enqueue NEW block 103 → Accepted
+        let h103 = make_chained_header(103, h102_new_hash);
+        let h103_hash = header_hash(&h103);
+        assert!(matches!(
+            queue.try_enqueue(seal(h103), vec![]),
+            EnqueueOutcome::Accepted
+        ));
+
+        // Block 104 continues on the new chain
+        let h104 = make_chained_header(104, h103_hash);
+        assert!(matches!(
+            queue.try_enqueue(seal(h104), vec![]),
+            EnqueueOutcome::Accepted
+        ));
+
+        assert_eq!(queue.pending_len(), 2);
+        assert_eq!(queue.pending_block(0).unwrap().header.number(), 103);
+        assert_eq!(queue.pending_block(1).unwrap().header.number(), 104);
     }
 }

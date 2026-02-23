@@ -195,14 +195,15 @@ where
         // Take exactly one L1 block per zone block — advanceTempo advances Tempo state
         // by exactly one block, maintaining sequential chain continuity.
         // The ZoneEngine ensures an L1 block is queued before triggering a build.
-        let l1_block = match self.deposit_queue.pop_next() {
-            Some(block) => block,
-            None => {
+        let l1_block = {
+            let mut queue = self.deposit_queue.lock();
+            let Some(block) = queue.pop_next() else {
                 debug!(target: "zone::payload", "No L1 block available, skipping build");
                 return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
                     "no L1 block available in deposit queue",
                 )));
-            }
+            };
+            block
         };
 
         // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
