@@ -31,10 +31,9 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoEvmConfig;
 use tempo_node::{
-    DEFAULT_AA_VALID_AFTER_MAX_SECS, node::TempoPayloadAttributesBuilder,
-    rpc::TempoReceiptConverter,
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator,
+    node::TempoPayloadAttributesBuilder, rpc::TempoReceiptConverter,
 };
-use tempo_node::engine::TempoEngineValidator;
 use tempo_payload_types::TempoPayloadTypes;
 use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
