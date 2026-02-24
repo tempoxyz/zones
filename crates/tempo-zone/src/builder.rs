@@ -7,6 +7,7 @@ use crate::{
     abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
     evm::ZoneEvmConfig,
     l1::L1Deposit,
+    pool::ZoneTransactionPool,
     precompiles::ecies,
 };
 use alloy_consensus::{Signed, TxLegacy};
@@ -42,7 +43,6 @@ use tempo_primitives::{
     TempoHeader, TempoPrimitives, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
-use tempo_transaction_pool::TempoTransactionPool;
 use tracing::{debug, error, info, warn};
 
 use super::node::ZoneNode;
@@ -75,7 +75,7 @@ impl ZonePayloadFactory {
     }
 }
 
-impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, ZoneEvmConfig>
+impl<Node> PayloadBuilderBuilder<Node, ZoneTransactionPool<Node::Provider>, ZoneEvmConfig>
     for ZonePayloadFactory
 where
     Node: FullNodeTypes<Types = ZoneNode>,
@@ -85,7 +85,7 @@ where
     async fn build_payload_builder(
         self,
         ctx: &BuilderContext<Node>,
-        pool: TempoTransactionPool<Node::Provider>,
+        pool: ZoneTransactionPool<Node::Provider>,
         evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
         Ok(ZonePayloadBuilder {
@@ -102,7 +102,7 @@ where
 /// Zone payload builder that executes `advanceTempo` system txs + pool txs.
 #[derive(Debug, Clone)]
 pub struct ZonePayloadBuilder<Provider> {
-    pool: TempoTransactionPool<Provider>,
+    pool: ZoneTransactionPool<Provider>,
     provider: Provider,
     evm_config: ZoneEvmConfig,
     deposit_queue: crate::DepositQueue,
@@ -113,7 +113,7 @@ pub struct ZonePayloadBuilder<Provider> {
 
 impl<Provider> ZonePayloadBuilder<Provider> {
     pub fn new(
-        pool: TempoTransactionPool<Provider>,
+        pool: ZoneTransactionPool<Provider>,
         provider: Provider,
         evm_config: ZoneEvmConfig,
         deposit_queue: crate::DepositQueue,

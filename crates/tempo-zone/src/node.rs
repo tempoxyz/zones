@@ -51,6 +51,7 @@ use crate::{
         L1StateListenerConfig, L1StateProvider, L1StateProviderConfig, SharedL1StateCache,
         spawn_l1_state_listener,
     },
+    pool::{ZoneTransactionPolicy, ZoneTransactionPool},
 };
 
 use crate::builder::ZonePayloadFactory;
@@ -158,7 +159,7 @@ impl ZoneNode {
     {
         ComponentsBuilder::default()
             .node_types::<N>()
-            .pool(ZonePoolBuilder)
+            .pool(ZonePoolBuilder::default())
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
                 deposit_queue,
@@ -432,16 +433,23 @@ where
     }
 }
 
-/// Transaction pool builder for Zone - uses Tempo pool with defaults.
-#[derive(Debug, Default, Clone, Copy)]
+/// Transaction pool builder for Zone.
+///
+/// Builds a [`ZoneTransactionPool`] that wraps the standard [`TempoTransactionPool`]
+/// with a [`ZoneTransactionPolicy`] to enforce zone-specific transaction restrictions
+/// (e.g. rejecting contract creation).
+#[derive(Debug, Default, Clone)]
 #[non_exhaustive]
-pub struct ZonePoolBuilder;
+pub struct ZonePoolBuilder {
+    /// Transaction policy enforced by the pool on every submission.
+    pub policy: ZoneTransactionPolicy,
+}
 
 impl<Node> PoolBuilder<Node, ZoneEvmConfig> for ZonePoolBuilder
 where
     Node: FullNodeTypes<Types = ZoneNode>,
 {
-    type Pool = TempoTransactionPool<Node::Provider>;
+    type Pool = ZoneTransactionPool<Node::Provider>;
 
     async fn build_pool(
         self,
@@ -491,7 +499,8 @@ where
             .with_validator(validator)
             .build(blob_store, pool_config.clone());
 
-        let transaction_pool = TempoTransactionPool::new(protocol_pool, aa_2d_pool);
+        let tempo_pool = TempoTransactionPool::new(protocol_pool, aa_2d_pool);
+        let transaction_pool = ZoneTransactionPool::new(tempo_pool, self.policy);
 
         spawn_maintenance_tasks(ctx, transaction_pool.clone(), &pool_config)?;
 
@@ -499,7 +508,7 @@ where
         // This consolidates: expired AA txs, 2D nonce updates, AMM cache, and keychain revocations
         ctx.task_executor().spawn_critical(
             "txpool maintenance - tempo pool",
-            tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.clone()),
+            tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.tempo_pool()),
         );
 
         info!(target: "reth::cli", "Transaction pool initialized");
