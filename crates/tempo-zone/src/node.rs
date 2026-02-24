@@ -6,9 +6,8 @@
 use alloy_primitives::U256;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
-    NewPayloadError, NodeAddOns, NodeTypes, PayloadAttributesBuilder, PayloadTypes,
-    PayloadValidator,
+    AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
+    PayloadAttributesBuilder, PayloadTypes,
 };
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
@@ -21,7 +20,6 @@ use reth_node_builder::{
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock};
 use reth_provider::ChainSpecProvider;
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
@@ -33,11 +31,11 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoEvmConfig;
 use tempo_node::{
-    DEFAULT_AA_VALID_AFTER_MAX_SECS, node::TempoPayloadAttributesBuilder,
-    rpc::TempoReceiptConverter,
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator,
+    node::TempoPayloadAttributesBuilder, rpc::TempoReceiptConverter,
 };
-use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
-use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
+use tempo_payload_types::TempoPayloadTypes;
+use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
     amm::AmmLiquidityCache,
@@ -427,40 +425,10 @@ impl<Node> PayloadValidatorBuilder<Node> for ZoneEngineValidatorBuilder
 where
     Node: FullNodeComponents<Types = ZoneNode>,
 {
-    type Validator = ZonePayloadValidator;
+    type Validator = TempoEngineValidator;
 
     async fn build(self, _ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
-        Ok(ZonePayloadValidator)
-    }
-}
-
-/// Payload validator for Zone.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ZonePayloadValidator;
-
-impl PayloadValidator<TempoPayloadTypes> for ZonePayloadValidator {
-    type Block = Block;
-
-    fn convert_payload_to_block(
-        &self,
-        payload: TempoExecutionData,
-    ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
-        let TempoExecutionData {
-            block,
-            validator_set: _,
-        } = payload;
-        Ok(Arc::unwrap_or_clone(block))
-    }
-
-    fn validate_payload_attributes_against_header(
-        &self,
-        attr: &TempoPayloadAttributes,
-        header: &TempoHeader,
-    ) -> Result<(), InvalidPayloadAttributesError> {
-        if attr.inner.timestamp < header.timestamp() {
-            return Err(InvalidPayloadAttributesError::InvalidTimestamp);
-        }
-        Ok(())
+        Ok(TempoEngineValidator::new())
     }
 }
 
