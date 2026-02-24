@@ -486,19 +486,21 @@ where
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
         let tempo_evm_config = TempoEvmConfig::new(ctx.chain_spec());
-        let validator =
-            TransactionValidationTaskExecutor::eth_builder(ctx.provider().clone(), tempo_evm_config)
-                .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
-                .with_local_transactions_config(pool_config.local_transactions_config.clone())
-                .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
-                .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
-                .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
-                .disable_balance_check()
-                .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-                .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
-                .with_custom_tx_type(TempoTxType::AA as u8)
-                .no_eip4844()
-                .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        let validator = TransactionValidationTaskExecutor::eth_builder(
+            ctx.provider().clone(),
+            tempo_evm_config,
+        )
+        .with_max_tx_input_bytes(ctx.config().txpool.max_tx_input_bytes)
+        .with_local_transactions_config(pool_config.local_transactions_config.clone())
+        .set_tx_fee_cap(ctx.config().rpc.rpc_tx_fee_cap)
+        .with_max_tx_gas_limit(ctx.config().txpool.max_tx_gas_limit)
+        .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
+        .disable_balance_check()
+        .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
+        .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
+        .with_custom_tx_type(TempoTxType::AA as u8)
+        .no_eip4844()
+        .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
 
         let aa_2d_config = AA2dPoolConfig {
             price_bump_config: pool_config.price_bumps,
