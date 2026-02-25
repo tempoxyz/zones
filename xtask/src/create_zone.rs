@@ -194,6 +194,8 @@ impl CreateZone {
             tempo_genesis_header_rlp: header_rlp_hex,
             sequencer: Some(self.sequencer),
             specs_out: self.specs_out.clone(),
+            with_createx: true,
+            with_safe_deployer: true,
         };
         genesis_cmd.run().await?;
 
