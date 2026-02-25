@@ -118,6 +118,8 @@ fn main() {
             // Disable the auth (Engine API) server — the zone node derives blocks
             // from L1, so no external consensus client or Engine API is needed.
             builder.config_mut().rpc.disable_auth_server = true;
+            // Allow up to 100k log entries per `eth_getLogs` response (default is 20k).
+            builder.config_mut().rpc.rpc_max_logs_per_response = 100_000u64.into();
 
             // Parse the sequencer key to derive the address for block building
             // and the k256 secret key for ECIES decryption of encrypted deposits.
