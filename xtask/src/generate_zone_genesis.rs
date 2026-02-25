@@ -86,6 +86,12 @@ pub(crate) struct GenerateZoneGenesis {
     /// Include Safe Singleton Factory in genesis.
     #[arg(long)]
     pub(crate) with_safe_deployer: bool,
+
+    /// Include Arachnid CREATE2 factory in genesis.
+    /// The factory is always used internally to deploy Permit2; this flag
+    /// controls whether it remains in the final genesis state.
+    #[arg(long)]
+    pub(crate) with_create2_factory: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -226,6 +232,9 @@ impl GenerateZoneGenesis {
             .accounts
             .iter()
             .filter(|(addr, _)| **addr != DEPLOYER)
+            .filter(|(addr, _)| {
+                self.with_create2_factory || **addr != ARACHNID_CREATE2_FACTORY_ADDRESS
+            })
             .map(|(address, account)| {
                 let storage: Option<BTreeMap<_, _>> = if !account.storage.is_empty() {
                     Some(

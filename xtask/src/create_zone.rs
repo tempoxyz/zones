@@ -196,6 +196,7 @@ impl CreateZone {
             specs_out: self.specs_out.clone(),
             with_createx: true,
             with_safe_deployer: true,
+            with_create2_factory: true,
         };
         genesis_cmd.run().await?;
 
