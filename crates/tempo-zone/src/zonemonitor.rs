@@ -163,7 +163,7 @@ impl ZoneMonitor {
                 .await
                 .expect("failed to look up zone block by hash from portal")
                 .expect("portal blockHash not found on zone L2 — chain mismatch?");
-            block.header.inner.inner.inner.number
+            block.number()
         };
 
         let prev_processed_deposit_hash = if last_submitted_zone_block == 0 {
