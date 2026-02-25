@@ -134,12 +134,12 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let portal_for_init = ZonePortal::new(config.portal_address, l1_provider.clone());
-        let genesis_tempo_block_number: u64 = portal_for_init
-            .genesisTempoBlockNumber()
-            .call()
-            .await
-            .expect("failed to read genesisTempoBlockNumber");
+        let genesis_tempo_block_number: u64 =
+            ZonePortal::new(config.portal_address, l1_provider.clone())
+                .genesisTempoBlockNumber()
+                .call()
+                .await
+                .expect("failed to read genesisTempoBlockNumber");
 
         let batch_submitter = BatchSubmitter::new(
             config.portal_address,
@@ -158,12 +158,25 @@ impl ZoneMonitor {
         let last_submitted_zone_block = if prev_zone_block_hash.is_zero() {
             0
         } else {
-            let block = provider
-                .get_block_by_hash(prev_zone_block_hash)
-                .await
-                .expect("failed to look up zone block by hash from portal")
-                .expect("portal blockHash not found on zone L2 — chain mismatch?");
-            block.number()
+            match provider.get_block_by_hash(prev_zone_block_hash).await {
+                Ok(Some(block)) => block.number(),
+                Ok(None) => {
+                    warn!(
+                        %prev_zone_block_hash,
+                        "Portal blockHash not found on zone L2 — zone may have been reset. \
+                         Starting from genesis."
+                    );
+                    0
+                }
+                Err(e) => {
+                    warn!(
+                        %prev_zone_block_hash,
+                        error = %e,
+                        "Failed to look up zone block by hash, starting from genesis"
+                    );
+                    0
+                }
+            }
         };
 
         let prev_processed_deposit_hash = if last_submitted_zone_block == 0 {
