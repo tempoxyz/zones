@@ -24,10 +24,6 @@ use reth_transaction_pool::{
 };
 use tempo_transaction_pool::{TempoTransactionPool, validator::TempoTransactionValidator};
 
-// ---------------------------------------------------------------------------
-// Policy
-// ---------------------------------------------------------------------------
-
 /// Policy flags that control which transaction types a zone accepts.
 ///
 /// Applied by [`ZoneTransactionPool`] on every submission and by
@@ -62,10 +58,6 @@ impl ZoneTransactionPolicy {
         None
     }
 }
-
-// ---------------------------------------------------------------------------
-// ZoneTransactionPool
-// ---------------------------------------------------------------------------
 
 /// Transaction pool wrapper that enforces a [`ZoneTransactionPolicy`] on every
 /// submission before delegating to the inner [`TempoTransactionPool`].
@@ -547,10 +539,6 @@ where
     }
 }
 
-// ---------------------------------------------------------------------------
-// ZoneTransactionValidator
-// ---------------------------------------------------------------------------
-
 /// Transaction validator that enforces a [`ZoneTransactionPolicy`] on top of the standard
 /// Tempo validation pipeline.
 ///
@@ -609,10 +597,6 @@ where
         self.inner.on_new_head_block(new_tip_block)
     }
 }
-
-// ---------------------------------------------------------------------------
-// Error
-// ---------------------------------------------------------------------------
 
 /// Error returned when a transaction attempts contract creation but the zone policy forbids it.
 #[derive(Debug, thiserror::Error)]
