@@ -159,7 +159,7 @@ impl ZoneMonitor {
             0
         } else {
             let block = provider
-                .get_block_by_hash(prev_zone_block_hash.into())
+                .get_block_by_hash(prev_zone_block_hash)
                 .await
                 .expect("failed to look up zone block by hash from portal")
                 .expect("portal blockHash not found on zone L2 — chain mismatch?");
