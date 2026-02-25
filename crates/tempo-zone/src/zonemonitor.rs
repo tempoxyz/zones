@@ -153,13 +153,32 @@ impl ZoneMonitor {
         )
         .expect("failed to read portal state at startup");
 
-        let prev_processed_deposit_hash = inbox
-            .processedDepositQueueHash()
-            .call()
-            .await
-            .unwrap_or(B256::ZERO);
+        // Resolve the last submitted zone block number from the portal's block
+        // hash. If the hash is zero no batches have been submitted yet.
+        let last_submitted_zone_block = if prev_zone_block_hash.is_zero() {
+            0
+        } else {
+            let block = provider
+                .get_block_by_hash(prev_zone_block_hash)
+                .await
+                .expect("failed to look up zone block by hash from portal")
+                .expect("portal blockHash not found on zone L2 — chain mismatch?");
+            block.number()
+        };
+
+        let prev_processed_deposit_hash = if last_submitted_zone_block == 0 {
+            B256::ZERO
+        } else {
+            inbox
+                .processedDepositQueueHash()
+                .block(last_submitted_zone_block.into())
+                .call()
+                .await
+                .unwrap_or(B256::ZERO)
+        };
 
         info!(
+            last_submitted_zone_block,
             %prev_zone_block_hash,
             %prev_processed_deposit_hash,
             portal_withdrawal_queue_tail,
@@ -175,7 +194,7 @@ impl ZoneMonitor {
             withdrawal_store,
             batch_submitter,
             withdrawal_notify,
-            last_submitted_zone_block: 0,
+            last_submitted_zone_block,
             prev_processed_deposit_hash,
             prev_zone_block_hash,
             portal_withdrawal_queue_tail,
