@@ -118,8 +118,8 @@ fn main() {
             // Disable the auth (Engine API) server — the zone node derives blocks
             // from L1, so no external consensus client or Engine API is needed.
             builder.config_mut().rpc.disable_auth_server = true;
-            // Allow up to 100k log entries per `eth_getLogs` response (default is 20k).
-            builder.config_mut().rpc.rpc_max_logs_per_response = 100_000u64.into();
+            builder.config_mut().rpc.rpc_max_logs_per_response = 1_000_000u64.into();
+            builder.config_mut().rpc.rpc_max_blocks_per_filter = 1_000_000u64.into();
 
             // Parse the sequencer key to derive the address for block building
             // and the k256 secret key for ECIES decryption of encrypted deposits.
@@ -193,8 +193,8 @@ fn main() {
                 "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
             );
 
-            // If any sequencer task exits, log it.
-            tokio::spawn(async move {
+            // Spawn as critical tasks — node shuts down if either exits.
+            handle.node.task_executor.spawn_critical("zone-monitor", async move {
                 tokio::select! {
                     res = seq_handle.withdrawal_handle => {
                         tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
