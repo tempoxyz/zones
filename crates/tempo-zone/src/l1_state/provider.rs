@@ -7,14 +7,14 @@
 //!
 //! Both a synchronous ([`L1StateProvider::get_storage`]) and an asynchronous
 //! ([`L1StateProvider::get_storage_async`]) entry point are provided. The synchronous variant is
-//! intended for use inside EVM precompiles where async is unavailable — it dispatches the RPC
-//! call through a [`tokio::runtime::Handle`] with a configurable timeout.
-
-use std::time::Duration;
+//! intended for use inside EVM precompiles where async is unavailable — it retries the RPC
+//! call indefinitely with exponential backoff to avoid bricking the chain on transient outages.
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
+use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
@@ -26,15 +26,20 @@ use super::cache::SharedL1StateCache;
 pub struct L1StateProviderConfig {
     /// HTTP RPC endpoint for Tempo L1.
     pub l1_rpc_url: String,
-    /// Timeout applied to each individual RPC request. Defaults to 2 seconds.
-    pub request_timeout: Duration,
+    /// Maximum number of transport-level retries for failed/rate-limited RPC requests.
+    /// Defaults to 10.
+    pub max_retries: u32,
+    /// Initial backoff in milliseconds for the transport-level retry layer.
+    /// Defaults to 20ms.
+    pub initial_backoff_ms: u64,
 }
 
 impl Default for L1StateProviderConfig {
     fn default() -> Self {
         Self {
             l1_rpc_url: String::new(),
-            request_timeout: Duration::from_secs(2),
+            max_retries: 10,
+            initial_backoff_ms: 20,
         }
     }
 }
@@ -57,11 +62,10 @@ impl Default for L1StateProviderConfig {
 /// `spawn_blocking`). Calling it from within an async task on the same runtime will panic.
 #[derive(Debug, Clone)]
 pub struct L1StateProvider {
-    /// Timeout applied to each individual RPC request.
-    request_timeout: Duration,
     /// In-memory cache of L1 contract storage slots, checked before any RPC call.
     cache: SharedL1StateCache,
     /// HTTP provider pointed at **Tempo L1**, used as a fallback when the cache misses.
+    /// Wraps a [`RetryBackoffLayer`] that handles retries with exponential backoff.
     provider: DynProvider<TempoNetwork>,
     /// Handle to the tokio runtime, used by [`get_storage`](Self::get_storage) to
     /// dispatch async RPC calls from a blocking (non-async) context.
@@ -80,7 +84,11 @@ impl L1StateProvider {
         cache: SharedL1StateCache,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<Self> {
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        let retry_layer =
+            RetryBackoffLayer::new(config.max_retries, config.initial_backoff_ms, u64::MAX);
+
+        let client = RpcClient::builder()
+            .layer(retry_layer)
             .connect(&config.l1_rpc_url)
             .await
             .map_err(|e| {
@@ -88,11 +96,13 @@ impl L1StateProvider {
                     "Failed to connect L1 state provider at {}: {e}",
                     config.l1_rpc_url
                 )
-            })?
+            })?;
+
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_client(client)
             .erased();
 
         Ok(Self {
-            request_timeout: config.request_timeout,
             cache,
             provider,
             runtime_handle,
@@ -104,13 +114,11 @@ impl L1StateProvider {
     /// Used by [`ZoneEvmConfig::new_without_l1`](crate::evm::ZoneEvmConfig::new_without_l1)
     /// to build a fallback provider that won't panic on an empty RPC URL.
     pub fn new_raw(
-        config: L1StateProviderConfig,
         cache: SharedL1StateCache,
         provider: DynProvider<TempoNetwork>,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
-            request_timeout: config.request_timeout,
             cache,
             provider,
             runtime_handle,
@@ -120,8 +128,10 @@ impl L1StateProvider {
     /// Read a storage slot synchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// This method is designed for use inside EVM precompiles that run on a **blocking thread**.
-    /// On cache miss it dispatches an async RPC call via `runtime_handle.block_on()` with the
-    /// configured [`request_timeout`](L1StateProviderConfig::request_timeout).
+    /// On cache miss it retries the RPC call indefinitely until the value is fetched. The
+    /// transport layer handles backoff internally via [`RetryBackoffLayer`], so retries here
+    /// are immediate. This ensures a transient L1 RPC outage stalls block production rather
+    /// than bricking the chain with a hard precompile error.
     ///
     /// # Panics
     ///
@@ -138,36 +148,37 @@ impl L1StateProvider {
 
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
-        let start = std::time::Instant::now();
-        let result = tokio::task::block_in_place(|| {
-            self.runtime_handle.block_on(tokio::time::timeout(
-                self.request_timeout,
-                self.fetch_slot(address, slot, block_number),
-            ))
-        });
-        let elapsed = start.elapsed();
+        let mut attempt = 0u32;
+        loop {
+            attempt += 1;
+            let start = std::time::Instant::now();
+            let result = tokio::task::block_in_place(|| {
+                self.runtime_handle
+                    .block_on(self.fetch_slot(address, slot, block_number))
+            });
+            let elapsed = start.elapsed();
 
-        match result {
-            Ok(inner) => {
-                let value = inner?;
-                self.cache.write().set(address, slot, block_number, value);
-                info!(%address, %slot, block_number, %value, ?elapsed, "L1 storage RPC fetch succeeded");
-                Ok(value)
-            }
-            Err(_elapsed) => {
-                warn!(%address, %slot, block_number, ?elapsed, timeout = ?self.request_timeout, "L1 storage RPC fetch timed out");
-                Err(eyre::eyre!(
-                    "L1 RPC request timed out after {:?} for address={address} slot={slot} block={block_number}",
-                    self.request_timeout,
-                ))
+            match result {
+                Ok(value) => {
+                    self.cache.write().set(address, slot, block_number, value);
+                    if attempt > 1 {
+                        info!(%address, %slot, block_number, %value, ?elapsed, attempt, "L1 storage RPC fetch succeeded after retries");
+                    } else {
+                        info!(%address, %slot, block_number, %value, ?elapsed, "L1 storage RPC fetch succeeded");
+                    }
+                    return Ok(value);
+                }
+                Err(rpc_err) => {
+                    warn!(%address, %slot, block_number, %rpc_err, ?elapsed, attempt, "L1 storage RPC fetch failed, retrying");
+                }
             }
         }
     }
 
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
     ///
-    /// Same semantics as [`get_storage`](Self::get_storage) but natively async, using
-    /// `tokio::time::timeout` directly.
+    /// Same semantics as [`get_storage`](Self::get_storage) but natively async. The
+    /// transport-level [`RetryBackoffLayer`] handles retries with exponential backoff.
     pub async fn get_storage_async(
         &self,
         address: Address,
@@ -184,23 +195,9 @@ impl L1StateProvider {
 
         warn!(%address, %slot, block_number, "L1 storage cache miss, fetching from RPC");
 
-        let result = tokio::time::timeout(
-            self.request_timeout,
-            self.fetch_slot(address, slot, block_number),
-        )
-        .await;
-
-        match result {
-            Ok(inner) => {
-                let value = inner?;
-                self.cache.write().set(address, slot, block_number, value);
-                Ok(value)
-            }
-            Err(_elapsed) => Err(eyre::eyre!(
-                "L1 RPC request timed out after {:?} for address={address} slot={slot} block={block_number}",
-                self.request_timeout,
-            )),
-        }
+        let value = self.fetch_slot(address, slot, block_number).await?;
+        self.cache.write().set(address, slot, block_number, value);
+        Ok(value)
     }
 
     /// Expose the shared cache handle for external use (e.g. the listener).
