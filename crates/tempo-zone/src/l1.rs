@@ -525,6 +525,7 @@ impl L1Deposit {
 
 /// Result of attempting to enqueue an L1 block into the deposit queue.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub(crate) enum EnqueueOutcome {
     /// Block was appended to the queue.
     Accepted,
