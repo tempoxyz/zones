@@ -14,7 +14,7 @@ This document defines a human-readable address format for the Tempo ecosystem th
 
 ## Abstract
 
-This TIP defines a Base58-encoded address format for Tempo that is easily distinguishable from other blockchain addresses, supports zone-specific addresses, and includes strong checksumming to prevent user errors. Addresses start with a 2-character ASCII prefix (`t1` for mainnet, `tz` for zones) followed by a Base58-encoded payload.
+This TIP defines an address format for Tempo that is easily distinguishable from other blockchain addresses, supports zone-specific addresses, and includes strong checksumming to prevent user errors. Addresses start with an ASCII prefix (`tempom` for mainnet, `tempoz` for zones) followed by a bech32 base32-encoded payload.
 
 ## Motivation
 
@@ -23,7 +23,7 @@ As Tempo expands with zones (L2 validiums), users need a clear way to distinguis
 2. Zone addresses from Tempo mainnet addresses
 3. Addresses on different zones from each other
 
-A well-designed address format prevents costly mistakes like sending funds to the wrong chain or zone. The format is inspired by Bitcoin's address format but adapted for Tempo's multi-zone architecture.
+A well-designed address format prevents costly mistakes like sending funds to the wrong chain or zone. The format uses a clear `tempo` prefix for instant recognition and bech32 base32 encoding for efficient, case-insensitive representation.
 
 ---
 
@@ -31,13 +31,13 @@ A well-designed address format prevents costly mistakes like sending funds to th
 
 ## Address Structure
 
-A Tempo address consists of a 2-character ASCII prefix followed by a Base58-encoded payload:
+A Tempo address consists of an ASCII prefix followed by a bech32 base32-encoded payload:
 
 ```
-┌──────────────┬─────────────────────────────────────────────┐
-│ ASCII Prefix │           Base58-encoded payload            │
-│   2 chars    │                                             │
-└──────────────┴─────────────────────────────────────────────┘
+┌──────────────┬──────────────────────────────────────────────┐
+│ ASCII Prefix │        Bech32 base32-encoded payload         │
+│   6 chars    │                                              │
+└──────────────┴──────────────────────────────────────────────┘
                               │
                               ▼
                ┌─────────┬──────────────┬──────────┐
@@ -46,20 +46,18 @@ A Tempo address consists of a 2-character ASCII prefix followed by a Base58-enco
                └─────────┴──────────────┴──────────┘
 ```
 
-## ASCII Prefix (2 characters)
+## ASCII Prefix (6 characters)
 
-The prefix is **not** Base58-encoded; it is literal ASCII:
+The prefix is **not** base32-encoded; it is literal ASCII:
 
 | Prefix | Meaning | Has Zone ID |
 |--------|---------|-------------|
-| `t1` | Tempo mainnet | No |
-| `tz` | Tempo zone | Yes |
-| `tt` | Tempo testnet | No |
-| `tZ` | Tempo testnet zone | Yes |
+| `tempom` | Tempo mainnet | No |
+| `tempoz` | Tempo zone | Yes |
 
 ## Zone ID Encoding (Variable Length, 0-9 bytes)
 
-For zone addresses (prefixes `tz` and `tZ`), the zone ID is encoded in the payload using Bitcoin's CompactSize variable-length encoding:
+For zone addresses (prefix `tempoz`), the zone ID is encoded in the payload using Bitcoin's CompactSize variable-length encoding:
 
 | Zone ID Range | Encoding | Bytes |
 |---------------|----------|-------|
@@ -68,7 +66,7 @@ For zone addresses (prefixes `tz` and `tZ`), the zone ID is encoded in the paylo
 | 65,536-4,294,967,295 | `0xFE` + 4 bytes LE | 5 |
 | > 4,294,967,295 | `0xFF` + 8 bytes LE | 9 |
 
-For mainnet addresses (prefixes `t1` and `tt`), the zone ID is omitted (0 bytes).
+For mainnet addresses (prefix `tempom`), the zone ID is omitted (0 bytes).
 
 ## Reserved Zone IDs
 
@@ -86,63 +84,86 @@ The checksum is the first 4 bytes of:
 SHA256(SHA256(prefix_bytes || zone_id || raw_address))
 ```
 
-Where `prefix_bytes` is the 2-byte ASCII prefix (e.g., `"t1"` = `0x7431`, `"tz"` = `0x747A`).
+Where `prefix_bytes` is the ASCII prefix (e.g., `"tempom"` = `0x74656d706f6d`, `"tempoz"` = `0x74656d706f7a`).
 
 Including the prefix in the checksum ensures that changing the prefix invalidates the address.
 
-## Base58 Alphabet
+## Bech32 Base32 Encoding
 
-Uses the Bitcoin Base58 alphabet (excludes 0, O, I, l to avoid confusion):
+The payload is encoded using the base32 encoding scheme from BIP-173 (bech32). This uses the following 32-character alphabet:
+
 ```
-123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz
+qpzry9x8gf2tvdw0s3jn54khce6mua7l
 ```
+
+Where value 0 maps to `q`, value 1 to `p`, ..., value 31 to `l`.
+
+The encoding process converts 8-bit byte groups to 5-bit groups:
+
+1. Concatenate all payload bytes into a bit stream
+2. Split into 5-bit groups (pad the last group with zeros on the right if needed)
+3. Map each 5-bit value to the corresponding character in the alphabet
+
+Decoding reverses the process:
+
+1. Map each character to its 5-bit value
+2. Concatenate into a bit stream
+3. Re-group into 8-bit bytes
+4. Discard any trailing padding bits (which must be zero)
+
+Addresses are case-insensitive but SHOULD be produced in lowercase.
+
+> **Note**: Only the base32 encoding from BIP-173 is used. The bech32 checksum and HRP conventions are not used; Tempo addresses have their own prefix and checksum scheme described above.
 
 ## Address Length Summary
 
-| Type | Payload Size | Total Length (approx) |
-|------|-------------|----------------------|
-| Mainnet (`t1`) | 24 bytes | **34-35 chars** |
-| Zone (ID < 253) | 25 bytes | **35-36 chars** |
-| Zone (ID < 65536) | 27 bytes | **38-39 chars** |
-| Zone (ID < 4B) | 29 bytes | **41-42 chars** |
-| Zone (ID max uint64) | 33 bytes | **46-47 chars** |
+| Type | Payload Size | Base32 Chars | Total Length |
+|------|-------------|-------------|-------------|
+| Mainnet (`tempom`) | 24 bytes | 39 chars | **45 chars** |
+| Zone (ID < 253) | 25 bytes | 40 chars | **46 chars** |
+| Zone (ID < 65536) | 27 bytes | 44 chars | **50 chars** |
+| Zone (ID < 4B) | 29 bytes | 47 chars | **53 chars** |
+| Zone (ID max uint64) | 33 bytes | 53 chars | **59 chars** |
 
 ## Encoding Algorithm
 
 ```python
-def encode_tempo_address(raw_address: bytes, zone_id: int | None = None, testnet: bool = False) -> str:
+def encode_tempo_address(raw_address: bytes, zone_id: int | None = None) -> str:
     if zone_id is None:
-        prefix = "tt" if testnet else "t1"
+        prefix = "tempom"
         zone_bytes = b''
     else:
-        prefix = "tZ" if testnet else "tz"
+        prefix = "tempoz"
         zone_bytes = encode_compact_size(zone_id)
     
     # Checksum includes prefix
     checksum_input = prefix.encode('ascii') + zone_bytes + raw_address
     checksum = sha256(sha256(checksum_input))[:4]
     
-    # Base58 encode only the payload (zone_id + address + checksum)
+    # Bech32 base32 encode only the payload (zone_id + address + checksum)
     payload = zone_bytes + raw_address + checksum
-    return prefix + base58_encode(payload)
+    return prefix + bech32_base32_encode(payload)
 ```
 
 ## Decoding Algorithm
 
 ```python
-def decode_tempo_address(address: str) -> tuple[bytes, int | None, bool]:
-    """Returns (raw_address, zone_id, is_testnet)"""
+def decode_tempo_address(address: str) -> tuple[bytes, int | None]:
+    """Returns (raw_address, zone_id)"""
     
-    # Extract prefix
-    prefix = address[:2]
-    if prefix not in ("t1", "tz", "tt", "tZ"):
-        raise InvalidPrefix(prefix)
-    
-    is_testnet = prefix in ("tt", "tZ")
-    has_zone = prefix in ("tz", "tZ")
+    # Extract prefix (case-insensitive)
+    address_lower = address.lower()
+    if address_lower.startswith("tempom"):
+        prefix = "tempom"
+        has_zone = False
+    elif address_lower.startswith("tempoz"):
+        prefix = "tempoz"
+        has_zone = True
+    else:
+        raise InvalidPrefix()
     
     # Decode payload
-    payload = base58_decode(address[2:])
+    payload = bech32_base32_decode(address_lower[len(prefix):])
     
     # Parse zone ID if present
     if has_zone:
@@ -169,15 +190,15 @@ def decode_tempo_address(address: str) -> tuple[bytes, int | None, bool]:
     if checksum != expected:
         raise InvalidChecksum()
     
-    return raw_address, zone_id, is_testnet
+    return raw_address, zone_id
 ```
 
 ## Validation Rules
 
-1. Verify address starts with valid prefix (`t1`, `tz`, `tt`, or `tZ`)
-2. Extract and Base58-decode the payload (everything after the 2-char prefix)
-3. If zone prefix (`tz` or `tZ`), decode zone ID using CompactSize encoding
-4. If mainnet prefix (`t1` or `tt`), verify no zone ID bytes present
+1. Verify address starts with valid prefix (`tempom` or `tempoz`)
+2. Extract and bech32 base32-decode the payload (everything after the 6-char prefix)
+3. If zone prefix (`tempoz`), decode zone ID using CompactSize encoding
+4. If mainnet prefix (`tempom`), verify no zone ID bytes present
 5. Extract raw address (20 bytes)
 6. Extract checksum (last 4 bytes)
 7. Compute expected checksum: `SHA256(SHA256(prefix || zone_id || address))[0:4]`
@@ -190,7 +211,7 @@ For user interfaces, addresses SHOULD be displayed with:
 - Monospace font
 - Full address always shown (no truncation for important operations)
 
-Example: `t1J7X cvK8m J3xGd QN5rY 4kHvL 2nP6w T9ab`
+Example: `tempom wst8d 6qejx tdg4y 5r3za rvary 0c5xw 7kvmg h8pm`
 
 ## Examples
 
@@ -198,33 +219,34 @@ Example: `t1J7X cvK8m J3xGd QN5rY 4kHvL 2nP6w T9ab`
 
 Raw address: `0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28`
 
-1. ASCII prefix: `t1`
+1. ASCII prefix: `tempom`
 2. Zone ID: (none)
 3. Raw address: 20 bytes
-4. Checksum: `SHA256(SHA256("t1" || address))[0:4]`
-5. Base58 encode (address + checksum)
+4. Checksum: `SHA256(SHA256("tempom" || address))[0:4]`
+5. Bech32 base32 encode (address + checksum)
 6. Prepend prefix
 
-Result: `t1J7XcvK8mJ3xGdQN5rY4kHvL2nP6wT9ab` (~34 chars)
+Result: `tempomwst8d6qejxtdg4y5r3zarvary0c5xw7kvmgh8pm` (~45 chars)
 
 ### Zone Address (Zone ID = 1)
 
-1. ASCII prefix: `tz`
+1. ASCII prefix: `tempoz`
 2. Zone ID: `0x01` (1 byte)
 3. Raw address: 20 bytes
-4. Checksum: `SHA256(SHA256("tz" || 0x01 || address))[0:4]`
-5. Base58 encode (zone_id + address + checksum)
+4. Checksum: `SHA256(SHA256("tempoz" || 0x01 || address))[0:4]`
+5. Bech32 base32 encode (zone_id + address + checksum)
 6. Prepend prefix
 
-Result: `tzAJ7XcvK8mJ3xGdQN5rY4kHvL2nP6wT9ab` (~36 chars)
+Result: `tempozqwst8d6qejxtdg4y5r3zarvary0c5xw7kvmgh8pm` (~46 chars)
 
 ---
 
 # Invariants
 
-1. **Prefix visibility**: The 2-character prefix MUST always be visible and unaffected by encoding
+1. **Prefix visibility**: The 6-character prefix MUST always be visible and unaffected by encoding
 2. **Checksum coverage**: The checksum MUST include the prefix, preventing prefix swaps
-3. **Unique decoding**: Any valid address string MUST decode to exactly one (raw_address, zone_id, network) tuple
-4. **Round-trip**: `decode(encode(addr, zone, net)) == (addr, zone, net)` for all valid inputs
+3. **Unique decoding**: Any valid address string MUST decode to exactly one (raw_address, zone_id) tuple
+4. **Round-trip**: `decode(encode(addr, zone)) == (addr, zone)` for all valid inputs
 5. **Checksum strength**: Single-character errors are detected with probability >= 1 - 2**(-32) (the 4-byte checksum provides ~32 bits of error detection)
 6. **Zone 0 reserved**: Zone ID 0 MUST NOT be assigned by ZoneFactory
+7. **Case insensitivity**: Addresses MUST be valid regardless of case (but SHOULD be produced in lowercase)
