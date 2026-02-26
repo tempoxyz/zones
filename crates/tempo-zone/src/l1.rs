@@ -386,7 +386,7 @@ impl L1Subscriber {
 }
 
 /// A deposit extracted from L1.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Deposit {
     /// L1 block number where the deposit was included.
     pub l1_block_number: u64,
@@ -423,7 +423,7 @@ impl Deposit {
 }
 
 /// An encrypted deposit extracted from L1.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EncryptedDeposit {
     /// L1 block number where the deposit was included.
     pub l1_block_number: u64,
@@ -472,7 +472,7 @@ impl EncryptedDeposit {
 }
 
 /// A deposit from L1 — either regular (plaintext) or encrypted.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum L1Deposit {
     /// A regular deposit with plaintext recipient and memo.
     Regular(Deposit),
@@ -535,7 +535,7 @@ pub enum EnqueueOutcome {
 }
 
 /// An L1 block's header paired with the deposits found in that block.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct L1BlockDeposits {
     /// The sealed L1 block header (caches the block hash).
     pub header: SealedHeader<TempoHeader>,
@@ -555,8 +555,8 @@ pub struct L1BlockDeposits {
 /// This mirrors the L1 portal's `currentDepositQueueHash`.
 #[derive(Debug)]
 pub struct PendingDeposits {
-    /// Deposit hash chain value after the last block consumed by the builder
-    /// via `pop_next` or `drain`. Serves as the rollback anchor when purging
+    /// Deposit hash chain value after the last block consumed by the engine
+    /// via `confirm` or `drain`. Serves as the rollback anchor when purging
     /// blocks during a reorg.
     processed_head_hash: B256,
     /// Deposit hash chain value after applying all pending deposits. Advances
@@ -565,11 +565,11 @@ pub struct PendingDeposits {
     enqueued_head_hash: B256,
     /// Pending L1 blocks with their deposits, not yet processed by the zone
     pending: Vec<L1BlockDeposits>,
-    /// Highest L1 block ever enqueued (number + hash). Survives `pop_next` /
+    /// Highest L1 block ever enqueued (number + hash). Survives `confirm` /
     /// `drain` so that reconnecting subscribers know where the queue left off,
     /// even if the engine has already consumed the blocks.
     last_enqueued: Option<NumHash>,
-    /// Last L1 block consumed by the engine via `pop_next` or `drain`.
+    /// Last L1 block consumed by the engine via `confirm` or `drain`.
     /// Used as a floor during reorg backfill to prevent re-offering blocks
     /// the zone has already built into zone blocks.
     last_processed: Option<NumHash>,
@@ -750,26 +750,39 @@ impl PendingDeposits {
         self.last_enqueued = self.pending.last().map(|e| e.header.num_hash());
     }
 
-    /// Take the next pending L1 block (oldest first).
+    /// Peek at the next pending L1 block without removing it.
     ///
-    /// Returns `None` if no L1 blocks are queued. The zone builder calls this once per zone
-    /// block to advance Tempo state by exactly one L1 block at a time.
-    pub fn pop_next(&mut self) -> Option<L1BlockDeposits> {
-        if self.pending.is_empty() {
-            None
-        } else {
-            let block = self.pending.remove(0);
-            self.processed_head_hash = block.queue_hash_after;
-            // Keep last_processed monotonic — never regress the floor.
-            let num_hash = block.header.num_hash();
-            if self
-                .last_processed
-                .is_none_or(|lp| num_hash.number > lp.number)
-            {
-                self.last_processed = Some(num_hash);
-            }
-            Some(block)
+    /// Returns `None` if no L1 blocks are queued. Use [`confirm`](Self::confirm)
+    /// after a successful build to advance the queue.
+    pub fn peek(&self) -> Option<&L1BlockDeposits> {
+        self.pending.first()
+    }
+
+    /// Confirm the next pending L1 block was successfully processed and remove it.
+    ///
+    /// The caller must pass the [`NumHash`] of the block being confirmed. If the
+    /// front of the queue no longer matches (e.g. because a reorg purged it
+    /// between `peek` and `confirm`), this returns `None` and the queue is left
+    /// unchanged.
+    ///
+    /// Must be called after a successful payload build + newPayload acceptance.
+    /// Advances `processed_head_hash` and `last_processed`.
+    pub fn confirm(&mut self, expected: NumHash) -> Option<L1BlockDeposits> {
+        let front = self.pending.first()?;
+        if front.header.num_hash() != expected {
+            return None;
         }
+        let block = self.pending.remove(0);
+        self.processed_head_hash = block.queue_hash_after;
+        // Keep last_processed monotonic — never regress the floor.
+        let num_hash = block.header.num_hash();
+        if self
+            .last_processed
+            .is_none_or(|lp| num_hash.number > lp.number)
+        {
+            self.last_processed = Some(num_hash);
+        }
+        Some(block)
     }
 
     /// Drain all pending L1 block deposits.
@@ -891,9 +904,17 @@ impl DepositQueue {
         self.notify.notify_one();
     }
 
-    /// Pop the next L1 block from the queue.
-    pub fn pop_next(&self) -> Option<L1BlockDeposits> {
-        self.inner.lock().pop_next()
+    /// Peek at the next L1 block without removing it.
+    pub fn peek(&self) -> Option<L1BlockDeposits> {
+        self.inner.lock().peek().cloned()
+    }
+
+    /// Confirm the next L1 block was successfully processed and remove it.
+    ///
+    /// Returns `None` if the front of the queue no longer matches `expected`
+    /// (e.g. a reorg purged it between `peek` and `confirm`).
+    pub fn confirm(&self, expected: NumHash) -> Option<L1BlockDeposits> {
+        self.inner.lock().confirm(expected)
     }
 
     /// Returns the number of pending L1 blocks.
@@ -913,7 +934,7 @@ impl DepositQueue {
 
     /// Returns the most recently enqueued L1 block (number + hash), if any.
     ///
-    /// This is a high-water mark that survives `pop_next` / `drain`, so it
+    /// This is a high-water mark that survives `confirm` / `drain`, so it
     /// reflects the last block ever enqueued — not just what's still pending.
     pub fn last_enqueued(&self) -> Option<NumHash> {
         self.inner.lock().last_enqueued()
@@ -966,6 +987,18 @@ mod tests {
 
     fn header_hash(header: &TempoHeader) -> B256 {
         keccak256(alloy_rlp::encode(header))
+    }
+
+    /// Confirm the front of the queue, panicking if it fails.
+    fn confirm(queue: &mut PendingDeposits) -> L1BlockDeposits {
+        let num_hash = queue.peek().expect("queue is empty").header.num_hash();
+        queue.confirm(num_hash).expect("confirm mismatch")
+    }
+
+    /// Confirm the front of a shared `DepositQueue`, panicking if it fails.
+    fn confirm_shared(queue: &DepositQueue) -> L1BlockDeposits {
+        let num_hash = queue.peek().expect("queue is empty").header.num_hash();
+        queue.confirm(num_hash).expect("confirm mismatch")
     }
 
     #[test]
@@ -1301,14 +1334,17 @@ mod tests {
         let last = queue.last_enqueued().unwrap();
         assert_eq!(last.number, 102);
 
-        // Pop all blocks — last_enqueued must still report 102
-        assert!(queue.pop_next().is_some());
-        assert!(queue.pop_next().is_some());
-        assert!(queue.pop_next().is_some());
-        assert!(queue.pop_next().is_none());
+        // Confirm all blocks — last_enqueued must still report 102
+        assert!(queue.peek().is_some());
+        confirm_shared(&queue);
+        assert!(queue.peek().is_some());
+        confirm_shared(&queue);
+        assert!(queue.peek().is_some());
+        confirm_shared(&queue);
+        assert!(queue.peek().is_none());
 
         let last = queue.last_enqueued().unwrap();
-        assert_eq!(last.number, 102, "last_enqueued must survive pop_next");
+        assert_eq!(last.number, 102, "last_enqueued must survive confirm");
 
         // Enqueue more (continuing from 102), then drain — last_enqueued must still track
         let h102_hash = last.hash;
@@ -1535,10 +1571,11 @@ mod tests {
 
         let hash_after_all = queue.enqueued_head_hash();
 
-        // Pop block 1
-        let popped = queue.pop_next().unwrap();
-        assert_eq!(popped.header.number(), 1);
-        assert_eq!(queue.processed_head_hash, popped.queue_hash_after);
+        // Confirm block 1
+        let peeked = queue.peek().unwrap().clone();
+        assert_eq!(peeked.header.number(), 1);
+        confirm(&mut queue);
+        assert_eq!(queue.processed_head_hash, peeked.queue_hash_after);
 
         // queue.enqueued_head_hash() hasn't changed
         assert_eq!(queue.enqueued_head_hash(), hash_after_all);
@@ -1578,8 +1615,8 @@ mod tests {
         queue.enqueue(h5, vec![]);
 
         // Pop blocks 1 and 2
-        queue.pop_next().unwrap();
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
+        confirm(&mut queue);
         assert_eq!(queue.pending_len(), 3); // blocks 3, 4, 5
 
         let hash_after_block3 = queue.pending_block(0).unwrap().queue_hash_after;
@@ -1617,7 +1654,7 @@ mod tests {
         queue.enqueue(h3, vec![make_deposit(3, 300)]);
 
         // Pop block 1 — processed_head_hash advances
-        let popped = queue.pop_next().unwrap();
+        let popped = confirm(&mut queue);
         let base_after_pop = popped.queue_hash_after;
         assert_eq!(queue.processed_head_hash, base_after_pop);
         assert_eq!(queue.pending_len(), 2); // blocks 2, 3
@@ -1755,8 +1792,8 @@ mod tests {
         ));
 
         // Drain everything
-        queue.pop_next().unwrap();
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
+        confirm(&mut queue);
         assert!(queue.pending_len() == 0);
         assert_eq!(queue.last_enqueued().unwrap().number, 11);
 
@@ -1823,7 +1860,7 @@ mod tests {
         ));
 
         // Pop only block 10
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
         assert_eq!(queue.pending_len(), 2); // blocks 11, 12
 
         // Block 13 with wrong parent — this is a normal parent mismatch on the
@@ -1850,7 +1887,7 @@ mod tests {
         ));
 
         // Drain
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
         assert!(queue.pending_len() == 0);
 
         // Wrong parent → NeedBackfill
@@ -1881,7 +1918,7 @@ mod tests {
         ));
 
         // Drain
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
 
         // Block 14 arrives — gap of 11..13 plus wrong parent is moot because
         // the gap check triggers first
@@ -1913,8 +1950,8 @@ mod tests {
         ));
 
         // Drain everything
-        queue.pop_next().unwrap();
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
+        confirm(&mut queue);
         assert!(queue.pending_len() == 0);
 
         // Re-deliver block 10 or 11 — should be Duplicate
@@ -1939,7 +1976,7 @@ mod tests {
         ));
 
         // Pop and record processed_head_hash
-        let popped = queue.pop_next().unwrap();
+        let popped = confirm(&mut queue);
         let base = queue.processed_head_hash;
         assert_eq!(base, popped.queue_hash_after);
 
@@ -1971,7 +2008,7 @@ mod tests {
         queue.enqueue(h1.clone(), vec![]);
 
         // Drain
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
         assert!(queue.pending_len() == 0);
         assert_eq!(queue.last_enqueued().unwrap().number, 10);
 
@@ -2082,8 +2119,8 @@ mod tests {
         queue.enqueue(h11.clone(), vec![]);
 
         // Drain
-        queue.pop_next().unwrap();
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
+        confirm(&mut queue);
 
         // Re-deliver block 11 with same hash — Duplicate, last_enqueued intact
         assert!(matches!(
@@ -2108,11 +2145,11 @@ mod tests {
         let h2 = make_chained_header(11, h1_hash);
         queue.enqueue(h2, vec![]);
 
-        let popped = queue.pop_next().unwrap();
+        let popped = confirm(&mut queue);
         assert_eq!(queue.last_processed().unwrap().number, 10);
         assert_eq!(queue.last_processed().unwrap().hash, popped.header.hash());
 
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
         assert_eq!(queue.last_processed().unwrap().number, 11);
     }
 
@@ -2154,8 +2191,8 @@ mod tests {
         queue.enqueue(h11, vec![]);
 
         // Engine consumes both blocks
-        queue.pop_next().unwrap(); // block 10
-        queue.pop_next().unwrap(); // block 11
+        confirm(&mut queue); // block 10
+        confirm(&mut queue); // block 11
         assert!(queue.pending_len() == 0);
         assert_eq!(queue.last_processed().unwrap().number, 11);
         assert_eq!(queue.last_enqueued().unwrap().number, 11);
@@ -2205,7 +2242,7 @@ mod tests {
         let h10 = make_test_header(10);
         let _h10_hash = header_hash(&h10);
         queue.enqueue(h10, vec![]);
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
 
         // Simulate last_enqueued being cleared (reorg path)
         queue.clear_last_enqueued();
@@ -2238,11 +2275,12 @@ mod tests {
         queue.enqueue(h11, vec![]);
 
         // Builder expects block 11 (tempoBlockNumber=10, expected=11).
-        // Pop loop should skip block 10 and return block 11.
+        // Peek/confirm loop should skip block 10 and use the correct one.
         let expected = 11u64;
         let l1_block = loop {
-            let block = queue.pop_next().expect("queue should not be empty");
+            let block = queue.peek().expect("queue should not be empty");
             if block.header.number() < expected {
+                confirm_shared(&queue);
                 continue;
             }
             break block;
@@ -2269,9 +2307,9 @@ mod tests {
         queue.enqueue(h102, vec![]);
 
         // Engine consumes all 3
-        queue.pop_next().unwrap();
-        queue.pop_next().unwrap();
-        queue.pop_next().unwrap();
+        confirm(&mut queue);
+        confirm(&mut queue);
+        confirm(&mut queue);
         assert_eq!(queue.last_processed().unwrap().number, 102);
 
         // L1 reorgs at 102: new block 103 has different parent
