@@ -227,7 +227,7 @@ impl L1Subscriber {
                     .await?
                     .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
                 let header: TempoHeader = header_resp.inner.inner;
-                self.deposit_queue.enqueue(header, events)?;
+                self.deposit_queue.enqueue(header, events);
             }
 
             cursor = end + 1;
@@ -277,7 +277,7 @@ impl L1Subscriber {
                 if sealed.parent_hash() == tip_header.hash() {
                     // Confirmed — flush the buffered tip to the queue.
                     let tip_number = tip_header.number();
-                    match self.deposit_queue.try_enqueue(tip_header, tip_events)? {
+                    match self.deposit_queue.try_enqueue(tip_header, tip_events) {
                         EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
                         EnqueueOutcome::NeedBackfill { from, to } => {
                             // Gap between queue head and confirmed tip — backfill
@@ -429,14 +429,6 @@ pub enum L1Deposit {
 }
 
 impl L1Deposit {
-    /// Returns the on-chain `newCurrentDepositQueueHash` from the portal event.
-    pub fn queue_hash(&self) -> B256 {
-        match self {
-            Self::Regular(d) => d.queue_hash,
-            Self::Encrypted(d) => d.queue_hash,
-        }
-    }
-
     /// Compute the next hash chain value: `keccak256(abi.encode(deposit, prevHash))`.
     pub fn hash_chain(&self, prev_hash: B256) -> B256 {
         match self {
@@ -664,7 +656,7 @@ impl PendingDeposits {
         &mut self,
         header: SealedHeader<TempoHeader>,
         events: L1PortalEvents,
-    ) -> eyre::Result<EnqueueOutcome> {
+    ) -> EnqueueOutcome {
         let block_number = header.number();
         let block_hash = header.hash();
         let parent_hash = header.parent_hash();
@@ -676,7 +668,7 @@ impl PendingDeposits {
             .position(|e| e.header.number() == block_number)
         {
             if self.pending[idx].header.hash() == block_hash {
-                return Ok(EnqueueOutcome::Duplicate);
+                return EnqueueOutcome::Duplicate;
             }
             // Different hash at same height — purge from this point (reorg)
             self.purge_from(idx);
@@ -688,13 +680,13 @@ impl PendingDeposits {
         if self.pending.is_empty() {
             if let Some(last) = self.last_enqueued {
                 if block_number <= last.number {
-                    return Ok(EnqueueOutcome::Duplicate);
+                    return EnqueueOutcome::Duplicate;
                 }
                 if block_number > last.number + 1 {
-                    return Ok(EnqueueOutcome::NeedBackfill {
+                    return EnqueueOutcome::NeedBackfill {
                         from: last.number + 1,
                         to: block_number - 1,
-                    });
+                    };
                 }
                 // block_number == last.number + 1 — verify parent connects.
                 // If it doesn't, the consumed block was reorged — clear
@@ -702,30 +694,30 @@ impl PendingDeposits {
                 // with its new (post-reorg) hash.
                 if parent_hash != last.hash {
                     self.last_enqueued = None;
-                    return Ok(EnqueueOutcome::NeedBackfill {
+                    return EnqueueOutcome::NeedBackfill {
                         from: last.number,
                         to: block_number - 1,
-                    });
+                    };
                 }
             } else if let Some(processed) = self.last_processed {
                 // last_enqueued was cleared (reorg of consumed block) but we
                 // know what the engine already consumed. Use it as a floor to
                 // prevent re-offering blocks the zone already built on.
                 if block_number <= processed.number {
-                    return Ok(EnqueueOutcome::Duplicate);
+                    return EnqueueOutcome::Duplicate;
                 }
                 if block_number > processed.number + 1 {
-                    return Ok(EnqueueOutcome::NeedBackfill {
+                    return EnqueueOutcome::NeedBackfill {
                         from: processed.number + 1,
                         to: block_number - 1,
-                    });
+                    };
                 }
                 // Immediate successor of a consumed block. Accept regardless
                 // of parent hash — the parent was reorged but the zone already
                 // committed to it. The builder will detect the hash mismatch.
             }
-            self.append(header, events)?;
-            return Ok(EnqueueOutcome::Accepted);
+            self.append(header, events);
+            return EnqueueOutcome::Accepted;
         }
 
         let tail = self.pending.last().unwrap();
@@ -734,16 +726,16 @@ impl PendingDeposits {
 
         // Block is behind our window
         if block_number <= tail_number {
-            return Ok(EnqueueOutcome::Duplicate);
+            return EnqueueOutcome::Duplicate;
         }
 
         // Gap — need backfill
         let expected = tail_number + 1;
         if block_number > expected {
-            return Ok(EnqueueOutcome::NeedBackfill {
+            return EnqueueOutcome::NeedBackfill {
                 from: expected,
                 to: block_number - 1,
-            });
+            };
         }
 
         // block_number == expected — check parent connects
@@ -763,57 +755,32 @@ impl PendingDeposits {
                 .map(|e| e.header.number() + 1)
                 .unwrap_or(block_number);
             if new_expected < block_number {
-                return Ok(EnqueueOutcome::NeedBackfill {
+                return EnqueueOutcome::NeedBackfill {
                     from: new_expected,
                     to: block_number - 1,
-                });
+                };
             }
             // If new_expected == block_number, fall through to accept (it'll be the anchor)
         }
 
-        self.append(header, events)?;
-        Ok(EnqueueOutcome::Accepted)
+        self.append(header, events);
+        EnqueueOutcome::Accepted
     }
 
     /// Enqueue a block during backfill. Accepts or skips duplicates.
     ///
     /// Panics on `NeedBackfill` — backfill blocks must be fetched sequentially.
-    /// Returns an error if the deposit hash chain cross-check fails.
-    pub(crate) fn enqueue(
-        &mut self,
-        header: TempoHeader,
-        events: L1PortalEvents,
-    ) -> eyre::Result<()> {
-        match self.try_enqueue(SealedHeader::seal_slow(header), events)? {
-            EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => Ok(()),
+    pub(crate) fn enqueue(&mut self, header: TempoHeader, events: L1PortalEvents) {
+        match self.try_enqueue(SealedHeader::seal_slow(header), events) {
+            EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
             other => panic!("enqueue expected Accepted or Duplicate, got {other:?}"),
         }
     }
 
-    fn append(
-        &mut self,
-        header: SealedHeader<TempoHeader>,
-        events: L1PortalEvents,
-    ) -> eyre::Result<()> {
+    fn append(&mut self, header: SealedHeader<TempoHeader>, events: L1PortalEvents) {
         let queue_hash_before = self.enqueued_head_hash;
         for deposit in &events.deposits {
             self.enqueued_head_hash = deposit.hash_chain(self.enqueued_head_hash);
-
-            // Cross-check: verify our computed hash matches the on-chain
-            // `newCurrentDepositQueueHash` emitted by the portal. A mismatch
-            // means the deposit ordering diverged from the contract — stop
-            // immediately rather than producing a reverting `advanceTempo`.
-            // Skip when queue_hash is zero (test data without L1 provenance).
-            let on_chain_hash = deposit.queue_hash();
-            if !on_chain_hash.is_zero() && self.enqueued_head_hash != on_chain_hash {
-                let block_number = header.number();
-                eyre::bail!(
-                    "Deposit hash chain mismatch at L1 block {block_number}: \
-                     computed {}, on-chain event {}",
-                    self.enqueued_head_hash,
-                    on_chain_hash,
-                );
-            }
         }
         let queue_hash_after = self.enqueued_head_hash;
         self.last_enqueued = Some(header.num_hash());
@@ -823,7 +790,6 @@ impl PendingDeposits {
             queue_hash_before,
             queue_hash_after,
         });
-        Ok(())
     }
 
     fn purge_from(&mut self, idx: usize) {
@@ -984,21 +950,20 @@ impl DepositQueue {
         &self,
         header: SealedHeader<TempoHeader>,
         events: L1PortalEvents,
-    ) -> eyre::Result<EnqueueOutcome> {
+    ) -> EnqueueOutcome {
         let mut queue = self.inner.lock();
-        let outcome = queue.try_enqueue(header, events)?;
+        let outcome = queue.try_enqueue(header, events);
         if matches!(outcome, EnqueueOutcome::Accepted) {
             drop(queue);
             self.notify.notify_one();
         }
-        Ok(outcome)
+        outcome
     }
 
     /// Enqueue an L1 block with its deposits and notify waiters.
-    pub fn enqueue(&self, header: TempoHeader, events: L1PortalEvents) -> eyre::Result<()> {
-        self.inner.lock().enqueue(header, events)?;
+    pub fn enqueue(&self, header: TempoHeader, events: L1PortalEvents) {
+        self.inner.lock().enqueue(header, events);
         self.notify.notify_one();
-        Ok(())
     }
 
     /// Peek at the next L1 block without removing it.
@@ -1107,13 +1072,13 @@ mod tests {
         queue.enqueue(
             make_test_header(1),
             L1PortalEvents::from_deposits(vec![d1.clone()]),
-        ).unwrap();
+        );
         let hash_after_d1 = queue.enqueued_head_hash();
         assert_ne!(hash_after_d1, B256::ZERO);
 
         // Verify hash is deterministic
         let mut queue2 = PendingDeposits::default();
-        queue2.enqueue(make_test_header(1), L1PortalEvents::from_deposits(vec![d1])).unwrap();
+        queue2.enqueue(make_test_header(1), L1PortalEvents::from_deposits(vec![d1]));
         assert_eq!(hash_after_d1, queue2.enqueued_head_hash);
 
         let d2 = L1Deposit::Regular(Deposit {
@@ -1127,7 +1092,7 @@ mod tests {
             queue_hash: B256::ZERO,
         });
 
-        queue.enqueue(make_test_header(2), L1PortalEvents::from_deposits(vec![d2])).unwrap();
+        queue.enqueue(make_test_header(2), L1PortalEvents::from_deposits(vec![d2]));
         let hash_after_d2 = queue.enqueued_head_hash();
         assert_ne!(hash_after_d2, hash_after_d1);
     }
@@ -1192,7 +1157,7 @@ mod tests {
         queue.enqueue(
             make_test_header(1),
             L1PortalEvents::from_deposits(deposits.clone()),
-        ).unwrap();
+        );
 
         let transition = PendingDeposits::transition(B256::ZERO, &deposits);
 
@@ -1227,11 +1192,11 @@ mod tests {
 
         let h10 = make_test_header(10);
         let h10_hash = header_hash(&h10);
-        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![d1])).unwrap();
+        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![d1]));
         queue.enqueue(
             make_chained_header(11, h10_hash),
             L1PortalEvents::from_deposits(vec![d2]),
-        ).unwrap();
+        );
 
         let blocks = queue.drain();
         assert_eq!(blocks.len(), 2);
@@ -1400,7 +1365,7 @@ mod tests {
         // Path 1: enqueue into PendingDeposits
         let mut pending = PendingDeposits::default();
         let header = make_test_header(1);
-        pending.enqueue(header, L1PortalEvents::from_deposits(deposits.clone())).unwrap();
+        pending.enqueue(header, L1PortalEvents::from_deposits(deposits.clone()));
 
         // Path 2: compute transition directly
         let transition = PendingDeposits::transition(B256::ZERO, &deposits);
@@ -1420,12 +1385,12 @@ mod tests {
 
         let h100 = make_test_header(100);
         let h100_hash = header_hash(&h100);
-        queue.enqueue(h100, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h100, L1PortalEvents::from_deposits(vec![]));
         let h101 = make_chained_header(101, h100_hash);
         let h101_hash = header_hash(&h101);
-        queue.enqueue(h101, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h101, L1PortalEvents::from_deposits(vec![]));
         let h102 = make_chained_header(102, h101_hash);
-        queue.enqueue(h102, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h102, L1PortalEvents::from_deposits(vec![]));
 
         let last = queue.last_enqueued().unwrap();
         assert_eq!(last.number, 102);
@@ -1446,11 +1411,11 @@ mod tests {
         let h102_hash = last.hash;
         let h103 = make_chained_header(103, h102_hash);
         let h103_hash = header_hash(&h103);
-        queue.enqueue(h103, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h103, L1PortalEvents::from_deposits(vec![]));
         queue.enqueue(
             make_chained_header(104, h103_hash),
             L1PortalEvents::from_deposits(vec![]),
-        ).unwrap();
+        );
         assert_eq!(queue.last_enqueued().unwrap().number, 104);
 
         let drained = queue.drain();
@@ -1469,13 +1434,13 @@ mod tests {
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         let h2 = make_chained_header(11, h1_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1488,13 +1453,13 @@ mod tests {
 
         let h1 = make_test_header(10);
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         // Skip block 11, try to enqueue 12
         let h3 = make_test_header(12);
-        match queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])).unwrap() {
+        match queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 assert_eq!(from, 11);
                 assert_eq!(to, 11);
@@ -1509,11 +1474,11 @@ mod tests {
 
         let h1 = make_test_header(10);
         assert!(matches!(
-            queue.try_enqueue(seal(h1.clone()), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1.clone()), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Duplicate
         ));
     }
@@ -1525,20 +1490,20 @@ mod tests {
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         let h2 = make_chained_header(11, h1_hash);
         let h2_hash = header_hash(&h2);
         assert!(matches!(
-            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         let h3 = make_chained_header(12, h2_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1548,7 +1513,7 @@ mod tests {
         let mut h2_reorg = make_chained_header(11, h1_hash);
         h2_reorg.inner.gas_limit = 999;
         assert!(matches!(
-            queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1565,19 +1530,19 @@ mod tests {
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         let h2 = make_chained_header(11, h1_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         // Block 12 with wrong parent hash — purges block 11, needs backfill
         let h3 = make_chained_header(12, B256::with_last_byte(0xDE));
-        match queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])).unwrap() {
+        match queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 assert_eq!(from, 11);
                 assert_eq!(to, 11);
@@ -1604,7 +1569,7 @@ mod tests {
             queue_hash: B256::ZERO,
         });
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![d1])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![d1])),
             EnqueueOutcome::Accepted
         ));
         let hash_after_h1 = queue.enqueued_head_hash();
@@ -1621,7 +1586,7 @@ mod tests {
             queue_hash: B256::ZERO,
         });
         assert!(matches!(
-            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![d2])).unwrap(),
+            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![d2])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1632,7 +1597,7 @@ mod tests {
         let mut h2_reorg = make_chained_header(11, h1_hash);
         h2_reorg.inner.gas_limit = 999;
         assert!(matches!(
-            queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1662,20 +1627,20 @@ mod tests {
         queue.enqueue(
             h1,
             L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
-        ).unwrap();
+        );
 
         let h2 = make_chained_header(2, h1_hash);
         let h2_hash = header_hash(&h2);
         queue.enqueue(
             h2,
             L1PortalEvents::from_deposits(vec![make_deposit(2, 200)]),
-        ).unwrap();
+        );
 
         let h3 = make_chained_header(3, h2_hash);
         queue.enqueue(
             h3,
             L1PortalEvents::from_deposits(vec![make_deposit(3, 300)]),
-        ).unwrap();
+        );
 
         let hash_after_all = queue.enqueued_head_hash();
 
@@ -1708,22 +1673,22 @@ mod tests {
         queue.enqueue(
             h1,
             L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
-        ).unwrap();
+        );
 
         let h2 = make_chained_header(2, h1_hash);
         let h2_hash = header_hash(&h2);
-        queue.enqueue(h2, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h2, L1PortalEvents::from_deposits(vec![]));
 
         let h3 = make_chained_header(3, h2_hash);
         let h3_hash = header_hash(&h3);
-        queue.enqueue(h3, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h3, L1PortalEvents::from_deposits(vec![]));
 
         let h4 = make_chained_header(4, h3_hash);
         let h4_hash = header_hash(&h4);
-        queue.enqueue(h4, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h4, L1PortalEvents::from_deposits(vec![]));
 
         let h5 = make_chained_header(5, h4_hash);
-        queue.enqueue(h5, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h5, L1PortalEvents::from_deposits(vec![]));
 
         // Pop blocks 1 and 2
         confirm(&mut queue);
@@ -1736,7 +1701,7 @@ mod tests {
         let mut h4_reorg = make_chained_header(4, h3_hash);
         h4_reorg.inner.gas_limit = 999;
         assert!(matches!(
-            queue.try_enqueue(seal(h4_reorg), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h4_reorg), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1758,20 +1723,20 @@ mod tests {
         queue.enqueue(
             h1,
             L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
-        ).unwrap();
+        );
 
         let h2 = make_chained_header(2, h1_hash);
         let h2_hash = header_hash(&h2);
         queue.enqueue(
             h2,
             L1PortalEvents::from_deposits(vec![make_deposit(2, 200)]),
-        ).unwrap();
+        );
 
         let h3 = make_chained_header(3, h2_hash);
         queue.enqueue(
             h3,
             L1PortalEvents::from_deposits(vec![make_deposit(3, 300)]),
-        ).unwrap();
+        );
 
         // Pop block 1 — processed_head_hash advances
         let popped = confirm(&mut queue);
@@ -1784,7 +1749,7 @@ mod tests {
         h2_reorg.inner.gas_limit = 777;
         // This block has a different hash at height 2, so purge_from(0) fires.
         // Queue becomes empty, then the new block is accepted as anchor.
-        let outcome = queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])).unwrap();
+        let outcome = queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![]));
         assert!(matches!(outcome, EnqueueOutcome::Accepted));
 
         // After purge and re-anchor, pending has just the new block 2
@@ -1804,7 +1769,7 @@ mod tests {
         queue.enqueue(
             h1,
             L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
-        ).unwrap();
+        );
 
         // Try to enqueue block 3 (skipping 2) => NeedBackfill
         let h2 = make_chained_header(2, h1_hash);
@@ -1814,7 +1779,7 @@ mod tests {
         match queue.try_enqueue(
             seal(make_test_header(3)),
             L1PortalEvents::from_deposits(vec![]),
-        ).unwrap() {
+        ) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 assert_eq!(from, 2);
                 assert_eq!(to, 2);
@@ -1826,12 +1791,12 @@ mod tests {
         queue.enqueue(
             h2,
             L1PortalEvents::from_deposits(vec![make_deposit(2, 200)]),
-        ).unwrap();
+        );
         assert!(matches!(
             queue.try_enqueue(
                 h3_sealed.clone(),
                 L1PortalEvents::from_deposits(vec![make_deposit(3, 300)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Accepted
         ));
 
@@ -1843,7 +1808,7 @@ mod tests {
             queue.try_enqueue(
                 h3_sealed,
                 L1PortalEvents::from_deposits(vec![make_deposit(3, 300)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Duplicate
         ));
 
@@ -1860,15 +1825,15 @@ mod tests {
         queue.enqueue(
             h1,
             L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
-        ).unwrap();
+        );
 
         let h2 = make_chained_header(2, h1_hash);
         let h2_hash = header_hash(&h2);
-        queue.enqueue(h2, L1PortalEvents::from_deposits(vec![])).unwrap(); // no deposits
+        queue.enqueue(h2, L1PortalEvents::from_deposits(vec![])); // no deposits
 
         let h3 = make_chained_header(3, h2_hash);
         let d3 = make_deposit(3, 300);
-        queue.enqueue(h3, L1PortalEvents::from_deposits(vec![d3.clone()])).unwrap();
+        queue.enqueue(h3, L1PortalEvents::from_deposits(vec![d3.clone()]));
 
         // Block 2 has no deposits => queue_hash_before == queue_hash_after
         assert_eq!(
@@ -1884,7 +1849,7 @@ mod tests {
         h2_reorg.inner.gas_limit = 888;
         let h2_reorg_hash = header_hash(&h2_reorg);
         assert!(matches!(
-            queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1897,7 +1862,7 @@ mod tests {
         // Re-enqueue new block 3 with same deposits as original
         let h3_new = make_chained_header(3, h2_reorg_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h3_new), L1PortalEvents::from_deposits(vec![d3])).unwrap(),
+            queue.try_enqueue(seal(h3_new), L1PortalEvents::from_deposits(vec![d3])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1919,13 +1884,13 @@ mod tests {
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         let h2 = make_chained_header(11, h1_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -1937,7 +1902,7 @@ mod tests {
 
         // Block 12 arrives with wrong parent — consumed block 11 was reorged
         let h3_bad = make_chained_header(12, B256::with_last_byte(0xDE));
-        match queue.try_enqueue(seal(h3_bad), L1PortalEvents::from_deposits(vec![])).unwrap() {
+        match queue.try_enqueue(seal(h3_bad), L1PortalEvents::from_deposits(vec![])) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 // Must re-fetch from block 11 (the consumed block that was reorged)
                 assert_eq!(from, 11);
@@ -1957,7 +1922,7 @@ mod tests {
         let h2_reorg = make_test_header(11);
         let h2_reorg_hash = header_hash(&h2_reorg);
         assert!(matches!(
-            queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2_reorg), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Duplicate
         ));
 
@@ -1966,7 +1931,7 @@ mod tests {
         // the builder will detect it).
         let h3 = make_chained_header(12, h2_reorg_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
         assert_eq!(queue.pending_len(), 1);
@@ -1983,7 +1948,7 @@ mod tests {
             queue.try_enqueue(
                 seal(h1),
                 L1PortalEvents::from_deposits(vec![make_deposit(10, 100)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Accepted
         ));
 
@@ -1993,13 +1958,13 @@ mod tests {
             queue.try_enqueue(
                 seal(h2),
                 L1PortalEvents::from_deposits(vec![make_deposit(11, 200)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Accepted
         ));
 
         let h3 = make_chained_header(12, h2_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h3), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -2010,7 +1975,7 @@ mod tests {
         // Block 13 with wrong parent — this is a normal parent mismatch on the
         // non-empty queue path, should purge block 12 and request backfill
         let h4_bad = make_chained_header(13, B256::with_last_byte(0xAB));
-        match queue.try_enqueue(seal(h4_bad), L1PortalEvents::from_deposits(vec![])).unwrap() {
+        match queue.try_enqueue(seal(h4_bad), L1PortalEvents::from_deposits(vec![])) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 assert_eq!(from, 12);
                 assert_eq!(to, 12);
@@ -2026,7 +1991,7 @@ mod tests {
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -2037,7 +2002,7 @@ mod tests {
         // Wrong parent → NeedBackfill
         let h2_bad = make_chained_header(11, B256::with_last_byte(0xFF));
         assert!(matches!(
-            queue.try_enqueue(seal(h2_bad), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2_bad), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::NeedBackfill { .. }
         ));
 
@@ -2047,7 +2012,7 @@ mod tests {
             queue.try_enqueue(
                 seal(h2_good),
                 L1PortalEvents::from_deposits(vec![make_deposit(11, 500)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Accepted
         ));
         assert_eq!(queue.pending_len(), 1);
@@ -2060,7 +2025,7 @@ mod tests {
 
         let h1 = make_test_header(10);
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -2070,7 +2035,7 @@ mod tests {
         // Block 14 arrives — gap of 11..13 plus wrong parent is moot because
         // the gap check triggers first
         let h5 = make_test_header(14);
-        match queue.try_enqueue(seal(h5), L1PortalEvents::from_deposits(vec![])).unwrap() {
+        match queue.try_enqueue(seal(h5), L1PortalEvents::from_deposits(vec![])) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 assert_eq!(from, 11);
                 assert_eq!(to, 13);
@@ -2086,13 +2051,13 @@ mod tests {
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         let h2 = make_chained_header(11, h1_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -2106,14 +2071,14 @@ mod tests {
             queue.try_enqueue(
                 seal(make_test_header(10)),
                 L1PortalEvents::from_deposits(vec![])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Duplicate
         ));
         assert!(matches!(
             queue.try_enqueue(
                 seal(make_chained_header(11, h1_hash)),
                 L1PortalEvents::from_deposits(vec![])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Duplicate
         ));
     }
@@ -2127,7 +2092,7 @@ mod tests {
             queue.try_enqueue(
                 seal(h1),
                 L1PortalEvents::from_deposits(vec![make_deposit(10, 100)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Accepted
         ));
 
@@ -2139,7 +2104,7 @@ mod tests {
         // Disconnected block should not alter processed_head_hash
         let h2_bad = make_chained_header(11, B256::with_last_byte(0xBB));
         assert!(matches!(
-            queue.try_enqueue(seal(h2_bad), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h2_bad), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::NeedBackfill { .. }
         ));
         assert_eq!(
@@ -2161,7 +2126,7 @@ mod tests {
         let mut queue = PendingDeposits::default();
 
         let h1 = make_test_header(10);
-        queue.enqueue(h1.clone(), L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h1.clone(), L1PortalEvents::from_deposits(vec![]));
 
         // Drain
         confirm(&mut queue);
@@ -2170,7 +2135,7 @@ mod tests {
 
         // Re-deliver same block 10 — must be Duplicate, last_enqueued preserved
         assert!(matches!(
-            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Duplicate
         ));
         assert_eq!(
@@ -2191,13 +2156,13 @@ mod tests {
         queue.enqueue(
             h1.clone(),
             L1PortalEvents::from_deposits(vec![make_deposit(10, 100)]),
-        ).unwrap();
+        );
 
         let h2 = make_chained_header(11, h1_hash);
         queue.enqueue(
             h2.clone(),
             L1PortalEvents::from_deposits(vec![make_deposit(11, 200)]),
-        ).unwrap();
+        );
 
         let hash_before = queue.enqueued_head_hash();
         let len_before = queue.pending_len();
@@ -2207,14 +2172,14 @@ mod tests {
             queue.try_enqueue(
                 seal(h1),
                 L1PortalEvents::from_deposits(vec![make_deposit(10, 100)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Duplicate
         ));
         assert!(matches!(
             queue.try_enqueue(
                 seal(h2),
                 L1PortalEvents::from_deposits(vec![make_deposit(11, 200)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Duplicate
         ));
         assert_eq!(queue.enqueued_head_hash(), hash_before);
@@ -2232,7 +2197,7 @@ mod tests {
         queue.enqueue(
             h10,
             L1PortalEvents::from_deposits(vec![make_deposit(10, 100)]),
-        ).unwrap();
+        );
         let hash_after_10 = queue.enqueued_head_hash();
 
         let h11 = make_chained_header(11, h10_hash);
@@ -2240,20 +2205,20 @@ mod tests {
         queue.enqueue(
             h11,
             L1PortalEvents::from_deposits(vec![make_deposit(11, 200)]),
-        ).unwrap();
+        );
 
         let h12 = make_chained_header(12, h11_hash);
         let h12_hash = header_hash(&h12);
         queue.enqueue(
             h12,
             L1PortalEvents::from_deposits(vec![make_deposit(12, 300)]),
-        ).unwrap();
+        );
 
         let h13 = make_chained_header(13, h12_hash);
         queue.enqueue(
             h13,
             L1PortalEvents::from_deposits(vec![make_deposit(13, 400)]),
-        ).unwrap();
+        );
 
         assert_eq!(queue.pending_len(), 4);
 
@@ -2266,7 +2231,7 @@ mod tests {
             queue.try_enqueue(
                 seal(h11_reorg),
                 L1PortalEvents::from_deposits(vec![make_deposit(11, 999)])
-            ).unwrap(),
+            ),
             EnqueueOutcome::Accepted
         ));
 
@@ -2282,7 +2247,7 @@ mod tests {
         // Can continue building on the new fork
         let h12_new = make_chained_header(12, h11_reorg_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h12_new), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h12_new), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
         assert_eq!(queue.pending_len(), 3);
@@ -2296,10 +2261,10 @@ mod tests {
 
         let h10 = make_test_header(10);
         let h10_hash = header_hash(&h10);
-        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![]));
 
         let h11 = make_chained_header(11, h10_hash);
-        queue.enqueue(h11.clone(), L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h11.clone(), L1PortalEvents::from_deposits(vec![]));
 
         // Drain
         confirm(&mut queue);
@@ -2307,7 +2272,7 @@ mod tests {
 
         // Re-deliver block 11 with same hash — Duplicate, last_enqueued intact
         assert!(matches!(
-            queue.try_enqueue(seal(h11), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h11), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Duplicate
         ));
         assert_eq!(queue.last_enqueued().unwrap().number, 11);
@@ -2323,10 +2288,10 @@ mod tests {
 
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
-        queue.enqueue(h1, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h1, L1PortalEvents::from_deposits(vec![]));
 
         let h2 = make_chained_header(11, h1_hash);
-        queue.enqueue(h2, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h2, L1PortalEvents::from_deposits(vec![]));
 
         let popped = confirm(&mut queue);
         assert_eq!(queue.last_processed().unwrap().number, 10);
@@ -2342,10 +2307,10 @@ mod tests {
 
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
-        queue.enqueue(h1, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h1, L1PortalEvents::from_deposits(vec![]));
 
         let h2 = make_chained_header(11, h1_hash);
-        queue.enqueue(h2, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h2, L1PortalEvents::from_deposits(vec![]));
 
         let drained = queue.drain();
         assert_eq!(queue.last_processed().unwrap().number, 11);
@@ -2367,11 +2332,11 @@ mod tests {
 
         let h10 = make_test_header(10);
         let h10_hash = header_hash(&h10);
-        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![]));
 
         let h11 = make_chained_header(11, h10_hash);
         let _h11_hash = header_hash(&h11);
-        queue.enqueue(h11, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h11, L1PortalEvents::from_deposits(vec![]));
 
         // Engine consumes both blocks
         confirm(&mut queue); // block 10
@@ -2382,7 +2347,7 @@ mod tests {
 
         // New block 12 arrives with parent pointing to NEW (reorged) block 11
         let h12_new = make_chained_header(12, B256::with_last_byte(0xDE));
-        match queue.try_enqueue(seal(h12_new), L1PortalEvents::from_deposits(vec![])).unwrap() {
+        match queue.try_enqueue(seal(h12_new), L1PortalEvents::from_deposits(vec![])) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 assert_eq!(from, 11);
                 assert_eq!(to, 11);
@@ -2398,7 +2363,7 @@ mod tests {
         h11_reorg.inner.gas_limit = 999;
         let h11_reorg_hash = header_hash(&h11_reorg);
         assert!(matches!(
-            queue.try_enqueue(seal(h11_reorg), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h11_reorg), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Duplicate
         ));
 
@@ -2407,7 +2372,7 @@ mod tests {
         // expected and will be caught by the builder)
         let h12 = make_chained_header(12, h11_reorg_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h12), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h12), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
@@ -2424,7 +2389,7 @@ mod tests {
 
         let h10 = make_test_header(10);
         let _h10_hash = header_hash(&h10);
-        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![]));
         confirm(&mut queue);
 
         // Simulate last_enqueued being cleared (reorg path)
@@ -2432,7 +2397,7 @@ mod tests {
 
         // Block 13 arrives — gap from 11..12
         let h13 = make_test_header(13);
-        match queue.try_enqueue(seal(h13), L1PortalEvents::from_deposits(vec![])).unwrap() {
+        match queue.try_enqueue(seal(h13), L1PortalEvents::from_deposits(vec![])) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 assert_eq!(from, 11); // last_processed.number + 1
                 assert_eq!(to, 12);
@@ -2451,11 +2416,11 @@ mod tests {
         // Enqueue block 10 (stale — zone already processed it)
         let h10 = make_test_header(10);
         let h10_hash = header_hash(&h10);
-        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h10, L1PortalEvents::from_deposits(vec![]));
 
         // Enqueue block 11 (the one the builder actually needs)
         let h11 = make_chained_header(11, h10_hash);
-        queue.enqueue(h11, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h11, L1PortalEvents::from_deposits(vec![]));
 
         // Builder expects block 11 (tempoBlockNumber=10, expected=11).
         // Peek/confirm loop should skip block 10 and use the correct one.
@@ -2480,14 +2445,14 @@ mod tests {
         // Build a 3-block chain: 100, 101, 102
         let h100 = make_test_header(100);
         let h100_hash = header_hash(&h100);
-        queue.enqueue(h100, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h100, L1PortalEvents::from_deposits(vec![]));
 
         let h101 = make_chained_header(101, h100_hash);
         let h101_hash = header_hash(&h101);
-        queue.enqueue(h101, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h101, L1PortalEvents::from_deposits(vec![]));
 
         let h102 = make_chained_header(102, h101_hash);
-        queue.enqueue(h102, L1PortalEvents::from_deposits(vec![])).unwrap();
+        queue.enqueue(h102, L1PortalEvents::from_deposits(vec![]));
 
         // Engine consumes all 3
         confirm(&mut queue);
@@ -2498,7 +2463,7 @@ mod tests {
         // L1 reorgs at 102: new block 103 has different parent
         let new_parent = B256::with_last_byte(0xAA);
         let h103 = make_chained_header(103, new_parent);
-        match queue.try_enqueue(seal(h103), L1PortalEvents::from_deposits(vec![])).unwrap() {
+        match queue.try_enqueue(seal(h103), L1PortalEvents::from_deposits(vec![])) {
             EnqueueOutcome::NeedBackfill { from, to } => {
                 assert_eq!(from, 102);
                 assert_eq!(to, 102);
@@ -2511,7 +2476,7 @@ mod tests {
         h102_new.inner.gas_limit = 42;
         let h102_new_hash = header_hash(&h102_new);
         assert!(matches!(
-            queue.try_enqueue(seal(h102_new), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h102_new), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Duplicate
         ));
 
@@ -2519,14 +2484,14 @@ mod tests {
         let h103 = make_chained_header(103, h102_new_hash);
         let h103_hash = header_hash(&h103);
         assert!(matches!(
-            queue.try_enqueue(seal(h103), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h103), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
         // Block 104 continues on the new chain
         let h104 = make_chained_header(104, h103_hash);
         assert!(matches!(
-            queue.try_enqueue(seal(h104), L1PortalEvents::from_deposits(vec![])).unwrap(),
+            queue.try_enqueue(seal(h104), L1PortalEvents::from_deposits(vec![])),
             EnqueueOutcome::Accepted
         ));
 
