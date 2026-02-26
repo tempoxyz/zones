@@ -188,6 +188,7 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     >,
     deposit_queue: crate::DepositQueue,
     l1_config: crate::L1SubscriberConfig,
+    fee_recipient: alloy_primitives::Address,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
@@ -203,7 +204,11 @@ where
     N: FullNodeTypes<Types = ZoneNode>,
 {
     /// Creates a new instance.
-    pub fn new(deposit_queue: crate::DepositQueue, l1_config: crate::L1SubscriberConfig) -> Self {
+    pub fn new(
+        deposit_queue: crate::DepositQueue,
+        l1_config: crate::L1SubscriberConfig,
+        fee_recipient: alloy_primitives::Address,
+    ) -> Self {
         Self {
             inner: RpcAddOns::new(
                 ZoneEthApiBuilder::default(),
@@ -214,6 +219,7 @@ where
             ),
             deposit_queue,
             l1_config,
+            fee_recipient,
         }
     }
 }
@@ -264,13 +270,20 @@ where
             let to_engine = ctx.beacon_engine_handle.clone();
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
+            let fee_recipient = self.fee_recipient;
 
             ctx.node
                 .task_executor()
                 .spawn_critical("zone-engine", async move {
-                    ZoneEngine::new(provider, to_engine, payload_builder, deposit_queue)
-                        .run()
-                        .await
+                    ZoneEngine::new(
+                        provider,
+                        to_engine,
+                        payload_builder,
+                        deposit_queue,
+                        fee_recipient,
+                    )
+                    .run()
+                    .await
                 });
             info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
         }
@@ -332,7 +345,11 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        ZoneAddOns::new(self.deposit_queue.clone(), self.l1_config.clone())
+        ZoneAddOns::new(
+            self.deposit_queue.clone(),
+            self.l1_config.clone(),
+            self.sequencer,
+        )
     }
 }
 
