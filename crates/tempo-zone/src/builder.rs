@@ -221,7 +221,7 @@ where
             )));
         }
 
-        let total_deposits = l1_block.deposits.len();
+        let total_deposits = l1_block.events.deposits.len();
 
         info!(
             target: "zone::payload",
@@ -230,7 +230,7 @@ where
             deposits = total_deposits,
             "Including advanceTempo system tx (chain continuity OK)"
         );
-        for deposit in &l1_block.deposits {
+        for deposit in &l1_block.events.deposits {
             match deposit {
                 L1Deposit::Regular(d) => {
                     debug!(
@@ -255,6 +255,14 @@ where
                     );
                 }
             }
+        }
+
+        if !l1_block.events.enabled_tokens.is_empty() {
+            info!(
+                target: "zone::payload",
+                tokens = ?l1_block.events.enabled_tokens,
+                "🪙 New tokens enabled on L1"
+            );
         }
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
@@ -319,7 +327,7 @@ where
 
             let advance_tx = build_advance_tempo_tx(
                 &l1_block.header,
-                &l1_block.deposits,
+                &l1_block.events.deposits,
                 &self.sequencer_key,
                 self.portal_address,
             );
@@ -330,7 +338,7 @@ where
                     error!(
                         target: "zone::payload",
                         l1_block = l1_block.header.inner.number,
-                        deposits = l1_block.deposits.len(),
+                        deposits = l1_block.events.deposits.len(),
                         is_halt = result.is_halt(),
                         revert_data = %revert_data,
                         "advanceTempo system tx reverted on-chain"
@@ -351,7 +359,7 @@ where
                     error!(
                         ?err,
                         l1_block = l1_block.header.inner.number,
-                        deposits = l1_block.deposits.len(),
+                        deposits = l1_block.events.deposits.len(),
                         "advanceTempo system tx failed"
                     );
                     return Err(PayloadBuilderError::evm(err));

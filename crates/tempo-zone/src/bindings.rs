@@ -34,6 +34,10 @@ sol! {
             bytes16 tag
         );
 
+        /// Event emitted when a new TIP-20 token is enabled for bridging.
+        #[derive(Debug)]
+        event TokenEnabled(address indexed token);
+
         /// Last synced Tempo block number.
         function lastSyncedTempoBlockNumber() external view returns (uint64);
 
