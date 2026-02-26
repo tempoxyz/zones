@@ -20,8 +20,8 @@ use std::{
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
 use zone::{
-    Deposit, DepositQueue, EncryptedDeposit, L1Deposit, L1PortalEvents, SharedL1StateCache,
-    ZoneNode,
+    Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents,
+    SharedL1StateCache, ZoneNode,
 };
 
 use alloy_provider::{Provider, ProviderBuilder, WalletProvider};
@@ -2177,6 +2177,16 @@ impl L1Fixture {
         queue.enqueue(block.header.clone(), events);
     }
 
+    /// Enqueue a pre-built block into a deposit queue with full portal events.
+    pub(crate) fn enqueue_events(
+        &self,
+        block: &FixtureBlock,
+        queue: &DepositQueue,
+        events: L1PortalEvents,
+    ) {
+        queue.enqueue(block.header.clone(), events);
+    }
+
     /// Create a [`Deposit`] tied to a specific L1 block number.
     pub(crate) fn make_deposit_for_block(
         l1_block_number: u64,
@@ -2195,6 +2205,20 @@ impl L1Fixture {
             memo: B256::ZERO,
             queue_hash: B256::ZERO,
         }
+    }
+
+    /// Inject an L1 block with enabled tokens (no deposits) into the queue.
+    pub(crate) fn inject_enabled_tokens(
+        &mut self,
+        queue: &DepositQueue,
+        tokens: Vec<EnabledToken>,
+    ) {
+        let header = self.next_header();
+        let events = L1PortalEvents {
+            deposits: vec![],
+            enabled_tokens: tokens,
+        };
+        queue.enqueue(header, events);
     }
 
     /// Inject an empty L1 block (no deposits) into the queue.

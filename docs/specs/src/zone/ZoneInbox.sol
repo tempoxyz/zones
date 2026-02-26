@@ -8,16 +8,19 @@ import {
     DecryptionData,
     Deposit,
     DepositType,
+    EnabledToken,
     EncryptedDeposit,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
+    ITIP20ZoneFactory,
     ITempoState,
     IZoneConfig,
     IZoneInbox,
     IZoneToken,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    QueuedDeposit
+    QueuedDeposit,
+    TIP20_FACTORY_ADDRESS
 } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
@@ -191,7 +194,8 @@ contract ZoneInbox is IZoneInbox {
     function advanceTempo(
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
-        DecryptionData[] calldata decryptions
+        DecryptionData[] calldata decryptions,
+        EnabledToken[] calldata enabledTokens
     )
         external
     {
@@ -204,6 +208,12 @@ contract ZoneInbox is IZoneInbox {
 
         // Step 1: Advance Tempo state (validates chain continuity internally)
         _tempoState.finalizeTempo(header);
+
+        // Enable new tokens
+        for (uint256 i = 0; i < enabledTokens.length; i++) {
+            EnabledToken calldata t = enabledTokens[i];
+            ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS).enableToken(t.token, t.name, t.symbol, t.currency);
+        }
 
         // Step 2: Process deposits and build hash chain
         bytes32 currentHash = processedDepositQueueHash;

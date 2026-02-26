@@ -35,6 +35,7 @@ use crate::{
     l1_state::{L1StateProvider, SharedL1StateCache, TempoStateReader},
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+        ZONE_TIP20_FACTORY_ADDRESS, zone_tip20_factory,
     },
 };
 
@@ -57,6 +58,7 @@ impl ZoneEvmFactory {
         &self,
         mut evm: TempoEvm<DB, I>,
     ) -> TempoEvm<DB, I> {
+        let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| {
             Some(TempoStateReader::create(self.l1_provider.clone()))
@@ -65,6 +67,9 @@ impl ZoneEvmFactory {
             Some(ChaumPedersenVerify.into())
         });
         precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| Some(AesGcmDecrypt.into()));
+        precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
+            Some(zone_tip20_factory(&cfg))
+        });
         evm
     }
 }

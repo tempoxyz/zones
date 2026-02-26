@@ -28,8 +28,8 @@ pub mod zonemonitor;
 pub use batch::{BatchData, BatchSubmitter};
 pub use engine::ZoneEngine;
 pub use l1::{
-    Deposit, DepositQueue, EncryptedDeposit, L1BlockDeposits, L1Deposit, L1PortalEvents,
-    L1Subscriber, L1SubscriberConfig,
+    Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockDeposits, L1Deposit,
+    L1PortalEvents, L1Subscriber, L1SubscriberConfig,
 };
 pub use l1_state::SharedL1StateCache;
 pub use node::{ZoneExecutorBuilder, ZoneNode};
