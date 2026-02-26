@@ -26,7 +26,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
@@ -38,6 +38,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
     batch::{BatchData, BatchSubmitter},
+    tee::TeeSigner,
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -110,6 +111,8 @@ pub struct ZoneMonitor {
     /// and incremented each time a batch with a non-zero
     /// `withdrawal_queue_hash` is successfully submitted to L1.
     portal_withdrawal_queue_tail: u64,
+    /// Optional TEE signer for producing enclave proofs on each batch.
+    tee_signer: Option<Arc<TeeSigner>>,
 }
 
 impl ZoneMonitor {
@@ -123,6 +126,7 @@ impl ZoneMonitor {
         l1_provider: DynProvider<TempoNetwork>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
+        tee_signer: Option<Arc<TeeSigner>>,
     ) -> Self {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect(&config.zone_rpc_url)
@@ -211,6 +215,7 @@ impl ZoneMonitor {
             prev_processed_deposit_hash,
             prev_zone_block_hash,
             portal_withdrawal_queue_tail,
+            tee_signer,
         }
     }
 
@@ -347,14 +352,31 @@ impl ZoneMonitor {
         }
 
         // --- 4. Build and submit BatchData ---
-        let batch_data = BatchData {
+        let mut batch_data = BatchData {
             tempo_block_number: end_state.tempo_block_number,
             prev_block_hash: self.prev_zone_block_hash,
             next_block_hash: end_state.block_hash,
             prev_processed_deposit_hash: self.prev_processed_deposit_hash,
             next_processed_deposit_hash: end_state.processed_deposit_hash,
             withdrawal_queue_hash,
+            verifier_config: Bytes::new(),
+            proof: Bytes::new(),
         };
+
+        // --- 5. Sign with TEE if configured ---
+        if let Some(tee_signer) = &self.tee_signer {
+            // TODO: pass real anchor block hash once ancestry mode proof is implemented.
+            let (verifier_config, proof) = tee_signer.sign_batch(
+                &batch_data,
+                self.config.portal_address,
+                Address::ZERO, // sequencer address — filled by the portal
+                self.portal_withdrawal_queue_tail,
+                0,             // anchor_block_number (direct mode)
+                B256::ZERO,    // anchor_block_hash (direct mode)
+            )?;
+            batch_data.verifier_config = verifier_config;
+            batch_data.proof = proof;
+        }
 
         // Submit — state and withdrawal store only advance on success.
         self.submit_batch_with_retry(&batch_data, to, all_withdrawals)
@@ -617,10 +639,12 @@ pub fn spawn_zone_monitor(
     l1_provider: DynProvider<TempoNetwork>,
     withdrawal_store: SharedWithdrawalStore,
     withdrawal_notify: Arc<Notify>,
+    tee_signer: Option<Arc<TeeSigner>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut monitor =
-            ZoneMonitor::new(config, l1_provider, withdrawal_store, withdrawal_notify).await;
+            ZoneMonitor::new(config, l1_provider, withdrawal_store, withdrawal_notify, tee_signer)
+                .await;
         loop {
             if let Err(e) = monitor.run().await {
                 error!(error = %e, "Zone monitor failed, restarting in 5s");

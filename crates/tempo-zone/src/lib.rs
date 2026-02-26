@@ -22,6 +22,7 @@ mod node;
 pub mod payload;
 pub mod precompiles;
 pub mod rpc;
+pub mod tee;
 pub mod withdrawals;
 pub mod zonemonitor;
 
@@ -35,6 +36,7 @@ pub use l1_state::SharedL1StateCache;
 pub use node::{ZoneExecutorBuilder, ZoneNode};
 pub use payload::{ZonePayloadAttributes, ZonePayloadBuilderAttributes, ZonePayloadTypes};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
+pub use tee::{TeeConfig, TeeSigner};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 
 use std::{sync::Arc, time::Duration};
@@ -66,6 +68,11 @@ pub struct ZoneSequencerConfig {
     pub zone_poll_interval: Duration,
     /// Maximum time to accumulate zone blocks before submitting a batch to L1.
     pub batch_interval: Duration,
+    /// Optional TEE signing configuration. When present, batches are signed
+    /// with the enclave key and proofs are included in L1 submissions.
+    pub tee_config: Option<TeeConfig>,
+    /// Verifier contract address on L1 (needed for batch digest domain separation).
+    pub verifier_address: Option<Address>,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -116,6 +123,17 @@ pub async fn spawn_zone_sequencer(
         fallback_poll_interval: config.withdrawal_poll_interval,
     };
 
+    let tee_signer = match (config.tee_config, config.verifier_address) {
+        (Some(tee_config), Some(verifier_address)) => {
+            let chain_id = l1_provider
+                .get_chain_id()
+                .await
+                .expect("failed to read L1 chain ID for TEE signer");
+            Some(Arc::new(TeeSigner::new(tee_config, chain_id, verifier_address)))
+        }
+        _ => None,
+    };
+
     let monitor_config = ZoneMonitorConfig {
         outbox_address: config.outbox_address,
         inbox_address: config.inbox_address,
@@ -137,6 +155,7 @@ pub async fn spawn_zone_sequencer(
         l1_provider,
         withdrawal_store,
         withdrawal_notify,
+        tee_signer,
     );
 
     ZoneSequencerHandle {

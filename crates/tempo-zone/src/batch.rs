@@ -51,6 +51,12 @@ pub struct BatchData {
     pub next_processed_deposit_hash: B256,
     /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
     pub withdrawal_queue_hash: B256,
+    /// ABI-encoded verifier configuration (e.g. measurement hash for TEE).
+    /// Empty when no proof system is configured.
+    pub verifier_config: Bytes,
+    /// ABI-encoded proof bytes (e.g. TEE enclave signature).
+    /// Empty when no proof system is configured.
+    pub proof: Bytes,
 }
 
 /// Submits zone batches to the ZonePortal contract on Tempo L1.
@@ -104,11 +110,9 @@ impl BatchSubmitter {
     ///   the proof must include a block header chain from `recentTempoBlockNumber`
     ///   back to `tempoBlockNumber`.
     ///
-    /// # POC note
-    ///
-    /// `verifierConfig` and `proof` are set to empty bytes — the verifier
-    /// contract must be configured to accept empty proofs.
-    // TODO: pass real proof bytes once proof generation is implemented.
+    /// When TEE signing is configured, `verifierConfig` and `proof` contain
+    /// the enclave signature. Otherwise they are empty bytes (the L1 verifier
+    /// contract must be configured to accept empty proofs).
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = batch.tempo_block_number,
@@ -153,8 +157,8 @@ impl BatchSubmitter {
                 block_transition,
                 deposit_transition,
                 batch.withdrawal_queue_hash,
-                Bytes::new(),
-                Bytes::new(),
+                batch.verifier_config.clone(),
+                batch.proof.clone(),
             )
             .send()
             .await?

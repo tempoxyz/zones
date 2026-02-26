@@ -410,6 +410,19 @@ deploy-zone name:
                       --log.file.directory "$DATADIR/logs" \
                       --sequencer-key "$SEQUENCER_KEY"
 
+[group('enclave')]
+[doc('Register an enclave signing key on the NitroVerifier contract. Requires TEE_SIGNING_KEY, TEE_MEASUREMENT_HASH, ATTESTER_KEY, VERIFIER_ADDRESS, and L1_PORTAL_ADDRESS env vars.')]
+register-enclave-key expires_in="86400":
+    ./enclave/register-enclave-key.sh \
+        --enclave-key "${TEE_SIGNING_KEY}" \
+        --measurement-hash "${TEE_MEASUREMENT_HASH}" \
+        --attester-key "${ATTESTER_KEY}" \
+        --verifier-address "${VERIFIER_ADDRESS}" \
+        --portal-address "${L1_PORTAL_ADDRESS}" \
+        --sequencer-address "$(cast wallet address ${SEQUENCER_KEY})" \
+        --expires-in "{{expires_in}}" \
+        --rpc-url "${L1_RPC_URL}"
+
 # Docs commands
 [group('docs')]
 [doc('Install docs dependencies')]
@@ -440,3 +453,18 @@ docs-specs-test:
 [doc('Build Solidity specs')]
 docs-specs-build:
     cd docs/specs && forge build --sizes
+
+[group('enclave')]
+[doc('Build the Nitro Enclave Docker image for the zone sequencer')]
+build-enclave-image:
+    docker build -f enclave/Dockerfile.enclave -t tempo-zone-enclave .
+
+[group('enclave')]
+[doc('Build the Nitro Enclave EIF and output PCR measurements')]
+build-enclave output="enclave/out":
+    ./enclave/build-enclave.sh --output-dir {{output}}
+
+[group('enclave')]
+[doc('Print the measurement hash (keccak256 of PCRs) from measurements.json')]
+enclave-measurements path="enclave/out/measurements.json":
+    @jq -r '.measurementHash' {{path}}

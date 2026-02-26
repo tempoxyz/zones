@@ -1,0 +1,50 @@
+# Deterministic Dockerfile for building the zone sequencer for Nitro Enclaves.
+#
+# Reproducibility guarantees:
+#   - Base images pinned by digest (not tag)
+#   - SOURCE_DATE_EPOCH=0 zeroes out embedded timestamps
+#   - CARGO_INCREMENTAL=0 disables incremental compilation artifacts
+#   - `cargo build --locked` ensures exact lockfile dependencies
+#
+# Usage:
+#   docker build -f enclave/Dockerfile.enclave -t tempo-zone-enclave .
+
+# ---------------------------------------------------------------------------
+# Builder stage — pinned Rust 1.91.0 on Bookworm
+# TODO: Pin to specific digest for reproducible builds — run
+#   `docker pull rust:1.91.0-bookworm` and use the actual digest
+# ---------------------------------------------------------------------------
+FROM rust:1.91.0-bookworm@sha256:PLACEHOLDER AS builder
+
+# Reproducibility: zero out timestamps and disable incremental compilation
+ENV SOURCE_DATE_EPOCH=0
+ENV CARGO_INCREMENTAL=0
+
+WORKDIR /build
+
+# Copy manifests first for layer caching
+COPY Cargo.toml Cargo.lock ./
+
+# Copy workspace members
+COPY crates/ crates/
+COPY bin/ bin/
+COPY xtask/ xtask/
+
+# Build the zone binary in release mode with exact lockfile
+RUN cargo build --locked --release --bin tempo-zone \
+    && strip target/release/tempo-zone
+
+# ---------------------------------------------------------------------------
+# Runtime stage — minimal Debian slim
+# TODO: Pin to specific digest for reproducible builds — run
+#   `docker pull debian:bookworm-slim` and use the actual digest
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim@sha256:PLACEHOLDER AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/tempo-zone /usr/local/bin/tempo-zone
+
+ENTRYPOINT ["/usr/local/bin/tempo-zone"]

@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import { TempoUtilities } from "../TempoUtilities.sol";
 import { IZoneFactory, ZoneInfo } from "./IZone.sol";
+import { NitroVerifier } from "./NitroVerifier.sol";
 import { Verifier } from "./Verifier.sol";
 import { ZoneMessenger } from "./ZoneMessenger.sol";
 import { ZonePortal } from "./ZonePortal.sol";
@@ -146,6 +147,21 @@ contract ZoneFactory is IZoneFactory {
                 abi.encodePacked(bytes1(0xda), bytes1(0x94), deployer, bytes1(0x84), uint32(nonce));
         }
         return address(uint160(uint256(keccak256(data))));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          NITRO VERIFIER
+    //////////////////////////////////////////////////////////////*/
+
+    event NitroVerifierDeployed(address indexed verifier, address indexed attestationSigner);
+
+    /// @notice Deploy a new NitroVerifier and register it as valid
+    function deployNitroVerifier(address attestationSigner) external returns (address) {
+        address v = address(new NitroVerifier(attestationSigner));
+        _validVerifiers[v] = true;
+        _deploymentNonce += 1;
+        emit NitroVerifierDeployed(v, attestationSigner);
+        return v;
     }
 
     /*//////////////////////////////////////////////////////////////

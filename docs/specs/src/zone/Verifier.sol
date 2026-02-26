@@ -4,9 +4,9 @@ pragma solidity ^0.8.13;
 import { BlockTransition, DepositQueueTransition, IVerifier } from "./IZone.sol";
 
 /// @title Verifier
-/// @notice Enshrined verifier system contract for zone proof/attestation verification.
+/// @notice Stub verifier for devnet/testing — always returns true.
+///         For production, use NitroVerifier with TEE attestation-backed signatures.
 ///         Deployed by ZoneFactory — all zones share the same verifier instance.
-///         Stub implementation that always returns true for prototyping.
 contract Verifier is IVerifier {
 
     /// @inheritdoc IVerifier

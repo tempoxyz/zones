@@ -75,6 +75,20 @@ struct ZoneArgs {
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
     pub l1_genesis_block_number: Option<u64>,
 
+    /// TEE enclave signing key (hex, with or without 0x prefix).
+    /// In production, this key lives inside the Nitro Enclave.
+    #[arg(long = "tee.signing-key", env = "TEE_SIGNING_KEY")]
+    pub tee_signing_key: Option<String>,
+
+    /// TEE measurement hash — keccak256(PCR0 || PCR1 || PCR2).
+    /// Published alongside deterministic build artifacts.
+    #[arg(long = "tee.measurement-hash", env = "TEE_MEASUREMENT_HASH")]
+    pub tee_measurement_hash: Option<String>,
+
+    /// Verifier contract address on L1 (for TEE batch digest domain separation).
+    #[arg(long = "tee.verifier-address", env = "TEE_VERIFIER_ADDRESS")]
+    pub tee_verifier_address: Option<Address>,
+
     /// Zone ID for the private RPC auth token validation.
     /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
@@ -172,6 +186,23 @@ fn main() {
                 .http_url()
                 .expect("HTTP RPC server must be enabled for sequencer mode");
 
+            let tee_config = match (&args.tee_signing_key, &args.tee_measurement_hash) {
+                (Some(key_hex), Some(hash_hex)) => {
+                    let key_bytes = const_hex::decode(
+                        key_hex.strip_prefix("0x").unwrap_or(key_hex),
+                    )
+                    .expect("invalid TEE signing key hex");
+                    let signing_key =
+                        k256::ecdsa::SigningKey::from_slice(&key_bytes)
+                            .expect("invalid TEE secp256k1 signing key");
+                    let measurement_hash: alloy_primitives::B256 = hash_hex
+                        .parse()
+                        .expect("invalid TEE measurement hash");
+                    Some(zone::TeeConfig::new(signing_key, measurement_hash))
+                }
+                _ => None,
+            };
+
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
                 l1_rpc_url: args.l1_rpc_url,
@@ -184,6 +215,8 @@ fn main() {
                 zone_rpc_url,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
+                tee_config,
+                verifier_address: args.tee_verifier_address,
             };
 
             let seq_handle = zone::spawn_zone_sequencer(sequencer_config, sequencer_signer).await;
