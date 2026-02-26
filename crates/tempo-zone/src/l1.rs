@@ -504,17 +504,9 @@ impl L1PortalEvents {
     ];
 
     /// Decode all portal events from a slice of logs for a single block.
-    ///
-    /// Logs are sorted by `log_index` before processing to ensure
-    /// deterministic deposit ordering regardless of RPC provider behaviour.
-    /// The deposit hash chain is order-dependent, so this is critical for
-    /// correctness.
     pub fn from_logs(logs: &[Log], block_number: u64) -> eyre::Result<Self> {
-        let mut sorted: Vec<&Log> = logs.iter().collect();
-        sorted.sort_by_key(|l| l.log_index);
-
         let mut events = Self::default();
-        for log in sorted {
+        for log in logs {
             events.push_log(log, block_number)?;
         }
         Ok(events)
