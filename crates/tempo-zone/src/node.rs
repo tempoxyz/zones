@@ -3,11 +3,13 @@
 //! This is a lightweight L2 node built on reth's node builder infrastructure.
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
+use crate::payload::{ZonePayloadAttributes, ZonePayloadTypes};
 use alloy_primitives::U256;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
-    PayloadAttributesBuilder, PayloadTypes,
+    AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
+    NewPayloadError, NodeAddOns, NodeTypes, PayloadAttributesBuilder, PayloadTypes,
+    PayloadValidator,
 };
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
@@ -31,10 +33,8 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoEvmConfig;
 use tempo_node::{
-    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator,
-    node::TempoPayloadAttributesBuilder, rpc::TempoReceiptConverter,
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoReceiptConverter,
 };
-use tempo_payload_types::TempoPayloadTypes;
 use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
@@ -140,7 +140,6 @@ impl ZoneNode {
 
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
-        deposit_queue: crate::DepositQueue,
         executor_builder: ZoneExecutorBuilder,
         sequencer: alloy_primitives::Address,
         sequencer_key: k256::SecretKey,
@@ -161,7 +160,6 @@ impl ZoneNode {
             .pool(ZonePoolBuilder)
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
-                deposit_queue,
                 sequencer,
                 sequencer_key,
                 portal_address,
@@ -175,7 +173,7 @@ impl NodeTypes for ZoneNode {
     type Primitives = TempoPrimitives;
     type ChainSpec = TempoChainSpec;
     type Storage = EmptyBodyStorage<TempoTxEnvelope, TempoHeader>;
-    type Payload = TempoPayloadTypes;
+    type Payload = ZonePayloadTypes;
 }
 
 /// Zone node add-ons (RPC, etc.)
@@ -263,8 +261,6 @@ where
         // Spawn the ZoneEngine — L1-event-driven block production
         {
             let provider = ctx.node.provider().clone();
-            let payload_attributes_builder =
-                TempoPayloadAttributesBuilder::new(provider.chain_spec());
             let to_engine = ctx.beacon_engine_handle.clone();
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
@@ -272,15 +268,9 @@ where
             ctx.node
                 .task_executor()
                 .spawn_critical("zone-engine", async move {
-                    ZoneEngine::new(
-                        provider,
-                        payload_attributes_builder,
-                        to_engine,
-                        payload_builder,
-                        deposit_queue,
-                    )
-                    .run()
-                    .await
+                    ZoneEngine::new(provider, to_engine, payload_builder, deposit_queue)
+                        .run()
+                        .await
                 });
             info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
         }
@@ -334,7 +324,6 @@ where
             self.l1_state_cache.clone(),
         );
         Self::components(
-            self.deposit_queue.clone(),
             executor_builder,
             self.sequencer,
             self.sequencer_key.clone(),
@@ -361,7 +350,27 @@ impl<N: FullNodeComponents<Types = Self>> DebugNode<N> for ZoneNode {
         chain_spec: &Self::ChainSpec,
     ) -> impl PayloadAttributesBuilder<<Self::Payload as PayloadTypes>::PayloadAttributes, TempoHeader>
     {
-        TempoPayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
+        ZonePayloadAttributesBuilder::new(Arc::new(chain_spec.clone()))
+    }
+}
+
+/// Builds [`ZonePayloadAttributes`] with `l1_block: None` — suitable for
+/// debug/test scenarios where no L1 data is available.
+#[derive(Debug)]
+pub(crate) struct ZonePayloadAttributesBuilder;
+
+impl ZonePayloadAttributesBuilder {
+    pub(crate) fn new(_chain_spec: Arc<TempoChainSpec>) -> Self {
+        Self
+    }
+}
+
+impl PayloadAttributesBuilder<ZonePayloadAttributes, TempoHeader> for ZonePayloadAttributesBuilder {
+    fn build(
+        &self,
+        _parent: &reth_primitives_traits::SealedHeader<TempoHeader>,
+    ) -> ZonePayloadAttributes {
+        unimplemented!("zone blocks require L1 data — use ZoneEngine instead")
     }
 }
 
@@ -429,6 +438,34 @@ where
 
     async fn build(self, _ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
         Ok(TempoEngineValidator::new())
+    }
+}
+
+impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
+    type Block = tempo_primitives::Block;
+
+    fn convert_payload_to_block(
+        &self,
+        payload: tempo_payload_types::TempoExecutionData,
+    ) -> Result<reth_primitives_traits::SealedBlock<Self::Block>, NewPayloadError> {
+        let tempo_payload_types::TempoExecutionData {
+            block,
+            validator_set: _,
+        } = payload;
+        Ok(Arc::unwrap_or_clone(block))
+    }
+
+    fn validate_payload_attributes_against_header(
+        &self,
+        attr: &crate::payload::ZonePayloadAttributes,
+        header: &TempoHeader,
+    ) -> Result<(), InvalidPayloadAttributesError> {
+        if reth_node_api::PayloadAttributes::timestamp(attr)
+            < reth_primitives_traits::AlloyBlockHeader::timestamp(header)
+        {
+            return Err(InvalidPayloadAttributesError::InvalidTimestamp);
+        }
+        Ok(())
     }
 }
 

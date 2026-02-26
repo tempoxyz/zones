@@ -19,6 +19,7 @@ mod executor;
 pub mod l1;
 pub mod l1_state;
 mod node;
+pub mod payload;
 pub mod precompiles;
 pub mod rpc;
 pub mod withdrawals;
@@ -32,6 +33,7 @@ pub use l1::{
 };
 pub use l1_state::SharedL1StateCache;
 pub use node::{ZoneExecutorBuilder, ZoneNode};
+pub use payload::{ZonePayloadAttributes, ZonePayloadBuilderAttributes, ZonePayloadTypes};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 
