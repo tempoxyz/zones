@@ -82,6 +82,8 @@ pub struct ZoneEngine {
     /// Latest block header — used as parent for the next payload and as the
     /// head/safe/finalized hash in FCU (instant finality).
     last_header: SealedHeader<TempoHeader>,
+    /// Address that receives block fees.
+    fee_recipient: Address,
 }
 
 impl ZoneEngine {
@@ -90,6 +92,7 @@ impl ZoneEngine {
         to_engine: ConsensusEngineHandle<ZonePayloadTypes>,
         payload_builder: PayloadBuilderHandle<ZonePayloadTypes>,
         deposit_queue: DepositQueue,
+        fee_recipient: Address,
     ) -> Self {
         let last_header = provider
             .sealed_header(provider.best_block_number().unwrap())
@@ -102,6 +105,7 @@ impl ZoneEngine {
             payload_builder,
             deposit_queue,
             last_header,
+            fee_recipient,
         }
     }
 
@@ -194,7 +198,7 @@ impl ZoneEngine {
             inner: EthPayloadAttributes {
                 timestamp: timestamp_secs,
                 prev_randao: B256::ZERO,
-                suggested_fee_recipient: Address::ZERO,
+                suggested_fee_recipient: self.fee_recipient,
                 withdrawals: self
                     .chain_spec
                     .is_shanghai_active_at_timestamp(timestamp_secs)
