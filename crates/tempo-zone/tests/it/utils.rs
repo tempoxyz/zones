@@ -19,7 +19,10 @@ use std::{
 };
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
-use zone::{Deposit, DepositQueue, EncryptedDeposit, L1Deposit, SharedL1StateCache, ZoneNode};
+use zone::{
+    Deposit, DepositQueue, EncryptedDeposit, L1Deposit, L1PortalEvents, SharedL1StateCache,
+    ZoneNode,
+};
 
 use alloy_provider::{Provider, ProviderBuilder, WalletProvider};
 use alloy_rpc_types_eth::BlockNumberOrTag;
@@ -2170,7 +2173,8 @@ impl L1Fixture {
         deposits: Vec<Deposit>,
     ) {
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
-        queue.enqueue(block.header.clone(), l1_deposits);
+        let events = L1PortalEvents::from_deposits(l1_deposits);
+        queue.enqueue(block.header.clone(), events);
     }
 
     /// Create a [`Deposit`] tied to a specific L1 block number.
@@ -2196,7 +2200,7 @@ impl L1Fixture {
     /// Inject an empty L1 block (no deposits) into the queue.
     pub(crate) fn inject_empty_block(&mut self, queue: &DepositQueue) {
         let header = self.next_header();
-        queue.enqueue(header, vec![]);
+        queue.enqueue(header, L1PortalEvents::default());
     }
 
     /// Inject `n` empty L1 blocks (no deposits) into the queue.
@@ -2210,14 +2214,16 @@ impl L1Fixture {
     pub(crate) fn inject_deposits(&mut self, queue: &DepositQueue, deposits: Vec<Deposit>) {
         let header = self.next_header();
         let l1_deposits = deposits.into_iter().map(L1Deposit::Regular).collect();
-        queue.enqueue(header, l1_deposits);
+        let events = L1PortalEvents::from_deposits(l1_deposits);
+        queue.enqueue(header, events);
     }
 
     /// Inject an L1 block with mixed regular and encrypted deposits.
     #[allow(dead_code)]
     pub(crate) fn inject_l1_deposits(&mut self, queue: &DepositQueue, deposits: Vec<L1Deposit>) {
         let header = self.next_header();
-        queue.enqueue(header, deposits);
+        let events = L1PortalEvents::from_deposits(deposits);
+        queue.enqueue(header, events);
     }
 
     /// Create an [`EncryptedDeposit`] for testing with dummy ECIES parameters.
