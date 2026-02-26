@@ -8,7 +8,7 @@ use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
-use alloy_sol_types::{SolEvent, SolValue};
+use alloy_sol_types::{SolEvent, SolEventInterface, SolValue};
 use alloy_transport::Authorization;
 use futures::StreamExt;
 use parking_lot::Mutex;
@@ -16,14 +16,16 @@ use reth_primitives_traits::SealedHeader;
 use std::{collections::BTreeMap, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     abi::{
         self, EncryptedDeposit as AbiEncryptedDeposit,
         EncryptedDepositPayload as AbiEncryptedDepositPayload,
     },
-    bindings::ZonePortal::{self, DepositMade, EncryptedDepositMade, TokenEnabled},
+    bindings::ZonePortal::{
+        self, DepositMade, EncryptedDepositMade, TokenEnabled, ZonePortalEvents,
+    },
 };
 
 /// Configuration for the L1 subscriber.
@@ -207,34 +209,7 @@ impl L1Subscriber {
                 let n = log
                     .block_number
                     .ok_or_else(|| eyre::eyre!("log missing block number"))?;
-                let topic0 = log.topic0().copied();
-                match topic0 {
-                    Some(h) if h == TokenEnabled::SIGNATURE_HASH => {
-                        let event = TokenEnabled::decode_log(&log.inner)?;
-                        events_by_block
-                            .entry(n)
-                            .or_default()
-                            .enabled_tokens
-                            .push(event.token);
-                    }
-                    Some(h)
-                        if h == DepositMade::SIGNATURE_HASH
-                            || h == EncryptedDepositMade::SIGNATURE_HASH =>
-                    {
-                        events_by_block
-                            .entry(n)
-                            .or_default()
-                            .deposits
-                            .push(self.parse_deposit(log, n)?);
-                    }
-                    _ => {
-                        warn!(
-                            block = n,
-                            topic0 = ?topic0,
-                            "Ignoring unknown portal event during backfill"
-                        );
-                    }
-                }
+                events_by_block.entry(n).or_default().push_log(&log, n)?;
             }
 
             for block_number in cursor..=end {
@@ -347,93 +322,14 @@ impl L1Subscriber {
             .get_logs(&self.portal_event_filter().select(block_number))
             .await?;
 
-        let mut events = L1PortalEvents::default();
-
-        for log in logs {
-            let topic0 = log.topic0().copied();
-            match topic0 {
-                Some(h) if h == TokenEnabled::SIGNATURE_HASH => {
-                    let event = TokenEnabled::decode_log(&log.inner)?;
-                    info!(
-                        l1_block = block_number,
-                        token = %event.token,
-                        "🪙 Token enabled on L1"
-                    );
-                    events.enabled_tokens.push(event.token);
-                }
-                Some(h)
-                    if h == DepositMade::SIGNATURE_HASH
-                        || h == EncryptedDepositMade::SIGNATURE_HASH =>
-                {
-                    events.deposits.push(self.parse_deposit(log, block_number)?);
-                }
-                _ => {
-                    warn!(
-                        l1_block = block_number,
-                        topic0 = ?topic0,
-                        "Ignoring unknown portal event"
-                    );
-                }
-            }
-        }
-
-        for d in &events.deposits {
-            match d {
-                L1Deposit::Regular(d) => {
-                    info!(
-                        l1_block = block_number,
-                        token = %d.token,
-                        sender = %d.sender,
-                        to = %d.to,
-                        amount = %d.amount,
-                        "💰 Deposit from L1"
-                    );
-                }
-                L1Deposit::Encrypted(d) => {
-                    info!(
-                        l1_block = block_number,
-                        token = %d.token,
-                        sender = %d.sender,
-                        amount = %d.amount,
-                        "🔒 Encrypted deposit from L1"
-                    );
-                }
-            }
-        }
-
-        Ok(events)
+        L1PortalEvents::from_logs(&logs, block_number)
     }
 
     /// Returns a log filter for portal events emitted by the ZonePortal.
     fn portal_event_filter(&self) -> Filter {
         Filter::new()
             .address(self.config.portal_address)
-            .event_signature(vec![
-                DepositMade::SIGNATURE_HASH,
-                EncryptedDepositMade::SIGNATURE_HASH,
-                TokenEnabled::SIGNATURE_HASH,
-            ])
-    }
-
-    /// Parse a single deposit log into an [`L1Deposit`].
-    ///
-    /// Supports both [`DepositMade`] and [`EncryptedDepositMade`] events.
-    fn parse_deposit(&self, log: Log, block_number: u64) -> eyre::Result<L1Deposit> {
-        if log.topic0() == Some(&DepositMade::SIGNATURE_HASH) {
-            let event = DepositMade::decode_log(&log.inner)?;
-            Ok(L1Deposit::Regular(Deposit::from_event(
-                event.data,
-                block_number,
-            )))
-        } else if log.topic0() == Some(&EncryptedDepositMade::SIGNATURE_HASH) {
-            let event = EncryptedDepositMade::decode_log(&log.inner)?;
-            Ok(L1Deposit::Encrypted(EncryptedDeposit::from_event(
-                event.data,
-                block_number,
-            )))
-        } else {
-            Err(eyre::eyre!("unknown deposit event topic"))
-        }
+            .event_signature(L1PortalEvents::SIGNATURE_HASHES.to_vec())
     }
 }
 
@@ -600,12 +496,86 @@ pub struct L1PortalEvents {
 }
 
 impl L1PortalEvents {
+    /// Event signature hashes that this container knows how to decode.
+    const SIGNATURE_HASHES: [B256; 3] = [
+        DepositMade::SIGNATURE_HASH,
+        EncryptedDepositMade::SIGNATURE_HASH,
+        TokenEnabled::SIGNATURE_HASH,
+    ];
+
+    /// Decode all portal events from a slice of logs for a single block.
+    pub fn from_logs(logs: &[Log], block_number: u64) -> eyre::Result<Self> {
+        let mut events = Self::default();
+        for log in logs {
+            events.push_log(log, block_number)?;
+        }
+        Ok(events)
+    }
+
     /// Create portal events from deposits only.
     pub fn from_deposits(deposits: Vec<L1Deposit>) -> Self {
         Self {
             deposits,
             ..Default::default()
         }
+    }
+
+    /// Decode a portal log and add the event to this container.
+    ///
+    /// Logs whose topic0 does not match a known portal event are skipped
+    /// (should be unreachable given the explicit filter). Known events that
+    /// fail to decode return an error.
+    pub fn push_log(&mut self, log: &Log, block_number: u64) -> eyre::Result<()> {
+        if !Self::is_known_event(log) {
+            debug!(
+                l1_block = block_number,
+                topic0 = ?log.topic0(),
+                "Skipping unknown portal event"
+            );
+            return Ok(());
+        }
+        match ZonePortalEvents::decode_log(&log.inner)?.data {
+            ZonePortalEvents::DepositMade(event) => {
+                info!(
+                    l1_block = block_number,
+                    token = %event.token,
+                    sender = %event.sender,
+                    to = %event.to,
+                    amount = %event.netAmount,
+                    "💰 Deposit from L1"
+                );
+                self.deposits
+                    .push(L1Deposit::Regular(Deposit::from_event(event, block_number)));
+            }
+            ZonePortalEvents::EncryptedDepositMade(event) => {
+                info!(
+                    l1_block = block_number,
+                    token = %event.token,
+                    sender = %event.sender,
+                    amount = %event.netAmount,
+                    "🔒 Encrypted deposit from L1"
+                );
+                self.deposits
+                    .push(L1Deposit::Encrypted(EncryptedDeposit::from_event(
+                        event,
+                        block_number,
+                    )));
+            }
+            ZonePortalEvents::TokenEnabled(event) => {
+                info!(
+                    l1_block = block_number,
+                    token = %event.token,
+                    "🪙 Token enabled on L1"
+                );
+                self.enabled_tokens.push(event.token);
+            }
+        }
+        Ok(())
+    }
+
+    fn is_known_event(log: &Log) -> bool {
+        log.topic0()
+            .is_some_and(|t| Self::SIGNATURE_HASHES.contains(t))
     }
 }
 
