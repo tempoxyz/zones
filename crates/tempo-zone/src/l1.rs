@@ -279,12 +279,13 @@ impl L1Subscriber {
                     let tip_number = tip_header.number();
                     match self.deposit_queue.try_enqueue(tip_header, tip_deposits) {
                         EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
-                        EnqueueOutcome::NeedBackfill { from, to: _ } => {
+                        EnqueueOutcome::NeedBackfill { from, to } => {
                             // Gap between queue head and confirmed tip — backfill
                             // the missing range including the tip (re-fetched from
                             // the provider since try_enqueue consumed ownership).
                             warn!(
                                 from,
+                                to,
                                 tip = tip_number,
                                 "Backfilling gap before confirmed tip"
                             );
@@ -524,7 +525,7 @@ impl L1Deposit {
 
 /// Result of attempting to enqueue an L1 block into the deposit queue.
 #[derive(Debug)]
-pub enum EnqueueOutcome {
+pub(crate) enum EnqueueOutcome {
     /// Block was appended to the queue.
     Accepted,
     /// Block is a duplicate (same number and hash already present, or behind our window).
@@ -554,7 +555,7 @@ pub struct L1BlockDeposits {
 ///
 /// This mirrors the L1 portal's `currentDepositQueueHash`.
 #[derive(Debug)]
-pub struct PendingDeposits {
+pub(crate) struct PendingDeposits {
     /// Deposit hash chain value after the last block consumed by the engine
     /// via `confirm` or `drain`. Serves as the rollback anchor when purging
     /// blocks during a reorg.
@@ -599,7 +600,7 @@ impl PendingDeposits {
     /// - [`EnqueueOutcome::NeedBackfill`] — block doesn't connect due to a gap
     ///   or parent hash mismatch. The caller must fetch and enqueue the missing
     ///   range `from..=to`, then retry this block.
-    pub fn try_enqueue(
+    pub(crate) fn try_enqueue(
         &mut self,
         header: SealedHeader<TempoHeader>,
         deposits: Vec<L1Deposit>,
@@ -717,7 +718,7 @@ impl PendingDeposits {
     /// Enqueue a block during backfill. Accepts or skips duplicates.
     ///
     /// Panics on `NeedBackfill` — backfill blocks must be fetched sequentially.
-    pub fn enqueue(&mut self, header: TempoHeader, deposits: Vec<L1Deposit>) {
+    pub(crate) fn enqueue(&mut self, header: TempoHeader, deposits: Vec<L1Deposit>) {
         match self.try_enqueue(SealedHeader::seal_slow(header), deposits) {
             EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
             other => panic!("enqueue expected Accepted or Duplicate, got {other:?}"),
@@ -754,7 +755,7 @@ impl PendingDeposits {
     ///
     /// Returns `None` if no L1 blocks are queued. Use [`confirm`](Self::confirm)
     /// after a successful build to advance the queue.
-    pub fn peek(&self) -> Option<&L1BlockDeposits> {
+    pub(crate) fn peek(&self) -> Option<&L1BlockDeposits> {
         self.pending.first()
     }
 
@@ -767,7 +768,7 @@ impl PendingDeposits {
     ///
     /// Must be called after a successful payload build + newPayload acceptance.
     /// Advances `processed_head_hash` and `last_processed`.
-    pub fn confirm(&mut self, expected: NumHash) -> Option<L1BlockDeposits> {
+    pub(crate) fn confirm(&mut self, expected: NumHash) -> Option<L1BlockDeposits> {
         let front = self.pending.first()?;
         if front.header.num_hash() != expected {
             return None;
@@ -786,7 +787,8 @@ impl PendingDeposits {
     }
 
     /// Drain all pending L1 block deposits.
-    pub fn drain(&mut self) -> Vec<L1BlockDeposits> {
+    #[cfg(test)]
+    fn drain(&mut self) -> Vec<L1BlockDeposits> {
         if let Some(last) = self.pending.last() {
             self.processed_head_hash = last.queue_hash_after;
             // Keep last_processed monotonic — never regress the floor.
@@ -802,7 +804,8 @@ impl PendingDeposits {
     }
 
     /// Compute a [`DepositQueueTransition`] for a batch of deposits starting from `prev_hash`
-    pub fn transition(prev_hash: B256, deposits: &[L1Deposit]) -> DepositQueueTransition {
+    #[cfg(test)]
+    fn transition(prev_hash: B256, deposits: &[L1Deposit]) -> DepositQueueTransition {
         let mut current = prev_hash;
         for d in deposits {
             current = d.hash_chain(current);
@@ -814,38 +817,44 @@ impl PendingDeposits {
     }
 
     /// Returns the deposit hash chain value after all enqueued deposits.
-    pub fn enqueued_head_hash(&self) -> B256 {
+    #[cfg(test)]
+    fn enqueued_head_hash(&self) -> B256 {
         self.enqueued_head_hash
     }
 
     /// Returns the number of pending L1 blocks.
-    pub fn pending_len(&self) -> usize {
+    #[cfg(test)]
+    fn pending_len(&self) -> usize {
         self.pending.len()
     }
 
     /// Returns a reference to the pending block at the given index.
-    pub fn pending_block(&self, idx: usize) -> Option<&L1BlockDeposits> {
+    #[cfg(test)]
+    fn pending_block(&self, idx: usize) -> Option<&L1BlockDeposits> {
         self.pending.get(idx)
     }
 
     /// Returns a slice of all pending L1 block deposits.
-    pub fn pending_blocks(&self) -> &[L1BlockDeposits] {
+    #[cfg(test)]
+    fn pending_blocks(&self) -> &[L1BlockDeposits] {
         &self.pending
     }
 
     /// Returns the most recently enqueued L1 block (number + hash), if any.
-    pub fn last_enqueued(&self) -> Option<NumHash> {
+    pub(crate) fn last_enqueued(&self) -> Option<NumHash> {
         self.last_enqueued
     }
 
     /// Clears the `last_enqueued` anchor. Used when a reorg invalidates
     /// the consumed block that `last_enqueued` pointed to.
-    pub fn clear_last_enqueued(&mut self) {
+    #[cfg(test)]
+    fn clear_last_enqueued(&mut self) {
         self.last_enqueued = None;
     }
 
     /// Returns the last L1 block consumed by the engine.
-    pub fn last_processed(&self) -> Option<NumHash> {
+    #[cfg(test)]
+    fn last_processed(&self) -> Option<NumHash> {
         self.last_processed
     }
 }
@@ -855,12 +864,13 @@ impl PendingDeposits {
 /// Represents the state of the deposit hash chain for a batch
 /// of deposits processed by the zone. Used to prove which deposits were
 /// included in a block.
+#[cfg(test)]
 #[derive(Debug, Clone, Default)]
-pub struct DepositQueueTransition {
+struct DepositQueueTransition {
     /// Hash chain head before the batch is processed
-    pub prev_processed_hash: B256,
+    prev_processed_hash: B256,
     /// Hash chain head after the batch is processed
-    pub next_processed_hash: B256,
+    next_processed_hash: B256,
 }
 
 /// Shared deposit queue with notification support.
@@ -884,7 +894,7 @@ impl DepositQueue {
 
     /// Try to enqueue an L1 block. Returns the outcome — callers handle
     /// `NeedBackfill` by fetching missing blocks and retrying.
-    pub fn try_enqueue(
+    pub(crate) fn try_enqueue(
         &self,
         header: SealedHeader<TempoHeader>,
         deposits: Vec<L1Deposit>,
@@ -917,19 +927,9 @@ impl DepositQueue {
         self.inner.lock().confirm(expected)
     }
 
-    /// Returns the number of pending L1 blocks.
-    pub fn pending_count(&self) -> usize {
-        self.inner.lock().pending_len()
-    }
-
     /// Wait until an L1 block is available.
     pub async fn notified(&self) {
         self.notify.notified().await
-    }
-
-    /// Get a reference to the notify for external use.
-    pub fn notify_ref(&self) -> &Arc<tokio::sync::Notify> {
-        &self.notify
     }
 
     /// Returns the most recently enqueued L1 block (number + hash), if any.
@@ -940,9 +940,9 @@ impl DepositQueue {
         self.inner.lock().last_enqueued()
     }
 
-    /// Lock the inner queue directly.
-    pub fn lock(&self) -> parking_lot::MutexGuard<'_, PendingDeposits> {
-        self.inner.lock()
+    #[cfg(test)]
+    fn drain(&self) -> Vec<L1BlockDeposits> {
+        self.inner.lock().drain()
     }
 }
 
@@ -1354,7 +1354,7 @@ mod tests {
         queue.enqueue(make_chained_header(104, h103_hash), vec![]);
         assert_eq!(queue.last_enqueued().unwrap().number, 104);
 
-        let drained = queue.lock().drain();
+        let drained = queue.drain();
         assert_eq!(drained.len(), 2);
         assert_eq!(
             queue.last_enqueued().unwrap().number,
