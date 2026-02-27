@@ -719,15 +719,8 @@ pub fn build_advance_tempo_tx(
         }
     }
 
-    let abi_enabled_tokens: Vec<abi::EnabledToken> = enabled_tokens
-        .iter()
-        .map(|t| abi::EnabledToken {
-            token: t.token,
-            name: t.name.clone(),
-            symbol: t.symbol.clone(),
-            currency: t.currency.clone(),
-        })
-        .collect();
+    let abi_enabled_tokens: Vec<abi::EnabledToken> =
+        enabled_tokens.iter().map(|t| t.to_abi()).collect();
 
     let calldata = abi::ZoneInbox::advanceTempoCall {
         header: Bytes::from(header_rlp),

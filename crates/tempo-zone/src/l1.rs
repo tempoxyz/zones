@@ -508,6 +508,18 @@ pub struct EnabledToken {
     pub currency: String,
 }
 
+impl EnabledToken {
+    /// Convert to the ABI type used in `advanceTempo` calldata.
+    pub fn to_abi(&self) -> abi::EnabledToken {
+        abi::EnabledToken {
+            token: self.token,
+            name: self.name.clone(),
+            symbol: self.symbol.clone(),
+            currency: self.currency.clone(),
+        }
+    }
+}
+
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
     const SIGNATURE_HASHES: [B256; 3] = [
