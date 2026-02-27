@@ -7,7 +7,6 @@
 #![allow(unnameable_types)]
 #![allow(clippy::too_many_arguments)]
 #![allow(unexpected_cfgs)] // `#[contract]` macro from tempo-precompiles-macros
-
 use eyre as _;
 
 // Required by the `#[contract]` proc macro expansion (references `crate::storage` / `crate::error`).

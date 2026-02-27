@@ -24,7 +24,7 @@ use zone::{
     SharedL1StateCache, ZoneNode,
 };
 
-use alloy_provider::{Provider, ProviderBuilder, WalletProvider};
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_alloy::TempoNetwork;

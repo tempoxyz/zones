@@ -1,7 +1,10 @@
 //! Multi-asset zone deposit and withdrawal.
 
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
-use alloy::{primitives::{B256, U256}, providers::Provider};
+use alloy::{
+    primitives::{B256, U256},
+    providers::Provider,
+};
 
 /// Longer timeout for real L1 tests.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
