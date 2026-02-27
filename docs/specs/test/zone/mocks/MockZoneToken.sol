@@ -10,6 +10,7 @@ contract MockZoneToken is IZoneToken {
 
     string public name;
     string public symbol;
+    string public currency;
     uint8 public constant decimals = 6;
 
     uint256 public totalSupply;
@@ -34,6 +35,7 @@ contract MockZoneToken is IZoneToken {
     constructor(string memory _name, string memory _symbol) {
         name = _name;
         symbol = _symbol;
+        currency = "USD";
         admin = msg.sender;
     }
 
