@@ -52,8 +52,6 @@ const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const TEMPO_STATE_READER_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000004");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-const ALPHA_USD_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000001");
-const BETA_USD_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000002");
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct GenerateZoneGenesis {
@@ -116,7 +114,6 @@ impl GenerateZoneGenesis {
         initialize_tip403_registry(&mut evm)?;
         initialize_tip20_factory(&mut evm)?;
         create_path_usd_token(&mut evm)?;
-        create_extra_tokens(&mut evm)?;
         initialize_fee_manager(&mut evm)?;
         initialize_stablecoin_dex(&mut evm)?;
         initialize_nonce_manager(&mut evm)?;
@@ -524,54 +521,6 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<(
     )?;
 
     println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
-    Ok(())
-}
-
-/// Create AlphaUSD and BetaUSD tokens at their reserved TIP20 addresses,
-/// mirroring the L1 genesis setup.
-fn create_extra_tokens(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let admin = DEPLOYER;
-
-    for (address, name) in [
-        (ALPHA_USD_ADDRESS, "AlphaUSD"),
-        (BETA_USD_ADDRESS, "BetaUSD"),
-    ] {
-        let ctx = evm.ctx_mut();
-        StorageCtx::enter_evm(
-            &mut ctx.journaled_state,
-            &ctx.block,
-            &ctx.cfg,
-            &ctx.tx,
-            || {
-                TIP20Factory::new().create_token_reserved_address(
-                    address,
-                    name,
-                    name,
-                    "USD",
-                    PATH_USD_ADDRESS,
-                    admin,
-                )?;
-
-                let mut token = TIP20Token::from_address(address)?;
-                token.grant_role_internal(admin, *ISSUER_ROLE)?;
-                token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
-                token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
-                token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
-
-                token.set_supply_cap(
-                    admin,
-                    ITIP20::setSupplyCapCall {
-                        newSupplyCap: U256::from(u128::MAX),
-                    },
-                )?;
-
-                Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
-            },
-        )?;
-
-        println!("Created {name} token at {address}");
-    }
-
     Ok(())
 }
 
