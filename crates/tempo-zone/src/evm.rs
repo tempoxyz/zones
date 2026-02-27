@@ -35,7 +35,7 @@ use crate::{
     l1_state::{L1StateProvider, SharedL1StateCache, TempoStateReader},
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        ZONE_TIP20_FACTORY_ADDRESS, zone_tip20_factory,
+        ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory,
     },
 };
 
@@ -68,7 +68,7 @@ impl ZoneEvmFactory {
         });
         precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| Some(AesGcmDecrypt.into()));
         precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
-            Some(zone_tip20_factory(&cfg))
+            Some(ZoneTokenFactory::create(&cfg))
         });
         evm
     }

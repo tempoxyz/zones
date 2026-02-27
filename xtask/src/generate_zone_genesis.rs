@@ -39,6 +39,7 @@ use tempo_precompiles::{
     tip403_registry::TIP403Registry,
 };
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
+use zone::precompiles::ZoneTokenFactory;
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -463,7 +464,7 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
     Ok(())
 }
 
-/// Initialize the TIP20Factory precompile (required before creating any TIP20 tokens).
+/// Initialize the ZoneTokenFactory precompile (required before creating any TIP20 tokens).
 fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
@@ -471,9 +472,9 @@ fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
-        || TIP20Factory::new().initialize(),
+        || ZoneTokenFactory::new().initialize(),
     )?;
-    println!("Initialized TIP20Factory");
+    println!("Initialized ZoneTokenFactory");
     Ok(())
 }
 

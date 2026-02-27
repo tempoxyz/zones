@@ -6,8 +6,13 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(unnameable_types)]
 #![allow(clippy::too_many_arguments)]
+#![allow(unexpected_cfgs)]
 
 use eyre as _;
+
+// Re-exports required by the `#[contract]` proc macro from `tempo-precompiles-macros`,
+// which generates code referencing `crate::storage` and `crate::error`.
+pub(crate) use tempo_precompiles::{error, storage};
 
 pub mod abi;
 pub mod batch;

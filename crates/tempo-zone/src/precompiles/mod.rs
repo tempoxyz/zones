@@ -23,7 +23,7 @@ pub mod tip20_factory;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
-pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, zone_tip20_factory};
+pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
 
 #[cfg(test)]
 mod test_utils;
