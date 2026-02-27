@@ -56,6 +56,8 @@ pub struct ZonePayloadFactory {
     sequencer_key: k256::SecretKey,
     /// ZonePortal address on L1 — used as context in HKDF key derivation.
     portal_address: Address,
+    /// Shared policy cache for TIP-403 authorization checks on encrypted deposits.
+    policy_cache: crate::SharedPolicyCache,
 }
 
 impl ZonePayloadFactory {
@@ -63,11 +65,13 @@ impl ZonePayloadFactory {
         sequencer: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
+        policy_cache: crate::SharedPolicyCache,
     ) -> Self {
         Self {
             sequencer,
             sequencer_key,
             portal_address,
+            policy_cache,
         }
     }
 }
@@ -92,6 +96,7 @@ where
             _sequencer: self.sequencer,
             sequencer_key: self.sequencer_key,
             portal_address: self.portal_address,
+            policy_cache: self.policy_cache,
         })
     }
 }
@@ -104,6 +109,7 @@ pub struct ZonePayloadBuilder<Provider> {
     _sequencer: Address,
     sequencer_key: k256::SecretKey,
     portal_address: Address,
+    policy_cache: crate::SharedPolicyCache,
 }
 
 impl<Provider> ZonePayloadBuilder<Provider> {
@@ -114,6 +120,7 @@ impl<Provider> ZonePayloadBuilder<Provider> {
         sequencer: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
+        policy_cache: crate::SharedPolicyCache,
     ) -> Self {
         Self {
             pool,
@@ -122,6 +129,7 @@ impl<Provider> ZonePayloadBuilder<Provider> {
             _sequencer: sequencer,
             sequencer_key,
             portal_address,
+            policy_cache,
         }
     }
 }
@@ -330,6 +338,7 @@ where
                 &l1_block.events.deposits,
                 &self.sequencer_key,
                 self.portal_address,
+                &self.policy_cache,
             );
             let mut reverted = false;
             match builder.execute_transaction_with_result_closure(advance_tx, |result| {
@@ -567,6 +576,8 @@ fn build_encrypted_deposit(
     d: &crate::l1::EncryptedDeposit,
     sequencer_key: &k256::SecretKey,
     portal_address: Address,
+    policy_cache: &crate::SharedPolicyCache,
+    l1_block_number: u64,
 ) -> (abi::QueuedDeposit, abi::DecryptionData) {
     let queued = abi::QueuedDeposit {
         depositType: abi::DepositType::Encrypted,
@@ -601,10 +612,40 @@ fn build_encrypted_deposit(
     );
 
     if let Some(dec) = dec {
+        // Check TIP-403 policy: if the decrypted recipient is explicitly unauthorized,
+        // redirect the deposit to the sender (refund). Cache misses (None) are treated
+        // as authorized to avoid blocking deposits when the cache hasn't been populated.
+        let recipient = match policy_cache.read().is_authorized(d.token, dec.to, l1_block_number) {
+            Some(false) => {
+                warn!(
+                    target: "zone::payload",
+                    sender = %d.sender,
+                    recipient = %dec.to,
+                    token = %d.token,
+                    amount = %d.amount,
+                    "Encrypted deposit recipient is unauthorized, redirecting to sender"
+                );
+                d.sender
+            }
+            None => {
+                warn!(
+                    target: "zone::payload",
+                    sender = %d.sender,
+                    recipient = %dec.to,
+                    token = %d.token,
+                    amount = %d.amount,
+                    l1_block = l1_block_number,
+                    "Policy cache miss for encrypted deposit recipient, allowing (fail-open)"
+                );
+                dec.to
+            }
+            Some(true) => dec.to,
+        };
+
         let decryption = abi::DecryptionData {
             sharedSecret: dec.proof.shared_secret,
             sharedSecretYParity: dec.proof.shared_secret_y_parity,
-            to: dec.to,
+            to: recipient,
             memo: dec.memo,
             cpProof: abi::ChaumPedersenProof {
                 s: dec.proof.cp_proof_s,
@@ -681,6 +722,7 @@ pub fn build_advance_tempo_tx(
     deposits: &[L1Deposit],
     sequencer_key: &k256::SecretKey,
     portal_address: Address,
+    policy_cache: &crate::SharedPolicyCache,
 ) -> Recovered<TempoTxEnvelope> {
     // RLP-encode the Tempo header
     let mut header_rlp = Vec::new();
@@ -706,7 +748,7 @@ pub fn build_advance_tempo_tx(
             }
             L1Deposit::Encrypted(d) => {
                 let (queued, decryption) =
-                    build_encrypted_deposit(d, sequencer_key, portal_address);
+                    build_encrypted_deposit(d, sequencer_key, portal_address, policy_cache, header.inner.number);
                 queued_deposits.push(queued);
                 decryptions.push(decryption);
             }
@@ -796,8 +838,9 @@ mod tests {
         // Build the system transaction with a dummy sequencer key
         let portal_address = address!("0x0000000000000000000000000000000000000001");
         let seq_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid key");
+        let policy_cache = crate::SharedPolicyCache::default();
         let recovered_tx =
-            super::build_advance_tempo_tx(&header, &deposits, &seq_key, portal_address);
+            super::build_advance_tempo_tx(&header, &deposits, &seq_key, portal_address, &policy_cache);
 
         // Decode the calldata to verify structure.
         // Recovered<TempoTxEnvelope> → deref → TempoTxEnvelope::Legacy(Signed<TxLegacy>)

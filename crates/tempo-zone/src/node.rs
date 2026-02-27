@@ -69,6 +69,7 @@ pub struct ZoneNode {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
+    policy_cache: crate::SharedPolicyCache,
     sequencer: alloy_primitives::Address,
     /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
     sequencer_key: k256::SecretKey,
@@ -120,6 +121,7 @@ impl ZoneNode {
             l1_state_provider_config,
             l1_state_listener_config,
             l1_state_cache,
+            policy_cache: crate::SharedPolicyCache::default(),
             sequencer,
             sequencer_key,
             portal_address,
@@ -138,12 +140,18 @@ impl ZoneNode {
         self.l1_state_cache.clone()
     }
 
+    /// Returns a clone of the shared policy cache handle.
+    pub fn policy_cache(&self) -> crate::SharedPolicyCache {
+        self.policy_cache.clone()
+    }
+
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         executor_builder: ZoneExecutorBuilder,
         sequencer: alloy_primitives::Address,
         sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
+        policy_cache: crate::SharedPolicyCache,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -163,6 +171,7 @@ impl ZoneNode {
                 sequencer,
                 sequencer_key,
                 portal_address,
+                policy_cache,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -189,6 +198,7 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     deposit_queue: crate::DepositQueue,
     l1_config: crate::L1SubscriberConfig,
     fee_recipient: alloy_primitives::Address,
+    policy_cache: crate::SharedPolicyCache,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
@@ -208,6 +218,7 @@ where
         deposit_queue: crate::DepositQueue,
         l1_config: crate::L1SubscriberConfig,
         fee_recipient: alloy_primitives::Address,
+        policy_cache: crate::SharedPolicyCache,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -220,6 +231,7 @@ where
             deposit_queue,
             l1_config,
             fee_recipient,
+            policy_cache,
         }
     }
 }
@@ -257,12 +269,24 @@ where
         }
 
         // Spawn L1 deposit subscriber
+        let l1_url = self.l1_config.l1_rpc_url.clone();
         L1Subscriber::spawn(
             self.l1_config,
             self.deposit_queue.clone(),
             ctx.node.task_executor().clone(),
         );
         info!(target: "reth::cli", "L1 deposit subscriber started as part of node lifecycle");
+
+        // Spawn TIP-403 policy listener to keep policy cache in sync with L1
+        crate::l1_state::spawn_policy_listener(
+            crate::l1_state::PolicyListenerConfig {
+                l1_ws_url: l1_url,
+                tracked_tokens: Vec::new(),
+            },
+            self.policy_cache,
+            ctx.node.task_executor().clone(),
+        );
+        info!(target: "reth::cli", "TIP-403 policy listener started");
 
         // Spawn the ZoneEngine — L1-event-driven block production
         {
@@ -341,6 +365,7 @@ where
             self.sequencer,
             self.sequencer_key.clone(),
             self.portal_address,
+            self.policy_cache.clone(),
         )
     }
 
@@ -349,6 +374,7 @@ where
             self.deposit_queue.clone(),
             self.l1_config.clone(),
             self.sequencer,
+            self.policy_cache.clone(),
         )
     }
 }

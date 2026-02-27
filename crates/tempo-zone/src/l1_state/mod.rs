@@ -10,6 +10,7 @@
 pub mod cache;
 pub mod listener;
 pub mod policy_cache;
+pub mod policy_listener;
 pub mod precompile;
 pub mod provider;
 pub mod versioned;
@@ -20,5 +21,6 @@ pub use listener::{
     spawn_l1_chain_notification_listener, spawn_l1_state_listener,
 };
 pub use policy_cache::{PolicyCache, SharedPolicyCache};
+pub use policy_listener::{PolicyListener, PolicyListenerConfig, spawn_policy_listener};
 pub use precompile::TempoStateReader;
 pub use provider::{L1StateProvider, L1StateProviderConfig};
