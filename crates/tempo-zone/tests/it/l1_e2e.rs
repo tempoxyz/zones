@@ -291,11 +291,10 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
 ///  2. Create a second TIP-20 token ("ZoneUSD") on L1.
 ///  3. Deploy ZoneFactory, create a zone with pathUSD as initial token.
 ///  4. Enable ZoneUSD on the portal.
-///  5. Start zone node connected to L1.
-///  6. Fund dev account on L2 for gas, create ZoneUSD on L2.
-///  7. Deposit pathUSD and ZoneUSD into the zone.
-///  8. Spawn sequencer, withdraw both tokens back to L1.
-///  9. Verify withdrawals processed and L2 balances decreased.
+///  5. Start zone node connected to L1 (ZoneUSD is auto-initialized via TokenEnabled event).
+///  6. Deposit pathUSD and ZoneUSD into the zone.
+///  7. Spawn sequencer, withdraw both tokens back to L1.
+///  8. Verify withdrawals processed and L2 balances decreased.
 ///
 /// ```text
 ///  L1 (pathUSD + ZoneUSD)          Zone L2
@@ -328,36 +327,24 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
     // --- Step 3: Deploy L1 infrastructure and create a zone ---
     let portal_address = l1.deploy_zone().await?;
 
-    // --- Step 4: Enable ZoneUSD on the portal ---
-    l1.enable_token_on_portal(portal_address, l1_zone_usd)
-        .await?;
-
-    // --- Step 5: Start zone node connected to L1 ---
+    // --- Step 4: Start zone node connected to L1 ---
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
 
-    // Wait for the zone to advance past genesis
-    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+    // --- Step 5: Enable ZoneUSD on the portal ---
+    // Must happen AFTER zone startup so the zone's L1 subscriber picks up the
+    // TokenEnabled event from a live block.
+    l1.enable_token_on_portal(portal_address, l1_zone_usd)
+        .await?;
+    let enable_block = l1.provider().get_block_number().await?;
 
-    // --- Step 6: Fund dev account on L2 for token creation gas ---
-    let dev_l2_gas_funding: u128 = 10_000_000; // 10 pathUSD
-    l1.fund_dev_l2_gas(portal_address, &zone, dev_l2_gas_funding, L1_TIMEOUT)
+    // Wait for the zone to finalize past the enableToken block
+    zone.wait_for_l2_tempo_finalized(enable_block, L1_TIMEOUT)
         .await?;
 
-    // --- Step 7: Create ZoneUSD on zone L2 ---
-    // The token must exist on L2 with ISSUER_ROLE granted to ZoneInbox
-    // (for minting deposits) and ZoneOutbox (for burning withdrawals).
-    // Use the SAME salt so the token gets the same address as on L1.
-    let l2_zone_usd = zone
-        .create_l2_token("ZoneUSD", "zUSD", zone_usd_salt)
-        .await?;
+    // L2 token address is the same as L1 by design (auto-initialized via TokenEnabled event)
+    let l2_zone_usd = l1_zone_usd;
 
-    // Verify L1 and L2 token addresses match (deterministic from sender + salt)
-    assert_eq!(
-        l1_zone_usd, l2_zone_usd,
-        "L1 and L2 ZoneUSD addresses should match (same sender + salt)"
-    );
-
-    // --- Step 8: Deposit both tokens (user account) ---
+    // --- Step 6: Deposit both tokens (user account) ---
     let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
     let pathusd_amount: u128 = 1_000_000; // 1 pathUSD
     let zoneusd_amount: u128 = 2_000_000; // 2 ZoneUSD
@@ -385,7 +372,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
         "ZoneUSD minted balance should equal deposit amount"
     );
 
-    // --- Step 9: Spawn sequencer and withdraw both tokens ---
+    // --- Step 7: Spawn sequencer and withdraw both tokens ---
     let _sequencer_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
     let withdrawal_timeout = std::time::Duration::from_secs(60);
 
@@ -416,7 +403,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
     )
     .await?;
 
-    // --- Step 10: Verify L2 balances decreased ---
+    // --- Step 8: Verify L2 balances decreased ---
     let final_pathusd = zone
         .balance_of(ZONE_TOKEN_ADDRESS, account.address())
         .await?;

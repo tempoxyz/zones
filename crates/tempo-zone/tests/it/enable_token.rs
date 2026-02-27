@@ -12,6 +12,7 @@ use crate::utils::{DEFAULT_TIMEOUT, L1Fixture, start_local_zone_with_fixture};
 // Imports for real-L1 tests
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::B256;
+use alloy_provider::Provider;
 
 /// Enable a new token (AlphaUSD) via a `TokenEnabled` event, then deposit it
 /// and verify the recipient receives the minted balance.
@@ -123,10 +124,11 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///  2. Create a second TIP-20 token ("AlphaUSD" / "aUSD") on L1.
 ///  3. Mint AlphaUSD to the dev account.
 ///  4. Deploy ZoneFactory + create zone.
-///  5. Enable AlphaUSD on the portal (emits `TokenEnabled` event).
-///  6. Start zone node connected to L1 — the zone processes the `TokenEnabled`
-///     event and automatically initializes AlphaUSD storage on L2.
-///  7. Wait for the zone to advance past genesis.
+///  5. Start zone node connected to L1.
+///  6. Enable AlphaUSD on the portal (emits `TokenEnabled` event) — must
+///     happen AFTER zone startup so the live L1 subscriber picks it up
+///     (events in blocks ≤ genesis are not backfilled).
+///  7. Wait for the zone to finalize past the `enableToken` L1 block.
 ///  8. Fund user with pathUSD (for L2 gas) and AlphaUSD on L1.
 ///  9. Deposit pathUSD first (for L2 gas), then deposit AlphaUSD.
 /// 10. Verify AlphaUSD balance on L2.
@@ -164,15 +166,20 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     // --- Step 4: Deploy L1 infrastructure and create a zone ---
     let portal_address = l1.deploy_zone().await?;
 
-    // --- Step 5: Enable AlphaUSD on the portal ---
-    l1.enable_token_on_portal(portal_address, l1_alpha_usd)
-        .await?;
-
-    // --- Step 6: Start zone node connected to L1 ---
+    // --- Step 5: Start zone node connected to L1 ---
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
 
-    // --- Step 7: Wait for the zone to advance past genesis ---
-    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+    // --- Step 6: Enable AlphaUSD on the portal ---
+    // Must happen AFTER zone startup so the zone's L1 subscriber picks up the
+    // TokenEnabled event from a live block (events in blocks <= genesis are not
+    // backfilled).
+    l1.enable_token_on_portal(portal_address, l1_alpha_usd)
+        .await?;
+    let enable_block = l1.provider().get_block_number().await?;
+
+    // --- Step 7: Wait for the zone to finalize past the enableToken block ---
+    zone.wait_for_l2_tempo_finalized(enable_block, L1_TIMEOUT)
+        .await?;
 
     // --- Step 8: Fund user account on L1 ---
     let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
