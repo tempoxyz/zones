@@ -110,7 +110,7 @@ serde_json.workspace = true
 tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
 tempo-payload-types.workspace = true
-tempo-precompiles.workspace = true
+tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
