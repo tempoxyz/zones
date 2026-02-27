@@ -63,9 +63,6 @@ impl ZoneTokenFactory {
     /// - [`ZONE_OUTBOX_ADDRESS`] — so withdrawals can burn zone-side tokens.
     ///
     /// The quote token is always set to [`PATH_USD_ADDRESS`].
-    ///
-    /// TODO: add idempotency guard — skip if already initialized with same
-    /// metadata, revert if initialized with different metadata.
     pub fn enable_token(&self, call: enableTokenCall) -> tempo_precompiles::Result<()> {
         let mut token = TIP20Token::from_address(call.token)?;
         token.initialize(
