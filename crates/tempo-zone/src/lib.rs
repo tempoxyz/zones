@@ -1,7 +1,4 @@
-//! Tempo Zone Node - a lightweight L2 node built on reth.
-//!
-//! This crate provides the node configuration and components for running a Tempo Zone L2.
-
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(unnameable_types)]
