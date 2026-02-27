@@ -12,33 +12,40 @@ and periodically submits batch proofs back to the L1 portal contract.
 
 ## Architecture
 
-```text
-                    Tempo L1
-                       │
-        ┌──────────────┼──────────────┐
-        │              │              │
-   L1Subscriber   L1StateListener  WithdrawalProcessor
-        │              │              │
-        ▼              ▼              │
-  DepositQueue    L1StateCache        │
-        │              │              │
-        ▼              ▼              │
-   ZoneEngine ──► ZoneEvmConfig       │
-        │              │              │
-        ▼              ▼              │
-  PayloadBuilder  ZonePrecompiles     │
-        │                             │
-        ▼                             │
-   ZoneMonitor ──► BatchSubmitter ────┘
-                       │
-                       ▼
-                  ZonePortal (L1)
+```mermaid
+graph TD
+    L1["Tempo L1"]
+
+    L1Sub["L1Subscriber<br/><i>WebSocket + backfill</i>"]
+    L1Listen["L1StateListener"]
+    DQ["DepositQueue"]
+    Cache["L1StateCache"]
+
+    Engine["ZoneEngine"]
+    Builder["PayloadBuilder<br/><i>advanceTempo + pool txs</i>"]
+
+    Monitor["ZoneMonitor"]
+    Batch["BatchSubmitter"]
+    WProc["WithdrawalProcessor"]
+    Portal["ZonePortal (L1)"]
+
+    L1 --> L1Sub
+    L1 --> L1Listen
+    L1Sub --> DQ
+    L1Listen --> Cache
+    DQ --> Engine
+    Engine --> Builder
+    Builder --> Monitor
+    Monitor --> Batch
+    Batch --> Portal
+    Portal --> WProc
+    WProc --> Portal
 ```
 
 ## Block Production
 
 Each zone block processes exactly one L1 block. The flow is driven by the
-[`ZoneEngine`](src/engine.rs):
+`ZoneEngine`:
 
 1. **L1Subscriber** connects to L1 via WebSocket, backfills missed blocks, and
    enqueues `L1BlockDeposits` into the `DepositQueue`.
@@ -89,9 +96,9 @@ which initializes the token's storage and grants `ISSUER_ROLE` to the inbox
 
 ## Batch Submission
 
-The [`ZoneMonitor`](src/zonemonitor.rs) watches the zone chain for new blocks,
-aggregates multiple zone blocks into a single batch, and submits it to the
-`ZonePortal` on L1 via [`BatchSubmitter`](src/batch.rs). Each batch contains:
+The `ZoneMonitor` watches the zone chain for new blocks, aggregates multiple
+zone blocks into a single batch, and submits it to the `ZonePortal` on L1 via
+`BatchSubmitter`. Each batch contains:
 
 - A block state transition (previous → new block hash)
 - A deposit queue transition (proving which deposits were processed)
@@ -122,27 +129,12 @@ header chain linking back to the target block.
 
 ## EVM Configuration
 
-[`ZoneEvmConfig`](src/evm.rs) wraps `TempoEvmConfig` with a `ZoneEvmFactory`
-that registers the zone-specific precompiles. The
-[`ZoneBlockExecutor`](src/executor.rs) is a simplified executor that does
-**not** enforce subblock ordering, shared-gas accounting, or end-of-block
-metadata — those are L1-only concerns.
+`ZoneEvmConfig` wraps `TempoEvmConfig` — the zone runs the same EVM as Tempo
+L1 with two differences:
 
-## Module Map
-
-| Module | Description |
-|--------|-------------|
-| [`abi`](src/abi.rs) | Solidity ABI bindings for ZonePortal, ZoneInbox, ZoneOutbox |
-| [`batch`](src/batch.rs) | L1 batch submission and EIP-2935 ancestry logic |
-| [`builder`](src/builder.rs) | Payload builder — `advanceTempo` + pool txs |
-| [`engine`](src/engine.rs) | L1-event-driven block production loop |
-| [`evm`](src/evm.rs) | Zone EVM factory and configuration |
-| [`executor`](src/executor.rs) | Simplified block executor (no subblocks) |
-| [`l1`](src/l1.rs) | L1 WebSocket subscriber and deposit queue |
-| [`l1_state`](src/l1_state) | L1 storage cache, listener, and reader precompile |
-| [`node`](src/node.rs) | reth node builder configuration |
-| [`payload`](src/payload.rs) | Zone-specific payload attribute types |
-| [`precompiles`](src/precompiles) | Chaum-Pedersen, AES-GCM, TIP20 factory, ECIES |
-| [`rpc`](src/rpc) | Authenticated JSON-RPC with per-caller privacy |
-| [`withdrawals`](src/withdrawals.rs) | Withdrawal store and L1 processor |
-| [`zonemonitor`](src/zonemonitor.rs) | Zone block monitor and multi-block batch aggregation |
+- The **TIP20Factory** precompile is replaced by `ZoneTokenFactory`, which only
+  supports `enableToken` (no `createToken`) since zone tokens are always bridged
+  from L1.
+- The **block executor** is simplified: no subblock ordering, shared-gas
+  accounting, or end-of-block metadata system transactions — those are L1-only
+  concerns.
