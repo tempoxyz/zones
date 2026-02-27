@@ -462,6 +462,10 @@ sol! {
         #[derive(Debug)]
         event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
 
+        /// Emitted when a TIP-20 token is enabled on the zone via advanceTempo.
+        #[derive(Debug)]
+        event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
         error OnlySequencer();
         error InvalidDepositQueueHash();
         error MissingDecryptionData();

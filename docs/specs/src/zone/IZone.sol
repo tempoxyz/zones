@@ -826,6 +826,9 @@ interface IZoneInbox {
     );
     event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
 
+    /// @notice Emitted when a TIP-20 token is enabled on the zone via advanceTempo
+    event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
     error OnlySequencer();
     error InvalidDepositQueueHash();
     error MissingDecryptionData();

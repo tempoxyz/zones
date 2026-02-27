@@ -214,6 +214,7 @@ contract ZoneInbox is IZoneInbox {
             EnabledToken calldata t = enabledTokens[i];
             ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS)
                 .enableToken(t.token, t.name, t.symbol, t.currency);
+            emit TokenEnabled(t.token, t.name, t.symbol, t.currency);
         }
 
         // Step 2: Process deposits and build hash chain
