@@ -134,12 +134,12 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let portal_for_init = ZonePortal::new(config.portal_address, l1_provider.clone());
-        let genesis_tempo_block_number: u64 = portal_for_init
-            .genesisTempoBlockNumber()
-            .call()
-            .await
-            .expect("failed to read genesisTempoBlockNumber");
+        let genesis_tempo_block_number: u64 =
+            ZonePortal::new(config.portal_address, l1_provider.clone())
+                .genesisTempoBlockNumber()
+                .call()
+                .await
+                .expect("failed to read genesisTempoBlockNumber");
 
         let batch_submitter = BatchSubmitter::new(
             config.portal_address,
@@ -153,13 +153,45 @@ impl ZoneMonitor {
         )
         .expect("failed to read portal state at startup");
 
-        let prev_processed_deposit_hash = inbox
-            .processedDepositQueueHash()
-            .call()
-            .await
-            .unwrap_or(B256::ZERO);
+        // Resolve the last submitted zone block number from the portal's block
+        // hash. If the hash is zero no batches have been submitted yet.
+        let last_submitted_zone_block = if prev_zone_block_hash.is_zero() {
+            0
+        } else {
+            match provider.get_block_by_hash(prev_zone_block_hash).await {
+                Ok(Some(block)) => block.number(),
+                Ok(None) => {
+                    warn!(
+                        %prev_zone_block_hash,
+                        "Portal blockHash not found on zone L2 — zone may have been reset. \
+                         Starting from genesis."
+                    );
+                    0
+                }
+                Err(e) => {
+                    warn!(
+                        %prev_zone_block_hash,
+                        error = %e,
+                        "Failed to look up zone block by hash, starting from genesis"
+                    );
+                    0
+                }
+            }
+        };
+
+        let prev_processed_deposit_hash = if last_submitted_zone_block == 0 {
+            B256::ZERO
+        } else {
+            inbox
+                .processedDepositQueueHash()
+                .block(last_submitted_zone_block.into())
+                .call()
+                .await
+                .unwrap_or(B256::ZERO)
+        };
 
         info!(
+            last_submitted_zone_block,
             %prev_zone_block_hash,
             %prev_processed_deposit_hash,
             portal_withdrawal_queue_tail,
@@ -175,7 +207,7 @@ impl ZoneMonitor {
             withdrawal_store,
             batch_submitter,
             withdrawal_notify,
-            last_submitted_zone_block: 0,
+            last_submitted_zone_block,
             prev_processed_deposit_hash,
             prev_zone_block_hash,
             portal_withdrawal_queue_tail,

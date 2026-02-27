@@ -32,7 +32,7 @@ use crate::executor::ZoneBlockExecutor;
 
 use crate::{
     abi::TEMPO_STATE_READER_ADDRESS,
-    l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache, TempoStateReader},
+    l1_state::{L1StateProvider, SharedL1StateCache, TempoStateReader},
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
     },
@@ -176,12 +176,11 @@ impl ZoneEvmConfig {
     /// TempoStateReader precompile will get a reverted / empty response.
     pub fn new_without_l1(chain_spec: Arc<TempoChainSpec>) -> Self {
         let cache = SharedL1StateCache::default();
-        let config = L1StateProviderConfig::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
-        let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+        let l1_provider = L1StateProvider::new_raw(cache, provider, runtime_handle);
         Self::new(chain_spec, l1_provider)
     }
 

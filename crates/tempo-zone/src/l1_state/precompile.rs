@@ -11,10 +11,10 @@
 //! - `readStorageBatchAt(address account, bytes32[] slots, uint64 blockNumber) → bytes32[]`
 //!
 //! Reads are served synchronously from the [`L1StateProvider`]. The provider first checks the
-//! in-memory cache and, on miss, attempts an RPC fetch (`eth_getStorageAt` at the given block
-//! number) to Tempo L1 with a configurable timeout. If both the cache and RPC fallback fail, the
-//! precompile returns a hard [`PrecompileError`] that halts the entire transaction — this is
-//! **not** a catchable revert.
+//! in-memory cache and, on miss, retries the RPC fetch (`eth_getStorageAt` at the given block
+//! number) to Tempo L1 indefinitely with exponential backoff. This means a transient L1 RPC
+//! outage will stall block production until connectivity is restored, rather than bricking the
+//! chain with an unrecoverable hard error.
 //!
 //! [`PrecompileError`]: revm::precompile::PrecompileError
 //!
@@ -63,8 +63,8 @@ const PER_SLOT_GAS: u64 = 200;
 ///
 /// - Only direct `CALL`s are accepted; `DELEGATECALL` reverts with [`DelegateCallNotAllowed`].
 /// - The precompile is **view-only** — it never writes to EVM state.
-/// - On cache miss the provider attempts an RPC fetch with timeout; if that also fails the
-///   precompile returns a hard [`PrecompileError`] that halts the transaction.
+/// - On cache miss the provider retries the RPC fetch indefinitely with backoff, stalling
+///   block production until L1 connectivity is restored.
 pub struct TempoStateReader;
 
 impl TempoStateReader {

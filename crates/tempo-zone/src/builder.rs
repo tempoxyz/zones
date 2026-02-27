@@ -7,6 +7,7 @@ use crate::{
     abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
     evm::ZoneEvmConfig,
     l1::L1Deposit,
+    payload::ZonePayloadBuilderAttributes,
     precompiles::ecies,
 };
 use alloy_consensus::{Signed, TxLegacy};
@@ -37,7 +38,6 @@ use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_consensus::TEMPO_SHARED_GAS_DIVISOR;
 use tempo_evm::TempoNextBlockEnvAttributes;
-use tempo_payload_types::TempoPayloadBuilderAttributes;
 use tempo_primitives::{
     TempoHeader, TempoPrimitives, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
@@ -51,7 +51,6 @@ use super::node::ZoneNode;
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZonePayloadFactory {
-    deposit_queue: crate::DepositQueue,
     sequencer: Address,
     /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
     sequencer_key: k256::SecretKey,
@@ -61,13 +60,11 @@ pub struct ZonePayloadFactory {
 
 impl ZonePayloadFactory {
     pub fn new(
-        deposit_queue: crate::DepositQueue,
         sequencer: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
     ) -> Self {
         Self {
-            deposit_queue,
             sequencer,
             sequencer_key,
             portal_address,
@@ -92,7 +89,6 @@ where
             pool,
             provider: ctx.provider().clone(),
             evm_config,
-            deposit_queue: self.deposit_queue,
             _sequencer: self.sequencer,
             sequencer_key: self.sequencer_key,
             portal_address: self.portal_address,
@@ -105,7 +101,6 @@ pub struct ZonePayloadBuilder<Provider> {
     pool: TempoTransactionPool<Provider>,
     provider: Provider,
     evm_config: ZoneEvmConfig,
-    deposit_queue: crate::DepositQueue,
     _sequencer: Address,
     sequencer_key: k256::SecretKey,
     portal_address: Address,
@@ -116,7 +111,6 @@ impl<Provider> ZonePayloadBuilder<Provider> {
         pool: TempoTransactionPool<Provider>,
         provider: Provider,
         evm_config: ZoneEvmConfig,
-        deposit_queue: crate::DepositQueue,
         sequencer: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
@@ -125,7 +119,6 @@ impl<Provider> ZonePayloadBuilder<Provider> {
             pool,
             provider,
             evm_config,
-            deposit_queue,
             _sequencer: sequencer,
             sequencer_key,
             portal_address,
@@ -138,7 +131,7 @@ where
     Provider:
         StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone + 'static,
 {
-    type Attributes = TempoPayloadBuilderAttributes;
+    type Attributes = ZonePayloadBuilderAttributes;
     type BuiltPayload = EthBuiltPayload<TempoPrimitives>;
 
     fn try_build(
@@ -192,19 +185,7 @@ where
             "TempoState current state"
         );
 
-        // Take exactly one L1 block per zone block — advanceTempo advances Tempo state
-        // by exactly one block, maintaining sequential chain continuity.
-        // The ZoneEngine ensures an L1 block is queued before triggering a build.
-        let l1_block = {
-            let mut queue = self.deposit_queue.lock();
-            let Some(block) = queue.pop_next() else {
-                debug!(target: "zone::payload", "No L1 block available, skipping build");
-                return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                    "no L1 block available in deposit queue",
-                )));
-            };
-            block
-        };
+        let l1_block = attributes.l1_block().clone();
 
         // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
         // and its parent hash must match the stored tempoBlockHash.
@@ -240,7 +221,7 @@ where
             )));
         }
 
-        let total_deposits = l1_block.deposits.len();
+        let total_deposits = l1_block.events.deposits.len();
 
         info!(
             target: "zone::payload",
@@ -249,7 +230,7 @@ where
             deposits = total_deposits,
             "Including advanceTempo system tx (chain continuity OK)"
         );
-        for deposit in &l1_block.deposits {
+        for deposit in &l1_block.events.deposits {
             match deposit {
                 L1Deposit::Regular(d) => {
                     debug!(
@@ -274,6 +255,14 @@ where
                     );
                 }
             }
+        }
+
+        if !l1_block.events.enabled_tokens.is_empty() {
+            info!(
+                target: "zone::payload",
+                tokens = ?l1_block.events.enabled_tokens,
+                "🪙 New tokens enabled on L1"
+            );
         }
 
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
@@ -308,7 +297,7 @@ where
                         gas_limit: block_gas_limit,
                         parent_beacon_block_root: attributes.parent_beacon_block_root(),
                         withdrawals: Some(attributes.withdrawals().clone()),
-                        extra_data: attributes.extra_data().clone(),
+                        extra_data: attributes.extra_data(),
                     },
                     general_gas_limit,
                     shared_gas_limit,
@@ -338,7 +327,7 @@ where
 
             let advance_tx = build_advance_tempo_tx(
                 &l1_block.header,
-                &l1_block.deposits,
+                &l1_block.events.deposits,
                 &self.sequencer_key,
                 self.portal_address,
             );
@@ -349,7 +338,7 @@ where
                     error!(
                         target: "zone::payload",
                         l1_block = l1_block.header.inner.number,
-                        deposits = l1_block.deposits.len(),
+                        deposits = l1_block.events.deposits.len(),
                         is_halt = result.is_halt(),
                         revert_data = %revert_data,
                         "advanceTempo system tx reverted on-chain"
@@ -370,7 +359,7 @@ where
                     error!(
                         ?err,
                         l1_block = l1_block.header.inner.number,
-                        deposits = l1_block.deposits.len(),
+                        deposits = l1_block.events.deposits.len(),
                         "advanceTempo system tx failed"
                     );
                     return Err(PayloadBuilderError::evm(err));

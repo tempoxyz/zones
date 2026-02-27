@@ -19,6 +19,7 @@ mod executor;
 pub mod l1;
 pub mod l1_state;
 mod node;
+pub mod payload;
 pub mod precompiles;
 pub mod rpc;
 pub mod withdrawals;
@@ -27,11 +28,12 @@ pub mod zonemonitor;
 pub use batch::{BatchData, BatchSubmitter};
 pub use engine::ZoneEngine;
 pub use l1::{
-    Deposit, DepositQueue, DepositQueueTransition, EncryptedDeposit, EnqueueOutcome,
-    L1BlockDeposits, L1Deposit, L1Subscriber, L1SubscriberConfig, PendingDeposits,
+    Deposit, DepositQueue, EncryptedDeposit, L1BlockDeposits, L1Deposit, L1PortalEvents,
+    L1Subscriber, L1SubscriberConfig,
 };
 pub use l1_state::SharedL1StateCache;
 pub use node::{ZoneExecutorBuilder, ZoneNode};
+pub use payload::{ZonePayloadAttributes, ZonePayloadBuilderAttributes, ZonePayloadTypes};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 
