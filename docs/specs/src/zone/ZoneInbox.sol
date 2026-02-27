@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, EncryptedDepositLib} from "./EncryptedDeposit.sol";
+import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, EncryptedDepositLib } from "./EncryptedDeposit.sol";
 import {
     AES_GCM_DECRYPT,
     CHAUM_PEDERSEN_VERIFY,
@@ -22,13 +22,14 @@ import {
     QueuedDeposit,
     TIP20_FACTORY_ADDRESS
 } from "./IZone.sol";
-import {TempoState} from "./TempoState.sol";
+import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
 /// @dev Called by sequencer. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -69,9 +70,11 @@ contract ZoneInbox is IZoneInbox {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev HMAC ipad constant (0x36 repeated 32 times)
-    bytes32 private constant _IPAD = 0x3636363636363636363636363636363636363636363636363636363636363636;
+    bytes32 private constant _IPAD =
+        0x3636363636363636363636363636363636363636363636363636363636363636;
     /// @dev HMAC opad constant (0x5c repeated 32 times)
-    bytes32 private constant _OPAD = 0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
+    bytes32 private constant _OPAD =
+        0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
 
     /// @notice HMAC-SHA256 implementation using the SHA256 precompile
     /// @dev HMAC(key, message) = SHA256((key ⊕ opad) || SHA256((key ⊕ ipad) || message))
@@ -80,7 +83,14 @@ contract ZoneInbox is IZoneInbox {
     /// @param key The HMAC key (will be hashed if longer than 64 bytes)
     /// @param message The message to authenticate
     /// @return result The 32-byte HMAC-SHA256 output
-    function _hmacSha256(bytes memory key, bytes memory message) internal view returns (bytes32 result) {
+    function _hmacSha256(
+        bytes memory key,
+        bytes memory message
+    )
+        internal
+        view
+        returns (bytes32 result)
+    {
         // Load key into two 32-byte words (SHA256 block size = 64 bytes = 2 words)
         bytes32 keyWord0;
         bytes32 keyWord1;
@@ -123,7 +133,15 @@ contract ZoneInbox is IZoneInbox {
     /// @param salt Salt value (use "ecies-aes-key" for ECIES)
     /// @param info Context-specific info (typically empty for ECIES)
     /// @return okm Output key material (32 bytes for AES-256)
-    function _hkdfSha256(bytes32 ikm, bytes memory salt, bytes memory info) internal view returns (bytes32 okm) {
+    function _hkdfSha256(
+        bytes32 ikm,
+        bytes memory salt,
+        bytes memory info
+    )
+        internal
+        view
+        returns (bytes32 okm)
+    {
         // HKDF-Extract: PRK = HMAC-SHA256(salt, IKM)
         bytes32 prk = _hmacSha256(salt, abi.encodePacked(ikm));
 
@@ -178,10 +196,10 @@ contract ZoneInbox is IZoneInbox {
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
-    ) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) {
-            revert OnlySequencer();
-        }
+    )
+        external
+    {
+        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
 
         // Enforce deposit cap (0 = unlimited)
         if (maxDepositsPerTempoBlock > 0 && deposits.length > maxDepositsPerTempoBlock) {
@@ -194,7 +212,8 @@ contract ZoneInbox is IZoneInbox {
         // Enable new tokens
         for (uint256 i = 0; i < enabledTokens.length; i++) {
             EnabledToken calldata t = enabledTokens[i];
-            ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS).enableToken(t.token, t.name, t.symbol, t.currency);
+            ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS)
+                .enableToken(t.token, t.name, t.symbol, t.currency);
         }
 
         // Step 2: Process deposits and build hash chain
@@ -283,7 +302,9 @@ contract ZoneInbox is IZoneInbox {
                 } else {
                     // Decryption succeeded - mint the correct zone-side TIP-20 to the decrypted recipient
                     IZoneToken(ed.token).mint(dec.to, ed.amount);
-                    emit EncryptedDepositProcessed(currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo);
+                    emit EncryptedDepositProcessed(
+                        currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
+                    );
                 }
             }
         }
@@ -296,7 +317,8 @@ contract ZoneInbox is IZoneInbox {
         // The proof validates that our processedDepositQueueHash is an ancestor of (or equal to)
         // tempoCurrentHash, allowing partial deposit processing when maxDepositsPerTempoBlock is set.
         // On-chain we only need to verify the hash chain when all deposits have been caught up.
-        bytes32 tempoCurrentHash = _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
+        bytes32 tempoCurrentHash =
+            _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
 
         if (currentHash != tempoCurrentHash) {
             // Partial processing is allowed — the proof validates ancestor contiguity.
@@ -308,6 +330,12 @@ contract ZoneInbox is IZoneInbox {
         // Step 4: Update state
         processedDepositQueueHash = currentHash;
 
-        emit TempoAdvanced(_tempoState.tempoBlockHash(), _tempoState.tempoBlockNumber(), deposits.length, currentHash);
+        emit TempoAdvanced(
+            _tempoState.tempoBlockHash(),
+            _tempoState.tempoBlockNumber(),
+            deposits.length,
+            currentHash
+        );
     }
+
 }
