@@ -1,11 +1,11 @@
 # Tempo Address Format
 
-This document defines a human-readable address format for the Tempo ecosystem that supports both mainnet and zone addresses with strong checksumming.
+This document defines a human-readable address format for the Tempo ecosystem that supports both mainnet and zone addresses with strong error detection.
 
 - **TIP ID**: TIP-XXXX
 - **Authors/Owners**: Dankrad Feist @dankrad
 - **Status**: Draft
-- **Related Specs/TIPs**: Zone Validium Design
+- **Related Specs/TIPs**: Zone Validium Design, BIP-350 (bech32m)
 - **Protocol Version**: TBD
 
 ---
@@ -14,7 +14,7 @@ This document defines a human-readable address format for the Tempo ecosystem th
 
 ## Abstract
 
-This TIP defines an address format for Tempo that is easily distinguishable from other blockchain addresses, supports zone-specific addresses, and includes strong checksumming to prevent user errors. Addresses start with an ASCII prefix (`tempo1` for mainnet, `tempoz1` for zones) followed by a bech32 base32-encoded payload.
+This TIP defines an address format for Tempo that is easily distinguishable from other blockchain addresses, supports zone-specific addresses, and includes strong error detection. The format uses bech32m encoding (BIP-350) with human-readable parts `tempo` (mainnet) and `tempoz` (zones), producing addresses like `tempo1...` and `tempoz1...`.
 
 ## Motivation
 
@@ -23,7 +23,7 @@ As Tempo expands with zones (L2 validiums), users need a clear way to distinguis
 2. Zone addresses from Tempo mainnet addresses
 3. Addresses on different zones from each other
 
-A well-designed address format prevents costly mistakes like sending funds to the wrong chain or zone. The format uses a clear `tempo` prefix for instant recognition and bech32 base32 encoding for efficient, case-insensitive representation.
+A well-designed address format prevents costly mistakes like sending funds to the wrong chain or zone. The format uses the `tempo` prefix for instant recognition and bech32m encoding for efficient, case-insensitive representation with guaranteed error detection for up to 4 character errors.
 
 ---
 
@@ -31,33 +31,36 @@ A well-designed address format prevents costly mistakes like sending funds to th
 
 ## Address Structure
 
-A Tempo address consists of an ASCII prefix followed by a bech32 base32-encoded payload:
+A Tempo address is a bech32m-encoded string (BIP-350) consisting of a human-readable part (HRP), a `1` separator, and base32-encoded data with a 6-character checksum:
 
 ```
-┌──────────────┬──────────────────────────────────────────────┐
-│ ASCII Prefix │        Bech32 base32-encoded payload         │
-│  6-7 chars   │                                              │
-└──────────────┴──────────────────────────────────────────────┘
+┌─────────┬───┬──────────────────────────────────────────────┐
+│   HRP   │ 1 │        Base32-encoded data + checksum        │
+│ 5-6 chr │sep│                                              │
+└─────────┴───┴──────────────────────────────────────────────┘
                               │
-                              ▼
-               ┌─────────┬──────────────┬──────────┐
-               │ Zone ID │ Raw Address  │ Checksum │
-               │ 0-9 B   │ 20 bytes     │ 4 bytes  │
-               └─────────┴──────────────┴──────────┘
+          ┌───────────────────┴───────────────────┐
+          │            Data (base32)               │
+          ├─────────┬──────────────┬───────────────┤
+          │ Zone ID │ Raw Address  │ Bech32m Chksum│
+          │ 0-9 B   │ 20 bytes     │ 6 chars       │
+          └─────────┴──────────────┴───────────────┘
 ```
 
-## ASCII Prefix
+## Human-Readable Part (HRP)
 
-The prefix is **not** base32-encoded; it is literal ASCII:
+The HRP identifies the address type and is followed by the bech32m `1` separator:
 
-| Prefix | Meaning | Has Zone ID |
-|--------|---------|-------------|
-| `tempo1` | Tempo mainnet | No |
-| `tempoz1` | Tempo zone | Yes |
+| HRP | Full Prefix | Meaning | Has Zone ID |
+|-----|-------------|---------|-------------|
+| `tempo` | `tempo1` | Tempo mainnet | No |
+| `tempoz` | `tempoz1` | Tempo zone | Yes |
+
+The HRP is included in the bech32m checksum, so changing the HRP invalidates the address.
 
 ## Zone ID Encoding (Variable Length, 0-9 bytes)
 
-For zone addresses (prefix `tempoz1`), the zone ID is encoded in the payload using Bitcoin's CompactSize variable-length encoding:
+For zone addresses (HRP `tempoz`), the zone ID is encoded in the data using Bitcoin's CompactSize variable-length encoding:
 
 | Zone ID Range | Encoding | Bytes |
 |---------------|----------|-------|
@@ -66,7 +69,7 @@ For zone addresses (prefix `tempoz1`), the zone ID is encoded in the payload usi
 | 65,536-4,294,967,295 | `0xFE` + 4 bytes LE | 5 |
 | > 4,294,967,295 | `0xFF` + 8 bytes LE | 9 |
 
-For mainnet addresses (prefix `tempo1`), the zone ID is omitted (0 bytes).
+For mainnet addresses (HRP `tempo`), the zone ID is omitted (0 bytes).
 
 ## Reserved Zone IDs
 
@@ -77,72 +80,42 @@ For mainnet addresses (prefix `tempo1`), the zone ID is omitted (0 bytes).
 
 The raw address is the standard 20-byte Ethereum-style address (last 20 bytes of `keccak256` of the public key).
 
-## Checksum
+## Bech32m Encoding
 
-The checksum is the first 4 bytes of:
-```
-SHA256(SHA256(prefix_bytes || zone_id || raw_address))
-```
+Addresses use the full bech32m encoding as specified in BIP-350:
 
-Where `prefix_bytes` is the ASCII prefix (e.g., `"tempo1"` = `0x74656d706f31`, `"tempoz1"` = `0x74656d706f7a31`).
+1. **Base32 alphabet**: `qpzry9x8gf2tvdw0s3jn54khce6mua7l` (value 0 → `q`, ..., value 31 → `l`)
+2. **8-to-5 bit conversion**: Data bytes are converted to 5-bit groups, with the last group zero-padded if needed
+3. **Checksum**: 6-character BCH code computed over the HRP and data, using the bech32m constant `0x2bc830a3`
+4. **Case insensitivity**: Addresses MUST be valid regardless of case but SHOULD be produced in lowercase
 
-Including the prefix in the checksum ensures that changing the prefix invalidates the address.
+The bech32m checksum provides:
 
-## Bech32 Base32 Encoding
-
-The payload is encoded using the base32 encoding scheme from BIP-173 (bech32). This uses the following 32-character alphabet:
-
-```
-qpzry9x8gf2tvdw0s3jn54khce6mua7l
-```
-
-Where value 0 maps to `q`, value 1 to `p`, ..., value 31 to `l`.
-
-The encoding process converts 8-bit byte groups to 5-bit groups:
-
-1. Concatenate all payload bytes into a bit stream
-2. Split into 5-bit groups (pad the last group with zeros on the right if needed)
-3. Map each 5-bit value to the corresponding character in the alphabet
-
-Decoding reverses the process:
-
-1. Map each character to its 5-bit value
-2. Concatenate into a bit stream
-3. Re-group into 8-bit bytes
-4. Discard any trailing padding bits (which must be zero)
-
-Addresses are case-insensitive but SHOULD be produced in lowercase.
-
-> **Note**: Only the base32 encoding from BIP-173 is used. The bech32 checksum and HRP conventions are not used; Tempo addresses have their own prefix and checksum scheme described above.
+- **Substitutions** (character replaced with a different one): **guaranteed** detection of up to 4 simultaneous errors anywhere in the address; probabilistic detection (≥ 1 − 2⁻³⁰) for 5 or more
+- **Insertions/deletions** (characters added or omitted): probabilistic detection via the checksum (≥ 1 − 2⁻³⁰), plus the fixed-length validation (raw address must be exactly 20 bytes) rejects any decoded data of the wrong size
 
 ## Address Length Summary
 
-| Type | Payload Size | Base32 Chars | Total Length |
-|------|-------------|-------------|-------------|
-| Mainnet (`tempo1`) | 24 bytes | 39 chars | **45 chars** |
-| Zone (ID < 253) | 25 bytes | 40 chars | **47 chars** |
-| Zone (ID < 65536) | 27 bytes | 44 chars | **51 chars** |
-| Zone (ID < 4B) | 29 bytes | 47 chars | **54 chars** |
-| Zone (ID max uint64) | 33 bytes | 53 chars | **60 chars** |
+| Type | Data Size | Base32 Chars | Checksum | Total Length |
+|------|-----------|-------------|----------|-------------|
+| Mainnet (`tempo1`) | 20 bytes | 32 chars | 6 chars | **44 chars** |
+| Zone (ID < 253) | 21 bytes | 34 chars | 6 chars | **47 chars** |
+| Zone (ID < 65536) | 23 bytes | 37 chars | 6 chars | **50 chars** |
+| Zone (ID < 4B) | 25 bytes | 40 chars | 6 chars | **53 chars** |
+| Zone (ID max uint64) | 29 bytes | 47 chars | 6 chars | **60 chars** |
 
 ## Encoding Algorithm
 
 ```python
 def encode_tempo_address(raw_address: bytes, zone_id: int | None = None) -> str:
     if zone_id is None:
-        prefix = "tempo1"
-        zone_bytes = b''
+        hrp = "tempo"
+        data = raw_address
     else:
-        prefix = "tempoz1"
-        zone_bytes = encode_compact_size(zone_id)
+        hrp = "tempoz"
+        data = encode_compact_size(zone_id) + raw_address
     
-    # Checksum includes prefix
-    checksum_input = prefix.encode('ascii') + zone_bytes + raw_address
-    checksum = sha256(sha256(checksum_input))[:4]
-    
-    # Bech32 base32 encode only the payload (zone_id + address + checksum)
-    payload = zone_bytes + raw_address + checksum
-    return prefix + bech32_base32_encode(payload)
+    return bech32m_encode(hrp, data)
 ```
 
 ## Decoding Algorithm
@@ -151,59 +124,31 @@ def encode_tempo_address(raw_address: bytes, zone_id: int | None = None) -> str:
 def decode_tempo_address(address: str) -> tuple[bytes, int | None]:
     """Returns (raw_address, zone_id)"""
     
-    # Extract prefix (case-insensitive)
-    address_lower = address.lower()
-    if address_lower.startswith("tempoz1"):
-        prefix = "tempoz1"
-        has_zone = True
-    elif address_lower.startswith("tempo1"):
-        prefix = "tempo1"
-        has_zone = False
-    else:
-        raise InvalidPrefix()
+    hrp, data = bech32m_decode(address)
     
-    # Decode payload
-    payload = bech32_base32_decode(address_lower[len(prefix):])
-    
-    # Parse zone ID if present
-    if has_zone:
-        zone_id, zone_len = decode_compact_size(payload)
-        remaining = payload[zone_len:]
-    else:
+    if hrp == "tempoz":
+        zone_id, zone_len = decode_compact_size(data)
+        raw_address = data[zone_len:]
+    elif hrp == "tempo":
         zone_id = None
-        remaining = payload
-    
-    # Extract address and checksum
-    raw_address = remaining[:20]
-    checksum = remaining[20:24]
-    
-    if len(remaining) != 24:
-        raise InvalidLength()
-    
-    # Verify checksum
-    if has_zone:
-        zone_bytes = encode_compact_size(zone_id)
+        raw_address = data
     else:
-        zone_bytes = b''
+        raise InvalidHRP(hrp)
     
-    expected = sha256(sha256(prefix.encode() + zone_bytes + raw_address))[:4]
-    if checksum != expected:
-        raise InvalidChecksum()
+    if len(raw_address) != 20:
+        raise InvalidLength()
     
     return raw_address, zone_id
 ```
 
 ## Validation Rules
 
-1. Verify address starts with valid prefix (`tempo1` or `tempoz1`)
-2. Extract and bech32 base32-decode the payload (everything after the prefix)
-3. If zone prefix (`tempoz1`), decode zone ID using CompactSize encoding
-4. If mainnet prefix (`tempo1`), verify no zone ID bytes present
+1. Decode using standard bech32m (BIP-350); reject if decoding fails (invalid characters, bad checksum, etc.)
+2. Verify HRP is `tempo` or `tempoz`
+3. If HRP is `tempoz`, decode zone ID using CompactSize encoding
+4. If HRP is `tempo`, verify data contains exactly 20 bytes (no zone ID)
 5. Extract raw address (20 bytes)
-6. Extract checksum (last 4 bytes)
-7. Compute expected checksum: `SHA256(SHA256(prefix || zone_id || address))[0:4]`
-8. Verify checksum matches
-9. If any step fails, address is INVALID
+6. If any step fails, address is INVALID
 
 ## Display Recommendations
 
@@ -211,7 +156,7 @@ For user interfaces, addresses SHOULD be displayed with:
 - Monospace font
 - Full address always shown (no truncation for important operations)
 
-Example: `tempo1 wst8d 6qejx tdg4y 5r3za rvary 0c5xw 7kvmg h8pm`
+Example: `tempo1 wsknt nrxxn q9x2f 95wuy f0y7w k2l90 fg0hl z9j`
 
 ## Examples
 
@@ -219,34 +164,149 @@ Example: `tempo1 wst8d 6qejx tdg4y 5r3za rvary 0c5xw 7kvmg h8pm`
 
 Raw address: `0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28`
 
-1. ASCII prefix: `tempo1`
-2. Zone ID: (none)
-3. Raw address: 20 bytes
-4. Checksum: `SHA256(SHA256("tempo1" || address))[0:4]`
-5. Bech32 base32 encode (address + checksum)
-6. Prepend prefix
+1. HRP: `tempo`
+2. Data: raw address (20 bytes)
+3. Bech32m encode (HRP + data → base32 + checksum)
 
-Result: `tempo1wst8d6qejxtdg4y5r3zarvary0c5xw7kvmgh8pm` (~45 chars)
+Result: `tempo1wskntnrxxnq9x2f95wuyf0y7wk2l90fg0hlz9j` (44 chars)
 
 ### Zone Address (Zone ID = 1)
 
-1. ASCII prefix: `tempoz1`
-2. Zone ID: `0x01` (1 byte)
-3. Raw address: 20 bytes
-4. Checksum: `SHA256(SHA256("tempoz1" || 0x01 || address))[0:4]`
-5. Bech32 base32 encode (zone_id + address + checksum)
-6. Prepend prefix
+1. HRP: `tempoz`
+2. Data: zone ID `0x01` (1 byte) + raw address (20 bytes)
+3. Bech32m encode (HRP + data → base32 + checksum)
 
-Result: `tempoz1qwst8d6qejxtdg4y5r3zarvary0c5xw7kvmgh8pm` (~47 chars)
+Result: `tempoz1q96z6dwvvc6vq5efyk3ms39une6etu4a9q2zvzv5` (47 chars)
 
 ---
 
 # Invariants
 
-1. **Prefix visibility**: The prefix (`tempo1` or `tempoz1`) MUST always be visible and unaffected by encoding
-2. **Checksum coverage**: The checksum MUST include the prefix, preventing prefix swaps
+1. **Prefix visibility**: The HRP and separator (`tempo1` or `tempoz1`) MUST always be visible in the address
+2. **Checksum coverage**: The bech32m checksum covers both HRP and data, preventing HRP swaps
 3. **Unique decoding**: Any valid address string MUST decode to exactly one (raw_address, zone_id) tuple
 4. **Round-trip**: `decode(encode(addr, zone)) == (addr, zone)` for all valid inputs
-5. **Checksum strength**: Single-character errors are detected with probability >= 1 - 2**(-32) (the 4-byte checksum provides ~32 bits of error detection)
+5. **Error detection**: Up to 4 character substitutions are guaranteed to be detected; insertions/deletions are caught probabilistically by the checksum and deterministically by fixed-length validation
 6. **Zone 0 reserved**: Zone ID 0 MUST NOT be assigned by ZoneFactory
 7. **Case insensitivity**: Addresses MUST be valid regardless of case (but SHOULD be produced in lowercase)
+8. **BIP-350 compliance**: Encoding and decoding MUST conform to BIP-350 (bech32m)
+
+---
+
+# Reference Implementation
+
+Complete Python implementation for encoding and decoding Tempo addresses. The bech32m primitives follow BIP-350; the Tempo-specific logic handles HRP selection and CompactSize zone ID encoding.
+
+```python
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+BECH32M_CONST = 0x2bc830a3
+
+def bech32_polymod(values):
+    GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3]
+    chk = 1
+    for v in values:
+        b = (chk >> 25)
+        chk = (chk & 0x1ffffff) << 5 ^ v
+        for i in range(5):
+            chk ^= GEN[i] if ((b >> i) & 1) else 0
+    return chk
+
+def bech32_hrp_expand(hrp):
+    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+
+def bech32m_verify_checksum(hrp, data):
+    return bech32_polymod(bech32_hrp_expand(hrp) + data) == BECH32M_CONST
+
+def bech32m_create_checksum(hrp, data):
+    values = bech32_hrp_expand(hrp) + data
+    polymod = bech32_polymod(values + [0, 0, 0, 0, 0, 0]) ^ BECH32M_CONST
+    return [(polymod >> 5 * (5 - i)) & 31 for i in range(6)]
+
+def convertbits(data, frombits, tobits, pad=True):
+    acc, bits, ret = 0, 0, []
+    maxv = (1 << tobits) - 1
+    for value in data:
+        acc = (acc << frombits) | value
+        bits += frombits
+        while bits >= tobits:
+            bits -= tobits
+            ret.append((acc >> bits) & maxv)
+    if pad:
+        if bits:
+            ret.append((acc << (tobits - bits)) & maxv)
+    elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
+        raise ValueError("Invalid padding")
+    return ret
+
+def bech32m_encode(hrp, data_bytes):
+    data5 = convertbits(data_bytes, 8, 5)
+    checksum = bech32m_create_checksum(hrp, data5)
+    return hrp + "1" + "".join(CHARSET[d] for d in data5 + checksum)
+
+def bech32m_decode(addr):
+    addr = addr.lower()
+    pos = addr.rfind("1")
+    if pos < 1:
+        raise ValueError("No separator found")
+    hrp = addr[:pos]
+    data5 = [CHARSET.find(c) for c in addr[pos + 1:]]
+    if any(d == -1 for d in data5):
+        raise ValueError("Invalid character")
+    if not bech32m_verify_checksum(hrp, data5):
+        raise ValueError("Invalid checksum")
+    return hrp, bytes(convertbits(data5[:-6], 5, 8, pad=False))
+
+def encode_compact_size(n):
+    if n < 253:
+        return bytes([n])
+    elif n <= 0xFFFF:
+        return b'\xfd' + n.to_bytes(2, 'little')
+    elif n <= 0xFFFFFFFF:
+        return b'\xfe' + n.to_bytes(4, 'little')
+    else:
+        return b'\xff' + n.to_bytes(8, 'little')
+
+def decode_compact_size(data):
+    if data[0] < 253:
+        return data[0], 1
+    elif data[0] == 0xFD:
+        return int.from_bytes(data[1:3], 'little'), 3
+    elif data[0] == 0xFE:
+        return int.from_bytes(data[1:5], 'little'), 5
+    else:
+        return int.from_bytes(data[1:9], 'little'), 9
+
+def encode_tempo_address(raw_address, zone_id=None):
+    if zone_id is None:
+        hrp = "tempo"
+        data = raw_address
+    else:
+        hrp = "tempoz"
+        data = encode_compact_size(zone_id) + raw_address
+    return bech32m_encode(hrp, list(data))
+
+def decode_tempo_address(address):
+    hrp, data = bech32m_decode(address)
+    if hrp == "tempoz":
+        zone_id, zone_len = decode_compact_size(data)
+        raw_address = data[zone_len:]
+    elif hrp == "tempo":
+        zone_id = None
+        raw_address = data
+    else:
+        raise ValueError(f"Invalid HRP: {hrp}")
+    if len(raw_address) != 20:
+        raise ValueError(f"Invalid address length: {len(raw_address)}")
+    return raw_address, zone_id
+```
+
+### Test Vectors
+
+```
+Raw address: 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28
+
+Mainnet:      tempo1wskntnrxxnq9x2f95wuyf0y7wk2l90fg0hlz9j        (44 chars)
+Zone 1:       tempoz1q96z6dwvvc6vq5efyk3ms39une6etu4a9q2zvzv5      (47 chars)
+Zone 1000:    tempoz1lh5qxapdxhxxvdxq2v5jtgacgj7fuav4727js684l7q   (50 chars)
+Zone 100000:  tempoz1l6sgvqgqwskntnrxxnq9x2f95wuyf0y7wk2l90fgcvstss (53 chars)
+```
