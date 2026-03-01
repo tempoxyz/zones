@@ -1115,6 +1115,7 @@ impl L1TestNode {
     }
 
     /// Create a new WHITELIST policy on L1. Returns the policy ID.
+    #[allow(dead_code)]
     pub(crate) async fn create_whitelist_policy(&self) -> eyre::Result<u64> {
         use tempo_contracts::precompiles::ITIP403Registry;
         use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
@@ -1161,6 +1162,7 @@ impl L1TestNode {
     }
 
     /// Add an address to a whitelist policy.
+    #[allow(dead_code)]
     pub(crate) async fn whitelist_address(
         &self,
         policy_id: u64,
@@ -1203,11 +1205,7 @@ impl L1TestNode {
     }
 
     /// Check if a user is authorized under a policy on L1.
-    pub(crate) async fn is_authorized(
-        &self,
-        policy_id: u64,
-        user: Address,
-    ) -> eyre::Result<bool> {
+    pub(crate) async fn is_authorized(&self, policy_id: u64, user: Address) -> eyre::Result<bool> {
         use tempo_contracts::precompiles::ITIP403Registry;
         use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
 

@@ -12,6 +12,7 @@ use crate::{
 };
 use alloy_consensus::{Signed, TxLegacy};
 use alloy_primitives::{Address, Bytes, U256};
+use alloy_provider::Provider as _;
 use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolValue};
 use reth_basic_payload_builder::{
@@ -58,6 +59,8 @@ pub struct ZonePayloadFactory {
     portal_address: Address,
     /// Shared policy cache for TIP-403 authorization checks on encrypted deposits.
     policy_cache: crate::SharedPolicyCache,
+    /// L1 RPC URL for creating the [`PolicyProvider`] fallback.
+    l1_rpc_url: String,
 }
 
 impl ZonePayloadFactory {
@@ -66,12 +69,14 @@ impl ZonePayloadFactory {
         sequencer_key: k256::SecretKey,
         portal_address: Address,
         policy_cache: crate::SharedPolicyCache,
+        l1_rpc_url: String,
     ) -> Self {
         Self {
             sequencer,
             sequencer_key,
             portal_address,
             policy_cache,
+            l1_rpc_url,
         }
     }
 }
@@ -89,6 +94,16 @@ where
         pool: TempoTransactionPool<Node::Provider>,
         evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
+        let l1_provider =
+            alloy_provider::ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
+                .connect(&self.l1_rpc_url)
+                .await?
+                .erased();
+        let policy_provider = crate::l1_state::PolicyProvider::new(
+            self.policy_cache,
+            l1_provider,
+            tokio::runtime::Handle::current(),
+        );
         Ok(ZonePayloadBuilder {
             pool,
             provider: ctx.provider().clone(),
@@ -96,7 +111,7 @@ where
             _sequencer: self.sequencer,
             sequencer_key: self.sequencer_key,
             portal_address: self.portal_address,
-            policy_cache: self.policy_cache,
+            policy_provider,
         })
     }
 }
@@ -109,7 +124,7 @@ pub struct ZonePayloadBuilder<Provider> {
     _sequencer: Address,
     sequencer_key: k256::SecretKey,
     portal_address: Address,
-    policy_cache: crate::SharedPolicyCache,
+    policy_provider: crate::l1_state::PolicyProvider,
 }
 
 impl<Provider> ZonePayloadBuilder<Provider> {
@@ -120,7 +135,7 @@ impl<Provider> ZonePayloadBuilder<Provider> {
         sequencer: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
-        policy_cache: crate::SharedPolicyCache,
+        policy_provider: crate::l1_state::PolicyProvider,
     ) -> Self {
         Self {
             pool,
@@ -129,7 +144,7 @@ impl<Provider> ZonePayloadBuilder<Provider> {
             _sequencer: sequencer,
             sequencer_key,
             portal_address,
-            policy_cache,
+            policy_provider,
         }
     }
 }
@@ -338,7 +353,7 @@ where
                 &l1_block.events.deposits,
                 &self.sequencer_key,
                 self.portal_address,
-                &self.policy_cache,
+                &self.policy_provider,
             );
             let mut reverted = false;
             match builder.execute_transaction_with_result_closure(advance_tx, |result| {
@@ -576,7 +591,7 @@ fn build_encrypted_deposit(
     d: &crate::l1::EncryptedDeposit,
     sequencer_key: &k256::SecretKey,
     portal_address: Address,
-    policy_cache: &crate::SharedPolicyCache,
+    policy_provider: &crate::l1_state::PolicyProvider,
     l1_block_number: u64,
 ) -> (abi::QueuedDeposit, abi::DecryptionData) {
     let queued = abi::QueuedDeposit {
@@ -613,10 +628,15 @@ fn build_encrypted_deposit(
 
     if let Some(dec) = dec {
         // Check TIP-403 policy: if the decrypted recipient is explicitly unauthorized,
-        // redirect the deposit to the sender (refund). Cache misses (None) are treated
-        // as authorized to avoid blocking deposits when the cache hasn't been populated.
-        let recipient = match policy_cache.read().is_authorized(d.token, dec.to, l1_block_number) {
-            Some(false) => {
+        // redirect the deposit to the sender (refund). RPC failures are treated as
+        // authorized (fail-open) to avoid blocking deposits on transient errors.
+        let recipient = match policy_provider.is_authorized(
+            d.token,
+            dec.to,
+            l1_block_number,
+            crate::l1_state::AuthRole::MintRecipient,
+        ) {
+            Ok(false) => {
                 warn!(
                     target: "zone::payload",
                     sender = %d.sender,
@@ -627,7 +647,7 @@ fn build_encrypted_deposit(
                 );
                 d.sender
             }
-            None => {
+            Err(e) => {
                 warn!(
                     target: "zone::payload",
                     sender = %d.sender,
@@ -635,11 +655,12 @@ fn build_encrypted_deposit(
                     token = %d.token,
                     amount = %d.amount,
                     l1_block = l1_block_number,
-                    "Policy cache miss for encrypted deposit recipient, allowing (fail-open)"
+                    error = %e,
+                    "Policy authorization RPC failed, allowing deposit (fail-open)"
                 );
                 dec.to
             }
-            Some(true) => dec.to,
+            Ok(true) => dec.to,
         };
 
         let decryption = abi::DecryptionData {
@@ -722,7 +743,7 @@ pub fn build_advance_tempo_tx(
     deposits: &[L1Deposit],
     sequencer_key: &k256::SecretKey,
     portal_address: Address,
-    policy_cache: &crate::SharedPolicyCache,
+    policy_provider: &crate::l1_state::PolicyProvider,
 ) -> Recovered<TempoTxEnvelope> {
     // RLP-encode the Tempo header
     let mut header_rlp = Vec::new();
@@ -747,8 +768,13 @@ pub fn build_advance_tempo_tx(
                 });
             }
             L1Deposit::Encrypted(d) => {
-                let (queued, decryption) =
-                    build_encrypted_deposit(d, sequencer_key, portal_address, policy_cache, header.inner.number);
+                let (queued, decryption) = build_encrypted_deposit(
+                    d,
+                    sequencer_key,
+                    portal_address,
+                    policy_provider,
+                    header.inner.number,
+                );
                 queued_deposits.push(queued);
                 decryptions.push(decryption);
             }
@@ -782,6 +808,7 @@ pub fn build_advance_tempo_tx(
 mod tests {
     use alloy_consensus::Header;
     use alloy_primitives::{B256, U256, address};
+    use alloy_provider::Provider as _;
     use alloy_sol_types::SolCall;
     use tempo_primitives::TempoHeader;
 
@@ -793,8 +820,8 @@ mod tests {
     /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
     /// deposit types. The calldata should include `QueuedDeposit` entries with the
     /// correct `DepositType` discriminator and `DecryptionData` for encrypted deposits.
-    #[test]
-    fn test_build_advance_tempo_tx_with_encrypted_deposit() {
+    #[tokio::test]
+    async fn test_build_advance_tempo_tx_with_encrypted_deposit() {
         let token = address!("0x0000000000000000000000000000000000001000");
         let sender = address!("0x0000000000000000000000000000000000001234");
         let recipient = address!("0x0000000000000000000000000000000000005678");
@@ -839,8 +866,24 @@ mod tests {
         let portal_address = address!("0x0000000000000000000000000000000000000001");
         let seq_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid key");
         let policy_cache = crate::SharedPolicyCache::default();
-        let recovered_tx =
-            super::build_advance_tempo_tx(&header, &deposits, &seq_key, portal_address, &policy_cache);
+        let l1_provider =
+            alloy_provider::ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
+                .connect("http://127.0.0.1:1")
+                .await
+                .unwrap()
+                .erased();
+        let policy_provider = crate::l1_state::PolicyProvider::new(
+            policy_cache,
+            l1_provider,
+            tokio::runtime::Handle::current(),
+        );
+        let recovered_tx = super::build_advance_tempo_tx(
+            &header,
+            &deposits,
+            &seq_key,
+            portal_address,
+            &policy_provider,
+        );
 
         // Decode the calldata to verify structure.
         // Recovered<TempoTxEnvelope> → deref → TempoTxEnvelope::Legacy(Signed<TxLegacy>)

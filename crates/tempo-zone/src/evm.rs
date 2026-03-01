@@ -32,9 +32,10 @@ use crate::executor::ZoneBlockExecutor;
 
 use crate::{
     abi::TEMPO_STATE_READER_ADDRESS,
-    l1_state::{L1StateProvider, SharedL1StateCache, TempoStateReader},
+    l1_state::{L1StateProvider, PolicyProvider, SharedL1StateCache, TempoStateReader},
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+        ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry,
     },
 };
 
@@ -45,12 +46,22 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 #[derive(Debug, Clone)]
 pub struct ZoneEvmFactory {
     l1_provider: L1StateProvider,
+    policy_provider: Option<PolicyProvider>,
 }
 
 impl ZoneEvmFactory {
     /// Create a new factory with the given L1 state provider.
     pub fn new(l1_provider: L1StateProvider) -> Self {
-        Self { l1_provider }
+        Self {
+            l1_provider,
+            policy_provider: None,
+        }
+    }
+
+    /// Set the policy provider for the TIP-403 proxy precompile.
+    pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
+        self.policy_provider = Some(policy_provider);
+        self
     }
 
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
@@ -65,6 +76,11 @@ impl ZoneEvmFactory {
             Some(ChaumPedersenVerify.into())
         });
         precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| Some(AesGcmDecrypt.into()));
+        if let Some(ref policy_provider) = self.policy_provider {
+            precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
+                Some(ZoneTip403ProxyRegistry::create(policy_provider.clone()))
+            });
+        }
         evm
     }
 }
@@ -182,6 +198,12 @@ impl ZoneEvmConfig {
         let runtime_handle = tokio::runtime::Handle::current();
         let l1_provider = L1StateProvider::new_raw(cache, provider, runtime_handle);
         Self::new(chain_spec, l1_provider)
+    }
+
+    /// Set the policy provider for the TIP-403 proxy precompile.
+    pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
+        self.zone_factory = self.zone_factory.with_policy_provider(policy_provider);
+        self
     }
 
     /// Returns the chain spec.

@@ -43,6 +43,8 @@ use tempo_transaction_pool::{
 };
 use tracing::{debug, info};
 
+use alloy_provider::Provider as _;
+
 use crate::{
     ZoneEngine,
     evm::ZoneEvmConfig,
@@ -152,6 +154,7 @@ impl ZoneNode {
         sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
         policy_cache: crate::SharedPolicyCache,
+        l1_rpc_url: String,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -172,6 +175,7 @@ impl ZoneNode {
                 sequencer_key,
                 portal_address,
                 policy_cache,
+                l1_rpc_url,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -359,6 +363,7 @@ where
             self.l1_state_provider_config.clone(),
             self.l1_state_listener_config.clone(),
             self.l1_state_cache.clone(),
+            self.policy_cache.clone(),
         );
         Self::components(
             executor_builder,
@@ -366,6 +371,7 @@ where
             self.sequencer_key.clone(),
             self.portal_address,
             self.policy_cache.clone(),
+            self.l1_config.l1_rpc_url.clone(),
         )
     }
 
@@ -425,6 +431,7 @@ pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
+    policy_cache: crate::SharedPolicyCache,
 }
 
 impl ZoneExecutorBuilder {
@@ -432,11 +439,13 @@ impl ZoneExecutorBuilder {
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_listener_config: L1StateListenerConfig,
         l1_state_cache: SharedL1StateCache,
+        policy_cache: crate::SharedPolicyCache,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_listener_config,
             l1_state_cache,
+            policy_cache,
         }
     }
 }
@@ -450,9 +459,9 @@ where
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
         let runtime_handle = tokio::runtime::Handle::current();
         let l1_provider = L1StateProvider::new(
-            self.l1_state_provider_config,
+            self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
-            runtime_handle,
+            runtime_handle.clone(),
         )
         .await?;
 
@@ -462,8 +471,24 @@ where
             ctx.task_executor().clone(),
         );
 
-        let evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
-        info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader precompile");
+        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
+
+        // Create PolicyProvider for the TIP-403 proxy precompile using the same
+        // L1 RPC URL as the state provider.
+        let l1_rpc_url = &self.l1_state_provider_config.l1_rpc_url;
+        if !l1_rpc_url.is_empty() {
+            let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect(l1_rpc_url)
+                .await?
+                .erased();
+            let policy_provider =
+                crate::l1_state::PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
+            evm_config = evm_config.with_policy_provider(policy_provider);
+            info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
+        } else {
+            info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader precompile (no TIP-403 proxy)");
+        }
+
         Ok(evm_config)
     }
 }

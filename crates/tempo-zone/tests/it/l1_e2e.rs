@@ -587,7 +587,10 @@ async fn test_l1_policy_operations_and_zone_advancement() -> eyre::Result<()> {
     // Non-blacklisted address should be authorized
     let clean_user = l1.signer_at(3).address();
     let clean_auth = l1.is_authorized(policy_id, clean_user).await?;
-    assert!(clean_auth, "non-blacklisted user should be authorized on L1");
+    assert!(
+        clean_auth,
+        "non-blacklisted user should be authorized on L1"
+    );
 
     // --- Start zone and verify it advances past the policy blocks ---
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
@@ -675,16 +678,16 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 
         let policy_cache = zone.policy_cache();
-        let mut cache = policy_cache.write();
-        // Use a broad block range so the check succeeds regardless of exact L1 block
+        // Fetch L1 block number before acquiring the write lock to avoid
+        // holding a parking_lot guard across an await point.
         let l1_block = l1.provider().get_block_number().await?;
+        let mut cache = policy_cache.write();
         cache.set_token_policy(PATH_USD_ADDRESS, 0, policy_id);
-        cache.set_token_policy_type(PATH_USD_ADDRESS, 0, PolicyType::BLACKLIST);
-        cache.set_member(PATH_USD_ADDRESS, blacklisted_recipient, 0, true);
+        cache.set_policy_type(policy_id, PolicyType::BLACKLIST);
+        cache.set_member(policy_id, blacklisted_recipient, 0, true);
         // Also seed for current and future blocks
         cache.set_token_policy(PATH_USD_ADDRESS, l1_block, policy_id);
-        cache.set_token_policy_type(PATH_USD_ADDRESS, l1_block, PolicyType::BLACKLIST);
-        cache.set_member(PATH_USD_ADDRESS, blacklisted_recipient, l1_block, true);
+        cache.set_member(policy_id, blacklisted_recipient, l1_block, true);
     }
 
     // --- Step 6: Make an encrypted deposit targeting the blacklisted recipient ---

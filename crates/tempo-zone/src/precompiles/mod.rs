@@ -19,9 +19,11 @@
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;
+pub mod tip403_proxy;
 
 pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
+pub use tip403_proxy::{ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry};
 
 #[cfg(test)]
 mod test_utils;
