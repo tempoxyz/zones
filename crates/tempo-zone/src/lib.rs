@@ -10,6 +10,7 @@
 use eyre as _;
 
 pub mod abi;
+pub use abi::TempoStateExt;
 pub mod batch;
 pub mod bindings;
 pub mod builder;

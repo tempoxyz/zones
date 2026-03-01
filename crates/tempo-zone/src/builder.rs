@@ -154,28 +154,15 @@ where
         // Read the current tempoBlockHash and tempoBlockNumber from TempoState storage
         // to validate the next L1 block we process is the expected successor.
         let (stored_l1_block_hash, expected_tempo_block_number) = {
+            use crate::abi::TempoStateExt;
             let sp = self.provider.state_by_block_hash(parent_header.hash())?;
             let hash = sp
-                .storage(
-                    crate::abi::TEMPO_STATE_ADDRESS,
-                    crate::abi::TEMPO_BLOCK_HASH_SLOT,
-                )
-                .map_err(|e| PayloadBuilderError::Internal(e.into()))?
-                .map(|v| alloy_primitives::B256::from(v.to_be_bytes()))
-                .unwrap_or_default();
-            // tempoBlockNumber is at slot 7, offset 0 (packed as lowest uint64 in the slot,
-            // alongside tempoGasLimit, tempoGasUsed, tempoTimestamp)
-            let slot7 = sp
-                .storage(
-                    crate::abi::TEMPO_STATE_ADDRESS,
-                    crate::abi::TEMPO_PACKED_SLOT,
-                )
-                .map_err(|e| PayloadBuilderError::Internal(e.into()))?
-                .unwrap_or_default();
-            // Extract lowest 8 bytes (uint64 at offset 0)
-            let tempo_block_number: u64 = (slot7 & U256::from(u64::MAX)).to::<u64>();
-            let expected: u64 = tempo_block_number + 1;
-            (hash, expected)
+                .tempo_block_hash()
+                .map_err(|e| PayloadBuilderError::Internal(e.into()))?;
+            let tempo_block_number = sp
+                .tempo_block_number()
+                .map_err(|e| PayloadBuilderError::Internal(e.into()))?;
+            (hash, tempo_block_number + 1)
         };
 
         info!(
