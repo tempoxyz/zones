@@ -9,10 +9,13 @@ use alloy::primitives::{Address, B256, U256, address};
 use alloy_eips::NumHash;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
-use zone::abi::{
-    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox,
+use zone::{
+    ChainTempoStateExt,
+    abi::{
+        TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox,
+        ZoneOutbox,
+    },
 };
-use zone::ChainTempoStateExt;
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, ZoneTestNode, poll_until, seed_fixture_for_zone,
@@ -491,11 +494,7 @@ async fn test_chain_tempo_state_ext_from_canon_notification() -> eyre::Result<()
         last.number, 3,
         "last canon notification should have tempoBlockNumber == 3"
     );
-    assert_ne!(
-        last.hash,
-        B256::ZERO,
-        "tempoBlockHash should be non-zero"
-    );
+    assert_ne!(last.hash, B256::ZERO, "tempoBlockHash should be non-zero");
 
     // Cross-check against the on-chain TempoState.
     let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, zone.provider());

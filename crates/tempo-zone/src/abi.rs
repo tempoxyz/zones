@@ -113,14 +113,20 @@ impl<N: reth_primitives_traits::NodePrimitives> ChainTempoStateExt for reth_prov
     fn tempo_block_number(&self) -> u64 {
         let slot7 = self
             .execution_outcome()
-            .storage(&TEMPO_STATE_ADDRESS, U256::from_be_bytes(TEMPO_PACKED_SLOT.0))
+            .storage(
+                &TEMPO_STATE_ADDRESS,
+                U256::from_be_bytes(TEMPO_PACKED_SLOT.0),
+            )
             .unwrap_or_default();
         (slot7 & U256::from(u64::MAX)).to::<u64>()
     }
 
     fn tempo_block_hash(&self) -> B256 {
         self.execution_outcome()
-            .storage(&TEMPO_STATE_ADDRESS, U256::from_be_bytes(TEMPO_BLOCK_HASH_SLOT.0))
+            .storage(
+                &TEMPO_STATE_ADDRESS,
+                U256::from_be_bytes(TEMPO_BLOCK_HASH_SLOT.0),
+            )
             .map(|v| B256::from(v.to_be_bytes()))
             .unwrap_or_default()
     }
