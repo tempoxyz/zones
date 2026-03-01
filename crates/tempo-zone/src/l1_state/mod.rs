@@ -24,6 +24,6 @@ pub use precompile::TempoStateReader;
 pub use provider::{L1StateProvider, L1StateProviderConfig};
 pub use tip403::{
     AuthRole, PolicyCache, PolicyEvent, PolicyListener, PolicyListenerConfig, PolicyProvider,
-    PolicyTaskMessage, SharedPolicyCache, Tip403Metrics, spawn_policy_listener,
+    PolicyTaskHandle, PolicyTaskMessage, SharedPolicyCache, Tip403Metrics, spawn_policy_listener,
     spawn_policy_resolution_task,
 };

@@ -10,6 +10,7 @@
 mod cache;
 mod listener;
 mod metrics;
+mod pool_prefetch;
 pub mod provider;
 pub mod task;
 
@@ -20,5 +21,8 @@ pub use cache::{
 pub(crate) use cache::{FIRST_USER_POLICY, POLICY_ALLOW_ALL, POLICY_REJECT_ALL};
 pub use listener::{PolicyListener, PolicyListenerConfig, spawn_policy_listener};
 pub use metrics::Tip403Metrics;
+pub use pool_prefetch::spawn_pool_prefetch_task;
 pub use provider::PolicyProvider;
-pub use task::{PolicyResolutionTask, PolicyTaskMessage, spawn_policy_resolution_task};
+pub use task::{
+    PolicyResolutionTask, PolicyTaskHandle, PolicyTaskMessage, spawn_policy_resolution_task,
+};
