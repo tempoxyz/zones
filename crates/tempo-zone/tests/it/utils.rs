@@ -121,6 +121,7 @@ pub(crate) struct ZoneTestNode {
     deposit_queue: DepositQueue,
     l1_state_cache: SharedL1StateCache,
     rpc_api: Arc<dyn zone::rpc::ZoneRpcApi>,
+    canon_state_tx: reth_provider::CanonStateNotificationSender<tempo_primitives::TempoPrimitives>,
     _node_handle: Box<dyn TestNodeHandle>,
     _tasks: TaskManager,
 }
@@ -151,6 +152,13 @@ impl ZoneTestNode {
     /// Returns the real private RPC API backed by the node's EthHandlers.
     pub(crate) fn rpc_api(&self) -> Arc<dyn zone::rpc::ZoneRpcApi> {
         self.rpc_api.clone()
+    }
+
+    /// Subscribe to canonical state notifications.
+    pub(crate) fn subscribe_to_canonical_state(
+        &self,
+    ) -> reth_provider::CanonStateNotifications<tempo_primitives::TempoPrimitives> {
+        self.canon_state_tx.subscribe()
     }
 
     /// Wait for a TIP-20 token balance to reach at least `min_balance` on this zone.
@@ -509,11 +517,27 @@ impl ZoneTestNode {
         let rpc_api: Arc<dyn zone::rpc::ZoneRpcApi> =
             Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
 
+        // Create a relay broadcast channel for canon state notifications.
+        // We subscribe to the node's provider and forward into our own sender
+        // so test code can subscribe after the concrete node type is erased.
+        let (canon_state_tx, _) = tokio::sync::broadcast::channel(64);
+        {
+            use reth_provider::CanonStateSubscriptions;
+            let mut rx = node_handle.node.provider().subscribe_to_canonical_state();
+            let tx = canon_state_tx.clone();
+            tokio::spawn(async move {
+                while let Ok(notification) = rx.recv().await {
+                    let _ = tx.send(notification);
+                }
+            });
+        }
+
         Ok(Self {
             deposit_queue,
             http_url,
             l1_state_cache,
             rpc_api,
+            canon_state_tx,
             _node_handle: Box::new(node_handle),
             _tasks: tasks,
         })

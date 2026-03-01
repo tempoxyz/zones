@@ -6,11 +6,13 @@
 //! exercised via queue injection (with the L1 state cache seeded for precompile reads).
 
 use alloy::primitives::{Address, B256, U256, address};
+use alloy_eips::NumHash;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use zone::abi::{
     TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox,
 };
+use zone::ChainTempoStateExt;
 
 use crate::utils::{
     DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, ZoneTestNode, poll_until, seed_fixture_for_zone,
@@ -436,6 +438,71 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
         last_batch.withdrawalQueueHash,
         B256::ZERO,
         "lastBatch.withdrawalQueueHash should be zero with no withdrawals"
+    );
+
+    Ok(())
+}
+
+/// Verify that `ChainTempoStateExt` on the committed `Chain` from a canon state
+/// notification returns the correct L1 block NumHash after zone blocks are mined.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_chain_tempo_state_ext_from_canon_notification() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+    let mut canon_rx = zone.subscribe_to_canonical_state();
+
+    // Inject 3 empty L1 blocks — each produces a zone block.
+    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+
+    // Wait for tempoBlockNumber to reach 3 via RPC (ensures blocks are mined).
+    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
+
+    // Drain canon notifications and collect the L1 NumHash from each committed chain.
+    let mut num_hashes: Vec<NumHash> = Vec::new();
+    while let Ok(notification) = canon_rx.try_recv() {
+        let chain = notification.committed();
+        let nh = chain.tempo_num_hash();
+        if nh.number > 0 {
+            num_hashes.push(nh);
+        }
+    }
+
+    // We should have received notifications for blocks 1, 2, 3.
+    assert!(
+        num_hashes.len() >= 3,
+        "expected at least 3 canon notifications with non-zero tempoBlockNumber, got {}",
+        num_hashes.len()
+    );
+
+    // Verify the L1 block numbers are monotonically increasing.
+    for window in num_hashes.windows(2) {
+        assert!(
+            window[1].number > window[0].number,
+            "L1 block numbers should be increasing: {} -> {}",
+            window[0].number,
+            window[1].number
+        );
+    }
+
+    // The last notification should match the final L1 block number (3).
+    let last = num_hashes.last().unwrap();
+    assert_eq!(
+        last.number, 3,
+        "last canon notification should have tempoBlockNumber == 3"
+    );
+    assert_ne!(
+        last.hash,
+        B256::ZERO,
+        "tempoBlockHash should be non-zero"
+    );
+
+    // Cross-check against the on-chain TempoState.
+    let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
+    let on_chain_hash = tempo_state.tempoBlockHash().call().await?;
+    assert_eq!(
+        last.hash, on_chain_hash,
+        "Chain ext hash should match on-chain tempoBlockHash"
     );
 
     Ok(())
