@@ -372,23 +372,6 @@ impl ZoneTestNode {
         Self::launch(DUMMY_L1_URL.to_string(), Address::ZERO, None, chain_id).await
     }
 
-    /// Start a self-contained zone node with a custom genesis.
-    ///
-    /// Allows tests to modify the genesis state (e.g. patching storage slots)
-    /// before launching the node. No real L1 connection.
-    pub(crate) async fn start_local_with_genesis(genesis: Genesis) -> eyre::Result<Self> {
-        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
-        Self::launch_with_genesis(
-            DUMMY_L1_URL.to_string(),
-            Address::ZERO,
-            None,
-            next_unique_chain_id(),
-            Some(genesis),
-            throwaway_key,
-        )
-        .await
-    }
-
     async fn launch(
         l1_ws_url: String,
         portal_address: Address,

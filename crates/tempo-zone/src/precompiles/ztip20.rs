@@ -215,9 +215,15 @@ impl ZoneTip20Token {
         if let Some(id) = self.registry.get_token_policy(token) {
             return Ok(id);
         }
-        TIP20Token::from_address(token)
+        let id = TIP20Token::from_address(token)
             .and_then(|t| t.transfer_policy_id())
-            .map_err(|e| PrecompileError::other(format!("failed to read transfer_policy_id: {e}")))
+            .map_err(|e| {
+                PrecompileError::other(format!("failed to read transfer_policy_id: {e}"))
+            })?;
+
+        // Storage default 0 means "not yet set" — treat as allow-all (policy 1),
+        // matching the vanilla TIP20Token initializer which writes 1 on creation.
+        if id == 0 { Ok(1) } else { Ok(id) }
     }
 
     /// Build a reverted output with the `policyForbids()` error selector.
