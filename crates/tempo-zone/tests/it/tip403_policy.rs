@@ -385,11 +385,17 @@ async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> 
 
     // Alice: whitelisted as sender + NOT in recipient blacklist → true
     let alice_auth = registry.isAuthorized(10, alice).call().await?;
-    assert!(alice_auth, "alice should be authorized (passes both sender and recipient checks)");
+    assert!(
+        alice_auth,
+        "alice should be authorized (passes both sender and recipient checks)"
+    );
 
     // Bob: NOT in sender whitelist → false (short-circuits before recipient check)
     let bob_auth = registry.isAuthorized(10, bob).call().await?;
-    assert!(!bob_auth, "bob should NOT be authorized (not in sender whitelist)");
+    assert!(
+        !bob_auth,
+        "bob should NOT be authorized (not in sender whitelist)"
+    );
 
     // Carol: whitelisted as sender AND in recipient blacklist
     {
@@ -433,11 +439,17 @@ async fn test_proxy_deterministic_failure_modes() -> eyre::Result<()> {
 
     // policyData on uncached policy 99 → reverts
     let policy_data = registry.policyData(99).call().await;
-    assert!(policy_data.is_err(), "policyData should revert for uncached policy");
+    assert!(
+        policy_data.is_err(),
+        "policyData should revert for uncached policy"
+    );
 
     // compoundPolicyData on uncached policy 99 → reverts
     let compound_data = registry.compoundPolicyData(99).call().await;
-    assert!(compound_data.is_err(), "compoundPolicyData should revert for uncached policy");
+    assert!(
+        compound_data.is_err(),
+        "compoundPolicyData should revert for uncached policy"
+    );
 
     // policyIdCounter with empty cache → returns 2 (FIRST_USER_POLICY)
     let counter = registry.policyIdCounter().call().await?;
@@ -456,7 +468,10 @@ async fn test_proxy_deterministic_failure_modes() -> eyre::Result<()> {
 
     // policyIdCounter → 6 (max cached ID 5 + 1)
     let counter_after = registry.policyIdCounter().call().await?;
-    assert_eq!(counter_after, 6, "counter should be max cached policy ID + 1");
+    assert_eq!(
+        counter_after, 6,
+        "counter should be max cached policy ID + 1"
+    );
 
     Ok(())
 }
@@ -477,17 +492,20 @@ async fn test_policy_type_change_via_events() -> eyre::Result<()> {
     // Step 1: Create policy 5 as WHITELIST via event, add Alice
     {
         let cache = zone.policy_cache();
-        cache.write().apply_events(1, &[
-            PolicyEvent::PolicyCreated {
-                policy_id: 5,
-                policy_type: ITIP403Registry::PolicyType::WHITELIST,
-            },
-            PolicyEvent::MembershipChanged {
-                policy_id: 5,
-                account: alice,
-                in_set: true,
-            },
-        ]);
+        cache.write().apply_events(
+            1,
+            &[
+                PolicyEvent::PolicyCreated {
+                    policy_id: 5,
+                    policy_type: ITIP403Registry::PolicyType::WHITELIST,
+                },
+                PolicyEvent::MembershipChanged {
+                    policy_id: 5,
+                    account: alice,
+                    in_set: true,
+                },
+            ],
+        );
     }
 
     // Alice should be authorized (whitelisted)
@@ -497,13 +515,14 @@ async fn test_policy_type_change_via_events() -> eyre::Result<()> {
     // Step 2: Remove Alice via event at block 2
     {
         let cache = zone.policy_cache();
-        cache.write().apply_events(2, &[
-            PolicyEvent::MembershipChanged {
+        cache.write().apply_events(
+            2,
+            &[PolicyEvent::MembershipChanged {
                 policy_id: 5,
                 account: alice,
                 in_set: false,
-            },
-        ]);
+            }],
+        );
     }
 
     // Alice should no longer be authorized
@@ -513,14 +532,15 @@ async fn test_policy_type_change_via_events() -> eyre::Result<()> {
     // Step 3: Create compound policy 10 via event
     {
         let cache = zone.policy_cache();
-        cache.write().apply_events(3, &[
-            PolicyEvent::CompoundPolicyCreated {
+        cache.write().apply_events(
+            3,
+            &[PolicyEvent::CompoundPolicyCreated {
                 policy_id: 10,
                 sender_policy_id: 5,
                 recipient_policy_id: 1, // allow all
                 mint_recipient_policy_id: 1,
-            },
-        ]);
+            }],
+        );
     }
 
     // Compound data should be queryable
@@ -550,12 +570,13 @@ async fn test_token_policy_change_via_events() -> eyre::Result<()> {
     // Apply a token policy change event
     {
         let cache = zone.policy_cache();
-        cache.write().apply_events(1, &[
-            PolicyEvent::TokenPolicyChanged {
+        cache.write().apply_events(
+            1,
+            &[PolicyEvent::TokenPolicyChanged {
                 token,
                 policy_id: 5,
-            },
-        ]);
+            }],
+        );
     }
 
     // Verify via cache read that the token policy was set
@@ -569,12 +590,13 @@ async fn test_token_policy_change_via_events() -> eyre::Result<()> {
     // Update the token's policy to 7
     {
         let cache = zone.policy_cache();
-        cache.write().apply_events(2, &[
-            PolicyEvent::TokenPolicyChanged {
+        cache.write().apply_events(
+            2,
+            &[PolicyEvent::TokenPolicyChanged {
                 token,
                 policy_id: 7,
-            },
-        ]);
+            }],
+        );
     }
 
     // Verify the update took effect
