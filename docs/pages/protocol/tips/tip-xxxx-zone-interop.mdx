@@ -18,7 +18,7 @@ This TIP defines the zone interoperability protocol that enables seamless token 
 
 ## Motivation
 
-With multiple zones in the Tempo ecosystem, users need a simple way to send tokens to any address without manually managing deposits and withdrawals. A user should be able to paste a Tempo address (e.g., `tz...` for a zone address) and have their wallet automatically:
+With multiple zones in the Tempo ecosystem, users need a simple way to send tokens to any address without manually managing deposits and withdrawals. A user should be able to paste a Tempo address (e.g., `tempoz1...` for a zone address) and have their wallet automatically:
 
 1. Determine where the recipient is (mainnet or which zone)
 2. Determine where the sender's funds are
@@ -36,7 +36,7 @@ This abstracts away the complexity of cross-zone transfers while maintaining use
 When a user initiates a transfer to a Tempo address, the wallet first decodes the address:
 
 ```python
-raw_address, zone_id, is_testnet = decode_tempo_address(destination)
+raw_address, zone_id = decode_tempo_address(destination)
 
 # zone_id = None means mainnet (Tempo L1)
 # zone_id = 1, 2, ... means a specific zone
@@ -58,8 +58,6 @@ Based on source and destination, the wallet determines the transfer type:
 | Zone N | Mainnet | Withdrawal from zone |
 | Zone N | Zone M (same token) | Cross-zone transfer (N→Mainnet→M) |
 | Zone N | Zone M (different token) | Cross-zone swap (N→Mainnet swap→M) |
-
-Transfer routing fails and the transaction should be rejected if the value of `is_testnet` is unequal between decoded source and destination addresses.
 
 ### Case 1: Direct Transfer (Same Network)
 
@@ -295,13 +293,12 @@ Same as Case 4, the wallet encrypts `(recipient, memo)` using the destination zo
 interface ParsedDestination {
   rawAddress: string;      // 0x... format
   zoneId: number | null;   // null = mainnet
-  isTestnet: boolean;
 }
 
 function parseDestination(tempoAddress: string): ParsedDestination {
   // Decode per TIP-XXXX (Tempo Address Format)
-  const [rawAddress, zoneId, isTestnet] = decodeTempoAddress(tempoAddress);
-  return { rawAddress, zoneId, isTestnet };
+  const [rawAddress, zoneId] = decodeTempoAddress(tempoAddress);
+  return { rawAddress, zoneId };
 }
 ```
 

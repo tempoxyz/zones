@@ -9,6 +9,8 @@ use eyre as _;
 pub(crate) use tempo_precompiles::{error, storage};
 
 pub mod abi;
+pub mod ext;
+pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub mod batch;
 pub mod bindings;
 pub mod builder;
