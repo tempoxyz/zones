@@ -347,3 +347,243 @@ async fn test_policy_proxy_reverts_mutating_calls() -> eyre::Result<()> {
 
     Ok(())
 }
+
+/// Compound policy `isAuthorized` checks BOTH sender AND recipient sub-policies (Transfer role).
+#[tokio::test(flavor = "multi_thread")]
+async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+
+    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
+
+    let alice = address!("0x000000000000000000000000000000000000A11C");
+    let bob = address!("0x0000000000000000000000000000000000000B0B");
+    let carol = address!("0x000000000000000000000000000000000000CA01");
+
+    // Policy 5 = sender whitelist, policy 6 = recipient blacklist
+    // Compound policy 10 references them
+    {
+        let cache = zone.policy_cache();
+        let mut w = cache.write();
+        w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
+        w.set_member(5, alice, 1, true); // Alice whitelisted as sender
+        w.set_policy_type(6, ITIP403Registry::PolicyType::BLACKLIST);
+        w.set_member(6, bob, 1, true); // Bob blacklisted as recipient
+        w.set_compound(
+            10,
+            CompoundData {
+                sender_policy_id: 5,
+                recipient_policy_id: 6,
+                mint_recipient_policy_id: 1, // builtin allow
+            },
+        );
+    }
+
+    let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, zone.provider());
+
+    // Alice: whitelisted as sender + NOT in recipient blacklist → true
+    let alice_auth = registry.isAuthorized(10, alice).call().await?;
+    assert!(alice_auth, "alice should be authorized (passes both sender and recipient checks)");
+
+    // Bob: NOT in sender whitelist → false (short-circuits before recipient check)
+    let bob_auth = registry.isAuthorized(10, bob).call().await?;
+    assert!(!bob_auth, "bob should NOT be authorized (not in sender whitelist)");
+
+    // Carol: whitelisted as sender AND in recipient blacklist
+    {
+        let cache = zone.policy_cache();
+        let mut w = cache.write();
+        w.set_member(5, carol, 1, true); // whitelisted as sender
+        w.set_member(6, carol, 1, true); // blacklisted as recipient
+    }
+
+    // Carol passes sender check but fails recipient → false
+    let carol_auth = registry.isAuthorized(10, carol).call().await?;
+    assert!(
+        !carol_auth,
+        "carol should NOT be authorized (passes sender but fails recipient blacklist)"
+    );
+
+    Ok(())
+}
+
+/// Proxy returns deterministic fail-closed results for uncached/missing policies.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_proxy_deterministic_failure_modes() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+
+    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
+
+    let alice = address!("0x000000000000000000000000000000000000A11C");
+
+    let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, zone.provider());
+
+    // isAuthorized on uncached policy 99 → false (fail-closed)
+    let auth = registry.isAuthorized(99, alice).call().await?;
+    assert!(!auth, "uncached policy should return false (fail-closed)");
+
+    // policyExists on uncached policy 99 → false
+    let exists = registry.policyExists(99).call().await?;
+    assert!(!exists, "uncached policy should not exist");
+
+    // policyData on uncached policy 99 → reverts
+    let policy_data = registry.policyData(99).call().await;
+    assert!(policy_data.is_err(), "policyData should revert for uncached policy");
+
+    // compoundPolicyData on uncached policy 99 → reverts
+    let compound_data = registry.compoundPolicyData(99).call().await;
+    assert!(compound_data.is_err(), "compoundPolicyData should revert for uncached policy");
+
+    // policyIdCounter with empty cache → returns 2 (FIRST_USER_POLICY)
+    let counter = registry.policyIdCounter().call().await?;
+    assert_eq!(counter, 2, "empty cache should return counter = 2");
+
+    // Now populate cache with policy 5
+    {
+        let cache = zone.policy_cache();
+        let mut w = cache.write();
+        w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
+    }
+
+    // policyExists for policy 5 → true
+    let exists_5 = registry.policyExists(5).call().await?;
+    assert!(exists_5, "policy 5 should exist after cache population");
+
+    // policyIdCounter → 6 (max cached ID 5 + 1)
+    let counter_after = registry.policyIdCounter().call().await?;
+    assert_eq!(counter_after, 6, "counter should be max cached policy ID + 1");
+
+    Ok(())
+}
+
+/// Applying a sequence of `PolicyEvent`s correctly updates the proxy's responses.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_policy_type_change_via_events() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+
+    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
+
+    let alice = address!("0x000000000000000000000000000000000000A11C");
+    let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, zone.provider());
+
+    // Step 1: Create policy 5 as WHITELIST via event, add Alice
+    {
+        let cache = zone.policy_cache();
+        cache.write().apply_events(1, &[
+            PolicyEvent::PolicyCreated {
+                policy_id: 5,
+                policy_type: ITIP403Registry::PolicyType::WHITELIST,
+            },
+            PolicyEvent::MembershipChanged {
+                policy_id: 5,
+                account: alice,
+                in_set: true,
+            },
+        ]);
+    }
+
+    // Alice should be authorized (whitelisted)
+    let authorized = registry.isAuthorized(5, alice).call().await?;
+    assert!(authorized, "alice should be authorized (whitelisted)");
+
+    // Step 2: Remove Alice via event at block 2
+    {
+        let cache = zone.policy_cache();
+        cache.write().apply_events(2, &[
+            PolicyEvent::MembershipChanged {
+                policy_id: 5,
+                account: alice,
+                in_set: false,
+            },
+        ]);
+    }
+
+    // Alice should no longer be authorized
+    let authorized = registry.isAuthorized(5, alice).call().await?;
+    assert!(!authorized, "alice should NOT be authorized after removal");
+
+    // Step 3: Create compound policy 10 via event
+    {
+        let cache = zone.policy_cache();
+        cache.write().apply_events(3, &[
+            PolicyEvent::CompoundPolicyCreated {
+                policy_id: 10,
+                sender_policy_id: 5,
+                recipient_policy_id: 1, // allow all
+                mint_recipient_policy_id: 1,
+            },
+        ]);
+    }
+
+    // Compound data should be queryable
+    let compound = registry.compoundPolicyData(10).call().await?;
+    assert_eq!(compound.senderPolicyId, 5);
+    assert_eq!(compound.recipientPolicyId, 1);
+
+    // Policy 10 should exist
+    let exists = registry.policyExists(10).call().await?;
+    assert!(exists, "compound policy 10 should exist");
+
+    Ok(())
+}
+
+/// `TokenPolicyChanged` event updates the token→policy mapping in the cache.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_token_policy_change_via_events() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+
+    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
+
+    let token = address!("0x0000000000000000000000000000000000BEEF01");
+
+    // Apply a token policy change event
+    {
+        let cache = zone.policy_cache();
+        cache.write().apply_events(1, &[
+            PolicyEvent::TokenPolicyChanged {
+                token,
+                policy_id: 5,
+            },
+        ]);
+    }
+
+    // Verify via cache read that the token policy was set
+    {
+        let cache = zone.policy_cache();
+        let r = cache.read();
+        let policy_id = r.get_token_policy(token, u64::MAX);
+        assert_eq!(policy_id, Some(5), "token should map to policy 5");
+    }
+
+    // Update the token's policy to 7
+    {
+        let cache = zone.policy_cache();
+        cache.write().apply_events(2, &[
+            PolicyEvent::TokenPolicyChanged {
+                token,
+                policy_id: 7,
+            },
+        ]);
+    }
+
+    // Verify the update took effect
+    {
+        let cache = zone.policy_cache();
+        let r = cache.read();
+        let policy_id = r.get_token_policy(token, u64::MAX);
+        assert_eq!(policy_id, Some(7), "token should now map to policy 7");
+    }
+
+    Ok(())
+}

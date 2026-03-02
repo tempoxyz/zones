@@ -603,8 +603,11 @@ async fn test_l1_policy_operations_and_zone_advancement() -> eyre::Result<()> {
         "zone should have produced blocks after L1 policy changes"
     );
 
-    // Deposit to a non-blacklisted user should still work
-    let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
+    // Deposit to a non-blacklisted user should still work.
+    // Use signer_at(3) — the same `clean_user` verified above — because the default
+    // user_signer (index 1) was blacklisted earlier in this test.
+    let clean_signer = l1.signer_at(3);
+    let mut account = ZoneAccount::with_signer(clean_signer, &l1, &zone, portal_address);
     let deposit_amount: u128 = 1_000_000;
     l1.fund_user(account.address(), deposit_amount).await?;
     let minted = account.deposit(deposit_amount, L1_TIMEOUT, &zone).await?;

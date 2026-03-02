@@ -72,6 +72,11 @@ where
             {
                 debug!(%token, recipient = %call.to, "Pre-fetching TIP-403 recipient authorization");
                 let _ = handle.send_resolve_policy(token, call.to, u64::MAX, AuthRole::Recipient);
+            } else if tx.transaction.function_selector() == Some(&ITIP20::transferWithMemoCall::SELECTOR.into())
+                && let Ok(call) = ITIP20::transferWithMemoCall::abi_decode_raw(&tx.transaction.input()[4..])
+            {
+                debug!(%token, recipient = %call.to, "Pre-fetching TIP-403 recipient authorization");
+                let _ = handle.send_resolve_policy(token, call.to, u64::MAX, AuthRole::Recipient);
             }
         }
     }
