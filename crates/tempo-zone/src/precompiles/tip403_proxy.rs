@@ -6,9 +6,8 @@
 //!
 //! **Read-only calls** (`isAuthorized`, `isAuthorizedSender`, `isAuthorizedRecipient`,
 //! `isAuthorizedMintRecipient`, `policyData`, `compoundPolicyData`, `policyExists`)
-//! are resolved from the [`SharedPolicyCache`] only (no L1 RPC during execution).
-//! On cache miss, authorization checks return `false` (fail-closed) and data queries
-//! revert, ensuring deterministic EVM execution across all nodes.
+//! are resolved cache-first from the [`SharedPolicyCache`]. On cache miss,
+//! all queries fall back to L1 RPC (via `block_in_place`) and populate the cache.
 //!
 //! **Mutating calls** (`createPolicy`, `modifyPolicyWhitelist`, etc.) are reverted —
 //! policy state is managed on L1, not on the zone.
@@ -171,24 +170,9 @@ impl ZoneTip403ProxyRegistry {
             return Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()));
         }
 
-        // Check cache
-        {
-            let cache = provider.cache().read();
-            if let Some(policy) = cache.policies().get(&call.policyId)
-                && let Some(policy_type) = policy.policy_type
-            {
-                let ret = ITIP403Registry::policyDataReturn {
-                    policyType: policy_type,
-                    admin: alloy_primitives::Address::ZERO,
-                };
-                let encoded = ITIP403Registry::policyDataCall::abi_encode_returns(&ret);
-                return Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()));
-            }
-        }
-
-        // Fallback: cache-only resolution (no RPC — deterministic)
+        // Cache-first, RPC-fallback resolution.
         let policy_type = provider
-            .resolve_policy_type_cached(call.policyId)
+            .resolve_policy_type_sync(call.policyId)
             .map_err(|e| {
                 PrecompileError::other(format!(
                     "policyData failed for policy {}: {e}",
@@ -209,25 +193,9 @@ impl ZoneTip403ProxyRegistry {
         let call = ITIP403Registry::compoundPolicyDataCall::abi_decode(data)
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 
-        // Check cache
-        {
-            let cache = provider.cache().read();
-            if let Some(policy) = cache.policies().get(&call.policyId)
-                && let Some(ref compound) = policy.compound
-            {
-                let ret = ITIP403Registry::compoundPolicyDataReturn {
-                    senderPolicyId: compound.sender_policy_id,
-                    recipientPolicyId: compound.recipient_policy_id,
-                    mintRecipientPolicyId: compound.mint_recipient_policy_id,
-                };
-                let encoded = ITIP403Registry::compoundPolicyDataCall::abi_encode_returns(&ret);
-                return Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()));
-            }
-        }
-
-        // Fallback: cache-only resolution (no RPC — deterministic)
+        // Cache-first, RPC-fallback resolution.
         let compound = provider
-            .resolve_compound_data_cached(call.policyId)
+            .resolve_compound_data_sync(call.policyId)
             .map_err(|e| {
                 PrecompileError::other(format!(
                     "compoundPolicyData failed for policy {}: {e}",

@@ -37,9 +37,13 @@ use super::{
 /// This is safe when the caller runs on a blocking thread (e.g. the payload builder).
 #[derive(Debug, Clone)]
 pub struct PolicyProvider {
+    /// Shared in-memory policy cache, populated by the listener and RPC fallback.
     cache: SharedPolicyCache,
+    /// L1 HTTP provider for RPC fallback on cache miss.
     provider: DynProvider<TempoNetwork>,
+    /// Tokio runtime handle for `block_in_place` + `block_on` in sync call sites.
     runtime_handle: tokio::runtime::Handle,
+    /// Metrics for cache hit/miss rates and RPC resolution latency.
     metrics: Tip403Metrics,
 }
 
@@ -159,20 +163,9 @@ impl PolicyProvider {
             return Ok(policy_id == POLICY_ALLOW_ALL);
         }
 
-        // Fetch policy data (type + admin) from L1
-        let policy_type = self.resolve_policy_type(policy_id, block_number).await?;
-
-        let result = match policy_type {
-            PolicyType::WHITELIST | PolicyType::BLACKLIST => {
-                self.fetch_and_cache_simple(policy_id, user, block_number, policy_type)
-                    .await
-            }
-            PolicyType::COMPOUND => {
-                self.fetch_and_cache_compound(policy_id, user, block_number, role)
-                    .await
-            }
-            _ => eyre::bail!("unknown policy type for policy {policy_id}"),
-        };
+        let result = self
+            .resolve_policy_authorization(policy_id, user, block_number, role)
+            .await;
 
         self.metrics
             .rpc_resolution_duration_seconds
@@ -383,16 +376,16 @@ impl PolicyProvider {
         Ok(compound)
     }
 
-    /// Cache-only authorization check by policy ID (no token resolution).
+    /// Cache-first, RPC-fallback authorization check by policy ID (no token resolution).
     ///
     /// Intended for the zone TIP-403 proxy precompile which receives `policyId`
     /// directly. Uses `u64::MAX` as block number to query the latest cached state.
+    /// On cache miss, falls back to L1 RPC (using `block_in_place`) and populates
+    /// the cache so subsequent lookups are instant.
     ///
-    /// **Deterministic / fail-closed**: on cache miss, returns `false` (not authorized)
-    /// rather than falling back to L1 RPC. This ensures EVM execution is deterministic
-    /// across all nodes and re-execution. The cache should be warmed by the
-    /// [`PolicyListener`](super::PolicyListener) and [`PolicyResolutionTask`](super::PolicyResolutionTask)
-    /// before block execution.
+    /// # Panics
+    ///
+    /// Panics if called from within an async context on the same tokio runtime.
     pub fn is_authorized_by_policy(
         &self,
         policy_id: u64,
@@ -407,7 +400,7 @@ impl PolicyProvider {
             return Ok(policy_id == POLICY_ALLOW_ALL);
         }
 
-        // Cache-only lookup — fail-closed on miss
+        // Try cache first
         if let Some(result) = self
             .cache
             .read()
@@ -417,37 +410,111 @@ impl PolicyProvider {
             return Ok(result);
         }
 
-        // Cache miss — fail-closed (not authorized)
+        // Cache miss — fall back to L1 RPC
         self.metrics.cache_misses.increment(1);
-        warn!(
-            policy_id, %user, ?role,
-            "Policy proxy cache miss — returning not authorized (fail-closed)"
+        let block_number = self.cache.read().last_l1_block();
+        debug!(
+            policy_id, %user, ?role, block_number,
+            "Policy proxy cache miss, fetching from L1 RPC"
         );
-        Ok(false)
+        tokio::task::block_in_place(|| {
+            self.runtime_handle
+                .block_on(self.fetch_and_cache_by_policy(policy_id, user, block_number, role))
+        })
     }
 
-    /// Cache-only policy type resolution for the proxy precompile.
+    /// Fetch and cache authorization data for a known policy ID (async).
     ///
-    /// Returns `Err` on cache miss (caller should revert).
-    pub fn resolve_policy_type_cached(&self, policy_id: u64) -> Result<PolicyType> {
+    /// Like [`fetch_and_cache`](Self::fetch_and_cache) but skips the token →
+    /// policy ID resolution step since the caller already has the policy ID.
+    async fn fetch_and_cache_by_policy(
+        &self,
+        policy_id: u64,
+        user: Address,
+        block_number: u64,
+        role: AuthRole,
+    ) -> Result<bool> {
+        let start = std::time::Instant::now();
+
+        let result = self
+            .resolve_policy_authorization(policy_id, user, block_number, role)
+            .await;
+
+        self.metrics
+            .rpc_resolution_duration_seconds
+            .record(start.elapsed().as_secs_f64());
+        result
+    }
+
+    /// Resolve authorization for a policy ID by fetching policy type and membership
+    /// from L1, caching the results.
+    ///
+    /// Shared implementation used by both [`fetch_and_cache`](Self::fetch_and_cache)
+    /// and [`fetch_and_cache_by_policy`](Self::fetch_and_cache_by_policy).
+    async fn resolve_policy_authorization(
+        &self,
+        policy_id: u64,
+        user: Address,
+        block_number: u64,
+        role: AuthRole,
+    ) -> Result<bool> {
+        let policy_type = self.resolve_policy_type(policy_id, block_number).await?;
+
+        match policy_type {
+            PolicyType::WHITELIST | PolicyType::BLACKLIST => {
+                self.fetch_and_cache_simple(policy_id, user, block_number, policy_type)
+                    .await
+            }
+            PolicyType::COMPOUND => {
+                self.fetch_and_cache_compound(policy_id, user, block_number, role)
+                    .await
+            }
+            _ => eyre::bail!("unknown policy type for policy {policy_id}"),
+        }
+    }
+
+    /// Cache-first, RPC-fallback policy type resolution (sync).
+    ///
+    /// Falls back to L1 RPC via `block_in_place` on cache miss.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an async context on the same tokio runtime.
+    pub fn resolve_policy_type_sync(&self, policy_id: u64) -> Result<PolicyType> {
         if let Some(policy) = self.cache.read().policies().get(&policy_id)
             && let Some(policy_type) = policy.policy_type
         {
             return Ok(policy_type);
         }
-        eyre::bail!("policy type not cached for policy {policy_id}")
+
+        let block_number = self.cache.read().last_l1_block();
+        debug!(policy_id, block_number, "Policy type cache miss, fetching from L1 RPC");
+        tokio::task::block_in_place(|| {
+            self.runtime_handle
+                .block_on(self.resolve_policy_type(policy_id, block_number))
+        })
     }
 
-    /// Cache-only compound data resolution for the proxy precompile.
+    /// Cache-first, RPC-fallback compound data resolution (sync).
     ///
-    /// Returns `Err` on cache miss (caller should revert).
-    pub fn resolve_compound_data_cached(&self, policy_id: u64) -> Result<CompoundData> {
+    /// Falls back to L1 RPC via `block_in_place` on cache miss.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an async context on the same tokio runtime.
+    pub fn resolve_compound_data_sync(&self, policy_id: u64) -> Result<CompoundData> {
         if let Some(policy) = self.cache.read().policies().get(&policy_id)
             && let Some(ref compound) = policy.compound
         {
             return Ok(*compound);
         }
-        eyre::bail!("compound data not cached for policy {policy_id}")
+
+        let block_number = self.cache.read().last_l1_block();
+        debug!(policy_id, block_number, "Compound data cache miss, fetching from L1 RPC");
+        tokio::task::block_in_place(|| {
+            self.runtime_handle
+                .block_on(self.resolve_compound_data(policy_id, block_number))
+        })
     }
 
     /// Call `isAuthorized(policyId, user)` on the TIP403Registry via L1 RPC.
