@@ -230,7 +230,12 @@ contract ZonePortal is IZonePortal {
         // Give messenger max approval for this token
         ITIP20(_token).approve(messenger, type(uint256).max);
 
-        emit TokenEnabled(_token);
+        // Read token metadata for the event so zone-side can create matching TIP-20
+        string memory name = ITIP20(_token).name();
+        string memory symbol = ITIP20(_token).symbol();
+        string memory currency = ITIP20(_token).currency();
+
+        emit TokenEnabled(_token, name, symbol, currency);
     }
 
     /*//////////////////////////////////////////////////////////////

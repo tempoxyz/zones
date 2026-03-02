@@ -267,11 +267,14 @@ where
             }
         }
 
-        if !l1_block.events.enabled_tokens.is_empty() {
+        for enabled in &l1_block.events.enabled_tokens {
             info!(
                 target: "zone::payload",
-                tokens = ?l1_block.events.enabled_tokens,
-                "🪙 New tokens enabled on L1"
+                token = %enabled.token,
+                name = %enabled.name,
+                symbol = %enabled.symbol,
+                currency = %enabled.currency,
+                "🪙 New token enabled on L1 — creating on L2"
             );
         }
 
@@ -338,6 +341,7 @@ where
             let advance_tx = build_advance_tempo_tx(
                 &l1_block.header,
                 &l1_block.events.deposits,
+                &l1_block.events.enabled_tokens,
                 &self.sequencer_key,
                 self.portal_address,
                 &self.policy_provider,
@@ -714,11 +718,12 @@ fn build_encrypted_deposit(
     (queued, decryption)
 }
 
-/// Build the `advanceTempo(header, deposits, decryptions)` system transaction.
+/// Build the `advanceTempo(header, deposits, decryptions, enabledTokens)` system transaction.
 ///
 /// This must be called **once per L1 block** at the start of a zone block (before user txs).
 /// It calls [`ZoneInbox.advanceTempo`](crate::abi::ZoneInbox) which atomically:
 /// - Advances the zone's view of Tempo by processing the L1 block header
+/// - Enables newly-bridged TIP-20 tokens via the zone's TIP20Factory precompile
 /// - Processes deposits from the queue (minting zone tokens to recipients)
 /// - Validates the deposit hash chain against Tempo state
 ///
@@ -728,6 +733,7 @@ fn build_encrypted_deposit(
 pub fn build_advance_tempo_tx(
     header: &TempoHeader,
     deposits: &[L1Deposit],
+    enabled_tokens: &[crate::l1::EnabledToken],
     sequencer_key: &k256::SecretKey,
     portal_address: Address,
     policy_provider: &crate::l1_state::PolicyProvider,
@@ -768,10 +774,14 @@ pub fn build_advance_tempo_tx(
         }
     }
 
+    let abi_enabled_tokens: Vec<abi::EnabledToken> =
+        enabled_tokens.iter().map(|t| t.to_abi()).collect();
+
     let calldata = abi::ZoneInbox::advanceTempoCall {
         header: Bytes::from(header_rlp),
         deposits: queued_deposits,
         decryptions,
+        enabledTokens: abi_enabled_tokens,
     }
     .abi_encode();
 
@@ -867,6 +877,7 @@ mod tests {
         let recovered_tx = super::build_advance_tempo_tx(
             &header,
             &deposits,
+            &[],
             &seq_key,
             portal_address,
             &policy_provider,

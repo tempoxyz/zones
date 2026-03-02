@@ -8,6 +8,7 @@ import {
     Deposit,
     DepositQueueTransition,
     DepositType,
+    EnabledToken,
     IWithdrawalReceiver,
     IZoneFactory,
     IZonePortal,
@@ -133,7 +134,9 @@ contract ZoneIntegrationTest is BaseTest {
     }
 
     function _advanceTempo(Deposit[] memory deposits) internal {
-        l2Inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
+        l2Inbox.advanceTempo(
+            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
+        );
     }
 
     /*//////////////////////////////////////////////////////////////

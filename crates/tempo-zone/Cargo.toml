@@ -22,6 +22,8 @@ tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-alloy = { workspace = true, features = ["tempo-compat"] }
 tempo-contracts.workspace = true
+tempo-precompiles.workspace = true
+tempo-precompiles-macros.workspace = true
 
 # reth
 reth-basic-payload-builder.workspace = true
@@ -45,6 +47,7 @@ reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
 
 # alloy
+alloy.workspace = true
 alloy-consensus.workspace = true
 alloy-contract.workspace = true
 alloy-eips.workspace = true
@@ -110,8 +113,21 @@ serde_json.workspace = true
 tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
 tempo-payload-types.workspace = true
-tempo-precompiles.workspace = true
+tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 
 [features]
 default = []
+test-utils = [
+	"reth-chainspec/test-utils",
+	"reth-ethereum/test-utils",
+	"reth-evm/test-utils",
+	"reth-node-builder/test-utils",
+	"reth-payload-builder/test-utils",
+	"reth-primitives-traits/test-utils",
+	"reth-provider/test-utils",
+	"reth-revm/test-utils",
+	"reth-transaction-pool/test-utils",
+	"tempo-precompiles/test-utils",
+	"tempo-transaction-pool/test-utils"
+]

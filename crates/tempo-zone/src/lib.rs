@@ -1,13 +1,12 @@
-//! Tempo Zone Node - a lightweight L2 node built on reth.
-//!
-//! This crate provides the node configuration and components for running a Tempo Zone L2.
-
+#![doc = include_str!("../README.md")]
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![allow(unnameable_types)]
 #![allow(clippy::too_many_arguments)]
-
 use eyre as _;
+
+// Required by the `#[contract]` proc macro expansion (references `crate::storage` / `crate::error`).
+pub(crate) use tempo_precompiles::{error, storage};
 
 pub mod abi;
 pub mod ext;
@@ -30,8 +29,8 @@ pub mod zonemonitor;
 pub use batch::{BatchData, BatchSubmitter};
 pub use engine::ZoneEngine;
 pub use l1::{
-    Deposit, DepositQueue, EncryptedDeposit, L1BlockDeposits, L1Deposit, L1PortalEvents,
-    L1Subscriber, L1SubscriberConfig,
+    Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockDeposits, L1Deposit,
+    L1PortalEvents, L1Subscriber, L1SubscriberConfig,
 };
 pub use l1_state::{PolicyProvider, SharedL1StateCache, SharedPolicyCache};
 pub use node::{ZoneExecutorBuilder, ZoneNode};

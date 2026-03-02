@@ -13085,6 +13085,7 @@ dependencies = [
  "tempo-node",
  "tempo-payload-types",
  "tempo-precompiles",
+ "tempo-precompiles-macros",
  "tempo-primitives",
  "tempo-revm",
  "tempo-transaction-pool",
