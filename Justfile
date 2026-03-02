@@ -294,6 +294,205 @@ enable-token token:
         sleep 0.5
     done
 
+[group('tip403')]
+[doc('Creates a new TIP-20 token on L1 via TIP20Factory. Returns the token address. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+create-token name symbol currency="USD" salt="0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    FACTORY="0x20FC000000000000000000000000000000000000"
+    QUOTE_TOKEN="0x20C0000000000000000000000000000000000000"
+    ADMIN=$(cast wallet address "$PK")
+    # Predict the address first
+    TOKEN_ADDR=$(cast call "$FACTORY" \
+        "getTokenAddress(address,bytes32)(address)" "$ADMIN" "{{salt}}" \
+        --rpc-url "$HTTP_RPC")
+    echo "Creating TIP-20 token '{{name}}' ({{symbol}}) at $TOKEN_ADDR..."
+    TX_OUTPUT=$(cast send "$FACTORY" \
+        "createToken(string,string,string,address,address,bytes32)" \
+        "{{name}}" "{{symbol}}" "{{currency}}" "$QUOTE_TOKEN" "$ADMIN" "{{salt}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    echo "Token created!"
+    echo "  Address:  $TOKEN_ADDR"
+    echo "  Name:     {{name}}"
+    echo "  Symbol:   {{symbol}}"
+    echo "  Currency: {{currency}}"
+    echo "  Admin:    $ADMIN"
+    echo "  L1 tx:    $TX_HASH"
+
+[group('tip403')]
+[doc('Mints TIP-20 tokens to an address on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars. Caller must have ISSUER_ROLE.')]
+mint-tokens token to="" amount="1000000000":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    TO="{{to}}"
+    if [[ -z "$TO" ]]; then
+        TO=$(cast wallet address "$PK")
+    fi
+    echo "Minting {{amount}} tokens to $TO on token {{token}}..."
+    cast send "{{token}}" "mint(address,uint256)" "$TO" "{{amount}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    BALANCE=$(cast call "{{token}}" "balanceOf(address)(uint256)" "$TO" --rpc-url "$HTTP_RPC")
+    echo "Balance of $TO: $BALANCE"
+
+[group('tip403')]
+[doc('Sets the supply cap for a TIP-20 token on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars. Caller must be token admin.')]
+set-supply-cap token cap="340282366920938463463374607431768211455":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    echo "Setting supply cap to {{cap}} on token {{token}}..."
+    cast send "{{token}}" "setSupplyCap(uint256)" "{{cap}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Supply cap set!"
+
+[group('tip403')]
+[doc('Grants ISSUER_ROLE on a TIP-20 token so the caller can mint. Requires L1_RPC_URL and PRIVATE_KEY env vars. Caller must be token admin.')]
+grant-issuer-role token to="":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    TO="{{to}}"
+    if [[ -z "$TO" ]]; then
+        TO=$(cast wallet address "$PK")
+    fi
+    ISSUER_ROLE=$(cast keccak "ISSUER_ROLE")
+    echo "Granting ISSUER_ROLE to $TO on token {{token}}..."
+    cast send "{{token}}" "grantRole(bytes32,address)" "$ISSUER_ROLE" "$TO" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Done!"
+
+[group('tip403')]
+[doc('Creates a TIP-403 whitelist or blacklist policy on L1. Type: 0=whitelist, 1=blacklist. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+create-policy type="0":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    ADMIN=$(cast wallet address "$PK")
+    TYPE_NAME="whitelist"
+    if [[ "{{type}}" == "1" ]]; then
+        TYPE_NAME="blacklist"
+    fi
+    echo "Creating $TYPE_NAME policy on L1 (admin: $ADMIN)..."
+    TX_OUTPUT=$(cast send "$REGISTRY" \
+        "createPolicy(address,uint8)(uint64)" "$ADMIN" "{{type}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    # Read the policy counter to get the new ID (strip cast's formatting like "984399 [9.843e5]")
+    COUNTER=$(cast call "$REGISTRY" "policyIdCounter()(uint64)" --rpc-url "$HTTP_RPC" | awk '{print $1}')
+    POLICY_ID=$((COUNTER - 1))
+    echo "Policy created!"
+    echo "  Policy ID: $POLICY_ID"
+    echo "  Type:      $TYPE_NAME"
+    echo "  Admin:     $ADMIN"
+    echo "  L1 tx:     $TX_HASH"
+
+[group('tip403')]
+[doc('Creates a compound TIP-403 policy from existing sub-policies. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+create-compound-policy sender-policy-id recipient-policy-id mint-recipient-policy-id="1":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    echo "Creating compound policy (sender={{sender-policy-id}}, recipient={{recipient-policy-id}}, mint={{mint-recipient-policy-id}})..."
+    TX_OUTPUT=$(cast send "$REGISTRY" \
+        "createCompoundPolicy(uint64,uint64,uint64)" \
+        "{{sender-policy-id}}" "{{recipient-policy-id}}" "{{mint-recipient-policy-id}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    COUNTER=$(cast call "$REGISTRY" "policyIdCounter()(uint64)" --rpc-url "$HTTP_RPC" | awk '{print $1}')
+    POLICY_ID=$((COUNTER - 1))
+    echo "Compound policy created!"
+    echo "  Policy ID:         $POLICY_ID"
+    echo "  Sender sub-policy: {{sender-policy-id}}"
+    echo "  Recipient sub-policy: {{recipient-policy-id}}"
+    echo "  Mint recipient sub-policy: {{mint-recipient-policy-id}}"
+    echo "  L1 tx:             $TX_HASH"
+
+[group('tip403')]
+[doc('Adds or removes an account from a whitelist policy on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+modify-whitelist policy-id account allowed="true":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    echo "Modifying whitelist policy {{policy-id}}: account={{account}} allowed={{allowed}}..."
+    cast send "$REGISTRY" \
+        "modifyPolicyWhitelist(uint64,address,bool)" "{{policy-id}}" "{{account}}" "{{allowed}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Done!"
+
+[group('tip403')]
+[doc('Adds or removes an account from a blacklist policy on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+modify-blacklist policy-id account restricted="true":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    echo "Modifying blacklist policy {{policy-id}}: account={{account}} restricted={{restricted}}..."
+    cast send "$REGISTRY" \
+        "modifyPolicyBlacklist(uint64,address,bool)" "{{policy-id}}" "{{account}}" "{{restricted}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Done!"
+
+[group('tip403')]
+[doc('Assigns a transfer policy to a TIP-20 token on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars. Caller must be token admin.')]
+set-transfer-policy token policy-id:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    echo "Setting transfer policy {{policy-id}} on token {{token}}..."
+    cast send "{{token}}" "changeTransferPolicyId(uint64)" "{{policy-id}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    CURRENT=$(cast call "{{token}}" "transferPolicyId()(uint64)" --rpc-url "$HTTP_RPC")
+    echo "Transfer policy set to: $CURRENT"
+
+[group('tip403')]
+[doc('Checks if an address is authorized under a policy on L1. Requires L1_RPC_URL env var.')]
+check-authorized policy-id account:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    RESULT=$(cast call "$REGISTRY" "isAuthorized(uint64,address)(bool)" "{{policy-id}}" "{{account}}" --rpc-url "$HTTP_RPC")
+    echo "Policy {{policy-id}}, account {{account}}: authorized=$RESULT"
+
+[group('tip403')]
+[doc('Reads the transfer policy ID for a TIP-20 token. Requires L1_RPC_URL env var.')]
+token-policy token rpc="":
+    #!/bin/bash
+    set -euo pipefail
+    RPC_URL="{{rpc}}"
+    if [[ -z "$RPC_URL" ]]; then
+        RPC_URL="${L1_RPC_URL:?Set L1_RPC_URL env var or pass rpc= parameter}"
+        RPC_URL=$(echo "$RPC_URL" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    fi
+    POLICY_ID=$(cast call "{{token}}" "transferPolicyId()(uint64)" --rpc-url "$RPC_URL")
+    NAME=$(cast call "{{token}}" "name()(string)" --rpc-url "$RPC_URL" 2>/dev/null || echo "???")
+    echo "$NAME ({{token}}): transferPolicyId=$POLICY_ID"
+
 [group('zone')]
 [doc('Checks TIP-20 token balance for an account on the zone (port 8546)')]
 check-balance account token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:

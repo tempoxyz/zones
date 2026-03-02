@@ -18,11 +18,14 @@ graph TD
 
     L1Sub["L1Subscriber<br/><i>WebSocket + backfill</i>"]
     L1Listen["L1StateListener"]
+    PolicyListen["PolicyListener<br/><i>TIP-403 events</i>"]
     DQ["DepositQueue"]
     Cache["L1StateCache"]
+    PolicyCache["PolicyCache"]
 
     Engine["ZoneEngine"]
     Builder["PayloadBuilder<br/><i>advanceTempo + pool txs</i>"]
+    PolicyPrefetch["PolicyResolutionTask<br/><i>pool pre-warm</i>"]
 
     Monitor["ZoneMonitor"]
     Batch["BatchSubmitter"]
@@ -31,8 +34,12 @@ graph TD
 
     L1 --> L1Sub
     L1 --> L1Listen
+    L1 --> PolicyListen
     L1Sub --> DQ
     L1Listen --> Cache
+    PolicyListen --> PolicyCache
+    PolicyCache --> Builder
+    PolicyPrefetch --> PolicyCache
     DQ --> Engine
     Engine --> Builder
     Builder --> Monitor
@@ -118,6 +125,142 @@ header chain linking back to the target block.
 4. The `WithdrawalProcessor` polls the L1 portal queue and calls
    `processWithdrawal` for each pending withdrawal.
 
+## TIP-403 Policy Enforcement
+
+The zone enforces TIP-403 transfer policies (whitelist, blacklist, compound)
+identically to L1. Policy state is mirrored via:
+
+1. **PolicyListener** — streams `PolicyCreated`, `WhitelistUpdated`,
+   `BlacklistUpdated`, `CompoundPolicyCreated`, and `TransferPolicyUpdate`
+   events from L1 via WebSocket and applies them to the in-memory
+   `PolicyCache`.
+2. **PolicyProvider** — cache-first, RPC-fallback resolution. On cache miss
+   it queries L1 via `block_in_place` and populates the cache for subsequent
+   lookups.
+3. **ZoneTip403ProxyRegistry** — a read-only precompile at the same address
+   as the L1 `TIP403Registry` (`0x403C…0000`). It intercepts `isAuthorized`,
+   `policyData`, `compoundPolicyData`, etc. and serves them from the
+   `PolicyProvider`. Mutating calls are reverted.
+4. **Pool pre-fetching** — the `PolicyResolutionTask` pre-warms the cache for
+   pending pool transactions so payload building doesn't block on RPC.
+
+The payload builder checks sender/recipient authorization during
+`advanceTempo` deposit processing. Encrypted deposits that fail policy checks
+are included with a zeroed-out amount (the deposit hash chain must still
+match L1).
+
+## Demo: Token Creation with Transfer Policy
+
+End-to-end walkthrough for creating a TIP-20 token on L1, assigning a
+blacklist policy, enabling it on the zone, and verifying enforcement.
+
+**Prerequisites:** `L1_RPC_URL`, `PRIVATE_KEY`, `L1_PORTAL_ADDRESS`, and
+`SEQUENCER_KEY` env vars set. A running zone (`just zone-up <name>`).
+
+### 1. Create a TIP-20 token on L1
+
+```bash
+just create-token "TestUSD" "TUSD"
+# → Token created at 0x20C0...
+```
+
+Save the token address for subsequent steps:
+```bash
+export TOKEN=0x20C0...  # address from output
+```
+
+### 2. Configure the token
+
+```bash
+# Set supply cap (defaults to u128::MAX)
+just set-supply-cap $TOKEN
+
+# Grant yourself ISSUER_ROLE so you can mint
+just grant-issuer-role $TOKEN
+
+# Mint tokens to yourself
+just mint-tokens $TOKEN
+```
+
+### 3. Create a blacklist policy
+
+```bash
+# type=1 for blacklist (type=0 for whitelist)
+just create-policy 1
+# → Policy ID: <N>
+```
+
+Save the policy ID:
+```bash
+export POLICY_ID=<N>  # from output
+```
+
+### 4. Blacklist an address
+
+```bash
+# Block a specific address from receiving transfers
+just modify-blacklist $POLICY_ID 0x000000000000000000000000000000000000dead
+
+# Verify
+just check-authorized $POLICY_ID 0x000000000000000000000000000000000000dead
+# → authorized=false
+```
+
+### 5. Assign the policy to the token
+
+```bash
+just set-transfer-policy $TOKEN $POLICY_ID
+
+# Verify
+just token-policy $TOKEN
+# → transferPolicyId=<N>
+```
+
+### 6. Enable the token on the zone and deposit
+
+```bash
+# Enable the token for bridging (requires SEQUENCER_KEY)
+just enable-token $TOKEN
+
+# Approve the portal to spend your tokens
+just max-approve-portal
+
+# Deposit to yourself on the zone
+just send-deposit token=$TOKEN
+```
+
+### 7. Test enforcement on the zone
+
+Transfers to blacklisted addresses will be rejected by the zone's
+`ZoneTip403ProxyRegistry` precompile, which mirrors L1 policy state.
+
+```bash
+# Check balance on zone
+just check-balance $(cast wallet address $PRIVATE_KEY) $TOKEN
+
+# Transfer to a non-blacklisted address — succeeds
+cast send $TOKEN "transfer(address,uint256)" <allowed_addr> 1000 \
+    --rpc-url $ZONE_RPC_URL --private-key $PRIVATE_KEY
+
+# Transfer to blacklisted address — reverts
+cast send $TOKEN "transfer(address,uint256)" 0x...dead 1000 \
+    --rpc-url $ZONE_RPC_URL --private-key $PRIVATE_KEY
+# → reverts with Unauthorized
+```
+
+### Compound policies
+
+For role-based policies (different rules for senders vs recipients), create
+sub-policies first, then combine them:
+
+```bash
+# Allow-all senders (builtin 1), blacklist recipients
+just create-compound-policy 1 $POLICY_ID
+# → Compound Policy ID: <M>
+
+just set-transfer-policy $TOKEN <M>
+```
+
 ## Zone Precompiles
 
 | Address | Precompile | Purpose |
@@ -126,15 +269,19 @@ header chain linking back to the target block.
 | `0x1C00…0100` | `ChaumPedersenVerify` | Verify DLOG equality proofs for ECDH |
 | `0x1C00…0101` | `AesGcmDecrypt` | AES-256-GCM authenticated decryption |
 | `0x20FC…0000` | `ZoneTokenFactory` | Initialize TIP-20 tokens on the zone |
+| `0x403C…0000` | `ZoneTip403ProxyRegistry` | Read-only proxy mirroring L1 TIP-403 policy state |
 
 ## EVM Configuration
 
 `ZoneEvmConfig` wraps `TempoEvmConfig` — the zone runs the same EVM as Tempo
-L1 with two differences:
+L1 with these differences:
 
 - The **TIP20Factory** precompile is replaced by `ZoneTokenFactory`, which only
   supports `enableToken` (no `createToken`) since zone tokens are always bridged
   from L1.
+- The **TIP403Registry** precompile is replaced by `ZoneTip403ProxyRegistry`,
+  a storage-less read-only proxy that resolves authorization from the in-memory
+  policy cache rather than on-chain storage.
 - The **block executor** is simplified: no subblock ordering, shared-gas
   accounting, or end-of-block metadata system transactions — those are L1-only
   concerns.

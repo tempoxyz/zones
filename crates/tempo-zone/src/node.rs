@@ -41,7 +41,7 @@ use tempo_transaction_pool::{
     amm::AmmLiquidityCache,
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use alloy_provider::Provider as _;
 
@@ -471,20 +471,36 @@ where
         // L1 RPC URL as the state provider.
         let l1_rpc_url = &self.l1_state_provider_config.l1_rpc_url;
         if !l1_rpc_url.is_empty() {
-            let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+            match alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
                 .connect(l1_rpc_url)
-                .await?
-                .erased();
+                .await
+            {
+                Ok(policy_l1) => {
+                    let policy_l1 = policy_l1.erased();
 
-            // Seed the policy cache with the current L1 block height so RPC
-            // fallback queries use a valid block number from the start.
-            let l1_head = policy_l1.get_block_number().await?;
-            self.policy_cache.write().apply_events(l1_head, &[]);
+                    // Seed the policy cache with the current L1 block height so RPC
+                    // fallback queries use a valid block number from the start.
+                    match policy_l1.get_block_number().await {
+                        Ok(l1_head) => {
+                            self.policy_cache.write().apply_events(l1_head, &[]);
+                        }
+                        Err(e) => {
+                            warn!(target: "reth::cli", %e, "Failed to seed policy cache with L1 block height");
+                        }
+                    }
 
-            let policy_provider =
-                crate::l1_state::PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
-            evm_config = evm_config.with_policy_provider(policy_provider);
-            info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
+                    let policy_provider = crate::l1_state::PolicyProvider::new(
+                        self.policy_cache,
+                        policy_l1,
+                        runtime_handle,
+                    );
+                    evm_config = evm_config.with_policy_provider(policy_provider);
+                    info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
+                }
+                Err(e) => {
+                    warn!(target: "reth::cli", %e, "Failed to connect to L1 for TIP-403 policy provider, proxy disabled");
+                }
+            }
         } else {
             info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader precompile (no TIP-403 proxy)");
         }

@@ -248,6 +248,73 @@ cast call "$PORTAL" "withdrawalQueueHead()(uint256)" --rpc-url "$HTTP_RPC"
 cast call "$PORTAL" "withdrawalQueueTail()(uint256)" --rpc-url "$HTTP_RPC"
 ```
 
+## Token & Policy Management (TIP-403)
+
+Tempo L1 supports transfer policies via the TIP-403 registry. You can create new TIP-20 tokens, assign transfer policies (whitelist, blacklist, or compound), and manage membership — all from L1. The zone picks up policy changes automatically via the L1 subscriber.
+
+### Create a New Token
+
+```bash
+# Create a TIP-20 token named "MyUSD" with symbol "MUSD"
+just create-token MyUSD MUSD
+# → Token created! Address: 0x20C0...
+
+# Grant yourself ISSUER_ROLE and mint tokens
+just grant-issuer-role <token-address>
+just mint-tokens <token-address>               # 1B tokens to yourself
+just mint-tokens <token-address> <to> 5000000  # 5 tokens to someone else
+
+# Set a supply cap (optional)
+just set-supply-cap <token-address> 1000000000000
+```
+
+### Enable a Token on the Zone
+
+To deposit a custom token into the zone, it must be enabled on the ZonePortal. Currently the portal enables pathUSD by default. For custom tokens, the token must exist on L1 and the portal must recognise it.
+
+### Blacklist a Sender
+
+This example creates a blacklist policy that prevents a specific address from sending transfers, while still allowing them to receive deposits.
+
+```bash
+# 1. Create a blacklist policy (type=1)
+just create-policy 1
+# → Policy ID: 2
+
+# 2. Add the address to the blacklist
+just modify-blacklist 2 0x<address-to-block>
+
+# 3. Wrap in a compound policy so only the SENDER role is restricted
+#    (recipient and mint-recipient use policy 1 = allow-all)
+just create-compound-policy 2 1 1
+# → Policy ID: 3
+
+# 4. Assign the compound policy to the token
+just set-transfer-policy 0x20C0000000000000000000000000000000000000 3
+
+# 5. Verify
+just check-authorized 2 0x<address-to-block>
+# → authorized=false
+```
+
+> **Why compound?** A simple blacklist blocks an address as both sender and recipient. A compound policy lets you blacklist only the sender role while keeping deposits (mint-recipient) and incoming transfers (recipient) open.
+
+### Other Policy Commands
+
+| Command | Description |
+|---------|-------------|
+| `just create-policy [type]` | Create a policy (`0`=whitelist, `1`=blacklist) |
+| `just create-compound-policy <sender> <recipient> [mint]` | Create a compound policy from sub-policies |
+| `just modify-whitelist <policy-id> <account> [allowed]` | Add/remove from a whitelist |
+| `just modify-blacklist <policy-id> <account> [restricted]` | Add/remove from a blacklist |
+| `just set-transfer-policy <token> <policy-id>` | Assign a transfer policy to a token |
+| `just check-authorized <policy-id> <account>` | Check if an address is authorized |
+| `just token-policy <token>` | Read a token's current transfer policy ID |
+| `just create-token <name> <symbol>` | Create a new TIP-20 token on L1 |
+| `just mint-tokens <token> [to] [amount]` | Mint tokens (requires ISSUER_ROLE) |
+| `just grant-issuer-role <token> [to]` | Grant ISSUER_ROLE on a token |
+| `just set-supply-cap <token> [cap]` | Set a token's supply cap |
+
 ## Architecture
 
 ```mermaid
