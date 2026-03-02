@@ -418,8 +418,12 @@ impl PolicyProvider {
             "Policy proxy cache miss, fetching from L1 RPC"
         );
         tokio::task::block_in_place(|| {
-            self.runtime_handle
-                .block_on(self.fetch_and_cache_by_policy(policy_id, user, block_number, role))
+            self.runtime_handle.block_on(self.fetch_and_cache_by_policy(
+                policy_id,
+                user,
+                block_number,
+                role,
+            ))
         })
     }
 
@@ -488,7 +492,10 @@ impl PolicyProvider {
         }
 
         let block_number = self.cache.read().last_l1_block();
-        debug!(policy_id, block_number, "Policy type cache miss, fetching from L1 RPC");
+        debug!(
+            policy_id,
+            block_number, "Policy type cache miss, fetching from L1 RPC"
+        );
         tokio::task::block_in_place(|| {
             self.runtime_handle
                 .block_on(self.resolve_policy_type(policy_id, block_number))
@@ -510,7 +517,10 @@ impl PolicyProvider {
         }
 
         let block_number = self.cache.read().last_l1_block();
-        debug!(policy_id, block_number, "Compound data cache miss, fetching from L1 RPC");
+        debug!(
+            policy_id,
+            block_number, "Compound data cache miss, fetching from L1 RPC"
+        );
         tokio::task::block_in_place(|| {
             self.runtime_handle
                 .block_on(self.resolve_compound_data(policy_id, block_number))

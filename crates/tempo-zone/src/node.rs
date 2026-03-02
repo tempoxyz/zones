@@ -475,6 +475,12 @@ where
                 .connect(l1_rpc_url)
                 .await?
                 .erased();
+
+            // Seed the policy cache with the current L1 block height so RPC
+            // fallback queries use a valid block number from the start.
+            let l1_head = policy_l1.get_block_number().await?;
+            self.policy_cache.write().apply_events(l1_head, &[]);
+
             let policy_provider =
                 crate::l1_state::PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
             evm_config = evm_config.with_policy_provider(policy_provider);
