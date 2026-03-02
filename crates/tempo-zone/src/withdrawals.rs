@@ -298,7 +298,7 @@ impl WithdrawalProcessor {
             //    the inner CALL receives at least `gasLimit`, the outer frame
             //    needs an extra `ceil(gasLimit / 63)`.
             let call = if withdrawal.gasLimit > 0 {
-                const CALLBACK_OVERHEAD: u64 = 1_000_000;
+                const CALLBACK_OVERHEAD: u64 = 2_000_000;
                 let eip150_cushion = withdrawal.gasLimit.div_ceil(63);
                 call.gas(withdrawal.gasLimit + CALLBACK_OVERHEAD + eip150_cushion)
             } else {

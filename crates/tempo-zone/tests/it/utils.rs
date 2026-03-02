@@ -1420,7 +1420,7 @@ impl WithdrawalArgs {
             amount,
             to: Some(router),
             memo: B256::ZERO,
-            gas_limit: 500_000,
+            gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
         }

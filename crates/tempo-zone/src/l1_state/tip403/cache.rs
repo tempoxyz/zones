@@ -227,6 +227,13 @@ impl PolicyCache {
     ///
     /// This is the primary ingestion path for the [`PolicyListener`](super::PolicyListener).
     /// Events are decoded outside the write lock, then applied here in one batch.
+    ///
+    /// **NOTE:** When a `TokenPolicyChanged` event points to a policy ID that was created
+    /// before the listener started, the cache will have no membership data for that policy.
+    /// Authorization queries will return `None` (cache miss), causing the
+    /// [`PolicyProvider`](super::PolicyProvider) to fall back to per-user L1 RPC. Ideally,
+    /// the listener should kick off background pre-fetching of the new policy's type and
+    /// membership set on `TokenPolicyChanged` to avoid cold-start RPC latency.
     pub fn apply_events(&mut self, block_number: u64, events: &[PolicyEvent]) {
         self.last_l1_block = self.last_l1_block.max(block_number);
         for event in events {
