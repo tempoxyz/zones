@@ -100,7 +100,9 @@ pub(crate) trait TestNodeHandle: Send {
 
 impl<Node, AddOns> TestNodeHandle for NodeHandle<Node, AddOns>
 where
-    Node: FullNodeComponents<Types: reth_node_api::NodeTypes<Primitives = tempo_primitives::TempoPrimitives>>,
+    Node: FullNodeComponents<
+        Types: reth_node_api::NodeTypes<Primitives = tempo_primitives::TempoPrimitives>,
+    >,
     AddOns: RethRpcAddOns<Node>,
 {
     fn subscribe_to_canonical_state(

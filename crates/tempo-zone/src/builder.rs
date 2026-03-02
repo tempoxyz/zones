@@ -154,7 +154,7 @@ where
         // Read the current tempoBlockHash and tempoBlockNumber from TempoState storage
         // to validate the next L1 block we process is the expected successor.
         let (stored_l1_block_hash, expected_tempo_block_number) = {
-            use crate::abi::TempoStateExt;
+            use crate::ext::TempoStateExt;
             let sp = self.provider.state_by_block_hash(parent_header.hash())?;
             let hash = sp
                 .tempo_block_hash()

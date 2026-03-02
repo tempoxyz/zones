@@ -242,7 +242,7 @@ where
         // Read the zone's current tempoBlockNumber from local state so the L1
         // subscriber knows exactly where to resume backfill.
         {
-            use crate::abi::TempoStateExt;
+            use crate::ext::TempoStateExt;
             use reth_storage_api::StateProviderFactory;
             let sp = ctx.node.provider().latest()?;
             let tempo_block_number = sp.tempo_block_number()?;

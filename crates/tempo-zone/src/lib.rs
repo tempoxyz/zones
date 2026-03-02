@@ -10,7 +10,8 @@
 use eyre as _;
 
 pub mod abi;
-pub use abi::{ChainTempoStateExt, TempoStateExt};
+pub mod ext;
+pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub mod batch;
 pub mod bindings;
 pub mod builder;
