@@ -115,6 +115,15 @@ sol! {
         uint64 withdrawalBatchIndex;
     }
 
+    /// A TIP-20 token enabled on L1 for bridging to the zone.
+    #[derive(Debug)]
+    struct EnabledToken {
+        address token;
+        string name;
+        string symbol;
+        string currency;
+    }
+
     // ---------------------------------------------------------------
     //  ZonePortal — deployed on Tempo L1
     // ---------------------------------------------------------------
@@ -453,6 +462,10 @@ sol! {
         #[derive(Debug)]
         event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
 
+        /// Emitted when a TIP-20 token is enabled on the zone via advanceTempo.
+        #[derive(Debug)]
+        event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
         error OnlySequencer();
         error InvalidDepositQueueHash();
         error MissingDecryptionData();
@@ -471,7 +484,8 @@ sol! {
         function advanceTempo(
             bytes calldata header,
             QueuedDeposit[] calldata deposits,
-            DecryptionData[] calldata decryptions
+            DecryptionData[] calldata decryptions,
+            EnabledToken[] calldata enabledTokens
         ) external;
     }
 
@@ -597,6 +611,7 @@ mod tests {
             header: header_bytes,
             deposits: vec![qd],
             decryptions: vec![],
+            enabledTokens: vec![],
         }
         .abi_encode();
 

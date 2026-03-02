@@ -1,7 +1,10 @@
 //! Multi-asset zone deposit and withdrawal.
 
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
-use alloy::primitives::{B256, U256};
+use alloy::{
+    primitives::{B256, U256},
+    providers::Provider,
+};
 
 /// Longer timeout for real L1 tests.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -11,7 +14,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// 1. Start L1 dev node.
 /// 2. Create AlphaUSD and BetaUSD on L1.
 /// 3. Deploy zone, enable both tokens.
-/// 4. Start zone node, create both tokens on L2.
+/// 4. Start zone node (tokens auto-initialized via `TokenEnabled` events from L1).
 /// 5. Alice deposits AlphaUSD and BetaUSD.
 /// 6. Spawn sequencer, withdraw both tokens.
 /// 7. Verify L1 withdrawals and L2 balance decreases.
@@ -45,24 +48,24 @@ async fn test_multiasset_deposit_and_withdraw() -> eyre::Result<()> {
     l1.mint_tip20(l1_beta, l1.dev_address(), mint_amount)
         .await?;
 
-    // --- Step 3: Deploy zone, enable both tokens ---
+    // --- Step 3: Deploy zone and start zone node ---
     let portal_address = l1.deploy_zone().await?;
+    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
+
+    // --- Step 4: Enable both tokens on the portal ---
+    // Must happen AFTER zone startup so the zone's L1 subscriber picks up the
+    // TokenEnabled events from live blocks.
     l1.enable_token_on_portal(portal_address, l1_alpha).await?;
     l1.enable_token_on_portal(portal_address, l1_beta).await?;
+    let enable_block = l1.provider().get_block_number().await?;
 
-    // --- Step 4: Start zone node, create tokens on L2 ---
-    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
-    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
-
-    // Fund dev account on L2 for token creation gas
-    let dev_l2_gas: u128 = 10_000_000;
-    l1.fund_dev_l2_gas(portal_address, &zone, dev_l2_gas, L1_TIMEOUT)
+    // Wait for the zone to finalize past the enableToken blocks
+    zone.wait_for_l2_tempo_finalized(enable_block, L1_TIMEOUT)
         .await?;
 
-    let l2_alpha = zone.create_l2_token("AlphaUSD", "aUSD", alpha_salt).await?;
-    let l2_beta = zone.create_l2_token("BetaUSD", "bUSD", beta_salt).await?;
-    assert_eq!(l1_alpha, l2_alpha, "AlphaUSD L1/L2 address mismatch");
-    assert_eq!(l1_beta, l2_beta, "BetaUSD L1/L2 address mismatch");
+    // L1 and L2 token addresses are the same by design
+    let l2_alpha = l1_alpha;
+    let l2_beta = l1_beta;
 
     // --- Step 5: Alice deposits both tokens ---
     let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);

@@ -491,8 +491,33 @@ pub(crate) enum EnqueueOutcome {
 pub struct L1PortalEvents {
     /// Deposit events (regular + encrypted).
     pub deposits: Vec<L1Deposit>,
-    /// Tokens newly enabled for bridging in this block.
-    pub enabled_tokens: Vec<Address>,
+    /// Tokens newly enabled for bridging in this block, with metadata.
+    pub enabled_tokens: Vec<EnabledToken>,
+}
+
+/// A token newly enabled for bridging, with metadata for L2 creation.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EnabledToken {
+    /// The L1 token address (TIP-20 with 0x20C0 prefix).
+    pub token: Address,
+    /// Token name.
+    pub name: String,
+    /// Token symbol.
+    pub symbol: String,
+    /// Token currency (e.g. "USD", "EUR").
+    pub currency: String,
+}
+
+impl EnabledToken {
+    /// Convert to the ABI type used in `advanceTempo` calldata.
+    pub fn to_abi(&self) -> abi::EnabledToken {
+        abi::EnabledToken {
+            token: self.token,
+            name: self.name.clone(),
+            symbol: self.symbol.clone(),
+            currency: self.currency.clone(),
+        }
+    }
 }
 
 impl L1PortalEvents {
@@ -565,9 +590,17 @@ impl L1PortalEvents {
                 info!(
                     l1_block = block_number,
                     token = %event.token,
+                    name = %event.name,
+                    symbol = %event.symbol,
+                    currency = %event.currency,
                     "🪙 Token enabled on L1"
                 );
-                self.enabled_tokens.push(event.token);
+                self.enabled_tokens.push(EnabledToken {
+                    token: event.token,
+                    name: event.name,
+                    symbol: event.symbol,
+                    currency: event.currency,
+                });
             }
         }
         Ok(())

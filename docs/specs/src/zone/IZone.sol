@@ -149,6 +149,31 @@ struct DecryptionData {
                     CRYPTOGRAPHIC PRECOMPILES
 //////////////////////////////////////////////////////////////*/
 
+/// @notice Token to be enabled on the zone via the TIP20 factory
+struct EnabledToken {
+    address token;
+    string name;
+    string symbol;
+    string currency;
+}
+
+/// @title ITIP20ZoneFactory
+/// @notice Interface for the zone's TIP20 factory that enables new tokens
+interface ITIP20ZoneFactory {
+
+    function enableToken(
+        address token,
+        string calldata name,
+        string calldata symbol,
+        string calldata currency
+    )
+        external;
+
+}
+
+// TIP20 factory predeploy address
+address constant TIP20_FACTORY_ADDRESS = 0x20Fc000000000000000000000000000000000000;
+
 // Precompile address for Chaum-Pedersen proof verification
 // Predeploy at 0x1c00000000000000000000000000000000000100
 address constant CHAUM_PEDERSEN_VERIFY = 0x1C00000000000000000000000000000000000100;
@@ -470,7 +495,7 @@ interface IZonePortal {
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
     /// @notice Emitted when sequencer enables a new TIP-20 token for bridging
-    event TokenEnabled(address indexed token);
+    event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
     /// @notice Emitted when sequencer pauses deposits for a token
     event DepositsPaused(address indexed token);
@@ -801,6 +826,9 @@ interface IZoneInbox {
     );
     event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
 
+    /// @notice Emitted when a TIP-20 token is enabled on the zone via advanceTempo
+    event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
     error OnlySequencer();
     error InvalidDepositQueueHash();
     error MissingDecryptionData();
@@ -844,10 +872,12 @@ interface IZoneInbox {
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for encrypted deposits (1:1 with encrypted deposits, in order)
+    /// @param enabledTokens Tokens to enable on the zone via the TIP20 factory
     function advanceTempo(
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
-        DecryptionData[] calldata decryptions
+        DecryptionData[] calldata decryptions,
+        EnabledToken[] calldata enabledTokens
     )
         external;
 

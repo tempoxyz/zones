@@ -35,8 +35,9 @@ sol! {
         );
 
         /// Event emitted when a new TIP-20 token is enabled for bridging.
+        /// Includes token metadata so the zone can create a matching TIP-20.
         #[derive(Debug)]
-        event TokenEnabled(address indexed token);
+        event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
         /// Last synced Tempo block number.
         function lastSyncedTempoBlockNumber() external view returns (uint64);

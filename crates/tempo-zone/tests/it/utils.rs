@@ -20,11 +20,11 @@ use std::{
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
 use zone::{
-    Deposit, DepositQueue, EncryptedDeposit, L1Deposit, L1PortalEvents, SharedL1StateCache,
-    ZoneNode,
+    Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents,
+    SharedL1StateCache, ZoneNode,
 };
 
-use alloy_provider::{Provider, ProviderBuilder, WalletProvider};
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_alloy::TempoNetwork;
@@ -236,85 +236,6 @@ impl ZoneTestNode {
             .balanceOf(account)
             .call()
             .await?)
-    }
-
-    /// Create a TIP-20 token on the zone L2 and grant `ISSUER_ROLE` to system contracts.
-    ///
-    /// Grants `ISSUER_ROLE` to `ZoneInbox` (minting deposits via `advanceTempo`) and
-    /// `ZoneOutbox` (burning withdrawals). Must be done before deposits of this token
-    /// can be processed. Uses the dev account (mnemonic index 0) which is pre-funded
-    /// with pathUSD for gas.
-    ///
-    /// Returns the L2 token address.
-    pub(crate) async fn create_l2_token(
-        &self,
-        name: &str,
-        symbol: &str,
-        salt: B256,
-    ) -> eyre::Result<Address> {
-        use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
-        use tempo_contracts::precompiles::{IRolesAuth, ITIP20Factory};
-        use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
-
-        let signer = MnemonicBuilder::<English>::default()
-            .phrase(TEST_MNEMONIC)
-            .build()
-            .expect("valid test mnemonic");
-        let provider = ProviderBuilder::new()
-            .wallet(signer)
-            .connect_http(self.http_url.clone());
-
-        // Create the token on L2
-        let factory = ITIP20Factory::new(TIP20_FACTORY_ADDRESS, &provider);
-        let receipt = factory
-            .createToken(
-                name.to_string(),
-                symbol.to_string(),
-                "USD".to_string(),
-                PATH_USD_ADDRESS,
-                provider.default_signer_address(),
-                salt,
-            )
-            .gas_price(TEMPO_T0_BASE_FEE as u128)
-            .gas(500_000)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "L2 createToken failed");
-
-        let event = receipt
-            .inner
-            .logs()
-            .iter()
-            .find_map(|log| ITIP20Factory::TokenCreated::decode_log(&log.inner).ok())
-            .ok_or_else(|| eyre::eyre!("TokenCreated event not found on L2"))?;
-        let l2_token = event.token;
-
-        // Grant ISSUER_ROLE to ZoneInbox so advanceTempo can mint deposits
-        let roles = IRolesAuth::new(l2_token, &provider);
-        let receipt = roles
-            .grantRole(*ISSUER_ROLE, zone::abi::ZONE_INBOX_ADDRESS)
-            .gas_price(TEMPO_T0_BASE_FEE as u128)
-            .gas(300_000)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "L2 grantRole (ZoneInbox) failed");
-
-        // Grant ISSUER_ROLE to ZoneOutbox so withdrawal burns work
-        let receipt = roles
-            .grantRole(*ISSUER_ROLE, zone::abi::ZONE_OUTBOX_ADDRESS)
-            .gas_price(TEMPO_T0_BASE_FEE as u128)
-            .gas(300_000)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "L2 grantRole (ZoneOutbox) failed");
-
-        Ok(l2_token)
     }
 
     /// Wait for the zone L2 to finalize an L1 block beyond `after_block`.
@@ -715,42 +636,6 @@ impl L1TestNode {
     pub(crate) async fn deploy_zone(&self) -> eyre::Result<Address> {
         let factory = self.deploy_zone_factory().await?;
         self.create_zone(factory).await
-    }
-
-    /// Deposit pathUSD from the dev account into a zone for L2 gas.
-    pub(crate) async fn fund_dev_l2_gas(
-        &self,
-        portal_address: Address,
-        zone: &ZoneTestNode,
-        amount: u128,
-        timeout: Duration,
-    ) -> eyre::Result<()> {
-        use tempo_contracts::precompiles::ITIP20;
-        use tempo_precompiles::PATH_USD_ADDRESS;
-        use zone::abi::{ZONE_TOKEN_ADDRESS, ZonePortal};
-
-        let dev_provider = self.dev_provider();
-        ITIP20::new(PATH_USD_ADDRESS, &dev_provider)
-            .approve(portal_address, U256::MAX)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        let receipt = ZonePortal::new(portal_address, &dev_provider)
-            .deposit(PATH_USD_ADDRESS, self.dev_address(), amount, B256::ZERO)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        eyre::ensure!(receipt.status(), "dev L2 gas deposit failed");
-        zone.wait_for_balance(
-            ZONE_TOKEN_ADDRESS,
-            self.dev_address(),
-            U256::from(amount),
-            timeout,
-        )
-        .await?;
-        Ok(())
     }
 
     /// Wait for a withdrawal to be fully processed on L1 (pathUSD).
@@ -2196,6 +2081,16 @@ impl L1Fixture {
         queue.enqueue(block.header.clone(), events);
     }
 
+    /// Enqueue a pre-built block into a deposit queue with full portal events.
+    pub(crate) fn enqueue_events(
+        &self,
+        block: &FixtureBlock,
+        queue: &DepositQueue,
+        events: L1PortalEvents,
+    ) {
+        queue.enqueue(block.header.clone(), events);
+    }
+
     /// Create a [`Deposit`] tied to a specific L1 block number.
     pub(crate) fn make_deposit_for_block(
         l1_block_number: u64,
@@ -2214,6 +2109,20 @@ impl L1Fixture {
             memo: B256::ZERO,
             queue_hash: B256::ZERO,
         }
+    }
+
+    /// Inject an L1 block with enabled tokens (no deposits) into the queue.
+    pub(crate) fn inject_enabled_tokens(
+        &mut self,
+        queue: &DepositQueue,
+        tokens: Vec<EnabledToken>,
+    ) {
+        let header = self.next_header();
+        let events = L1PortalEvents {
+            deposits: vec![],
+            enabled_tokens: tokens,
+        };
+        queue.enqueue(header, events);
     }
 
     /// Inject an empty L1 block (no deposits) into the queue.

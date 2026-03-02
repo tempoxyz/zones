@@ -89,7 +89,9 @@ send-deposit amount="1000000" to="" token="0x20C00000000000000000000000000000000
     TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" \
         --rpc-url "$RPC" --private-key "$PK" --json)
     TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
-    echo "Deposit sent!"
+    L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
+    L1_BLOCK_DEC=$(printf '%d' "$L1_BLOCK")
+    echo "Deposit sent! (block $L1_BLOCK_DEC)"
     echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
 
 [group('zone')]
@@ -245,6 +247,51 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
             break
         fi
         sleep 0.25
+    done
+
+[group('zone')]
+[doc('Enables a TIP-20 token on the ZonePortal for bridging. Token can be an address or alias (pathusd, alphausd, betausd). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and SEQUENCER_KEY env vars.')]
+enable-token token:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var (only the sequencer can enable tokens)}"
+    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    TOKEN="{{token}}"
+    # Resolve well-known aliases (lowercased for case-insensitive matching)
+    TOKEN_LOWER=$(echo "$TOKEN" | tr '[:upper:]' '[:lower:]')
+    case "$TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            TOKEN="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            TOKEN="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            TOKEN="0x20c0000000000000000000000000000000000002" ;;
+    esac
+    echo "Enabling token $TOKEN on portal $PORTAL..."
+    TX_OUTPUT=$(cast send "$PORTAL" "enableToken(address)" "$TOKEN" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
+    L1_BLOCK_DEC=$(printf '%d' "$L1_BLOCK")
+    echo "L1 tx: $TX_HASH (block $L1_BLOCK_DEC)"
+    echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
+    # Read token metadata from L1
+    NAME=$(cast call "$TOKEN" "name()(string)" --rpc-url "$HTTP_RPC" 2>/dev/null || echo "???")
+    SYMBOL=$(cast call "$TOKEN" "symbol()(string)" --rpc-url "$HTTP_RPC" 2>/dev/null || echo "???")
+    echo "Waiting for zone to process L1 block $L1_BLOCK_DEC (token: $NAME / $SYMBOL)..."
+    ZONE_RPC="${ZONE_RPC_URL:-http://localhost:8546}"
+    INBOX="0x1c00000000000000000000000000000000000001"
+    while true; do
+        LOGS=$(cast logs --address "$INBOX" --from-block 1 --rpc-url "$ZONE_RPC" \
+            "TokenEnabled(address indexed token, string name, string symbol, string currency)" \
+            "$TOKEN" --json 2>/dev/null || echo "[]")
+        if [[ "$LOGS" != "[]" && "$LOGS" != "" && "$LOGS" != "null" ]]; then
+            echo "✅ Token enabled on zone: $NAME ($SYMBOL) at $TOKEN"
+            break
+        fi
+        sleep 0.5
     done
 
 [group('zone')]
