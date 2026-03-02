@@ -92,14 +92,10 @@ impl PolicyResolutionTask {
     /// Dispatch a message to the appropriate handler.
     fn on_message(&mut self, msg: PolicyTaskMessage) {
         match msg {
-            PolicyTaskMessage::ResolveAuthorization {
-                token,
-                user,
-                block_number,
-                role,
-            } => {
+            PolicyTaskMessage::ResolveAuthorization { token, user, role } => {
                 self.metrics.prefetch_requests_total.increment(1);
                 let provider = self.provider.clone();
+                let block_number = provider.cache().read().last_l1_block();
                 let metrics = self.metrics.clone();
                 self.in_flight.push(
                     async move {
@@ -136,13 +132,14 @@ impl PolicyResolutionTask {
 #[derive(Debug, Clone)]
 pub enum PolicyTaskMessage {
     /// Pre-fetch and cache authorization data for a (token, user) pair.
+    ///
+    /// The resolution task queries L1 at the latest block number — callers
+    /// don't need to specify one.
     ResolveAuthorization {
         /// The TIP-20 token whose transfer policy to check.
         token: Address,
         /// The address to check authorization for.
         user: Address,
-        /// The L1 block number to query at.
-        block_number: u64,
         /// Which role to resolve (sender, recipient, mint recipient, or full transfer).
         role: AuthRole,
     },
@@ -165,22 +162,17 @@ impl PolicyTaskHandle {
 
     /// Request pre-fetch of authorization data for a (token, user) pair.
     ///
+    /// The resolution task will query L1 at the latest block number.
     /// Returns `Ok(())` if the message was queued, or `Err` if the
     /// resolution task has shut down.
     pub async fn resolve_authorization(
         &self,
         token: Address,
         user: Address,
-        block_number: u64,
         role: AuthRole,
     ) -> Result<(), mpsc::error::SendError<PolicyTaskMessage>> {
         self.tx
-            .send(PolicyTaskMessage::ResolveAuthorization {
-                token,
-                user,
-                block_number,
-                role,
-            })
+            .send(PolicyTaskMessage::ResolveAuthorization { token, user, role })
             .await
     }
 
@@ -191,15 +183,10 @@ impl PolicyTaskHandle {
         &self,
         token: Address,
         user: Address,
-        block_number: u64,
         role: AuthRole,
     ) -> Result<(), mpsc::error::TrySendError<PolicyTaskMessage>> {
-        self.tx.try_send(PolicyTaskMessage::ResolveAuthorization {
-            token,
-            user,
-            block_number,
-            role,
-        })
+        self.tx
+            .try_send(PolicyTaskMessage::ResolveAuthorization { token, user, role })
     }
 }
 

@@ -70,6 +70,14 @@ pub struct PolicyCache {
     tokens: HashMap<Address, HeightVersioned<u64>>,
     /// Per-policy-ID records (type, membership, compound data).
     policies: HashMap<u64, CachedPolicy>,
+    /// Highest L1 block number processed by the policy listener.
+    ///
+    /// This equals the last block height the listener has fully processed and
+    /// should advance in lockstep with the L1 head tracked by the
+    /// `TempoStateReader` contract. The
+    /// [`PolicyResolutionTask`](super::PolicyResolutionTask) reads this to
+    /// query L1 at the correct block height for cache-miss RPC fallback.
+    last_l1_block: u64,
 }
 
 impl PolicyCache {
@@ -108,6 +116,13 @@ impl PolicyCache {
     /// Returns a reference to the per-policy-ID records for direct inspection.
     pub fn policies(&self) -> &HashMap<u64, CachedPolicy> {
         &self.policies
+    }
+
+    /// Returns the highest L1 block number processed by the cache.
+    ///
+    /// Returns `0` if no events have been applied yet.
+    pub fn last_l1_block(&self) -> u64 {
+        self.last_l1_block
     }
 
     /// Returns a mutable reference to the [`CachedPolicy`] for the given policy ID,
@@ -213,6 +228,7 @@ impl PolicyCache {
     /// This is the primary ingestion path for the [`PolicyListener`](super::PolicyListener).
     /// Events are decoded outside the write lock, then applied here in one batch.
     pub fn apply_events(&mut self, block_number: u64, events: &[PolicyEvent]) {
+        self.last_l1_block = self.last_l1_block.max(block_number);
         for event in events {
             match event {
                 PolicyEvent::MembershipChanged {
@@ -250,10 +266,11 @@ impl PolicyCache {
         }
     }
 
-    /// Clears all cached policy data.
+    /// Clears all cached policy data and resets the L1 block tracker.
     pub fn clear(&mut self) {
         self.tokens.clear();
         self.policies.clear();
+        self.last_l1_block = 0;
     }
 
     /// Collapse all history before `min_block` into single baseline entries.

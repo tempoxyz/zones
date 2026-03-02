@@ -93,6 +93,9 @@ impl PolicyListener {
         };
 
         if registry_logs.is_empty() && tip20_logs.is_empty() {
+            // No policy events in this block, but still advance the block tracker
+            // so the resolution task queries L1 at a recent height.
+            self.cache.write().apply_events(block_number, &[]);
             return Ok(());
         }
 
