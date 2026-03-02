@@ -711,20 +711,164 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
         .balance_of(ZONE_TOKEN_ADDRESS, depositor.address())
         .await?;
 
-    // At least one of these should be true:
-    // - recipient has zero balance (refund worked)
-    // - sender got the funds instead
-    if recipient_balance == U256::ZERO && sender_balance >= U256::from(deposit_amount) {
-        // Perfect: refund to sender worked
-    } else if recipient_balance > U256::ZERO {
-        // TODO: Once the TIP403Registry shim precompile is wired, the on-chain
-        // ZoneInbox will also enforce the policy and this path should not be reached.
-        tracing::warn!(
-            recipient_balance = %recipient_balance,
-            sender_balance = %sender_balance,
-            "Encrypted deposit reached blacklisted recipient — TIP-403 shim not yet enforcing"
+    assert_eq!(
+        recipient_balance,
+        U256::ZERO,
+        "Blacklisted recipient should not have received the deposit"
+    );
+    assert!(
+        sender_balance >= U256::from(deposit_amount),
+        "Sender should have received the refund (balance: {sender_balance})"
+    );
+
+    Ok(())
+}
+
+/// Blacklisted sender cannot transfer on the zone.
+///
+///  1. Start L1 dev node, deploy zone.
+///  2. Create a blacklist policy for senders, wrap it in a compound policy
+///     (sender=blacklist, recipient=allow-all, mintRecipient=allow-all).
+///  3. Assign the compound policy to pathUSD's `transferPolicyId`.
+///  4. Blacklist Alice in the sender sub-policy.
+///  5. Start zone connected to L1, wait for it to process the policy blocks.
+///  6. Deposit pathUSD to Alice (succeeds — mint recipient is allow-all).
+///  7. Alice attempts a transfer → rejected at pool level (blacklisted sender).
+///
+/// NOTE: The T2 hardfork must be active on L1 for compound policies and
+/// directional authorization roles to work.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    // --- Step 1: Start L1 ---
+    let l1 = L1TestNode::start().await?;
+    let portal_address = l1.deploy_zone().await?;
+
+    // --- Step 2: Create compound policy and blacklist Alice as sender ---
+    let alice_signer = l1.user_signer();
+    let alice = alice_signer.address();
+
+    let sender_policy_id = l1.create_blacklist_policy().await?;
+    let compound_policy_id = l1.create_compound_policy(sender_policy_id, 1, 1).await?;
+    l1.change_transfer_policy_id(PATH_USD_ADDRESS, compound_policy_id)
+        .await?;
+    l1.blacklist_address(sender_policy_id, alice).await?;
+
+    // Verify on L1: Alice is NOT authorized as sender
+    {
+        use tempo_contracts::precompiles::ITIP403Registry;
+        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, l1.provider());
+        let authorized = registry
+            .isAuthorizedSender(compound_policy_id, alice)
+            .call()
+            .await?;
+        assert!(
+            !authorized,
+            "alice should NOT be authorized as sender on L1"
         );
     }
+
+    // --- Step 3: Start zone connected to L1 ---
+    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
+    zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+
+    // Seed the policy cache so ZoneTip20Token knows pathUSD's policy.
+    // The PolicyListener may not have caught up yet, so we seed manually.
+    {
+        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
+
+        let l1_block = l1.provider().get_block_number().await?;
+        let mut cache = zone.policy_cache().write();
+        cache.set_token_policy(PATH_USD_ADDRESS, 0, compound_policy_id);
+        cache.set_token_policy(PATH_USD_ADDRESS, l1_block, compound_policy_id);
+        cache.set_policy_type(compound_policy_id, PolicyType::COMPOUND);
+        cache.set_compound(
+            compound_policy_id,
+            zone::l1_state::tip403::CompoundData {
+                sender_policy_id,
+                recipient_policy_id: 1,
+                mint_recipient_policy_id: 1,
+            },
+        );
+        cache.set_policy_type(sender_policy_id, PolicyType::BLACKLIST);
+        cache.set_member(sender_policy_id, alice, 0, true);
+        cache.set_member(sender_policy_id, alice, l1_block, true);
+    }
+
+    // --- Step 4: Deposit to Alice via the dev account ---
+    // Alice is blacklisted as a sender, so she can't transfer pathUSD on L1
+    // herself. The dev account deposits on her behalf (recipient = allow-all).
+    let deposit_amount: u128 = 1_000_000; // 1 pathUSD
+    {
+        use tempo_contracts::precompiles::ITIP20;
+        use zone::abi::ZonePortal;
+
+        let dev_provider = l1.dev_provider();
+        ITIP20::new(PATH_USD_ADDRESS, &dev_provider)
+            .approve(portal_address, U256::MAX)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+
+        let portal = ZonePortal::new(portal_address, &dev_provider);
+        let receipt = portal
+            .deposit(PATH_USD_ADDRESS, alice, deposit_amount, B256::ZERO)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L1 deposit tx failed");
+    }
+
+    // Wait for the deposit to be minted on L2
+    zone.wait_for_balance(
+        ZONE_TOKEN_ADDRESS,
+        alice,
+        U256::from(deposit_amount),
+        L1_TIMEOUT,
+    )
+    .await?;
+
+    // --- Step 5: Alice attempts a transfer → should be rejected ---
+    // The transfer may be rejected at the pool level (send() returns Err) or
+    // accepted into a block but reverted (receipt.status() == false). Either
+    // outcome proves the blacklist is enforced.
+    let bob = Address::with_last_byte(0xBB);
+
+    let alice_provider = alloy::providers::ProviderBuilder::new()
+        .wallet(alice_signer)
+        .connect_http(zone.http_url().clone());
+
+    let tip20 = tempo_contracts::precompiles::ITIP20::new(ZONE_TOKEN_ADDRESS, &alice_provider);
+    let send_result = tip20
+        .transfer(bob, U256::from(200_000u128))
+        .gas_price(tempo_chainspec::spec::TEMPO_T1_BASE_FEE as u128)
+        .gas(500_000)
+        .send()
+        .await;
+
+    match send_result {
+        Err(_) => {
+            // Pool-level rejection — blacklist enforced before inclusion.
+        }
+        Ok(pending) => {
+            // Tx was accepted into the pool — wait for it to be included and
+            // verify it reverted.
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            let receipt = pending.get_receipt().await?;
+            assert!(
+                !receipt.status(),
+                "transfer from blacklisted sender should revert, but succeeded"
+            );
+        }
+    }
+
+    // Bob should have zero balance
+    let bob_balance = zone.balance_of(ZONE_TOKEN_ADDRESS, bob).await?;
+    assert_eq!(bob_balance, U256::ZERO, "bob should have received nothing");
 
     Ok(())
 }

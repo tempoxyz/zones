@@ -35,8 +35,8 @@ use crate::{
     l1_state::{L1StateProvider, PolicyProvider, SharedL1StateCache, TempoStateReader},
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry,
-        ZoneTokenFactory,
+        ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
+        ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
 };
 
@@ -82,8 +82,48 @@ impl ZoneEvmFactory {
             Some(ZoneTokenFactory::create(&cfg))
         });
         if let Some(ref policy_provider) = self.policy_provider {
+            let registry = ZoneTip403ProxyRegistry::new(policy_provider.clone());
+
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
                 Some(ZoneTip403ProxyRegistry::create(policy_provider.clone()))
+            });
+
+            // Override the TIP-20 precompile lookup so that all TIP-20 token
+            // calls go through ZoneTip20Token (which checks the registry)
+            // instead of the vanilla TIP20Precompile (which reads empty local
+            // TIP403Registry storage).
+            //
+            // `set_precompile_lookup` replaces the existing lookup entirely, so
+            // we must also handle the non-TIP-20 Tempo precompiles that the
+            // vanilla lookup registers (FeeManager, StablecoinDEX, etc.).
+            // TIP20Factory and TIP403Registry are already in the static map
+            // via `apply_precompile` above and are checked first.
+            let zone_cfg = cfg.clone();
+            precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
+                use tempo_precompiles::{
+                    AccountKeychainPrecompile, NoncePrecompile, StablecoinDEXPrecompile,
+                    TipFeeManagerPrecompile, ValidatorConfigPrecompile, tip20::is_tip20_prefix,
+                };
+
+                if is_tip20_prefix(*address) {
+                    Some(ZoneTip20Token::create(
+                        *address,
+                        &zone_cfg,
+                        registry.clone(),
+                    ))
+                } else if *address == tempo_precompiles::TIP_FEE_MANAGER_ADDRESS {
+                    Some(TipFeeManagerPrecompile::create(&zone_cfg))
+                } else if *address == tempo_precompiles::STABLECOIN_DEX_ADDRESS {
+                    Some(StablecoinDEXPrecompile::create(&zone_cfg))
+                } else if *address == tempo_precompiles::NONCE_PRECOMPILE_ADDRESS {
+                    Some(NoncePrecompile::create(&zone_cfg))
+                } else if *address == tempo_precompiles::VALIDATOR_CONFIG_ADDRESS {
+                    Some(ValidatorConfigPrecompile::create(&zone_cfg))
+                } else if *address == tempo_precompiles::ACCOUNT_KEYCHAIN_ADDRESS {
+                    Some(AccountKeychainPrecompile::create(&zone_cfg))
+                } else {
+                    None
+                }
             });
         }
         evm

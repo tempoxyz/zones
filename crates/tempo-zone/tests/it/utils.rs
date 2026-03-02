@@ -372,6 +372,23 @@ impl ZoneTestNode {
         Self::launch(DUMMY_L1_URL.to_string(), Address::ZERO, None, chain_id).await
     }
 
+    /// Start a self-contained zone node with a custom genesis.
+    ///
+    /// Allows tests to modify the genesis state (e.g. patching storage slots)
+    /// before launching the node. No real L1 connection.
+    pub(crate) async fn start_local_with_genesis(genesis: Genesis) -> eyre::Result<Self> {
+        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        Self::launch_with_genesis(
+            DUMMY_L1_URL.to_string(),
+            Address::ZERO,
+            None,
+            next_unique_chain_id(),
+            Some(genesis),
+            throwaway_key,
+        )
+        .await
+    }
+
     async fn launch(
         l1_ws_url: String,
         portal_address: Address,
@@ -1106,6 +1123,42 @@ impl L1TestNode {
             .await?;
         eyre::ensure!(receipt.status(), "changeTransferPolicyId failed");
         Ok(())
+    }
+
+    /// Create a COMPOUND policy on L1 that delegates to sub-policies by role.
+    ///
+    /// Returns the compound policy ID.
+    pub(crate) async fn create_compound_policy(
+        &self,
+        sender_policy_id: u64,
+        recipient_policy_id: u64,
+        mint_recipient_policy_id: u64,
+    ) -> eyre::Result<u64> {
+        use tempo_contracts::precompiles::ITIP403Registry;
+        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+
+        let provider = self.dev_provider();
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let receipt = registry
+            .createCompoundPolicy(
+                sender_policy_id,
+                recipient_policy_id,
+                mint_recipient_policy_id,
+            )
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "createCompoundPolicy failed");
+
+        let event = receipt
+            .inner
+            .logs()
+            .iter()
+            .find_map(|log| ITIP403Registry::CompoundPolicyCreated::decode_log(&log.inner).ok())
+            .ok_or_else(|| eyre::eyre!("CompoundPolicyCreated event not found"))?;
+
+        Ok(event.policyId)
     }
 
     /// Check if a user is authorized under a policy on L1.

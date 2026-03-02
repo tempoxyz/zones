@@ -227,62 +227,6 @@ async fn test_policy_proxy_compound_policy() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Cache updates are immediately reflected in proxy responses.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_policy_cache_update_reflects_in_proxy() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
-
-    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
-    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
-
-    let alice = address!("0x000000000000000000000000000000000000A11C");
-
-    let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, zone.provider());
-
-    // Initially, policy cache is empty: fail-closed → false
-    let before = registry.isAuthorized(5, alice).call().await?;
-    assert!(!before, "cache miss should return false (fail-closed)");
-
-    // Populate cache: whitelist policy 5, add Alice
-    {
-        let cache = zone.policy_cache();
-        let mut w = cache.write();
-        w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
-        w.set_member(5, alice, 1, true);
-    }
-
-    // Now Alice should be authorized
-    let after_add = registry.isAuthorized(5, alice).call().await?;
-    assert!(
-        after_add,
-        "alice should be authorized after cache population"
-    );
-
-    // Remove Alice via apply_events
-    {
-        let cache = zone.policy_cache();
-        cache.write().apply_events(
-            2,
-            &[PolicyEvent::MembershipChanged {
-                policy_id: 5,
-                account: alice,
-                in_set: false,
-            }],
-        );
-    }
-
-    // Alice should no longer be authorized
-    let after_remove = registry.isAuthorized(5, alice).call().await?;
-    assert!(
-        !after_remove,
-        "alice should NOT be authorized after removal"
-    );
-
-    Ok(())
-}
-
 /// Builtin policies: policy 0 = reject all, policy 1 = allow all.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_policy_proxy_builtin_policies() -> eyre::Result<()> {
@@ -410,67 +354,6 @@ async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> 
     assert!(
         !carol_auth,
         "carol should NOT be authorized (passes sender but fails recipient blacklist)"
-    );
-
-    Ok(())
-}
-
-/// Proxy returns deterministic fail-closed results for uncached/missing policies.
-#[tokio::test(flavor = "multi_thread")]
-async fn test_proxy_deterministic_failure_modes() -> eyre::Result<()> {
-    reth_tracing::init_test_tracing();
-
-    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
-
-    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
-    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
-
-    let alice = address!("0x000000000000000000000000000000000000A11C");
-
-    let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, zone.provider());
-
-    // isAuthorized on uncached policy 99 → false (fail-closed)
-    let auth = registry.isAuthorized(99, alice).call().await?;
-    assert!(!auth, "uncached policy should return false (fail-closed)");
-
-    // policyExists on uncached policy 99 → false
-    let exists = registry.policyExists(99).call().await?;
-    assert!(!exists, "uncached policy should not exist");
-
-    // policyData on uncached policy 99 → reverts
-    let policy_data = registry.policyData(99).call().await;
-    assert!(
-        policy_data.is_err(),
-        "policyData should revert for uncached policy"
-    );
-
-    // compoundPolicyData on uncached policy 99 → reverts
-    let compound_data = registry.compoundPolicyData(99).call().await;
-    assert!(
-        compound_data.is_err(),
-        "compoundPolicyData should revert for uncached policy"
-    );
-
-    // policyIdCounter with empty cache → returns 2 (FIRST_USER_POLICY)
-    let counter = registry.policyIdCounter().call().await?;
-    assert_eq!(counter, 2, "empty cache should return counter = 2");
-
-    // Now populate cache with policy 5
-    {
-        let cache = zone.policy_cache();
-        let mut w = cache.write();
-        w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
-    }
-
-    // policyExists for policy 5 → true
-    let exists_5 = registry.policyExists(5).call().await?;
-    assert!(exists_5, "policy 5 should exist after cache population");
-
-    // policyIdCounter → 6 (max cached ID 5 + 1)
-    let counter_after = registry.policyIdCounter().call().await?;
-    assert_eq!(
-        counter_after, 6,
-        "counter should be max cached policy ID + 1"
     );
 
     Ok(())

@@ -13,7 +13,7 @@
 //! policy state is managed on L1, not on the zone.
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::Bytes;
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_contracts::precompiles::{
@@ -28,10 +28,10 @@ use crate::l1_state::{
 };
 
 /// The precompile address — same as the L1 TIP403Registry.
-pub const ZONE_TIP403_PROXY_ADDRESS: alloy_primitives::Address = TIP403_REGISTRY_ADDRESS;
+pub const ZONE_TIP403_PROXY_ADDRESS: Address = TIP403_REGISTRY_ADDRESS;
 
 /// Fixed gas cost for authorization checks.
-const AUTH_CHECK_GAS: u64 = 200;
+pub(crate) const AUTH_CHECK_GAS: u64 = 200;
 
 /// Fixed gas cost for policy data lookups.
 const POLICY_DATA_GAS: u64 = 200;
@@ -41,19 +41,83 @@ alloy_sol_types::sol! {
     error ReadOnlyRegistry();
 }
 
-/// Read-only zone-side proxy for the L1 TIP-403 registry.
+/// Read-only zone-side proxy that mirrors the L1 TIP-403 registry.
 ///
-/// Intercepts EVM calls to the TIP403Registry address and serves authorization
-/// queries from the [`SharedPolicyCache`] (populated by the
-/// [`PolicyListener`](crate::l1_state::PolicyListener)). All mutating calls
-/// (`createPolicy`, `modifyPolicyWhitelist`, etc.) are rejected with
-/// `ReadOnlyRegistry` — policy state lives exclusively on L1.
-pub struct ZoneTip403ProxyRegistry;
+/// Unlike the L1 [`TIP403Registry`] (which is a storage-backed `#[contract]`
+/// precompile), this proxy has **no on-chain storage**. It intercepts EVM calls
+/// at the same address (`0x403C…0000`) and resolves authorization queries from
+/// the in-memory [`PolicyProvider`] (cache-first, L1 RPC fallback). The
+/// underlying cache is populated by the [`PolicyListener`](crate::l1_state::PolicyListener)
+/// which streams events from L1.
+///
+/// All mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) are
+/// rejected with `ReadOnlyRegistry` — policy state lives exclusively on L1.
+///
+/// Genesis initializes the L1 `TIP403Registry` at this address solely to set
+/// `0xef` bytecode so Solidity's `EXTCODESIZE` guard passes; the storage it
+/// writes is unused.
+///
+/// The struct also exposes [`is_authorized`](Self::is_authorized) and
+/// [`is_transfer_authorized`](Self::is_transfer_authorized) for use by the
+/// [`ZoneTip20Token`](super::ZoneTip20Token) precompile, which needs the same
+/// authorization logic during transfer/mint pre-checks.
+#[derive(Debug, Clone)]
+pub struct ZoneTip403ProxyRegistry {
+    provider: PolicyProvider,
+}
 
 impl ZoneTip403ProxyRegistry {
+    /// Create a new proxy registry backed by the given policy provider.
+    pub fn new(provider: PolicyProvider) -> Self {
+        Self { provider }
+    }
+
+    /// Resolve the `transferPolicyId` for a token from the policy cache.
+    ///
+    /// Returns `None` if the token has no cached policy mapping (the caller
+    /// should fall back to reading EVM storage).
+    pub fn get_token_policy(&self, token: Address) -> Option<u64> {
+        self.provider
+            .cache()
+            .read()
+            .get_token_policy(token, u64::MAX)
+    }
+
+    /// Check whether `user` is authorized under `policy_id` for the given `role`.
+    pub fn is_authorized(
+        &self,
+        policy_id: u64,
+        user: Address,
+        role: AuthRole,
+    ) -> Result<bool, PrecompileError> {
+        self.provider
+            .is_authorized_by_policy(policy_id, user, role)
+            .map_err(|e| {
+                PrecompileError::other(format!(
+                    "auth check failed for policy {policy_id} user {user}: {e}"
+                ))
+            })
+    }
+
+    /// Check sender + recipient authorization for a transfer.
+    ///
+    /// Short-circuits on sender failure (matching L1 T2 behavior).
+    pub fn is_transfer_authorized(
+        &self,
+        policy_id: u64,
+        from: Address,
+        to: Address,
+    ) -> Result<bool, PrecompileError> {
+        if !self.is_authorized(policy_id, from, AuthRole::Sender)? {
+            return Ok(false);
+        }
+        self.is_authorized(policy_id, to, AuthRole::Recipient)
+    }
+
     /// Create a [`DynPrecompile`] that dispatches TIP-403 registry calls
     /// to the zone's policy cache / L1 RPC fallback.
     pub fn create(provider: PolicyProvider) -> DynPrecompile {
+        let registry = Self::new(provider);
         DynPrecompile::new_stateful(
             PrecompileId::Custom("ZoneTip403ProxyRegistry".into()),
             move |input| {
@@ -73,37 +137,37 @@ impl ZoneTip403ProxyRegistry {
 
                 let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
 
-                Self::dispatch(&provider, selector, data)
+                registry.dispatch(selector, data)
             },
         )
     }
 
     /// Dispatch based on the 4-byte selector.
-    fn dispatch(provider: &PolicyProvider, selector: [u8; 4], data: &[u8]) -> PrecompileResult {
+    fn dispatch(&self, selector: [u8; 4], data: &[u8]) -> PrecompileResult {
         // View functions — served from cache/RPC
         if selector == ITIP403Registry::isAuthorizedCall::SELECTOR {
-            return Self::handle_is_authorized(provider, data, AuthRole::Transfer);
+            return self.handle_is_authorized(data, AuthRole::Transfer);
         }
         if selector == ITIP403Registry::isAuthorizedSenderCall::SELECTOR {
-            return Self::handle_is_authorized(provider, data, AuthRole::Sender);
+            return self.handle_is_authorized(data, AuthRole::Sender);
         }
         if selector == ITIP403Registry::isAuthorizedRecipientCall::SELECTOR {
-            return Self::handle_is_authorized(provider, data, AuthRole::Recipient);
+            return self.handle_is_authorized(data, AuthRole::Recipient);
         }
         if selector == ITIP403Registry::isAuthorizedMintRecipientCall::SELECTOR {
-            return Self::handle_is_authorized(provider, data, AuthRole::MintRecipient);
+            return self.handle_is_authorized(data, AuthRole::MintRecipient);
         }
         if selector == ITIP403Registry::policyDataCall::SELECTOR {
-            return Self::handle_policy_data(provider, data);
+            return self.handle_policy_data(data);
         }
         if selector == ITIP403Registry::compoundPolicyDataCall::SELECTOR {
-            return Self::handle_compound_policy_data(provider, data);
+            return self.handle_compound_policy_data(data);
         }
         if selector == ITIP403Registry::policyExistsCall::SELECTOR {
-            return Self::handle_policy_exists(provider, data);
+            return self.handle_policy_exists(data);
         }
         if selector == ITIP403Registry::policyIdCounterCall::SELECTOR {
-            return Self::handle_policy_id_counter(provider);
+            return self.handle_policy_id_counter();
         }
 
         // Mutating functions — all reverted on zone
@@ -129,29 +193,18 @@ impl ZoneTip403ProxyRegistry {
     /// Handle `isAuthorized(policyId, user)` and the directional variants.
     ///
     /// All four share the same ABI shape: `(uint64 policyId, address user) → bool`.
-    fn handle_is_authorized(
-        provider: &PolicyProvider,
-        data: &[u8],
-        role: AuthRole,
-    ) -> PrecompileResult {
+    fn handle_is_authorized(&self, data: &[u8], role: AuthRole) -> PrecompileResult {
         let call = ITIP403Registry::isAuthorizedCall::abi_decode_raw(&data[4..])
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 
-        let authorized = provider
-            .is_authorized_by_policy(call.policyId, call.user, role)
-            .map_err(|e| {
-                PrecompileError::other(format!(
-                    "isAuthorized failed for policy {} user {}: {e}",
-                    call.policyId, call.user
-                ))
-            })?;
+        let authorized = self.is_authorized(call.policyId, call.user, role)?;
 
         let encoded = ITIP403Registry::isAuthorizedCall::abi_encode_returns(&authorized);
         Ok(PrecompileOutput::new(AUTH_CHECK_GAS, encoded.into()))
     }
 
     /// Handle `policyData(policyId) → (PolicyType, address admin)`.
-    fn handle_policy_data(provider: &PolicyProvider, data: &[u8]) -> PrecompileResult {
+    fn handle_policy_data(&self, data: &[u8]) -> PrecompileResult {
         let call = ITIP403Registry::policyDataCall::abi_decode(data)
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 
@@ -164,14 +217,15 @@ impl ZoneTip403ProxyRegistry {
             };
             let ret = ITIP403Registry::policyDataReturn {
                 policyType: policy_type,
-                admin: alloy_primitives::Address::ZERO,
+                admin: Address::ZERO,
             };
             let encoded = ITIP403Registry::policyDataCall::abi_encode_returns(&ret);
             return Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()));
         }
 
         // Cache-first, RPC-fallback resolution.
-        let policy_type = provider
+        let policy_type = self
+            .provider
             .resolve_policy_type_sync(call.policyId)
             .map_err(|e| {
                 PrecompileError::other(format!(
@@ -182,19 +236,20 @@ impl ZoneTip403ProxyRegistry {
 
         let ret = ITIP403Registry::policyDataReturn {
             policyType: policy_type,
-            admin: alloy_primitives::Address::ZERO,
+            admin: Address::ZERO,
         };
         let encoded = ITIP403Registry::policyDataCall::abi_encode_returns(&ret);
         Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()))
     }
 
     /// Handle `compoundPolicyData(policyId) → (uint64, uint64, uint64)`.
-    fn handle_compound_policy_data(provider: &PolicyProvider, data: &[u8]) -> PrecompileResult {
+    fn handle_compound_policy_data(&self, data: &[u8]) -> PrecompileResult {
         let call = ITIP403Registry::compoundPolicyDataCall::abi_decode(data)
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 
         // Cache-first, RPC-fallback resolution.
-        let compound = provider
+        let compound = self
+            .provider
             .resolve_compound_data_sync(call.policyId)
             .map_err(|e| {
                 PrecompileError::other(format!(
@@ -216,7 +271,7 @@ impl ZoneTip403ProxyRegistry {
     ///
     /// **Cache-only**: returns `true` only for policies observed by the listener.
     /// A `false` result does NOT guarantee the policy doesn't exist on L1.
-    fn handle_policy_exists(provider: &PolicyProvider, data: &[u8]) -> PrecompileResult {
+    fn handle_policy_exists(&self, data: &[u8]) -> PrecompileResult {
         let call = ITIP403Registry::policyExistsCall::abi_decode(data)
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 
@@ -227,7 +282,8 @@ impl ZoneTip403ProxyRegistry {
         }
 
         // Check cache for any known policy data
-        let exists = provider
+        let exists = self
+            .provider
             .cache()
             .read()
             .policies()
@@ -240,9 +296,9 @@ impl ZoneTip403ProxyRegistry {
     ///
     /// **Cache-only**: returns the highest cached policy ID + 1 (minimum 2).
     /// This may be lower than the actual L1 counter if the cache is incomplete.
-    fn handle_policy_id_counter(provider: &PolicyProvider) -> PrecompileResult {
+    fn handle_policy_id_counter(&self) -> PrecompileResult {
         let counter = {
-            let cache = provider.cache().read();
+            let cache = self.provider.cache().read();
             cache.policies().keys().max().map_or(2, |max| max + 1)
         };
         let encoded = ITIP403Registry::policyIdCounterCall::abi_encode_returns(&counter);
