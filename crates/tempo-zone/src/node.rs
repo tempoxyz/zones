@@ -203,7 +203,42 @@ impl NodeTypes for ZoneNode {
     type Payload = ZonePayloadTypes;
 }
 
-/// Zone node add-ons (RPC, etc.)
+/// Zone node add-ons — spawns all background tasks and wires the block production pipeline.
+///
+/// [`launch_add_ons`](NodeAddOns::launch_add_ons) is the central wiring point for the zone
+/// sequencer. It spawns the following tasks:
+///
+/// ## Spawned tasks
+///
+/// - **[`L1Subscriber`](crate::L1Subscriber)** *(critical)* — subscribes to L1 blocks via
+///   WebSocket, extracts deposit and token events from the ZonePortal, and enqueues them
+///   into the [`DepositQueue`](crate::DepositQueue).
+///
+/// - **[`PolicyListener`](crate::l1_state::PolicyListener)** *(critical)* — subscribes to L1
+///   for TIP-403 policy events (membership changes, policy type changes, token policy
+///   assignments) and writes them into the [`SharedPolicyCache`](crate::SharedPolicyCache).
+///
+/// - **[`PolicyResolutionTask`](crate::l1_state::PolicyResolutionTask)** *(critical)* —
+///   receives pre-fetch requests via a channel and resolves them concurrently against L1
+///   RPC, populating the [`SharedPolicyCache`](crate::SharedPolicyCache) so the engine
+///   hits the cache at block-building time.
+///
+/// - **Pool prefetch task** *(background)* — watches incoming pool transactions, extracts
+///   sender/recipient/fee-payer addresses, and submits them to the
+///   [`PolicyResolutionTask`](crate::l1_state::PolicyResolutionTask) for pre-fetching.
+///
+/// - **[`ZoneEngine`](crate::ZoneEngine)** *(critical)* — drives L1-event-driven block
+///   production. Peeks the [`DepositQueue`](crate::DepositQueue), calls
+///   [`prepare_l1_block`](crate::ZoneEngine::prepare_l1_block) (ECIES decryption +
+///   TIP-403 policy checks via [`PolicyProvider`](crate::PolicyProvider)), then triggers
+///   payload building via FCU and submits via `newPayload`.
+///
+/// ## Shared state
+///
+/// The [`SharedPolicyCache`](crate::SharedPolicyCache) connects all policy-aware
+/// components: the listener writes L1 events, the resolution task pre-fetches on
+/// cache miss, and the engine's [`PolicyProvider`](crate::PolicyProvider) reads
+/// during block preparation (cache-first, L1 RPC fallback).
 pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> {
     inner: RpcAddOns<
         N,
