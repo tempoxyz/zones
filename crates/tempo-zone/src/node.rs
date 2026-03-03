@@ -44,7 +44,7 @@ use tempo_transaction_pool::{
     amm::AmmLiquidityCache,
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use alloy_provider::Provider as _;
 
@@ -546,8 +546,18 @@ impl PayloadAttributesBuilder<ZonePayloadAttributes, TempoHeader> for ZonePayloa
     }
 }
 
-/// Executor builder for Zone — constructs [`ZoneEvmConfig`] with the TempoStateReader precompile
-/// and spawns the L1 state listener for cache updates.
+/// Executor builder for Zone — constructs the [`ZoneEvmConfig`] used during block execution.
+///
+/// Called once during node startup by the reth component builder. It:
+///
+/// 1. Creates the [`L1StateProvider`] (cache-first, RPC-fallback reader for L1 contract
+///    storage) and connects it to the [`SharedL1StateCache`].
+/// 2. Spawns the [`L1StateListener`](crate::l1_state::L1StateListener), which subscribes
+///    to L1 chain notifications and keeps the storage cache up to date.
+/// 3. Creates a [`PolicyProvider`](crate::PolicyProvider) for the TIP-403 proxy precompile,
+///    giving the EVM synchronous access to policy authorization checks during execution.
+/// 4. Returns a [`ZoneEvmConfig`] with the TempoStateReader and TIP-403 proxy precompiles
+///    wired in.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZoneExecutorBuilder {
@@ -596,43 +606,19 @@ where
 
         let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
 
-        // Create PolicyProvider for the TIP-403 proxy precompile using the same
-        // L1 RPC URL as the state provider.
-        let l1_rpc_url = &self.l1_state_provider_config.l1_rpc_url;
-        if !l1_rpc_url.is_empty() {
-            match alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect(l1_rpc_url)
-                .await
-            {
-                Ok(policy_l1) => {
-                    let policy_l1 = policy_l1.erased();
+        // Create PolicyProvider for the TIP-403 proxy precompile.
+        let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect(&self.l1_state_provider_config.l1_rpc_url)
+            .await?
+            .erased();
 
-                    // Seed the policy cache with the current L1 block height so RPC
-                    // fallback queries use a valid block number from the start.
-                    match policy_l1.get_block_number().await {
-                        Ok(l1_head) => {
-                            self.policy_cache.write().apply_events(l1_head, &[]);
-                        }
-                        Err(e) => {
-                            warn!(target: "reth::cli", %e, "Failed to seed policy cache with L1 block height");
-                        }
-                    }
-
-                    let policy_provider = crate::l1_state::PolicyProvider::new(
-                        self.policy_cache,
-                        policy_l1,
-                        runtime_handle,
-                    );
-                    evm_config = evm_config.with_policy_provider(policy_provider);
-                    info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
-                }
-                Err(e) => {
-                    warn!(target: "reth::cli", %e, "Failed to connect to L1 for TIP-403 policy provider, proxy disabled");
-                }
-            }
-        } else {
-            info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader precompile (no TIP-403 proxy)");
-        }
+        let policy_provider = crate::l1_state::PolicyProvider::new(
+            self.policy_cache,
+            policy_l1,
+            runtime_handle,
+        );
+        evm_config = evm_config.with_policy_provider(policy_provider);
+        info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
 
         Ok(evm_config)
     }
