@@ -48,17 +48,9 @@ use tracing::{error, info, warn};
 use super::node::ZoneNode;
 
 /// Factory for constructing the zone payload builder.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 #[non_exhaustive]
-pub struct ZonePayloadFactory {
-    sequencer: alloy_primitives::Address,
-}
-
-impl ZonePayloadFactory {
-    pub fn new(sequencer: alloy_primitives::Address) -> Self {
-        Self { sequencer }
-    }
-}
+pub struct ZonePayloadFactory;
 
 impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, ZoneEvmConfig>
     for ZonePayloadFactory
@@ -77,10 +69,10 @@ where
             pool,
             provider: ctx.provider().clone(),
             evm_config,
-            _sequencer: self.sequencer,
         })
     }
 }
+
 /// Zone payload builder that executes `advanceTempo` system txs + pool txs.
 #[derive(Debug, Clone)]
 pub struct ZonePayloadBuilder<Provider> {
@@ -90,24 +82,6 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
     evm_config: ZoneEvmConfig,
-    /// Sequencer address (currently unused).
-    _sequencer: alloy_primitives::Address,
-}
-
-impl<Provider> ZonePayloadBuilder<Provider> {
-    pub fn new(
-        pool: TempoTransactionPool<Provider>,
-        provider: Provider,
-        evm_config: ZoneEvmConfig,
-        sequencer: alloy_primitives::Address,
-    ) -> Self {
-        Self {
-            pool,
-            provider,
-            evm_config,
-            _sequencer: sequencer,
-        }
-    }
 }
 
 impl<Provider> PayloadBuilder for ZonePayloadBuilder<Provider>

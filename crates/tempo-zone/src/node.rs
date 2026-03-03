@@ -175,9 +175,6 @@ impl ZoneNode {
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         executor_builder: ZoneExecutorBuilder,
-        sequencer: alloy_primitives::Address,
-        _sequencer_key: k256::SecretKey,
-        _portal_address: alloy_primitives::Address,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -193,9 +190,7 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(executor_builder)
-            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
-                sequencer,
-            )))
+            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -436,12 +431,7 @@ where
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
         );
-        Self::components(
-            executor_builder,
-            self.sequencer,
-            self.sequencer_key.clone(),
-            self.portal_address,
-        )
+        Self::components(executor_builder)
     }
 
     fn add_ons(&self) -> Self::AddOns {
