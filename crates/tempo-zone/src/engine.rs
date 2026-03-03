@@ -84,6 +84,13 @@ pub struct ZoneEngine {
     last_header: SealedHeader<TempoHeader>,
     /// Address that receives block fees.
     fee_recipient: Address,
+    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
+    sequencer_key: k256::SecretKey,
+    /// ZonePortal address on L1 — used as context in HKDF key derivation.
+    portal_address: Address,
+    /// Cache-first, RPC-fallback TIP-403 policy provider for authorization checks
+    /// on encrypted deposit recipients during preparation.
+    policy_provider: crate::l1_state::PolicyProvider,
 }
 
 impl ZoneEngine {
@@ -93,6 +100,9 @@ impl ZoneEngine {
         payload_builder: PayloadBuilderHandle<ZonePayloadTypes>,
         deposit_queue: DepositQueue,
         fee_recipient: Address,
+        sequencer_key: k256::SecretKey,
+        portal_address: Address,
+        policy_provider: crate::l1_state::PolicyProvider,
     ) -> Self {
         let last_header = provider
             .sealed_header(provider.best_block_number().unwrap())
@@ -106,6 +116,9 @@ impl ZoneEngine {
             deposit_queue,
             last_header,
             fee_recipient,
+            sequencer_key,
+            portal_address,
+            policy_provider,
         }
     }
 
@@ -180,6 +193,23 @@ impl ZoneEngine {
         }
     }
 
+    /// Decrypt encrypted deposits, check TIP-403 policy authorization, and
+    /// ABI-encode everything into a [`PreparedL1Block`] ready for the payload
+    /// builder. Errors (e.g. policy RPC failures) are propagated so the engine
+    /// retries rather than allowing unauthorized deposits through.
+    async fn prepare_l1_block(
+        &self,
+        l1_block: L1BlockDeposits,
+    ) -> eyre::Result<crate::l1::PreparedL1Block> {
+        l1_block
+            .prepare(
+                &self.sequencer_key,
+                self.portal_address,
+                &self.policy_provider,
+            )
+            .await
+    }
+
     /// Advance the chain by one block.
     ///
     /// Wraps the given L1 block into [`ZonePayloadAttributes`], sends FCU
@@ -193,6 +223,8 @@ impl ZoneEngine {
         // two chains stay in lockstep.
         let timestamp_secs = l1_block.header.timestamp();
         let timestamp_millis_part = l1_block.header.timestamp_millis_part;
+
+        let l1_block = self.prepare_l1_block(l1_block).await?;
 
         let attributes = ZonePayloadAttributes {
             inner: EthPayloadAttributes {
@@ -209,7 +241,7 @@ impl ZoneEngine {
                     .then_some(B256::ZERO),
             },
             timestamp_millis_part,
-            l1_block,
+            l1_block: Some(l1_block),
         };
 
         // Send FCU with payload attributes through the engine API to trigger

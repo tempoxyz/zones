@@ -3,7 +3,10 @@
 //! This is a lightweight L2 node built on reth's node builder infrastructure.
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
-use crate::payload::{ZonePayloadAttributes, ZonePayloadTypes};
+use crate::{
+    ext::TempoStateExt,
+    payload::{ZonePayloadAttributes, ZonePayloadTypes},
+};
 use alloy_primitives::U256;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
@@ -26,7 +29,7 @@ use reth_provider::ChainSpecProvider;
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
-use reth_storage_api::EmptyBodyStorage;
+use reth_storage_api::{EmptyBodyStorage, StateProviderFactory};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
@@ -41,7 +44,7 @@ use tempo_transaction_pool::{
     amm::AmmLiquidityCache,
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use alloy_provider::Provider as _;
 
@@ -66,16 +69,28 @@ type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnve
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZoneNode {
+    /// Queue of L1 deposit messages to be included in the next zone block.
     deposit_queue: crate::DepositQueue,
+    /// Configuration for the L1 event subscriber (RPC endpoint, poll interval, etc.).
     l1_config: crate::L1SubscriberConfig,
+    /// Configuration for the L1 state provider (contract addresses, query parameters).
     l1_state_provider_config: L1StateProviderConfig,
+    /// Configuration for the L1 state listener (WebSocket URL, tracked events).
     l1_state_listener_config: L1StateListenerConfig,
+    /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
     l1_state_cache: SharedL1StateCache,
+    /// Shared TIP-403 policy cache, populated by the [`PolicyListener`](crate::l1_state::PolicyListener)
+    /// and read by the precompile during block building.
     policy_cache: crate::SharedPolicyCache,
+    /// Address of the zone sequencer (fee recipient, authorized block producer).
     sequencer: alloy_primitives::Address,
     /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
     sequencer_key: k256::SecretKey,
+    /// Address of the L1 deposit portal contract.
     portal_address: alloy_primitives::Address,
+    /// Optional pre-configured list of enabled token addresses. When set, the
+    /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
+    initial_tokens: Option<Vec<alloy_primitives::Address>>,
 }
 
 impl ZoneNode {
@@ -127,7 +142,17 @@ impl ZoneNode {
             sequencer,
             sequencer_key,
             portal_address,
+            initial_tokens: None,
         }
+    }
+
+    /// Set the initial list of enabled token addresses.
+    ///
+    /// When set, the startup L1 RPC query for enabled tokens is skipped —
+    /// useful for tests or environments where no L1 node is available at launch.
+    pub fn with_initial_tokens(mut self, tokens: Vec<alloy_primitives::Address>) -> Self {
+        self.initial_tokens = Some(tokens);
+        self
     }
 
     /// Returns a clone of the deposit queue handle for external use (e.g. sequencer tasks).
@@ -151,10 +176,8 @@ impl ZoneNode {
     pub fn components<N>(
         executor_builder: ZoneExecutorBuilder,
         sequencer: alloy_primitives::Address,
-        sequencer_key: k256::SecretKey,
-        portal_address: alloy_primitives::Address,
-        policy_cache: crate::SharedPolicyCache,
-        l1_rpc_url: String,
+        _sequencer_key: k256::SecretKey,
+        _portal_address: alloy_primitives::Address,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -172,10 +195,6 @@ impl ZoneNode {
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
                 sequencer,
-                sequencer_key,
-                portal_address,
-                policy_cache,
-                l1_rpc_url,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
@@ -199,10 +218,21 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
         BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>,
         Identity,
     >,
+    /// Queue of L1 deposit messages to be included in the next zone block.
     deposit_queue: crate::DepositQueue,
+    /// Configuration for the L1 event subscriber (RPC endpoint, poll interval, etc.).
     l1_config: crate::L1SubscriberConfig,
+    /// Address that receives zone block fees (the sequencer's fee vault).
     fee_recipient: alloy_primitives::Address,
+    /// Shared TIP-403 policy cache, populated by the [`PolicyListener`](crate::l1_state::PolicyListener)
+    /// and read by the precompile during block building.
     policy_cache: crate::SharedPolicyCache,
+    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
+    sequencer_key: k256::SecretKey,
+    /// ZonePortal address on L1 — used as context in HKDF key derivation.
+    portal_address: alloy_primitives::Address,
+    /// Optional pre-configured list of enabled token addresses.
+    initial_tokens: Option<Vec<alloy_primitives::Address>>,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
@@ -223,6 +253,9 @@ where
         l1_config: crate::L1SubscriberConfig,
         fee_recipient: alloy_primitives::Address,
         policy_cache: crate::SharedPolicyCache,
+        sequencer_key: k256::SecretKey,
+        portal_address: alloy_primitives::Address,
+        initial_tokens: Option<Vec<alloy_primitives::Address>>,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -236,6 +269,9 @@ where
             l1_config,
             fee_recipient,
             policy_cache,
+            sequencer_key,
+            portal_address,
+            initial_tokens,
         }
     }
 }
@@ -257,17 +293,17 @@ where
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
         // Read the zone's current tempoBlockNumber from local state so the L1
         // subscriber knows exactly where to resume backfill.
-        {
-            use crate::ext::TempoStateExt;
-            use reth_storage_api::StateProviderFactory;
-            let sp = ctx.node.provider().latest()?;
-            let tempo_block_number = sp.tempo_block_number()?;
-            self.l1_config.local_tempo_block_number = tempo_block_number;
-            info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
-        }
+        let sp = ctx.node.provider().latest()?;
+        let tempo_block_number = sp.tempo_block_number()?;
+        self.l1_config.local_tempo_block_number = tempo_block_number;
+        self.policy_cache.set_last_l1_block(tempo_block_number);
+        info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
+
+        // Capture fields needed after `self.l1_config` is moved into the subscriber.
+        let l1_url = self.l1_config.l1_rpc_url.clone();
+        let portal_address = self.l1_config.portal_address;
 
         // Spawn L1 deposit subscriber
-        let l1_url = self.l1_config.l1_rpc_url.clone();
         L1Subscriber::spawn(
             self.l1_config,
             self.deposit_queue.clone(),
@@ -275,13 +311,29 @@ where
         );
         info!(target: "reth::cli", "L1 deposit subscriber started as part of node lifecycle");
 
+        // Resolve enabled tokens — use pre-configured list if available, otherwise
+        // query L1 via RPC as a fallback.
+        let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
+            info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
+            tokens
+        } else {
+            let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                .connect(&l1_url)
+                .await?;
+            let tokens = crate::bindings::enabled_tokens(portal_address, &l1_provider).await?;
+            info!(target: "reth::cli", count = tokens.len(), ?tokens, "Discovered enabled tokens from L1");
+            tokens
+        };
+
         // Spawn TIP-403 policy listener to keep policy cache in sync with L1
+        let engine_l1_url = l1_url.clone();
         crate::l1_state::spawn_policy_listener(
             crate::l1_state::PolicyListenerConfig {
                 l1_ws_url: l1_url,
-                tracked_tokens: Vec::new(),
+                portal_address,
+                tracked_tokens,
             },
-            self.policy_cache,
+            self.policy_cache.clone(),
             ctx.node.task_executor().clone(),
         );
         info!(target: "reth::cli", "TIP-403 policy listener started");
@@ -293,16 +345,41 @@ where
             let payload_builder = ctx.node.payload_builder_handle().clone();
             let deposit_queue = self.deposit_queue;
             let fee_recipient = self.fee_recipient;
+            let sequencer_key = self.sequencer_key;
+            let portal_address = self.portal_address;
+            let l1_url = engine_l1_url;
+            let policy_cache = self.policy_cache;
 
             ctx.node
                 .task_executor()
                 .spawn_critical("zone-engine", async move {
+                    // Connect to L1 for policy resolution (cache-first, RPC fallback).
+                    let l1_provider =
+                        match alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+                            .connect(&l1_url)
+                            .await
+                        {
+                            Ok(p) => p.erased(),
+                            Err(e) => {
+                                error!(target: "reth::cli", %e, "Failed to connect to L1 for policy provider in ZoneEngine");
+                                return;
+                            }
+                        };
+                    let policy_provider = crate::l1_state::PolicyProvider::new(
+                        policy_cache,
+                        l1_provider,
+                        tokio::runtime::Handle::current(),
+                    );
+
                     ZoneEngine::new(
                         provider,
                         to_engine,
                         payload_builder,
                         deposit_queue,
                         fee_recipient,
+                        sequencer_key,
+                        portal_address,
+                        policy_provider,
                     )
                     .run()
                     .await
@@ -364,8 +441,6 @@ where
             self.sequencer,
             self.sequencer_key.clone(),
             self.portal_address,
-            self.policy_cache.clone(),
-            self.l1_config.l1_rpc_url.clone(),
         )
     }
 
@@ -375,6 +450,9 @@ where
             self.l1_config.clone(),
             self.sequencer,
             self.policy_cache.clone(),
+            self.sequencer_key.clone(),
+            self.portal_address,
+            self.initial_tokens.clone(),
         )
     }
 }

@@ -5,7 +5,7 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::NumHash;
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolEventInterface, SolValue};
@@ -623,6 +623,199 @@ pub struct L1BlockDeposits {
     pub queue_hash_before: B256,
     /// Deposit queue hash chain value after this block's deposits.
     pub queue_hash_after: B256,
+}
+
+/// An L1 block with deposits fully prepared for the payload builder.
+///
+/// All ECIES decryption, TIP-403 policy checks, and ABI encoding have been
+/// performed. The builder only needs to RLP-encode the header and assemble
+/// the `advanceTempo` calldata.
+#[derive(Debug, Clone)]
+pub struct PreparedL1Block {
+    /// The sealed L1 block header.
+    pub header: SealedHeader<TempoHeader>,
+    /// ABI-encoded queued deposits (regular + encrypted).
+    pub queued_deposits: Vec<abi::QueuedDeposit>,
+    /// Decryption data for encrypted deposits (one per encrypted deposit, in order).
+    pub decryptions: Vec<abi::DecryptionData>,
+    /// Tokens newly enabled for bridging in this block.
+    pub enabled_tokens: Vec<abi::EnabledToken>,
+}
+
+impl L1BlockDeposits {
+    /// Prepare all deposits for the payload builder.
+    ///
+    /// Decrypts encrypted deposits, checks TIP-403 policy authorization,
+    /// and ABI-encodes everything into the types the `advanceTempo` call expects.
+    /// The resulting [`PreparedL1Block`] is ready to be passed through payload
+    /// attributes to the builder.
+    pub async fn prepare(
+        self,
+        sequencer_key: &k256::SecretKey,
+        portal_address: Address,
+        policy_provider: &crate::l1_state::PolicyProvider,
+    ) -> eyre::Result<PreparedL1Block> {
+        use crate::precompiles::ecies;
+
+        let l1_block_number = self.header.inner.number;
+        let mut queued_deposits: Vec<abi::QueuedDeposit> = Vec::new();
+        let mut decryptions: Vec<abi::DecryptionData> = Vec::new();
+
+        for deposit in &self.events.deposits {
+            match deposit {
+                L1Deposit::Regular(d) => {
+                    let deposit = abi::Deposit {
+                        token: d.token,
+                        sender: d.sender,
+                        to: d.to,
+                        amount: d.amount,
+                        memo: d.memo,
+                    };
+                    queued_deposits.push(abi::QueuedDeposit {
+                        depositType: abi::DepositType::Regular,
+                        depositData: Bytes::from(deposit.abi_encode()),
+                    });
+                }
+                L1Deposit::Encrypted(d) => {
+                    let queued = abi::QueuedDeposit {
+                        depositType: abi::DepositType::Encrypted,
+                        depositData: Bytes::from(
+                            abi::EncryptedDeposit {
+                                token: d.token,
+                                sender: d.sender,
+                                amount: d.amount,
+                                keyIndex: d.key_index,
+                                encrypted: abi::EncryptedDepositPayload {
+                                    ephemeralPubkeyX: d.ephemeral_pubkey_x,
+                                    ephemeralPubkeyYParity: d.ephemeral_pubkey_y_parity,
+                                    ciphertext: d.ciphertext.clone().into(),
+                                    nonce: d.nonce.into(),
+                                    tag: d.tag.into(),
+                                },
+                            }
+                            .abi_encode(),
+                        ),
+                    };
+
+                    // Attempt full ECIES decryption.
+                    let dec = ecies::decrypt_deposit(
+                        sequencer_key,
+                        &d.ephemeral_pubkey_x,
+                        d.ephemeral_pubkey_y_parity,
+                        &d.ciphertext,
+                        &d.nonce,
+                        &d.tag,
+                        portal_address,
+                        d.key_index,
+                    );
+
+                    if let Some(dec) = dec {
+                        // Check TIP-403 policy via the provider (cache-first, RPC fallback).
+                        // Errors are propagated so the engine retries rather than allowing
+                        // unauthorized deposits through.
+                        let authorized = policy_provider
+                            .is_authorized_async(
+                                d.token,
+                                dec.to,
+                                l1_block_number,
+                                crate::l1_state::AuthRole::MintRecipient,
+                            )
+                            .await?;
+
+                        let recipient = if authorized {
+                            dec.to
+                        } else {
+                            warn!(
+                                target: "zone::engine",
+                                sender = %d.sender,
+                                recipient = %dec.to,
+                                token = %d.token,
+                                amount = %d.amount,
+                                "Encrypted deposit recipient unauthorized, redirecting to sender"
+                            );
+                            d.sender
+                        };
+
+                        let decryption = abi::DecryptionData {
+                            sharedSecret: dec.proof.shared_secret,
+                            sharedSecretYParity: dec.proof.shared_secret_y_parity,
+                            to: recipient,
+                            memo: dec.memo,
+                            cpProof: abi::ChaumPedersenProof {
+                                s: dec.proof.cp_proof_s,
+                                c: dec.proof.cp_proof_c,
+                            },
+                        };
+                        queued_deposits.push(queued);
+                        decryptions.push(decryption);
+                        continue;
+                    }
+
+                    // Full decryption failed — try ECDH proof for on-chain refund.
+                    let proof = ecies::compute_ecdh_proof(
+                        sequencer_key,
+                        &d.ephemeral_pubkey_x,
+                        d.ephemeral_pubkey_y_parity,
+                    );
+
+                    if let Some(proof) = proof {
+                        warn!(
+                            target: "zone::payload",
+                            sender = %d.sender,
+                            amount = %d.amount,
+                            "Encrypted deposit decryption failed, providing valid proof for on-chain refund"
+                        );
+                        let decryption = abi::DecryptionData {
+                            sharedSecret: proof.shared_secret,
+                            sharedSecretYParity: proof.shared_secret_y_parity,
+                            to: d.sender,
+                            memo: B256::ZERO,
+                            cpProof: abi::ChaumPedersenProof {
+                                s: proof.cp_proof_s,
+                                c: proof.cp_proof_c,
+                            },
+                        };
+                        queued_deposits.push(queued);
+                        decryptions.push(decryption);
+                        continue;
+                    }
+
+                    warn!(
+                        target: "zone::payload",
+                        sender = %d.sender,
+                        amount = %d.amount,
+                        "Encrypted deposit has invalid ephemeral pubkey, using zeroed DecryptionData"
+                    );
+                    let decryption = abi::DecryptionData {
+                        sharedSecret: B256::ZERO,
+                        sharedSecretYParity: 0x02,
+                        to: d.sender,
+                        memo: B256::ZERO,
+                        cpProof: abi::ChaumPedersenProof {
+                            s: B256::ZERO,
+                            c: B256::ZERO,
+                        },
+                    };
+                    queued_deposits.push(queued);
+                    decryptions.push(decryption);
+                }
+            }
+        }
+
+        let enabled_tokens = self
+            .events
+            .enabled_tokens
+            .iter()
+            .map(|t| t.to_abi())
+            .collect();
+
+        Ok(PreparedL1Block {
+            header: self.header,
+            queued_deposits,
+            decryptions,
+            enabled_tokens,
+        })
+    }
 }
 
 /// Deposit queue hash chain state.

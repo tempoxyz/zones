@@ -414,7 +414,8 @@ impl ZoneTestNode {
             genesis_tempo_block_number,
             Address::ZERO, // sequencer address (overridden by sequencer_key)
             sequencer_key,
-        );
+        )
+        .with_initial_tokens(vec![]);
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
         // The ZoneEngine is the sole block producer; it advances the chain when L1
