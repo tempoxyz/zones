@@ -125,6 +125,11 @@ impl PolicyCache {
         self.last_l1_block
     }
 
+    /// Sets the highest L1 block number, unless the cache already tracks a higher block.
+    pub fn set_last_l1_block(&mut self, block_number: u64) {
+        self.last_l1_block = self.last_l1_block.max(block_number);
+    }
+
     /// Returns a mutable reference to the [`CachedPolicy`] for the given policy ID,
     /// inserting a default entry if absent.
     fn get_policy_entry(&mut self, policy_id: u64) -> &mut CachedPolicy {
@@ -236,6 +241,11 @@ impl PolicyCache {
     /// membership set on `TokenPolicyChanged` to avoid cold-start RPC latency.
     pub fn apply_events(&mut self, block_number: u64, events: &[PolicyEvent]) {
         self.last_l1_block = self.last_l1_block.max(block_number);
+
+        // GC old versioned entries — everything before the current block is
+        // stale since we only ever query at `last_l1_block` or later.
+        self.advance(block_number);
+
         for event in events {
             match event {
                 PolicyEvent::MembershipChanged {
@@ -309,6 +319,14 @@ pub struct SharedPolicyCache(Arc<RwLock<PolicyCache>>);
 impl Default for SharedPolicyCache {
     fn default() -> Self {
         Self(Arc::new(RwLock::new(PolicyCache::default())))
+    }
+}
+
+impl SharedPolicyCache {
+    /// Seeds the cache with the initial L1 block height so RPC fallback queries
+    /// target the correct block before the listener has processed any events.
+    pub fn set_last_l1_block(&self, block_number: u64) {
+        self.write().set_last_l1_block(block_number);
     }
 }
 
