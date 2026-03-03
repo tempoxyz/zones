@@ -657,7 +657,9 @@ impl L1BlockDeposits {
     ) -> eyre::Result<PreparedL1Block> {
         use crate::precompiles::ecies;
 
+        let start = std::time::Instant::now();
         let l1_block_number = self.header.inner.number;
+        let total_deposits = self.events.deposits.len();
         let mut queued_deposits: Vec<abi::QueuedDeposit> = Vec::new();
         let mut decryptions: Vec<abi::DecryptionData> = Vec::new();
 
@@ -710,6 +712,16 @@ impl L1BlockDeposits {
                     );
 
                     if let Some(dec) = dec {
+                        debug!(
+                            target: "zone::engine",
+                            l1_block = l1_block_number,
+                            sender = %d.sender,
+                            recipient = %dec.to,
+                            token = %d.token,
+                            amount = %d.amount,
+                            "Decrypted encrypted deposit, checking policy"
+                        );
+
                         // Check TIP-403 policy via the provider (cache-first, RPC fallback).
                         // Errors are propagated so the engine retries rather than allowing
                         // unauthorized deposits through.
@@ -723,6 +735,12 @@ impl L1BlockDeposits {
                             .await?;
 
                         let recipient = if authorized {
+                            debug!(
+                                target: "zone::engine",
+                                recipient = %dec.to,
+                                token = %d.token,
+                                "Policy authorized encrypted deposit recipient"
+                            );
                             dec.to
                         } else {
                             warn!(
@@ -802,12 +820,23 @@ impl L1BlockDeposits {
             }
         }
 
-        let enabled_tokens = self
+        let enabled_tokens: Vec<_> = self
             .events
             .enabled_tokens
             .iter()
             .map(|t| t.to_abi())
             .collect();
+
+        let elapsed = start.elapsed();
+        info!(
+            target: "zone::engine",
+            l1_block = l1_block_number,
+            total_deposits,
+            encrypted = decryptions.len(),
+            enabled_tokens = enabled_tokens.len(),
+            ?elapsed,
+            "Prepared L1 block deposits"
+        );
 
         Ok(PreparedL1Block {
             header: self.header,
