@@ -25,5 +25,5 @@ pub use provider::{L1StateProvider, L1StateProviderConfig};
 pub use tip403::{
     AuthRole, PolicyCache, PolicyEvent, PolicyListener, PolicyListenerConfig, PolicyProvider,
     PolicyTaskHandle, PolicyTaskMessage, SharedPolicyCache, Tip403Metrics, spawn_policy_listener,
-    spawn_policy_resolution_task,
+    spawn_policy_resolution_task, spawn_pool_prefetch_task,
 };

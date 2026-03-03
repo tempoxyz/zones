@@ -274,6 +274,9 @@ where
 impl<N> NodeAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: reth_transaction_pool::TransactionPool<
+            Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
+        >,
     ZoneEthApiBuilder: EthApiBuilder<N>,
 {
     type Handle = <RpcAddOns<
@@ -324,7 +327,7 @@ where
         let engine_l1_url = l1_url.clone();
         crate::l1_state::spawn_policy_listener(
             crate::l1_state::PolicyListenerConfig {
-                l1_ws_url: l1_url,
+                l1_ws_url: l1_url.clone(),
                 portal_address,
                 tracked_tokens,
             },
@@ -332,6 +335,23 @@ where
             ctx.node.task_executor().clone(),
         );
         info!(target: "reth::cli", "TIP-403 policy listener started");
+
+        // Spawn policy resolution task for pre-fetching authorization data from L1.
+        // The pool prefetch task feeds it with sender/recipient addresses from
+        // incoming transactions so the cache is warm by the time we build blocks.
+        let policy_task_handle = crate::l1_state::spawn_policy_resolution_task(
+            self.policy_cache.clone(),
+            l1_url.clone(),
+            16,  // max concurrent RPC resolutions
+            256, // channel capacity
+            ctx.node.task_executor().clone(),
+        );
+        crate::l1_state::spawn_pool_prefetch_task(
+            ctx.node.pool().clone(),
+            policy_task_handle,
+            ctx.node.task_executor().clone(),
+        );
+        info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");
 
         // Spawn the ZoneEngine — L1-event-driven block production
         {
@@ -389,6 +409,9 @@ where
 impl<N> RethRpcAddOns<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: reth_transaction_pool::TransactionPool<
+            Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
+        >,
     ZoneEthApiBuilder: EthApiBuilder<N>,
 {
     type EthApi = <ZoneEthApiBuilder as EthApiBuilder<N>>::EthApi;
@@ -401,6 +424,9 @@ where
 impl<N> EngineValidatorAddOn<N> for ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: reth_transaction_pool::TransactionPool<
+            Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
+        >,
     ZoneEthApiBuilder: EthApiBuilder<N>,
 {
     type ValidatorBuilder = BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>;
