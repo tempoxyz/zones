@@ -136,36 +136,19 @@ impl PolicyListener {
             vec![]
         };
 
-        if registry_logs.is_empty() && tip20_logs.is_empty() {
-            // No policy events in this block, but still advance the block tracker
-            // so the resolution task queries L1 at a recent height.
-            self.cache.write().apply_events(block_number, &[]);
-            return Ok(());
-        }
-
-        debug!(
-            block_number,
-            registry = registry_logs.len(),
-            tip20 = tip20_logs.len(),
-            "Processing policy events"
-        );
-
         // Decode all logs into PolicyEvents outside the write lock.
-        let mut events = Vec::new();
-        for log in &registry_logs {
-            if let Some(event) = decode_registry_event(log, block_number) {
-                events.push(event);
-            }
-        }
-        for log in &tip20_logs {
-            if let Some(event) = decode_tip20_event(log, block_number) {
-                events.push(event);
-            }
-        }
+        let events: Vec<_> = registry_logs
+            .iter()
+            .filter_map(|log| decode_registry_event(log, block_number))
+            .chain(tip20_logs.iter().filter_map(|log| decode_tip20_event(log, block_number)))
+            .collect();
 
         if !events.is_empty() {
-            self.cache.write().apply_events(block_number, &events);
+            debug!(block_number, count = events.len(), "Applying policy events");
         }
+
+        // Always call apply_events to advance the block tracker, even when empty.
+        self.cache.write().apply_events(block_number, &events);
 
         Ok(())
     }
