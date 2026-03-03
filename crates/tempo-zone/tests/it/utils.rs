@@ -198,7 +198,13 @@ impl ZoneTestNode {
         poll_until(timeout, DEFAULT_POLL, "token balance", || {
             let tip20 = &tip20;
             async move {
-                let balance = tip20.balanceOf(account).call().await?;
+                // balanceOf may revert with Uninitialized() if the token hasn't
+                // been created yet (e.g. waiting for a TokenEnabled event to be
+                // processed). Treat reverts as "not ready" rather than fatal.
+                let balance = match tip20.balanceOf(account).call().await {
+                    Ok(b) => b,
+                    Err(_) => return Ok(None),
+                };
                 if balance >= min_balance {
                     Ok(Some(balance))
                 } else {
