@@ -20,17 +20,21 @@ use tempo_contracts::precompiles::{
 };
 use tracing::{debug, error, info, warn};
 
+use crate::bindings::ZonePortal::TokenEnabled;
+
 /// Configuration for the policy listener.
 #[derive(Debug, Clone)]
 pub struct PolicyListenerConfig {
     /// WebSocket URL of the L1 node.
     pub l1_ws_url: String,
+    /// ZonePortal contract address on L1, monitored for `TokenEnabled` events.
+    pub portal_address: Address,
     /// Token addresses to monitor for transfer policy changes.
+    /// New tokens discovered via `TokenEnabled` are appended at runtime.
     pub tracked_tokens: Vec<Address>,
 }
 
 /// Listener that watches L1 for TIP-403 policy events and updates the policy cache.
-#[derive(Clone)]
 pub struct PolicyListener {
     cache: SharedPolicyCache,
     config: PolicyListenerConfig,
@@ -44,7 +48,7 @@ impl PolicyListener {
     /// Connect to the L1 node via WebSocket and subscribe to new block headers.
     ///
     /// On each new block, TIP-403 policy events are fetched and applied to the cache.
-    pub async fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&mut self) -> eyre::Result<()> {
         info!(url = %self.config.l1_ws_url, "Connecting to L1 for policy listener");
 
         let ws = WsConnect::new(&self.config.l1_ws_url);
@@ -68,8 +72,48 @@ impl PolicyListener {
         Ok(())
     }
 
-    /// Fetch and process TIP-403 and TIP-20 policy events for a single block.
-    async fn process_block(&self, provider: &impl Provider, block_number: u64) -> eyre::Result<()> {
+    /// Fetch and process policy events for a single L1 block.
+    ///
+    /// Queries three event sources and applies them to the [`SharedPolicyCache`]:
+    ///
+    /// 1. **ZonePortal `TokenEnabled`** — discovers newly bridged tokens and adds
+    ///    them to `tracked_tokens` so their policy changes are monitored going forward.
+    /// 2. **TIP403Registry** — `BlacklistUpdated`, `WhitelistUpdated`, `PolicyCreated`,
+    ///    and `CompoundPolicyCreated` events that update policy membership and metadata.
+    /// 3. **TIP-20 `TransferPolicyUpdate`** — emitted when a token's transfer policy ID
+    ///    changes, updating the token → policy mapping in the cache.
+    ///
+    /// Even when no events are found, the cache's block tracker is advanced so the
+    /// resolution task queries L1 at a recent height.
+    async fn process_block(
+        &mut self,
+        provider: &impl Provider,
+        block_number: u64,
+    ) -> eyre::Result<()> {
+        // Fetch TokenEnabled events from the portal contract.
+        let portal_filter = Filter::new()
+            .address(self.config.portal_address)
+            .event_signature(vec![TokenEnabled::SIGNATURE_HASH])
+            .select(block_number);
+
+        let portal_logs = provider.get_logs(&portal_filter).await?;
+
+        // Process portal logs first so newly enabled tokens are immediately tracked.
+        for log in &portal_logs {
+            if let Ok(decoded) = TokenEnabled::decode_log(&log.inner) {
+                let token = decoded.data.token;
+                if !self.config.tracked_tokens.contains(&token) {
+                    info!(
+                        %token,
+                        name = decoded.data.name,
+                        symbol = decoded.data.symbol,
+                        "New token enabled on portal, adding to tracked tokens"
+                    );
+                    self.config.tracked_tokens.push(token);
+                }
+            }
+        }
+
         let registry_filter = Filter::new()
             .address(TIP403_REGISTRY_ADDRESS)
             .event_signature(vec![
@@ -250,7 +294,7 @@ pub fn spawn_policy_listener(
     cache: SharedPolicyCache,
     task_executor: impl reth_ethereum::tasks::TaskSpawner,
 ) {
-    let listener = PolicyListener::new(cache, config);
+    let mut listener = PolicyListener::new(cache, config);
 
     task_executor.spawn_critical(
         "l1-policy-listener",
