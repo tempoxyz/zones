@@ -59,17 +59,16 @@ localnet accounts="1000" reset="false" profile="maxperf" features="asm-keccak" a
                       {{args}}
 
 [group('zone')]
-[doc('Approves the ZonePortal to spend max TEMPO. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
-max-approve-portal:
+[doc('Approves the ZonePortal to spend max tokens. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars.')]
+max-approve-portal token="0x20C0000000000000000000000000000000000000":
     #!/bin/bash
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
-    TOKEN="0x20C0000000000000000000000000000000000000"
     HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
-    echo "Approving ZonePortal for max TEMPO..."
-    cast send "$TOKEN" "approve(address,uint256)" "$PORTAL" "$(cast max-uint)" \
+    echo "Approving ZonePortal for max tokens ({{token}})..."
+    cast send "{{token}}" "approve(address,uint256)" "$PORTAL" "$(cast max-uint)" \
         --rpc-url "$HTTP_RPC" --private-key "$PK"
     echo "Approved!"
 
@@ -296,7 +295,7 @@ enable-token token:
 
 [group('tip403')]
 [doc('Creates a new TIP-20 token on L1 via TIP20Factory. Returns the token address. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
-create-token name symbol currency="USD" salt="0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890":
+create-token name symbol salt="0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890":
     #!/bin/bash
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
@@ -312,14 +311,14 @@ create-token name symbol currency="USD" salt="0xabcdef1234567890abcdef1234567890
     echo "Creating TIP-20 token '{{name}}' ({{symbol}}) at $TOKEN_ADDR..."
     TX_OUTPUT=$(cast send "$FACTORY" \
         "createToken(string,string,string,address,address,bytes32)" \
-        "{{name}}" "{{symbol}}" "{{currency}}" "$QUOTE_TOKEN" "$ADMIN" "{{salt}}" \
+        "{{name}}" "{{symbol}}" "USD" "$QUOTE_TOKEN" "$ADMIN" "{{salt}}" \
         --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
     TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
     echo "Token created!"
     echo "  Address:  $TOKEN_ADDR"
     echo "  Name:     {{name}}"
     echo "  Symbol:   {{symbol}}"
-    echo "  Currency: {{currency}}"
+    echo "  Currency: USD"
     echo "  Admin:    $ADMIN"
     echo "  L1 tx:    $TX_HASH"
 
@@ -391,9 +390,9 @@ create-policy type="0":
         "createPolicy(address,uint8)(uint64)" "$ADMIN" "{{type}}" \
         --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
     TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
-    # Read the policy counter to get the new ID (strip cast's formatting like "984399 [9.843e5]")
-    COUNTER=$(cast call "$REGISTRY" "policyIdCounter()(uint64)" --rpc-url "$HTTP_RPC" | awk '{print $1}')
-    POLICY_ID=$((COUNTER - 1))
+    # Extract the policy ID from the PolicyCreated event log in the receipt
+    POLICY_ID_HEX=$(echo "$TX_OUTPUT" | jq -r '.logs[] | select(.topics[0] == "0x718d87917f0c4cfd1263707ef0e77c656ed8d8bfaca06152bdb0b8094142ec27") | .topics[1]')
+    POLICY_ID=$(printf '%d' "$POLICY_ID_HEX")
     echo "Policy created!"
     echo "  Policy ID: $POLICY_ID"
     echo "  Type:      $TYPE_NAME"

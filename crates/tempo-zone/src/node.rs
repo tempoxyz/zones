@@ -612,11 +612,8 @@ where
             .await?
             .erased();
 
-        let policy_provider = crate::l1_state::PolicyProvider::new(
-            self.policy_cache,
-            policy_l1,
-            runtime_handle,
-        );
+        let policy_provider =
+            crate::l1_state::PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
         evm_config = evm_config.with_policy_provider(policy_provider);
         info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
 

@@ -70,6 +70,13 @@ pub struct PolicyCache {
     /// Per-token transfer policy ID.
     tokens: HashMap<Address, HeightVersioned<u64>>,
     /// Per-policy-ID records (type, membership, compound data).
+    ///
+    /// Populated from **all** `PolicyCreated`, `CompoundPolicyCreated`,
+    /// `WhitelistUpdated`, and `BlacklistUpdated` events on the global
+    /// `TIP403Registry` — not filtered to this zone's tokens. This is
+    /// intentional: a token can switch to any policy via
+    /// `TransferPolicyUpdate`, so pre-caching all policies avoids RPC
+    /// round-trips on policy switch. The memory overhead is negligible.
     policies: HashMap<u64, CachedPolicy>,
     /// Highest L1 block number processed by the policy listener.
     ///
@@ -327,6 +334,11 @@ impl Default for SharedPolicyCache {
 }
 
 impl SharedPolicyCache {
+    /// Returns the last L1 block number tracked by the cache.
+    pub fn last_l1_block(&self) -> u64 {
+        self.read().last_l1_block()
+    }
+
     /// Seeds the cache with the initial L1 block height so RPC fallback queries
     /// target the correct block before the listener has processed any events.
     pub fn set_last_l1_block(&self, block_number: u64) {

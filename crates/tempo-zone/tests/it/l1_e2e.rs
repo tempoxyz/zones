@@ -910,4 +910,3 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
 
     Ok(())
 }
-

@@ -256,7 +256,10 @@ Tempo L1 supports transfer policies via the TIP-403 registry. You can create new
 
 ```bash
 # Create a TIP-20 token named "MyUSD" with symbol "MUSD"
+# The address is derived from your wallet + salt (not the name/symbol).
+# Use a different salt to create multiple tokens from the same wallet.
 just create-token MyUSD MUSD
+just create-token AnotherUSD AUSD 0x0000000000000000000000000000000000000000000000000000000000000001
 # → Token created! Address: 0x20C0...
 
 # Grant yourself ISSUER_ROLE and mint tokens
@@ -270,7 +273,33 @@ just set-supply-cap <token-address> 1000000000000
 
 ### Enable a Token on the Zone
 
-To deposit a custom token into the zone, it must be enabled on the ZonePortal. Currently the portal enables pathUSD by default. For custom tokens, the token must exist on L1 and the portal must recognise it.
+To deposit a custom token into the zone, it must be enabled on the ZonePortal. Currently the portal enables pathUSD by default. For custom tokens, the token must exist on L1 and the portal must recognise it. Only the sequencer can enable tokens.
+
+```bash
+# Enable a token by address (requires SEQUENCER_KEY, L1_RPC_URL, L1_PORTAL_ADDRESS)
+export SEQUENCER_KEY="0x<your-sequencer-key>"
+export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
+just enable-token <token-address>
+
+# Well-known aliases also work
+just enable-token pathusd
+just enable-token alphausd
+```
+
+If `ZONE_RPC_URL` is set (defaults to `http://localhost:8546`), the command waits for the zone to process the L1 block and confirms the token is available on L2.
+
+Once the token is enabled, approve the portal and deposit as usual — just pass the token address:
+
+```bash
+# Approve the portal to spend the custom token
+just max-approve-portal <token-address>
+
+# Deposit the custom token into the zone
+just send-deposit 1000000 "" <token-address>
+
+# Check balance on the zone (pass the token address)
+just check-balance "$ADDR" <token-address>
+```
 
 ### Blacklist a Sender
 
@@ -310,7 +339,7 @@ just check-authorized 2 0x<address-to-block>
 | `just set-transfer-policy <token> <policy-id>` | Assign a transfer policy to a token |
 | `just check-authorized <policy-id> <account>` | Check if an address is authorized |
 | `just token-policy <token>` | Read a token's current transfer policy ID |
-| `just create-token <name> <symbol>` | Create a new TIP-20 token on L1 |
+| `just create-token <name> <symbol> [salt]` | Create a new TIP-20 token on L1 |
 | `just mint-tokens <token> [to] [amount]` | Mint tokens (requires ISSUER_ROLE) |
 | `just grant-issuer-role <token> [to]` | Grant ISSUER_ROLE on a token |
 | `just set-supply-cap <token> [cap]` | Set a token's supply cap |
@@ -379,6 +408,7 @@ graph TB
 | `just max-approve-portal` | Approve portal to spend tokens on L1 |
 | `just send-deposit [to]` | Deposit tokens from L1 to zone (defaults to sender) |
 | `just send-deposit-encrypted [to]` | Encrypted deposit — hides recipient and memo on-chain |
+| `just enable-token <token>` | Enable a TIP-20 token on the portal for bridging (sequencer only) |
 | `just max-approve-outbox` | Approve outbox to spend tokens on zone |
 | `just send-withdrawal [to]` | Withdraw tokens from zone to L1 (defaults to sender) |
 | `just check-balance <addr>` | Check token balance on the zone |

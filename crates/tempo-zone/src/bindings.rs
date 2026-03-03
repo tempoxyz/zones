@@ -67,7 +67,10 @@ pub async fn enabled_tokens(
     let count: u64 = portal.enabledTokenCount().call().await?.try_into()?;
     let mut tokens = Vec::with_capacity(count as usize);
     for i in 0..count {
-        let token = portal.enabledTokenAt(alloy_primitives::U256::from(i)).call().await?;
+        let token = portal
+            .enabledTokenAt(alloy_primitives::U256::from(i))
+            .call()
+            .await?;
         tokens.push(token);
     }
     Ok(tokens)
