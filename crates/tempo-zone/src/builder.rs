@@ -125,11 +125,7 @@ where
             "TempoState current state"
         );
 
-        let prepared = attributes.l1_block().ok_or_else(|| {
-            PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                "missing prepared L1 block in payload attributes",
-            ))
-        })?;
+        let prepared = attributes.l1_block();
 
         // Validate chain continuity: the L1 block must be exactly tempoBlockNumber + 1
         // and its parent hash must match the stored tempoBlockHash.

@@ -17,15 +17,15 @@ use serde::{Deserialize, Serialize};
 use tempo_payload_types::TempoExecutionData;
 use tempo_primitives::{Block, TempoPrimitives};
 
-use crate::l1::L1BlockDeposits;
+use crate::l1::PreparedL1Block;
 
 /// Zone RPC payload attributes — the type that flows through FCU.
 ///
 /// Carries standard Ethereum attributes, a millisecond timestamp portion, and
-/// optionally the L1 block whose deposits should be included in this zone
-/// block. The L1 data is set by the [`ZoneEngine`](crate::ZoneEngine) before
-/// sending FCU and is skipped during (de)serialisation since it only travels
-/// through in-process channels.
+/// the prepared L1 block whose deposits should be included in this zone block.
+/// The L1 data is set by the [`ZoneEngine`](crate::ZoneEngine) before sending
+/// FCU and is skipped during (de)serialisation since it only travels through
+/// in-process channels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ZonePayloadAttributes {
     /// Standard Ethereum payload attributes.
@@ -34,9 +34,10 @@ pub struct ZonePayloadAttributes {
     /// Milliseconds portion of the timestamp (0–999).
     pub timestamp_millis_part: u64,
 
-    /// L1 block to process in this zone block. Every zone block processes
-    /// exactly one L1 block via `advanceTempo`.
-    pub l1_block: L1BlockDeposits,
+    /// Prepared L1 block to process in this zone block. Every zone block
+    /// processes exactly one L1 block via `advanceTempo`. Decryption and
+    /// TIP-403 policy checks have already been performed by the engine.
+    pub l1_block: PreparedL1Block,
 }
 
 impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
@@ -57,17 +58,18 @@ impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
 /// data and the millisecond timestamp portion.
 ///
 /// The `l1_block` is mandatory: every zone block processes exactly one L1
-/// block via `advanceTempo`.
+/// block via `advanceTempo`. Decryption and TIP-403 policy checks have
+/// already been performed by the engine.
 #[derive(Debug, Clone)]
 pub struct ZonePayloadBuilderAttributes {
     inner: EthPayloadBuilderAttributes,
     timestamp_millis_part: u64,
-    l1_block: L1BlockDeposits,
+    l1_block: PreparedL1Block,
 }
 
 impl ZonePayloadBuilderAttributes {
-    /// Returns a reference to the L1 block data.
-    pub fn l1_block(&self) -> &L1BlockDeposits {
+    /// Returns a reference to the prepared L1 block data.
+    pub fn l1_block(&self) -> &PreparedL1Block {
         &self.l1_block
     }
 

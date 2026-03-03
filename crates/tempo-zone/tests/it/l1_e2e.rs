@@ -681,44 +681,82 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     }
 
     // --- Step 6: Make an encrypted deposit targeting the blacklisted recipient ---
-    let mut depositor = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
+    let depositor = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
     let deposit_amount: u128 = 1_000_000;
     l1.fund_user(depositor.address(), deposit_amount).await?;
 
-    // The encrypted deposit targets `blacklisted_recipient`, but the builder should
-    // redirect it to the sender (depositor) because the recipient is blacklisted.
-    depositor
-        .deposit_encrypted(
-            deposit_amount,
+    // Make the encrypted deposit on L1 targeting the blacklisted recipient.
+    // We don't use `deposit_encrypted` because it waits for the recipient's
+    // balance to increase — which never happens since the deposit gets
+    // redirected to the sender. Instead, call the portal directly and wait
+    // for the sender's balance.
+    {
+        use tempo_contracts::precompiles::ITIP20;
+        use zone::precompiles::ecies;
+
+        let portal = zone::abi::ZonePortal::new(portal_address, depositor.l1_provider());
+
+        ITIP20::new(PATH_USD_ADDRESS, depositor.l1_provider())
+            .approve(portal_address, U256::MAX)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+
+        // Read sequencer encryption key from portal
+        let key_result = portal.sequencerEncryptionKey().call().await?;
+        let key_count = portal.encryptionKeyCount().call().await?;
+        eyre::ensure!(key_count > U256::ZERO, "no encryption key registered");
+        let key_index = key_count - U256::from(1);
+
+        let enc = ecies::encrypt_deposit(
+            &key_result.x,
+            key_result.yParity,
             blacklisted_recipient,
             B256::ZERO,
-            Duration::from_secs(45),
-            &zone,
+            portal_address,
+            key_index,
         )
-        .await
-        .ok(); // May fail if refund goes to sender instead of recipient
+        .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
 
-    // Wait a bit for processing
-    tokio::time::sleep(Duration::from_secs(5)).await;
+        let receipt = portal
+            .depositEncrypted(
+                PATH_USD_ADDRESS,
+                deposit_amount,
+                key_index,
+                zone::abi::EncryptedDepositPayload {
+                    ephemeralPubkeyX: enc.eph_pub_x,
+                    ephemeralPubkeyYParity: enc.eph_pub_y_parity,
+                    ciphertext: enc.ciphertext.into(),
+                    nonce: alloy_primitives::FixedBytes(enc.nonce),
+                    tag: alloy_primitives::FixedBytes(enc.tag),
+                },
+            )
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "L1 depositEncrypted tx failed");
+    }
+
+    // Wait for the refund to arrive at the sender (not the blacklisted recipient).
+    zone.wait_for_balance(
+        ZONE_TOKEN_ADDRESS,
+        depositor.address(),
+        U256::from(deposit_amount),
+        L1_TIMEOUT,
+    )
+    .await?;
 
     // The blacklisted recipient should NOT have received the deposit
     let recipient_balance = zone
         .balance_of(ZONE_TOKEN_ADDRESS, blacklisted_recipient)
         .await?;
 
-    // The depositor (sender) should have received the refund instead
-    let sender_balance = zone
-        .balance_of(ZONE_TOKEN_ADDRESS, depositor.address())
-        .await?;
-
     assert_eq!(
         recipient_balance,
         U256::ZERO,
         "Blacklisted recipient should not have received the deposit"
-    );
-    assert!(
-        sender_balance >= U256::from(deposit_amount),
-        "Sender should have received the refund (balance: {sender_balance})"
     );
 
     Ok(())
@@ -872,3 +910,4 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
 
     Ok(())
 }
+

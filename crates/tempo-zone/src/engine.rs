@@ -241,7 +241,7 @@ impl ZoneEngine {
                     .then_some(B256::ZERO),
             },
             timestamp_millis_part,
-            l1_block: Some(l1_block),
+            l1_block,
         };
 
         // Send FCU with payload attributes through the engine API to trigger
@@ -286,6 +286,12 @@ impl ZoneEngine {
         if self.deposit_queue.confirm(l1_num_hash).is_none() {
             warn!(target: "zone::engine", ?l1_num_hash, "L1 block was purged from queue during build");
         }
+
+        // GC stale versioned entries from the policy cache. Only the engine
+        // drives this — the listener must not advance past blocks the engine
+        // hasn't processed yet, otherwise policy lookups for in-flight blocks
+        // could return wrong results.
+        self.policy_provider.cache().advance(l1_num_hash.number);
 
         self.last_header = header;
 

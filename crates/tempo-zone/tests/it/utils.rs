@@ -1519,6 +1519,11 @@ impl ZoneAccount {
         self.address
     }
 
+    /// The account's L1 provider.
+    pub(crate) fn l1_provider(&self) -> &alloy_provider::DynProvider {
+        &self.l1_provider
+    }
+
     /// Approve the ZonePortal to spend pathUSD on L1, then deposit.
     ///
     /// Skips approval if already approved in this session.

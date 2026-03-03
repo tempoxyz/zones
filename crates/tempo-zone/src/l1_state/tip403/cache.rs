@@ -45,6 +45,7 @@ use std::{
     sync::Arc,
 };
 use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
+use tracing::info;
 
 use crate::l1_state::versioned::HeightVersioned;
 
@@ -242,10 +243,6 @@ impl PolicyCache {
     pub fn apply_events(&mut self, block_number: u64, events: &[PolicyEvent]) {
         self.last_l1_block = self.last_l1_block.max(block_number);
 
-        // GC old versioned entries — everything before the current block is
-        // stale since we only ever query at `last_l1_block` or later.
-        self.advance(block_number);
-
         for event in events {
             match event {
                 PolicyEvent::MembershipChanged {
@@ -303,6 +300,13 @@ impl PolicyCache {
 
     /// Advance the baseline to `new_height` for all tracked entries.
     pub fn advance(&mut self, new_height: u64) {
+        info!(
+            target: "zone::policy",
+            new_height,
+            tokens = self.tokens.len(),
+            policies = self.policies.len(),
+            "Advancing policy cache baseline"
+        );
         for v in self.tokens.values_mut() {
             v.advance(new_height);
         }
@@ -327,6 +331,15 @@ impl SharedPolicyCache {
     /// target the correct block before the listener has processed any events.
     pub fn set_last_l1_block(&self, block_number: u64) {
         self.write().set_last_l1_block(block_number);
+    }
+
+    /// Collapse versioned entries up to `block_number`.
+    ///
+    /// Called by the engine after successfully processing an L1 block. Only the
+    /// engine should drive this — the listener must not advance past blocks the
+    /// engine hasn't consumed yet.
+    pub fn advance(&self, block_number: u64) {
+        self.write().advance(block_number);
     }
 }
 
