@@ -157,12 +157,17 @@ impl DemoBlacklist {
             .wallet(wallet)
             .connect(&http_rpc)
             .await?;
+        l1.client()
+            .set_poll_interval(std::time::Duration::from_millis(250));
 
         // Separate provider for sequencer-only operations (enableToken)
         let l1_seq = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(seq_wallet)
             .connect(&http_rpc)
             .await?;
+        l1_seq
+            .client()
+            .set_poll_interval(std::time::Duration::from_millis(250));
 
         let l2 = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect(&self.zone_rpc_url)
