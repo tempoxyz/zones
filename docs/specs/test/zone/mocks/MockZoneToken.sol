@@ -17,6 +17,9 @@ contract MockZoneToken is IZoneToken {
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
 
+    /// @notice Transfer policy ID (1 = always-allow, matches TIP-20 default)
+    uint64 public transferPolicyId = 1;
+
     /// @notice Addresses authorized to mint (ZoneInbox)
     mapping(address => bool) public minters;
 

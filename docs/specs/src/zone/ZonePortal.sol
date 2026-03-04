@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITIP20 } from "../interfaces/ITIP20.sol";
 import { TIP403Registry } from "../TIP403Registry.sol";
+import { ITIP20 } from "../interfaces/ITIP20.sol";
 
 import { TempoUtilities } from "../TempoUtilities.sol";
 import { getBlockHash } from "./BlockHashHistory.sol";
