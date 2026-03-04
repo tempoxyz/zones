@@ -4,12 +4,14 @@
 //! Events are decoded into [`PolicyEvent`]s and applied to the cache in a single batch
 //! so the zone can evaluate transfer authorization without per-call RPC round-trips.
 
-use super::{PolicyEvent, SharedPolicyCache};
+use super::{PolicyEvent, SharedPolicyCache, metrics::Tip403Metrics};
+use alloy_consensus::BlockHeader as _;
 use alloy_primitives::Address;
-use alloy_provider::{Provider, ProviderBuilder, WsConnect};
+use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::{Filter, Log};
 use alloy_sol_types::{SolEvent, SolEventInterface};
 use futures::StreamExt;
+use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
     ITIP20::TransferPolicyUpdate,
     ITIP403Registry::{
@@ -25,8 +27,8 @@ use crate::bindings::ZonePortal::TokenEnabled;
 /// Configuration for the policy listener.
 #[derive(Debug, Clone)]
 pub struct PolicyListenerConfig {
-    /// WebSocket URL of the L1 node.
-    pub l1_ws_url: String,
+    /// Pre-connected L1 provider for subscriptions and RPC calls.
+    pub l1_provider: DynProvider<TempoNetwork>,
     /// ZonePortal contract address on L1, monitored for `TokenEnabled` events.
     pub portal_address: Address,
     /// Token addresses to monitor for transfer policy changes.
@@ -35,43 +37,51 @@ pub struct PolicyListenerConfig {
 }
 
 /// Listener that watches L1 for TIP-403 policy events and updates the policy cache.
+///
+/// Subscribes to L1 block headers and, for each new block, fetches events from three sources:
+/// `ZonePortal::TokenEnabled` (to discover newly bridged tokens),
+/// `TIP403Registry::{BlacklistUpdated, WhitelistUpdated, PolicyCreated, CompoundPolicyCreated}`
+/// (policy metadata and membership), and `TIP20::TransferPolicyUpdate` on every tracked token
+/// (token-to-policy mapping changes).
+///
+/// `tracked_tokens` grows dynamically: whenever a `TokenEnabled` event is seen the new token
+/// address is appended so its `TransferPolicyUpdate` events are monitored from that point on.
+///
+/// `last_l1_block` on the cache is advanced after every block, even when no events are found,
+/// so downstream consumers know how far the cache has caught up.
+///
+/// Intended to be spawned via [`spawn_policy_listener`] as a critical task that automatically
+/// reconnects on WebSocket failure.
 pub struct PolicyListener {
     cache: SharedPolicyCache,
     config: PolicyListenerConfig,
+    metrics: Tip403Metrics,
 }
 
 impl PolicyListener {
     pub fn new(cache: SharedPolicyCache, config: PolicyListenerConfig) -> Self {
-        Self { cache, config }
+        Self {
+            cache,
+            config,
+            metrics: Tip403Metrics::default(),
+        }
     }
 
-    /// Connect to the L1 node via WebSocket and subscribe to new block headers.
-    ///
-    /// On each new block, TIP-403 policy events are fetched and applied to the cache.
-    /// On first connect, seeds the cache with the current `transferPolicyId` for each
-    /// tracked token so the cache is warm even if no `TransferPolicyUpdate` event has
-    /// ever been emitted.
+    /// Subscribe to L1 block headers and process policy events for each new block.
     pub async fn run(&mut self) -> eyre::Result<()> {
-        info!(url = %self.config.l1_ws_url, "Connecting to L1 for policy listener");
-
-        let ws = WsConnect::new(&self.config.l1_ws_url);
-        let provider = ProviderBuilder::new().connect_ws(ws).await?;
-
-        info!("Policy listener connected, seeding token policies");
-
-        // Seed the cache with the current transferPolicyId for each tracked token.
-        // Without this, tokens that have never had a TransferPolicyUpdate event
-        // (i.e. still using the default policy) would show tokens=0 in the cache.
-        self.seed_token_policies(&provider).await?;
-
-        let mut stream = provider.subscribe_blocks().await?.into_stream();
+        let mut stream = self
+            .config
+            .l1_provider
+            .subscribe_blocks()
+            .await?
+            .into_stream();
 
         info!("Subscribed to L1 block headers for policy events");
 
         while let Some(header) = stream.next().await {
-            let block_number = header.number;
+            let block_number = header.inner.number();
 
-            if let Err(e) = self.process_block(&provider, block_number).await {
+            if let Err(e) = self.process_block(block_number).await {
                 warn!(block_number, error = %e, "Failed to process policy events for block");
             }
         }
@@ -93,11 +103,9 @@ impl PolicyListener {
     ///
     /// Even when no events are found, the cache's block tracker is advanced so the
     /// resolution task queries L1 at a recent height.
-    async fn process_block(
-        &mut self,
-        provider: &impl Provider,
-        block_number: u64,
-    ) -> eyre::Result<()> {
+    async fn process_block(&mut self, block_number: u64) -> eyre::Result<()> {
+        let provider = &self.config.l1_provider;
+
         // Fetch TokenEnabled events from the portal contract.
         let portal_filter = Filter::new()
             .address(self.config.portal_address)
@@ -108,16 +116,26 @@ impl PolicyListener {
 
         // Process portal logs first so newly enabled tokens are immediately tracked.
         for log in &portal_logs {
-            if let Ok(decoded) = TokenEnabled::decode_log(&log.inner) {
-                let token = decoded.data.token;
-                if !self.config.tracked_tokens.contains(&token) {
-                    info!(
-                        %token,
-                        name = decoded.data.name,
-                        symbol = decoded.data.symbol,
-                        "New token enabled on portal, adding to tracked tokens"
+            match TokenEnabled::decode_log(&log.inner) {
+                Ok(decoded) => {
+                    let token = decoded.data.token;
+                    if !self.config.tracked_tokens.contains(&token) {
+                        info!(
+                            %token,
+                            name = decoded.data.name,
+                            symbol = decoded.data.symbol,
+                            "New token enabled on portal, adding to tracked tokens"
+                        );
+                        self.config.tracked_tokens.push(token);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        block_number,
+                        address = %log.address(),
+                        error = %e,
+                        "Failed to decode TokenEnabled event from portal"
                     );
-                    self.config.tracked_tokens.push(token);
                 }
             }
         }
@@ -158,59 +176,90 @@ impl PolicyListener {
             )
             .collect();
 
-        if !events.is_empty() {
-            debug!(block_number, count = events.len(), "Applying policy events");
+        let event_count = events.len();
+        if event_count > 0 {
+            debug!(block_number, count = event_count, "Applying policy events");
         }
 
         // Always call apply_events to advance the block tracker, even when empty.
-        self.cache.write().apply_events(block_number, &events);
+        {
+            let mut cache = self.cache.write();
+            cache.apply_events(block_number, &events);
+            self.metrics
+                .cached_policies
+                .set(cache.policies().len() as f64);
+            self.metrics
+                .cached_token_policies
+                .set(cache.num_token_policies() as f64);
+        }
 
-        Ok(())
-    }
-
-    /// Query the current `transferPolicyId` for each tracked token and seed it
-    /// into the cache. This ensures the cache knows about tokens that have never
-    /// had a `TransferPolicyUpdate` event (i.e. still using the default policy).
-    async fn seed_token_policies(&self, provider: &impl Provider) -> eyre::Result<()> {
-        use tempo_contracts::precompiles::ITIP20;
-
-        let block_number = self.cache.last_l1_block();
-
-        let futs: Vec<_> = self
-            .config
-            .tracked_tokens
-            .iter()
-            .map(|token| {
-                let tip20 = ITIP20::new(*token, provider);
-                async move {
-                    let policy_id = tip20
-                        .transferPolicyId()
-                        .block(alloy_rpc_types_eth::BlockId::number(block_number))
-                        .call()
-                        .await
-                        .map_err(|e| {
-                            eyre::eyre!("transferPolicyId RPC failed for token {token}: {e}")
-                        })?;
-                    Ok::<_, eyre::Report>((*token, policy_id))
-                }
-            })
-            .collect();
-
-        let results = futures::future::try_join_all(futs).await?;
-
-        let mut cache = self.cache.write();
-        for (token, policy_id) in &results {
-            info!(
-                %token,
-                policy_id,
-                block_number,
-                "Seeded token policy from L1"
-            );
-            cache.set_token_policy(*token, block_number, *policy_id);
+        if event_count > 0 {
+            self.metrics
+                .listener_events_applied
+                .increment(event_count as u64);
         }
 
         Ok(())
     }
+}
+
+/// Query the current `transferPolicyId` for each tracked token and seed it
+/// into the cache. This ensures the cache knows about tokens that have never
+/// had a `TransferPolicyUpdate` event (i.e. still using the default policy).
+///
+/// Individual token failures are logged and skipped so one failing token
+/// does not prevent the rest from being seeded.
+pub async fn seed_token_policies(
+    cache: &SharedPolicyCache,
+    portal_address: Address,
+    tracked_tokens: &[Address],
+    provider: &DynProvider<TempoNetwork>,
+) -> eyre::Result<()> {
+    use tempo_contracts::precompiles::ITIP20;
+
+    let block_number = cache.last_l1_block();
+
+    let futs: Vec<_> = tracked_tokens
+        .iter()
+        .map(|token| {
+            let tip20 = ITIP20::new(*token, provider);
+            async move {
+                let result = tip20
+                    .transferPolicyId()
+                    .block(alloy_rpc_types_eth::BlockId::number(block_number))
+                    .call()
+                    .await;
+                (*token, result)
+            }
+        })
+        .collect();
+
+    let results = futures::future::join_all(futs).await;
+
+    let mut w = cache.write();
+    for (token, result) in results {
+        match result {
+            Ok(policy_id) => {
+                info!(
+                    %token,
+                    policy_id,
+                    block_number,
+                    "Seeded token policy from L1"
+                );
+                w.set_token_policy(token, block_number, policy_id);
+            }
+            Err(e) => {
+                warn!(
+                    %token,
+                    %portal_address,
+                    error = %e,
+                    "Failed to seed transferPolicyId, skipping token"
+                );
+            }
+        }
+    }
+
+    Ok(())
 }
 
 /// Decode a single TIP-403 registry log into a [`PolicyEvent`], if applicable.

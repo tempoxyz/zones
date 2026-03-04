@@ -9,9 +9,6 @@ use reth_metrics::{
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tip403")]
 pub struct Tip403Metrics {
-    /// Number of unique addresses tracked across all policy membership sets.
-    pub tracked_accounts: Gauge,
-
     /// Number of cached policy records.
     pub cached_policies: Gauge,
 

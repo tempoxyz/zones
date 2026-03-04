@@ -344,6 +344,34 @@ just check-authorized 2 0x<address-to-block>
 | `just grant-issuer-role <token> [to]` | Grant ISSUER_ROLE on a token |
 | `just set-supply-cap <token> [cap]` | Set a token's supply cap |
 
+### Blacklist Demo (End-to-End)
+
+`just demo-blacklist` runs a self-contained scenario that exercises the full TIP-20 + TIP-403 lifecycle in a single command. It creates a fresh token, deposits into the zone, blacklists an address, proves that encrypted deposits to that address bounce, unblacklists the address, proves deposits now succeed, and withdraws back to L1.
+
+This is useful for verifying that transfer-policy enforcement works end-to-end across L1 and L2, or for demoing the blacklist feature to others.
+
+```bash
+export PRIVATE_KEY="0x<your-wallet-private-key>"
+export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
+
+just demo-blacklist              # default deposit amount = 500,000
+just demo-blacklist 1000000      # custom deposit amount
+```
+
+The demo walks through 9 steps, printing every transaction with an explorer link:
+
+1. **Create token** — deploys a fresh TIP-20 "DemoUSD" via `TIP20Factory` (random salt each run)
+2. **Configure token** — sets supply cap, grants `ISSUER_ROLE`, mints tokens, approves portal
+3. **Enable on zone** — sequencer calls `enableToken` on the portal (auto-reads sequencer key from `zone.json`)
+4. **Deposit** — plain deposit so admin has L2 funds
+5. **Blacklist** — creates a TIP-403 blacklist policy, adds a fresh target wallet, assigns the policy to the token
+6. **Encrypted deposit → bounce** — sends an encrypted deposit to the blacklisted target; zone rejects it and returns funds to sender
+7. **Unblacklist** — removes the target from the blacklist on L1
+8. **Encrypted deposit → success** — same encrypted deposit now goes through
+9. **Withdraw** — target withdraws tokens from zone back to L1
+
+Prerequisites: a running zone with the sequencer producing blocks, and the admin wallet funded with pathUSD on L1 (the demo deposits a small amount to the target for L2 gas fees).
+
 ## Architecture
 
 ```mermaid
@@ -415,3 +443,4 @@ graph TB
 | `just zone-auth-token <name>` | Generate a signed private RPC auth token (10 min TTL) |
 | `just check-balance-private <name>` | Check balance via the private RPC (auto-generates auth token) |
 | `just zone-info <id-or-portal>` | Fetch zone metadata from ZoneFactory |
+| `just demo-blacklist [amount]` | End-to-end TIP-20 + TIP-403 blacklist lifecycle demo |

@@ -10,7 +10,7 @@
 //! submit pre-fetch requests for sender/recipient addresses as transactions arrive.
 
 use alloy_primitives::Address;
-use alloy_provider::{DynProvider, Provider as _};
+use alloy_provider::DynProvider;
 use futures::{FutureExt, StreamExt, stream::FuturesUnordered};
 use tempo_alloy::TempoNetwork;
 use tokio::sync::mpsc;
@@ -195,7 +195,7 @@ impl PolicyTaskHandle {
 /// Returns a [`PolicyTaskHandle`] for sending pre-fetch requests.
 pub fn spawn_policy_resolution_task(
     cache: SharedPolicyCache,
-    l1_rpc_url: String,
+    l1_provider: DynProvider<TempoNetwork>,
     max_concurrent: usize,
     channel_capacity: usize,
     task_executor: impl reth_ethereum::tasks::TaskSpawner,
@@ -206,18 +206,6 @@ pub fn spawn_policy_resolution_task(
     task_executor.spawn_critical(
         "l1-policy-resolution",
         Box::pin(async move {
-            let l1_provider =
-                match alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-                    .connect(&l1_rpc_url)
-                    .await
-                {
-                    Ok(p) => p.erased(),
-                    Err(e) => {
-                        warn!(error = %e, "Failed to connect L1 provider for policy resolution task");
-                        return;
-                    }
-                };
-
             let task = PolicyResolutionTask {
                 provider: PolicyProvider::new(
                     cache,

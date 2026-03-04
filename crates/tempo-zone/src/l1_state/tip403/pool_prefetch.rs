@@ -26,8 +26,9 @@ use super::{AuthRole, task::PolicyTaskHandle};
 ///    may specify a different fee token or delegate fee payment to another address.
 /// 2. **Transfer sender** — for TIP-20 payment transactions, the sender is resolved
 ///    against the transfer token if it differs from the fee token.
-/// 3. **Transfer recipient** — for `transfer` and `transferWithMemo` calls, the
-///    `to` address is decoded from calldata and resolved as `AuthRole::Recipient`.
+/// 3. **Transfer recipient** — for `transfer`, `transferWithMemo`, `transferFrom`,
+///    and `transferFromWithMemo` calls, the `to` address is decoded from calldata
+///    and resolved as `AuthRole::Recipient`.
 ///
 /// The resolution task fetches the latest L1 block number for each request,
 /// so callers don't need to track block heights.
@@ -83,19 +84,37 @@ where
                 let _ = handle.send_resolve_policy(token, sender, AuthRole::Sender);
             }
 
-            // If this is a transfer call, also pre-fetch for the recipient
-            if tx.transaction.function_selector() == Some(&ITIP20::transferCall::SELECTOR.into())
+            // Pre-fetch recipient authorization for all transfer variants
+            let recipient = if tx.transaction.function_selector()
+                == Some(&ITIP20::transferCall::SELECTOR.into())
                 && let Ok(call) = ITIP20::transferCall::abi_decode_raw(&tx.transaction.input()[4..])
             {
-                debug!(%token, recipient = %call.to, "Pre-fetching TIP-403 recipient authorization");
-                let _ = handle.send_resolve_policy(token, call.to, AuthRole::Recipient);
+                Some(call.to)
             } else if tx.transaction.function_selector()
                 == Some(&ITIP20::transferWithMemoCall::SELECTOR.into())
                 && let Ok(call) =
                     ITIP20::transferWithMemoCall::abi_decode_raw(&tx.transaction.input()[4..])
             {
-                debug!(%token, recipient = %call.to, "Pre-fetching TIP-403 recipient authorization");
-                let _ = handle.send_resolve_policy(token, call.to, AuthRole::Recipient);
+                Some(call.to)
+            } else if tx.transaction.function_selector()
+                == Some(&ITIP20::transferFromCall::SELECTOR.into())
+                && let Ok(call) =
+                    ITIP20::transferFromCall::abi_decode_raw(&tx.transaction.input()[4..])
+            {
+                Some(call.to)
+            } else if tx.transaction.function_selector()
+                == Some(&ITIP20::transferFromWithMemoCall::SELECTOR.into())
+                && let Ok(call) =
+                    ITIP20::transferFromWithMemoCall::abi_decode_raw(&tx.transaction.input()[4..])
+            {
+                Some(call.to)
+            } else {
+                None
+            };
+
+            if let Some(to) = recipient {
+                debug!(%token, recipient = %to, "Pre-fetching TIP-403 recipient authorization");
+                let _ = handle.send_resolve_policy(token, to, AuthRole::Recipient);
             }
         }
     }

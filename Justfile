@@ -655,6 +655,11 @@ deploy-zone name:
                       --log.file.directory "$DATADIR/logs" \
                       --sequencer-key "$SEQUENCER_KEY"
 
+[group('zone')]
+[doc('Runs the full TIP-20 + TIP-403 blacklist demo: creates token, enables on zone, blacklists address, shows deposit bounce, unblacklists, shows deposit success, withdraws. Requires PRIVATE_KEY (sequencer key) and L1_PORTAL_ADDRESS env vars.')]
+demo-blacklist amount="500000" rpc=zone_rpc:
+    cargo run -p tempo-xtask -- demo-blacklist --zone-rpc-url {{rpc}} --amount {{amount}}
+
 # Docs commands
 [group('docs')]
 [doc('Install docs dependencies')]

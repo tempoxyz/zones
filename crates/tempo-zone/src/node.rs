@@ -29,7 +29,7 @@ use reth_provider::ChainSpecProvider;
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
-use reth_storage_api::{EmptyBodyStorage, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
 use std::{default::Default, sync::Arc};
 use tempo_alloy::TempoNetwork;
@@ -44,7 +44,7 @@ use tempo_transaction_pool::{
     amm::AmmLiquidityCache,
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use alloy_provider::Provider as _;
 
@@ -344,25 +344,38 @@ where
         );
         info!(target: "reth::cli", "L1 deposit subscriber started as part of node lifecycle");
 
+        // Connect L1 provider upfront so startup failures are immediately visible.
+        let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect(&l1_url)
+            .await?
+            .erased();
+
         // Resolve enabled tokens — use pre-configured list if available, otherwise
         // query L1 via RPC as a fallback.
         let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
-            let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-                .connect(&l1_url)
-                .await?;
             let tokens = crate::bindings::enabled_tokens(portal_address, &l1_provider).await?;
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Discovered enabled tokens from L1");
             tokens
         };
 
+        // Seed the policy cache with current transferPolicyId for each tracked token
+        // before spawning the listener, so errors propagate to the caller.
+        crate::l1_state::seed_token_policies(
+            &self.policy_cache,
+            portal_address,
+            &tracked_tokens,
+            &l1_provider,
+        )
+        .await?;
+        info!(target: "reth::cli", "Seeded token policies from L1");
+
         // Spawn TIP-403 policy listener to keep policy cache in sync with L1
-        let engine_l1_url = l1_url.clone();
         crate::l1_state::spawn_policy_listener(
             crate::l1_state::PolicyListenerConfig {
-                l1_ws_url: l1_url.clone(),
+                l1_provider: l1_provider.clone(),
                 portal_address,
                 tracked_tokens,
             },
@@ -376,7 +389,7 @@ where
         // incoming transactions so the cache is warm by the time we build blocks.
         let policy_task_handle = crate::l1_state::spawn_policy_resolution_task(
             self.policy_cache.clone(),
-            l1_url.clone(),
+            l1_provider.clone(),
             16,  // max concurrent RPC resolutions
             256, // channel capacity
             ctx.node.task_executor().clone(),
@@ -388,54 +401,31 @@ where
         );
         info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");
 
-        // Spawn the ZoneEngine — L1-event-driven block production
-        {
-            let provider = ctx.node.provider().clone();
-            let to_engine = ctx.beacon_engine_handle.clone();
-            let payload_builder = ctx.node.payload_builder_handle().clone();
-            let deposit_queue = self.deposit_queue;
-            let fee_recipient = self.fee_recipient;
-            let sequencer_key = self.sequencer_key;
-            let portal_address = self.portal_address;
-            let l1_url = engine_l1_url;
-            let policy_cache = self.policy_cache;
-
-            ctx.node
-                .task_executor()
-                .spawn_critical("zone-engine", async move {
-                    // Connect to L1 for policy resolution (cache-first, RPC fallback).
-                    let l1_provider =
-                        match alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-                            .connect(&l1_url)
-                            .await
-                        {
-                            Ok(p) => p.erased(),
-                            Err(e) => {
-                                error!(target: "reth::cli", %e, "Failed to connect to L1 for policy provider in ZoneEngine");
-                                return;
-                            }
-                        };
-                    let policy_provider = crate::l1_state::PolicyProvider::new(
-                        policy_cache,
-                        l1_provider,
-                        tokio::runtime::Handle::current(),
-                    );
-
-                    ZoneEngine::new(
-                        provider,
-                        to_engine,
-                        payload_builder,
-                        deposit_queue,
-                        fee_recipient,
-                        sequencer_key,
-                        portal_address,
-                        policy_provider,
-                    )
-                    .run()
-                    .await
-                });
-            info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
-        }
+        // Build and spawn the ZoneEngine — L1-event-driven block production
+        let policy_provider = crate::l1_state::PolicyProvider::new(
+            self.policy_cache,
+            l1_provider,
+            tokio::runtime::Handle::current(),
+        );
+        let provider = ctx.node.provider();
+        let last_header = provider
+            .sealed_header(provider.best_block_number()?)?
+            .ok_or_else(|| eyre::eyre!("no latest block header"))?;
+        let engine = ZoneEngine::new(
+            provider.chain_spec(),
+            ctx.beacon_engine_handle.clone(),
+            ctx.node.payload_builder_handle().clone(),
+            self.deposit_queue,
+            last_header,
+            self.fee_recipient,
+            self.sequencer_key,
+            self.portal_address,
+            policy_provider,
+        );
+        ctx.node
+            .task_executor()
+            .spawn_critical("zone-engine", engine.run());
+        info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
 
         self.inner.launch_add_ons(ctx).await
     }

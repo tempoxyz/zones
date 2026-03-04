@@ -46,8 +46,6 @@ use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{EngineApiMessageVersion, PayloadKind, PayloadTypes};
 use reth_primitives_traits::SealedHeader;
-use reth_provider::ChainSpecProvider;
-use reth_storage_api::BlockReader;
 use std::{sync::Arc, time::Duration};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
@@ -95,22 +93,18 @@ pub struct ZoneEngine {
 
 impl ZoneEngine {
     pub fn new(
-        provider: impl BlockReader<Header = TempoHeader> + ChainSpecProvider<ChainSpec = TempoChainSpec>,
+        chain_spec: Arc<TempoChainSpec>,
         to_engine: ConsensusEngineHandle<ZonePayloadTypes>,
         payload_builder: PayloadBuilderHandle<ZonePayloadTypes>,
         deposit_queue: DepositQueue,
+        last_header: SealedHeader<TempoHeader>,
         fee_recipient: Address,
         sequencer_key: k256::SecretKey,
         portal_address: Address,
         policy_provider: crate::l1_state::PolicyProvider,
     ) -> Self {
-        let last_header = provider
-            .sealed_header(provider.best_block_number().unwrap())
-            .unwrap()
-            .unwrap();
-
         Self {
-            chain_spec: provider.chain_spec(),
+            chain_spec,
             to_engine,
             payload_builder,
             deposit_queue,

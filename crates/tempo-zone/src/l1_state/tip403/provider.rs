@@ -265,18 +265,13 @@ impl PolicyProvider {
             return Ok(policy_id == POLICY_ALLOW_ALL);
         }
 
-        // Check cache first for this sub-policy
+        // Check cache first for this sub-policy.
+        // If the policy type is known but the user's membership was never observed by the
+        // listener, `check_simple` returns `None` and we fall through to RPC.
         {
             let cache = self.cache.read();
-            if let Some(policy) = cache.policies().get(&policy_id)
-                && let Some(policy_type) = policy.policy_type
-            {
-                let in_set = policy.members.is_member(user, block_number);
-                return Ok(match policy_type {
-                    PolicyType::WHITELIST => in_set,
-                    PolicyType::BLACKLIST => !in_set,
-                    _ => eyre::bail!("sub-policy {policy_id} is not simple"),
-                });
+            if let Some(result) = cache.check_simple(policy_id, user, block_number) {
+                return Ok(result);
             }
         }
 

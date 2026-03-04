@@ -100,12 +100,13 @@ async fn test_policy_proxy_whitelist_authorization() -> eyre::Result<()> {
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
 
-    // Populate the cache: policy 5 = WHITELIST, Alice is a member
+    // Populate the cache: policy 5 = WHITELIST, Alice is a member, Bob is not
     {
         let cache = zone.policy_cache();
         let mut w = cache.write();
         w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
         w.set_member(5, alice, 1, true);
+        w.set_member(5, bob, 1, false);
     }
 
     let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, zone.provider());
@@ -149,12 +150,13 @@ async fn test_policy_proxy_blacklist_authorization() -> eyre::Result<()> {
     let alice = address!("0x000000000000000000000000000000000000A11C");
     let bob = address!("0x0000000000000000000000000000000000000B0B");
 
-    // Populate the cache: policy 5 = BLACKLIST, Alice is blacklisted
+    // Populate the cache: policy 5 = BLACKLIST, Alice is blacklisted, Bob is not
     {
         let cache = zone.policy_cache();
         let mut w = cache.write();
         w.set_policy_type(5, ITIP403Registry::PolicyType::BLACKLIST);
         w.set_member(5, alice, 1, true);
+        w.set_member(5, bob, 1, false);
     }
 
     let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, zone.provider());
@@ -313,7 +315,9 @@ async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> 
         let mut w = cache.write();
         w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
         w.set_member(5, alice, 1, true); // Alice whitelisted as sender
+        w.set_member(5, bob, 1, false); // Bob not whitelisted as sender
         w.set_policy_type(6, ITIP403Registry::PolicyType::BLACKLIST);
+        w.set_member(6, alice, 1, false); // Alice not blacklisted as recipient
         w.set_member(6, bob, 1, true); // Bob blacklisted as recipient
         w.set_compound(
             10,

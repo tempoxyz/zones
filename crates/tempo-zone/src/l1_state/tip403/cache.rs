@@ -21,10 +21,10 @@
 //!
 //! ## Default membership
 //!
-//! Users with no recorded membership are treated as "not in set" (`false`), matching the L1
-//! storage default for `policy_set[policyId][user]`. This means:
-//! - **Blacklist**: unknown users are authorized (not restricted) — correct default.
-//! - **Whitelist**: unknown users are not authorized — correct if all additions were observed.
+//! Users with no recorded membership event are treated as "unknown" — cache lookups return
+//! `None` so the caller falls back to RPC. This avoids silent false negatives when the
+//! listener started after a user was added to a whitelist. Users who were explicitly added
+//! or removed are tracked in [`MembershipSet::observed`].
 //!
 //! ## Compound policies (TIP-1015)
 //!
@@ -126,6 +126,11 @@ impl PolicyCache {
         &self.policies
     }
 
+    /// Returns the number of token-to-policy mappings in the cache.
+    pub fn num_token_policies(&self) -> usize {
+        self.tokens.len()
+    }
+
     /// Returns the highest L1 block number processed by the cache.
     ///
     /// Returns `0` if no events have been applied yet.
@@ -188,8 +193,18 @@ impl PolicyCache {
         let policy_type = policy.policy_type?;
 
         match policy_type {
-            PolicyType::WHITELIST => Some(policy.members.is_member(user, block_number)),
-            PolicyType::BLACKLIST => Some(!policy.members.is_member(user, block_number)),
+            PolicyType::WHITELIST => {
+                if !policy.members.membership_known(&user) {
+                    return None;
+                }
+                Some(policy.members.is_member(user, block_number))
+            }
+            PolicyType::BLACKLIST => {
+                if !policy.members.membership_known(&user) {
+                    return None;
+                }
+                Some(!policy.members.is_member(user, block_number))
+            }
             PolicyType::COMPOUND => {
                 let compound = policy.compound.as_ref()?;
                 match role {
@@ -221,7 +236,7 @@ impl PolicyCache {
     ///
     /// Handles builtins and whitelist/blacklist. Returns `None` for compound sub-policies
     /// (compound-of-compound is invalid on L1).
-    fn check_simple(&self, policy_id: u64, user: Address, block_number: u64) -> Option<bool> {
+    pub fn check_simple(&self, policy_id: u64, user: Address, block_number: u64) -> Option<bool> {
         if policy_id < FIRST_USER_POLICY {
             return Some(policy_id == POLICY_ALLOW_ALL);
         }
@@ -230,8 +245,18 @@ impl PolicyCache {
         let policy_type = policy.policy_type?;
 
         match policy_type {
-            PolicyType::WHITELIST => Some(policy.members.is_member(user, block_number)),
-            PolicyType::BLACKLIST => Some(!policy.members.is_member(user, block_number)),
+            PolicyType::WHITELIST => {
+                if !policy.members.membership_known(&user) {
+                    return None;
+                }
+                Some(policy.members.is_member(user, block_number))
+            }
+            PolicyType::BLACKLIST => {
+                if !policy.members.membership_known(&user) {
+                    return None;
+                }
+                Some(!policy.members.is_member(user, block_number))
+            }
             _ => None,
         }
     }
@@ -287,25 +312,31 @@ impl PolicyCache {
         }
     }
 
-    /// Clears all cached policy data and resets the L1 block tracker.
+    /// Clears all cached policy data. `last_l1_block` is preserved because it
+    /// tracks the L1 cursor, not the cache contents — the caller (listener) will
+    /// re-set it when it reprocesses blocks after a reorg.
     pub fn clear(&mut self) {
         self.tokens.clear();
         self.policies.clear();
-        self.last_l1_block = 0;
     }
 
     /// Collapse all history before `min_block` into single baseline entries.
     pub fn flatten(&mut self, min_block: u64) {
-        self.tokens.retain(|_, v| {
+        for v in self.tokens.values_mut() {
             v.flatten(min_block);
-            !v.is_empty()
-        });
+        }
         for policy in self.policies.values_mut() {
             policy.members.flatten(min_block);
         }
     }
 
     /// Advance the baseline to `new_height` for all tracked entries.
+    ///
+    /// Only the engine should call this after successfully processing a block.
+    /// Advancing past unprocessed blocks would fold pending deltas prematurely,
+    /// causing incorrect authorization decisions for in-flight blocks. The
+    /// listener writes events via [`apply_events`](Self::apply_events) but never
+    /// advances the cache.
     pub fn advance(&mut self, new_height: u64) {
         info!(
             target: "zone::policy",
@@ -438,6 +469,9 @@ pub struct MembershipSet {
     baseline_height: u64,
     /// Per-block membership changes above `baseline_height`.
     pending: BTreeMap<u64, Vec<MembershipUpdate>>,
+    /// All addresses for which we've ever recorded a membership event. Survives `advance()` so
+    /// we can distinguish "explicitly not a member" from "never observed by the listener".
+    observed: HashSet<Address>,
 }
 
 impl MembershipSet {
@@ -461,8 +495,17 @@ impl MembershipSet {
         self.baseline.contains(&user)
     }
 
+    /// Returns `true` if we've ever recorded a membership event for `user` (added or removed).
+    ///
+    /// When `false`, the caller should not trust [`is_member`](Self::is_member) returning `false`
+    /// because the user may have been added before the listener started.
+    pub fn membership_known(&self, user: &Address) -> bool {
+        self.observed.contains(user) || self.baseline.contains(user)
+    }
+
     /// Record a membership change at the given block height.
     pub fn set(&mut self, user: Address, block_number: u64, in_set: bool) {
+        self.observed.insert(user);
         let change = MembershipChange::from_in_set(in_set);
         if block_number <= self.baseline_height {
             match change {
@@ -524,6 +567,7 @@ impl MembershipSet {
         self.baseline.clear();
         self.baseline_height = 0;
         self.pending.clear();
+        self.observed.clear();
     }
 }
 
@@ -684,28 +728,28 @@ mod tests {
     }
 
     #[test]
-    fn blacklist_unknown_user_is_authorized() {
+    fn blacklist_unknown_user_returns_none() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 3);
         cache.set_policy_type(3, PolicyType::BLACKLIST);
 
-        // USER_A has no membership data — defaults to "not in set" → authorized for blacklist
+        // USER_A has no membership data — unknown, caller should fall back to RPC
         assert_eq!(
             cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
-            Some(true)
+            None
         );
     }
 
     #[test]
-    fn whitelist_unknown_user_is_not_authorized() {
+    fn whitelist_unknown_user_returns_none() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
         cache.set_policy_type(2, PolicyType::WHITELIST);
 
-        // USER_A has no membership data — defaults to "not in set" → not authorized for whitelist
+        // USER_A has no membership data — unknown, caller should fall back to RPC
         assert_eq!(
             cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
-            Some(false)
+            None
         );
     }
 
@@ -746,14 +790,15 @@ mod tests {
             Some(true)
         );
 
-        // At block 25: policy_id=2 (whitelist), USER_A in set, USER_B not in set
+        // At block 25: policy_id=2 (whitelist), USER_A in set
         assert_eq!(
             cache.is_authorized(TOKEN, USER_A, 25, AuthRole::Transfer),
             Some(true)
         );
+        // USER_B never observed → None (fall back to RPC)
         assert_eq!(
             cache.is_authorized(TOKEN, USER_B, 25, AuthRole::Transfer),
-            Some(false)
+            None
         );
     }
 
@@ -847,14 +892,14 @@ mod tests {
             cache.is_authorized(token2, USER_A, 10, AuthRole::Transfer),
             Some(false)
         );
-        // USER_B not in set → authorized
+        // USER_B never observed → None (fall back to RPC)
         assert_eq!(
             cache.is_authorized(TOKEN, USER_B, 10, AuthRole::Transfer),
-            Some(true)
+            None
         );
         assert_eq!(
             cache.is_authorized(token2, USER_B, 10, AuthRole::Transfer),
-            Some(true)
+            None
         );
     }
 
@@ -904,7 +949,7 @@ mod tests {
     }
 
     #[test]
-    fn flatten_removes_empty_token_entries() {
+    fn flatten_preserves_token_entries() {
         let mut cache = PolicyCache::default();
         let token2: Address = address!("0x20C0000000000000000000000000000000000001");
 
@@ -994,17 +1039,17 @@ mod tests {
         );
         cache.set_token_policy(TOKEN, 10, 5);
 
-        // Neither whitelisted → fails on sender
+        // Neither whitelisted → unknown (USER_A never observed)
         assert_eq!(
             cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
-            Some(false)
+            None
         );
 
-        // Only sender whitelisted → fails on recipient
+        // Only sender whitelisted → fails on recipient (still unknown for recipient sub-policy)
         cache.set_member(2, USER_A, 10, true);
         assert_eq!(
             cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
-            Some(false)
+            None
         );
 
         // Both whitelisted → authorized
@@ -1106,9 +1151,163 @@ mod tests {
             cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
             Some(true)
         );
+        // USER_B never observed → None (fall back to RPC)
         assert_eq!(
             cache.is_authorized(TOKEN, USER_B, 10, AuthRole::Transfer),
+            None
+        );
+    }
+
+    // --- `observed` tracking and `advance` interaction tests ---
+
+    #[test]
+    fn observed_survives_advance() {
+        let mut cache = PolicyCache::default();
+        cache.set_token_policy(TOKEN, 10, 2);
+        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_member(2, USER_A, 10, true);
+
+        // Before advance: known and authorized
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
+            Some(true)
+        );
+
+        // Advance past the membership block — folds pending into baseline
+        cache.advance(20);
+
+        // After advance: still known and still authorized (observed persists)
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_A, 25, AuthRole::Transfer),
+            Some(true)
+        );
+
+        // Unobserved user still returns None after advance
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_B, 25, AuthRole::Transfer),
+            None
+        );
+    }
+
+    #[test]
+    fn observed_survives_advance_for_removed_member() {
+        let mut cache = PolicyCache::default();
+        cache.set_token_policy(TOKEN, 10, 2);
+        cache.set_policy_type(2, PolicyType::WHITELIST);
+
+        // Add then remove USER_A
+        cache.set_member(2, USER_A, 10, true);
+        cache.set_member(2, USER_A, 20, false);
+
+        // Advance past both events
+        cache.advance(25);
+
+        // USER_A was removed but is still "observed" — returns Some(false), not None
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_A, 30, AuthRole::Transfer),
             Some(false)
+        );
+    }
+
+    #[test]
+    fn observed_survives_advance_blacklist() {
+        let mut cache = PolicyCache::default();
+        cache.set_token_policy(TOKEN, 10, 2);
+        cache.set_policy_type(2, PolicyType::BLACKLIST);
+        cache.set_member(2, USER_A, 10, true); // blacklisted
+
+        cache.advance(20);
+
+        // After advance: observed, blacklisted → not authorized
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_A, 25, AuthRole::Transfer),
+            Some(false)
+        );
+
+        // Unobserved user → None (not Some(true) which would be a false positive)
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_B, 25, AuthRole::Transfer),
+            None
+        );
+    }
+
+    #[test]
+    fn clear_resets_observed() {
+        let mut cache = PolicyCache::default();
+        cache.set_token_policy(TOKEN, 10, 2);
+        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_member(2, USER_A, 10, true);
+
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
+            Some(true)
+        );
+
+        cache.clear();
+
+        // After clear, observed is gone — returns None, not Some(false)
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
+            None
+        );
+    }
+
+    #[test]
+    fn membership_known_direct() {
+        let mut set = MembershipSet::default();
+
+        // Fresh set: nobody known
+        assert!(!set.membership_known(&USER_A));
+        assert!(!set.membership_known(&USER_B));
+
+        // Add USER_A
+        set.set(USER_A, 10, true);
+        assert!(set.membership_known(&USER_A));
+        assert!(!set.membership_known(&USER_B));
+
+        // Advance past the event
+        set.advance(20);
+        assert!(
+            set.membership_known(&USER_A),
+            "observed must survive advance"
+        );
+        assert!(!set.membership_known(&USER_B));
+
+        // Clear resets everything
+        set.clear();
+        assert!(!set.membership_known(&USER_A));
+    }
+
+    #[test]
+    fn multiple_advances_preserve_observed() {
+        let mut cache = PolicyCache::default();
+        cache.set_token_policy(TOKEN, 5, 2);
+        cache.set_policy_type(2, PolicyType::WHITELIST);
+
+        // Events at different blocks
+        cache.set_member(2, USER_A, 10, true);
+        cache.set_member(2, USER_B, 20, true);
+
+        // Advance past first event only
+        cache.advance(15);
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_A, 15, AuthRole::Transfer),
+            Some(true)
+        );
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_B, 25, AuthRole::Transfer),
+            Some(true) // still in pending, but observed
+        );
+
+        // Advance past second event
+        cache.advance(25);
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_A, 30, AuthRole::Transfer),
+            Some(true)
+        );
+        assert_eq!(
+            cache.is_authorized(TOKEN, USER_B, 30, AuthRole::Transfer),
+            Some(true)
         );
     }
 
@@ -1118,6 +1317,7 @@ mod tests {
         // Pre-populate simple sub-policies
         cache.set_policy_type(2, PolicyType::BLACKLIST);
         cache.set_policy_type(3, PolicyType::WHITELIST);
+        cache.set_member(2, USER_A, 10, false); // explicitly not blacklisted
         cache.set_member(3, USER_A, 10, true);
 
         let events = vec![
@@ -1135,7 +1335,7 @@ mod tests {
 
         cache.apply_events(10, &events);
 
-        // Sender (blacklist, not in set → authorized), Recipient (whitelist, in set → authorized)
+        // Sender (blacklist, explicitly not in set → authorized), Recipient (whitelist, in set → authorized)
         assert_eq!(
             cache.is_authorized(TOKEN, USER_A, 10, AuthRole::Transfer),
             Some(true)

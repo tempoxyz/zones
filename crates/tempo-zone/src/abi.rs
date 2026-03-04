@@ -170,6 +170,8 @@ sol! {
         error InvalidProof();
         #[derive(Debug)]
         error InvalidTempoBlockNumber();
+        #[derive(Debug)]
+        error DepositPolicyForbids();
 
         // -- View functions --
 
@@ -509,6 +511,7 @@ impl std::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
+            Self::DepositPolicyForbids(_) => f.write_str("DepositPolicyForbids"),
         }
     }
 }

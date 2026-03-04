@@ -2,6 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { ITIP20 } from "../interfaces/ITIP20.sol";
+import { TIP403Registry } from "../TIP403Registry.sol";
 
 import { TempoUtilities } from "../TempoUtilities.sol";
 import { getBlockHash } from "./BlockHashHistory.sol";
@@ -34,6 +35,10 @@ contract ZonePortal is IZonePortal {
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice TIP-403 registry for transfer policy authorization checks
+    TIP403Registry internal constant TIP403_REGISTRY =
+        TIP403Registry(0x403c000000000000000000000000000000000000);
 
     /// @notice Fixed gas value for deposit fee calculation
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
@@ -471,6 +476,17 @@ contract ZonePortal is IZonePortal {
         TokenConfig storage cfg = _tokenConfigs[_token];
         if (!cfg.enabled) revert TokenNotEnabled();
         if (!cfg.depositsActive) revert DepositsNotActive();
+
+        // Enforce TIP-403 policy: the recipient must be authorized under the
+        // token's transfer policy before accepting the deposit.
+        uint64 policyId = ITIP20(_token).transferPolicyId();
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
+            revert DepositPolicyForbids();
+        }
+        // TODO(T2): also check isAuthorizedMintRecipient for compound policies
+        // if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
+        //     revert DepositPolicyForbids();
+        // }
 
         // Calculate deposit fee
         uint128 fee = calculateDepositFee();
