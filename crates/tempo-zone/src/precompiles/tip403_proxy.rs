@@ -283,10 +283,7 @@ impl ZoneTip403ProxyRegistry {
         }
 
         // Cache-first, RPC-fallback — reuse policy type resolution.
-        let exists = match self.provider.resolve_policy_type_sync(call.policyId) {
-            Ok(_) => true,
-            Err(_) => false,
-        };
+        let exists = self.provider.resolve_policy_type_sync(call.policyId).is_ok();
         let encoded = ITIP403Registry::policyExistsCall::abi_encode_returns(&exists);
         Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()))
     }
