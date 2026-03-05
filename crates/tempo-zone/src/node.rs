@@ -79,7 +79,7 @@ pub struct ZoneNode {
     l1_state_listener_config: L1StateListenerConfig,
     /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
     l1_state_cache: SharedL1StateCache,
-    /// Shared TIP-403 policy cache, populated by the [`PolicyListener`](crate::l1_state::PolicyListener)
+    /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](crate::l1::L1Subscriber)
     /// and read by the precompile during block building.
     policy_cache: crate::SharedPolicyCache,
     /// Address of the zone sequencer (fee recipient, authorized block producer).
@@ -117,6 +117,8 @@ impl ZoneNode {
             portal_address,
             genesis_tempo_block_number,
             local_tempo_block_number: 0, // resolved at launch from local state
+            policy_cache: None,          // set later in launch_add_ons
+            tracked_tokens: vec![],      // set later in launch_add_ons
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
@@ -210,13 +212,11 @@ impl NodeTypes for ZoneNode {
 ///
 /// ## Spawned tasks
 ///
-/// - **[`L1Subscriber`](crate::L1Subscriber)** *(critical)* — subscribes to L1 blocks via
-///   WebSocket, extracts deposit and token events from the ZonePortal, and enqueues them
-///   into the [`DepositQueue`](crate::DepositQueue).
-///
-/// - **[`PolicyListener`](crate::l1_state::PolicyListener)** *(critical)* — subscribes to L1
-///   for TIP-403 policy events (membership changes, policy type changes, token policy
-///   assignments) and writes them into the [`SharedPolicyCache`](crate::SharedPolicyCache).
+/// - **[`L1Subscriber`](crate::L1Subscriber)** *(critical)* — unified subscriber that
+///   connects to L1 via WebSocket, extracts both deposit/token events and TIP-403 policy
+///   events from each block's receipts, applies policy events to the
+///   [`SharedPolicyCache`](crate::SharedPolicyCache), and enqueues deposit blocks into the
+///   [`DepositQueue`](crate::DepositQueue).
 ///
 /// - **[`PolicyResolutionTask`](crate::l1_state::PolicyResolutionTask)** *(critical)* —
 ///   receives pre-fetch requests via a channel and resolves them concurrently against L1
@@ -236,8 +236,8 @@ impl NodeTypes for ZoneNode {
 /// ## Shared state
 ///
 /// The [`SharedPolicyCache`](crate::SharedPolicyCache) connects all policy-aware
-/// components: the listener writes L1 events, the resolution task pre-fetches on
-/// cache miss, and the engine's [`PolicyProvider`](crate::PolicyProvider) reads
+/// components: the unified subscriber writes L1 events, the resolution task pre-fetches
+/// on cache miss, and the engine's [`PolicyProvider`](crate::PolicyProvider) reads
 /// during block preparation (cache-first, L1 RPC fallback).
 pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> {
     inner: RpcAddOns<
@@ -254,7 +254,7 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     l1_config: crate::L1SubscriberConfig,
     /// Address that receives zone block fees (the sequencer's fee vault).
     fee_recipient: alloy_primitives::Address,
-    /// Shared TIP-403 policy cache, populated by the [`PolicyListener`](crate::l1_state::PolicyListener)
+    /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](crate::l1::L1Subscriber)
     /// and read by the precompile during block building.
     policy_cache: crate::SharedPolicyCache,
     /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
@@ -332,17 +332,8 @@ where
         self.policy_cache.set_last_l1_block(tempo_block_number);
         info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
 
-        // Capture fields needed after `self.l1_config` is moved into the subscriber.
         let l1_url = self.l1_config.l1_rpc_url.clone();
         let portal_address = self.l1_config.portal_address;
-
-        // Spawn L1 deposit subscriber
-        L1Subscriber::spawn(
-            self.l1_config,
-            self.deposit_queue.clone(),
-            ctx.node.task_executor().clone(),
-        );
-        info!(target: "reth::cli", "L1 deposit subscriber started as part of node lifecycle");
 
         // Connect L1 provider upfront so startup failures are immediately visible.
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -362,7 +353,7 @@ where
         };
 
         // Seed the policy cache with current transferPolicyId for each tracked token
-        // before spawning the listener, so errors propagate to the caller.
+        // before spawning the subscriber, so errors propagate to the caller.
         crate::l1_state::seed_token_policies(
             &self.policy_cache,
             portal_address,
@@ -372,17 +363,17 @@ where
         .await?;
         info!(target: "reth::cli", "Seeded token policies from L1");
 
-        // Spawn TIP-403 policy listener to keep policy cache in sync with L1
-        crate::l1_state::spawn_policy_listener(
-            crate::l1_state::PolicyListenerConfig {
-                l1_provider: l1_provider.clone(),
-                portal_address,
-                tracked_tokens,
-            },
-            self.policy_cache.clone(),
+        // Spawn unified L1 subscriber (deposits + policy events).
+        // The subscriber applies policy events to the cache before enqueuing
+        // blocks.
+        self.l1_config.policy_cache = Some(self.policy_cache.clone());
+        self.l1_config.tracked_tokens = tracked_tokens;
+        L1Subscriber::spawn(
+            self.l1_config,
+            self.deposit_queue.clone(),
             ctx.node.task_executor().clone(),
         );
-        info!(target: "reth::cli", "TIP-403 policy listener started");
+        info!(target: "reth::cli", "Unified L1 subscriber started (deposits + policy events)");
 
         // Spawn policy resolution task for pre-fetching authorization data from L1.
         // The pool prefetch task feeds it with sender/recipient addresses from

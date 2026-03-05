@@ -25,7 +25,7 @@ use super::{
 
 /// Cache-first, RPC-fallback provider for TIP-403 policy authorization.
 ///
-/// Wraps a [`SharedPolicyCache`] (populated by the [`PolicyListener`](super::PolicyListener))
+/// Wraps a [`SharedPolicyCache`] (populated by the [`L1Subscriber`](crate::l1::L1Subscriber))
 /// and an L1 HTTP provider. When the cache cannot resolve an authorization query (e.g. the
 /// policy existed before the listener started), the provider falls back to L1 RPC calls and
 /// caches the result for future lookups.

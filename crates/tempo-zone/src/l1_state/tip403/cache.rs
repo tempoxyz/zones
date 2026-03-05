@@ -263,7 +263,7 @@ impl PolicyCache {
 
     /// Apply a batch of decoded policy events for a single block.
     ///
-    /// This is the primary ingestion path for the [`PolicyListener`](super::PolicyListener).
+    /// This is the primary ingestion path used by [`L1Subscriber`](crate::l1::L1Subscriber).
     /// Events are decoded outside the write lock, then applied here in one batch.
     ///
     /// **NOTE:** When a `TokenPolicyChanged` event points to a policy ID that was created
@@ -388,7 +388,7 @@ impl SharedPolicyCache {
 
 /// A decoded L1 policy event ready to be applied to the cache.
 ///
-/// The [`PolicyListener`](super::PolicyListener) decodes raw logs into these events
+/// The [`L1Subscriber`](crate::l1::L1Subscriber) decodes raw logs into these events
 /// outside the cache write lock, then applies them in batch via
 /// [`PolicyCache::apply_events`].
 #[derive(Debug, Clone)]
