@@ -16,6 +16,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-
     RUSTFLAGS="-C link-arg=-fuse-ld=mold ${EXTRA_RUSTFLAGS}" \
     cargo build --profile ${RUST_PROFILE} \
         --bin tempo --features "asm-keccak,jemalloc,otlp" \
+        --bin tempo-zone \
         --bin tempo-bench \
         --bin tempo-sidecar \
         --bin tempo-xtask
@@ -33,6 +34,12 @@ FROM base AS tempo
 ARG RUST_PROFILE=profiling
 COPY --from=builder /app/target/${RUST_PROFILE}/tempo /usr/local/bin/tempo
 ENTRYPOINT ["/usr/local/bin/tempo"]
+
+# tempo-zone
+FROM base AS tempo-zone
+ARG RUST_PROFILE=profiling
+COPY --from=builder /app/target/${RUST_PROFILE}/tempo-zone /usr/local/bin/tempo-zone
+ENTRYPOINT ["/usr/local/bin/tempo-zone"]
 
 # tempo-sidecar
 FROM base AS tempo-sidecar

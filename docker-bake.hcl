@@ -7,7 +7,7 @@ variable "VERGEN_GIT_SHA_SHORT" {
 }
 
 group "default" {
-  targets = ["tempo", "tempo-bench", "tempo-sidecar", "tempo-xtask"]
+  targets = ["tempo", "tempo-zone", "tempo-bench", "tempo-sidecar", "tempo-xtask"]
 }
 
 target "docker-metadata" {}
@@ -41,6 +41,11 @@ target "_common" {
 target "tempo" {
   inherits = ["_common", "docker-metadata"]
   target = "tempo"
+}
+
+target "tempo-zone" {
+  inherits = ["_common", "docker-metadata"]
+  target = "tempo-zone"
 }
 
 target "tempo-bench" {
