@@ -7,40 +7,13 @@
 use alloy_evm::{
     Database, Evm,
     block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
-    eth::{
-        EthBlockExecutor, EthTxResult,
-        receipt_builder::{ReceiptBuilder, ReceiptBuilderCtx},
-    },
+    eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_revm::{Inspector, State};
 use tempo_chainspec::TempoChainSpec;
-use tempo_evm::{TempoBlockExecutionCtx, evm::TempoEvm};
+use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder, evm::TempoEvm};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::evm::TempoContext;
-
-/// Local receipt builder for zone execution, mirrors the upstream `TempoReceiptBuilder`.
-#[derive(Debug, Clone, Copy, Default)]
-struct ZoneReceiptBuilder;
-
-impl ReceiptBuilder for ZoneReceiptBuilder {
-    type Transaction = TempoTxEnvelope;
-    type Receipt = TempoReceipt;
-
-    fn build_receipt<E: Evm>(&self, ctx: ReceiptBuilderCtx<'_, TempoTxType, E>) -> Self::Receipt {
-        let ReceiptBuilderCtx {
-            tx_type,
-            result,
-            cumulative_gas_used,
-            ..
-        } = ctx;
-        TempoReceipt {
-            tx_type,
-            success: result.is_success(),
-            cumulative_gas_used,
-            logs: result.into_logs(),
-        }
-    }
-}
 
 /// Simplified block executor for zone nodes.
 ///
@@ -51,7 +24,7 @@ pub(crate) struct ZoneBlockExecutor<'a, DB: Database, I> {
         'a,
         TempoEvm<&'a mut State<DB>, I>,
         &'a TempoChainSpec,
-        ZoneReceiptBuilder,
+        TempoReceiptBuilder,
     >,
 }
 
@@ -66,7 +39,12 @@ where
         chain_spec: &'a TempoChainSpec,
     ) -> Self {
         Self {
-            inner: EthBlockExecutor::new(evm, ctx.inner, chain_spec, ZoneReceiptBuilder),
+            inner: EthBlockExecutor::new(
+                evm,
+                ctx.inner,
+                chain_spec,
+                TempoReceiptBuilder::default(),
+            ),
         }
     }
 }
