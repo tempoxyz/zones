@@ -24,7 +24,7 @@ use tempo_precompiles::{
     storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
     tip20::{ITIP20, TIP20Token},
 };
-use tracing::{trace, warn};
+use tracing::{debug, trace};
 
 use super::tip403_proxy::{AUTH_CHECK_GAS, ZoneTip403ProxyRegistry};
 use crate::l1_state::tip403::AuthRole;
@@ -169,11 +169,10 @@ impl ZoneTip20Token {
         let policy_id = match self.resolve_transfer_policy_id(token) {
             Ok(id) => id,
             Err(e) => {
-                // Can't resolve policy (cache miss + RPC unreachable). Fall through
-                // to vanilla TIP20Token which reads transferPolicyId from EVM storage
-                // and checks via the local TIP403Registry. For the default policy (1)
-                // this works without RPC; for custom policies it will also fail.
-                warn!(
+                // Can't resolve policy — token may be uninitialized or RPC
+                // unreachable. Fall through to vanilla TIP20Token which will
+                // handle it (revert for uninitialized, or read from EVM storage).
+                debug!(
                     target: "zone::precompile",
                     %token, error = %e,
                     "failed to resolve transfer_policy_id, deferring to vanilla TIP20"
@@ -212,7 +211,7 @@ impl ZoneTip20Token {
         let policy_id = match self.resolve_transfer_policy_id(token) {
             Ok(id) => id,
             Err(e) => {
-                warn!(
+                debug!(
                     target: "zone::precompile",
                     %token, error = %e,
                     "failed to resolve transfer_policy_id, deferring to vanilla TIP20"

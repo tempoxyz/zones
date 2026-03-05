@@ -301,33 +301,18 @@ impl PolicyProvider {
     }
 
     /// Resolve the `transferPolicyId` for a token — cache first, RPC fallback.
-    ///
-    /// If the L1 call reverts (e.g. token is uninitialized), defaults to
-    /// [`POLICY_ALLOW_ALL`] — matching the on-chain behavior where an unset
-    /// `transferPolicyId` (0) is treated as allow-all.
     async fn resolve_policy_id(&self, token: Address, block_number: u64) -> Result<u64> {
         if let Some(id) = self.cache.read().get_token_policy(token, block_number) {
             return Ok(id);
         }
 
         let tip20 = ITIP20::new(token, &self.provider);
-        let policy_id = match tip20
+        let policy_id = tip20
             .transferPolicyId()
             .block(BlockId::number(block_number))
             .call()
             .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                // Contract reverts (e.g. Uninitialized) mean the token hasn't
-                // set a transfer policy — default to allow-all.
-                debug!(
-                    %token, block_number, error = %e,
-                    "transferPolicyId reverted, defaulting to POLICY_ALLOW_ALL"
-                );
-                POLICY_ALLOW_ALL
-            }
-        };
+            .map_err(|e| eyre::eyre!("transferPolicyId RPC failed for token {token}: {e}"))?;
 
         self.cache
             .write()
