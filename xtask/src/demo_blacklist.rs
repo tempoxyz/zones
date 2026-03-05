@@ -478,8 +478,8 @@ impl DemoBlacklist {
         let bounced = wait_for_encrypted_result(&l2, l2_block_before, admin, Some(target)).await?;
         if bounced {
             println!("  BOUNCED! Deposit to blacklisted address was correctly rejected.");
-            let zone_balance = token.balanceOf(self.portal).call().await?;
-            println!("  Funds returned to zone balance on L1. Portal balance: {zone_balance}");
+            let sender_l2_balance = get_l2_balance(&l2, token_addr, admin).await?;
+            println!("  Funds returned to sender on L2. Admin L2 balance: {sender_l2_balance}");
         } else {
             println!("  WARNING: Deposit was processed — blacklist may need more time to sync.");
         }
