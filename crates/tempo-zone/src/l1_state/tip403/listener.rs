@@ -207,8 +207,8 @@ impl PolicyListener {
 /// into the cache. This ensures the cache knows about tokens that have never
 /// had a `TransferPolicyUpdate` event (i.e. still using the default policy).
 ///
-/// Individual token failures are logged and skipped so one failing token
-/// does not prevent the rest from being seeded.
+/// Fails if any token's `transferPolicyId` cannot be resolved — all enabled
+/// tokens must be seeded for the zone to enforce policies correctly.
 pub async fn seed_token_policies(
     cache: &SharedPolicyCache,
     portal_address: Address,
@@ -219,44 +219,31 @@ pub async fn seed_token_policies(
 
     let block_number = cache.last_l1_block();
 
-    let futs: Vec<_> = tracked_tokens
-        .iter()
-        .map(|token| {
-            let tip20 = ITIP20::new(*token, provider);
-            async move {
-                let result = tip20
-                    .transferPolicyId()
-                    .block(alloy_rpc_types_eth::BlockId::number(block_number))
-                    .call()
-                    .await;
-                (*token, result)
-            }
-        })
-        .collect();
-
-    let results = futures::future::join_all(futs).await;
+    let seeded = futures::future::join_all(tracked_tokens.iter().map(|token| {
+        let tip20 = ITIP20::new(*token, provider);
+        async move {
+            let policy_id = tip20
+                .transferPolicyId()
+                .block(alloy_rpc_types_eth::BlockId::number(block_number))
+                .call()
+                .await
+                .map_err(|e| {
+                    eyre::eyre!(
+                        "failed to seed transferPolicyId for token {token} \
+                         (portal {portal_address}): {e}"
+                    )
+                })?;
+            Ok::<_, eyre::Report>((*token, policy_id))
+        }
+    }))
+    .await
+    .into_iter()
+    .collect::<eyre::Result<Vec<_>>>()?;
 
     let mut w = cache.write();
-    for (token, result) in results {
-        match result {
-            Ok(policy_id) => {
-                info!(
-                    %token,
-                    policy_id,
-                    block_number,
-                    "Seeded token policy from L1"
-                );
-                w.set_token_policy(token, block_number, policy_id);
-            }
-            Err(e) => {
-                warn!(
-                    %token,
-                    %portal_address,
-                    error = %e,
-                    "Failed to seed transferPolicyId, skipping token"
-                );
-            }
-        }
+    for (token, policy_id) in seeded {
+        info!(%token, policy_id, block_number, "Seeded token policy from L1");
+        w.set_token_policy(token, block_number, policy_id);
     }
 
     Ok(())
