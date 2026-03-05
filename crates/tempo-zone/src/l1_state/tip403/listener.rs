@@ -56,19 +56,31 @@ pub struct PolicyListener {
     cache: SharedPolicyCache,
     config: PolicyListenerConfig,
     metrics: Tip403Metrics,
+    /// Last L1 block successfully processed by this listener instance.
+    /// Used to backfill missed blocks after reconnects or transient errors.
+    last_processed: u64,
 }
 
 impl PolicyListener {
     pub fn new(cache: SharedPolicyCache, config: PolicyListenerConfig) -> Self {
+        let last_processed = cache.last_l1_block();
         Self {
             cache,
             config,
             metrics: Tip403Metrics::default(),
+            last_processed,
         }
     }
 
     /// Subscribe to L1 block headers and process policy events for each new block.
+    ///
+    /// Before subscribing, backfills any blocks missed since `last_processed`
+    /// (e.g. after a reconnect or if `process_block` failed for a prior block).
     pub async fn run(&mut self) -> eyre::Result<()> {
+        // Backfill any blocks missed between the last successfully processed
+        // block and the current L1 tip before subscribing to new headers.
+        self.backfill().await?;
+
         let mut stream = self
             .config
             .l1_provider
@@ -81,13 +93,60 @@ impl PolicyListener {
         while let Some(header) = stream.next().await {
             let block_number = header.inner.number();
 
+            // The subscription may skip blocks if the gap between subscribe
+            // and the first header is > 1. Process any intermediate blocks.
+            self.backfill_to(block_number).await;
+
             if let Err(e) = self.process_block(block_number).await {
                 warn!(block_number, error = %e, "Failed to process policy events for block");
+                // Don't advance last_processed — backfill will retry on
+                // next iteration or reconnect.
+            } else {
+                self.last_processed = block_number;
             }
         }
 
         warn!("Policy listener block subscription ended");
         Ok(())
+    }
+
+    /// Backfill blocks from `last_processed + 1` up to the current L1 tip.
+    async fn backfill(&mut self) -> eyre::Result<()> {
+        let tip = self.config.l1_provider.get_block_number().await?;
+        if tip <= self.last_processed {
+            return Ok(());
+        }
+
+        let gap = tip - self.last_processed;
+        info!(
+            from = self.last_processed + 1,
+            to = tip,
+            blocks = gap,
+            "Backfilling missed policy events"
+        );
+
+        self.backfill_to(tip).await;
+        Ok(())
+    }
+
+    /// Process all blocks from `last_processed + 1` up to `target` (inclusive).
+    /// Errors on individual blocks are logged but don't stop the backfill —
+    /// they will be retried on the next reconnect.
+    async fn backfill_to(&mut self, target: u64) {
+        let start = self.last_processed + 1;
+        for block in start..=target {
+            match self.process_block(block).await {
+                Ok(()) => self.last_processed = block,
+                Err(e) => {
+                    warn!(
+                        block_number = block,
+                        error = %e,
+                        "Failed to backfill policy events, will retry on reconnect"
+                    );
+                    break;
+                }
+            }
+        }
     }
 
     /// Fetch and process policy events for a single L1 block.
