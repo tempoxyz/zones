@@ -19,7 +19,7 @@ target "chef" {
   platforms = ["linux/amd64"]
   args = {
     RUST_PROFILE = "profiling"
-    RUST_FEATURES = "jemalloc"
+    RUST_FEATURES = "asm-keccak,jemalloc,otlp"
   }
 }
 
