@@ -78,6 +78,20 @@ pub(crate) struct GenerateZoneGenesis {
 
     #[arg(long, default_value = "docs/specs/out")]
     pub(crate) specs_out: PathBuf,
+
+    /// Include CreateX factory in genesis.
+    #[arg(long)]
+    pub(crate) with_createx: bool,
+
+    /// Include Safe Singleton Factory in genesis.
+    #[arg(long)]
+    pub(crate) with_safe_deployer: bool,
+
+    /// Include Arachnid CREATE2 factory in genesis.
+    /// The factory is always used internally to deploy Permit2; this flag
+    /// controls whether it remains in the final genesis state.
+    #[arg(long)]
+    pub(crate) with_create2_factory: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -218,6 +232,9 @@ impl GenerateZoneGenesis {
             .accounts
             .iter()
             .filter(|(addr, _)| **addr != DEPLOYER)
+            .filter(|(addr, _)| {
+                self.with_create2_factory || **addr != ARACHNID_CREATE2_FACTORY_ADDRESS
+            })
             .map(|(address, account)| {
                 let storage: Option<BTreeMap<_, _>> = if !account.storage.is_empty() {
                     Some(
@@ -256,22 +273,26 @@ impl GenerateZoneGenesis {
                 ..Default::default()
             },
         );
-        genesis_alloc.insert(
-            CREATEX_ADDRESS,
-            GenesisAccount {
-                code: Some(Bytes::from_static(&CreateX::DEPLOYED_BYTECODE)),
-                nonce: Some(1),
-                ..Default::default()
-            },
-        );
-        genesis_alloc.insert(
-            SAFE_DEPLOYER_ADDRESS,
-            GenesisAccount {
-                code: Some(Bytes::from_static(&SafeDeployer::DEPLOYED_BYTECODE)),
-                nonce: Some(1),
-                ..Default::default()
-            },
-        );
+        if self.with_createx {
+            genesis_alloc.insert(
+                CREATEX_ADDRESS,
+                GenesisAccount {
+                    code: Some(Bytes::from_static(&CreateX::DEPLOYED_BYTECODE)),
+                    nonce: Some(1),
+                    ..Default::default()
+                },
+            );
+        }
+        if self.with_safe_deployer {
+            genesis_alloc.insert(
+                SAFE_DEPLOYER_ADDRESS,
+                GenesisAccount {
+                    code: Some(Bytes::from_static(&SafeDeployer::DEPLOYED_BYTECODE)),
+                    nonce: Some(1),
+                    ..Default::default()
+                },
+            );
+        }
 
         if let Some(sequencer) = self.sequencer {
             genesis_alloc.entry(sequencer).or_default().balance =
