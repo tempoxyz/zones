@@ -23,8 +23,8 @@
 //! - A running zone (defaults to z5: `generated/z5/zone.json`)
 //! - The zone's sequencer must be actively producing blocks
 //! - An L1 account with enough funds for gas (set via `PRIVATE_KEY`)
-//! - The admin account needs a small pathUSD balance on L1 (used to seed
-//!   the Fee AMM pool in step 6b)
+//! - The admin account needs a small pathUSD balance on L1 (deposited to
+//!   the target wallet for L2 gas fees)
 //!
 //! # Usage
 //!
@@ -63,10 +63,10 @@ use alloy::{
     sol_types::SolEvent,
 };
 use eyre::{WrapErr as _, eyre};
-use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt as _};
+use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
     IRolesAuth, ITIP20 as TIP20Token, ITIP20Factory as TIP20Factory,
-    ITIP403Registry as TIP403Registry, ITIPFeeAMM, TIP_FEE_MANAGER_ADDRESS,
+    ITIP403Registry as TIP403Registry,
 };
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
@@ -158,7 +158,7 @@ impl DemoBlacklist {
             .connect(&http_rpc)
             .await?;
         l1.client()
-            .set_poll_interval(std::time::Duration::from_millis(250));
+            .set_poll_interval(std::time::Duration::from_secs(1));
 
         // Separate provider for sequencer-only operations (enableToken)
         let l1_seq = ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -167,16 +167,9 @@ impl DemoBlacklist {
             .await?;
         l1_seq
             .client()
-            .set_poll_interval(std::time::Duration::from_millis(250));
+            .set_poll_interval(std::time::Duration::from_secs(1));
 
         let l2 = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&self.zone_rpc_url)
-            .await?;
-
-        // L2 provider with admin wallet for Fee AMM seeding
-        let admin_signer2: PrivateKeySigner = key_str.parse()?;
-        let l2_admin = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(EthereumWallet::from(admin_signer2))
             .connect(&self.zone_rpc_url)
             .await?;
 
@@ -485,8 +478,7 @@ impl DemoBlacklist {
         }
         println!();
 
-        // Seed Fee AMM with DemoUSD/pathUSD liquidity so DemoUSD can be used
-        // as a fee token in step 9. Deposit pathUSD to L2, approve, then mint.
+        // Fund target with pathUSD so it can pay L2 gas in step 9.
         let pathusd_token = TIP20Token::new(PATH_USD_ADDRESS, &l1);
         let receipt = pathusd_token
             .approve(self.portal, U256::MAX)
@@ -494,39 +486,19 @@ impl DemoBlacklist {
             .await?
             .get_receipt()
             .await?;
-        check(&receipt, "approve pathUSD")?;
+        check(&receipt, "approve pathUSD for portal")?;
 
-        let pool_amount: u128 = 100_000;
+        let gas_fund: u128 = 100_000;
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, admin, pool_amount, B256::ZERO)
+            .deposit(PATH_USD_ADDRESS, target, gas_fund, B256::ZERO)
             .send()
             .await?
             .get_receipt()
             .await?;
-        check(&receipt, "deposit pathUSD for Fee AMM")?;
-        let _ = wait_for_deposit_processed(&l2, l2_block_before, admin, admin).await?;
-
-        let l2_pathusd = TIP20Token::new(PATH_USD_ADDRESS, &l2_admin);
-        let receipt = l2_pathusd
-            .approve(TIP_FEE_MANAGER_ADDRESS, U256::MAX)
-            .gas(100_000)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
-        check(&receipt, "approve pathUSD for Fee AMM (L2)")?;
-
-        let fee_amm = ITIPFeeAMM::new(TIP_FEE_MANAGER_ADDRESS, &l2_admin);
-        let receipt = fee_amm
-            .mint(token_addr, PATH_USD_ADDRESS, U256::from(pool_amount), admin)
-            .gas(500_000)
-            .send()
-            .await
-            .wrap_err("Fee AMM mint failed")?
-            .get_receipt()
-            .await?;
-        check(&receipt, "Fee AMM mint")?;
+        check(&receipt, "deposit pathUSD to target for gas")?;
+        let _ = wait_for_deposit_processed(&l2, l2_block_before, admin, target).await?;
+        println!("  Deposited {gas_fund} pathUSD to target for L2 gas");
 
         // ── Step 7: Unblacklist the address ──────────────────────────────
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -586,7 +558,7 @@ impl DemoBlacklist {
         println!("  Target wallet withdraws DUSD from the zone to their L1 address.");
         println!();
 
-        // Target pays L2 gas in DemoUSD via fee_token (pool was seeded in step 6b).
+        // Target pays L2 gas in pathUSD (deposited in step 6b).
         let target_wallet = EthereumWallet::from(target_signer);
         let l2_target = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(target_wallet)
@@ -597,7 +569,6 @@ impl DemoBlacklist {
         let receipt = outbox_token
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
             .gas(100_000)
-            .fee_token(token_addr)
             .send()
             .await
             .wrap_err("approve outbox on L2")?
@@ -609,8 +580,8 @@ impl DemoBlacklist {
             receipt.transaction_hash
         );
 
-        // Withdraw half — the rest covers DemoUSD gas fees.
-        let withdraw_amount = target_balance.to::<u128>() / 2;
+        // Withdraw all DemoUSD — gas is paid in pathUSD.
+        let withdraw_amount = target_balance.to::<u128>();
         if withdraw_amount == 0 {
             println!("  No balance to withdraw — skipping.");
         } else {
@@ -628,7 +599,6 @@ impl DemoBlacklist {
                     Bytes::new(),
                 )
                 .gas(500_000)
-                .fee_token(token_addr)
                 .send()
                 .await?
                 .get_receipt()
