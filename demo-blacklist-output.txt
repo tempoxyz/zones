@@ -1,0 +1,118 @@
+cargo run -p tempo-xtask -- demo-blacklist --zone-rpc-url http://localhost:8546 --amount 500000
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.44s
+     Running `target/debug/tempo-xtask demo-blacklist --zone-rpc-url 'http://localhost:8546' --amount 500000`
+╔══════════════════════════════════════════════════════════════╗
+║          TIP-20 + TIP-403 Blacklist Demo                    ║
+╚══════════════════════════════════════════════════════════════╝
+
+  Admin:     0x05C265fB662bf03f0f6cb7A572ea4a92fd654a2e
+  Sequencer: 0xFc484fE8d26F132D0B21D2088f17F1DdFf11c133
+  Portal:    0x9d00Ee56f371Cc5365a686180dE3648207399640
+  L1 RPC:    https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz
+  Zone RPC:  http://localhost:8546
+
+  Target wallet (fresh): 0x0254Aa53EA318FB7BBd9bf26440e12b97530CbA6
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 1: Create a new TIP-20 token on L1
+  Deploying a fresh token via TIP20Factory.
+
+  Predicted address: 0x20c000000000000000000000619f67948860E149
+  Token created: DemoUSD (DUSD) at 0x20c000000000000000000000619f67948860E149
+  https://explore.moderato.tempo.xyz/tx/0xbbfd5ced43d9fb13cda39e1b2948038f0472153851ad5e9386022030edc7c18e
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 2: Configure token — set supply cap, grant ISSUER_ROLE, mint tokens
+
+  Supply cap set to max
+  https://explore.moderato.tempo.xyz/tx/0xe2091f086e00b34e44d38e7b332d9c3cf8dd8bfcff999767a4d7c48a3d8e04b1
+  ISSUER_ROLE granted to 0x05C265fB662bf03f0f6cb7A572ea4a92fd654a2e
+  https://explore.moderato.tempo.xyz/tx/0x48be5ca4a2766dc529c1f77cf3b19fbebdb8fe1f510e61a99e8d972fbdbbc304
+  Minted 2000000 DUSD to admin
+  https://explore.moderato.tempo.xyz/tx/0xee3014da68122608818d5fae10723da2d7a4a6d54926ea0f177516b138cac8db
+  Portal approved for max spend
+  https://explore.moderato.tempo.xyz/tx/0x74df3baa3dbe3ef1be68e6c56a1be8ad7ed4244e7b127be9739f9b5a21e480c9
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 3: Enable token on zone
+  Only the sequencer (0xFc484fE8d26F132D0B21D2088f17F1DdFf11c133) can call enableToken on the portal.
+
+  Token enabled on L1 (block 7141864)
+  https://explore.moderato.tempo.xyz/tx/0x8d3ab5fdcfb06ebc93f479247f1de9933bf50682a595839fef769b472f760a92
+  Waiting for zone to pick up the new token...
+  Token available on zone!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 4: Deposit 1000000 DUSD into the zone (to admin)
+  Plain deposit so admin has L2 funds for later encrypted deposits.
+
+  Deposited 1000000 DUSD
+  https://explore.moderato.tempo.xyz/tx/0xbcb64803e2be01ababdd064be313a797a1291fa0940bf706e9e771bcfe52b2ed
+  Waiting for deposit to land on L2...
+  Deposit processed on L2 (block 122871)
+  Admin L2 balance: 1000000
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 5: Create a blacklist policy and blacklist target wallet
+  A TIP-403 blacklist blocks specific addresses from sending/receiving.
+  We create one, blacklist the target, and assign the policy to the token.
+
+  Blacklist policy created: ID=1005032
+  https://explore.moderato.tempo.xyz/tx/0xe724a894e82202da01ad945464befb09182ad65d6659ce4629a3281fff075d49
+  0x0254Aa53EA318FB7BBd9bf26440e12b97530CbA6 added to blacklist
+  https://explore.moderato.tempo.xyz/tx/0xc18aa687bb5f41f1e0285048b20c4882c08d26d3a4b25706a511f1da3378dc53
+  isAuthorized(policy=1005032, target): false  (expected: false)
+  Token transfer policy set to 1005032
+  https://explore.moderato.tempo.xyz/tx/0x20f448fe36ba0d01f1875ae287e2ca773bf5e90f35476b0e73b26894b1b38c6f
+  Waiting for zone to sync the blacklist from L1...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 6: Encrypted deposit 500000 DUSD to blacklisted address 0x0254Aa53EA318FB7BBd9bf26440e12b97530CbA6
+  The zone should reject this deposit and bounce funds back to sender.
+
+  Encrypted deposit sent (block 7141886)
+  https://explore.moderato.tempo.xyz/tx/0x9adee7fd9d58a7b7d79246e09c7393f821a3ebc70fcd2219fa4e03ad7f23a67a
+  Waiting for zone to process (expecting EncryptedDepositFailed)...
+  BOUNCED! Deposit to blacklisted address was correctly rejected.
+  Funds returned to zone balance on L1. Portal balance: 1500000
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 7: Remove target from blacklist on L1
+
+  0x0254Aa53EA318FB7BBd9bf26440e12b97530CbA6 removed from blacklist
+  https://explore.moderato.tempo.xyz/tx/0x8e0de2a9df843d6fd1d6c73e9354433a8849c6d6f25dade597c96781615f95f2
+  isAuthorized(policy=1005032, target): true  (expected: true)
+  Waiting for zone to sync the unblacklist...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 8: Encrypted deposit 500000 DUSD to unblacklisted address 0x0254Aa53EA318FB7BBd9bf26440e12b97530CbA6
+  Now that the target is no longer blacklisted, this should succeed.
+
+  Encrypted deposit sent (block 7141906)
+  https://explore.moderato.tempo.xyz/tx/0xd04382974c9b279cd933bd4c097882cbd7319a889960cd064a3b51e7b608be93
+  Waiting for zone to process (expecting EncryptedDepositProcessed)...
+  SUCCESS! Deposit to unblacklisted address was accepted.
+  Target L2 balance: 500000
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Step 9: Withdraw tokens from zone back to L1
+  Target wallet withdraws DUSD from the zone to their L1 address.
+
+  Outbox approved on L2  [tx: 0x6a87aa0029113f2e3446bb284ae72cca77efdbb5d4b5d0ed8c27943b022b57e6]
+  Withdrawal requested: 250000 DUSD  [tx: 0x69f7badee32dd631927aecbbd34c04e30679069c9f83be3b4da7c46b35a3929f]
+  Waiting for withdrawal to be processed on L1...
+  Withdrawal processed on L1 (block 7141919)
+  https://explore.moderato.tempo.xyz/tx/0x666a53677bc32b211fdbcbabc317c758403ecb64f61c0b813499fe40f9f6147d
+  Target final L1 balance: 250000
+
+╔══════════════════════════════════════════════════════════════╗
+║                     Demo Complete!                          ║
+╚══════════════════════════════════════════════════════════════╝
+
+  Token:                       DemoUSD (DUSD) at 0x20c000000000000000000000619f67948860E149
+  Target wallet:               0x0254Aa53EA318FB7BBd9bf26440e12b97530CbA6
+  Blacklist:                   policy=1005032
+  Deposit to blacklisted addr: BOUNCED
+  Deposit after unblacklist:   ACCEPTED
+  Withdrawal to L1:            250000 DUSD
+

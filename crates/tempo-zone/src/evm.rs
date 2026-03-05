@@ -93,17 +93,13 @@ impl ZoneEvmFactory {
             // instead of the vanilla TIP20Precompile (which reads empty local
             // TIP403Registry storage).
             //
-            // `set_precompile_lookup` replaces the existing lookup entirely, so
-            // we must also handle the non-TIP-20 Tempo precompiles that the
-            // vanilla lookup registers (FeeManager, StablecoinDEX, etc.).
-            // TIP20Factory and TIP403Registry are already in the static map
-            // via `apply_precompile` above and are checked first.
+            // The lookup only handles TIP-20 prefix addresses; all other
+            // precompiles (FeeManager, StablecoinDEX, etc.) are resolved from
+            // the static map populated by `TempoEvmFactory` and the
+            // `apply_precompile` calls above.
             let zone_cfg = cfg.clone();
             precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
-                use tempo_precompiles::{
-                    AccountKeychainPrecompile, NoncePrecompile, StablecoinDEXPrecompile,
-                    TipFeeManagerPrecompile, ValidatorConfigPrecompile, tip20::is_tip20_prefix,
-                };
+                use tempo_precompiles::tip20::is_tip20_prefix;
 
                 if is_tip20_prefix(*address) {
                     Some(ZoneTip20Token::create(
@@ -111,16 +107,6 @@ impl ZoneEvmFactory {
                         &zone_cfg,
                         registry.clone(),
                     ))
-                } else if *address == tempo_precompiles::TIP_FEE_MANAGER_ADDRESS {
-                    Some(TipFeeManagerPrecompile::create(&zone_cfg))
-                } else if *address == tempo_precompiles::STABLECOIN_DEX_ADDRESS {
-                    Some(StablecoinDEXPrecompile::create(&zone_cfg))
-                } else if *address == tempo_precompiles::NONCE_PRECOMPILE_ADDRESS {
-                    Some(NoncePrecompile::create(&zone_cfg))
-                } else if *address == tempo_precompiles::VALIDATOR_CONFIG_ADDRESS {
-                    Some(ValidatorConfigPrecompile::create(&zone_cfg))
-                } else if *address == tempo_precompiles::ACCOUNT_KEYCHAIN_ADDRESS {
-                    Some(AccountKeychainPrecompile::create(&zone_cfg))
                 } else {
                     None
                 }

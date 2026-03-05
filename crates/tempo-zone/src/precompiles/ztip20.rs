@@ -206,24 +206,9 @@ impl ZoneTip20Token {
         }
     }
 
-    /// Resolve the `transfer_policy_id` for a token.
-    ///
-    /// Prefers the policy cache (populated by the [`PolicyListener`]) over EVM
-    /// storage, since the zone's local storage may not reflect L1 policy
-    /// changes (e.g. `changeTransferPolicyId` called on L1 after zone genesis).
+    /// Resolve the `transfer_policy_id` for a token — cache first, L1 RPC fallback.
     fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64, PrecompileError> {
-        if let Some(id) = self.registry.get_token_policy(token) {
-            return Ok(id);
-        }
-        let id = TIP20Token::from_address(token)
-            .and_then(|t| t.transfer_policy_id())
-            .map_err(|e| {
-                PrecompileError::other(format!("failed to read transfer_policy_id: {e}"))
-            })?;
-
-        // Storage default 0 means "not yet set" — treat as allow-all (policy 1),
-        // matching the vanilla TIP20Token initializer which writes 1 on creation.
-        if id == 0 { Ok(1) } else { Ok(id) }
+        self.registry.resolve_transfer_policy_id(token)
     }
 
     /// Build a reverted output with the `policyForbids()` error selector.

@@ -281,6 +281,25 @@ impl PolicyProvider {
             .await
     }
 
+    /// Resolve the `transferPolicyId` for a token — cache first, RPC fallback (sync).
+    ///
+    /// Intended for the zone TIP-20 precompile which runs on a blocking thread.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an async context on the same tokio runtime.
+    pub fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64> {
+        if let Some(id) = self.cache.read().get_token_policy(token, u64::MAX) {
+            return Ok(id);
+        }
+
+        let block_number = self.cache.read().last_l1_block();
+        tokio::task::block_in_place(|| {
+            self.runtime_handle
+                .block_on(self.resolve_policy_id(token, block_number))
+        })
+    }
+
     /// Resolve the `transferPolicyId` for a token — cache first, RPC fallback.
     async fn resolve_policy_id(&self, token: Address, block_number: u64) -> Result<u64> {
         if let Some(id) = self.cache.read().get_token_policy(token, block_number) {

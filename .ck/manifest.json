@@ -1,0 +1,2632 @@
+{
+  "version": "0.1.0",
+  "created": 1772626874,
+  "updated": 1772627511,
+  "files": {
+    "./crates/tempo-zone/src/l1_state/mod.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/mod.rs",
+      "hash": "330cd27db378677b2c4b90bf2ad87df51d6196b5a3f6c03609f3144bff522ed1",
+      "last_modified": 1772617326,
+      "size": 1294
+    },
+    "./docs/pages/guide/node/index.mdx": {
+      "path": "./docs/pages/guide/node/index.mdx",
+      "hash": "3f0932240254b13b7f4974c99043a55fd24099c5efb8eb351fe86fc1e8b9c03e",
+      "last_modified": 1771924437,
+      "size": 1563
+    },
+    "./docs/pages/quickstart/evm-compatibility.mdx": {
+      "path": "./docs/pages/quickstart/evm-compatibility.mdx",
+      "hash": "0e5e5d69bec37499c8a2e437e34f1ae96a30181bcd3fc354a0a2474214888bab",
+      "last_modified": 1771924437,
+      "size": 6917
+    },
+    "./docs/pages/sdk/typescript/prool/setup.mdx": {
+      "path": "./docs/pages/sdk/typescript/prool/setup.mdx",
+      "hash": "7a1cc16e695d1af670165cdc66c0a937a8215cfe8271c7ac1e168424418d2b5d",
+      "last_modified": 1771924437,
+      "size": 1319
+    },
+    "./xtask/src/create_zone.rs": {
+      "path": "./xtask/src/create_zone.rs",
+      "hash": "0491aaabc762c91f7c32d2f143fd1c1c986d4abfeb72bc4514a87b450c2b7a3e",
+      "last_modified": 1772463566,
+      "size": 8195
+    },
+    "./crates/tempo-zone/README.md": {
+      "path": "./crates/tempo-zone/README.md",
+      "hash": "b412f212e9f83012d538554c19949cfa5226097b5d995754df49d67455c90a9a",
+      "last_modified": 1772463566,
+      "size": 9800
+    },
+    "./crates/tempo-zone/tests/it/tip403_transfers.rs": {
+      "path": "./crates/tempo-zone/tests/it/tip403_transfers.rs",
+      "hash": "9d8517733392194c7245c92bac2ca640d01666aee64a8c96034d6749c1c6d8d4",
+      "last_modified": 1772463566,
+      "size": 12317
+    },
+    "./docs/pages/learn/tempo/modern-transactions.mdx": {
+      "path": "./docs/pages/learn/tempo/modern-transactions.mdx",
+      "hash": "211b0315f96149f1fd17b505122051e0c9279a514b392f485e414ca82fa9854c",
+      "last_modified": 1771924437,
+      "size": 4221
+    },
+    "./docs/pages/sdk/typescript/server/handler.keyManager.mdx": {
+      "path": "./docs/pages/sdk/typescript/server/handler.keyManager.mdx",
+      "hash": "9b2d7c364218d5b9c4a31cf12b7eb9cb37f08f8b379a2ba11a1d3c717abf90a2",
+      "last_modified": 1771924437,
+      "size": 4332
+    },
+    "./docs/specs/src/interfaces/ITIP20.sol": {
+      "path": "./docs/specs/src/interfaces/ITIP20.sol",
+      "hash": "aa8412d0c158ca9e209175eb4032ef51e72d7320e51b26885b3cca20081b4d95",
+      "last_modified": 1770817422,
+      "size": 11291
+    },
+    "./docs/pages/guide/issuance/create-a-stablecoin.mdx": {
+      "path": "./docs/pages/guide/issuance/create-a-stablecoin.mdx",
+      "hash": "5b87dc330b46582f144a6a03a9a8a8043ca2540588c2508b9bc019bf3c449909",
+      "last_modified": 1771924437,
+      "size": 9028
+    },
+    "./docs/pages/protocol/tip20/overview.mdx": {
+      "path": "./docs/pages/protocol/tip20/overview.mdx",
+      "hash": "d8c3fb5e2402adce4a22a1764a9ddb5bede3f49d5c82e19ce685d8a07fd77e10",
+      "last_modified": 1771924437,
+      "size": 8775
+    },
+    "./docs/specs/test/TIP20Factory.t.sol": {
+      "path": "./docs/specs/test/TIP20Factory.t.sol",
+      "hash": "79a1b2ccb2343347c495f10c848ba4e8662c59d76094abc0f3e9ba1e23a23617",
+      "last_modified": 1772199176,
+      "size": 10062
+    },
+    "./docs/pages/sdk/typescript/server/handler.feePayer.mdx": {
+      "path": "./docs/pages/sdk/typescript/server/handler.feePayer.mdx",
+      "hash": "8023ff2819a0518ec002523558d10ad3172378bd647ff0adeb89f683da0e4206",
+      "last_modified": 1771924437,
+      "size": 3009
+    },
+    "./crates/tempo-zone/src/precompiles/tip20_factory.rs": {
+      "path": "./crates/tempo-zone/src/precompiles/tip20_factory.rs",
+      "hash": "b3199e48191acdb3f295ef4b972ff250fef71ba6979650d4f37c152438d5eb5c",
+      "last_modified": 1772463566,
+      "size": 5463
+    },
+    "./tempoup/install": {
+      "path": "./tempoup/install",
+      "hash": "82280e3a9a16f68fa6e9a2cba732469e2f1c492bd076f61d3fc79ee32ca99fe6",
+      "last_modified": 1771926291,
+      "size": 2397
+    },
+    "./docs/snippets/unformatted/withFeePayer.ts": {
+      "path": "./docs/snippets/unformatted/withFeePayer.ts",
+      "hash": "751e449407aaacdc3f749ad82d54a6d974b2d82bee601066899b90f3fe2d3427",
+      "last_modified": 1771924437,
+      "size": 1520
+    },
+    "./docs/specs/lib/forge-std/test/StdChains.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdChains.t.sol",
+      "hash": "871b2020873a9f0b14bfd8b313b5a8f61b0c10c7d7997829e7850f41128c080a",
+      "last_modified": 1770678210,
+      "size": 9753
+    },
+    "./docs/components/guides/steps/issuance/LinkTokenPolicy.tsx": {
+      "path": "./docs/components/guides/steps/issuance/LinkTokenPolicy.tsx",
+      "hash": "492fa10f75dd64454d70a081ffa57cca548fa8182565092e38cc1836a14d7255",
+      "last_modified": 1771924437,
+      "size": 3539
+    },
+    "./docs/pages/guide/issuance/mint-stablecoins.mdx": {
+      "path": "./docs/pages/guide/issuance/mint-stablecoins.mdx",
+      "hash": "6855d1fe46f92bb8bf25e8d44fb2802276271487e5a7f210160b8dd03a7ba160",
+      "last_modified": 1771924437,
+      "size": 13390
+    },
+    "./docs/pages/protocol/privacy/rpc.md": {
+      "path": "./docs/pages/protocol/privacy/rpc.md",
+      "hash": "20422d70b8a70293ca5fb9f94d7b592d2cc558f744fbda5d882b0121c5282b83",
+      "last_modified": 1771924437,
+      "size": 32692
+    },
+    "./crates/tempo-zone/src/ext.rs": {
+      "path": "./crates/tempo-zone/src/ext.rs",
+      "hash": "3c65ed7ab929669bfd330a641e47fd5a4340432da741ba0812c2ae4fa7749f87",
+      "last_modified": 1772463566,
+      "size": 3095
+    },
+    "./docs/specs/src/zone/ZoneInbox.sol": {
+      "path": "./docs/specs/src/zone/ZoneInbox.sol",
+      "hash": "a5f818ddb13d7d7e3b07e215e1f1c490f4793ed35c07dab484a50cc60f52ee52",
+      "last_modified": 1772463566,
+      "size": 15989
+    },
+    "./docs/components/guides/steps/wallet/ConnectWallet.tsx": {
+      "path": "./docs/components/guides/steps/wallet/ConnectWallet.tsx",
+      "hash": "6b05bb75e338744f795b065ff9adb74428e17518fa8f2f3c5c88cd4ecef392f2",
+      "last_modified": 1771924437,
+      "size": 4624
+    },
+    "./docs/public/lockup-dark.svg": {
+      "path": "./docs/public/lockup-dark.svg",
+      "hash": "86021377c4bc2719e4a876de431517d7dd4ac073dbf8f5ac1f4df781140e9949",
+      "last_modified": 1771924437,
+      "size": 2674
+    },
+    "./docs/internal/commonware-reth-integration.md": {
+      "path": "./docs/internal/commonware-reth-integration.md",
+      "hash": "e12a4f58cf568fee6acd6df072b0bd479a7281bbdf9e58b2fd5e52d7521d9021",
+      "last_modified": 1771924437,
+      "size": 7540
+    },
+    "./docs/pages/learn/use-cases/global-payouts.mdx": {
+      "path": "./docs/pages/learn/use-cases/global-payouts.mdx",
+      "hash": "37637777687df91189b45a667f192bf2d5ff312d67b3abac24eedad2b85a0a2c",
+      "last_modified": 1771924437,
+      "size": 5180
+    },
+    "./crates/tempo-zone/src/precompiles/tip403_proxy.rs": {
+      "path": "./crates/tempo-zone/src/precompiles/tip403_proxy.rs",
+      "hash": "27aeb918ff72cc75392360a7849af54bdbbe84d00531a62eda12298d06dc0c43",
+      "last_modified": 1772463566,
+      "size": 12942
+    },
+    "./crates/tempo-zone/src/rpc/types.rs": {
+      "path": "./crates/tempo-zone/src/rpc/types.rs",
+      "hash": "1c9eedbf601c8c43f866e0b3d88929e66af691dbd5b30b40662eecf7af58c2c6",
+      "last_modified": 1771391303,
+      "size": 7604
+    },
+    "./docs/pages/guide/stablecoin-dex/executing-swaps.mdx": {
+      "path": "./docs/pages/guide/stablecoin-dex/executing-swaps.mdx",
+      "hash": "86d2cc1720eb93f6d8c62cdebfb088030d12425ec5e13e56171851178ca8ec10",
+      "last_modified": 1771924437,
+      "size": 12648
+    },
+    "./docs/pages/protocol/exchange/executing-swaps.mdx": {
+      "path": "./docs/pages/protocol/exchange/executing-swaps.mdx",
+      "hash": "718b57c1e71a150128e588ce53b06ea9e805b80e34f061aff24708ba8ed9667e",
+      "last_modified": 1771924437,
+      "size": 4556
+    },
+    "./docs/pages/quickstart/developer-tools.mdx": {
+      "path": "./docs/pages/quickstart/developer-tools.mdx",
+      "hash": "21aa4fb23e56f203ffef28e7159593480ee7150d57537ac7477ee1c77e92147d",
+      "last_modified": 1771924437,
+      "size": 18963
+    },
+    "./docs/specs/src/zone/PrivateZoneToken.sol": {
+      "path": "./docs/specs/src/zone/PrivateZoneToken.sol",
+      "hash": "0f1cd06155a598c5604927a6ab9b2599df77517052b76acca2cb1def0a9548f1",
+      "last_modified": 1771351550,
+      "size": 10631
+    },
+    "./docs/components/guides/steps/issuance/MintToken.tsx": {
+      "path": "./docs/components/guides/steps/issuance/MintToken.tsx",
+      "hash": "0d5f63e457c01e3f06aeedbf6f250151cccf481143eb30a4a114400eecb3716d",
+      "last_modified": 1771924437,
+      "size": 5487
+    },
+    "./rustfmt.toml": {
+      "path": "./rustfmt.toml",
+      "hash": "bfb145a6402afe2ed454c55a7769d9ba88f7b7ff417d052533bcd21ff1432eba",
+      "last_modified": 1770678210,
+      "size": 30
+    },
+    "./docs/specs/lib/forge-std/test/CommonBase.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/CommonBase.t.sol",
+      "hash": "990ee935e133d71a8b4f0352b2e4cf0f73b233641ba6faa971d8b1faa08e8c54",
+      "last_modified": 1770678210,
+      "size": 1318
+    },
+    "./crates/tempo-zone/src/evm.rs": {
+      "path": "./crates/tempo-zone/src/evm.rs",
+      "hash": "a799db1f53e5e5fa72cc093392fa0f145810eab84139366409d45dc16af4ad8c",
+      "last_modified": 1772463566,
+      "size": 13390
+    },
+    "./crates/tempo-zone/src/l1.rs": {
+      "path": "./crates/tempo-zone/src/l1.rs",
+      "hash": "4db601c6c20a01278acc7daf649569f8c3371942d82fef74ccbf55667bdc0729",
+      "last_modified": 1772539843,
+      "size": 102910
+    },
+    "./docs/specs/lib/forge-std/test/Vm.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/Vm.t.sol",
+      "hash": "81e80bae0824b542369cf2c1cfb3381bbdf1a958bbb113e422a3fd93cd44f30c",
+      "last_modified": 1770678210,
+      "size": 659
+    },
+    "./docs/specs/lib/forge-std/test/fixtures/test.json": {
+      "path": "./docs/specs/lib/forge-std/test/fixtures/test.json",
+      "hash": "b5ce5bc59e284c5b5e0b619c09a04c7d729357ccfb6fd09a1c767d889fcadd01",
+      "last_modified": 1770678210,
+      "size": 74
+    },
+    "./docs/specs/lib/forge-std/src/StdError.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdError.sol",
+      "hash": "212a7d5643ea71a0f8b276b2758bfab5c702c4dfbfbfd66488e24db9814ea241",
+      "last_modified": 1770678210,
+      "size": 1013
+    },
+    "./tempoup/README.md": {
+      "path": "./tempoup/README.md",
+      "hash": "c0d92e63cb0ace041718188d25b6bdefd95c2f41cda17807c2bd5c9e5f7b8842",
+      "last_modified": 1771926291,
+      "size": 1325
+    },
+    "./docs/components/ZoomableImage.tsx": {
+      "path": "./docs/components/ZoomableImage.tsx",
+      "hash": "7dc02aa29b421f65cec8cd20cb7d9b284b6343cb67bc750f0c53f276155c6abc",
+      "last_modified": 1771924437,
+      "size": 3109
+    },
+    "./docs/specs/test/zone/ZoneBridge.t.sol": {
+      "path": "./docs/specs/test/zone/ZoneBridge.t.sol",
+      "hash": "58d62f5b086f89686729967e3bf24711c3d9c753fda15413b4f726962965c457",
+      "last_modified": 1772463566,
+      "size": 55617
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IMulticall3.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IMulticall3.sol",
+      "hash": "973964cd33ccf4a4d614aa70d5ab8f07ccb6fb11294aaa252c2a21bca77aa272",
+      "last_modified": 1770678210,
+      "size": 2185
+    },
+    "./docs/snippets/tempo-tx-properties.mdx": {
+      "path": "./docs/snippets/tempo-tx-properties.mdx",
+      "hash": "b2b6d790ddb980791b929fe4c17533105f31d6d70144629d1f3140ed8e30911a",
+      "last_modified": 1771924437,
+      "size": 17218
+    },
+    "./docs/specs/src/interfaces/ITIP20RolesAuth.sol": {
+      "path": "./docs/specs/src/interfaces/ITIP20RolesAuth.sol",
+      "hash": "0f6d1860b7a8f530554268762a019dd3978dac296323c8e6fcd7ed5ba795c8d1",
+      "last_modified": 1770678210,
+      "size": 619
+    },
+    "./docs/pages/guide/stablecoin-dex/view-the-orderbook.mdx": {
+      "path": "./docs/pages/guide/stablecoin-dex/view-the-orderbook.mdx",
+      "hash": "8990267d40c17f3d65101be2ad4c3c56717500e7d65090e6aa658302d1c82d9a",
+      "last_modified": 1771924437,
+      "size": 5747
+    },
+    "./docs/specs/src/zone/BlockHashHistory.sol": {
+      "path": "./docs/specs/src/zone/BlockHashHistory.sol",
+      "hash": "0e4c80d8290683019e60bf2b96efc374e6726d1974c6eecd286eff808f077078",
+      "last_modified": 1770921325,
+      "size": 886
+    },
+    "./docs/specs/test/zone/mocks/MockZoneToken.sol": {
+      "path": "./docs/specs/test/zone/mocks/MockZoneToken.sol",
+      "hash": "abf55d7902e2d7255b986daeb929213aae4e1e10f72cae51a95bb424d37dea86",
+      "last_modified": 1772463566,
+      "size": 3029
+    },
+    "./docs/specs/src/AccountKeychain.sol": {
+      "path": "./docs/specs/src/AccountKeychain.sol",
+      "hash": "e07bf7673c2ac002ef26099cc77688737c5558a4ab150b9b4d98866a39087807",
+      "last_modified": 1772199176,
+      "size": 10123
+    },
+    "./docs/components/guides/steps/rewards/DistributeReward.tsx": {
+      "path": "./docs/components/guides/steps/rewards/DistributeReward.tsx",
+      "hash": "44927102ce13a1fe31f4d44349d4a5ac939979b1bffba221795924821ad72de5",
+      "last_modified": 1771924437,
+      "size": 3575
+    },
+    "./docs/pages/guide/payments/pay-fees-in-any-stablecoin.mdx": {
+      "path": "./docs/pages/guide/payments/pay-fees-in-any-stablecoin.mdx",
+      "hash": "6411c2111396b7af5d96a632d63ba330651657ea198b24a9098dc2766876e9b4",
+      "last_modified": 1771924437,
+      "size": 10440
+    },
+    "./docs/style-guide.md": {
+      "path": "./docs/style-guide.md",
+      "hash": "ff246e79b7802f6b900119119eaa2786ca3f06fa23f7a0f82c99d81cb31eeca0",
+      "last_modified": 1771924437,
+      "size": 20690
+    },
+    "./docs/specs/test/zone/WithdrawalQueueLib.t.sol": {
+      "path": "./docs/specs/test/zone/WithdrawalQueueLib.t.sol",
+      "hash": "05bfa295dd576ea1b1cd5abdb8c7a8d0f5687df688ad3359d7e11ddd13d64c02",
+      "last_modified": 1771320079,
+      "size": 12134
+    },
+    "./docs/lib/posthog.ts": {
+      "path": "./docs/lib/posthog.ts",
+      "hash": "ecb85226f9b163e8309969cde2e79014bfd611fb7c7e2b4dd601366ab43a7a78",
+      "last_modified": 1771924437,
+      "size": 5966
+    },
+    "./docs/pages/learn/tempo/performance.mdx": {
+      "path": "./docs/pages/learn/tempo/performance.mdx",
+      "hash": "d342273c74b06ca46c76091cf8593a071c941a7608a4a1952a5aaa977e07df2d",
+      "last_modified": 1771924437,
+      "size": 2988
+    },
+    "./docs/components/PostHogSiteIdentifier.tsx": {
+      "path": "./docs/components/PostHogSiteIdentifier.tsx",
+      "hash": "b629bf7bd8eb13f276f8e82463f22f39543245a72dbf28f394ab78ed169c5383",
+      "last_modified": 1771924437,
+      "size": 487
+    },
+    "./crates/tempo-zone/src/rpc/mod.rs": {
+      "path": "./crates/tempo-zone/src/rpc/mod.rs",
+      "hash": "f87f68c89b69aed8f0965e954dca42bbcabafaa1a21be327833a062ca9485b7b",
+      "last_modified": 1771526445,
+      "size": 495
+    },
+    "./docs/diagrams/two-queue-swap.d2": {
+      "path": "./docs/diagrams/two-queue-swap.d2",
+      "hash": "32cbe238814b457c36a1f1a17f5f29d19737c76f56996957a1174e202368b112",
+      "last_modified": 1771923977,
+      "size": 1682
+    },
+    "./docs/components/guides/steps/wallet/SetFeeToken.tsx": {
+      "path": "./docs/components/guides/steps/wallet/SetFeeToken.tsx",
+      "hash": "d4595523a2130ce4cba5cc43f493c5eb0727b8be03ecf8d70646165dc604e675",
+      "last_modified": 1771924437,
+      "size": 7325
+    },
+    "./docs/pages/guide/use-accounts/connect-to-wallets.mdx": {
+      "path": "./docs/pages/guide/use-accounts/connect-to-wallets.mdx",
+      "hash": "d319eab87395551d9946434b29dcc7091c7631576b6d7f3692f3e88f027503bc",
+      "last_modified": 1771924437,
+      "size": 7766
+    },
+    "./docs/specs/test/TIP20.t.sol": {
+      "path": "./docs/specs/test/TIP20.t.sol",
+      "hash": "2d7563c4a1d21c34352dee0362579e3e550249ca0d3bb32979cfb7be83eddcdb",
+      "last_modified": 1772199176,
+      "size": 76492
+    },
+    "./docs/specs/src/interfaces/IAccountKeychain.sol": {
+      "path": "./docs/specs/src/interfaces/IAccountKeychain.sol",
+      "hash": "d39e2c325c6692f86063e21865c65d892ee441387ed570c84c38aa24f2af5327",
+      "last_modified": 1770817422,
+      "size": 5952
+    },
+    "./docs/specs/src/zone/ZoneConfig.sol": {
+      "path": "./docs/specs/src/zone/ZoneConfig.sol",
+      "hash": "865766dda40af8e0b61e85c971a7f7435d839156e90f59b4f42b987fbebe5bc3",
+      "last_modified": 1771320079,
+      "size": 6056
+    },
+    "./docs/components/guides/steps/issuance/SetSupplyCap.tsx": {
+      "path": "./docs/components/guides/steps/issuance/SetSupplyCap.tsx",
+      "hash": "8cfb9dcd36bbd5131ba2c4004d5c921785e5b2e27aa97a61262d038844d16a00",
+      "last_modified": 1771924437,
+      "size": 3972
+    },
+    "./docs/tsconfig.json": {
+      "path": "./docs/tsconfig.json",
+      "hash": "48ec12d4391642e161cc4a4aebc907700c2e68f9f3648f30e5e1e7b30c6ce462",
+      "last_modified": 1771924437,
+      "size": 1019
+    },
+    "./crates/tempo-zone/src/l1_state/provider.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/provider.rs",
+      "hash": "8e2de4f4d6b1cf49fe491ad3ddcfb2bdbdb5a8e1757b900a813c9ff822d1d794",
+      "last_modified": 1772538596,
+      "size": 9199
+    },
+    "./crates/tempo-zone/src/lib.rs": {
+      "path": "./crates/tempo-zone/src/lib.rs",
+      "hash": "976b93a8218cc61d088cf160051be5ada98575762e16801dbcc8491dfcf75cb6",
+      "last_modified": 1772538596,
+      "size": 5452
+    },
+    "./docs/pages/learn/tempo/index.mdx": {
+      "path": "./docs/pages/learn/tempo/index.mdx",
+      "hash": "9f6e9c3af34a3f61e2b764cf0edef84f4910c3b3701501889bb703ba9e022a28",
+      "last_modified": 1771924437,
+      "size": 2548
+    },
+    "./docs/specs/lib/forge-std/CONTRIBUTING.md": {
+      "path": "./docs/specs/lib/forge-std/CONTRIBUTING.md",
+      "hash": "3e27498fa3b52808ac9c842a4b97c17202c2d37b5de6c88cc4cbad7459ce91fc",
+      "last_modified": 1770678210,
+      "size": 11630
+    },
+    "./docs/specs/test/FeeAMM.t.sol": {
+      "path": "./docs/specs/test/FeeAMM.t.sol",
+      "hash": "ea214a8bad4dc766b895e7637ee091a3b78b0c3eebe45a2e913dc61d4a28087e",
+      "last_modified": 1770678210,
+      "size": 16128
+    },
+    "./docs/components/guides/steps/rewards/OptInToRewards.tsx": {
+      "path": "./docs/components/guides/steps/rewards/OptInToRewards.tsx",
+      "hash": "895e593bf81283e51de3d9a7b36f1cbb11058a74a73e68065ee651229841f09d",
+      "last_modified": 1771924437,
+      "size": 2974
+    },
+    "./crates/tempo-zone/src/rpc/provider.rs": {
+      "path": "./crates/tempo-zone/src/rpc/provider.rs",
+      "hash": "bdad8136f5e1dacd52ed75040993e943391a66c7a78d917e930b4f4f6039e0ef",
+      "last_modified": 1771391303,
+      "size": 4499
+    },
+    "./docs/specs/lib/forge-std/src/safeconsole.sol": {
+      "path": "./docs/specs/lib/forge-std/src/safeconsole.sol",
+      "hash": "76bc6186b1108a2547e1c55b8da6f73e9f58ef4fc14a2e3100a9a13cab2541ff",
+      "last_modified": 1770678210,
+      "size": 427535
+    },
+    "./docs/pages/protocol/tip20/spec.mdx": {
+      "path": "./docs/pages/protocol/tip20/spec.mdx",
+      "hash": "b2be4ec59d3f1c55313f7850f3fc4b7ec794f4c7325bdaa6ce53d8507f4b5933",
+      "last_modified": 1771924437,
+      "size": 28995
+    },
+    "./docs/components/ConnectWallet.tsx": {
+      "path": "./docs/components/ConnectWallet.tsx",
+      "hash": "849787e8c4924ce5c36d94828cdcd6ca25729e2880617bb8078fe05f2ad23bc8",
+      "last_modified": 1771924437,
+      "size": 2428
+    },
+    "./docs/pages/index.mdx": {
+      "path": "./docs/pages/index.mdx",
+      "hash": "005c83ce7dfbca67b33ac3853d4c41e040c37c0a3d95ce8a664b18b952da1280",
+      "last_modified": 1771924437,
+      "size": 1845
+    },
+    "./crates/tempo-zone/src/rpc/server.rs": {
+      "path": "./crates/tempo-zone/src/rpc/server.rs",
+      "hash": "fd24397e4000cb25b5f372c895cdf6737180f6348c7177ea1c49c05d6ad9bfd9",
+      "last_modified": 1771391303,
+      "size": 5063
+    },
+    "./docs/components/Tabs.tsx": {
+      "path": "./docs/components/Tabs.tsx",
+      "hash": "bd4b9c518a509ca4603b17794296d6fcafc3c4e043b04bfe4b9ec568f9f682fa",
+      "last_modified": 1771924437,
+      "size": 1375
+    },
+    "./docs/components/SqlEditor.tsx": {
+      "path": "./docs/components/SqlEditor.tsx",
+      "hash": "ae6e691353d179d5ade530d96bd693ecc944706beb60a678007c0788e2d2785f",
+      "last_modified": 1771924437,
+      "size": 11765
+    },
+    "./crates/tempo-zone/tests/it/utils.rs": {
+      "path": "./crates/tempo-zone/tests/it/utils.rs",
+      "hash": "e689178b5ad21ecc0aa6f6b5feaf3fcc2e774a0ff152115e48f3915d0b352289",
+      "last_modified": 1772549022,
+      "size": 86678
+    },
+    "./docs/specs/lib/forge-std/foundry.toml": {
+      "path": "./docs/specs/lib/forge-std/foundry.toml",
+      "hash": "b30fada98bb6fbff4e7a3bcf75a35ec75e16e5fede87783624f999e8ab01ed64",
+      "last_modified": 1770678210,
+      "size": 803
+    },
+    "./docs/specs/lib/forge-std/src/StdAssertions.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdAssertions.sol",
+      "hash": "00369553423924f61b378ab7b6b908517092d9b7499d4c4b0cb551de4df43232",
+      "last_modified": 1770678210,
+      "size": 23360
+    },
+    "./docs/pages/guide/use-accounts/fee-sponsorship.mdx": {
+      "path": "./docs/pages/guide/use-accounts/fee-sponsorship.mdx",
+      "hash": "c66ae5e7a7db94cf5bc2c11375389689c585066ff050a6452989c6e49d573cd2",
+      "last_modified": 1771924437,
+      "size": 3240
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IERC7540.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IERC7540.sol",
+      "hash": "559998341dd6a7d9e8cacef75371ceea0009483a08484b4f04fd30873c6ee97e",
+      "last_modified": 1770678210,
+      "size": 6611
+    },
+    "./crates/tempo-zone/tests/it/demo_asset_swap.rs": {
+      "path": "./crates/tempo-zone/tests/it/demo_asset_swap.rs",
+      "hash": "09d665d86be0781b9e98c3f75106c28383dc85e76542f48e5c666abad3e9fe45",
+      "last_modified": 1772463566,
+      "size": 5255
+    },
+    "./docs/specs/lib/forge-std/LICENSE-MIT": {
+      "path": "./docs/specs/lib/forge-std/LICENSE-MIT",
+      "hash": "d6abee69bed7cd3adaa187f7d44db7e61291c13f43496b554650ca5faf3203a1",
+      "last_modified": 1770678210,
+      "size": 1073
+    },
+    "./docs/components/guides/steps/payments/AddFundsToOthers.tsx": {
+      "path": "./docs/components/guides/steps/payments/AddFundsToOthers.tsx",
+      "hash": "e5ed4f8d63a1569f857561c46aaa90924159d728c223188121f22c9561e38e9a",
+      "last_modified": 1771924437,
+      "size": 5082
+    },
+    "./xtask/src/encrypted_deposit.rs": {
+      "path": "./xtask/src/encrypted_deposit.rs",
+      "hash": "02e2babab7ce664028ea334f9365423b313870710f2c16308562daf4bb9e3d89",
+      "last_modified": 1771844899,
+      "size": 8237
+    },
+    "./docs/specs/lib/forge-std/src/console.sol": {
+      "path": "./docs/specs/lib/forge-std/src/console.sol",
+      "hash": "ed96accb97dd0f6ac7846a4c13314e4d8e35810d53457be05f839bde177a1f49",
+      "last_modified": 1770678210,
+      "size": 69270
+    },
+    "./docs/components/guides/Demo.tsx": {
+      "path": "./docs/components/guides/Demo.tsx",
+      "hash": "87a92e431df604a98c2fa544105775d6cabcf9221bbaac2933183c18a91492ff",
+      "last_modified": 1771924437,
+      "size": 16237
+    },
+    "./docs/pages/guide/node/rpc.mdx": {
+      "path": "./docs/pages/guide/node/rpc.mdx",
+      "hash": "fca714c3b47a0e7a6fd8f2aa0168593e5823abd3d06f0e6c1bbf6f1a5b0fd880",
+      "last_modified": 1771924437,
+      "size": 2529
+    },
+    "./docs/scripts/gen-specs.ts": {
+      "path": "./docs/scripts/gen-specs.ts",
+      "hash": "5e7e5ebbd87e5584b0b55fb803687d579a8e5ebcd73cbd1363b380d243ed9247",
+      "last_modified": 1771924437,
+      "size": 1326
+    },
+    "./docs/pages/protocol/privacy/overview.md": {
+      "path": "./docs/pages/protocol/privacy/overview.md",
+      "hash": "2b27ffcd5de4c44f1207d2501c2a0d94c1073b195d096e0537f0cab65b794645",
+      "last_modified": 1771924437,
+      "size": 90917
+    },
+    "./docs/pages/guide/node/installation.mdx": {
+      "path": "./docs/pages/guide/node/installation.mdx",
+      "hash": "6687828b19797d783ac26eef5d58453214075946702399d498526363c52ea6dc",
+      "last_modified": 1771924437,
+      "size": 1264
+    },
+    "./docs/specs/lib/forge-std/src/StdUtils.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdUtils.sol",
+      "hash": "22316d749a62bab119a48c4edace7b5ad688fbeb21340f0468e8296c2529420d",
+      "last_modified": 1770678210,
+      "size": 10024
+    },
+    "./docs/specs/src/zone/ZoneOutbox.sol": {
+      "path": "./docs/specs/src/zone/ZoneOutbox.sol",
+      "hash": "9c5ad3e54166e2434a2f258ec401a0cf77ff0ca184a39037febc31923092aeca",
+      "last_modified": 1771320079,
+      "size": 12835
+    },
+    "./docs/snippets/setup.ts": {
+      "path": "./docs/snippets/setup.ts",
+      "hash": "2367add516f052f2e418803d3ea0146947dc3aed92a7f057c57756b0e9acc728",
+      "last_modified": 1771924437,
+      "size": 455
+    },
+    "./docs/components/guides/steps/types.ts": {
+      "path": "./docs/components/guides/steps/types.ts",
+      "hash": "1e81d7c78bdf0099d96b07395d600e656e28ffa78a807d5c6edfc2fe3a12969e",
+      "last_modified": 1771924437,
+      "size": 627
+    },
+    "./docs/pages/guide/issuance/index.mdx": {
+      "path": "./docs/pages/guide/issuance/index.mdx",
+      "hash": "e2b782bd2f256dd111cd37054bd69621f741feb712f5a19812198b51ee2839c5",
+      "last_modified": 1771924437,
+      "size": 1331
+    },
+    "./docs/pages/quickstart/wallet-developers.mdx": {
+      "path": "./docs/pages/quickstart/wallet-developers.mdx",
+      "hash": "7bfb98af3b357b147fdbdf0fcecac6e17e739faa2e08f17cae4b20c2aa7de746",
+      "last_modified": 1771924437,
+      "size": 5998
+    },
+    "./docs/specs/src/TIP20Factory.sol": {
+      "path": "./docs/specs/src/TIP20Factory.sol",
+      "hash": "fb78cc1b329fbe0218dc7ae736458e52ea7c4948e87dca50aaf88ed675371be4",
+      "last_modified": 1770817422,
+      "size": 2999
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IERC721.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IERC721.sol",
+      "hash": "02db1c957f5a4c9975f3c30ea8ad50d91a57b925125f52afd2016a087cd90c3b",
+      "last_modified": 1770678210,
+      "size": 9041
+    },
+    "./docs/pages/guide/issuance/manage-stablecoin.mdx": {
+      "path": "./docs/pages/guide/issuance/manage-stablecoin.mdx",
+      "hash": "c4286d4ab9fa0cb0edc75eded0cb55d92f247abd721bcbbe018e661fbeecebe3",
+      "last_modified": 1771924437,
+      "size": 19626
+    },
+    "./docs/pages/guide/stablecoin-dex/index.mdx": {
+      "path": "./docs/pages/guide/stablecoin-dex/index.mdx",
+      "hash": "b6b6d2e8f3b89e823f99213586efbac3f31a8973f339746af070eda2b620b089",
+      "last_modified": 1771924437,
+      "size": 1380
+    },
+    "./docs/pages/guide/payments/accept-a-payment.mdx": {
+      "path": "./docs/pages/guide/payments/accept-a-payment.mdx",
+      "hash": "92c283891f2e21733794a705de34f9584ec72504686a13f7ac2d3ab41bf7f6b0",
+      "last_modified": 1771924437,
+      "size": 7481
+    },
+    "./docs/specs/test/invariants/StablecoinDEX.t.sol": {
+      "path": "./docs/specs/test/invariants/StablecoinDEX.t.sol",
+      "hash": "1cc9d8cfee807b3a2756fde42c32368a74ed4424ac57e7bf1fa0cac721f7795b",
+      "last_modified": 1772199176,
+      "size": 53878
+    },
+    "./docs/pages/learn/use-cases/remittances.mdx": {
+      "path": "./docs/pages/learn/use-cases/remittances.mdx",
+      "hash": "0ae7a1422f96e06d07e31f155c320dc466b49a2857c3e2b4222d0d593674a8f7",
+      "last_modified": 1771924437,
+      "size": 5241
+    },
+    "./docs/public/robots.txt": {
+      "path": "./docs/public/robots.txt",
+      "hash": "263b351749c12dc8a28594d18c2068e48166b9c85aeaaa151eabdf457c8c536f",
+      "last_modified": 1771924437,
+      "size": 23
+    },
+    "./crates/tempo-zone/src/rpc/auth/token.rs": {
+      "path": "./crates/tempo-zone/src/rpc/auth/token.rs",
+      "hash": "eb5606427c8629fc59f2ae3cb08286dde573d970d469f115811a29cd971f399a",
+      "last_modified": 1771391303,
+      "size": 7711
+    },
+    "./docs/pages/protocol/exchange/index.mdx": {
+      "path": "./docs/pages/protocol/exchange/index.mdx",
+      "hash": "22b0aa5d9a0827ad18eb4e87239ebf8d589aca599a24e9ab935a5ac980d3368d",
+      "last_modified": 1771924437,
+      "size": 2981
+    },
+    "./crates/tempo-zone/tests/it/l1_e2e.rs": {
+      "path": "./crates/tempo-zone/tests/it/l1_e2e.rs",
+      "hash": "d044f6a5ed6ca116fe66e28a25ed159f2f21e27c614e6356224710a1f775b566",
+      "last_modified": 1772619973,
+      "size": 38001
+    },
+    "./Cargo.toml": {
+      "path": "./Cargo.toml",
+      "hash": "5672cf44f7b2eddf45a015cb91878d9084b9c017d1e690ca41764bf14ef98ae6",
+      "last_modified": 1772463566,
+      "size": 6865
+    },
+    "./Dockerfile.chef": {
+      "path": "./Dockerfile.chef",
+      "hash": "4d5345f6b781f18134b65a9f23bcab88da59556f4e1456762b695b0043972967",
+      "last_modified": 1771924011,
+      "size": 1060
+    },
+    "./docs/specs/test/Nonce.t.sol": {
+      "path": "./docs/specs/test/Nonce.t.sol",
+      "hash": "9db96f6ebb022d310255a30410ae79e5c64283be67d49e337a85f8edc86798b7",
+      "last_modified": 1772199176,
+      "size": 11221
+    },
+    "./docs/specs/test/AccountKeychain.t.sol": {
+      "path": "./docs/specs/test/AccountKeychain.t.sol",
+      "hash": "2e53fdcf5335b45e147f420137aa1f1d03249ea7341e231155bb37c7dfea7c63",
+      "last_modified": 1772199176,
+      "size": 31275
+    },
+    "./crates/tempo-zone/tests/it/deposit.rs": {
+      "path": "./crates/tempo-zone/tests/it/deposit.rs",
+      "hash": "6b03c2320a1b0362f8c5b9785405565d2214a2e4fab4b9da0704b8944e91503c",
+      "last_modified": 1771391303,
+      "size": 5503
+    },
+    "./docs/components/guides/steps/rewards/Constants.tsx": {
+      "path": "./docs/components/guides/steps/rewards/Constants.tsx",
+      "hash": "a00cfc1ac85e25117dd15d0a89d49b78cb7d96ef1fdc2e14b75b1135a96b983e",
+      "last_modified": 1771924437,
+      "size": 119
+    },
+    "./docs/pages/guide/tempo-transaction/index.mdx": {
+      "path": "./docs/pages/guide/tempo-transaction/index.mdx",
+      "hash": "472c5ec67ec19f53e6ce3da9ece2c2b8764aff4f7a5f33094b81fa46dbf4635c",
+      "last_modified": 1771924437,
+      "size": 3396
+    },
+    "./docs/specs/lib/forge-std/src/StdConstants.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdConstants.sol",
+      "hash": "68c09c4be6661b71c079582b5a07ea5fa339e99d412a9094f15c86b85212db5b",
+      "last_modified": 1770678210,
+      "size": 1867
+    },
+    "./docs/diagrams/deposit-queue.svg": {
+      "path": "./docs/diagrams/deposit-queue.svg",
+      "hash": "5a9738b7caa78f0212392cdaa399ff66050a1fa88cf53bd74d157196b9ed4245",
+      "last_modified": 1771923977,
+      "size": 53671
+    },
+    "./docs/specs/src/interfaces/IValidatorConfig.sol": {
+      "path": "./docs/specs/src/interfaces/IValidatorConfig.sol",
+      "hash": "d99cdc25414f7f9555d3d2811c10010c86a36c1187ba154cc6bbf18a5b9b39ee",
+      "last_modified": 1770817422,
+      "size": 4860
+    },
+    "./docs/specs/test/StablecoinDEX.t.sol": {
+      "path": "./docs/specs/test/StablecoinDEX.t.sol",
+      "hash": "434045f7ff3972c54ef3aab24f9d3c52830afdaec22feef06ffca2299f677f8c",
+      "last_modified": 1772199176,
+      "size": 78423
+    },
+    "./docs/snippets/viem.config.ts": {
+      "path": "./docs/snippets/viem.config.ts",
+      "hash": "f823bbdfe047dabff10516ad460b579894e8bfe1a43da357a3b910928e8f9cd4",
+      "last_modified": 1771924437,
+      "size": 454
+    },
+    "./docs/pages/protocol/tips/tip-1004.mdx": {
+      "path": "./docs/pages/protocol/tips/tip-1004.mdx",
+      "hash": "1b495a6f741ba4a4f33713dfd335e50854174ed644c493684bd12956b567760a",
+      "last_modified": 1771924437,
+      "size": 11038
+    },
+    "./xtask/Cargo.toml": {
+      "path": "./xtask/Cargo.toml",
+      "hash": "aa2e85d23f77d7dc747db3870800667c7e194f0c9e1f7c67f53edcaa752f568b",
+      "last_modified": 1771844899,
+      "size": 1013
+    },
+    "./docs/specs/test/zone/EncryptionKeyLayout.t.sol": {
+      "path": "./docs/specs/test/zone/EncryptionKeyLayout.t.sol",
+      "hash": "60aa301f81f776abfaf738792a7a5d102664a40d58a67ef8c42929aa1794efe1",
+      "last_modified": 1770817422,
+      "size": 5421
+    },
+    "./crates/tempo-zone/src/l1_state/cache.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/cache.rs",
+      "hash": "4709f2afe09d4f2f7e8b6232ed8ebf4e685682249dbd27f971bda2ab317dc292",
+      "last_modified": 1771939008,
+      "size": 9999
+    },
+    "./docs/specs/src/interfaces/ITIP403Registry.sol": {
+      "path": "./docs/specs/src/interfaces/ITIP403Registry.sol",
+      "hash": "a126af0dfb331eb6a40c9d81a4cb8dc702e9d46c312509513f0452b048eabce8",
+      "last_modified": 1772619492,
+      "size": 8778
+    },
+    "./docs/components/guides/steps/exchange/QueryOrder.tsx": {
+      "path": "./docs/components/guides/steps/exchange/QueryOrder.tsx",
+      "hash": "b44afcaa10b23b0289f959a6c371b26e3d9d3c3ab07d6c6c653f0354fe206c08",
+      "last_modified": 1771924437,
+      "size": 5186
+    },
+    "./docs/specs/test/invariants/FeeAMM.t.sol": {
+      "path": "./docs/specs/test/invariants/FeeAMM.t.sol",
+      "hash": "385d376dd0ebb45d3df36d3ef753949198c47081c709fcca45ee14092111bc98",
+      "last_modified": 1772199176,
+      "size": 91621
+    },
+    "./docs/components/guides/steps/issuance/BurnTokenBlocked.tsx": {
+      "path": "./docs/components/guides/steps/issuance/BurnTokenBlocked.tsx",
+      "hash": "16b2890fbc42bd75a1964e14493e88e6c5edb9f5ea726994d7157547f94fb198",
+      "last_modified": 1771924437,
+      "size": 4648
+    },
+    "./docs/components/guides/steps/issuance/PauseUnpauseTransfers.tsx": {
+      "path": "./docs/components/guides/steps/issuance/PauseUnpauseTransfers.tsx",
+      "hash": "128a6dfaa8f05129c254c4e838957e854b7fe215baa81fa70bd33ff967803c2f",
+      "last_modified": 1771924437,
+      "size": 2960
+    },
+    "./docs/specs/lib/forge-std/test/fixtures/broadcast.log.json": {
+      "path": "./docs/specs/lib/forge-std/test/fixtures/broadcast.log.json",
+      "hash": "4a5a38c5b496011709037b4456cd0b5b14146f88bdde631c34b579b064fc5525",
+      "last_modified": 1770678210,
+      "size": 10954
+    },
+    "./typos.toml": {
+      "path": "./typos.toml",
+      "hash": "5b280bd6c2edb56364b74be01ac862027a448a2e897ae9e18c0b807787b2dd87",
+      "last_modified": 1770678210,
+      "size": 354
+    },
+    "./docs/footer.tsx": {
+      "path": "./docs/footer.tsx",
+      "hash": "10692a8ac051990545918fd27dce28b81b07192f28ff60d87144a8e39059f186",
+      "last_modified": 1771924437,
+      "size": 553
+    },
+    "./docs/specs/tempo-cast": {
+      "path": "./docs/specs/tempo-cast",
+      "hash": "610be90cad85f4df618dd575a1e7872264417ec1dc36e07a7a2be3e65e40554a",
+      "last_modified": 1770678210,
+      "size": 2118
+    },
+    "./docs/pages/protocol/fees/spec-fee-amm.mdx": {
+      "path": "./docs/pages/protocol/fees/spec-fee-amm.mdx",
+      "hash": "7ce5fd61cfb46d4f091c410050a35e17cc1e3c6c1f2f89cb6a95978b7cd10436",
+      "last_modified": 1771924437,
+      "size": 11732
+    },
+    "./docs/specs/test/zone/DepositQueueLib.t.sol": {
+      "path": "./docs/specs/test/zone/DepositQueueLib.t.sol",
+      "hash": "31241acb9bd12c55fa08120bb20e383c9fc08a80b238c016057bce810402bcc8",
+      "last_modified": 1771320079,
+      "size": 12944
+    },
+    "./docs/pages/protocol/tip20-rewards/spec.mdx": {
+      "path": "./docs/pages/protocol/tip20-rewards/spec.mdx",
+      "hash": "9581c7663166d4f6f13a993a34740652e93162c124a2e09fdd07dd5e0b461c63",
+      "last_modified": 1771924437,
+      "size": 2999
+    },
+    "./docs/specs/test/BaseTest.t.sol": {
+      "path": "./docs/specs/test/BaseTest.t.sol",
+      "hash": "93c85b9a35c79f0f59116d29808a0724d42e0814771526fb8d94826c1da886dd",
+      "last_modified": 1772199176,
+      "size": 7524
+    },
+    "./docs/specs/lib/forge-std/test/StdJson.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdJson.t.sol",
+      "hash": "07b98cf0be486c1cc4701a12f4cd78fafe397d5b0416f122c5e76bb657708ea7",
+      "last_modified": 1770678210,
+      "size": 1273
+    },
+    "./docs/specs/lib/forge-std/src/StdStyle.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdStyle.sol",
+      "hash": "f6d0e5f2932f8f8d36560172b312c9dacf3201f4043bc90c2737bcc691d25061",
+      "last_modified": 1770678210,
+      "size": 10462
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IERC20.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IERC20.sol",
+      "hash": "9a262bcf2a175027903c9e49a3f1d94c006246e1757e7610412da67ef3b43cc0",
+      "last_modified": 1770678210,
+      "size": 2067
+    },
+    "./docs/snippets/read-account-parameters.mdx": {
+      "path": "./docs/snippets/read-account-parameters.mdx",
+      "hash": "fac45cea3a514faa1764f849a47d7080f6811066b1fc7e041085445fe9330325",
+      "last_modified": 1771924437,
+      "size": 356
+    },
+    "./docs/components/guides/steps/exchange/CancelOrder.tsx": {
+      "path": "./docs/components/guides/steps/exchange/CancelOrder.tsx",
+      "hash": "de9da962f0176a2a1c7ac09bba0492dbcf42c23503814dbf26ad5999200cf16d",
+      "last_modified": 1771924437,
+      "size": 2113
+    },
+    "./docs/wagmi.config.ts": {
+      "path": "./docs/wagmi.config.ts",
+      "hash": "e719d761ee49045589ad3c2c5ba34e43e92047c2763fc751c93b674aad932225",
+      "last_modified": 1771924437,
+      "size": 2014
+    },
+    "./docs/pages/quickstart/faucet.mdx": {
+      "path": "./docs/pages/quickstart/faucet.mdx",
+      "hash": "76d2831a480084f4df4ee5d4b5467b8cf93e6783b32c3ec30d7594b84afa1d5a",
+      "last_modified": 1771924437,
+      "size": 1753
+    },
+    "./docs/pages/protocol/blockspace/overview.mdx": {
+      "path": "./docs/pages/protocol/blockspace/overview.mdx",
+      "hash": "ad9884aa83e062e5b13e2b2ca5c68b405630e6f9ae5dd00b7da8d72c4240a2f7",
+      "last_modified": 1771924437,
+      "size": 2277
+    },
+    "./docs/pages/sdk/typescript/index.mdx": {
+      "path": "./docs/pages/sdk/typescript/index.mdx",
+      "hash": "d5537a67e37cd811361445fac36ec8a9982f6bb7def2b656eff36ba2a252b24c",
+      "last_modified": 1771924437,
+      "size": 3165
+    },
+    "./xtask/README.md": {
+      "path": "./xtask/README.md",
+      "hash": "0cc99ac76acad5d1b5f9da7c6cc182f94186510944b01d617929cbf57b773c26",
+      "last_modified": 1771674699,
+      "size": 247
+    },
+    "./crates/tempo-zone/src/l1_state/tip403/task.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/tip403/task.rs",
+      "hash": "801ba14bd0e3532818a4b2c62b17b9bc5be553672a599bd3ca8d43607c94cf3e",
+      "last_modified": 1772617326,
+      "size": 8795
+    },
+    "./docs/components/guides/steps/issuance/RevokeTokenRoles.tsx": {
+      "path": "./docs/components/guides/steps/issuance/RevokeTokenRoles.tsx",
+      "hash": "4ce567b05f3cda7cf32bf6d1be14a2eb891589d583e7eb05bf52c1a3338c22ef",
+      "last_modified": 1771924437,
+      "size": 4330
+    },
+    "./docs/pages/protocol/tips/tip-xxxx-zone-interop.mdx": {
+      "path": "./docs/pages/protocol/tips/tip-xxxx-zone-interop.mdx",
+      "hash": "35d91e3514daa207e5d1b562a57d9b568ac1e1a0438d5e7d79f425096047573d",
+      "last_modified": 1772463566,
+      "size": 21584
+    },
+    "./docs/specs/src/interfaces/IERC20.sol": {
+      "path": "./docs/specs/src/interfaces/IERC20.sol",
+      "hash": "35bbc08987c26485d7a3cd975e8419ae19a6f0c4ee066d467c97476215e0e864",
+      "last_modified": 1770678210,
+      "size": 489
+    },
+    "./docs/pages/protocol/tips/tip_template.mdx": {
+      "path": "./docs/pages/protocol/tips/tip_template.mdx",
+      "hash": "c38a7a6a52f3fc430ffcf9076f2c07ccbc86dfd68a70b62ba1d6fa1d44269cf7",
+      "last_modified": 1771924437,
+      "size": 2148
+    },
+    "./docs/specs/test/mocks/MockTIP20.sol": {
+      "path": "./docs/specs/test/mocks/MockTIP20.sol",
+      "hash": "bfbb33dcb2b974e2c9e0dfb9f7a9e629fee90977fc12fe86e1a8cbf91fd46d9e",
+      "last_modified": 1770678210,
+      "size": 1671
+    },
+    "./docs/specs/src/FeeAMM.sol": {
+      "path": "./docs/specs/src/FeeAMM.sol",
+      "hash": "b76819760cf0ff317327810d0aef257ab08dc6619726e0095024ad815bb4ef7e",
+      "last_modified": 1772199176,
+      "size": 8372
+    },
+    "./docs/specs/test/zone/mocks/MockTempoState.sol": {
+      "path": "./docs/specs/test/zone/mocks/MockTempoState.sol",
+      "hash": "d6a0ccef0a693cd1c66a24cc766dbc4cbc17c90599d88a43102875e1ca7fd9ed",
+      "last_modified": 1770678210,
+      "size": 2054
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IERC4626.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IERC4626.sol",
+      "hash": "079ad4473e67279a51fb6dc9f2886c333149cdcae2c067fe502774f26e3142ea",
+      "last_modified": 1770678210,
+      "size": 11970
+    },
+    "./crates/tempo-zone/src/rpc/auth/verify.rs": {
+      "path": "./crates/tempo-zone/src/rpc/auth/verify.rs",
+      "hash": "b2142fdfab55c523190216a93b1e1715daa3b3e422ca49d22c5ade85fe0da4ea",
+      "last_modified": 1771391303,
+      "size": 665
+    },
+    "./docs/cva.config.ts": {
+      "path": "./docs/cva.config.ts",
+      "hash": "307c5dafe5421f1e94846b01b3315460a7e5b76a7258e3d6e3174996b4fd449d",
+      "last_modified": 1771924437,
+      "size": 198
+    },
+    "./crates/tempo-zone/src/executor.rs": {
+      "path": "./crates/tempo-zone/src/executor.rs",
+      "hash": "bd5fea16d9e6276ef17b9aadb3d80954085125d8d6376a4e1badf62a4cd83935",
+      "last_modified": 1772107061,
+      "size": 4018
+    },
+    "./docs/components/guides/tokens.ts": {
+      "path": "./docs/components/guides/tokens.ts",
+      "hash": "d032dd843e3eb11fec74a188a1e8db034e43123cf061dce1de317dec6e81a37c",
+      "last_modified": 1771924437,
+      "size": 274
+    },
+    "./crates/tempo-zone/src/withdrawals.rs": {
+      "path": "./crates/tempo-zone/src/withdrawals.rs",
+      "hash": "9c97c14ece801989210ca99f64a53486dfcf533484dfd9d47d8fcf4d36685611",
+      "last_modified": 1772465070,
+      "size": 19123
+    },
+    "./docs/pages/guide/use-accounts/embed-passkeys.mdx": {
+      "path": "./docs/pages/guide/use-accounts/embed-passkeys.mdx",
+      "hash": "635d7538cd39f4ec6fe39bd25d9a0abfa42b66ebbe9f8bff2d8f92f4a4c95b85",
+      "last_modified": 1771924437,
+      "size": 8600
+    },
+    "./docs/specs/src/FeeManager.sol": {
+      "path": "./docs/specs/src/FeeManager.sol",
+      "hash": "d798b5ed6edbab1e81dfe8b55b0102a9f95eaeebc41997180d5c8f5dcbb49aba",
+      "last_modified": 1770817422,
+      "size": 2961
+    },
+    "./docs/pages/learn/use-cases/embedded-finance.mdx": {
+      "path": "./docs/pages/learn/use-cases/embedded-finance.mdx",
+      "hash": "c0d7afaf9d54ad00b285015da6e430b852621e8c0e3d63e07bb764d21c8f6027",
+      "last_modified": 1771924437,
+      "size": 5204
+    },
+    "./docs/components/lib/IndexSupply.ts": {
+      "path": "./docs/components/lib/IndexSupply.ts",
+      "hash": "13cd1f8ef84cc09df84060e9409b26760fe250a8cdc4f993c2dd43863a90de95",
+      "last_modified": 1771924437,
+      "size": 2489
+    },
+    "./crates/tempo-zone/src/node.rs": {
+      "path": "./crates/tempo-zone/src/node.rs",
+      "hash": "b79755c7c350377afcdf61e56af3abaf61010d68f8d54685cf7ea2a9960d8811",
+      "last_modified": 1772617326,
+      "size": 29279
+    },
+    "./docs/pages/guide/use-accounts/index.mdx": {
+      "path": "./docs/pages/guide/use-accounts/index.mdx",
+      "hash": "378e7c98a4b2b1963e4c5640e52f9999f58dac4d2ebb7452659ec21ba6c84913",
+      "last_modified": 1771924437,
+      "size": 1352
+    },
+    "./README.md": {
+      "path": "./README.md",
+      "hash": "27c02870a08000610aab3121d70aead13d5322ac94535445ff8277790030d2b0",
+      "last_modified": 1770678210,
+      "size": 6444
+    },
+    "./crates/tempo-zone/tests/advance_tempo.rs": {
+      "path": "./crates/tempo-zone/tests/advance_tempo.rs",
+      "hash": "109ed7562f8e0bee2e7c79528e92d603c31044ed87fdfd03a1c9b2648bd6765c",
+      "last_modified": 1772538596,
+      "size": 15302
+    },
+    "./docs/specs/lib/forge-std/src/StdMath.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdMath.sol",
+      "hash": "4b3a34d7b4c068ae08471055c060bac656b59255dedb51bb613754a98768ac9f",
+      "last_modified": 1770678210,
+      "size": 1360
+    },
+    "./xtask/src/demo_blacklist.rs": {
+      "path": "./xtask/src/demo_blacklist.rs",
+      "hash": "847806cf5e8437cfbb6c57f6c5fcd26bb18aaff44f901a666d40c222d40b1a91",
+      "last_modified": 1772627445,
+      "size": 33885
+    },
+    "./crates/tempo-zone/src/zonemonitor.rs": {
+      "path": "./crates/tempo-zone/src/zonemonitor.rs",
+      "hash": "052fb145f810c87f99bfee036b7d5938ab282c7113c37bae641f7a73e50231ae",
+      "last_modified": 1772205554,
+      "size": 27528
+    },
+    "./docs/components/guides/steps/payments/PayWithFeeToken.tsx": {
+      "path": "./docs/components/guides/steps/payments/PayWithFeeToken.tsx",
+      "hash": "1b8413461eccd07840f3f7df7e76b65a39c80dd874f51d4de6bf6fd40cf1ca20",
+      "last_modified": 1771924437,
+      "size": 7432
+    },
+    "./docs/specs/test/zone/ZoneIntegration.t.sol": {
+      "path": "./docs/specs/test/zone/ZoneIntegration.t.sol",
+      "hash": "cc9ffa3f4e520b55ed008d2f55c4f5419379b56062981b97b9fe83f3b3bc063e",
+      "last_modified": 1772463566,
+      "size": 26556
+    },
+    "./docs/specs/test/zone/SwapAndDepositRouter.t.sol": {
+      "path": "./docs/specs/test/zone/SwapAndDepositRouter.t.sol",
+      "hash": "ccd334e0f095dd3931b21811672d234f3804f1cd0cdb29e9188cba1a43335df1",
+      "last_modified": 1771320079,
+      "size": 10314
+    },
+    "./docs/specs/src/zone/TempoState.sol": {
+      "path": "./docs/specs/src/zone/TempoState.sol",
+      "hash": "8cf3ae4cb627e61d3f8e00904524b10eb0027432ee7a90189ad4a494fc2399d5",
+      "last_modified": 1770921325,
+      "size": 16790
+    },
+    "./docs/components/guides/steps/exchange/PlaceOrder.tsx": {
+      "path": "./docs/components/guides/steps/exchange/PlaceOrder.tsx",
+      "hash": "b796d531787b5148cdaa91afdc84e1abfab4af3ffb59643c534e5139c5985f0a",
+      "last_modified": 1771924437,
+      "size": 2946
+    },
+    "./docs/diagrams/queue-comparison.d2": {
+      "path": "./docs/diagrams/queue-comparison.d2",
+      "hash": "ba8737e3737abe7753a71b0a471305216ddb5d1168962975ecdcf50bebf11cfb",
+      "last_modified": 1771923977,
+      "size": 2736
+    },
+    "./.envrc": {
+      "path": "./.envrc",
+      "hash": "ff3acbff862dc9da6a8ad7b08dbc285ab310e0f98666d1c9278965971a6fd2b3",
+      "last_modified": 1770678210,
+      "size": 32
+    },
+    "./crates/tempo-zone/src/l1_state/tip403/mod.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/tip403/mod.rs",
+      "hash": "dd212ab8421b4cca90425f30a632f23aa0ad768623f391acd9cfaef5806dc4d9",
+      "last_modified": 1772626548,
+      "size": 3749
+    },
+    "./crates/tempo-zone/src/batch.rs": {
+      "path": "./crates/tempo-zone/src/batch.rs",
+      "hash": "0f821ff2147a74d5de101563ea13df8db9f8b4ce073f04043fbf5068b6341c14",
+      "last_modified": 1771428936,
+      "size": 12988
+    },
+    "./docs/components/guides/steps/amm/CheckFeeAmmPool.tsx": {
+      "path": "./docs/components/guides/steps/amm/CheckFeeAmmPool.tsx",
+      "hash": "2e46497ce6056b54d66c022126f2b4abce191a2eb535f6bfb0c4d5115e5fa6e6",
+      "last_modified": 1771924437,
+      "size": 3129
+    },
+    "./docs/components/PageViewTracker.tsx": {
+      "path": "./docs/components/PageViewTracker.tsx",
+      "hash": "857af84f6272c61ab3249dcb3c636e47c784752d6cd8c2405252519b1b7553a7",
+      "last_modified": 1771924437,
+      "size": 575
+    },
+    "./docs/specs/lib/forge-std/src/StdCheats.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdCheats.sol",
+      "hash": "97f7235ab7756713b7f4deab7703d567cbc816a1447ce891a08cee7a6ddc91b9",
+      "last_modified": 1770678210,
+      "size": 31809
+    },
+    "./docs/specs/src/TIP20.sol": {
+      "path": "./docs/specs/src/TIP20.sol",
+      "hash": "c2997583e29bf54ae170897290d83faf47bc332228470d6f8986f6725f25f59f",
+      "last_modified": 1772199176,
+      "size": 19771
+    },
+    "./docs/specs/test/zone/ZoneInbox.t.sol": {
+      "path": "./docs/specs/test/zone/ZoneInbox.t.sol",
+      "hash": "840d06ef6142ee2878a9b4c09e122a1edd080973c1489e75a70e70cf864a8f7c",
+      "last_modified": 1772463566,
+      "size": 40526
+    },
+    "./docs/components/guides/steps/rewards/ClaimReward.tsx": {
+      "path": "./docs/components/guides/steps/rewards/ClaimReward.tsx",
+      "hash": "c26006f6a9a5adc7e2ad12e7e7cdf3d10f1b1c17096316528f198a96afd1324a",
+      "last_modified": 1771924437,
+      "size": 3051
+    },
+    "./docs/specs/test/zone/ZoneOutbox.t.sol": {
+      "path": "./docs/specs/test/zone/ZoneOutbox.t.sol",
+      "hash": "afe9b89784944d1ce1263bf217053e0850a257f2df23c97f7b16fa123d3810a8",
+      "last_modified": 1771320079,
+      "size": 34187
+    },
+    "./docs/components/guides/steps/issuance/CreateOrLoadToken.tsx": {
+      "path": "./docs/components/guides/steps/issuance/CreateOrLoadToken.tsx",
+      "hash": "17f8d9e1898198ffc99477c8ba0e352091dfc27fcf084d2bd8f2f2ffe49a89db",
+      "last_modified": 1771924437,
+      "size": 1752
+    },
+    "./docs/styles.css": {
+      "path": "./docs/styles.css",
+      "hash": "a6b6c6e52b49ee5e85f984622758fb5e1169961543b9926ff2a2f09ddace0a27",
+      "last_modified": 1771924437,
+      "size": 10091
+    },
+    "./docs/.env.example": {
+      "path": "./docs/.env.example",
+      "hash": "8aeb246151f455bf20ce2da860d330a1087bb24a85566ab229ae44786af9343b",
+      "last_modified": 1771924437,
+      "size": 255
+    },
+    "./docs/pages/guide/use-accounts/add-funds.mdx": {
+      "path": "./docs/pages/guide/use-accounts/add-funds.mdx",
+      "hash": "5667a4a00c0a6240c013578518eab8b857c3ac82f6023d958129718632d7d77c",
+      "last_modified": 1771924437,
+      "size": 1607
+    },
+    "./crates/tempo-zone/src/abi.rs": {
+      "path": "./crates/tempo-zone/src/abi.rs",
+      "hash": "f54e018c789c4468e6b0b57bfea6e0d1dde35ee4e64abac44b10b1a15f54945e",
+      "last_modified": 1772619894,
+      "size": 23074
+    },
+    "./docs/specs/test/TIP20RolesAuth.t.sol": {
+      "path": "./docs/specs/test/TIP20RolesAuth.t.sol",
+      "hash": "a7328930c6f7a0c2908040b6a0ce9bcef4c9b5d127468ff1c041dbe0eb2c3a9d",
+      "last_modified": 1770678210,
+      "size": 3052
+    },
+    "./docs/pages/guide/node/system-requirements.mdx": {
+      "path": "./docs/pages/guide/node/system-requirements.mdx",
+      "hash": "5ff7de9ae8050b5541ffdeda4558837b3a1631a121f3dd39f4aefe86154007d9",
+      "last_modified": 1771924437,
+      "size": 1096
+    },
+    "./docs/pages/guide/_template.mdx": {
+      "path": "./docs/pages/guide/_template.mdx",
+      "hash": "c95e4738f8c09e93c4c68a310746e0ee668f80d20fcebd54c76842079f7572fd",
+      "last_modified": 1771924437,
+      "size": 3096
+    },
+    "./docs/pages/learn/tempo/fx.mdx": {
+      "path": "./docs/pages/learn/tempo/fx.mdx",
+      "hash": "38283144a85b708fffba1793d009b9f4da0e215896bd2f70d45ed6174304814f",
+      "last_modified": 1771924437,
+      "size": 2052
+    },
+    "./docs/components/Container.tsx": {
+      "path": "./docs/components/Container.tsx",
+      "hash": "416ab027a623494e0638c37cfd00a875d28878d9f1baedea53efa8d9f5c50c36",
+      "last_modified": 1771924437,
+      "size": 774
+    },
+    "./crates/tempo-zone/src/precompiles/ecies.rs": {
+      "path": "./crates/tempo-zone/src/precompiles/ecies.rs",
+      "hash": "9eb8c834be142e43c77a301c2d251daafc47ee11aed9d57160e69cd0878dcc10",
+      "last_modified": 1771666942,
+      "size": 19845
+    },
+    "./crates/tempo-zone/src/rpc/config.rs": {
+      "path": "./crates/tempo-zone/src/rpc/config.rs",
+      "hash": "ce37cd9daeae0bfad806d781f2a126872652bc65dc4f91ce8555bd29de9e9e53",
+      "last_modified": 1771391303,
+      "size": 607
+    },
+    "./crates/tempo-zone/tests/l1_state_reader.rs": {
+      "path": "./crates/tempo-zone/tests/l1_state_reader.rs",
+      "hash": "fa7adda46f333f8eb26333958f52f48dedd86ba57c6a548434b7e691530963a7",
+      "last_modified": 1771391303,
+      "size": 4740
+    },
+    "./docs/specs/lib/forge-std/test/StdCheats.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdCheats.t.sol",
+      "hash": "ac51ecd7847483544df761e9f355436f0f69ab9f578cd0754dab06592b15a705",
+      "last_modified": 1770678210,
+      "size": 22731
+    },
+    "./docs/specs/src/abstracts/TIP20RolesAuth.sol": {
+      "path": "./docs/specs/src/abstracts/TIP20RolesAuth.sol",
+      "hash": "2e60b9883e297dc319a5e3cec8023ec235db5af705b0425dcc1ff83233c51b0a",
+      "last_modified": 1770817422,
+      "size": 1706
+    },
+    "./docs/pages/guide/payments/sponsor-user-fees.mdx": {
+      "path": "./docs/pages/guide/payments/sponsor-user-fees.mdx",
+      "hash": "14714c38e4bf57aba0c93fdaded360ac785fcc60754a3eb44e93ca3327cd7baf",
+      "last_modified": 1771924437,
+      "size": 6657
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IERC1155.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IERC1155.sol",
+      "hash": "c6c13c1231a9d8d72db4d79c10878227a43aae4c2e2f826f9e510656916392ac",
+      "last_modified": 1770678210,
+      "size": 7604
+    },
+    "./docs/specs/lib/forge-std/src/console2.sol": {
+      "path": "./docs/specs/lib/forge-std/src/console2.sol",
+      "hash": "6503b0753302aa5e24954b84d536747cf52861d3e8f0cba2de08be23b432d6f1",
+      "last_modified": 1770678210,
+      "size": 117
+    },
+    "./docs/pages/guide/use-accounts/webauthn-p256-signatures.mdx": {
+      "path": "./docs/pages/guide/use-accounts/webauthn-p256-signatures.mdx",
+      "hash": "708abd874bf66243e9afa3da6076039802db7b0c12776e788c7a5d4ba8fc5545",
+      "last_modified": 1771924437,
+      "size": 1225
+    },
+    "./docs/components/guides/steps/exchange/ApproveSpend.tsx": {
+      "path": "./docs/components/guides/steps/exchange/ApproveSpend.tsx",
+      "hash": "e58aa0e57ce655527c51375c9c9e7fa1f2596de9afecf6ccb3ceb7d37c22ebfe",
+      "last_modified": 1771924437,
+      "size": 1782
+    },
+    "./docs/specs/lib/forge-std/src/Test.sol": {
+      "path": "./docs/specs/lib/forge-std/src/Test.sol",
+      "hash": "39a7ac3ba034d702ca49f1fc7252f6978a417a63fb4fc1f802aafcc49557a6ba",
+      "last_modified": 1770678210,
+      "size": 1095
+    },
+    "./docs/pages/learn/index.mdx": {
+      "path": "./docs/pages/learn/index.mdx",
+      "hash": "8d85e7f0208295605b565a883c21772bd47b72339e87ede5d98265cb1e01198a",
+      "last_modified": 1771924437,
+      "size": 2968
+    },
+    "./docs/pages/protocol/exchange/pathUSD.mdx": {
+      "path": "./docs/pages/protocol/exchange/pathUSD.mdx",
+      "hash": "b769bd82c625386f8f3ba7cb761a4f40fed1c057b4cc46f96ae39a28c3f86999",
+      "last_modified": 1771924437,
+      "size": 3443
+    },
+    "./docs/pages/protocol/fees/index.mdx": {
+      "path": "./docs/pages/protocol/fees/index.mdx",
+      "hash": "9455e18ecdcd7ad5df6d78eabf891faf08d784d5e1abede0eb6f10abd6d2909b",
+      "last_modified": 1771924437,
+      "size": 1815
+    },
+    "./docs/pages/protocol/tips/tip-1000.mdx": {
+      "path": "./docs/pages/protocol/tips/tip-1000.mdx",
+      "hash": "61c3074b79678425189f81027110a3bae7b63c607f9bd160a12ac81d5f9163b1",
+      "last_modified": 1771924437,
+      "size": 19441
+    },
+    "./docs/pages/sdk/rust/index.mdx": {
+      "path": "./docs/pages/sdk/rust/index.mdx",
+      "hash": "f9ade359cf6084d72a65d9e8b3c39cad3556b485dac0d4f90216ca5a4c4e891e",
+      "last_modified": 1771924437,
+      "size": 2444
+    },
+    "./docs/specs/test/zone/ZoneFactory.t.sol": {
+      "path": "./docs/specs/test/zone/ZoneFactory.t.sol",
+      "hash": "ce79ec8f9602fb8370eec65d33f85ce8a2de37ef6c5cfb9d31a1a8ef3a2b2aab",
+      "last_modified": 1771320079,
+      "size": 11531
+    },
+    "./docs/pages/protocol/exchange/exchange-balance.mdx": {
+      "path": "./docs/pages/protocol/exchange/exchange-balance.mdx",
+      "hash": "bdcf362864bb0defe6b1b000f4b052374037238d2ec11f166e9f9341bb401680",
+      "last_modified": 1771924437,
+      "size": 2568
+    },
+    "./xtask/src/generate_zone_genesis.rs": {
+      "path": "./xtask/src/generate_zone_genesis.rs",
+      "hash": "bc7c1cd707137d7d3545d539a276025292ac4def9bda1ed8f76528c4a4e87086",
+      "last_modified": 1772463566,
+      "size": 20405
+    },
+    "./docs/snippets/public-testnet-sponsor-tip.mdx": {
+      "path": "./docs/snippets/public-testnet-sponsor-tip.mdx",
+      "hash": "ebd872dd2808a4a3625520f3fa4a4b08cca198cf9a50e4c1abe3fca507bdf252",
+      "last_modified": 1771924437,
+      "size": 206
+    },
+    "./docs/pages/protocol/tips/tip-1002.mdx": {
+      "path": "./docs/pages/protocol/tips/tip-1002.mdx",
+      "hash": "14cce2b4baee3a07020b7c7c979f2f12596821f67dc4074c9f8c03d7b2674b05",
+      "last_modified": 1771924437,
+      "size": 4324
+    },
+    "./crates/tempo-zone/src/l1_state/tip403/listener.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/tip403/listener.rs",
+      "hash": "5ace3648478cde7775ad320a12aef0a0d56b684b559701053e1e4debf1c7eafc",
+      "last_modified": 1772626523,
+      "size": 14117
+    },
+    "./crates/tempo-zone/src/engine.rs": {
+      "path": "./crates/tempo-zone/src/engine.rs",
+      "hash": "6ca842131c1aeea3c300775f66917cc3db25d24ce5b33f0b207c41f322afec67",
+      "last_modified": 1772617326,
+      "size": 12507
+    },
+    "./docs/specs/lib/forge-std/src/Script.sol": {
+      "path": "./docs/specs/lib/forge-std/src/Script.sol",
+      "hash": "34bedb09a382cfc82adcddf143a3d08f293c0fd46e31911517763e71f488e632",
+      "last_modified": 1770678210,
+      "size": 881
+    },
+    "./docs/pages/guide/issuance/use-for-fees.mdx": {
+      "path": "./docs/pages/guide/issuance/use-for-fees.mdx",
+      "hash": "48b0a894b94858a99a7e4038dc41bcb48db47fea2f5a7063752a7f97f70f5851",
+      "last_modified": 1771924437,
+      "size": 11339
+    },
+    "./docs/public/favicon-dark.svg": {
+      "path": "./docs/public/favicon-dark.svg",
+      "hash": "83448cd2634660ae8427bdc038ec11bf8f4d2da499cad28cb6a116a08bce01cd",
+      "last_modified": 1771924437,
+      "size": 556
+    },
+    "./crates/tempo-zone/src/l1_state/precompile.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/precompile.rs",
+      "hash": "27144a5599e7effce59a9f0a85d4468e3aabbed3c7e7d12b842915b6dab52c00",
+      "last_modified": 1772205554,
+      "size": 8180
+    },
+    "./docs/specs/README.md": {
+      "path": "./docs/specs/README.md",
+      "hash": "9b6068ec0d2e8c4682c44dba1f60b1d160dc7ccc511fb337cca6b67637b53397",
+      "last_modified": 1770678210,
+      "size": 3353
+    },
+    "./docs/specs/lib/forge-std/test/StdMath.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdMath.t.sol",
+      "hash": "91a97be32afae82623cc44a19e43c4ad8fea07a3ec3648023f48ca320ecb054c",
+      "last_modified": 1770678210,
+      "size": 8635
+    },
+    "./docs/specs/src/zone/ZoneMessenger.sol": {
+      "path": "./docs/specs/src/zone/ZoneMessenger.sol",
+      "hash": "4e183fbb66421de194ce771f3cc8d3dbcf1a05bde53cef457b7cb361fa99954b",
+      "last_modified": 1771320079,
+      "size": 3775
+    },
+    "./docs/specs/src/interfaces/INonce.sol": {
+      "path": "./docs/specs/src/interfaces/INonce.sol",
+      "hash": "9921f2abc707133d07309852a1af67dc4ee3826a98abb83473c1bfd174686f12",
+      "last_modified": 1770678210,
+      "size": 1542
+    },
+    "./docs/components/guides/steps/wallet/AddTokensToWallet.tsx": {
+      "path": "./docs/components/guides/steps/wallet/AddTokensToWallet.tsx",
+      "hash": "95944ffddea30f3f177d52fee9f53a328ac5c6dbb8b3058f4114ae7f00aa4b8a",
+      "last_modified": 1771924437,
+      "size": 3350
+    },
+    "./docs/components/lib/wallets.ts": {
+      "path": "./docs/components/lib/wallets.ts",
+      "hash": "27b2a26741af2c983c094398be680a728b311330e8ddf1675fb0987fe900aaf9",
+      "last_modified": 1771924437,
+      "size": 436
+    },
+    "./docs/specs/src/zone/DepositQueueLib.sol": {
+      "path": "./docs/specs/src/zone/DepositQueueLib.sol",
+      "hash": "82b020038cb6b7ef4b107fc2cd97d76d40c6141e507ccdf44a1d276762ca76a0",
+      "last_modified": 1770817422,
+      "size": 2090
+    },
+    "./docs/pages/guide/node/validator.mdx": {
+      "path": "./docs/pages/guide/node/validator.mdx",
+      "hash": "22322b905d436e11cb5371c836c1b6c8716cc1f9190c3a3710cf08ef0f1b3f39",
+      "last_modified": 1771924437,
+      "size": 5333
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IERC7575.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IERC7575.sol",
+      "hash": "8ebcb92c55399039152fca3b4ffa681aa314682e0d96d651eef21dda3a441ed4",
+      "last_modified": 1770678210,
+      "size": 12593
+    },
+    "./docs/specs/test/zone/mocks/MockVerifier.sol": {
+      "path": "./docs/specs/test/zone/mocks/MockVerifier.sol",
+      "hash": "971edb7ecd3e3dc7704189385428c3b053518794034dfe59be7838d26a0c8dc5",
+      "last_modified": 1770817422,
+      "size": 942
+    },
+    "./flake.lock": {
+      "path": "./flake.lock",
+      "hash": "8ad874b647f2f7c423a9e02f2975902e9557789171dd112d4fcc11d90a859575",
+      "last_modified": 1770678210,
+      "size": 3367
+    },
+    "./docs/components/guides/steps/exchange/MakeSwaps.tsx": {
+      "path": "./docs/components/guides/steps/exchange/MakeSwaps.tsx",
+      "hash": "048fe882997446ead8c539037b1f47d8a9371bf6eb134f49daf1e0a46c6bf24a",
+      "last_modified": 1771924437,
+      "size": 2127
+    },
+    "./docs/components/guides/steps/issuance/CreateTokenPolicy.tsx": {
+      "path": "./docs/components/guides/steps/issuance/CreateTokenPolicy.tsx",
+      "hash": "cbf5f84cb6cf31fa7f7d4447c9e3622dc3c031b8d044f63c4e220cd2b378f06c",
+      "last_modified": 1771924437,
+      "size": 3423
+    },
+    "./docs/specs/lib/forge-std/src/StdChains.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdChains.sol",
+      "hash": "3f6afdf22ac3e60b4b8f5d9ba4c6ff34d882569ddbdeffb5471bca61319090a1",
+      "last_modified": 1770678210,
+      "size": 14232
+    },
+    "./docs/pages/protocol/transactions/index.mdx": {
+      "path": "./docs/pages/protocol/transactions/index.mdx",
+      "hash": "3273d81045354fd6e1851cbc37ddc02099a83d52be7fce017279feb331d59eda",
+      "last_modified": 1771924437,
+      "size": 4775
+    },
+    "./docs/components/guides/steps/wallet/AddFundsToWallet.tsx": {
+      "path": "./docs/components/guides/steps/wallet/AddFundsToWallet.tsx",
+      "hash": "f700ea36e0afc192a044077373ee83f437e883c74a16bdaef145b451c865f307",
+      "last_modified": 1771924437,
+      "size": 3594
+    },
+    "./docs/pages/guide/stablecoin-dex/managing-fee-liquidity.mdx": {
+      "path": "./docs/pages/guide/stablecoin-dex/managing-fee-liquidity.mdx",
+      "hash": "6f16df8e947253f261e8e129c011c0d35a1f752b53ba064696605a9ce0effa12",
+      "last_modified": 1771924437,
+      "size": 14011
+    },
+    "./docs/pages/protocol/index.mdx": {
+      "path": "./docs/pages/protocol/index.mdx",
+      "hash": "1aa30453880607647781a7c424c3ac1f3490fd62db9ce7feff829557381e7729",
+      "last_modified": 1771924437,
+      "size": 2465
+    },
+    "./docs/pages/learn/use-cases/microtransactions.mdx": {
+      "path": "./docs/pages/learn/use-cases/microtransactions.mdx",
+      "hash": "5928a78b45d50d5d94db17c3059d1c6248d98becf49a2f6303244b340537a059",
+      "last_modified": 1771924437,
+      "size": 5219
+    },
+    "./docker-bake.hcl": {
+      "path": "./docker-bake.hcl",
+      "hash": "5692135b9f5e0aeac0e991cea21539260382da6c6a84b4b57d3167f600da5339",
+      "last_modified": 1771924011,
+      "size": 1131
+    },
+    "./docs/pages/protocol/tips/tip-1003.mdx": {
+      "path": "./docs/pages/protocol/tips/tip-1003.mdx",
+      "hash": "16247bb1ef07b642c0b97554e6f376399a6b7b3e9a668e8bad65bf2e450d8fb2",
+      "last_modified": 1771924437,
+      "size": 6147
+    },
+    "./crates/tempo-zone/tests/it/enable_token.rs": {
+      "path": "./crates/tempo-zone/tests/it/enable_token.rs",
+      "hash": "dca38da62d8073479fbe30722aa95fd2288044e17596012ae3021a04f4d9ec57",
+      "last_modified": 1772463566,
+      "size": 8962
+    },
+    "./docs/specs/test/TIP403Registry.t.sol": {
+      "path": "./docs/specs/test/TIP403Registry.t.sol",
+      "hash": "cba2d339ada44e968b0b5a556b6b98ff72679ea04b54fe3a19e6427764d0eb2d",
+      "last_modified": 1772199176,
+      "size": 35161
+    },
+    "./docs/specs/lib/forge-std/test/compilation/CompilationTestBase.sol": {
+      "path": "./docs/specs/lib/forge-std/test/compilation/CompilationTestBase.sol",
+      "hash": "7d47214d915347ffbb9f5c280b38d3c90a1754c61ff9954e465dabe954b51b9b",
+      "last_modified": 1770678210,
+      "size": 413
+    },
+    "./crates/tempo-zone/src/l1_state/versioned.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/versioned.rs",
+      "hash": "110f01e6d3486ae8b5fc01930f0cb74b172e482eb7ef24627bf07dcc0a2865d9",
+      "last_modified": 1772463566,
+      "size": 7990
+    },
+    "./docs/specs/src/zone/WithdrawalQueueLib.sol": {
+      "path": "./docs/specs/src/zone/WithdrawalQueueLib.sol",
+      "hash": "223a39a0967f559323aeeef558a77cb44fe80ab4be036e2f873579178d3a639f",
+      "last_modified": 1770817422,
+      "size": 4956
+    },
+    "./docs/pages/protocol/tips/tip-xxxx.mdx": {
+      "path": "./docs/pages/protocol/tips/tip-xxxx.mdx",
+      "hash": "b8499c30ca6fc9c703edb50d9a42727b0b05b0193665070160ca8f37ffe059df",
+      "last_modified": 1772463566,
+      "size": 14004
+    },
+    "./docs/pages/quickstart/connection-details.mdx": {
+      "path": "./docs/pages/quickstart/connection-details.mdx",
+      "hash": "88a43272b8da48ea869025bd7f46d648000bb2d933ce3a4980136c7580050347",
+      "last_modified": 1771924437,
+      "size": 1686
+    },
+    "./LICENSE-APACHE": {
+      "path": "./LICENSE-APACHE",
+      "hash": "954f95e96e3ec540822edf2aed3f70c8bc0b8ee82b02feeb8a8f9bb783dd37b2",
+      "last_modified": 1770678210,
+      "size": 10837
+    },
+    "./docs/api/index-supply.ts": {
+      "path": "./docs/api/index-supply.ts",
+      "hash": "d818705a56f72d356efd46b813413b56ecb73c1728a700b5c2467a9bb4e67b74",
+      "last_modified": 1771924437,
+      "size": 3338
+    },
+    "./docs/internal/network-reconfiguration.md": {
+      "path": "./docs/internal/network-reconfiguration.md",
+      "hash": "07423c1e38881b29e5197cf1304a4b1c65c3488e10e01d5f2bb6b39501a26130",
+      "last_modified": 1771924437,
+      "size": 8680
+    },
+    "./docs/specs/spec_template.md": {
+      "path": "./docs/specs/spec_template.md",
+      "hash": "09193ccc1e8da132f957bdb25c93e9c42de6b35e8f73ad5a8f85072949a6fb27",
+      "last_modified": 1770678210,
+      "size": 1918
+    },
+    "./docs/components/guides/CreatePasskeyAccount.tsx": {
+      "path": "./docs/components/guides/CreatePasskeyAccount.tsx",
+      "hash": "9a80b99922b23453a23dd9c26ec7164afb775eee08251f48d9ce2e4c800de2b1",
+      "last_modified": 1771924437,
+      "size": 2689
+    },
+    "./docs/public/robots-noindex.txt": {
+      "path": "./docs/public/robots-noindex.txt",
+      "hash": "1f78f1323561144708bd28db8389b798b0474b4f36120c34afc7acf85231cd9f",
+      "last_modified": 1771924437,
+      "size": 26
+    },
+    "./docs/specs/lib/forge-std/src/Base.sol": {
+      "path": "./docs/specs/lib/forge-std/src/Base.sol",
+      "hash": "c1cdb9964dde4c19d4fe434c1038f7bb7e372ac5d4c410c963fb3ee0952ee809",
+      "last_modified": 1770678210,
+      "size": 2227
+    },
+    "./docs/pages/sdk/go/index.mdx": {
+      "path": "./docs/pages/sdk/go/index.mdx",
+      "hash": "176bcd9e346489fdc2f989166b061ecd1ce9e450c9db8bdcf822db16b9d0a07f",
+      "last_modified": 1771924437,
+      "size": 4774
+    },
+    "./tempo.nu": {
+      "path": "./tempo.nu",
+      "hash": "4ae28cba18d0ace80f1e8b4fcac81b28a0b540e19c7173b6d9b9e601b99a5350",
+      "last_modified": 1771926291,
+      "size": 24680
+    },
+    "./docs/specs/test/zone/TempoState.t.sol": {
+      "path": "./docs/specs/test/zone/TempoState.t.sol",
+      "hash": "5756b33df2dbd9365325d10e10ee187cd8549ad2f2d707c8b07b1befdb2badfb",
+      "last_modified": 1770921325,
+      "size": 14766
+    },
+    "./crates/tempo-zone/src/l1_state/tip403/cache.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/tip403/cache.rs",
+      "hash": "2184def115beaa4c072a58b697117ce650a0f5d423fa7d204494f22ca4852a46",
+      "last_modified": 1772626518,
+      "size": 47313
+    },
+    "./crates/tempo-zone/src/payload.rs": {
+      "path": "./crates/tempo-zone/src/payload.rs",
+      "hash": "c272bee87e46cd79ce62d20f6cf4f5448f8de7cf5cc133350a6a1e0e84a26e29",
+      "last_modified": 1772539744,
+      "size": 4953
+    },
+    "./docs/pages/protocol/privacy/execution.md": {
+      "path": "./docs/pages/protocol/privacy/execution.md",
+      "hash": "0ab3145a1f0b739a66fc94f7614da5927890b1db4b3742fce38c7fc4512b70fa",
+      "last_modified": 1771924437,
+      "size": 8171
+    },
+    "./docs/pages/guide/use-accounts/batch-transactions.mdx": {
+      "path": "./docs/pages/guide/use-accounts/batch-transactions.mdx",
+      "hash": "b64276eb273cf26b6e4acd117204bd5cf82c21e317274b91450a6cad392a33c6",
+      "last_modified": 1771924437,
+      "size": 2605
+    },
+    "./crates/tempo-zone/tests/it/README.md": {
+      "path": "./crates/tempo-zone/tests/it/README.md",
+      "hash": "b0b003f6eb7ab916b9f5b7c28e7cc056ba363cbe83c415b23fda8580ed0fe5c0",
+      "last_modified": 1771496315,
+      "size": 8234
+    },
+    "./docs/bun.lock": {
+      "path": "./docs/bun.lock",
+      "hash": "c84b98d41793cfed859ba4b0e1a8bc3a586624c031ff12da06f022e592d8f5db",
+      "last_modified": 1771924437,
+      "size": 316416
+    },
+    "./crates/tempo-zone/src/l1_state/tip403/metrics.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/tip403/metrics.rs",
+      "hash": "42bfcc4b33eaa7cc736b6c7923ded963fa69a4f316ae612df17f03b97f7c5ab2",
+      "last_modified": 1772617326,
+      "size": 1448
+    },
+    "./docs/components/lib/IndexSupplySignatures.ts": {
+      "path": "./docs/components/lib/IndexSupplySignatures.ts",
+      "hash": "2a88f96d1fe72bd49885f3ecbbd833b624deb9231d5051135ef07cd51e1375d4",
+      "last_modified": 1771924437,
+      "size": 2859
+    },
+    "./zone-genesis/genesis.json": {
+      "path": "./zone-genesis/genesis.json",
+      "hash": "e1e8838f98bc0a07de122bb3849acbda393ea22d385247e5ce5045fc61fda82f",
+      "last_modified": 1772463566,
+      "size": 35914
+    },
+    "./docs/specs/src/ValidatorConfig.sol": {
+      "path": "./docs/specs/src/ValidatorConfig.sol",
+      "hash": "762930e956f74a44ee3fb16e34bcd1a2c33bfccf1ebe91b22f4d0bd8553bece1",
+      "last_modified": 1770817422,
+      "size": 14203
+    },
+    "./xtask/src/main.rs": {
+      "path": "./xtask/src/main.rs",
+      "hash": "5390766e7d27e5f141c47bd057d3885686cb81b5551523cfa68243ee3804e0e1",
+      "last_modified": 1772617326,
+      "size": 1833
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IERC6909.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IERC6909.sol",
+      "hash": "255070c82a10cb7f70aebdd762e2ba7ecc6804d796dd48811e9ae2362c91a2b9",
+      "last_modified": 1770678210,
+      "size": 3481
+    },
+    "./docs/public/google6bae3dfb1e9772fa.html": {
+      "path": "./docs/public/google6bae3dfb1e9772fa.html",
+      "hash": "ac3d929270e44e67bb66ac7ae7f61a7e54bc0ee58ee91f5f5d4733cbdb4c1b56",
+      "last_modified": 1771924437,
+      "size": 53
+    },
+    "./docs/specs/test/zone/mocks/MockEIP2935.sol": {
+      "path": "./docs/specs/test/zone/mocks/MockEIP2935.sol",
+      "hash": "604e2aaee24df6d0a449640ece5ff03a88deb5afb22f55105a8ec0f9ef823ee2",
+      "last_modified": 1770921325,
+      "size": 1020
+    },
+    "./docs/pages/protocol/fees/spec-fee.mdx": {
+      "path": "./docs/pages/protocol/fees/spec-fee.mdx",
+      "hash": "2f833a0e76f50116edb16fdbc7134cae8b7d4d0a953f16aa06d8acd94da4b474",
+      "last_modified": 1771924437,
+      "size": 13597
+    },
+    "./crates/tempo-zone/src/l1_state/tip403/pool_prefetch.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/tip403/pool_prefetch.rs",
+      "hash": "29ca33d8ae8d1a831ce1187b1c8e6b63e8fe6ed749da2bc4b234a6fa9d508e20",
+      "last_modified": 1772626820,
+      "size": 5408
+    },
+    "./docs/specs/lib/forge-std/test/StdConstants.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdConstants.t.sol",
+      "hash": "aca868fb7ac02ad25afded3cf07fecbbbbef40482bbbfee85c6a7f34ffb16a2c",
+      "last_modified": 1770678210,
+      "size": 1316
+    },
+    "./docs/specs/src/zone/IZone.sol": {
+      "path": "./docs/specs/src/zone/IZone.sol",
+      "hash": "993afbb114d7d31be2492a67d14a2ba2a7f3e86b8690662e269dbfd675693b7c",
+      "last_modified": 1772619541,
+      "size": 42369
+    },
+    "./docs/pages/protocol/privacy/prover-design.md": {
+      "path": "./docs/pages/protocol/privacy/prover-design.md",
+      "hash": "6407f23e7db7c4cf236b52c90a06c6d7bbc8ee26cc972bb0e12c63a4c8a6b243",
+      "last_modified": 1771924437,
+      "size": 20623
+    },
+    "./docs/pages/quickstart/predeployed-contracts.mdx": {
+      "path": "./docs/pages/quickstart/predeployed-contracts.mdx",
+      "hash": "919b6150a1c48404ed94af482a1af64907582b876c96ca704d08781d68f3dd61",
+      "last_modified": 1771924437,
+      "size": 2049
+    },
+    "./crates/tempo-zone/tests/assets/test-genesis.json": {
+      "path": "./crates/tempo-zone/tests/assets/test-genesis.json",
+      "hash": "7fd26e66fbe040bdb3f10e7226ad4ca85a87121fdb67dff8c1e339075634e934",
+      "last_modified": 1772464894,
+      "size": 88965
+    },
+    "./docs/components/Card.tsx": {
+      "path": "./docs/components/Card.tsx",
+      "hash": "987634ac6d9a8565139292681c6ef23dcefc62f516edccda82ed79df1dbfe82e",
+      "last_modified": 1771924437,
+      "size": 3319
+    },
+    "./docs/specs/foundry.toml": {
+      "path": "./docs/specs/foundry.toml",
+      "hash": "a711555896fb6017a468264dd541a9e066b4178a2a7b1c1c3fb82f2e0be441ba",
+      "last_modified": 1770817422,
+      "size": 665
+    },
+    "./crates/tempo-zone/tests/it/demo_shield_and_send.rs": {
+      "path": "./crates/tempo-zone/tests/it/demo_shield_and_send.rs",
+      "hash": "e64b34db49903eac174a7bbf91103e0453f9f3bc8da1df10d6b8bf20c506d650",
+      "last_modified": 1771406307,
+      "size": 3787
+    },
+    "./docs/specs/src/TIP403Registry.sol": {
+      "path": "./docs/specs/src/TIP403Registry.sol",
+      "hash": "a36f40e5d6f01951959de3105b034a4d8e85ace634f5104673da2df814d86ac4",
+      "last_modified": 1772619522,
+      "size": 9934
+    },
+    "./docs/pages/protocol/tip20-rewards/overview.mdx": {
+      "path": "./docs/pages/protocol/tip20-rewards/overview.mdx",
+      "hash": "a6c5443dc3ea0c691bf0d75ac3ad5339399409307fd754b390c41b83655863c3",
+      "last_modified": 1771924437,
+      "size": 1638
+    },
+    "./LICENSE-MIT": {
+      "path": "./LICENSE-MIT",
+      "hash": "c22e19d752da6b06b07837f304336ad79b0b40dcfb901a6d7aa5b8e18082d665",
+      "last_modified": 1770678210,
+      "size": 1084
+    },
+    "./docs/specs/test/zone/ZonePortal.t.sol": {
+      "path": "./docs/specs/test/zone/ZonePortal.t.sol",
+      "hash": "0367205b6c52f7463924e552fcc85b0bea5c3ddb3460ca0c02b9eaeccb27713a",
+      "last_modified": 1771320079,
+      "size": 88146
+    },
+    "./docs/specs/test/FeeManager.t.sol": {
+      "path": "./docs/specs/test/FeeManager.t.sol",
+      "hash": "cb2b5ce662445193a0d15fe844409cde4afc17712c395867a9d71d4d63149bd9",
+      "last_modified": 1770678210,
+      "size": 15093
+    },
+    "./docs/specs/lib/forge-std/test/StdAssertions.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdAssertions.t.sol",
+      "hash": "78a92f613406735bc41a6d89b2b2b918c6d9582713f425eb0e0f72678d76bbac",
+      "last_modified": 1770678210,
+      "size": 4784
+    },
+    "./docs/specs/lib/forge-std/test/StdStorage.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdStorage.t.sol",
+      "hash": "6e728304f1a14375dbea89a75cd0b36ba0f0210cefce24c041d9c698bd646b1e",
+      "last_modified": 1770678210,
+      "size": 18701
+    },
+    "./docs/specs/lib/forge-std/test/compilation/CompilationScriptBase.sol": {
+      "path": "./docs/specs/lib/forge-std/test/compilation/CompilationScriptBase.sol",
+      "hash": "90b88fe4b3ca12674af82a1295342162a2e2791615f5a4d168def0d200641828",
+      "last_modified": 1770678210,
+      "size": 421
+    },
+    "./docs/snippets/wagmi.config.ts": {
+      "path": "./docs/snippets/wagmi.config.ts",
+      "hash": "216900dc5325f7dd284d07e3dbe27da485eac7293713c0c8db2b4175d86c1937",
+      "last_modified": 1771924437,
+      "size": 1189
+    },
+    "./docs/diagrams/withdrawal-queue.svg": {
+      "path": "./docs/diagrams/withdrawal-queue.svg",
+      "hash": "85b71aebaf0b470ea9bb74e93381d542f0946b9c7b45afc05ab8ac41bd12540f",
+      "last_modified": 1771923977,
+      "size": 59918
+    },
+    "./docs/components/guides/steps/payments/SponsorUserFees.tsx": {
+      "path": "./docs/components/guides/steps/payments/SponsorUserFees.tsx",
+      "hash": "9c40e1ee1a84aa2aa1aebf6ab3088f21468b6bd847e7cf5ae1ef5b5593b6fafc",
+      "last_modified": 1771924437,
+      "size": 5608
+    },
+    "./docs/pages/protocol/transactions/AccountKeychain.mdx": {
+      "path": "./docs/pages/protocol/transactions/AccountKeychain.mdx",
+      "hash": "8ed303ee282d5c02f42bb8ef6713119550f7f909d26c352a9779869407f97592",
+      "last_modified": 1771924437,
+      "size": 13789
+    },
+    "./crates/tempo-zone/src/builder.rs": {
+      "path": "./crates/tempo-zone/src/builder.rs",
+      "hash": "cd33184f2967c63968f2fe56535ad024c3b1c60b52b67ab70f4168c71d25cc98",
+      "last_modified": 1772539753,
+      "size": 22751
+    },
+    "./docs/vercel.json": {
+      "path": "./docs/vercel.json",
+      "hash": "c778fade11e9689b5026f7e636d0eb28be1b4bc8f7d3cd9f9ef21ffbd788218e",
+      "last_modified": 1771924437,
+      "size": 1768
+    },
+    "./docs/specs/test/ValidatorConfig.t.sol": {
+      "path": "./docs/specs/test/ValidatorConfig.t.sol",
+      "hash": "18ac93f5d77cbd2dc4afd68930f7f1b4e47dee98e718a8f5fc3db48e9ce52c84",
+      "last_modified": 1772199176,
+      "size": 22996
+    },
+    "./docs/specs/lib/forge-std/test/StdStyle.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdStyle.t.sol",
+      "hash": "7000ebdee1755df2bdfd42b64497dd1796813c9fb5d4df1d4d08af1bb2dfb012",
+      "last_modified": 1770678210,
+      "size": 5862
+    },
+    "./docs/specs/lib/forge-std/test/fixtures/test.toml": {
+      "path": "./docs/specs/lib/forge-std/test/fixtures/test.toml",
+      "hash": "c4710ecc5344d3fd49a2d41dd5097047ecd0d5fc6f768a9d02ca020148faba4b",
+      "last_modified": 1770678210,
+      "size": 43
+    },
+    "./docs/specs/lib/forge-std/README.md": {
+      "path": "./docs/specs/lib/forge-std/README.md",
+      "hash": "cb37051dc604cf9e92e20d6a01dcce131be0d80a3c3567e74d9d22b6a39f6568",
+      "last_modified": 1770678210,
+      "size": 9126
+    },
+    "./docs/specs/src/Nonce.sol": {
+      "path": "./docs/specs/src/Nonce.sol",
+      "hash": "96eb95cd98fed03c6fe71c5fad4b78957897e0983c1f2128e6f25d0d82adfb46",
+      "last_modified": 1772199176,
+      "size": 2306
+    },
+    "./docs/specs/src/zone/Verifier.sol": {
+      "path": "./docs/specs/src/zone/Verifier.sol",
+      "hash": "6ff77b40e252b8dbfee97a7dc6a1b39c118528670d85963329aaef9e0552e718",
+      "last_modified": 1770817422,
+      "size": 825
+    },
+    "./docs/specs/src/TempoUtilities.sol": {
+      "path": "./docs/specs/src/TempoUtilities.sol",
+      "hash": "251703f86c7cb221b989def729e6af284338121c7f3e50b4e7cc08baadf5e155",
+      "last_modified": 1770678210,
+      "size": 1075
+    },
+    "./docs/pages/learn/use-cases/agentic-commerce.mdx": {
+      "path": "./docs/pages/learn/use-cases/agentic-commerce.mdx",
+      "hash": "3e7bf70694f14e0aee6c1f7167c0bb9b2b9cde30e9256e3d05bde311f36e4a0a",
+      "last_modified": 1771924437,
+      "size": 5248
+    },
+    "./docs/pages/learn/tempo/native-stablecoins.mdx": {
+      "path": "./docs/pages/learn/tempo/native-stablecoins.mdx",
+      "hash": "42a3faacf2bfca7d3bc674ede85c41bca928f3d33cda6ddc31f112e55d1fdb65",
+      "last_modified": 1771924437,
+      "size": 5174
+    },
+    "./docs/public/ph.js": {
+      "path": "./docs/public/ph.js",
+      "hash": "f6d42b618bab3b67700959f7a28d7908274fc140bbc9676cc7083e912a728e54",
+      "last_modified": 1771924437,
+      "size": 2773
+    },
+    "./docs/specs/lib/forge-std/test/StdUtils.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdUtils.t.sol",
+      "hash": "4663c901040e0a155fb95573995dcb6a51f19417bb51e35910a0f7afd18279e5",
+      "last_modified": 1770678210,
+      "size": 14913
+    },
+    "./docs/components/guides/steps/issuance/BurnToken.tsx": {
+      "path": "./docs/components/guides/steps/issuance/BurnToken.tsx",
+      "hash": "8f4b226595b4f476cd08804af6bf80639ae13948c6fee351dcfebdd0b496d69a",
+      "last_modified": 1771924437,
+      "size": 4347
+    },
+    "./docs/public/favicon-light.svg": {
+      "path": "./docs/public/favicon-light.svg",
+      "hash": "9e424a7d4fc6fe1ea1d8c04c8ba3593d6bd272366b3334fbb65248207072fed7",
+      "last_modified": 1771924437,
+      "size": 556
+    },
+    "./docs/diagrams/deposit-queue.d2": {
+      "path": "./docs/diagrams/deposit-queue.d2",
+      "hash": "f73991e99697d23414424439e311061347760b8c9e8574ebdcd1625fe86a1542",
+      "last_modified": 1771923977,
+      "size": 2938
+    },
+    "./crates/tempo-zone/tests/it/private_rpc_e2e.rs": {
+      "path": "./crates/tempo-zone/tests/it/private_rpc_e2e.rs",
+      "hash": "2a19be0ea29c908f66268f943cddd2b68a2effa82403ae66f7862b9857265e9f",
+      "last_modified": 1771406307,
+      "size": 9126
+    },
+    "./docs/components/guides/steps/payments/SendPayment.tsx": {
+      "path": "./docs/components/guides/steps/payments/SendPayment.tsx",
+      "hash": "5f4d3e2a98edbd0133daa9b9632a7ac8541e7c9ad92dc32b939ae26d56da8996",
+      "last_modified": 1771924437,
+      "size": 5651
+    },
+    "./crates/tempo-zone/tests/it/demo_cross_zone.rs": {
+      "path": "./crates/tempo-zone/tests/it/demo_cross_zone.rs",
+      "hash": "595dd63a32522c5b53549ad9b0607f8a10e56602a05de95abfb174e162162f54",
+      "last_modified": 1771666942,
+      "size": 4387
+    },
+    "./docs/specs/src/zone/ZonePortal.sol": {
+      "path": "./docs/specs/src/zone/ZonePortal.sol",
+      "hash": "80b18cabdd3c0227bce5700a186db746c6df78d762f4ddfa10f563ff22c5bbbd",
+      "last_modified": 1772623794,
+      "size": 31737
+    },
+    "./docs/specs/src/interfaces/IStablecoinDEX.sol": {
+      "path": "./docs/specs/src/interfaces/IStablecoinDEX.sol",
+      "hash": "ccd78c7299baf2259b739497163c1fa23edf42541fec5cc4a5cf0129f7c5e3ed",
+      "last_modified": 1770817422,
+      "size": 5017
+    },
+    "./crates/tempo-zone/src/rpc/api.rs": {
+      "path": "./crates/tempo-zone/src/rpc/api.rs",
+      "hash": "47207d1f20993aa5ee57bb448e8e3e7ffbf5d972a3939465b93e5f53ef0e565c",
+      "last_modified": 1771526445,
+      "size": 17417
+    },
+    "./tempoup/tempoup": {
+      "path": "./tempoup/tempoup",
+      "hash": "5084b3012e04d8fbf3e10d76db942a68970f7d77c74de23378b23e352b706438",
+      "last_modified": 1771926291,
+      "size": 11615
+    },
+    "./xtask/src/set_encryption_key.rs": {
+      "path": "./xtask/src/set_encryption_key.rs",
+      "hash": "53cbeb862e6aff63635a2b47dfb84923e6af338f784ee61efcf9add438e7852f",
+      "last_modified": 1771844899,
+      "size": 3505
+    },
+    "./crates/tempo-zone/src/precompiles/chaum_pedersen.rs": {
+      "path": "./crates/tempo-zone/src/precompiles/chaum_pedersen.rs",
+      "hash": "bb13c7f584e66d82ccb1d303e65e5de653971574575549dd603e16e745e65c76",
+      "last_modified": 1771666942,
+      "size": 17785
+    },
+    "./docs/diagrams/two-queue-swap.svg": {
+      "path": "./docs/diagrams/two-queue-swap.svg",
+      "hash": "f35dc3698041052b7efe992665da9b80b9e32e8860e3f539a265acaa381aba60",
+      "last_modified": 1771923977,
+      "size": 51946
+    },
+    "./xtask/src/zone_info.rs": {
+      "path": "./xtask/src/zone_info.rs",
+      "hash": "afdabb1d40a98a546aa912bdc145cf7fe96ab7f7e6e6875feaae105286b904a4",
+      "last_modified": 1772463566,
+      "size": 4290
+    },
+    "./docs/pages/protocol/fees/fee-amm/index.mdx": {
+      "path": "./docs/pages/protocol/fees/fee-amm/index.mdx",
+      "hash": "3635306255918efd3ed9876600ed6a02a327709889e50c9d91e2d49059294da9",
+      "last_modified": 1771924437,
+      "size": 1566
+    },
+    "./docs/components/guides/steps/exchange/SellSwap.tsx": {
+      "path": "./docs/components/guides/steps/exchange/SellSwap.tsx",
+      "hash": "65108c9fc052a66ed04ed7e7051c152d218bcea98887f1083197c6dfc85072d0",
+      "last_modified": 1771924437,
+      "size": 2995
+    },
+    "./docs/layout.tsx": {
+      "path": "./docs/layout.tsx",
+      "hash": "703b3346f64fb5f0ad4e25175167203715908bdeac3496891ff49d1335d4c959",
+      "last_modified": 1771924437,
+      "size": 2689
+    },
+    "./docs/pages/protocol/transactions/spec-tempo-transaction.mdx": {
+      "path": "./docs/pages/protocol/transactions/spec-tempo-transaction.mdx",
+      "hash": "844b69d9059500cf428212aa3431fa492aaaf037d9bde26401411dc224f34f74",
+      "last_modified": 1771924437,
+      "size": 45898
+    },
+    "./docs/pages/sdk/typescript/server/handler.compose.mdx": {
+      "path": "./docs/pages/sdk/typescript/server/handler.compose.mdx",
+      "hash": "93480b9a046f75338c129aeee6c854e3974a84f33b1e4bd1113f9b1e6447cfda",
+      "last_modified": 1771924437,
+      "size": 2680
+    },
+    "./docs/components/guides/EmbedPasskeys.tsx": {
+      "path": "./docs/components/guides/EmbedPasskeys.tsx",
+      "hash": "8082c6bc2b20d1dc419c5ed5749154633f786aaa98fee64a66d3bd468dc03872",
+      "last_modified": 1771924437,
+      "size": 1519
+    },
+    "./docs/pages/sdk/index.mdx": {
+      "path": "./docs/pages/sdk/index.mdx",
+      "hash": "bdc95aba20eef9e675f714a07d8113e55dab12da1b30317cde608069b53635cc",
+      "last_modified": 1771924437,
+      "size": 1088
+    },
+    "./docs/snippets/unformatted/fee.setUserToken.ts": {
+      "path": "./docs/snippets/unformatted/fee.setUserToken.ts",
+      "hash": "e0e7d618d805c1618d8acc4af2629e5cab6f5048973ceb8493ceb8998bccbd8d",
+      "last_modified": 1771924437,
+      "size": 846
+    },
+    "./docs/pages/sdk/typescript/server/handlers.mdx": {
+      "path": "./docs/pages/sdk/typescript/server/handlers.mdx",
+      "hash": "1617c9fec4bb2c6fb0e54211e378d1569d10d32f52c379e5fac8519fcd15677c",
+      "last_modified": 1771924437,
+      "size": 1879
+    },
+    "./flake.nix": {
+      "path": "./flake.nix",
+      "hash": "a6ce7e324dcb2270af58f97d7b89020666cbfcbed00c90ddc207c16a91e7a623",
+      "last_modified": 1770678210,
+      "size": 3371
+    },
+    "./crates/tempo-zone/Cargo.toml": {
+      "path": "./crates/tempo-zone/Cargo.toml",
+      "hash": "37b34fecc6bfe18c4ad0b469ad99564f55783215ec44a7927af2246c9bd3c273",
+      "last_modified": 1772463566,
+      "size": 3717
+    },
+    "./crates/tempo-zone/tests/it/restart_e2e.rs": {
+      "path": "./crates/tempo-zone/tests/it/restart_e2e.rs",
+      "hash": "24fcd6ca3bf42bad4beca8cc0d8b22845a67a7b5a0fac00a231aa48ee2c607de",
+      "last_modified": 1772205554,
+      "size": 13937
+    },
+    "./crates/tempo-zone/tests/assets/zone-test-genesis.json": {
+      "path": "./crates/tempo-zone/tests/assets/zone-test-genesis.json",
+      "hash": "66e4ca18f9e3ffd6fec0471901f9b4d11015dd77b1c3d6aae3eb920ed1bd2bd2",
+      "last_modified": 1772463566,
+      "size": 96000
+    },
+    "./docs/ZONES.md": {
+      "path": "./docs/ZONES.md",
+      "hash": "c2498ea99e47be64efa7d64e52f6148144830b0134517c4ed241ed97c5c68ba1",
+      "last_modified": 1772619770,
+      "size": 17129
+    },
+    "./docs/specs/lib/forge-std/src/StdStorage.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdStorage.sol",
+      "hash": "ac6b54639b4c062f8937451a9ac6183fd93183aa945fe6fd0f6e95c80c4c70d0",
+      "last_modified": 1770678210,
+      "size": 17841
+    },
+    "./docs/components/guides/steps/amm/BurnFeeAmmLiquidity.tsx": {
+      "path": "./docs/components/guides/steps/amm/BurnFeeAmmLiquidity.tsx",
+      "hash": "9ad614cada97e1b50877c99090a8ab7bc126a47140172bfadd5832e3c698f87d",
+      "last_modified": 1771924437,
+      "size": 2888
+    },
+    "./crates/tempo-zone/src/bindings.rs": {
+      "path": "./crates/tempo-zone/src/bindings.rs",
+      "hash": "395837577445a6ca1c7a1c31b874816dd3954dce16706177b01238a6be7b89d3",
+      "last_modified": 1772546825,
+      "size": 2490
+    },
+    "./docs/env.d.ts": {
+      "path": "./docs/env.d.ts",
+      "hash": "0a34ceb0f1617b8e202a467fed7d3bb83f3606406c0678308bea5588753dc625",
+      "last_modified": 1771924437,
+      "size": 602
+    },
+    "./docs/components/guides/steps/issuance/CreateToken.tsx": {
+      "path": "./docs/components/guides/steps/issuance/CreateToken.tsx",
+      "hash": "486cc527f0a7eccdca75ae1bef75e77f27935124e784e521cc3a9e1cf156d5f0",
+      "last_modified": 1771924437,
+      "size": 4940
+    },
+    "./docs/public/learn/stablecoin-use-cases.svg": {
+      "path": "./docs/public/learn/stablecoin-use-cases.svg",
+      "hash": "73f09003bd06c7d21fef439c591b6a319e3807b2d2861485887e03d7e6ce7180",
+      "last_modified": 1771924437,
+      "size": 603876
+    },
+    "./docs/specs/src/interfaces/IFeeManager.sol": {
+      "path": "./docs/specs/src/interfaces/IFeeManager.sol",
+      "hash": "64bdecaf35e5c83af06b53a3788f77f6703a583fe79c4477a01e27ba117721bf",
+      "last_modified": 1770678210,
+      "size": 796
+    },
+    "./docs/pages/guide/payments/index.mdx": {
+      "path": "./docs/pages/guide/payments/index.mdx",
+      "hash": "66510aa342476e5c4e45337aa15a7527a4d263061a6bcbc7f8a27a3cbbf91fd8",
+      "last_modified": 1771924437,
+      "size": 1650
+    },
+    "./docs/pages/protocol/blockspace/payment-lane-specification.mdx": {
+      "path": "./docs/pages/protocol/blockspace/payment-lane-specification.mdx",
+      "hash": "9fa33e95385be051db50c4e47c229a5def3db32344fdce861f5b580e01680f22",
+      "last_modified": 1771924437,
+      "size": 2881
+    },
+    "./crates/tempo-zone/src/precompiles/mod.rs": {
+      "path": "./crates/tempo-zone/src/precompiles/mod.rs",
+      "hash": "0cb6cb68b4fe5e2212e0647e869434430eff5c3986643803c8d9adc37df5fc89",
+      "last_modified": 1772463566,
+      "size": 1296
+    },
+    "./docs/public/lockup-light.svg": {
+      "path": "./docs/public/lockup-light.svg",
+      "hash": "0288673b80876d3f4d552ecf53b19429629d013b765e7f0ab08a555fbba8f055",
+      "last_modified": 1771924437,
+      "size": 2674
+    },
+    "./crates/tempo-zone/src/l1_state/listener.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/listener.rs",
+      "hash": "13f24674c1f15ca2a7c9b5b086e5224cb0473790daf76e2760f27e70518a3d6a",
+      "last_modified": 1771367771,
+      "size": 8770
+    },
+    "./crates/tempo-zone/tests/it/main.rs": {
+      "path": "./crates/tempo-zone/tests/it/main.rs",
+      "hash": "6ef4964407443484457503a3ee3dd16c72c3bd8731480473c115ff46a09d4007",
+      "last_modified": 1772463566,
+      "size": 257
+    },
+    "./docs/snippets/read-parameters.mdx": {
+      "path": "./docs/snippets/read-parameters.mdx",
+      "hash": "f130536d9cbb96fd5aa6c54a2e8fb9008f7f18bc777910e574f3d11c7fa25d5e",
+      "last_modified": 1771924437,
+      "size": 465
+    },
+    "./crates/tempo-zone/tests/it/private_rpc.rs": {
+      "path": "./crates/tempo-zone/tests/it/private_rpc.rs",
+      "hash": "379b2dc107fccdeb0a0221384fa2b0ed3d0a796711626c66e016b46056c84395",
+      "last_modified": 1771391303,
+      "size": 10104
+    },
+    "./docs/specs/lib/forge-std/scripts/vm.py": {
+      "path": "./docs/specs/lib/forge-std/scripts/vm.py",
+      "hash": "ca2ad1b14b9afa6543177677087ef2236f1c394844732daa79cdef975e7611fc",
+      "last_modified": 1770678210,
+      "size": 17708
+    },
+    "./docs/pages/guide/issuance/distribute-rewards.mdx": {
+      "path": "./docs/pages/guide/issuance/distribute-rewards.mdx",
+      "hash": "2451c46d22ad6e814ac518b86143384991fe7f880132a2fde5b3263c3d0bcee4",
+      "last_modified": 1771924437,
+      "size": 7416
+    },
+    "./docs/pages/protocol/tips/tip-1005.mdx": {
+      "path": "./docs/pages/protocol/tips/tip-1005.mdx",
+      "hash": "9ab425c58a9c28134c30f2246d237379b8c231357c88e42da0d897c3d624e759",
+      "last_modified": 1771924437,
+      "size": 4566
+    },
+    "./docs/specs/lib/forge-std/test/compilation/CompilationTest.sol": {
+      "path": "./docs/specs/lib/forge-std/test/compilation/CompilationTest.sol",
+      "hash": "8f9b44d1b1d360caf199b150e64b588b847b5ebffd19a75225776631e6534a92",
+      "last_modified": 1770678210,
+      "size": 401
+    },
+    "./docs/pages/quickstart/tip20.mdx": {
+      "path": "./docs/pages/quickstart/tip20.mdx",
+      "hash": "cd9c9050554075f51b1e463a543d604b7acef11255ffe24b3deb50324e0a7894",
+      "last_modified": 1771924437,
+      "size": 6561
+    },
+    "./crates/tempo-zone/src/rpc/auth/mod.rs": {
+      "path": "./crates/tempo-zone/src/rpc/auth/mod.rs",
+      "hash": "8604a2db2a2ce0844952a931abcfad3ec6cf4039c0a470b5d23875a87bd7a2ca",
+      "last_modified": 1771391303,
+      "size": 259
+    },
+    "./docs/pages/protocol/exchange/providing-liquidity.mdx": {
+      "path": "./docs/pages/protocol/exchange/providing-liquidity.mdx",
+      "hash": "c821e5ca551da063bfeb5515352cd8919afb5c0bf6ead645240ef635b29decc1",
+      "last_modified": 1771924437,
+      "size": 5673
+    },
+    "./docker-bake-profiling.hcl": {
+      "path": "./docker-bake-profiling.hcl",
+      "hash": "69fc0e46e13dfbb3958ffada47d0a4c152d6edfae2c2013dcf6f8181872774ca",
+      "last_modified": 1771924011,
+      "size": 915
+    },
+    "./crates/tempo-zone/src/precompiles/test_utils.rs": {
+      "path": "./crates/tempo-zone/src/precompiles/test_utils.rs",
+      "hash": "ba327d7d56c68a31b9b9e8db7f83e5337eaa637ea74948870b129a9fe8f68bf0",
+      "last_modified": 1771666942,
+      "size": 4298
+    },
+    "./docs/specs/src/zone/SwapAndDepositRouter.sol": {
+      "path": "./docs/specs/src/zone/SwapAndDepositRouter.sol",
+      "hash": "53e7e852e16bc8b5860241e9b1027a53b59dfb9c133fd40bd11509b1ceecbe76",
+      "last_modified": 1771320079,
+      "size": 5793
+    },
+    "./docs/components/HomePage.tsx": {
+      "path": "./docs/components/HomePage.tsx",
+      "hash": "9525635c43237ae9e4c7f78292b4332191bb90a2ddcc94e9fdbbfac1e37f4a3f",
+      "last_modified": 1771924437,
+      "size": 13888
+    },
+    "./docs/pages/guide/payments/send-parallel-transactions.mdx": {
+      "path": "./docs/pages/guide/payments/send-parallel-transactions.mdx",
+      "hash": "9064a35b934915696e5774870728d844002a9f21538d96e397178e5bc05c9bb6",
+      "last_modified": 1771924437,
+      "size": 7493
+    },
+    "./docs/pages/network-upgrades.mdx": {
+      "path": "./docs/pages/network-upgrades.mdx",
+      "hash": "c3eeaf6694d2fe119b7c185cd34875f4baa5ee08599f563f5e104bfc41688801",
+      "last_modified": 1771924437,
+      "size": 2214
+    },
+    "./Justfile": {
+      "path": "./Justfile",
+      "hash": "7a84f55ce89d618be60ed27568146849a7827ad1b38d23bb495fc6391b72e9ab",
+      "last_modified": 1772617326,
+      "size": 31807
+    },
+    "./Cargo.lock": {
+      "path": "./Cargo.lock",
+      "hash": "4a08da6cec1735cc6980637d96417912ddb997e479af0de13f2194c5412f4dc8",
+      "last_modified": 1772463566,
+      "size": 305018
+    },
+    "./crates/tempo-zone/src/rpc/handlers.rs": {
+      "path": "./crates/tempo-zone/src/rpc/handlers.rs",
+      "hash": "70a8eaf65729f222ec8be52776cf35a4eb845fef85acf37ab848189192d1e3cd",
+      "last_modified": 1771587507,
+      "size": 22011
+    },
+    "./docs/public/learn/stablecoin-mint-burn-process.svg": {
+      "path": "./docs/public/learn/stablecoin-mint-burn-process.svg",
+      "hash": "57d2ab108788ab464fcc7c253cd47be2c451a22d9735e9154da0441043d28e39",
+      "last_modified": 1771924437,
+      "size": 500015
+    },
+    "./docs/package.json": {
+      "path": "./docs/package.json",
+      "hash": "20759125ecb00e8c72326a0136999ab78953c3677981e11e6422db6d65cabc03",
+      "last_modified": 1771924437,
+      "size": 1677
+    },
+    "./docs/components/guides/steps/index.ts": {
+      "path": "./docs/components/guides/steps/index.ts",
+      "hash": "13714e4e8bd1b185386dc3adf89e069e3c865fd9450296b0d53fc18dcf03d734",
+      "last_modified": 1771924437,
+      "size": 2023
+    },
+    "./docs/pages/guide/use-accounts/scheduled-transactions.mdx": {
+      "path": "./docs/pages/guide/use-accounts/scheduled-transactions.mdx",
+      "hash": "61e76c448bf0189244d4a0b6fff82039e77e7558b43e0a4fd91185c61c62acfe",
+      "last_modified": 1771924437,
+      "size": 5635
+    },
+    "./docs/specs/src/interfaces/ITIP20Factory.sol": {
+      "path": "./docs/specs/src/interfaces/ITIP20Factory.sol",
+      "hash": "c8def02551c5acab7738a1bb69a537049f63a94f37777518a6e9c42ae31e388f",
+      "last_modified": 1770817422,
+      "size": 2389
+    },
+    "./CNAME": {
+      "path": "./CNAME",
+      "hash": "2c57a70b59008aa44598e5a6c8aea0d853912a8c4a23ae923d9b37a4cb9a399c",
+      "last_modified": 1771926291,
+      "size": 18
+    },
+    "./crates/tempo-zone/src/l1_state/tip403/provider.rs": {
+      "path": "./crates/tempo-zone/src/l1_state/tip403/provider.rs",
+      "hash": "b921681ac5905ac2840d1acf57917d165379e842066cb3552a2f26090a7efb75",
+      "last_modified": 1772617326,
+      "size": 18985
+    },
+    "./docs/specs/lib/forge-std/test/compilation/CompilationScript.sol": {
+      "path": "./docs/specs/lib/forge-std/test/compilation/CompilationScript.sol",
+      "hash": "c694b83d030954b416dfbd06a9a05a94379d4841e3d8072fa07d139017fd67a2",
+      "last_modified": 1770678210,
+      "size": 409
+    },
+    "./docs/.claude/agents/tempo-ts-sdk-doc-fixer.md": {
+      "path": "./docs/.claude/agents/tempo-ts-sdk-doc-fixer.md",
+      "hash": "90ef187b0e8ba59f0fea872323bbf97351436cfb99492738c54febbe5e7f8ed7",
+      "last_modified": 1771924437,
+      "size": 774
+    },
+    "./crates/tempo-zone/src/precompiles/ztip20.rs": {
+      "path": "./crates/tempo-zone/src/precompiles/ztip20.rs",
+      "hash": "afda89a2a225e027ab9eab79ddbaf484ec62e2a8b07036e4274850ba186da077",
+      "last_modified": 1772538596,
+      "size": 9304
+    },
+    "./docs/components/TokenSelector.tsx": {
+      "path": "./docs/components/TokenSelector.tsx",
+      "hash": "39d5186f684ce02327b0d661f89802f2db76d83b675b3d52ce6276c5e740276b",
+      "last_modified": 1771924437,
+      "size": 962
+    },
+    "./docs/components/SignatureSelector.tsx": {
+      "path": "./docs/components/SignatureSelector.tsx",
+      "hash": "7d01ca57207c3887c58da73356a469f8bf23d65ea0d8d525836c740c93436c53",
+      "last_modified": 1771924437,
+      "size": 10875
+    },
+    "./docs/components/guides/steps/amm/MintFeeAmmLiquidity.tsx": {
+      "path": "./docs/components/guides/steps/amm/MintFeeAmmLiquidity.tsx",
+      "hash": "de28db76cf257d10021a9474b35655e81e02d155ae1d2aed59a22854599cc30e",
+      "last_modified": 1771924437,
+      "size": 2937
+    },
+    "./docs/diagrams/withdrawal-queue.d2": {
+      "path": "./docs/diagrams/withdrawal-queue.d2",
+      "hash": "7b5e1db784126f59358b23a836e17b74de2eaf37db2d90bbda2bb4ffa6785199",
+      "last_modified": 1771923977,
+      "size": 1568
+    },
+    "./docs/pages/learn/tempo/privacy.mdx": {
+      "path": "./docs/pages/learn/tempo/privacy.mdx",
+      "hash": "71abdf18e5932e402147fd5951474da58dbafd3180bc90084d44fab88086f0d4",
+      "last_modified": 1771924437,
+      "size": 2922
+    },
+    "./docs/pages/protocol/exchange/spec.mdx": {
+      "path": "./docs/pages/protocol/exchange/spec.mdx",
+      "hash": "8ace3bfd74bc4d1bdb47b0a8c6fb9dafdf9a6bbf2c5fdaed855884d459976122",
+      "last_modified": 1771924437,
+      "size": 13695
+    },
+    "./docs/pages/learn/stablecoins.mdx": {
+      "path": "./docs/pages/learn/stablecoins.mdx",
+      "hash": "b9aa018c4b4f02574c33484387c5a32f2a223affd25b54b5277560a38049c545",
+      "last_modified": 1771924437,
+      "size": 6245
+    },
+    "./docs/components/guides/steps/auth/Connect.tsx": {
+      "path": "./docs/components/guides/steps/auth/Connect.tsx",
+      "hash": "416f4c099371a7614f32bc23e03c344105a1004d41f6c781c5cf821e547bcb40",
+      "last_modified": 1771924437,
+      "size": 480
+    },
+    "./docs/specs/src/interfaces/IFeeAMM.sol": {
+      "path": "./docs/specs/src/interfaces/IFeeAMM.sol",
+      "hash": "e7335b10457dd618f177a682b3346e241ccd65c0f41e0be225be3c152a26fa6b",
+      "last_modified": 1772199176,
+      "size": 2822
+    },
+    "./docs/pages/protocol/tips/tip-1001.mdx": {
+      "path": "./docs/pages/protocol/tips/tip-1001.mdx",
+      "hash": "013b566de7e3d985cf2203f70c580c788f1f5244e440e8769b1f094694356419",
+      "last_modified": 1771924437,
+      "size": 5931
+    },
+    "./Dockerfile": {
+      "path": "./Dockerfile",
+      "hash": "2ee8630a925e37978930c6d8c2662860cbf325e1561517d874c4776be66c852e",
+      "last_modified": 1771924011,
+      "size": 1748
+    },
+    "./docs/specs/lib/forge-std/src/Vm.sol": {
+      "path": "./docs/specs/lib/forge-std/src/Vm.sol",
+      "hash": "6e13742c93d82d1c33d71457d65258057f4c399a1a085b1b9bac864b1f90f46f",
+      "last_modified": 1770678210,
+      "size": 125018
+    },
+    "./docs/pages/protocol/blockspace/sub-block-specification.mdx": {
+      "path": "./docs/pages/protocol/blockspace/sub-block-specification.mdx",
+      "hash": "71bee09565cb468944ee7756617efd1f088cfd99c304bc5abdaba5bc384b8f15",
+      "last_modified": 1771924437,
+      "size": 13261
+    },
+    "./docs/pages/quickstart/integrate-tempo.mdx": {
+      "path": "./docs/pages/quickstart/integrate-tempo.mdx",
+      "hash": "fd859246acc2737fcfa08ee62f253bec23889cc6cc73c69e1d770c7f9ac64522",
+      "last_modified": 1771924437,
+      "size": 4320
+    },
+    "./Cross.toml": {
+      "path": "./Cross.toml",
+      "hash": "c3544001466b84d4152fed3a5d6f5bbe82a0441c6a78988050fb6940e17cc7ce",
+      "last_modified": 1771926291,
+      "size": 397
+    },
+    "./docs/specs/lib/forge-std/test/StdError.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdError.t.sol",
+      "hash": "8f42821eeb1cdb18c522d0866da311747d86a5206b182181b852c5946eb0a8c3",
+      "last_modified": 1770678210,
+      "size": 2727
+    },
+    "./docs/specs/lib/forge-std/src/interfaces/IERC165.sol": {
+      "path": "./docs/specs/lib/forge-std/src/interfaces/IERC165.sol",
+      "hash": "be9ef58351f9b589ab0af27cd65a56b5bf16c3864ed5355ab52d11eb95cab060",
+      "last_modified": 1770678210,
+      "size": 537
+    },
+    "./docs/biome.json": {
+      "path": "./docs/biome.json",
+      "hash": "65930c8f26cec5e35a22fe1d847906bead540c7064eddf4337c0d946f43f1a55",
+      "last_modified": 1771924437,
+      "size": 776
+    },
+    "./docs/pages/guide/stablecoin-dex/providing-liquidity.mdx": {
+      "path": "./docs/pages/guide/stablecoin-dex/providing-liquidity.mdx",
+      "hash": "cdfaf9d6ee2d5aae7dc7ad38c1f9546043952a73d7962df9e2177d84567be15b",
+      "last_modified": 1771924437,
+      "size": 12326
+    },
+    "./docs/pages/guide/payments/send-a-payment.mdx": {
+      "path": "./docs/pages/guide/payments/send-a-payment.mdx",
+      "hash": "407938467c57a848d71aa90eafd5e19354cd87e32b5322852595491dd170b691",
+      "last_modified": 1771924437,
+      "size": 13939
+    },
+    "./crates/tempo-zone/tests/it/tip403_policy.rs": {
+      "path": "./crates/tempo-zone/tests/it/tip403_policy.rs",
+      "hash": "8568813f138feb161b41d9061eede7b464e4dbd63be4aa9f6267b70e6041ea20",
+      "last_modified": 1772617326,
+      "size": 17798
+    },
+    "./docs/specs/test/invariants/README.md": {
+      "path": "./docs/specs/test/invariants/README.md",
+      "hash": "666b5925d7269c5bb9d07f99ba2dc396d364fe83d0269e4c0998333273f72532",
+      "last_modified": 1770678210,
+      "size": 9401
+    },
+    "./docs/specs/lib/forge-std/src/StdToml.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdToml.sol",
+      "hash": "06fac2a92cf2c5c3df446582792736f58b0b34efc3763f63bc52bea5fc5e146b",
+      "last_modified": 1770678210,
+      "size": 9703
+    },
+    "./docs/diagrams/queue-comparison.svg": {
+      "path": "./docs/diagrams/queue-comparison.svg",
+      "hash": "95149fdc27ad3c136651a0b1bbd152b417d9470aa2f5829e286bb0f1badddb0b",
+      "last_modified": 1771923977,
+      "size": 62913
+    },
+    "./docs/snippets/unformatted/README.md": {
+      "path": "./docs/snippets/unformatted/README.md",
+      "hash": "e39eaea8d0f453217a93700db3fb143143fa009de58f2d3afff744ae263a3013",
+      "last_modified": 1771924437,
+      "size": 209
+    },
+    "./docs/components/guides/steps/issuance/GrantTokenRoles.tsx": {
+      "path": "./docs/components/guides/steps/issuance/GrantTokenRoles.tsx",
+      "hash": "734add6a8655581ec370c3372ebb80cb0df3cde3bdd14fefd156ce4ea1704c98",
+      "last_modified": 1771924437,
+      "size": 4329
+    },
+    "./docs/specs/lib/forge-std/test/StdToml.t.sol": {
+      "path": "./docs/specs/lib/forge-std/test/StdToml.t.sol",
+      "hash": "ea596b4876d394bcf6a6bb20967c8ba8baa6b612c9935a7e3bfe724a7f4564e3",
+      "last_modified": 1770678210,
+      "size": 1271
+    },
+    "./docs/components/DemoContext.tsx": {
+      "path": "./docs/components/DemoContext.tsx",
+      "hash": "94f6b45af88619658506b15f4c39858ad02692fb396a654df006c00bb6907489",
+      "last_modified": 1771924437,
+      "size": 2383
+    },
+    "./docs/specs/tempo-forge": {
+      "path": "./docs/specs/tempo-forge",
+      "hash": "7bebafe734e19d923ae528c96bd54fa3e07cf11d303dc92f9ef888afecf7df18",
+      "last_modified": 1770678210,
+      "size": 2493
+    },
+    "./docs/pages/learn/partners.mdx": {
+      "path": "./docs/pages/learn/partners.mdx",
+      "hash": "4a2280b3ed25d567904e1fbdfec36e6905a5dad8842927147b5c82970e7fe571",
+      "last_modified": 1771924437,
+      "size": 2352
+    },
+    "./deny.toml": {
+      "path": "./deny.toml",
+      "hash": "1c8ce4929e5a007dd4b2d9e8078cd7eea1874d16f3cefbecadea2fd0ebf42620",
+      "last_modified": 1770678210,
+      "size": 2980
+    },
+    "./docs/specs/src/StablecoinDEX.sol": {
+      "path": "./docs/specs/src/StablecoinDEX.sol",
+      "hash": "6a7ad1dc6ee5d120c077a963ee500d3110f126a746d653c12caf6858627a3a28",
+      "last_modified": 1772199176,
+      "size": 52304
+    },
+    "./docs/components/IndexSupplyQuery.tsx": {
+      "path": "./docs/components/IndexSupplyQuery.tsx",
+      "hash": "8c3630a3402506c334e35509d05af3a93e35a2732b5f4c5252fe2bc1cb904e62",
+      "last_modified": 1771924437,
+      "size": 11896
+    },
+    "./docs/components/guides/steps/payments/AddFunds.tsx": {
+      "path": "./docs/components/guides/steps/payments/AddFunds.tsx",
+      "hash": "aa6fde9ea02b2297f20be894b22ee7233748a98d5408ce993bd49db189d7f84d",
+      "last_modified": 1771924437,
+      "size": 3500
+    },
+    "./docs/components/guides/steps/payments/PayWithIssuedToken.tsx": {
+      "path": "./docs/components/guides/steps/payments/PayWithIssuedToken.tsx",
+      "hash": "da5b42d2b029a78b776f2db15116ff05264fbcaab29dc566caca6eb6fa373193",
+      "last_modified": 1771924437,
+      "size": 6821
+    },
+    "./docs/pages/learn/use-cases/tokenized-deposits.mdx": {
+      "path": "./docs/pages/learn/use-cases/tokenized-deposits.mdx",
+      "hash": "b571cf77942e9518ac01101a36da6adc38941746396702e84e8335be2ea0635c",
+      "last_modified": 1771924437,
+      "size": 6692
+    },
+    "./crates/tempo-zone/tests/it/e2e.rs": {
+      "path": "./crates/tempo-zone/tests/it/e2e.rs",
+      "hash": "654ff486140514094fd12564bef1fdcb7657c21b328eb655aad82d1d6ab7b581",
+      "last_modified": 1772463566,
+      "size": 17527
+    },
+    "./crates/tempo-zone/src/precompiles/aes_gcm.rs": {
+      "path": "./crates/tempo-zone/src/precompiles/aes_gcm.rs",
+      "hash": "8061ae1aebee0fb68f970f03242db394369a14e0c6d44772faf541fa304a5d15",
+      "last_modified": 1771666942,
+      "size": 9470
+    },
+    "./docs/vocs.config.tsx": {
+      "path": "./docs/vocs.config.tsx",
+      "hash": "e1a751f5786da085d44dbbc41680954929b4ec16b2f65afc82ca3a69cfaaf2be",
+      "last_modified": 1771924437,
+      "size": 23731
+    },
+    "./docs/specs/src/zone/EncryptedDeposit.sol": {
+      "path": "./docs/specs/src/zone/EncryptedDeposit.sol",
+      "hash": "23bc6e5c08bf4241abf80639fb8b67668fbcdabefc5feccec7bd628714523552",
+      "last_modified": 1771320079,
+      "size": 4826
+    },
+    "./crates/tempo-zone/src/rpc/filter.rs": {
+      "path": "./crates/tempo-zone/src/rpc/filter.rs",
+      "hash": "1c400f9d08d57cc0de16d17f6a314c9e963d89958c70678ff9d5236cd7fe17dd",
+      "last_modified": 1771526445,
+      "size": 15298
+    },
+    "./docs/specs/lib/forge-std/src/StdJson.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdJson.sol",
+      "hash": "b1157a47e6074a2dfe92c28879d3362e29cb600c6768493bb5c53d8f5fbcbc21",
+      "last_modified": 1770678210,
+      "size": 9703
+    },
+    "./docs/specs/lib/forge-std/src/StdInvariant.sol": {
+      "path": "./docs/specs/lib/forge-std/src/StdInvariant.sol",
+      "hash": "421f75e3cd0e307b259f8fb420cd7b11cb05e2e3c2c57c20d5d7d1f31763133e",
+      "last_modified": 1770678210,
+      "size": 3977
+    },
+    "./docs/specs/src/zone/ZoneFactory.sol": {
+      "path": "./docs/specs/src/zone/ZoneFactory.sol",
+      "hash": "78bcb28239771d5a628dd0fed6c194347c137ec70f215ce9e631f8011b03ffc5",
+      "last_modified": 1771320079,
+      "size": 6958
+    },
+    "./docs/components/guides/steps/payments/SendParallelPayments.tsx": {
+      "path": "./docs/components/guides/steps/payments/SendParallelPayments.tsx",
+      "hash": "78401534253b4c450d38e10e7ff8d8e464f059e63247f0ab08edb7f64e9e1f52",
+      "last_modified": 1771924437,
+      "size": 8139
+    },
+    "./docs/components/guides/steps/exchange/BuySwap.tsx": {
+      "path": "./docs/components/guides/steps/exchange/BuySwap.tsx",
+      "hash": "39bcc042ce6c9f717f862fbd5d1123591b111d483c9c52fc02b6020d4058e31d",
+      "last_modified": 1771924437,
+      "size": 3001
+    },
+    "./docs/pages/protocol/tip403/spec.mdx": {
+      "path": "./docs/pages/protocol/tip403/spec.mdx",
+      "hash": "153c12b76e59d3eebfa2266c4f7cad4f1945ccbec385a2d41ab614859b3931ca",
+      "last_modified": 1771924437,
+      "size": 12089
+    },
+    "./docs/pages/protocol/tip403/overview.mdx": {
+      "path": "./docs/pages/protocol/tip403/overview.mdx",
+      "hash": "e870ce341c52076c88eeb455c29badfa546de4d2cd9f6e9dac03fac844b58438",
+      "last_modified": 1771924437,
+      "size": 1498
+    },
+    "./docs/specs/lib/forge-std/package.json": {
+      "path": "./docs/specs/lib/forge-std/package.json",
+      "hash": "e3b77b4cc4df99fc54ad0705fdeb53491cc6b80a54a831ff68b500a0fe0b5b7f",
+      "last_modified": 1770678210,
+      "size": 516
+    },
+    "./docs/specs/lib/forge-std/LICENSE-APACHE": {
+      "path": "./docs/specs/lib/forge-std/LICENSE-APACHE",
+      "hash": "0a555c4882fb215fa3eff1203124f74a71f67b639345cf75b85e4de584a73406",
+      "last_modified": 1770678210,
+      "size": 10897
+    },
+    "./docs/pages/sdk/foundry/index.mdx": {
+      "path": "./docs/pages/sdk/foundry/index.mdx",
+      "hash": "a3bd05e903989921205f5f41a7521d1dd53d12f4b5545ef8b88d730dd7a97483",
+      "last_modified": 1771924437,
+      "size": 4731
+    }
+  },
+  "embedding_model": "BAAI/bge-small-en-v1.5",
+  "embedding_dimensions": 384,
+  "chunk_hash_version": 2
+}
