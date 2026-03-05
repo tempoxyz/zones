@@ -15,7 +15,7 @@ target "chef" {
   platforms = ["linux/amd64"]
   args = {
     RUST_PROFILE = "profiling"
-    RUST_FEATURES = "asm-keccak,jemalloc,otlp"
+    RUST_FEATURES = "jemalloc"
     EXTRA_RUSTFLAGS = "-C force-frame-pointers=yes"
   }
 }
