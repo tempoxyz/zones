@@ -79,6 +79,7 @@ sha2.workspace = true
 reqwest.workspace = true
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
+either.workspace = true
 eyre.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

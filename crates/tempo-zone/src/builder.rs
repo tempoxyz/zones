@@ -14,6 +14,7 @@ use alloy_consensus::{Signed, Transaction, TxLegacy};
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
+use either::Either;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -21,12 +22,12 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
     ConfigureEvm, Database, NextBlockEnvAttributes,
-    execute::{BlockBuilder, BlockBuilderOutcome},
+    execute::{BlockBuilder, BlockBuilderOutcome, ExecutionOutcome},
 };
 use reth_node_api::FullNodeTypes;
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
-use reth_payload_primitives::PayloadBuilderAttributes;
+use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
@@ -38,8 +39,9 @@ use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_consensus::TEMPO_SHARED_GAS_DIVISOR;
 use tempo_evm::TempoNextBlockEnvAttributes;
+use tempo_payload_types::TempoBuiltPayload;
 use tempo_primitives::{
-    TempoHeader, TempoPrimitives, TempoTxEnvelope,
+    TempoHeader, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
 use tempo_transaction_pool::TempoTransactionPool;
@@ -90,7 +92,7 @@ where
         StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone + 'static,
 {
     type Attributes = ZonePayloadBuilderAttributes;
-    type BuiltPayload = EthBuiltPayload<TempoPrimitives>;
+    type BuiltPayload = TempoBuiltPayload;
 
     fn try_build(
         &self,
@@ -352,13 +354,14 @@ where
 
         let BlockBuilderOutcome {
             execution_result,
+            hashed_state,
+            trie_updates,
             block,
-            ..
         } = builder.finish(&state_provider)?;
 
         let requests = chain_spec
             .is_prague_active_at_timestamp(attributes.timestamp())
-            .then_some(execution_result.requests);
+            .then_some(execution_result.requests.clone());
 
         let sealed_block = Arc::new(block.sealed_block().clone());
         let elapsed = start.elapsed();
@@ -375,8 +378,24 @@ where
             "Built zone payload"
         );
 
-        let payload =
+        let eth_payload =
             EthBuiltPayload::new(attributes.payload_id(), sealed_block, total_fees, requests);
+
+        let execution_outcome = ExecutionOutcome::new(
+            db.take_bundle(),
+            vec![execution_result.receipts],
+            block.number(),
+            vec![execution_result.requests],
+        );
+
+        let executed_block = BuiltPayloadExecutedBlock {
+            recovered_block: Arc::new(block),
+            execution_output: Arc::new(execution_outcome),
+            hashed_state: Either::Left(Arc::new(hashed_state)),
+            trie_updates: Either::Left(Arc::new(trie_updates)),
+        };
+
+        let payload = TempoBuiltPayload::new(eth_payload, Some(executed_block));
 
         drop(db);
         // Zone payloads are deterministic (one L1 block = one zone block), so freeze
