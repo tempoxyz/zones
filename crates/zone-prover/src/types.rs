@@ -437,6 +437,10 @@ pub enum ProverError {
         account: Address,
         slot: U256,
     },
+
+    /// Database error (from State wrapper or BAL layer).
+    #[error("database error: {0}")]
+    DatabaseError(String),
 }
 
 // Implement revm's DBErrorMarker so ProverError can be used as Database::Error.

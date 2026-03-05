@@ -119,7 +119,7 @@ impl WitnessDatabase {
                     .code
                     .as_ref()
                     .map(|c| Bytecode::new_raw(alloy_primitives::Bytes::copy_from_slice(c))),
-                account_id: Some(0),
+                account_id: None,
             };
 
             // Index code by hash.
