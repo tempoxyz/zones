@@ -10,7 +10,7 @@ use crate::{
     l1::PreparedL1Block,
     payload::ZonePayloadBuilderAttributes,
 };
-use alloy_consensus::{Signed, TxLegacy};
+use alloy_consensus::{Signed, Transaction, TxLegacy};
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
@@ -266,6 +266,16 @@ where
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
 
         while let Some(pool_tx) = best_txs.next() {
+            // Contract creation (CREATE) transactions are not allowed on zones
+            if pool_tx.transaction.is_create() {
+                best_txs.mark_invalid(
+                    &pool_tx,
+                    &InvalidPoolTransactionError::Consensus(
+                        reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                    ),
+                );
+                continue;
+            }
             let gas_limit_left = block_gas_limit.saturating_sub(shared_gas_limit);
             if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
                 best_txs.mark_invalid(
