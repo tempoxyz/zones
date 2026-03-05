@@ -95,15 +95,10 @@ impl PolicyListener {
 
             // The subscription may skip blocks if the gap between subscribe
             // and the first header is > 1. Process any intermediate blocks.
+            // `backfill_to` processes up to block_number (inclusive) — if it
+            // succeeds through block_number, last_processed is already set.
+            // If it fails partway, we don't skip ahead to avoid gaps.
             self.backfill_to(block_number).await;
-
-            if let Err(e) = self.process_block(block_number).await {
-                warn!(block_number, error = %e, "Failed to process policy events for block");
-                // Don't advance last_processed — backfill will retry on
-                // next iteration or reconnect.
-            } else {
-                self.last_processed = block_number;
-            }
         }
 
         warn!("Policy listener block subscription ended");

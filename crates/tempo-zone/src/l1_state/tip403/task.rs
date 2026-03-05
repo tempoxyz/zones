@@ -27,8 +27,6 @@ use crate::l1_state::PolicyProvider;
 pub struct PolicyResolutionTask {
     /// Cache-first, RPC-fallback provider used to resolve authorization queries.
     provider: PolicyProvider,
-    /// Sending half of the task channel, used to create new [`PolicyTaskHandle`]s.
-    tx: mpsc::Sender<PolicyTaskMessage>,
     /// Receiver for pre-fetch requests from the mempool / tx validation layer.
     rx: mpsc::Receiver<PolicyTaskMessage>,
     /// Maximum number of concurrent in-flight RPC resolutions.
@@ -40,30 +38,6 @@ pub struct PolicyResolutionTask {
 }
 
 impl PolicyResolutionTask {
-    /// Create a new resolution task with an internal channel of the given capacity.
-    pub fn new(
-        cache: SharedPolicyCache,
-        l1_provider: DynProvider<TempoNetwork>,
-        max_concurrent: usize,
-        channel_capacity: usize,
-    ) -> Self {
-        let (tx, rx) = mpsc::channel(channel_capacity);
-        let provider = PolicyProvider::new(cache, l1_provider, tokio::runtime::Handle::current());
-        Self {
-            provider,
-            tx,
-            rx,
-            max_concurrent,
-            in_flight: FuturesUnordered::new(),
-            metrics: Tip403Metrics::default(),
-        }
-    }
-
-    /// Returns a new [`PolicyTaskHandle`] for sending pre-fetch requests to this task.
-    pub fn handle(&self) -> PolicyTaskHandle {
-        PolicyTaskHandle::new(self.tx.clone())
-    }
-
     /// Run the resolution loop until the channel is closed.
     ///
     /// Processes requests concurrently up to `max_concurrent` in-flight futures.
@@ -201,7 +175,7 @@ pub fn spawn_policy_resolution_task(
     task_executor: impl reth_ethereum::tasks::TaskSpawner,
 ) -> PolicyTaskHandle {
     let (tx, rx) = mpsc::channel(channel_capacity);
-    let handle = PolicyTaskHandle::new(tx.clone());
+    let handle = PolicyTaskHandle::new(tx);
 
     task_executor.spawn_critical(
         "l1-policy-resolution",
@@ -212,7 +186,6 @@ pub fn spawn_policy_resolution_task(
                     l1_provider,
                     tokio::runtime::Handle::current(),
                 ),
-                tx,
                 rx,
                 max_concurrent,
                 in_flight: FuturesUnordered::new(),
