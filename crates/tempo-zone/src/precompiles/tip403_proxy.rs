@@ -269,8 +269,9 @@ impl ZoneTip403ProxyRegistry {
 
     /// Handle `policyExists(policyId) → bool`.
     ///
-    /// **Cache-only**: returns `true` only for policies observed by the listener.
-    /// A `false` result does NOT guarantee the policy doesn't exist on L1.
+    /// Cache-first, RPC-fallback: attempts to resolve the policy type via
+    /// [`PolicyProvider::resolve_policy_type_sync`]. If resolution succeeds
+    /// the policy exists; if the RPC call itself fails, the error propagates.
     fn handle_policy_exists(&self, data: &[u8]) -> PrecompileResult {
         let call = ITIP403Registry::policyExistsCall::abi_decode(data)
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
@@ -281,13 +282,11 @@ impl ZoneTip403ProxyRegistry {
             return Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()));
         }
 
-        // Check cache for any known policy data
-        let exists = self
-            .provider
-            .cache()
-            .read()
-            .policies()
-            .contains_key(&call.policyId);
+        // Cache-first, RPC-fallback — reuse policy type resolution.
+        let exists = match self.provider.resolve_policy_type_sync(call.policyId) {
+            Ok(_) => true,
+            Err(_) => false,
+        };
         let encoded = ITIP403Registry::policyExistsCall::abi_encode_returns(&exists);
         Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()))
     }
