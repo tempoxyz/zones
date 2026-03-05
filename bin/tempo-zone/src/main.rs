@@ -178,13 +178,8 @@ fn main() {
                 withdrawal_poll_interval: Duration::from_secs(
                     args.poll_interval_secs,
                 ),
-
-                // NOTE: does this mean that we are hadcoding these addresses 
                 outbox_address: zone::abi::ZONE_OUTBOX_ADDRESS,
                 inbox_address: zone::abi::ZONE_INBOX_ADDRESS,
-
-
-                // NOTE: what is the tempo state addres
                 tempo_state_address: zone::abi::TEMPO_STATE_ADDRESS,
                 zone_rpc_url,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
