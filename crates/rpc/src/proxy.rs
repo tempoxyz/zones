@@ -110,10 +110,7 @@ fn redact_block_json(value: &mut serde_json::Value) {
             "logsBloom".to_string(),
             serde_json::Value::String(format!("0x{}", "0".repeat(512))),
         );
-        obj.insert(
-            "transactions".to_string(),
-            serde_json::Value::Array(vec![]),
-        );
+        obj.insert("transactions".to_string(), serde_json::Value::Array(vec![]));
     }
 }
 
@@ -221,7 +218,12 @@ impl ZoneRpcApi for ProxyZoneRpc {
         })
     }
 
-    fn block_by_hash(&self, hash: alloy_primitives::B256, full: bool, auth: AuthContext) -> BoxFut<'_> {
+    fn block_by_hash(
+        &self,
+        hash: alloy_primitives::B256,
+        full: bool,
+        auth: AuthContext,
+    ) -> BoxFut<'_> {
         Box::pin(async move {
             let result = self
                 .forward("eth_getBlockByHash", serde_json::json!([hash, full]))
@@ -396,10 +398,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 .forward("eth_newFilter", serde_json::json!([filter]))
                 .await?;
             let id: FilterId = serde_json::from_str(result.get()).map_err(internal)?;
-            self.filter_owners
-                .lock()
-                .await
-                .insert(id, auth.caller);
+            self.filter_owners.lock().await.insert(id, auth.caller);
             Ok(result)
         })
     }
@@ -451,10 +450,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 .forward("eth_newBlockFilter", serde_json::json!([]))
                 .await?;
             let id: FilterId = serde_json::from_str(result.get()).map_err(internal)?;
-            self.filter_owners
-                .lock()
-                .await
-                .insert(id, auth.caller);
+            self.filter_owners.lock().await.insert(id, auth.caller);
             Ok(result)
         })
     }

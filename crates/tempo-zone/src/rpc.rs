@@ -26,8 +26,10 @@ use tempo_alloy::{
 use tempo_primitives::TempoTxEnvelope;
 use tokio::sync::Mutex;
 
-use zone_rpc::auth::AuthContext;
-use zone_rpc::types::{BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw};
+use zone_rpc::{
+    auth::AuthContext,
+    types::{BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
+};
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 
