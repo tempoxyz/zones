@@ -74,9 +74,13 @@ impl ZoneTip403ProxyRegistry {
 
     /// Resolve the `transferPolicyId` for a token — cache first, RPC fallback.
     pub fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64, PrecompileError> {
-        self.provider.resolve_transfer_policy_id(token).map_err(|e| {
-            PrecompileError::other(format!("failed to resolve transfer_policy_id for {token}: {e}"))
-        })
+        self.provider
+            .resolve_transfer_policy_id(token)
+            .map_err(|e| {
+                PrecompileError::other(format!(
+                    "failed to resolve transfer_policy_id for {token}: {e}"
+                ))
+            })
     }
 
     /// Check whether `user` is authorized under `policy_id` for the given `role`.

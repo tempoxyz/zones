@@ -16,7 +16,7 @@
 //! is made configurable to accept an external authorization provider.
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolInterface};
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput};
 use tempo_precompiles::{
@@ -24,10 +24,26 @@ use tempo_precompiles::{
     storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
     tip20::{ITIP20, TIP20Token},
 };
-use tracing::trace;
+use tracing::{trace, warn};
 
 use super::tip403_proxy::{AUTH_CHECK_GAS, ZoneTip403ProxyRegistry};
 use crate::l1_state::tip403::AuthRole;
+
+/// Decode ABI args or return a reverted precompile output.
+///
+/// Unlike `.ok()?` (which silently skips the policy check on decode failure),
+/// this macro returns a definitive revert so malformed calldata cannot bypass
+/// the zone policy layer.
+macro_rules! decode_or_revert {
+    ($call_ty:ty, $args:expr) => {
+        match <$call_ty>::abi_decode_raw($args) {
+            Ok(c) => c,
+            Err(_) => {
+                return Some(Ok(PrecompileOutput::new_reverted(0, Bytes::new())));
+            }
+        }
+    };
+}
 
 /// Zone-specific TIP-20 token precompile.
 ///
@@ -114,27 +130,27 @@ impl ZoneTip20Token {
 
         match selector {
             ITIP20::transferCall::SELECTOR => {
-                let call = ITIP20::transferCall::abi_decode_raw(args).ok()?;
+                let call = decode_or_revert!(ITIP20::transferCall, args);
                 self.enforce_transfer(address, caller, call.to)
             }
             ITIP20::transferFromCall::SELECTOR => {
-                let call = ITIP20::transferFromCall::abi_decode_raw(args).ok()?;
+                let call = decode_or_revert!(ITIP20::transferFromCall, args);
                 self.enforce_transfer(address, call.from, call.to)
             }
             ITIP20::transferWithMemoCall::SELECTOR => {
-                let call = ITIP20::transferWithMemoCall::abi_decode_raw(args).ok()?;
+                let call = decode_or_revert!(ITIP20::transferWithMemoCall, args);
                 self.enforce_transfer(address, caller, call.to)
             }
             ITIP20::transferFromWithMemoCall::SELECTOR => {
-                let call = ITIP20::transferFromWithMemoCall::abi_decode_raw(args).ok()?;
+                let call = decode_or_revert!(ITIP20::transferFromWithMemoCall, args);
                 self.enforce_transfer(address, call.from, call.to)
             }
             ITIP20::mintCall::SELECTOR => {
-                let call = ITIP20::mintCall::abi_decode_raw(args).ok()?;
+                let call = decode_or_revert!(ITIP20::mintCall, args);
                 self.enforce_mint(address, call.to)
             }
             ITIP20::mintWithMemoCall::SELECTOR => {
-                let call = ITIP20::mintWithMemoCall::abi_decode_raw(args).ok()?;
+                let call = decode_or_revert!(ITIP20::mintWithMemoCall, args);
                 self.enforce_mint(address, call.to)
             }
             _ => None,
@@ -152,7 +168,18 @@ impl ZoneTip20Token {
     ) -> Option<revm::precompile::PrecompileResult> {
         let policy_id = match self.resolve_transfer_policy_id(token) {
             Ok(id) => id,
-            Err(e) => return Some(Err(e)),
+            Err(e) => {
+                // Can't resolve policy (cache miss + RPC unreachable). Fall through
+                // to vanilla TIP20Token which reads transferPolicyId from EVM storage
+                // and checks via the local TIP403Registry. For the default policy (1)
+                // this works without RPC; for custom policies it will also fail.
+                warn!(
+                    target: "zone::precompile",
+                    %token, error = %e,
+                    "failed to resolve transfer_policy_id, deferring to vanilla TIP20"
+                );
+                return None;
+            }
         };
 
         trace!(
@@ -184,7 +211,14 @@ impl ZoneTip20Token {
     ) -> Option<revm::precompile::PrecompileResult> {
         let policy_id = match self.resolve_transfer_policy_id(token) {
             Ok(id) => id,
-            Err(e) => return Some(Err(e)),
+            Err(e) => {
+                warn!(
+                    target: "zone::precompile",
+                    %token, error = %e,
+                    "failed to resolve transfer_policy_id, deferring to vanilla TIP20"
+                );
+                return None;
+            }
         };
 
         trace!(

@@ -93,13 +93,21 @@ impl ZoneEvmFactory {
             // instead of the vanilla TIP20Precompile (which reads empty local
             // TIP403Registry storage).
             //
-            // The lookup only handles TIP-20 prefix addresses; all other
-            // precompiles (FeeManager, StablecoinDEX, etc.) are resolved from
-            // the static map populated by `TempoEvmFactory` and the
-            // `apply_precompile` calls above.
+            // This replaces the upstream `extend_tempo_precompiles` lookup, so
+            // we must also handle the non-TIP-20 Tempo precompiles that are
+            // only registered via that lookup (FeeManager, StablecoinDEX, etc.).
+            // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
+            // static map via `apply_precompile` and take priority over this.
             let zone_cfg = cfg.clone();
             precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
-                use tempo_precompiles::tip20::is_tip20_prefix;
+                use tempo_precompiles::{
+                    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
+                    TIP_FEE_MANAGER_ADDRESS, VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
+                    account_keychain::AccountKeychain, nonce::NonceManager,
+                    stablecoin_dex::StablecoinDEX, tip_fee_manager::TipFeeManager,
+                    tip20::is_tip20_prefix, validator_config::ValidatorConfig,
+                    validator_config_v2::ValidatorConfigV2,
+                };
 
                 if is_tip20_prefix(*address) {
                     Some(ZoneTip20Token::create(
@@ -107,6 +115,18 @@ impl ZoneEvmFactory {
                         &zone_cfg,
                         registry.clone(),
                     ))
+                } else if *address == TIP_FEE_MANAGER_ADDRESS {
+                    Some(TipFeeManager::create_precompile(&zone_cfg))
+                } else if *address == STABLECOIN_DEX_ADDRESS {
+                    Some(StablecoinDEX::create_precompile(&zone_cfg))
+                } else if *address == NONCE_PRECOMPILE_ADDRESS {
+                    Some(NonceManager::create_precompile(&zone_cfg))
+                } else if *address == VALIDATOR_CONFIG_ADDRESS {
+                    Some(ValidatorConfig::create_precompile(&zone_cfg))
+                } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
+                    Some(AccountKeychain::create_precompile(&zone_cfg))
+                } else if *address == VALIDATOR_CONFIG_V2_ADDRESS {
+                    Some(ValidatorConfigV2::create_precompile(&zone_cfg))
                 } else {
                     None
                 }
