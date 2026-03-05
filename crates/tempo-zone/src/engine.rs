@@ -44,7 +44,7 @@ use eyre::OptionExt;
 use reth_chainspec::EthereumHardforks;
 use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
-use reth_payload_primitives::{EngineApiMessageVersion, PayloadKind, PayloadTypes};
+use reth_payload_primitives::{BuiltPayload, EngineApiMessageVersion, PayloadKind, PayloadTypes};
 use reth_primitives_traits::SealedHeader;
 use std::{sync::Arc, time::Duration};
 use tempo_chainspec::spec::TempoChainSpec;

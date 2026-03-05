@@ -11,11 +11,11 @@ use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
 use alloy_rpc_types_eth::Withdrawal;
 use reth_node_api::{PayloadBuilderAttributes, PayloadTypes};
-use reth_payload_builder::{EthBuiltPayload, EthPayloadBuilderAttributes};
+use reth_payload_builder::EthPayloadBuilderAttributes;
 use reth_primitives_traits::SealedBlock;
 use serde::{Deserialize, Serialize};
-use tempo_payload_types::TempoExecutionData;
-use tempo_primitives::{Block, TempoPrimitives};
+use tempo_payload_types::{TempoBuiltPayload, TempoExecutionData};
+use tempo_primitives::Block;
 
 use crate::l1::PreparedL1Block;
 
@@ -140,7 +140,7 @@ pub struct ZonePayloadTypes;
 
 impl PayloadTypes for ZonePayloadTypes {
     type ExecutionData = TempoExecutionData;
-    type BuiltPayload = EthBuiltPayload<TempoPrimitives>;
+    type BuiltPayload = TempoBuiltPayload;
     type PayloadAttributes = ZonePayloadAttributes;
     type PayloadBuilderAttributes = ZonePayloadBuilderAttributes;
 

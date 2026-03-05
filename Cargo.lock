@@ -13042,6 +13042,7 @@ dependencies = [
  "axum",
  "const-hex",
  "derive_more",
+ "either",
  "eyre",
  "futures",
  "k256",
