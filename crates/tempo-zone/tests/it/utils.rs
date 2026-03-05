@@ -132,6 +132,7 @@ pub(crate) struct ZoneTestNode {
     http_url: url::Url,
     deposit_queue: DepositQueue,
     l1_state_cache: SharedL1StateCache,
+    policy_cache: zone::SharedPolicyCache,
     rpc_api: Arc<dyn zone::rpc::ZoneRpcApi>,
     node_handle: Box<dyn TestNodeHandle>,
     _tasks: TaskManager,
@@ -158,6 +159,11 @@ impl ZoneTestNode {
     /// Returns a handle to the L1 state cache for seeding precompile data.
     pub(crate) fn l1_state_cache(&self) -> &SharedL1StateCache {
         &self.l1_state_cache
+    }
+
+    /// Returns a handle to the policy cache for TIP-403 authorization.
+    pub(crate) fn policy_cache(&self) -> &zone::SharedPolicyCache {
+        &self.policy_cache
     }
 
     /// Returns the real private RPC API backed by the node's EthHandlers.
@@ -192,7 +198,13 @@ impl ZoneTestNode {
         poll_until(timeout, DEFAULT_POLL, "token balance", || {
             let tip20 = &tip20;
             async move {
-                let balance = tip20.balanceOf(account).call().await?;
+                // balanceOf may revert with Uninitialized() if the token hasn't
+                // been created yet (e.g. waiting for a TokenEnabled event to be
+                // processed). Treat reverts as "not ready" rather than fatal.
+                let balance = match tip20.balanceOf(account).call().await {
+                    Ok(b) => b,
+                    Err(_) => return Ok(None),
+                };
                 if balance >= min_balance {
                     Ok(Some(balance))
                 } else {
@@ -408,7 +420,8 @@ impl ZoneTestNode {
             genesis_tempo_block_number,
             Address::ZERO, // sequencer address (overridden by sequencer_key)
             sequencer_key,
-        );
+        )
+        .with_initial_tokens(vec![]);
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
         // The ZoneEngine is the sole block producer; it advances the chain when L1
@@ -428,6 +441,7 @@ impl ZoneTestNode {
 
         let deposit_queue = zone_node.deposit_queue();
         let l1_state_cache = zone_node.l1_state_cache();
+        let policy_cache = zone_node.policy_cache();
 
         let node_handle = NodeBuilder::new(node_config)
             .testing_node(tasks.executor())
@@ -453,6 +467,7 @@ impl ZoneTestNode {
             deposit_queue,
             http_url,
             l1_state_cache,
+            policy_cache,
             rpc_api,
             node_handle: Box::new(node_handle),
             _tasks: tasks,
@@ -985,6 +1000,166 @@ impl L1TestNode {
         Ok(())
     }
 
+    /// Create a new BLACKLIST policy on L1. Returns the policy ID.
+    pub(crate) async fn create_blacklist_policy(&self) -> eyre::Result<u64> {
+        use tempo_contracts::precompiles::ITIP403Registry;
+        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+
+        let provider = self.dev_provider();
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let receipt = registry
+            .createPolicy(self.dev_address(), ITIP403Registry::PolicyType::BLACKLIST)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "createPolicy (BLACKLIST) failed");
+
+        let event = receipt
+            .inner
+            .logs()
+            .iter()
+            .find_map(|log| ITIP403Registry::PolicyCreated::decode_log(&log.inner).ok())
+            .ok_or_else(|| eyre::eyre!("PolicyCreated event not found"))?;
+
+        Ok(event.policyId)
+    }
+
+    /// Create a new WHITELIST policy on L1. Returns the policy ID.
+    #[allow(dead_code)]
+    pub(crate) async fn create_whitelist_policy(&self) -> eyre::Result<u64> {
+        use tempo_contracts::precompiles::ITIP403Registry;
+        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+
+        let provider = self.dev_provider();
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let receipt = registry
+            .createPolicy(self.dev_address(), ITIP403Registry::PolicyType::WHITELIST)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "createPolicy (WHITELIST) failed");
+
+        let event = receipt
+            .inner
+            .logs()
+            .iter()
+            .find_map(|log| ITIP403Registry::PolicyCreated::decode_log(&log.inner).ok())
+            .ok_or_else(|| eyre::eyre!("PolicyCreated event not found"))?;
+
+        Ok(event.policyId)
+    }
+
+    /// Add an address to a blacklist policy.
+    pub(crate) async fn blacklist_address(
+        &self,
+        policy_id: u64,
+        account: Address,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP403Registry;
+        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+
+        let provider = self.dev_provider();
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let receipt = registry
+            .modifyPolicyBlacklist(policy_id, account, true)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "modifyPolicyBlacklist failed");
+        Ok(())
+    }
+
+    /// Add an address to a whitelist policy.
+    #[allow(dead_code)]
+    pub(crate) async fn whitelist_address(
+        &self,
+        policy_id: u64,
+        account: Address,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP403Registry;
+        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+
+        let provider = self.dev_provider();
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let receipt = registry
+            .modifyPolicyWhitelist(policy_id, account, true)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "modifyPolicyWhitelist failed");
+        Ok(())
+    }
+
+    /// Change a token's transfer policy on L1.
+    ///
+    /// The dev account must hold `DEFAULT_ADMIN_ROLE` on the token.
+    pub(crate) async fn change_transfer_policy_id(
+        &self,
+        token: Address,
+        policy_id: u64,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+
+        let provider = self.dev_provider();
+        let receipt = ITIP20::new(token, &provider)
+            .changeTransferPolicyId(policy_id)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "changeTransferPolicyId failed");
+        Ok(())
+    }
+
+    /// Create a COMPOUND policy on L1 that delegates to sub-policies by role.
+    ///
+    /// Returns the compound policy ID.
+    pub(crate) async fn create_compound_policy(
+        &self,
+        sender_policy_id: u64,
+        recipient_policy_id: u64,
+        mint_recipient_policy_id: u64,
+    ) -> eyre::Result<u64> {
+        use tempo_contracts::precompiles::ITIP403Registry;
+        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+
+        let provider = self.dev_provider();
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &provider);
+        let receipt = registry
+            .createCompoundPolicy(
+                sender_policy_id,
+                recipient_policy_id,
+                mint_recipient_policy_id,
+            )
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "createCompoundPolicy failed");
+
+        let event = receipt
+            .inner
+            .logs()
+            .iter()
+            .find_map(|log| ITIP403Registry::CompoundPolicyCreated::decode_log(&log.inner).ok())
+            .ok_or_else(|| eyre::eyre!("CompoundPolicyCreated event not found"))?;
+
+        Ok(event.policyId)
+    }
+
+    /// Check if a user is authorized under a policy on L1.
+    pub(crate) async fn is_authorized(&self, policy_id: u64, user: Address) -> eyre::Result<bool> {
+        use tempo_contracts::precompiles::ITIP403Registry;
+        use tempo_precompiles::TIP403_REGISTRY_ADDRESS;
+
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, self.provider());
+        Ok(registry.isAuthorized(policy_id, user).call().await?)
+    }
+
     /// Start an L1 dev node with the default configuration (500ms block time).
     pub(crate) async fn start() -> eyre::Result<Self> {
         Self::start_with(|_| {}).await
@@ -1252,7 +1427,7 @@ impl WithdrawalArgs {
             amount,
             to: Some(router),
             memo: B256::ZERO,
-            gas_limit: 500_000,
+            gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
         }
@@ -1348,6 +1523,11 @@ impl ZoneAccount {
     /// The account's address.
     pub(crate) fn address(&self) -> Address {
         self.address
+    }
+
+    /// The account's L1 provider.
+    pub(crate) fn l1_provider(&self) -> &alloy_provider::DynProvider {
+        &self.l1_provider
     }
 
     /// Approve the ZonePortal to spend pathUSD on L1, then deposit.

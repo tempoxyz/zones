@@ -32,7 +32,7 @@ pub use l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockDeposits, L1Deposit,
     L1PortalEvents, L1Subscriber, L1SubscriberConfig,
 };
-pub use l1_state::SharedL1StateCache;
+pub use l1_state::{PolicyProvider, SharedL1StateCache, SharedPolicyCache};
 pub use node::{ZoneExecutorBuilder, ZoneNode};
 pub use payload::{ZonePayloadAttributes, ZonePayloadBuilderAttributes, ZonePayloadTypes};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};

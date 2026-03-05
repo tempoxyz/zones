@@ -44,10 +44,34 @@ sol! {
 
         /// Genesis Tempo block number.
         function genesisTempoBlockNumber() external view returns (uint64);
+
+        /// Number of enabled tokens.
+        function enabledTokenCount() external view returns (uint256);
+
+        /// Enabled token by index.
+        function enabledTokenAt(uint256 index) external view returns (address);
     }
 }
 
 sol! {
     /// TIP-20 token mint function.
     function mint(address to, uint256 amount);
+}
+
+/// Query all enabled tokens from a ZonePortal contract.
+pub async fn enabled_tokens(
+    portal_address: alloy_primitives::Address,
+    provider: &impl alloy_provider::Provider<tempo_alloy::TempoNetwork>,
+) -> eyre::Result<Vec<alloy_primitives::Address>> {
+    let portal = ZonePortal::new(portal_address, provider);
+    let count: u64 = portal.enabledTokenCount().call().await?.try_into()?;
+    let mut tokens = Vec::with_capacity(count as usize);
+    for i in 0..count {
+        let token = portal
+            .enabledTokenAt(alloy_primitives::U256::from(i))
+            .call()
+            .await?;
+        tokens.push(token);
+    }
+    Ok(tokens)
 }

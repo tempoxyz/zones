@@ -6,11 +6,14 @@
 //! - [`L1StateListener`] — a service that subscribes to L1 chain notifications and updates the cache.
 //! - [`L1StateProvider`] — a cache-first, RPC-fallback reader for `eth_getStorageAt`.
 //! - [`TempoStateReader`] — a standalone `DynPrecompile` that handles `readStorageAt` calls.
+//! - [`tip403`] — TIP-403 policy cache, listener, and provider.
 
 pub mod cache;
 pub mod listener;
 pub mod precompile;
 pub mod provider;
+pub mod tip403;
+pub mod versioned;
 
 pub use cache::{L1StateCache, SharedL1StateCache};
 pub use listener::{
@@ -19,3 +22,8 @@ pub use listener::{
 };
 pub use precompile::TempoStateReader;
 pub use provider::{L1StateProvider, L1StateProviderConfig};
+pub use tip403::{
+    AuthRole, PolicyCache, PolicyEvent, PolicyListener, PolicyListenerConfig, PolicyProvider,
+    PolicyTaskHandle, PolicyTaskMessage, SharedPolicyCache, Tip403Metrics, seed_token_policies,
+    spawn_policy_listener, spawn_policy_resolution_task, spawn_pool_prefetch_task,
+};

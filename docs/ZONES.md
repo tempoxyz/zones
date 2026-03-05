@@ -248,6 +248,130 @@ cast call "$PORTAL" "withdrawalQueueHead()(uint256)" --rpc-url "$HTTP_RPC"
 cast call "$PORTAL" "withdrawalQueueTail()(uint256)" --rpc-url "$HTTP_RPC"
 ```
 
+## Token & Policy Management (TIP-403)
+
+Tempo L1 supports transfer policies via the TIP-403 registry. You can create new TIP-20 tokens, assign transfer policies (whitelist, blacklist, or compound), and manage membership — all from L1. The zone picks up policy changes automatically via the L1 subscriber.
+
+### Create a New Token
+
+```bash
+# Create a TIP-20 token named "MyUSD" with symbol "MUSD"
+# The address is derived from your wallet + salt (not the name/symbol).
+# Use a different salt to create multiple tokens from the same wallet.
+just create-token MyUSD MUSD
+just create-token AnotherUSD AUSD 0x0000000000000000000000000000000000000000000000000000000000000001
+# → Token created! Address: 0x20C0...
+
+# Grant yourself ISSUER_ROLE and mint tokens
+just grant-issuer-role <token-address>
+just mint-tokens <token-address>               # 1B tokens to yourself
+just mint-tokens <token-address> <to> 5000000  # 5 tokens to someone else
+
+# Set a supply cap (optional)
+just set-supply-cap <token-address> 1000000000000
+```
+
+### Enable a Token on the Zone
+
+To deposit a custom token into the zone, it must be enabled on the ZonePortal. Currently the portal enables pathUSD by default. For custom tokens, the token must exist on L1 and the portal must recognise it. Only the sequencer can enable tokens.
+
+```bash
+# Enable a token by address (requires SEQUENCER_KEY, L1_RPC_URL, L1_PORTAL_ADDRESS)
+export SEQUENCER_KEY="0x<your-sequencer-key>"
+export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
+just enable-token <token-address>
+
+# Well-known aliases also work
+just enable-token pathusd
+just enable-token alphausd
+```
+
+If `ZONE_RPC_URL` is set (defaults to `http://localhost:8546`), the command waits for the zone to process the L1 block and confirms the token is available on L2.
+
+Once the token is enabled, approve the portal and deposit as usual — just pass the token address:
+
+```bash
+# Approve the portal to spend the custom token
+just max-approve-portal <token-address>
+
+# Deposit the custom token into the zone
+just send-deposit 1000000 "" <token-address>
+
+# Check balance on the zone (pass the token address)
+just check-balance "$ADDR" <token-address>
+```
+
+### Blacklist a Sender
+
+This example creates a blacklist policy that prevents a specific address from sending transfers, while still allowing them to receive deposits.
+
+```bash
+# 1. Create a blacklist policy (type=1)
+just create-policy 1
+# → Policy ID: 2
+
+# 2. Add the address to the blacklist
+just modify-blacklist 2 0x<address-to-block>
+
+# 3. Wrap in a compound policy so only the SENDER role is restricted
+#    (recipient and mint-recipient use policy 1 = allow-all)
+just create-compound-policy 2 1 1
+# → Policy ID: 3
+
+# 4. Assign the compound policy to the token
+just set-transfer-policy 0x20C0000000000000000000000000000000000000 3
+
+# 5. Verify
+just check-authorized 2 0x<address-to-block>
+# → authorized=false
+```
+
+> **Why compound?** A simple blacklist blocks an address as both sender and recipient. A compound policy lets you blacklist only the sender role while keeping deposits (mint-recipient) and incoming transfers (recipient) open.
+
+### Other Policy Commands
+
+| Command | Description |
+|---------|-------------|
+| `just create-policy [type]` | Create a policy (`0`=whitelist, `1`=blacklist) |
+| `just create-compound-policy <sender> <recipient> [mint]` | Create a compound policy from sub-policies |
+| `just modify-whitelist <policy-id> <account> [allowed]` | Add/remove from a whitelist |
+| `just modify-blacklist <policy-id> <account> [restricted]` | Add/remove from a blacklist |
+| `just set-transfer-policy <token> <policy-id>` | Assign a transfer policy to a token |
+| `just check-authorized <policy-id> <account>` | Check if an address is authorized |
+| `just token-policy <token>` | Read a token's current transfer policy ID |
+| `just create-token <name> <symbol> [salt]` | Create a new TIP-20 token on L1 |
+| `just mint-tokens <token> [to] [amount]` | Mint tokens (requires ISSUER_ROLE) |
+| `just grant-issuer-role <token> [to]` | Grant ISSUER_ROLE on a token |
+| `just set-supply-cap <token> [cap]` | Set a token's supply cap |
+
+### Blacklist Demo (End-to-End)
+
+`just demo-blacklist` runs a self-contained scenario that exercises the full TIP-20 + TIP-403 lifecycle in a single command. It creates a fresh token, deposits into the zone, blacklists an address, proves that encrypted deposits to that address bounce, unblacklists the address, proves deposits now succeed, and withdraws back to L1.
+
+This is useful for verifying that transfer-policy enforcement works end-to-end across L1 and L2, or for demoing the blacklist feature to others.
+
+```bash
+export PRIVATE_KEY="0x<your-wallet-private-key>"
+export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
+
+just demo-blacklist              # default deposit amount = 500,000
+just demo-blacklist 1000000      # custom deposit amount
+```
+
+The demo walks through 9 steps, printing every transaction with an explorer link:
+
+1. **Create token** — deploys a fresh TIP-20 "DemoUSD" via `TIP20Factory` (random salt each run)
+2. **Configure token** — sets supply cap, grants `ISSUER_ROLE`, mints tokens, approves portal
+3. **Enable on zone** — sequencer calls `enableToken` on the portal (auto-reads sequencer key from `zone.json`)
+4. **Deposit** — plain deposit so admin has L2 funds
+5. **Blacklist** — creates a TIP-403 blacklist policy, adds a fresh target wallet, assigns the policy to the token
+6. **Encrypted deposit → bounce** — sends an encrypted deposit to the blacklisted target; zone rejects it and returns funds to sender
+7. **Unblacklist** — removes the target from the blacklist on L1
+8. **Encrypted deposit → success** — same encrypted deposit now goes through
+9. **Withdraw** — target withdraws tokens from zone back to L1
+
+Prerequisites: a running zone with the sequencer producing blocks, and the admin wallet funded with pathUSD on L1 (the demo deposits a small amount to the target for L2 gas fees).
+
 ## Architecture
 
 ```mermaid
@@ -312,9 +436,11 @@ graph TB
 | `just max-approve-portal` | Approve portal to spend tokens on L1 |
 | `just send-deposit [to]` | Deposit tokens from L1 to zone (defaults to sender) |
 | `just send-deposit-encrypted [to]` | Encrypted deposit — hides recipient and memo on-chain |
+| `just enable-token <token>` | Enable a TIP-20 token on the portal for bridging (sequencer only) |
 | `just max-approve-outbox` | Approve outbox to spend tokens on zone |
 | `just send-withdrawal [to]` | Withdraw tokens from zone to L1 (defaults to sender) |
 | `just check-balance <addr>` | Check token balance on the zone |
 | `just zone-auth-token <name>` | Generate a signed private RPC auth token (10 min TTL) |
 | `just check-balance-private <name>` | Check balance via the private RPC (auto-generates auth token) |
 | `just zone-info <id-or-portal>` | Fetch zone metadata from ZoneFactory |
+| `just demo-blacklist [amount]` | End-to-end TIP-20 + TIP-403 blacklist lifecycle demo |

@@ -21,6 +21,7 @@ tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-alloy = { workspace = true, features = ["tempo-compat"] }
+tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
 tempo-precompiles-macros.workspace = true
 
@@ -31,6 +32,7 @@ reth-errors.workspace = true
 reth-eth-wire-types.workspace = true
 reth-ethereum.workspace = true
 reth-evm.workspace = true
+reth-metrics.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-payload-builder.workspace = true
@@ -69,6 +71,7 @@ revm.workspace = true
 axum.workspace = true
 
 # misc
+metrics.workspace = true
 aes-gcm.workspace = true
 k256.workspace = true
 rand.workspace = true

@@ -46,8 +46,6 @@ use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{EngineApiMessageVersion, PayloadKind, PayloadTypes};
 use reth_primitives_traits::SealedHeader;
-use reth_provider::ChainSpecProvider;
-use reth_storage_api::BlockReader;
 use std::{sync::Arc, time::Duration};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
@@ -84,28 +82,37 @@ pub struct ZoneEngine {
     last_header: SealedHeader<TempoHeader>,
     /// Address that receives block fees.
     fee_recipient: Address,
+    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
+    sequencer_key: k256::SecretKey,
+    /// ZonePortal address on L1 — used as context in HKDF key derivation.
+    portal_address: Address,
+    /// Cache-first, RPC-fallback TIP-403 policy provider for authorization checks
+    /// on encrypted deposit recipients during preparation.
+    policy_provider: crate::l1_state::PolicyProvider,
 }
 
 impl ZoneEngine {
     pub fn new(
-        provider: impl BlockReader<Header = TempoHeader> + ChainSpecProvider<ChainSpec = TempoChainSpec>,
+        chain_spec: Arc<TempoChainSpec>,
         to_engine: ConsensusEngineHandle<ZonePayloadTypes>,
         payload_builder: PayloadBuilderHandle<ZonePayloadTypes>,
         deposit_queue: DepositQueue,
+        last_header: SealedHeader<TempoHeader>,
         fee_recipient: Address,
+        sequencer_key: k256::SecretKey,
+        portal_address: Address,
+        policy_provider: crate::l1_state::PolicyProvider,
     ) -> Self {
-        let last_header = provider
-            .sealed_header(provider.best_block_number().unwrap())
-            .unwrap()
-            .unwrap();
-
         Self {
-            chain_spec: provider.chain_spec(),
+            chain_spec,
             to_engine,
             payload_builder,
             deposit_queue,
             last_header,
             fee_recipient,
+            sequencer_key,
+            portal_address,
+            policy_provider,
         }
     }
 
@@ -180,6 +187,23 @@ impl ZoneEngine {
         }
     }
 
+    /// Decrypt encrypted deposits, check TIP-403 policy authorization, and
+    /// ABI-encode everything into a [`PreparedL1Block`] ready for the payload
+    /// builder. Errors (e.g. policy RPC failures) are propagated so the engine
+    /// retries rather than allowing unauthorized deposits through.
+    async fn prepare_l1_block(
+        &self,
+        l1_block: L1BlockDeposits,
+    ) -> eyre::Result<crate::l1::PreparedL1Block> {
+        l1_block
+            .prepare(
+                &self.sequencer_key,
+                self.portal_address,
+                &self.policy_provider,
+            )
+            .await
+    }
+
     /// Advance the chain by one block.
     ///
     /// Wraps the given L1 block into [`ZonePayloadAttributes`], sends FCU
@@ -193,6 +217,8 @@ impl ZoneEngine {
         // two chains stay in lockstep.
         let timestamp_secs = l1_block.header.timestamp();
         let timestamp_millis_part = l1_block.header.timestamp_millis_part;
+
+        let l1_block = self.prepare_l1_block(l1_block).await?;
 
         let attributes = ZonePayloadAttributes {
             inner: EthPayloadAttributes {
@@ -254,6 +280,12 @@ impl ZoneEngine {
         if self.deposit_queue.confirm(l1_num_hash).is_none() {
             warn!(target: "zone::engine", ?l1_num_hash, "L1 block was purged from queue during build");
         }
+
+        // GC stale versioned entries from the policy cache. Only the engine
+        // drives this — the listener must not advance past blocks the engine
+        // hasn't processed yet, otherwise policy lookups for in-flight blocks
+        // could return wrong results.
+        self.policy_provider.cache().advance(l1_num_hash.number);
 
         self.last_header = header;
 

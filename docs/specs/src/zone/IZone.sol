@@ -515,6 +515,7 @@ interface IZonePortal {
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
+    error DepositPolicyForbids();
     error DepositTooSmall();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();

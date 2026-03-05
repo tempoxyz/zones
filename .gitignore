@@ -18,6 +18,7 @@ generated/
 
 .claude/
 !docs/.claude/
+.ck/
 
 # Docs
 docs/dist
