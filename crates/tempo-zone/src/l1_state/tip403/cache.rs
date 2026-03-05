@@ -391,7 +391,8 @@ impl SharedPolicyCache {
 /// The [`L1Subscriber`](crate::l1::L1Subscriber) decodes raw logs into these events
 /// outside the cache write lock, then applies them in batch via
 /// [`PolicyCache::apply_events`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PolicyEvent {
     /// A user's membership in a policy set changed (`WhitelistUpdated` / `BlacklistUpdated`).
     MembershipChanged {
@@ -404,6 +405,7 @@ pub enum PolicyEvent {
     /// A new simple policy was created on L1 (`PolicyCreated`).
     PolicyCreated {
         policy_id: u64,
+        #[serde(with = "policy_type_serde")]
         policy_type: PolicyType,
     },
     /// A new compound policy was created on L1 (`CompoundPolicyCreated`).
@@ -413,6 +415,20 @@ pub enum PolicyEvent {
         recipient_policy_id: u64,
         mint_recipient_policy_id: u64,
     },
+}
+
+mod policy_type_serde {
+    use super::PolicyType;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(val: &PolicyType, s: S) -> Result<S::Ok, S::Error> {
+        (*val as u8).serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PolicyType, D::Error> {
+        let v = u8::deserialize(d)?;
+        PolicyType::try_from(v).map_err(serde::de::Error::custom)
+    }
 }
 
 /// Authorization role for policy checks.

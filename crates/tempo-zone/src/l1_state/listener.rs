@@ -1,103 +1,20 @@
 //! L1 state listener that tracks Tempo L1 storage for zone-side reads.
 //!
-//! Supports two subscription modes:
+//! The [`L1ChainNotificationListener`] receives full state diffs from the L1 node (in-process).
+//! On each commit it proactively writes changed storage slots for tracked contracts into the
+//! cache. On reorgs the cache is cleared and re-populated from the new chain segment.
 //!
-//! - **Block headers** (`subscribe_blocks`) — lightweight; only updates the cache anchor and
-//!   detects reorgs. Storage values are populated lazily via [`L1StateProvider`] RPC fallback.
-//!
-//! - **Chain notifications** (`CanonStateSubscriptions`) — receives full state diffs from the L1
-//!   node (in-process). On each commit the listener proactively writes changed storage slots for
-//!   tracked contracts into the cache. On reorgs the cache is cleared and re-populated from the
-//!   new chain segment.
-//!
-//! [`L1StateProvider`]: super::provider::L1StateProvider
+//! For lighter-weight anchor tracking (header-only), the unified
+//! [`L1Subscriber`](crate::l1::L1Subscriber) handles anchor updates and reorg detection
+//! as part of its block processing loop.
 
 use crate::l1_state::cache::SharedL1StateCache;
 use alloy_eips::NumHash;
 use alloy_primitives::B256;
-use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use futures::StreamExt;
 use reth_primitives_traits::AlloyBlockHeader as _;
 use reth_provider::{CanonStateNotification, CanonStateSubscriptions};
-use std::time::Duration;
 use tracing::{debug, error, info, warn};
-
-/// Configuration for the L1 state listener.
-#[derive(Debug, Clone)]
-pub struct L1StateListenerConfig {
-    /// WebSocket URL of the L1 node.
-    pub l1_ws_url: String,
-    /// Fallback poll interval if the WebSocket subscription drops.
-    pub poll_interval: Duration,
-}
-
-impl Default for L1StateListenerConfig {
-    fn default() -> Self {
-        Self {
-            l1_ws_url: "ws://localhost:8546".to_string(),
-            poll_interval: Duration::from_secs(12),
-        }
-    }
-}
-
-/// Listener that subscribes to L1 block headers and keeps the state cache anchor current.
-///
-/// Storage values are populated lazily via `L1StateProvider` RPC fallback.
-#[derive(Clone)]
-pub struct L1StateListener {
-    cache: SharedL1StateCache,
-}
-
-impl L1StateListener {
-    pub fn new(cache: SharedL1StateCache) -> Self {
-        Self { cache }
-    }
-
-    /// Connect to the L1 node via WebSocket and subscribe to new block headers.
-    ///
-    /// On each new block the cache anchor is updated. If the new block's parent hash does not
-    /// match the current anchor (indicating a reorg), the cache is cleared first.
-    pub async fn start(self, config: &L1StateListenerConfig) -> eyre::Result<()> {
-        info!(url = %config.l1_ws_url, "Connecting to L1 for state listener");
-
-        let ws = WsConnect::new(&config.l1_ws_url);
-        let provider = ProviderBuilder::new().connect_ws(ws).await?;
-
-        info!("Connected to L1 node, subscribing to block headers");
-
-        let mut stream = provider.subscribe_blocks().await?.into_stream();
-
-        info!("Subscribed to L1 block headers");
-
-        while let Some(header) = stream.next().await {
-            let block_hash = header.hash;
-            let block_number = header.number;
-            let parent_hash = header.parent_hash;
-
-            let mut cache = self.cache.write();
-            let anchor = cache.anchor();
-
-            if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
-                warn!(
-                    old_anchor = %anchor.hash,
-                    new_parent = %parent_hash,
-                    block_number,
-                    "Reorg detected, clearing L1 state cache"
-                );
-                cache.clear();
-            }
-
-            cache.update_anchor(NumHash {
-                number: block_number,
-                hash: block_hash,
-            });
-            debug!(block_hash = %block_hash, block_number, "Updated L1 state cache anchor");
-        }
-
-        warn!("L1 block header subscription stream ended");
-        Ok(())
-    }
-}
 
 /// Listener that consumes in-process `CanonStateSubscriptions` for full state-diff streaming.
 ///
@@ -195,28 +112,6 @@ where
             );
         }
     }
-}
-
-/// Spawn the header-only L1 state listener as a critical background task with automatic
-/// reconnection.
-pub fn spawn_l1_state_listener(
-    config: L1StateListenerConfig,
-    cache: SharedL1StateCache,
-    task_executor: impl reth_ethereum::tasks::TaskSpawner,
-) {
-    let listener = L1StateListener::new(cache);
-
-    task_executor.spawn_critical(
-        "l1-state-listener",
-        Box::pin(async move {
-            loop {
-                if let Err(e) = listener.clone().start(&config).await {
-                    error!(error = %e, "L1 state listener failed, reconnecting in 5s");
-                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-                }
-            }
-        }),
-    );
 }
 
 /// Spawn the chain-notification L1 state listener as a critical background task.

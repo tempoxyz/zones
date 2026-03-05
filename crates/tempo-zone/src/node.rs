@@ -52,10 +52,7 @@ use crate::{
     ZoneEngine,
     evm::ZoneEvmConfig,
     l1::L1Subscriber,
-    l1_state::{
-        L1StateListenerConfig, L1StateProvider, L1StateProviderConfig, SharedL1StateCache,
-        spawn_l1_state_listener,
-    },
+    l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache},
 };
 
 use crate::builder::ZonePayloadFactory;
@@ -75,8 +72,6 @@ pub struct ZoneNode {
     l1_config: crate::L1SubscriberConfig,
     /// Configuration for the L1 state provider (contract addresses, query parameters).
     l1_state_provider_config: L1StateProviderConfig,
-    /// Configuration for the L1 state listener (WebSocket URL, tracked events).
-    l1_state_listener_config: L1StateListenerConfig,
     /// Shared L1 state cache (enabled tokens, zone metadata, etc.).
     l1_state_cache: SharedL1StateCache,
     /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](crate::l1::L1Subscriber)
@@ -97,12 +92,13 @@ impl ZoneNode {
     /// Create a new zone node from minimal configuration.
     ///
     /// Internally constructs the [`DepositQueue`], [`L1SubscriberConfig`],
-    /// [`L1StateProviderConfig`], [`L1StateListenerConfig`], and [`SharedL1StateCache`]
-    /// from the provided parameters — callers don't need to know about these internals.
+    /// [`L1StateProviderConfig`], and [`SharedL1StateCache`] from the provided
+    /// parameters — callers don't need to know about these internals.
     ///
     /// The L1 subscriber is spawned automatically as part of the node lifecycle via
     /// [`ZoneAddOns::launch_add_ons`], ensuring it cannot be accidentally omitted.
-    /// The L1 state listener is spawned by [`ZoneExecutorBuilder`] during EVM construction.
+    /// It also handles L1 state cache anchor updates (replacing the old separate
+    /// `L1StateListener`).
     pub fn new(
         l1_rpc_url: String,
         portal_address: alloy_primitives::Address,
@@ -112,22 +108,19 @@ impl ZoneNode {
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
+        let policy_cache = crate::SharedPolicyCache::default();
         let l1_config = crate::L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
             local_tempo_block_number: 0, // resolved at launch from local state
-            policy_cache: None,          // set later in launch_add_ons
-            tracked_tokens: vec![],      // set later in launch_add_ons
+            policy_cache: policy_cache.clone(),
+            tracked_tokens: vec![], // set later in launch_add_ons
+            l1_state_cache: None,   // set later in launch_add_ons
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
-            l1_rpc_url: l1_rpc_url.clone(),
-            ..Default::default()
-        };
-
-        let l1_state_listener_config = L1StateListenerConfig {
-            l1_ws_url: l1_rpc_url,
+            l1_rpc_url: l1_rpc_url,
             ..Default::default()
         };
 
@@ -138,9 +131,8 @@ impl ZoneNode {
             deposit_queue,
             l1_config,
             l1_state_provider_config,
-            l1_state_listener_config,
             l1_state_cache,
-            policy_cache: crate::SharedPolicyCache::default(),
+            policy_cache,
             sequencer,
             sequencer_key,
             portal_address,
@@ -263,6 +255,8 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     portal_address: alloy_primitives::Address,
     /// Optional pre-configured list of enabled token addresses.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
+    /// Shared L1 state cache for anchor tracking.
+    l1_state_cache: SharedL1StateCache,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
@@ -286,6 +280,7 @@ where
         sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
         initial_tokens: Option<Vec<alloy_primitives::Address>>,
+        l1_state_cache: SharedL1StateCache,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -302,6 +297,7 @@ where
             sequencer_key,
             portal_address,
             initial_tokens,
+            l1_state_cache,
         }
     }
 }
@@ -363,17 +359,15 @@ where
         .await?;
         info!(target: "reth::cli", "Seeded token policies from L1");
 
-        // Spawn unified L1 subscriber (deposits + policy events).
-        // The subscriber applies policy events to the cache before enqueuing
-        // blocks.
-        self.l1_config.policy_cache = Some(self.policy_cache.clone());
+        // Spawn unified L1 subscriber (deposits + policy events + L1 state anchor).
         self.l1_config.tracked_tokens = tracked_tokens;
+        self.l1_config.l1_state_cache = Some(self.l1_state_cache.clone());
         L1Subscriber::spawn(
             self.l1_config,
             self.deposit_queue.clone(),
             ctx.node.task_executor().clone(),
         );
-        info!(target: "reth::cli", "Unified L1 subscriber started (deposits + policy events)");
+        info!(target: "reth::cli", "Unified L1 subscriber started (deposits + policy events + L1 state anchor)");
 
         // Spawn policy resolution task for pre-fetching authorization data from L1.
         // The pool prefetch task feeds it with sender/recipient addresses from
@@ -469,7 +463,6 @@ where
     fn components_builder(&self) -> Self::ComponentsBuilder {
         let executor_builder = ZoneExecutorBuilder::new(
             self.l1_state_provider_config.clone(),
-            self.l1_state_listener_config.clone(),
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
         );
@@ -485,6 +478,7 @@ where
             self.sequencer_key.clone(),
             self.portal_address,
             self.initial_tokens.clone(),
+            self.l1_state_cache.clone(),
         )
     }
 }
@@ -533,17 +527,14 @@ impl PayloadAttributesBuilder<ZonePayloadAttributes, TempoHeader> for ZonePayloa
 ///
 /// 1. Creates the [`L1StateProvider`] (cache-first, RPC-fallback reader for L1 contract
 ///    storage) and connects it to the [`SharedL1StateCache`].
-/// 2. Spawns the [`L1StateListener`](crate::l1_state::L1StateListener), which subscribes
-///    to L1 chain notifications and keeps the storage cache up to date.
-/// 3. Creates a [`PolicyProvider`](crate::PolicyProvider) for the TIP-403 proxy precompile,
+/// 2. Creates a [`PolicyProvider`](crate::PolicyProvider) for the TIP-403 proxy precompile,
 ///    giving the EVM synchronous access to policy authorization checks during execution.
-/// 4. Returns a [`ZoneEvmConfig`] with the TempoStateReader and TIP-403 proxy precompiles
+/// 3. Returns a [`ZoneEvmConfig`] with the TempoStateReader and TIP-403 proxy precompiles
 ///    wired in.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
-    l1_state_listener_config: L1StateListenerConfig,
     l1_state_cache: SharedL1StateCache,
     policy_cache: crate::SharedPolicyCache,
 }
@@ -551,13 +542,11 @@ pub struct ZoneExecutorBuilder {
 impl ZoneExecutorBuilder {
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
-        l1_state_listener_config: L1StateListenerConfig,
         l1_state_cache: SharedL1StateCache,
         policy_cache: crate::SharedPolicyCache,
     ) -> Self {
         Self {
             l1_state_provider_config,
-            l1_state_listener_config,
             l1_state_cache,
             policy_cache,
         }
@@ -574,16 +563,10 @@ where
         let runtime_handle = tokio::runtime::Handle::current();
         let l1_provider = L1StateProvider::new(
             self.l1_state_provider_config.clone(),
-            self.l1_state_cache.clone(),
+            self.l1_state_cache,
             runtime_handle.clone(),
         )
         .await?;
-
-        spawn_l1_state_listener(
-            self.l1_state_listener_config,
-            self.l1_state_cache,
-            ctx.task_executor().clone(),
-        );
 
         let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
 

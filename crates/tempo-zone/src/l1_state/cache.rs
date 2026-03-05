@@ -41,7 +41,7 @@ use std::{
 /// the `tempoBlockNumber` it committed to, even if the L1 chain has since advanced.
 ///
 /// The anchor tracks the latest L1 block the cache has received data for, used by the
-/// [`L1StateListener`](super::listener::L1StateListener) for reorg detection.
+/// [`L1Subscriber`](crate::l1::L1Subscriber) for reorg detection.
 #[derive(Debug, Default)]
 pub struct L1StateCache {
     tracked_contracts: HashSet<Address>,

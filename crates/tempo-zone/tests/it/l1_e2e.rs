@@ -812,8 +812,7 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
     let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
 
-    // Seed the policy cache so ZoneTip20Token knows pathUSD's policy.
-    // The PolicyListener may not have caught up yet, so we seed manually.
+    // Seed the policy cache manually so it has policy data before test execution.
     {
         use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 

@@ -44,13 +44,16 @@ pub struct L1SubscriberConfig {
     /// Backfill starts from `local_tempo_block_number + 1` to avoid re-fetching
     /// blocks the zone has already processed.
     pub local_tempo_block_number: u64,
-    /// Shared TIP-403 policy cache. When set, the subscriber applies policy
-    /// events extracted from L1 receipts directly into this cache before
-    /// enqueuing blocks, removing the need for a separate `PolicyListener`.
-    pub policy_cache: Option<crate::l1_state::tip403::SharedPolicyCache>,
-    /// Token addresses tracked for TIP-403 policy events. Only relevant when
-    /// `policy_cache` is `Some`.
+    /// Shared TIP-403 policy cache. The subscriber applies policy events
+    /// extracted from L1 receipts directly into this cache before enqueuing
+    /// blocks.
+    pub policy_cache: crate::l1_state::tip403::SharedPolicyCache,
+    /// Token addresses tracked for TIP-403 policy events.
     pub tracked_tokens: Vec<Address>,
+    /// Optional shared L1 state cache. When set, the subscriber updates the
+    /// cache anchor on each confirmed block and clears it on reorgs, replacing
+    /// the separate `L1StateListener`.
+    pub l1_state_cache: Option<crate::l1_state::cache::SharedL1StateCache>,
 }
 
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
@@ -227,7 +230,10 @@ impl L1Subscriber {
                 .await?
                 .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
             let header: TempoHeader = header_resp.inner.inner;
-            self.deposit_queue.enqueue(header, events, policy_events);
+            let sealed = SealedHeader::seal_slow(header);
+            self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
+            self.deposit_queue
+                .enqueue_sealed(sealed, events, policy_events);
         }
 
         info!(from, to, blocks = to - from + 1, "Backfill complete");
@@ -276,9 +282,13 @@ impl L1Subscriber {
             // If we have a buffered tip, check if the new block confirms it.
             if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
                 if sealed.parent_hash() == tip_header.hash() {
-                    // Confirmed — apply policy events and flush to the queue.
+                    // Confirmed — apply policy events, update L1 state anchor,
+                    // and flush to the queue.
                     let tip_number = tip_header.number();
+                    let tip_hash = tip_header.hash();
+                    let tip_parent = tip_header.parent_hash();
                     self.apply_policy_events(tip_number, &tip_policy_events);
+                    self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
                     match self
                         .deposit_queue
                         .try_enqueue(tip_header, tip_events, tip_policy_events)
@@ -298,7 +308,7 @@ impl L1Subscriber {
                         }
                     }
                 } else {
-                    // Reorg — discard the buffered tip (it was on the wrong fork).
+                    // Reorg — discard the buffered tip and clear L1 state cache.
                     warn!(
                         discarded_block = tip_header.number(),
                         discarded_hash = %tip_header.hash(),
@@ -306,6 +316,9 @@ impl L1Subscriber {
                         new_parent = %sealed.parent_hash(),
                         "Discarding unconfirmed L1 block (reorg)"
                     );
+                    if let Some(ref cache) = self.config.l1_state_cache {
+                        cache.write().clear();
+                    }
                 }
             }
 
@@ -373,13 +386,33 @@ impl L1Subscriber {
         Ok((portal_events, policy_events))
     }
 
-    /// Apply policy events to the shared cache, if configured.
     fn apply_policy_events(&self, block_number: u64, policy_events: &[PolicyEvent]) {
-        if let Some(ref cache) = self.config.policy_cache {
-            if !policy_events.is_empty() {
-                cache.write().apply_events(block_number, policy_events);
+        if !policy_events.is_empty() {
+            self.config
+                .policy_cache
+                .write()
+                .apply_events(block_number, policy_events);
+        }
+        self.config.policy_cache.set_last_l1_block(block_number);
+    }
+
+    /// Update the L1 state cache anchor, if configured. Detects reorgs by
+    /// comparing `parent_hash` against the current anchor and clears the cache
+    /// when they diverge.
+    fn update_l1_state_anchor(&self, number: u64, hash: B256, parent_hash: B256) {
+        if let Some(ref cache) = self.config.l1_state_cache {
+            let mut guard = cache.write();
+            let anchor = guard.anchor();
+            if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
+                warn!(
+                    old_anchor = %anchor.hash,
+                    new_parent = %parent_hash,
+                    block_number = number,
+                    "Reorg detected, clearing L1 state cache"
+                );
+                guard.clear();
             }
-            cache.set_last_l1_block(block_number);
+            guard.update_anchor(NumHash { number, hash });
         }
     }
 }
@@ -671,37 +704,11 @@ pub struct L1BlockDeposits {
     /// Portal events extracted from this block.
     pub events: L1PortalEvents,
     /// TIP-403 policy events extracted from this block's receipts.
-    #[serde(skip)]
     pub policy_events: Vec<PolicyEvent>,
     /// Deposit queue hash chain value before this block's deposits.
     pub queue_hash_before: B256,
     /// Deposit queue hash chain value after this block's deposits.
     pub queue_hash_after: B256,
-}
-
-/// An L1 block with deposits fully prepared for the payload builder.
-///
-/// All ECIES decryption, TIP-403 policy checks, and ABI encoding have been
-/// performed. The builder only needs to RLP-encode the header and assemble
-/// the `advanceTempo` calldata.
-///
-/// Implements `Serialize`/`Deserialize` to satisfy the `PayloadAttributes`
-/// trait bound, but the deposit fields are `#[serde(skip)]` because the sol!
-/// types don't derive serde. This is fine — payload attributes only flow
-/// through in-process channels and are never serialised to the wire.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct PreparedL1Block {
-    /// The sealed L1 block header.
-    pub header: SealedHeader<TempoHeader>,
-    /// ABI-encoded queued deposits (regular + encrypted).
-    #[serde(skip)]
-    pub queued_deposits: Vec<abi::QueuedDeposit>,
-    /// Decryption data for encrypted deposits (one per encrypted deposit, in order).
-    #[serde(skip)]
-    pub decryptions: Vec<abi::DecryptionData>,
-    /// Tokens newly enabled for bridging in this block.
-    #[serde(skip)]
-    pub enabled_tokens: Vec<abi::EnabledToken>,
 }
 
 impl L1BlockDeposits {
@@ -907,6 +914,31 @@ impl L1BlockDeposits {
             enabled_tokens,
         })
     }
+}
+
+/// An L1 block with deposits fully prepared for the payload builder.
+///
+/// All ECIES decryption, TIP-403 policy checks, and ABI encoding have been
+/// performed. The builder only needs to RLP-encode the header and assemble
+/// the `advanceTempo` calldata.
+///
+/// Implements `Serialize`/`Deserialize` to satisfy the `PayloadAttributes`
+/// trait bound, but the deposit fields are `#[serde(skip)]` because the sol!
+/// types don't derive serde. This is fine — payload attributes only flow
+/// through in-process channels and are never serialised to the wire.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PreparedL1Block {
+    /// The sealed L1 block header.
+    pub header: SealedHeader<TempoHeader>,
+    /// ABI-encoded queued deposits (regular + encrypted).
+    #[serde(skip)]
+    pub queued_deposits: Vec<abi::QueuedDeposit>,
+    /// Decryption data for encrypted deposits (one per encrypted deposit, in order).
+    #[serde(skip)]
+    pub decryptions: Vec<abi::DecryptionData>,
+    /// Tokens newly enabled for bridging in this block.
+    #[serde(skip)]
+    pub enabled_tokens: Vec<abi::EnabledToken>,
 }
 
 /// Deposit queue hash chain state.
@@ -1290,6 +1322,23 @@ impl DepositQueue {
         policy_events: Vec<PolicyEvent>,
     ) {
         self.inner.lock().enqueue(header, events, policy_events);
+        self.notify.notify_one();
+    }
+
+    /// Like [`enqueue`](Self::enqueue) but accepts an already-sealed header,
+    /// avoiding a redundant hash computation.
+    pub fn enqueue_sealed(
+        &self,
+        header: SealedHeader<TempoHeader>,
+        events: L1PortalEvents,
+        policy_events: Vec<PolicyEvent>,
+    ) {
+        let mut queue = self.inner.lock();
+        match queue.try_enqueue(header, events, policy_events) {
+            EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
+            other => panic!("enqueue_sealed expected Accepted or Duplicate, got {other:?}"),
+        }
+        drop(queue);
         self.notify.notify_one();
     }
 
