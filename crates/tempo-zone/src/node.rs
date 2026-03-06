@@ -31,7 +31,7 @@ use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
-use std::{default::Default, sync::Arc};
+use std::sync::Arc;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoEvmConfig;
@@ -97,35 +97,34 @@ impl ZoneNode {
     ///
     /// The L1 subscriber is spawned automatically as part of the node lifecycle via
     /// [`ZoneAddOns::launch_add_ons`], ensuring it cannot be accidentally omitted.
-    /// It also handles L1 state cache anchor updates (replacing the old separate
-    /// `L1StateListener`).
+    /// It also handles L1 state cache anchor updates.
     pub fn new(
         l1_rpc_url: String,
         portal_address: alloy_primitives::Address,
         genesis_tempo_block_number: Option<u64>,
         sequencer: alloy_primitives::Address,
         sequencer_key: k256::SecretKey,
+        l1_fetch_concurrency: usize,
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
         let policy_cache = crate::SharedPolicyCache::default();
+        let l1_state_cache =
+            SharedL1StateCache::new(std::collections::HashSet::from([portal_address]));
         let l1_config = crate::L1SubscriberConfig {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
             local_tempo_block_number: 0, // resolved at launch from local state
             policy_cache: policy_cache.clone(),
-            tracked_tokens: vec![], // set later in launch_add_ons
-            l1_state_cache: None,   // set later in launch_add_ons
+            l1_state_cache: l1_state_cache.clone(),
+            l1_fetch_concurrency,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
-            l1_rpc_url: l1_rpc_url,
+            l1_rpc_url,
             ..Default::default()
         };
-
-        let l1_state_cache =
-            SharedL1StateCache::new(std::collections::HashSet::from([portal_address]));
 
         Self {
             deposit_queue,
@@ -255,8 +254,6 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     portal_address: alloy_primitives::Address,
     /// Optional pre-configured list of enabled token addresses.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
-    /// Shared L1 state cache for anchor tracking.
-    l1_state_cache: SharedL1StateCache,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
@@ -280,7 +277,6 @@ where
         sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
         initial_tokens: Option<Vec<alloy_primitives::Address>>,
-        l1_state_cache: SharedL1StateCache,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -297,7 +293,6 @@ where
             sequencer_key,
             portal_address,
             initial_tokens,
-            l1_state_cache,
         }
     }
 }
@@ -350,18 +345,12 @@ where
 
         // Seed the policy cache with current transferPolicyId for each tracked token
         // before spawning the subscriber, so errors propagate to the caller.
-        crate::l1_state::seed_token_policies(
-            &self.policy_cache,
-            portal_address,
-            &tracked_tokens,
-            &l1_provider,
-        )
-        .await?;
+        self.policy_cache
+            .seed_token_policies(portal_address, &tracked_tokens, &l1_provider)
+            .await?;
         info!(target: "reth::cli", "Seeded token policies from L1");
 
         // Spawn unified L1 subscriber (deposits + policy events + L1 state anchor).
-        self.l1_config.tracked_tokens = tracked_tokens;
-        self.l1_config.l1_state_cache = Some(self.l1_state_cache.clone());
         L1Subscriber::spawn(
             self.l1_config,
             self.deposit_queue.clone(),
@@ -478,7 +467,6 @@ where
             self.sequencer_key.clone(),
             self.portal_address,
             self.initial_tokens.clone(),
-            self.l1_state_cache.clone(),
         )
     }
 }

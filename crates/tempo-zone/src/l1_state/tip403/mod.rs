@@ -32,7 +32,7 @@
 //!
 //! # Startup sequence
 //!
-//! 1. [`seed_token_policies`] — bulk-fetch current policy state from L1 for all
+//! 1. [`SharedPolicyCache::seed_token_policies`] — bulk-fetch current policy state from L1 for all
 //!    tracked tokens and populate the cache baseline.
 //! 2. [`spawn_policy_resolution_task`] — start the background resolution task
 //!    (processes pre-fetch requests from the pool and other callers).
@@ -63,7 +63,6 @@
 //!   cache never runs ahead of the engine's view.
 
 mod cache;
-mod listener;
 mod metrics;
 mod pool_prefetch;
 pub mod provider;
@@ -74,8 +73,6 @@ pub use cache::{
     SharedPolicyCache,
 };
 pub(crate) use cache::{FIRST_USER_POLICY, POLICY_ALLOW_ALL, POLICY_REJECT_ALL};
-pub use listener::seed_token_policies;
-pub(crate) use listener::{decode_registry_event, decode_tip20_event};
 pub use metrics::Tip403Metrics;
 pub use pool_prefetch::spawn_pool_prefetch_task;
 pub use provider::PolicyProvider;

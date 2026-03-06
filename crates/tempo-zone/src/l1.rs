@@ -10,7 +10,7 @@ use alloy_provider::{Provider, ProviderBuilder, WsConnect};
 use alloy_rpc_types_eth::{BlockId, Log};
 use alloy_sol_types::{SolEvent, SolEventInterface, SolValue};
 use alloy_transport::Authorization;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt as _};
 use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
 use std::sync::Arc;
@@ -48,12 +48,12 @@ pub struct L1SubscriberConfig {
     /// extracted from L1 receipts directly into this cache before enqueuing
     /// blocks.
     pub policy_cache: crate::l1_state::tip403::SharedPolicyCache,
-    /// Token addresses tracked for TIP-403 policy events.
-    pub tracked_tokens: Vec<Address>,
-    /// Optional shared L1 state cache. When set, the subscriber updates the
-    /// cache anchor on each confirmed block and clears it on reorgs, replacing
-    /// the separate `L1StateListener`.
-    pub l1_state_cache: Option<crate::l1_state::cache::SharedL1StateCache>,
+    /// Shared L1 state cache. The subscriber updates the cache anchor on each
+    /// confirmed block and clears it on reorgs.
+    pub l1_state_cache: crate::l1_state::cache::SharedL1StateCache,
+    /// Maximum number of concurrent L1 RPC receipt fetches. Used directly for
+    /// the live stream and halved for backfill (which sends 2 requests per block).
+    pub l1_fetch_concurrency: usize,
 }
 
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
@@ -76,7 +76,7 @@ impl L1Subscriber {
         deposit_queue: DepositQueue,
         task_executor: impl reth_ethereum::tasks::TaskSpawner,
     ) {
-        let tracked_tokens = config.tracked_tokens.clone();
+        let tracked_tokens = config.policy_cache.read().tracked_tokens();
         let subscriber = Self {
             config,
             deposit_queue,
@@ -198,45 +198,95 @@ impl L1Subscriber {
         self.backfill(l1_provider, from, tip).await
     }
 
-    /// Backfill L1 blocks from `from..=to`, fetching receipts per block.
+    /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
     ///
-    /// Fetches block receipts and header for each block, extracts portal +
-    /// policy events, applies policy events to the cache, and enqueues the
-    /// block. Every block is enqueued (even without events) to maintain chain
-    /// continuity.
+    /// Fetches receipts and headers for up to `BACKFILL_CONCURRENCY` blocks in
+    /// parallel, then processes them sequentially (event extraction, policy
+    /// application, enqueue). This avoids the round-trip latency of fetching
+    /// one block at a time.
     async fn backfill(
         &mut self,
         l1_provider: &impl Provider<TempoNetwork>,
         from: u64,
         to: u64,
     ) -> eyre::Result<()> {
-        for block_number in from..=to {
-            let (events, policy_events) =
-                self.fetch_block_events(l1_provider, block_number).await?;
+        use futures::stream;
 
-            if !events.deposits.is_empty() || !events.enabled_tokens.is_empty() {
-                info!(
-                    block = block_number,
-                    deposits = events.deposits.len(),
-                    enabled_tokens = events.enabled_tokens.len(),
-                    "💰 Backfill portal events"
-                );
-            }
+        // Backfill sends 2 requests per block (receipts + header), so halve
+        // the concurrency to stay within the configured fetch budget.
+        let concurrency = (self.config.l1_fetch_concurrency / 2).max(1);
+
+        let mut fetched = stream::iter(from..=to)
+            .map(|block_number| {
+                let provider = l1_provider;
+                async move {
+                    let start = std::time::Instant::now();
+                    let (receipts, header_resp) = tokio::try_join!(
+                        async {
+                            provider
+                                .get_block_receipts(BlockId::number(block_number))
+                                .await?
+                                .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
+                        },
+                        async {
+                            provider
+                                .get_header_by_number(block_number.into())
+                                .await?
+                                .ok_or_else(|| {
+                                    eyre::eyre!("L1 header not found for block {block_number}")
+                                })
+                        },
+                    )?;
+                    let elapsed = start.elapsed();
+                    debug!(
+                        block_number,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        receipts = receipts.len(),
+                        "Fetched L1 block data"
+                    );
+                    let header = header_resp.inner.inner;
+                    Ok::<_, eyre::Report>((header, receipts))
+                }
+            })
+            .buffered(concurrency);
+
+        let mut enqueued = 0u64;
+        let backfill_start = std::time::Instant::now();
+
+        while let Some((header, receipts)) = fetched.try_next().await? {
+            let block_number = header.number();
+            let (events, policy_events) = self.extract_events(block_number, &receipts);
 
             self.apply_policy_events(block_number, &policy_events);
 
-            let header_resp = l1_provider
-                .get_header_by_number(block_number.into())
-                .await?
-                .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
-            let header: TempoHeader = header_resp.inner.inner;
             let sealed = SealedHeader::seal_slow(header);
             self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
             self.deposit_queue
                 .enqueue_sealed(sealed, events, policy_events);
+            enqueued += 1;
+
+            if enqueued.is_multiple_of(100) {
+                let elapsed = backfill_start.elapsed();
+                let blocks_per_sec = enqueued as f64 / elapsed.as_secs_f64().max(0.001);
+                info!(
+                    enqueued,
+                    current_block = block_number,
+                    target = to,
+                    remaining = to - block_number,
+                    blocks_per_sec = format!("{blocks_per_sec:.1}"),
+                    "Backfill progress"
+                );
+            }
         }
 
-        info!(from, to, blocks = to - from + 1, "Backfill complete");
+        let elapsed = backfill_start.elapsed();
+        info!(
+            from,
+            to,
+            blocks = to - from + 1,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "Backfill complete"
+        );
         Ok(())
     }
 
@@ -261,8 +311,34 @@ impl L1Subscriber {
         self.sync_to_l1_tip(&provider).await?;
 
         let sub = provider.subscribe_blocks().await?;
-        let mut stream = sub.into_stream();
         info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
+
+        // Map each incoming header to an async receipt fetch and buffer ahead
+        // so the next block's receipts are already in flight while we process
+        // the current one.
+        let concurrency = self.config.l1_fetch_concurrency;
+        let mut stream = sub
+            .into_stream()
+            .map(|header| {
+                let provider = &provider;
+                async move {
+                    let block_number = header.number();
+                    let start = std::time::Instant::now();
+                    let receipts = provider
+                        .get_block_receipts(BlockId::number(block_number))
+                        .await?
+                        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
+                    let elapsed = start.elapsed();
+                    debug!(
+                        block_number,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        receipts = receipts.len(),
+                        "Fetched live block receipts"
+                    );
+                    Ok::<_, eyre::Report>((header, receipts))
+                }
+            })
+            .buffered(concurrency);
 
         // Confirmation buffer: holds the latest unconfirmed L1 block.
         // A block is only flushed to the deposit queue once the NEXT block
@@ -274,10 +350,10 @@ impl L1Subscriber {
             Vec<PolicyEvent>,
         )> = None;
 
-        while let Some(header) = stream.next().await {
+        while let Some((header, receipts)) = stream.try_next().await? {
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-            let (events, policy_events) = self.fetch_block_events(&provider, block_number).await?;
+            let (events, policy_events) = self.extract_events(block_number, &receipts);
 
             // If we have a buffered tip, check if the new block confirms it.
             if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
@@ -316,9 +392,7 @@ impl L1Subscriber {
                         new_parent = %sealed.parent_hash(),
                         "Discarding unconfirmed L1 block (reorg)"
                     );
-                    if let Some(ref cache) = self.config.l1_state_cache {
-                        cache.write().clear();
-                    }
+                    self.config.l1_state_cache.write().clear();
                 }
             }
 
@@ -330,98 +404,82 @@ impl L1Subscriber {
         Ok(())
     }
 
-    /// Fetch block receipts and extract all events (portal + policy).
-    ///
-    /// Replaces separate `get_logs` calls with a single `eth_getBlockReceipts`.
-    /// Returns portal events and policy events for the block.
-    async fn fetch_block_events(
+    /// Extract portal and policy events from pre-fetched receipts (no RPC).
+    fn extract_events(
         &mut self,
-        provider: &impl Provider<TempoNetwork>,
         block_number: u64,
-    ) -> eyre::Result<(L1PortalEvents, Vec<PolicyEvent>)> {
+        receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
+    ) -> (L1PortalEvents, Vec<PolicyEvent>) {
         use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 
-        let receipts = provider
-            .get_block_receipts(BlockId::number(block_number))
-            .await?
-            .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
-
+        let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut policy_events = Vec::new();
 
-        for receipt in &receipts {
+        for receipt in receipts {
             for log in receipt.logs() {
                 let addr = log.address();
 
-                if addr == self.config.portal_address {
+                if addr == portal_address {
+                    let prev_len = portal_events.enabled_tokens.len();
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
-                    // Check for TokenEnabled to grow tracked_tokens
-                    if log.topics().first() == Some(&TokenEnabled::SIGNATURE_HASH)
-                        && let Ok(decoded) = TokenEnabled::decode_log(&log.inner)
-                    {
-                        let token = decoded.data.token;
+                    if let Some(enabled) = portal_events.enabled_tokens.get(prev_len) {
+                        let token = enabled.token;
                         if !self.tracked_tokens.contains(&token) {
                             info!(%token, "New token enabled, adding to tracked tokens");
                             self.tracked_tokens.push(token);
                         }
                     }
                 } else if addr == TIP403_REGISTRY_ADDRESS {
-                    if let Some(event) =
-                        crate::l1_state::tip403::decode_registry_event(log, block_number)
-                    {
+                    if let Some(event) = PolicyEvent::decode_registry(log) {
                         policy_events.push(event);
                     }
                 } else if self.tracked_tokens.contains(&addr)
                     && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
-                    && let Some(event) =
-                        crate::l1_state::tip403::decode_tip20_event(log, block_number)
+                    && let Some(event) = PolicyEvent::decode_tip20(log)
                 {
                     policy_events.push(event);
                 }
             }
         }
 
-        Ok((portal_events, policy_events))
+        (portal_events, policy_events)
     }
 
+    /// Write decoded policy events into the shared cache and advance its L1 block
+    /// cursor. The cursor is always updated — even for blocks with no policy events —
+    /// so that cache-miss fallback queries target the correct L1 height.
     fn apply_policy_events(&self, block_number: u64, policy_events: &[PolicyEvent]) {
-        if !policy_events.is_empty() {
-            self.config
-                .policy_cache
-                .write()
-                .apply_events(block_number, policy_events);
-        }
-        self.config.policy_cache.set_last_l1_block(block_number);
+        self.config
+            .policy_cache
+            .write()
+            .apply_events(block_number, policy_events);
     }
 
-    /// Update the L1 state cache anchor, if configured. Detects reorgs by
-    /// comparing `parent_hash` against the current anchor and clears the cache
-    /// when they diverge.
+    /// Update the L1 state cache anchor. Detects reorgs by comparing
+    /// `parent_hash` against the current anchor and clears the cache when they
+    /// diverge.
     fn update_l1_state_anchor(&self, number: u64, hash: B256, parent_hash: B256) {
-        if let Some(ref cache) = self.config.l1_state_cache {
-            let mut guard = cache.write();
-            let anchor = guard.anchor();
-            if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
-                warn!(
-                    old_anchor = %anchor.hash,
-                    new_parent = %parent_hash,
-                    block_number = number,
-                    "Reorg detected, clearing L1 state cache"
-                );
-                guard.clear();
-            }
-            guard.update_anchor(NumHash { number, hash });
+        let mut guard = self.config.l1_state_cache.write();
+        let anchor = guard.anchor();
+        if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
+            warn!(
+                old_anchor = %anchor.hash,
+                new_parent = %parent_hash,
+                block_number = number,
+                "Reorg detected, clearing L1 state cache"
+            );
+            guard.clear();
         }
+        guard.update_anchor(NumHash { number, hash });
     }
 }
 
 /// A deposit extracted from L1.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Deposit {
-    /// L1 block number where the deposit was included.
-    pub l1_block_number: u64,
     /// TIP-20 token being deposited.
     pub token: Address,
     /// Sender on L1.
@@ -434,22 +492,18 @@ pub struct Deposit {
     pub fee: u128,
     /// User-provided memo.
     pub memo: B256,
-    /// New deposit queue hash after this deposit.
-    pub queue_hash: B256,
 }
 
 impl Deposit {
-    /// Create a new deposit from an event and block number.
-    pub fn from_event(event: DepositMade, l1_block_number: u64) -> Self {
+    /// Create a new deposit from an event.
+    pub fn from_event(event: DepositMade) -> Self {
         Self {
-            l1_block_number,
             token: event.token,
             sender: event.sender,
             to: event.to,
             amount: event.netAmount,
             fee: event.fee,
             memo: event.memo,
-            queue_hash: event.newCurrentDepositQueueHash,
         }
     }
 }
@@ -457,8 +511,6 @@ impl Deposit {
 /// An encrypted deposit extracted from L1.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct EncryptedDeposit {
-    /// L1 block number where the deposit was included.
-    pub l1_block_number: u64,
     /// TIP-20 token being deposited.
     pub token: Address,
     /// Sender on L1.
@@ -479,15 +531,12 @@ pub struct EncryptedDeposit {
     pub nonce: [u8; 12],
     /// GCM authentication tag (16 bytes).
     pub tag: [u8; 16],
-    /// New deposit queue hash after this deposit.
-    pub queue_hash: B256,
 }
 
 impl EncryptedDeposit {
-    /// Create a new encrypted deposit from an event and block number.
-    pub fn from_event(event: EncryptedDepositMade, l1_block_number: u64) -> Self {
+    /// Create a new encrypted deposit from an event.
+    pub fn from_event(event: EncryptedDepositMade) -> Self {
         Self {
-            l1_block_number,
             token: event.token,
             sender: event.sender,
             amount: event.netAmount,
@@ -498,7 +547,6 @@ impl EncryptedDeposit {
             ciphertext: event.ciphertext.to_vec(),
             nonce: event.nonce.0,
             tag: event.tag.0,
-            queue_hash: event.newCurrentDepositQueueHash,
         }
     }
 }
@@ -612,15 +660,6 @@ impl L1PortalEvents {
         TokenEnabled::SIGNATURE_HASH,
     ];
 
-    /// Decode all portal events from a slice of logs for a single block.
-    pub fn from_logs(logs: &[Log], block_number: u64) -> eyre::Result<Self> {
-        let mut events = Self::default();
-        for log in logs {
-            events.push_log(log, block_number)?;
-        }
-        Ok(events)
-    }
-
     /// Create portal events from deposits only.
     pub fn from_deposits(deposits: Vec<L1Deposit>) -> Self {
         Self {
@@ -631,9 +670,8 @@ impl L1PortalEvents {
 
     /// Decode a portal log and add the event to this container.
     ///
-    /// Logs whose topic0 does not match a known portal event are skipped
-    /// (should be unreachable given the explicit filter). Known events that
-    /// fail to decode return an error.
+    /// Logs whose topic0 does not match a known portal event are skipped.
+    /// Known events that fail to decode return an error.
     pub fn push_log(&mut self, log: &Log, block_number: u64) -> eyre::Result<()> {
         if !Self::is_known_event(log) {
             debug!(
@@ -654,7 +692,7 @@ impl L1PortalEvents {
                     "💰 Deposit from L1"
                 );
                 self.deposits
-                    .push(L1Deposit::Regular(Deposit::from_event(event, block_number)));
+                    .push(L1Deposit::Regular(Deposit::from_event(event)));
             }
             ZonePortalEvents::EncryptedDepositMade(event) => {
                 info!(
@@ -665,10 +703,7 @@ impl L1PortalEvents {
                     "🔒 Encrypted deposit from L1"
                 );
                 self.deposits
-                    .push(L1Deposit::Encrypted(EncryptedDeposit::from_event(
-                        event,
-                        block_number,
-                    )));
+                    .push(L1Deposit::Encrypted(EncryptedDeposit::from_event(event)));
             }
             ZonePortalEvents::TokenEnabled(event) => {
                 info!(
@@ -1435,14 +1470,12 @@ mod tests {
         assert_eq!(queue.enqueued_head_hash(), B256::ZERO);
 
         let d1 = L1Deposit::Regular(Deposit {
-            l1_block_number: 1,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         });
 
         queue.enqueue(
@@ -1463,14 +1496,12 @@ mod tests {
         assert_eq!(hash_after_d1, queue2.enqueued_head_hash);
 
         let d2 = L1Deposit::Regular(Deposit {
-            l1_block_number: 2,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000003"),
             to: address!("0x0000000000000000000000000000000000000004"),
             amount: 2000,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         });
 
         queue.enqueue(
@@ -1486,24 +1517,20 @@ mod tests {
     fn test_process_deposits_transition() {
         let deposits = vec![
             L1Deposit::Regular(Deposit {
-                l1_block_number: 1,
                 token: address!("0x0000000000000000000000000000000000001000"),
                 sender: address!("0x0000000000000000000000000000000000000001"),
                 to: address!("0x0000000000000000000000000000000000000002"),
                 amount: 1000,
                 fee: 0,
                 memo: B256::ZERO,
-                queue_hash: B256::ZERO,
             }),
             L1Deposit::Regular(Deposit {
-                l1_block_number: 2,
                 token: address!("0x0000000000000000000000000000000000001000"),
                 sender: address!("0x0000000000000000000000000000000000000003"),
                 to: address!("0x0000000000000000000000000000000000000004"),
                 amount: 2000,
                 fee: 0,
                 memo: B256::ZERO,
-                queue_hash: B256::ZERO,
             }),
         ];
 
@@ -1529,14 +1556,12 @@ mod tests {
         let mut queue = PendingDeposits::default();
 
         let deposits = vec![L1Deposit::Regular(Deposit {
-            l1_block_number: 1,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 500,
             fee: 0,
             memo: FixedBytes::from([0xABu8; 32]),
-            queue_hash: B256::ZERO,
         })];
 
         queue.enqueue(
@@ -1555,25 +1580,21 @@ mod tests {
         let mut queue = PendingDeposits::default();
 
         let d1 = L1Deposit::Regular(Deposit {
-            l1_block_number: 10,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 100,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         });
 
         let d2 = L1Deposit::Regular(Deposit {
-            l1_block_number: 11,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000003"),
             to: address!("0x0000000000000000000000000000000000000004"),
             amount: 200,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         });
 
         let h10 = make_test_header(10);
@@ -1602,7 +1623,6 @@ mod tests {
         let sender = address!("0x0000000000000000000000000000000000001234");
 
         let encrypted = EncryptedDeposit {
-            l1_block_number: 1,
             token,
             sender,
             amount: 1_000_000,
@@ -1613,7 +1633,6 @@ mod tests {
             ciphertext: vec![0x42u8; 64],
             nonce: [0x01; 12],
             tag: [0x02; 16],
-            queue_hash: B256::ZERO,
         };
 
         // Compute via PendingDeposits (Rust implementation)
@@ -1654,18 +1673,15 @@ mod tests {
         let recipient = address!("0x000000000000000000000000000000000000A11C");
 
         let regular = Deposit {
-            l1_block_number: 1,
             token,
             sender,
             to: recipient,
             amount: 500_000,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         };
 
         let encrypted = EncryptedDeposit {
-            l1_block_number: 1,
             token,
             sender,
             amount: 300_000,
@@ -1676,7 +1692,6 @@ mod tests {
             ciphertext: vec![0x55u8; 64],
             nonce: [0x0A; 12],
             tag: [0x0B; 16],
-            queue_hash: B256::ZERO,
         };
 
         let deposits = vec![
@@ -1733,7 +1748,6 @@ mod tests {
         let sender = address!("0x0000000000000000000000000000000000001234");
 
         let encrypted = EncryptedDeposit {
-            l1_block_number: 1,
             token,
             sender,
             amount: 750_000,
@@ -1744,7 +1758,6 @@ mod tests {
             ciphertext: vec![0x99u8; 64],
             nonce: [0x03; 12],
             tag: [0x04; 16],
-            queue_hash: B256::ZERO,
         };
 
         let deposits = vec![L1Deposit::Encrypted(encrypted)];
@@ -1959,14 +1972,12 @@ mod tests {
         let h1 = make_test_header(10);
         let h1_hash = header_hash(&h1);
         let d1 = L1Deposit::Regular(Deposit {
-            l1_block_number: 10,
             token,
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 100,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         });
         assert!(matches!(
             queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![d1]), vec![]),
@@ -1976,14 +1987,12 @@ mod tests {
 
         let h2 = make_chained_header(11, h1_hash);
         let d2 = L1Deposit::Regular(Deposit {
-            l1_block_number: 11,
             token,
             sender: address!("0x0000000000000000000000000000000000000003"),
             to: address!("0x0000000000000000000000000000000000000004"),
             amount: 200,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         });
         assert!(matches!(
             queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![d2]), vec![]),
@@ -2009,16 +2018,14 @@ mod tests {
         assert_eq!(queue.enqueued_head_hash(), hash_after_h1);
     }
 
-    fn make_deposit(block: u64, amount: u128) -> L1Deposit {
+    fn make_deposit(amount: u128) -> L1Deposit {
         L1Deposit::Regular(Deposit {
-            l1_block_number: block,
             token: address!("0x0000000000000000000000000000000000001000"),
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         })
     }
 
@@ -2030,7 +2037,7 @@ mod tests {
         let h1_hash = header_hash(&h1);
         queue.enqueue(
             h1,
-            L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(100)]),
             vec![],
         );
 
@@ -2038,14 +2045,14 @@ mod tests {
         let h2_hash = header_hash(&h2);
         queue.enqueue(
             h2,
-            L1PortalEvents::from_deposits(vec![make_deposit(2, 200)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(200)]),
             vec![],
         );
 
         let h3 = make_chained_header(3, h2_hash);
         queue.enqueue(
             h3,
-            L1PortalEvents::from_deposits(vec![make_deposit(3, 300)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(300)]),
             vec![],
         );
 
@@ -2079,7 +2086,7 @@ mod tests {
         let h1_hash = header_hash(&h1);
         queue.enqueue(
             h1,
-            L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(100)]),
             vec![],
         );
 
@@ -2134,7 +2141,7 @@ mod tests {
         let h1_hash = header_hash(&h1);
         queue.enqueue(
             h1,
-            L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(100)]),
             vec![],
         );
 
@@ -2142,14 +2149,14 @@ mod tests {
         let h2_hash = header_hash(&h2);
         queue.enqueue(
             h2,
-            L1PortalEvents::from_deposits(vec![make_deposit(2, 200)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(200)]),
             vec![],
         );
 
         let h3 = make_chained_header(3, h2_hash);
         queue.enqueue(
             h3,
-            L1PortalEvents::from_deposits(vec![make_deposit(3, 300)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(300)]),
             vec![],
         );
 
@@ -2187,7 +2194,7 @@ mod tests {
         let h1_hash = header_hash(&h1);
         queue.enqueue(
             h1,
-            L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(100)]),
             vec![],
         );
 
@@ -2211,13 +2218,13 @@ mod tests {
         // Backfill: enqueue block 2, then block 3
         queue.enqueue(
             h2,
-            L1PortalEvents::from_deposits(vec![make_deposit(2, 200)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(200)]),
             vec![],
         );
         assert!(matches!(
             queue.try_enqueue(
                 h3_sealed.clone(),
-                L1PortalEvents::from_deposits(vec![make_deposit(3, 300)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(300)]),
                 vec![],
             ),
             EnqueueOutcome::Accepted
@@ -2230,7 +2237,7 @@ mod tests {
         assert!(matches!(
             queue.try_enqueue(
                 h3_sealed,
-                L1PortalEvents::from_deposits(vec![make_deposit(3, 300)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(300)]),
                 vec![],
             ),
             EnqueueOutcome::Duplicate
@@ -2248,7 +2255,7 @@ mod tests {
         let h1_hash = header_hash(&h1);
         queue.enqueue(
             h1,
-            L1PortalEvents::from_deposits(vec![make_deposit(1, 100)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(100)]),
             vec![],
         );
 
@@ -2257,7 +2264,7 @@ mod tests {
         queue.enqueue(h2, L1PortalEvents::from_deposits(vec![]), vec![]); // no deposits
 
         let h3 = make_chained_header(3, h2_hash);
-        let d3 = make_deposit(3, 300);
+        let d3 = make_deposit(300);
         queue.enqueue(h3, L1PortalEvents::from_deposits(vec![d3.clone()]), vec![]);
 
         // Block 2 has no deposits => queue_hash_before == queue_hash_after
@@ -2384,7 +2391,7 @@ mod tests {
         assert!(matches!(
             queue.try_enqueue(
                 seal(h1),
-                L1PortalEvents::from_deposits(vec![make_deposit(10, 100)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(100)]),
                 vec![],
             ),
             EnqueueOutcome::Accepted
@@ -2395,7 +2402,7 @@ mod tests {
         assert!(matches!(
             queue.try_enqueue(
                 seal(h2),
-                L1PortalEvents::from_deposits(vec![make_deposit(11, 200)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(200)]),
                 vec![],
             ),
             EnqueueOutcome::Accepted
@@ -2450,7 +2457,7 @@ mod tests {
         assert!(matches!(
             queue.try_enqueue(
                 seal(h2_good),
-                L1PortalEvents::from_deposits(vec![make_deposit(11, 500)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(500)]),
                 vec![],
             ),
             EnqueueOutcome::Accepted
@@ -2533,7 +2540,7 @@ mod tests {
         assert!(matches!(
             queue.try_enqueue(
                 seal(h1),
-                L1PortalEvents::from_deposits(vec![make_deposit(10, 100)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(100)]),
                 vec![],
             ),
             EnqueueOutcome::Accepted
@@ -2598,14 +2605,14 @@ mod tests {
         let h1_hash = header_hash(&h1);
         queue.enqueue(
             h1.clone(),
-            L1PortalEvents::from_deposits(vec![make_deposit(10, 100)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(100)]),
             vec![],
         );
 
         let h2 = make_chained_header(11, h1_hash);
         queue.enqueue(
             h2.clone(),
-            L1PortalEvents::from_deposits(vec![make_deposit(11, 200)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(200)]),
             vec![],
         );
 
@@ -2616,7 +2623,7 @@ mod tests {
         assert!(matches!(
             queue.try_enqueue(
                 seal(h1),
-                L1PortalEvents::from_deposits(vec![make_deposit(10, 100)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(100)]),
                 vec![],
             ),
             EnqueueOutcome::Duplicate
@@ -2624,7 +2631,7 @@ mod tests {
         assert!(matches!(
             queue.try_enqueue(
                 seal(h2),
-                L1PortalEvents::from_deposits(vec![make_deposit(11, 200)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(200)]),
                 vec![],
             ),
             EnqueueOutcome::Duplicate
@@ -2643,7 +2650,7 @@ mod tests {
         let h10_hash = header_hash(&h10);
         queue.enqueue(
             h10,
-            L1PortalEvents::from_deposits(vec![make_deposit(10, 100)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(100)]),
             vec![],
         );
         let hash_after_10 = queue.enqueued_head_hash();
@@ -2652,7 +2659,7 @@ mod tests {
         let h11_hash = header_hash(&h11);
         queue.enqueue(
             h11,
-            L1PortalEvents::from_deposits(vec![make_deposit(11, 200)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(200)]),
             vec![],
         );
 
@@ -2660,14 +2667,14 @@ mod tests {
         let h12_hash = header_hash(&h12);
         queue.enqueue(
             h12,
-            L1PortalEvents::from_deposits(vec![make_deposit(12, 300)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(300)]),
             vec![],
         );
 
         let h13 = make_chained_header(13, h12_hash);
         queue.enqueue(
             h13,
-            L1PortalEvents::from_deposits(vec![make_deposit(13, 400)]),
+            L1PortalEvents::from_deposits(vec![make_deposit(400)]),
             vec![],
         );
 
@@ -2681,7 +2688,7 @@ mod tests {
         assert!(matches!(
             queue.try_enqueue(
                 seal(h11_reorg),
-                L1PortalEvents::from_deposits(vec![make_deposit(11, 999)]),
+                L1PortalEvents::from_deposits(vec![make_deposit(999)]),
                 vec![],
             ),
             EnqueueOutcome::Accepted

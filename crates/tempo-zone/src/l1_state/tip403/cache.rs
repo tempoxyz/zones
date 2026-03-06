@@ -38,12 +38,14 @@
 //! per-block rollback.
 
 use alloy_primitives::Address;
+use alloy_provider::DynProvider;
 use derive_more::Deref;
 use parking_lot::RwLock;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
+use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 use tracing::info;
 
@@ -383,6 +385,52 @@ impl SharedPolicyCache {
     /// engine hasn't consumed yet.
     pub fn advance(&self, block_number: u64) {
         self.write().advance(block_number);
+    }
+
+    /// Query the current `transferPolicyId` for each tracked token and seed it
+    /// into the cache. This ensures the cache knows about tokens that have never
+    /// had a `TransferPolicyUpdate` event (i.e. still using the default policy).
+    ///
+    /// Fails if any token's `transferPolicyId` cannot be resolved — all enabled
+    /// tokens must be seeded for the zone to enforce policies correctly.
+    pub async fn seed_token_policies(
+        &self,
+        portal_address: Address,
+        tracked_tokens: &[Address],
+        provider: &DynProvider<TempoNetwork>,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+
+        let block_number = self.last_l1_block();
+
+        let seeded = futures::future::join_all(tracked_tokens.iter().map(|token| {
+            let tip20 = ITIP20::new(*token, provider);
+            async move {
+                let policy_id = tip20
+                    .transferPolicyId()
+                    .block(alloy_rpc_types_eth::BlockId::number(block_number))
+                    .call()
+                    .await
+                    .map_err(|e| {
+                        eyre::eyre!(
+                            "failed to seed transferPolicyId for token {token} \
+                             (portal {portal_address}): {e}"
+                        )
+                    })?;
+                Ok::<_, eyre::Report>((*token, policy_id))
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<eyre::Result<Vec<_>>>()?;
+
+        let mut w = self.write();
+        for (token, policy_id) in seeded {
+            info!(%token, policy_id, block_number, "Seeded token policy from L1");
+            w.set_token_policy(token, block_number, policy_id);
+        }
+
+        Ok(())
     }
 }
 

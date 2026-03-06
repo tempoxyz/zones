@@ -420,6 +420,7 @@ impl ZoneTestNode {
             genesis_tempo_block_number,
             Address::ZERO, // sequencer address (overridden by sequencer_key)
             sequencer_key,
+            4,
         )
         .with_initial_tokens(vec![]);
 
@@ -2271,23 +2272,20 @@ impl L1Fixture {
         queue.enqueue(block.header.clone(), events, vec![]);
     }
 
-    /// Create a [`Deposit`] tied to a specific L1 block number.
+    /// Create a [`Deposit`] for a specific L1 block.
     pub(crate) fn make_deposit_for_block(
-        l1_block_number: u64,
         token: Address,
         sender: Address,
         to: Address,
         amount: u128,
     ) -> Deposit {
         Deposit {
-            l1_block_number,
             token,
             sender,
             to,
             amount,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         }
     }
 
@@ -2343,7 +2341,6 @@ impl L1Fixture {
         amount: u128,
     ) -> EncryptedDeposit {
         EncryptedDeposit {
-            l1_block_number: self.next_block_number,
             token,
             sender,
             amount,
@@ -2354,7 +2351,6 @@ impl L1Fixture {
             ciphertext: vec![0u8; 64], // ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE = 64
             nonce: [0u8; 12],
             tag: [0u8; 16],
-            queue_hash: B256::ZERO,
         }
     }
 
@@ -2367,14 +2363,12 @@ impl L1Fixture {
         amount: u128,
     ) -> Deposit {
         Deposit {
-            l1_block_number: self.next_block_number,
             token,
             sender,
             to,
             amount,
             fee: 0,
             memo: B256::ZERO,
-            queue_hash: B256::ZERO,
         }
     }
 
@@ -2426,7 +2420,6 @@ impl L1Fixture {
         let (ciphertext, nonce, tag) = encrypt_plaintext(&aes_key, &plaintext);
 
         EncryptedDeposit {
-            l1_block_number: self.next_block_number,
             token,
             sender,
             amount,
@@ -2437,7 +2430,6 @@ impl L1Fixture {
             ciphertext,
             nonce,
             tag,
-            queue_hash: B256::ZERO,
         }
     }
 }
