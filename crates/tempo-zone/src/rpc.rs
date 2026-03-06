@@ -1,10 +1,13 @@
-//! [`ZoneRpcApi`] implementation backed by reth's EthApi.
+//! [`ZoneRpcApi`] implementation backed by reth's EthApi (in-process reth-backed).
+//!
+//! Re-exports the standalone `zone-rpc` crate so everything is accessible
+//! via `zone::rpc::*`.
+
+pub use zone_rpc::*;
 
 use std::{collections::HashMap, sync::Arc};
 
-use alloy_consensus::transaction::SignerRecoverable;
-use alloy_eips::eip2718::Decodable2718;
-use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
+use alloy_network::{ReceiptResponse, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U256};
 use alloy_rpc_types_eth::{
     Block, BlockId, BlockNumberOrTag, BlockTransactions, Filter, FilterChanges, FilterId,
@@ -23,9 +26,8 @@ use tempo_alloy::{
 use tempo_primitives::TempoTxEnvelope;
 use tokio::sync::Mutex;
 
-use super::{
+use zone_rpc::{
     auth::AuthContext,
-    handlers::ZoneRpcApi,
     types::{BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
 };
 
@@ -54,7 +56,7 @@ type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHe
 ///   recovered transaction sender matches the authenticated account
 ///   (`-32003` on mismatch).
 ///
-/// [`classify_method`]: super::types::classify_method
+/// [`classify_method`]: zone_rpc::types::classify_method
 pub struct TempoZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     /// Maps filter IDs to the authenticated account that created them.
@@ -102,7 +104,7 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
     }
 }
 
-impl<Api> ZoneRpcApi for TempoZoneRpc<Api>
+impl<Api> zone_rpc::ZoneRpcApi for TempoZoneRpc<Api>
 where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
 {
@@ -286,7 +288,7 @@ where
             }
 
             if !auth.is_sequencer {
-                enforce_from(&mut request, &auth)?;
+                zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
 
             let result = EthCall::call(
@@ -315,7 +317,7 @@ where
             }
 
             if !auth.is_sequencer {
-                enforce_from(&mut request, &auth)?;
+                zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
 
             let result = EthCall::estimate_gas_at(
@@ -333,7 +335,7 @@ where
     fn send_raw_transaction(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             if !auth.is_sequencer {
-                verify_raw_tx_sender(&data, &auth)?;
+                zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
             }
 
             let hash = EthTransactions::send_raw_transaction(&self.eth.api, data)
@@ -346,7 +348,7 @@ where
     fn send_raw_transaction_sync(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             if !auth.is_sequencer {
-                verify_raw_tx_sender(&data, &auth)?;
+                zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
             }
 
             let receipt = EthTransactions::send_raw_transaction_sync(&self.eth.api, data)
@@ -363,7 +365,7 @@ where
     ) -> BoxFut<'_> {
         Box::pin(async move {
             if !auth.is_sequencer {
-                enforce_from(&mut request, &auth)?;
+                zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
 
             let result = EthTransactions::fill_transaction(&self.eth.api, request)
@@ -382,11 +384,11 @@ where
                 return to_raw(&logs);
             }
 
-            super::filter::scope_filter(&mut filter);
+            zone_rpc::filter::scope_filter(&mut filter);
             let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
                 .await
                 .map_err(internal)?;
-            let filtered = super::filter::filter_logs(logs, &auth.caller);
+            let filtered = zone_rpc::filter::filter_logs(logs, &auth.caller);
             to_raw(&filtered)
         })
     }
@@ -394,7 +396,7 @@ where
     fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             if !auth.is_sequencer {
-                super::filter::scope_filter(&mut filter);
+                zone_rpc::filter::scope_filter(&mut filter);
             }
             let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
                 .await
@@ -417,7 +419,7 @@ where
                 return to_raw(&logs);
             }
 
-            let filtered = super::filter::filter_logs(logs, &auth.caller);
+            let filtered = zone_rpc::filter::filter_logs(logs, &auth.caller);
             to_raw(&filtered)
         })
     }
@@ -434,7 +436,7 @@ where
 
             match changes {
                 FilterChanges::Logs(logs) => {
-                    let filtered = super::filter::filter_logs(logs, &auth.caller);
+                    let filtered = zone_rpc::filter::filter_logs(logs, &auth.caller);
                     to_raw(&FilterChanges::<
                         alloy_rpc_types_eth::Transaction<TempoTxEnvelope>,
                     >::Logs(filtered))
@@ -481,41 +483,6 @@ where
             to_raw(&result)
         })
     }
-}
-
-/// Enforce that `from` matches the authenticated caller.
-///
-/// - If `from` is omitted, sets it to `auth.caller`.
-/// - If present and mismatched, returns `-32004 Account mismatch`.
-fn enforce_from(
-    request: &mut TempoTransactionRequest,
-    auth: &AuthContext,
-) -> Result<(), JsonRpcError> {
-    match TransactionBuilder::from(request as &TempoTransactionRequest) {
-        Some(from) if from != auth.caller => Err(JsonRpcError::account_mismatch()),
-        None => {
-            request.set_from(auth.caller);
-            Ok(())
-        }
-        _ => Ok(()),
-    }
-}
-
-/// Decode a raw transaction and verify the recovered sender matches the
-/// authenticated caller. Returns `-32003 Transaction rejected` on mismatch.
-fn verify_raw_tx_sender(data: &[u8], auth: &AuthContext) -> Result<(), JsonRpcError> {
-    let tx = TempoTxEnvelope::decode_2718_exact(data)
-        .map_err(|_| JsonRpcError::invalid_params("failed to decode transaction"))?;
-
-    let sender = tx
-        .recover_signer()
-        .map_err(|_| JsonRpcError::invalid_params("invalid transaction signature"))?;
-
-    if sender != auth.caller {
-        return Err(JsonRpcError::transaction_rejected());
-    }
-
-    Ok(())
 }
 
 /// Strip privacy-sensitive fields from a block for non-sequencer callers.

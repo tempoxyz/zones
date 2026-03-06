@@ -9,7 +9,7 @@ use serde_json::{Value, value::RawValue};
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tracing::warn;
 
-use super::{
+use crate::{
     auth::AuthContext,
     types::{BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, MethodTier, classify_method},
 };
@@ -252,11 +252,11 @@ pub async fn dispatch(
             api.max_priority_fee_per_gas().await,
         ),
         "net_version" => api_result(id, "net_version", api.net_version().await),
-        "net_listening" => api_result(id, "net_listening", super::types::to_raw(&true)),
+        "net_listening" => api_result(id, "net_listening", crate::types::to_raw(&true)),
         "web3_clientVersion" => api_result(
             id,
             "web3_clientVersion",
-            super::types::to_raw(&"tempo-zone/v0.1.0"),
+            crate::types::to_raw(&"tempo-zone/v0.1.0"),
         ),
 
         // Fee history

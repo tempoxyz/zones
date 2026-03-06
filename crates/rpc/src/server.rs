@@ -14,7 +14,7 @@ use axum::{
 use std::sync::Arc;
 use tracing::{info, warn};
 
-use super::{
+use crate::{
     auth::{self, AuthContext, AuthError, SignatureType},
     config::PrivateRpcConfig,
     handlers::{self, ZoneRpcApi},

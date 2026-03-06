@@ -16,7 +16,7 @@ use alloy_signer_local::PrivateKeySigner;
 use parking_lot::Mutex;
 use tempo_alloy::TempoNetwork;
 
-use super::auth::{X_AUTHORIZATION_TOKEN, build_token_fields};
+use crate::auth::{X_AUTHORIZATION_TOKEN, build_token_fields};
 
 /// How many seconds before expiry to refresh the token.
 const REFRESH_BUFFER_SECS: u64 = 30;

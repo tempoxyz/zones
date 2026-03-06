@@ -9,6 +9,7 @@ publish = false
 members = [
   "bin/tempo-zone",
   "crates/tempo-zone",
+  "crates/rpc",
   "xtask",
 ]
 
@@ -92,6 +93,9 @@ tempo-primitives = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc
 ] }
 tempo-revm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
 tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
+
+# zones
+zone-rpc = { path = "crates/rpc" }
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v1.10.2" }

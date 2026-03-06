@@ -6,12 +6,12 @@ use alloy_primitives::U256;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
-/// Shorthand for the boxed future returned by [`ZoneRpcApi`](super::handlers::ZoneRpcApi) methods.
+/// Shorthand for the boxed future returned by [`ZoneRpcApi`](crate::handlers::ZoneRpcApi) methods.
 ///
 /// Returns pre-serialized JSON ([`RawValue`]) to avoid an intermediate
 /// `serde_json::Value` allocation — the result is embedded verbatim in
 /// the JSON-RPC response.
-pub(crate) type BoxFut<'a> =
+pub type BoxFut<'a> =
     Pin<Box<dyn Future<Output = Result<Box<RawValue>, JsonRpcError>> + Send + 'a>>;
 
 /// A JSON-RPC 2.0 request.

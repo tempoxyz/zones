@@ -13039,7 +13039,6 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-types",
  "alloy-transport",
- "axum",
  "const-hex",
  "derive_more",
  "either",
@@ -13087,6 +13086,33 @@ dependencies = [
  "tempo-primitives",
  "tempo-revm",
  "tempo-transaction-pool",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "zone-rpc",
+]
+
+[[package]]
+name = "zone-rpc"
+version = "1.0.0-rc.5"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rpc-types-eth",
+ "alloy-signer",
+ "alloy-signer-local",
+ "axum",
+ "eyre",
+ "parking_lot",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "tempo-alloy",
+ "tempo-primitives",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
