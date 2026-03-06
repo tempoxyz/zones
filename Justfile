@@ -656,6 +656,19 @@ deploy-zone name:
                       --sequencer-key "$SEQUENCER_KEY"
 
 [group('zone')]
+[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars.')]
+spam-deposits total="20" per-block="10" amount="1000000" token="0x20C0000000000000000000000000000000000000" encrypted="" lead-time="5" rpc=zone_rpc:
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    ARGS="--total {{total}} --per-block {{per-block}} --amount {{amount}} --token {{token}} --lead-time {{lead-time}}"
+    if [[ -n "{{encrypted}}" ]]; then
+        ARGS="$ARGS --encrypted"
+    fi
+    ARGS="$ARGS --zone-rpc-url {{rpc}}"
+    cargo run -p tempo-xtask -- spam-deposits --private-key "$PK" $ARGS
+
+[group('zone')]
 [doc('Runs the full TIP-20 + TIP-403 blacklist demo: creates token, enables on zone, blacklists address, shows deposit bounce, unblacklists, shows deposit success, withdraws. Requires PRIVATE_KEY (sequencer key) and L1_PORTAL_ADDRESS env vars.')]
 demo-blacklist amount="500000" rpc=zone_rpc:
     cargo run -p tempo-xtask -- demo-blacklist --zone-rpc-url {{rpc}} --amount {{amount}}
