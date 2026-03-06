@@ -529,10 +529,9 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     pub async fn encryption_key(
         &self,
     ) -> Result<(ZonePortal::sequencerEncryptionKeyReturn, alloy_primitives::U256), alloy_contract::Error> {
-        let (key, count) = tokio::try_join!(
-            self.sequencerEncryptionKey().call(),
-            self.encryptionKeyCount().call(),
-        )?;
+        let key_call = self.sequencerEncryptionKey();
+        let count_call = self.encryptionKeyCount();
+        let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
         let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
         Ok((key, key_index))
     }
