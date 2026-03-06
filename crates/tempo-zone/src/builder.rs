@@ -124,8 +124,8 @@ where
         header_rlp: Option<Vec<u8>>,
     ) {
         use alloy_consensus::BlockHeader;
-        use alloy_primitives::Bytes;
-        use alloy_sol_types::SolValue;
+        
+        
         use zone_prover::types::{DepositType, QueuedDeposit, ZoneBlock, ZoneHeader};
 
         let block_number = sealed_block.number();

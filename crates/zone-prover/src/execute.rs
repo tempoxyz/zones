@@ -170,8 +170,8 @@ pub fn execute_zone_block<DB: Database<Error: core::fmt::Debug> + DatabaseCommit
     }
 
     // 3. Execute finalizeWithdrawalBatch system tx (only in final block).
-    if is_last_block {
-        if let Some(count) = block.finalize_withdrawal_batch_count {
+    if is_last_block
+        && let Some(count) = block.finalize_withdrawal_batch_count {
             let recovered_tx = build_finalize_withdrawal_batch_tx(count, block.number);
 
             let tx_env = <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
@@ -195,7 +195,6 @@ pub fn execute_zone_block<DB: Database<Error: core::fmt::Debug> + DatabaseCommit
             });
             all_txs.push(recovered_tx.into_inner());
         }
-    }
 
     // Compute transactions root and receipts root.
     let transactions_root = compute_transactions_root(&all_txs);
@@ -273,11 +272,11 @@ fn compute_receipts_root(receipts: &[ReceiptData]) -> B256 {
         })
         .collect();
 
-    leaves.sort_by(|(a, _), (b, _)| a.cmp(b));
+    leaves.sort_by_key(|(a, _)| *a);
 
     let mut hb = HashBuilder::default();
     for (key, value) in &leaves {
-        hb.add_leaf(key.clone(), value);
+        hb.add_leaf(*key, value);
     }
     hb.root()
 }
@@ -316,7 +315,7 @@ fn encode_receipt_payload_rlp(receipt: &ReceiptData) -> Vec<u8> {
     let logs = &receipt.logs;
 
     // Compute the logs list RLP length.
-    let logs_list_payload: usize = logs.iter().map(|l| alloy_rlp::Encodable::length(l)).sum();
+    let logs_list_payload: usize = logs.iter().map(alloy_rlp::Encodable::length).sum();
     let logs_len = alloy_rlp::Header {
         list: true,
         payload_length: logs_list_payload,

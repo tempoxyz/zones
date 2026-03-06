@@ -38,7 +38,7 @@ pub struct AccessSnapshot {
 
 impl AccessSnapshot {
     /// Merge another snapshot into this one (union of all accesses).
-    pub fn merge(&mut self, other: &AccessSnapshot) {
+    pub fn merge(&mut self, other: &Self) {
         self.accounts.extend(&other.accounts);
         for (addr, slots) in &other.storage {
             self.storage.entry(*addr).or_default().extend(slots);

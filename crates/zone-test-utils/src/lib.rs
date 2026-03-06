@@ -167,7 +167,7 @@ pub fn setup_zone_evm(chain_id: u64) -> TempoEvm<CacheDB<EmptyDB>> {
     // 1. TempoState(bytes headerRlp)
     let tempo_state_bytecode = load_artifact("TempoState");
     let tempo_state_args =
-        alloy_sol_types::SolValue::abi_encode_params(&(Bytes::from(dummy_header_rlp.clone()),));
+        alloy_sol_types::SolValue::abi_encode_params(&(Bytes::from(dummy_header_rlp),));
     deploy_contract(
         &mut evm,
         &tempo_state_bytecode,

@@ -33,7 +33,7 @@ use crate::executor::ZoneBlockExecutor;
 use crate::{
     abi::TEMPO_STATE_READER_ADDRESS,
     l1_state::{
-        L1StateProvider, L1StateProviderConfig, L1StorageReader, PolicyProvider,
+        L1StateProvider, L1StorageReader, PolicyProvider,
         SharedL1StateCache, TempoStateReader,
     },
     precompiles::{

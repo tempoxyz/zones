@@ -75,14 +75,12 @@ impl SparseTrie {
         // in the branch node).
         let branch_keys: Vec<Nibbles> = entries
             .iter()
-            .filter_map(|(k, v)| matches!(v, TrieEntry::Branch(_)).then(|| k.clone()))
+            .filter(|&(_, v)| matches!(v, TrieEntry::Branch(_))).map(|(k, _)| *k)
             .collect();
         for bk in branch_keys {
             let has_descendant = entries
-                .range(bk.clone()..)
-                .skip(1) // skip the branch entry itself
-                .next()
-                .map_or(false, |(next_key, _)| {
+                .range(bk..).nth(1)
+                .is_some_and(|(next_key, _)| {
                     next_key.len() > bk.len() && bk.common_prefix_length(next_key) == bk.len()
                 });
             if has_descendant {
@@ -125,8 +123,8 @@ impl SparseTrie {
 
         for (key, entry) in &self.entries {
             match entry {
-                TrieEntry::Leaf(value) => hb.add_leaf(key.clone(), value),
-                TrieEntry::Branch(hash) => hb.add_branch(key.clone(), *hash, false),
+                TrieEntry::Leaf(value) => hb.add_leaf(*key, value),
+                TrieEntry::Branch(hash) => hb.add_branch(*key, *hash, false),
             }
         }
 
@@ -170,7 +168,7 @@ fn walk_proof(
                         stack_idx += 1;
 
                         if nibble != target_nibble {
-                            let mut child_path = path.clone();
+                            let mut child_path = path;
                             child_path.push(nibble);
                             record_child(child, child_path, entries)?;
                         }
@@ -201,7 +199,7 @@ fn walk_proof(
                     path.extend(&ext.key);
                 } else {
                     // Extension diverges — record child as blinded branch.
-                    let mut child_path = path.clone();
+                    let mut child_path = path;
                     child_path.extend(&ext.key);
                     record_child(&ext.child, child_path, entries)?;
                     break;
@@ -209,9 +207,9 @@ fn walk_proof(
             }
 
             TrieNode::Leaf(leaf) => {
-                let mut full_key = path.clone();
+                let mut full_key = path;
                 full_key.extend(&leaf.key);
-                entries.insert(full_key, TrieEntry::Leaf(leaf.value.into()));
+                entries.insert(full_key, TrieEntry::Leaf(leaf.value));
             }
         }
     }
@@ -252,7 +250,7 @@ fn process_inline_node(
         TrieNode::Leaf(leaf) => {
             let mut full_key = path;
             full_key.extend(&leaf.key);
-            entries.insert(full_key, TrieEntry::Leaf(leaf.value.into()));
+            entries.insert(full_key, TrieEntry::Leaf(leaf.value));
         }
         TrieNode::Extension(ext) => {
             let mut child_path = path;
@@ -265,7 +263,7 @@ fn process_inline_node(
                 if branch.state_mask.is_bit_set(nibble) {
                     let child = &branch.stack[stack_idx];
                     stack_idx += 1;
-                    let mut child_path = path.clone();
+                    let mut child_path = path;
                     child_path.push(nibble);
                     record_child(child, child_path, entries)?;
                 }

@@ -162,7 +162,7 @@ where
             .iter()
             .rev()
             .find_map(|(_, bw)| bw.tempo_header_rlp.as_ref())
-            .map(|rlp| alloy_primitives::keccak256(rlp))
+            .map(alloy_primitives::keccak256)
             .unwrap_or_else(|| {
                 // No advanceTempo in this batch — read from the zone state witness.
                 // The initial_zone_state already includes TempoState slot 0 because
@@ -239,7 +239,7 @@ where
             );
 
             let storage_keys: Vec<alloy_primitives::StorageKey> =
-                slots.iter().copied().map(Into::into).collect();
+                slots.to_vec();
 
             let proof_response: EIP1186AccountProofResponse = self
                 .l1_provider
@@ -293,7 +293,7 @@ where
         prev_block_hash: B256,
         expected_withdrawal_batch_index: u64,
     ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
-        ProofGenerator::generate_batch_proof(
+        Self::generate_batch_proof(
             self,
             from,
             to,

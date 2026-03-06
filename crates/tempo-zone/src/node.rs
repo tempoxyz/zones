@@ -177,8 +177,8 @@ impl ZoneNode {
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         executor_builder: ZoneExecutorBuilder,
-        deposit_queue: crate::DepositQueue,
-        sequencer: alloy_primitives::Address,
+        _deposit_queue: crate::DepositQueue,
+        _sequencer: alloy_primitives::Address,
         witness_store: crate::witness::SharedWitnessStore,
     ) -> ComponentsBuilder<
         N,
