@@ -36,7 +36,7 @@ struct ZoneArgs {
     #[arg(
         long = "block.interval-ms",
         env = "BLOCK_INTERVAL_MS",
-        default_value = "250"
+        default_value_t = 250
     )]
     pub block_interval_ms: u64,
 
@@ -49,7 +49,7 @@ struct ZoneArgs {
     #[arg(
         long = "zone.poll-interval-secs",
         env = "ZONE_POLL_INTERVAL_SECS",
-        default_value = "1"
+        default_value_t = 1
     )]
     pub zone_poll_interval_secs: u64,
 
@@ -58,7 +58,7 @@ struct ZoneArgs {
     #[arg(
         long = "zone.batch-interval-secs",
         env = "ZONE_BATCH_INTERVAL_SECS",
-        default_value = "60"
+        default_value_t = 60
     )]
     pub zone_batch_interval_secs: u64,
 
@@ -66,7 +66,7 @@ struct ZoneArgs {
     #[arg(
         long = "withdrawal-poll-interval-secs",
         env = "WITHDRAWAL_POLL_INTERVAL_SECS",
-        default_value = "5"
+        default_value_t = 5
     )]
     pub poll_interval_secs: u64,
 
