@@ -152,14 +152,16 @@ where α = 2 in GF(256).
    - ASCII bytes of the HRP (`"tempo"` or `"tempoz"`)
    - Separator byte: `0x00`
    - Version byte: e.g., `0x00`
-   - Zone ID bytes (zone addresses only): big-endian minimal encoding
+   - For zone addresses only:
+     - Zone ID length byte: `len(zone_id_bytes)` (1 byte)
+     - Zone ID bytes: big-endian minimal encoding
    - Raw address bytes: 20 bytes
 
 2. Compute the RS remainder: divide the input polynomial by g(x) over GF(256) using synthetic division. The 4-byte remainder is the checksum.
 
 3. Encode the 4 checksum bytes as 8 lowercase hex characters.
 
-The HRP bytes are included in the checksum input (but are not part of the hex data in the address) to ensure that mainnet and zone checksums are never interchangeable.
+The HRP bytes are included in the checksum input to ensure that mainnet and zone checksums are never interchangeable. The zone ID length byte ensures the checksum unambiguously commits to the zone ID boundary, even if future versions change the address length.
 
 ### Error Detection Properties
 
@@ -194,7 +196,7 @@ def encode_tempo_address(raw_address: bytes, zone_id: int | None = None, version
     else:
         n = max(1, (zone_id.bit_length() + 7) // 8)
         zone_bytes = zone_id.to_bytes(n, "big")
-        data = b"tempoz\x00" + bytes([version]) + zone_bytes + raw_address
+        data = b"tempoz\x00" + bytes([version]) + bytes([len(zone_bytes)]) + zone_bytes + raw_address
         check = rs_checksum(data)
         return "tempozx" + format(version, "02x") + "x" + zone_bytes.hex() + "x" + raw_address.hex() + "x" + check.hex()
 ```
@@ -237,7 +239,7 @@ def decode_tempo_address(address: str) -> tuple[bytes, int | None, int]:
         if len(zone_bytes) > 1 and zone_bytes[0] == 0:
             raise InvalidFormat()  # non-canonical: leading zero byte
         zone_id = int.from_bytes(zone_bytes, "big")
-        data = b"tempoz\x00" + bytes([version]) + zone_bytes + raw_address
+        data = b"tempoz\x00" + bytes([version]) + bytes([len(zone_bytes)]) + zone_bytes + raw_address
     else:
         zone_id = None
         data = b"tempo\x00" + bytes([version]) + raw_address
@@ -305,25 +307,25 @@ Result: `tempox00x742d35cc6634c0532925a3b844bc9e7595f2bd28xf4b7acd9` (58 chars)
 ### Zone Address (Zone ID = 1)
 
 1. HRP: `tempoz`
-2. Data: version `0x00` + zone ID `0x01` (1 byte) + raw address (20 bytes)
-3. RS checksum over `b"tempoz\x00"` + version + zone ID + address
+2. Data: version `0x00` + zone ID length `0x01` + zone ID `0x01` (1 byte) + raw address (20 bytes)
+3. RS checksum over `b"tempoz\x00"` + version + zone ID length + zone ID + address
 
-Result: `tempozx00x01x742d35cc6634c0532925a3b844bc9e7595f2bd28xecd8da0f` (62 chars)
+Result: `tempozx00x01x742d35cc6634c0532925a3b844bc9e7595f2bd28xe05a1a1b` (62 chars)
 
 ### Zone Address (Zone ID = 1000)
 
 1. HRP: `tempoz`
-2. Data: version `0x00` + zone ID `0x03e8` (2 bytes big-endian) + raw address
-3. RS checksum over `b"tempoz\x00"` + version + zone bytes + address
+2. Data: version `0x00` + zone ID length `0x02` + zone ID `0x03e8` (2 bytes big-endian) + raw address
+3. RS checksum over `b"tempoz\x00"` + version + zone ID length + zone bytes + address
 
-Result: `tempozx00x03e8x742d35cc6634c0532925a3b844bc9e7595f2bd28x577be6be` (64 chars)
+Result: `tempozx00x03e8x742d35cc6634c0532925a3b844bc9e7595f2bd28xbdad81ad` (64 chars)
 
 ### Zone Address (Zone ID = 100000)
 
 1. HRP: `tempoz`
-2. Data: version `0x00` + zone ID `0x0186a0` (3 bytes big-endian) + raw address
+2. Data: version `0x00` + zone ID length `0x03` + zone ID `0x0186a0` (3 bytes big-endian) + raw address
 
-Result: `tempozx00x0186a0x742d35cc6634c0532925a3b844bc9e7595f2bd28x8c69c079` (66 chars)
+Result: `tempozx00x0186a0x742d35cc6634c0532925a3b844bc9e7595f2bd28x29b37c41` (66 chars)
 
 ---
 
@@ -331,7 +333,7 @@ Result: `tempozx00x0186a0x742d35cc6634c0532925a3b844bc9e7595f2bd28x8c69c079` (66
 
 1. **Prefix visibility**: Every Tempo address MUST begin with `tempo` or `tempoz` followed by `x`
 2. **Separator safety**: Since `x` is not a valid hex character, component boundaries are always unambiguous
-3. **Checksum coverage**: The RS checksum covers the HRP, version byte, zone ID (if any), and raw address; changing any of these invalidates the checksum
+3. **Checksum coverage**: The RS checksum covers the HRP, version byte, zone ID length and value (if any), and raw address; changing any of these invalidates the checksum
 4. **Version validity**: Decoders MUST reject addresses with unrecognized version bytes
 5. **Unique decoding**: Any valid address string MUST decode to exactly one (raw_address, zone_id, version) tuple
 6. **Round-trip**: `decode(encode(addr, zone, version)) == (addr, zone, version)` for all valid inputs
@@ -409,7 +411,7 @@ def encode_tempo_address(raw_address, zone_id=None, version=CURRENT_VERSION):
         return "tempox" + format(version, "02x") + "x" + raw_address.hex() + "x" + check.hex()
     else:
         zone_bytes = zone_id_to_bytes(zone_id)
-        data = b"tempoz\x00" + bytes([version]) + zone_bytes + raw_address
+        data = b"tempoz\x00" + bytes([version]) + bytes([len(zone_bytes)]) + zone_bytes + raw_address
         check = rs_checksum(data)
         return "tempozx" + format(version, "02x") + "x" + zone_bytes.hex() + "x" + raw_address.hex() + "x" + check.hex()
 
@@ -443,7 +445,7 @@ def decode_tempo_address(address):
         if len(zone_bytes) > 1 and zone_bytes[0] == 0:
             raise ValueError("Non-canonical zone ID: leading zero byte")
         zone_id = int.from_bytes(zone_bytes, "big")
-        data = b"tempoz\x00" + bytes([version]) + zone_bytes + addr_bytes
+        data = b"tempoz\x00" + bytes([version]) + bytes([len(zone_bytes)]) + zone_bytes + addr_bytes
     else:
         zone_id = None
         data = b"tempo\x00" + bytes([version]) + addr_bytes
@@ -465,9 +467,9 @@ Raw address: 0x742d35Cc6634C0532925a3b844Bc9e7595f2bD28
 Version: 0x00
 
 Mainnet:      tempox00x742d35cc6634c0532925a3b844bc9e7595f2bd28xf4b7acd9        (58 chars)
-Zone 1:       tempozx00x01x742d35cc6634c0532925a3b844bc9e7595f2bd28xecd8da0f      (62 chars)
-Zone 1000:    tempozx00x03e8x742d35cc6634c0532925a3b844bc9e7595f2bd28x577be6be    (64 chars)
-Zone 100000:  tempozx00x0186a0x742d35cc6634c0532925a3b844bc9e7595f2bd28x8c69c079  (66 chars)
+Zone 1:       tempozx00x01x742d35cc6634c0532925a3b844bc9e7595f2bd28xe05a1a1b      (62 chars)
+Zone 1000:    tempozx00x03e8x742d35cc6634c0532925a3b844bc9e7595f2bd28xbdad81ad    (64 chars)
+Zone 100000:  tempozx00x0186a0x742d35cc6634c0532925a3b844bc9e7595f2bd28x29b37c41  (66 chars)
 ```
 
 ### Invalid: Mainnet Checksum on Zone Address
