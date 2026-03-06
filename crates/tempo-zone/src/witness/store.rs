@@ -50,7 +50,7 @@ impl AccessSnapshot {
 ///
 /// Stored by the payload builder after each block and consumed by the
 /// zone monitor when assembling a batch for proof generation.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BuiltBlockWitness {
     /// Zone block in prover format (system txs + pool txs + deposits).
     pub zone_block: ZoneBlock,
@@ -139,6 +139,33 @@ impl WitnessStore {
     /// Discard entries below a given block number (cleanup after batch submission).
     pub fn prune_below(&mut self, block_number: u64) {
         self.blocks = self.blocks.split_off(&block_number);
+    }
+
+    /// Get witness data for a range of blocks `[from, to]`, cloning them
+    /// from the store (non-destructive). Returns entries in block-number order.
+    ///
+    /// Returns an error if any block in the range is missing from the store.
+    pub fn get_range(&self, from: u64, to: u64) -> Result<Vec<(u64, BuiltBlockWitness)>, u64> {
+        for num in from..=to {
+            if !self.blocks.contains_key(&num) {
+                return Err(num);
+            }
+        }
+        let mut result = Vec::with_capacity((to - from + 1) as usize);
+        for num in from..=to {
+            result.push((num, self.blocks.get(&num).unwrap().clone()));
+        }
+        Ok(result)
+    }
+
+    /// Returns the smallest block number in the store, or `None` if empty.
+    pub fn first_block(&self) -> Option<u64> {
+        self.blocks.keys().next().copied()
+    }
+
+    /// Returns the largest block number in the store, or `None` if empty.
+    pub fn last_block(&self) -> Option<u64> {
+        self.blocks.keys().next_back().copied()
     }
 }
 

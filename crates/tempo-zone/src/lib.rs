@@ -26,6 +26,7 @@ pub mod proof;
 pub mod rpc;
 pub mod withdrawals;
 pub mod witness;
+pub mod witness_rpc;
 pub mod zonemonitor;
 
 pub use batch::{BatchData, BatchSubmitter};

@@ -98,6 +98,15 @@ struct ZoneArgs {
         default_value_t = 8544
     )]
     pub private_rpc_port: u16,
+
+    /// Port for the witness RPC server (`zone_getBatchWitness`).
+    /// Set to 0 to disable.
+    #[arg(
+        long = "witness-rpc.port",
+        env = "WITNESS_RPC_PORT",
+        default_value_t = 8546
+    )]
+    pub witness_rpc_port: u16,
 }
 
 fn main() {
@@ -204,6 +213,18 @@ fn main() {
                     l1_proof_provider,
                     sequencer_addr,
                 ));
+
+            // Start the witness RPC server if a port is configured.
+            if args.witness_rpc_port != 0 {
+                let witness_addr = zone::witness_rpc::start_witness_rpc(
+                    ([0, 0, 0, 0], args.witness_rpc_port).into(),
+                    proof_generator.clone(),
+                    witness_store.clone(),
+                    Arc::new(handle.node.provider().clone()),
+                )
+                .await?;
+                info!(target: "reth::cli", %witness_addr, "Witness RPC server started");
+            }
 
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,

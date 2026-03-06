@@ -25,7 +25,7 @@ tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
 tempo-precompiles-macros.workspace = true
 zone-rpc.workspace = true
-zone-prover.workspace = true
+zone-prover = { workspace = true, features = ["serde"] }
 
 # reth
 reth-basic-payload-builder.workspace = true
@@ -70,6 +70,7 @@ alloy-transport.workspace = true
 revm.workspace = true
 
 # misc
+axum.workspace = true
 async-trait.workspace = true
 metrics.workspace = true
 aes-gcm.workspace = true
@@ -81,6 +82,7 @@ derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 either.workspace = true
 eyre.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true

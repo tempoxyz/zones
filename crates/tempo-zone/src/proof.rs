@@ -213,6 +213,115 @@ where
         Ok((alloy_primitives::Bytes::new(), proof_bytes.into()))
     }
 
+    /// Build the [`BatchWitness`] for the given zone block range without
+    /// running the prover. Uses non-destructive reads from the [`WitnessStore`].
+    ///
+    /// This is the same assembly pipeline as [`generate_batch_proof`] but:
+    /// - Uses `get_range` (clone) instead of `take_range` (remove)
+    /// - Does not prune the store
+    /// - Returns the witness instead of a proof
+    pub async fn generate_batch_witness(
+        &self,
+        from: u64,
+        to: u64,
+        tempo_block_number: u64,
+        prev_block_hash: B256,
+        expected_withdrawal_batch_index: u64,
+    ) -> Result<zone_prover::types::BatchWitness> {
+        let block_witnesses = {
+            let store = self.witness_store.lock().expect("witness store poisoned");
+            store.get_range(from, to).map_err(|missing_block| {
+                eyre::eyre!(
+                    "missing witness data for block {missing_block} in range [{from}, {to}]"
+                )
+            })?
+        };
+
+        let first = &block_witnesses[0].1;
+        let chain_id = first.chain_id;
+        let prev_block_header = first.prev_block_header.clone();
+        let s0_parent_hash = first.parent_block_hash;
+
+        let mut merged_accesses = AccessSnapshot::default();
+        let mut all_l1_reads = Vec::new();
+        let mut zone_blocks = Vec::new();
+        let tempo_ancestry_headers: Vec<Vec<u8>> = vec![];
+
+        for (_, bw) in &block_witnesses {
+            merged_accesses.merge(&bw.access_snapshot);
+            all_l1_reads.extend(bw.l1_reads.iter().cloned());
+            zone_blocks.push(bw.zone_block.clone());
+        }
+
+        info!(
+            from,
+            to,
+            accounts = merged_accesses.accounts.len(),
+            storage_accounts = merged_accesses.storage.len(),
+            "Building batch witness (non-destructive)"
+        );
+
+        let state_provider = self
+            .provider
+            .state_by_block_hash(s0_parent_hash)
+            .map_err(|e| {
+                eyre::eyre!("failed to open state provider for S₀ ({s0_parent_hash}): {e}")
+            })?;
+
+        let s0_state_root = prev_block_header.state_root;
+
+        let initial_zone_state = self.witness_generator.generate_zone_state_witness(
+            &*state_provider,
+            s0_state_root,
+            &merged_accesses.accounts,
+            &merged_accesses.storage,
+        )?;
+
+        let l1_proofs = self.fetch_l1_proofs(&all_l1_reads).await?;
+
+        let tempo_state_proofs = self
+            .witness_generator
+            .generate_tempo_state_proof(&all_l1_reads, &l1_proofs)?;
+
+        let anchor_block_hash = block_witnesses
+            .iter()
+            .rev()
+            .find_map(|(_, bw)| bw.tempo_header_rlp.as_ref())
+            .map(alloy_primitives::keccak256)
+            .unwrap_or_else(|| {
+                initial_zone_state
+                    .accounts
+                    .get(&zone_prover::execute::TEMPO_STATE_ADDRESS)
+                    .and_then(|acct| {
+                        acct.storage
+                            .get(&zone_prover::execute::storage::TEMPO_STATE_BLOCK_HASH_SLOT)
+                    })
+                    .map(|v| B256::from(v.to_be_bytes()))
+                    .unwrap_or(B256::ZERO)
+            });
+
+        let public_inputs = zone_prover::types::PublicInputs {
+            prev_block_hash,
+            tempo_block_number,
+            anchor_block_number: tempo_block_number,
+            anchor_block_hash,
+            expected_withdrawal_batch_index,
+            sequencer: self.witness_generator.sequencer(),
+        };
+
+        let batch_witness = self.witness_generator.assemble_witness(
+            public_inputs,
+            chain_id,
+            prev_block_header,
+            zone_blocks,
+            initial_zone_state,
+            tempo_state_proofs,
+            tempo_ancestry_headers,
+        );
+
+        Ok(batch_witness)
+    }
+
     /// Fetch `eth_getProof` responses from the Tempo L1 chain for all
     /// recorded L1 reads.
     ///
@@ -277,6 +386,17 @@ pub trait BatchProofGenerator: Send + Sync {
         prev_block_hash: B256,
         expected_withdrawal_batch_index: u64,
     ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)>;
+
+    /// Build the [`BatchWitness`] for the given zone block range without
+    /// running the prover (non-destructive read from the witness store).
+    async fn generate_batch_witness(
+        &self,
+        from: u64,
+        to: u64,
+        tempo_block_number: u64,
+        prev_block_hash: B256,
+        expected_withdrawal_batch_index: u64,
+    ) -> Result<zone_prover::types::BatchWitness>;
 }
 
 #[async_trait::async_trait]
@@ -293,6 +413,25 @@ where
         expected_withdrawal_batch_index: u64,
     ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
         Self::generate_batch_proof(
+            self,
+            from,
+            to,
+            tempo_block_number,
+            prev_block_hash,
+            expected_withdrawal_batch_index,
+        )
+        .await
+    }
+
+    async fn generate_batch_witness(
+        &self,
+        from: u64,
+        to: u64,
+        tempo_block_number: u64,
+        prev_block_hash: B256,
+        expected_withdrawal_batch_index: u64,
+    ) -> Result<zone_prover::types::BatchWitness> {
+        Self::generate_batch_witness(
             self,
             from,
             to,
