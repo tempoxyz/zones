@@ -120,11 +120,9 @@ impl SpamDeposits {
         for (i, signer) in signers.iter().enumerate() {
             token_contract
                 .transfer(signer.address(), funding_per_signer)
-                .send()
+                .send_sync()
                 .await
-                .wrap_err_with(|| format!("failed to fund signer {i}"))?
-                .get_receipt()
-                .await?;
+                .wrap_err_with(|| format!("failed to fund signer {i}"))?;
         }
 
         println!("Approving portal for all signers...");
@@ -137,11 +135,9 @@ impl SpamDeposits {
             let token = ITIP20::new(self.token, &p);
             token
                 .approve(self.portal, U256::MAX)
-                .send()
+                .send_sync()
                 .await
-                .wrap_err_with(|| format!("failed to approve for signer {i}"))?
-                .get_receipt()
-                .await?;
+                .wrap_err_with(|| format!("failed to approve for signer {i}"))?;
         }
 
         // Fetch encryption key if needed: (pub_x, y_parity, key_index)
@@ -224,29 +220,26 @@ impl SpamDeposits {
                 encoded_txs.push(signed.encoded_2718());
             }
 
-            // Fire all sends concurrently
-            let send_results: Vec<_> =
+            // Send all deposits concurrently (returns receipts directly)
+            let receipts: Vec<_> =
                 futures::future::join_all(encoded_txs.iter().enumerate().map(|(i, encoded)| {
                     let provider = &provider;
                     async move {
-                        provider.send_raw_transaction(encoded).await.map_err(|e| {
-                            eprintln!("  failed to send deposit {i}: {e}");
-                            e
-                        })
+                        provider
+                            .send_raw_transaction_sync(encoded)
+                            .await
+                            .map_err(|e| {
+                                eprintln!("  deposit {i} failed: {e}");
+                                e
+                            })
                     }
                 }))
                 .await;
 
-            let pending_txs: Vec<_> = send_results.into_iter().flatten().collect();
-            total_sent += pending_txs.len();
-
-            // Wait for all receipts concurrently
-            let receipts: Vec<_> =
-                futures::future::join_all(pending_txs.into_iter().map(|p| p.get_receipt())).await;
-
             for (i, result) in receipts.into_iter().enumerate() {
                 match result {
                     Ok(receipt) => {
+                        total_sent += 1;
                         if receipt.status() {
                             total_confirmed += 1;
                             if let Some(block_num) = receipt.block_number {
@@ -261,7 +254,7 @@ impl SpamDeposits {
                         }
                     }
                     Err(e) => {
-                        eprintln!("  failed to get receipt: {e}");
+                        eprintln!("  failed to send/confirm deposit {i}: {e}");
                     }
                 }
             }
