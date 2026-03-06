@@ -58,20 +58,25 @@ sol! {
     function mint(address to, uint256 amount);
 }
 
-/// Query all enabled tokens from a ZonePortal contract.
-pub async fn enabled_tokens(
-    portal_address: alloy_primitives::Address,
-    provider: &impl alloy_provider::Provider<tempo_alloy::TempoNetwork>,
-) -> eyre::Result<Vec<alloy_primitives::Address>> {
-    let portal = ZonePortal::new(portal_address, provider);
-    let count: u64 = portal.enabledTokenCount().call().await?.try_into()?;
-    let mut tokens = Vec::with_capacity(count as usize);
-    for i in 0..count {
-        let token = portal
-            .enabledTokenAt(alloy_primitives::U256::from(i))
-            .call()
-            .await?;
-        tokens.push(token);
+impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
+    ZonePortal::ZonePortalInstance<P, N>
+{
+    /// Returns all token addresses currently enabled for bridging on this [`ZonePortal`].
+    ///
+    /// Calls [`enabledTokenCount`](ZonePortal::enabledTokenCountCall) followed by
+    /// [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) for each index.
+    pub async fn enabled_tokens(
+        &self,
+    ) -> Result<Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        let count = self.enabledTokenCount().call().await?;
+        let mut tokens = Vec::with_capacity(count.to::<usize>());
+        for i in 0..count.to::<u64>() {
+            let token = self
+                .enabledTokenAt(alloy_primitives::U256::from(i))
+                .call()
+                .await?;
+            tokens.push(token);
+        }
+        Ok(tokens)
     }
-    Ok(tokens)
 }
