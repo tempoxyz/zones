@@ -4,8 +4,9 @@
 //! authentication and privacy redactions applied per-method.
 //!
 //! Supports both HTTP POST and WebSocket transports. WebSocket clients
-//! authenticate by passing their token as a query parameter:
-//! `ws://host/?token=0x<hex>`.
+//! authenticate via the `X-Authorization-Token` header (preferred) or
+//! a `?token=0x<hex>` query parameter (for browser clients that cannot
+//! set custom headers on the upgrade request).
 
 use axum::{
     Router,
@@ -28,6 +29,12 @@ use crate::{
     handlers::{self, ZoneRpcApi},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
 };
+
+/// Maximum number of requests in a single JSON-RPC batch.
+const MAX_BATCH_SIZE: usize = 100;
+
+/// Maximum WebSocket message size (1 MiB).
+const MAX_WS_MESSAGE_SIZE: usize = 1 << 20;
 
 /// Shared state for the private RPC server.
 #[derive(Clone)]
@@ -68,13 +75,67 @@ pub async fn start_private_rpc(
     Ok(local_addr)
 }
 
-/// Main RPC handler — authenticates, dispatches, returns response.
+/// Result of processing a JSON-RPC text payload (single or batch).
+enum RpcResult {
+    Single(JsonRpcResponse),
+    Batch(Vec<JsonRpcResponse>),
+}
+
+/// Parse and dispatch a JSON-RPC text payload, handling both single and batch
+/// requests. Shared by HTTP and WebSocket transports.
+async fn process_rpc_text(
+    text: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> RpcResult {
+    let trimmed = text.trim_start();
+
+    if trimmed.starts_with('[') {
+        match serde_json::from_str::<Vec<JsonRpcRequest>>(trimmed) {
+            Ok(requests) if requests.is_empty() => RpcResult::Single(JsonRpcResponse::error(
+                serde_json::Value::Null,
+                JsonRpcError::parse_error("empty batch"),
+            )),
+            Ok(requests) if requests.len() > MAX_BATCH_SIZE => {
+                RpcResult::Single(JsonRpcResponse::error(
+                    serde_json::Value::Null,
+                    JsonRpcError::invalid_params(format!(
+                        "batch too large ({} > {MAX_BATCH_SIZE})",
+                        requests.len()
+                    )),
+                ))
+            }
+            Ok(requests) => {
+                let mut responses = Vec::with_capacity(requests.len());
+                for req in &requests {
+                    responses.push(handlers::dispatch(req, auth, api).await);
+                }
+                RpcResult::Batch(responses)
+            }
+            Err(e) => RpcResult::Single(JsonRpcResponse::error(
+                serde_json::Value::Null,
+                JsonRpcError::parse_error(format!("parse error: {e}")),
+            )),
+        }
+    } else {
+        match serde_json::from_str::<JsonRpcRequest>(trimmed) {
+            Ok(request) => {
+                RpcResult::Single(handlers::dispatch(&request, auth, api).await)
+            }
+            Err(e) => RpcResult::Single(JsonRpcResponse::error(
+                serde_json::Value::Null,
+                JsonRpcError::parse_error(format!("parse error: {e}")),
+            )),
+        }
+    }
+}
+
+/// Main HTTP RPC handler — authenticates, dispatches, returns response.
 async fn handle_rpc(
     State(state): State<Arc<RpcState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    // 1. Authenticate
     let auth = match authenticate(&headers, &state.config) {
         Ok(auth) => auth,
         Err(e) => {
@@ -87,7 +148,6 @@ async fn handle_rpc(
         }
     };
 
-    // 2. Parse the JSON-RPC request body
     let body_str = match std::str::from_utf8(&body) {
         Ok(s) => s,
         Err(_) => {
@@ -95,47 +155,9 @@ async fn handle_rpc(
         }
     };
 
-    let trimmed = body_str.trim_start();
-    let is_batch = trimmed.starts_with('[');
-
-    if is_batch {
-        let requests: Vec<JsonRpcRequest> = match serde_json::from_str(trimmed) {
-            Ok(reqs) => reqs,
-            Err(e) => {
-                return (
-                    StatusCode::OK,
-                    axum::Json(JsonRpcResponse::error(
-                        serde_json::Value::Null,
-                        JsonRpcError::invalid_params(format!("parse error: {e}")),
-                    )),
-                )
-                    .into_response();
-            }
-        };
-
-        let mut responses = Vec::with_capacity(requests.len());
-        for req in &requests {
-            responses.push(handlers::dispatch(req, &auth, state.api.as_ref()).await);
-        }
-
-        (StatusCode::OK, axum::Json(responses)).into_response()
-    } else {
-        let request: JsonRpcRequest = match serde_json::from_str(trimmed) {
-            Ok(req) => req,
-            Err(e) => {
-                return (
-                    StatusCode::OK,
-                    axum::Json(JsonRpcResponse::error(
-                        serde_json::Value::Null,
-                        JsonRpcError::invalid_params(format!("parse error: {e}")),
-                    )),
-                )
-                    .into_response();
-            }
-        };
-
-        let response = handlers::dispatch(&request, &auth, state.api.as_ref()).await;
-        (StatusCode::OK, axum::Json(response)).into_response()
+    match process_rpc_text(body_str, &auth, state.api.as_ref()).await {
+        RpcResult::Single(resp) => (StatusCode::OK, axum::Json(resp)).into_response(),
+        RpcResult::Batch(resps) => (StatusCode::OK, axum::Json(resps)).into_response(),
     }
 }
 
@@ -176,24 +198,34 @@ fn authenticate_token(
     })
 }
 
-// ---------------------------------------------------------------------------
-// WebSocket transport
-// ---------------------------------------------------------------------------
 
 /// Query parameters for the WebSocket upgrade endpoint.
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, Default)]
 struct WsQuery {
-    token: String,
+    /// Auth token passed as query param (fallback when headers are unavailable).
+    token: Option<String>,
 }
 
-/// WebSocket upgrade handler — authenticates via `?token=` query param.
+/// WebSocket upgrade handler — authenticates via header or `?token=` query param.
 async fn handle_ws_upgrade(
     State(state): State<Arc<RpcState>>,
+    headers: HeaderMap,
     Query(query): Query<WsQuery>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    // Authenticate before upgrading so we reject early on bad tokens.
-    let auth = match authenticate_token(&query.token, &state.config) {
+    // Prefer header auth; fall back to query param for browser clients.
+    let auth = match headers
+        .get(auth::X_AUTHORIZATION_TOKEN)
+        .and_then(|v| v.to_str().ok())
+    {
+        Some(header_value) => authenticate_token(header_value, &state.config),
+        None => match &query.token {
+            Some(token) => authenticate_token(token, &state.config),
+            None => Err(AuthError::Missing),
+        },
+    };
+
+    let auth = match auth {
         Ok(auth) => auth,
         Err(e) => {
             warn!(target: "zone::rpc", err = %e, "ws auth failed");
@@ -205,7 +237,8 @@ async fn handle_ws_upgrade(
         }
     };
 
-    ws.on_upgrade(move |socket| handle_ws_session(socket, auth, state))
+    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
+        .on_upgrade(move |socket| handle_ws_session(socket, auth, state))
         .into_response()
 }
 
@@ -219,10 +252,10 @@ async fn handle_ws_session(mut socket: WebSocket, auth: AuthContext, state: Arc<
                 Ok(s) => s.into(),
                 Err(_) => {
                     let _ = socket
-                            .send(Message::Text(
-                                r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"invalid UTF-8"},"id":null}"#.into(),
-                            ))
-                            .await;
+                        .send(Message::Text(
+                            r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"invalid UTF-8"},"id":null}"#.into(),
+                        ))
+                        .await;
                     continue;
                 }
             },
@@ -234,52 +267,12 @@ async fn handle_ws_session(mut socket: WebSocket, auth: AuthContext, state: Arc<
             }
         };
 
-        let trimmed = text.trim_start();
-        let is_batch = trimmed.starts_with('[');
-
-        let response_json = if is_batch {
-            match serde_json::from_str::<Vec<JsonRpcRequest>>(trimmed) {
-                Ok(requests) => {
-                    let mut responses = Vec::with_capacity(requests.len());
-                    for req in &requests {
-                        responses.push(handlers::dispatch(req, &auth, state.api.as_ref()).await);
-                    }
-                    serde_json::to_string(&responses).unwrap_or_default()
-                }
-                Err(e) => {
-                    let err_resp = JsonRpcResponse::error(
-                        serde_json::Value::Null,
-                        JsonRpcError::invalid_params(format!("parse error: {e}")),
-                    );
-                    serde_json::to_string(&err_resp).unwrap_or_default()
-                }
-            }
-        } else {
-            let request: JsonRpcRequest = match serde_json::from_str(trimmed) {
-                Ok(req) => req,
-                Err(e) => {
-                    let err_resp = JsonRpcResponse::error(
-                        serde_json::Value::Null,
-                        JsonRpcError::invalid_params(format!("parse error: {e}")),
-                    );
-                    let _ = socket
-                        .send(Message::Text(
-                            serde_json::to_string(&err_resp).unwrap_or_default().into(),
-                        ))
-                        .await;
-                    continue;
-                }
-            };
-
-            let response = handlers::dispatch(&request, &auth, state.api.as_ref()).await;
-            serde_json::to_string(&response).unwrap_or_default()
+        let response_json = match process_rpc_text(&text, &auth, state.api.as_ref()).await {
+            RpcResult::Single(resp) => serde_json::to_string(&resp).unwrap_or_default(),
+            RpcResult::Batch(resps) => serde_json::to_string(&resps).unwrap_or_default(),
         };
 
-        if socket
-            .send(Message::Text(response_json.into()))
-            .await
-            .is_err()
-        {
+        if socket.send(Message::Text(response_json.into())).await.is_err() {
             break;
         }
     }

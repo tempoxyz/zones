@@ -137,6 +137,15 @@ impl JsonRpcError {
         }
     }
 
+    /// Parse error — invalid JSON (-32700).
+    pub fn parse_error(msg: impl Into<String>) -> Self {
+        Self {
+            code: -32700,
+            message: msg.into(),
+            data: None,
+        }
+    }
+
     /// Internal error (-32603).
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
