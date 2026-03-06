@@ -225,21 +225,17 @@ impl SpamDeposits {
             }
 
             // Fire all sends concurrently
-            let send_results: Vec<_> = futures::future::join_all(
-                encoded_txs.iter().enumerate().map(|(i, encoded)| {
+            let send_results: Vec<_> =
+                futures::future::join_all(encoded_txs.iter().enumerate().map(|(i, encoded)| {
                     let provider = &provider;
                     async move {
-                        provider
-                            .send_raw_transaction(encoded)
-                            .await
-                            .map_err(|e| {
-                                eprintln!("  failed to send deposit {i}: {e}");
-                                e
-                            })
+                        provider.send_raw_transaction(encoded).await.map_err(|e| {
+                            eprintln!("  failed to send deposit {i}: {e}");
+                            e
+                        })
                     }
-                }),
-            )
-            .await;
+                }))
+                .await;
 
             let pending_txs: Vec<_> = send_results.into_iter().flatten().collect();
             total_sent += pending_txs.len();
@@ -312,7 +308,12 @@ impl SpamDeposits {
     ) -> eyre::Result<Vec<u8>> {
         if let Some(&(pub_x, y_parity, key_index)) = enc_setup {
             let encrypted = encrypt_deposit(
-                &pub_x, y_parity, recipient, B256::ZERO, self.portal, key_index,
+                &pub_x,
+                y_parity,
+                recipient,
+                B256::ZERO,
+                self.portal,
+                key_index,
             )
             .ok_or_else(|| eyre!("ECIES encryption failed"))?;
 

@@ -94,7 +94,10 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     pub async fn encryption_key(
         &self,
     ) -> Result<
-        (ZonePortal::sequencerEncryptionKeyReturn, alloy_primitives::U256),
+        (
+            ZonePortal::sequencerEncryptionKeyReturn,
+            alloy_primitives::U256,
+        ),
         alloy_contract::Error,
     > {
         let key_call = self.sequencerEncryptionKey();

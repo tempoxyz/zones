@@ -528,7 +528,13 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     /// `key_index` is the zero-based index of the current key.
     pub async fn encryption_key(
         &self,
-    ) -> Result<(ZonePortal::sequencerEncryptionKeyReturn, alloy_primitives::U256), alloy_contract::Error> {
+    ) -> Result<
+        (
+            ZonePortal::sequencerEncryptionKeyReturn,
+            alloy_primitives::U256,
+        ),
+        alloy_contract::Error,
+    > {
         let key_call = self.sequencerEncryptionKey();
         let count_call = self.encryptionKeyCount();
         let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
