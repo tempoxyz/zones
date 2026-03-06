@@ -174,17 +174,17 @@ impl WitnessGenerator {
                 })
                 .collect();
 
-            // Read code separately (not included in the account proof).
-            let code = state_provider.account_code(&addr).ok().flatten();
-            // Use keccak256(code) if code is available, otherwise fall back to
-            // the bytecode_hash from the account proof. For accounts without
-            // code (EOAs), use KECCAK_EMPTY per Ethereum convention.
+            // The code_hash MUST come from the account proof (which is
+            // consistent with state_root). state_provider.account_code() may
+            // return bytecode from a later block if the contract was upgraded,
+            // causing a mismatch with the proof leaf.
             let keccak_empty = keccak256([]);
-            let code_hash = code
-                .as_ref()
-                .map(|c| keccak256(c.bytes_slice()))
-                .or(code_hash_from_proof)
-                .unwrap_or(keccak_empty);
+            let code_hash = code_hash_from_proof.unwrap_or(keccak_empty);
+
+            // Read code separately (not included in the account proof).
+            // Only include it if its hash matches the proof's code_hash.
+            let code = state_provider.account_code(&addr).ok().flatten();
+            let code = code.filter(|c| keccak256(c.bytes_slice()) == code_hash);
 
             // Read storage values (the proof gives us proof nodes but we also
             // need the actual slot values in the witness).
