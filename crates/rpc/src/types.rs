@@ -221,6 +221,9 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         "eth_mining" | "eth_hashrate" | "eth_submitWork" | "eth_submitHashrate"
         | "eth_subscribe" | "eth_unsubscribe" => Some(MethodTier::Disabled),
 
+        // Zone-specific sequencer-only methods
+        "zone_getBatchWitness" => Some(MethodTier::Restricted),
+
         _ if method.starts_with("admin_") => Some(MethodTier::Restricted),
         _ => None,
     }

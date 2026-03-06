@@ -66,14 +66,25 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
     /// After bumping reth, use its `ActiveFilters` API to periodically sync this
     /// map and remove entries for filters that no longer exist on the reth side.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
+    proof_generator: Arc<dyn crate::proof::BatchProofGenerator>,
+    witness_store: crate::witness::SharedWitnessStore,
+    state_provider_factory: Arc<dyn reth_provider::StateProviderFactory>,
 }
 
 impl<Api: EthApiTypes> TempoZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
-    pub fn new(eth: EthHandlers<Api>) -> Self {
+    pub fn new(
+        eth: EthHandlers<Api>,
+        proof_generator: Arc<dyn crate::proof::BatchProofGenerator>,
+        witness_store: crate::witness::SharedWitnessStore,
+        state_provider_factory: Arc<dyn reth_provider::StateProviderFactory>,
+    ) -> Self {
         Self {
             eth,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
+            proof_generator,
+            witness_store,
+            state_provider_factory,
         }
     }
 
@@ -481,6 +492,85 @@ where
             }
 
             to_raw(&result)
+        })
+    }
+
+    fn get_batch_witness(&self) -> BoxFut<'_> {
+        Box::pin(async move {
+            use crate::abi::{TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS, ZONE_OUTBOX_ADDRESS};
+            use reth_storage_api::StateProvider;
+
+            // 1. Read the available block range from the store.
+            let (from, to, prev_block_hash) = {
+                let store = self.witness_store.lock().expect("witness store poisoned");
+                let (Some(from), Some(to)) = (store.first_block(), store.last_block()) else {
+                    return Err(JsonRpcError::internal("no unsubmitted batch available"));
+                };
+                let first = store
+                    .get_range(from, from)
+                    .map_err(|b| JsonRpcError::internal(format!("missing block {b}")))?;
+                let prev_block_hash = first[0].1.parent_block_hash;
+                (from, to, prev_block_hash)
+            };
+
+            // 2. Read tempo_block_number and withdrawal_batch_index from zone state.
+            let (tempo_block_number, expected_withdrawal_batch_index) = {
+                let sp = self
+                    .state_provider_factory
+                    .latest()
+                    .map_err(|e| {
+                        JsonRpcError::internal(format!(
+                            "failed to open latest state provider: {e}"
+                        ))
+                    })?;
+
+                let packed = sp
+                    .storage(TEMPO_STATE_ADDRESS, TEMPO_PACKED_SLOT)
+                    .map_err(|e| {
+                        JsonRpcError::internal(format!(
+                            "failed to read tempo block number: {e}"
+                        ))
+                    })?
+                    .unwrap_or_default();
+                let tempo_block_number = (packed & U256::from(u64::MAX)).to::<u64>();
+
+                let slot = B256::from(
+                    (zone_prover::execute::storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT
+                        + U256::from(1))
+                    .to_be_bytes(),
+                );
+                let value = sp
+                    .storage(ZONE_OUTBOX_ADDRESS, slot)
+                    .map_err(|e| {
+                        JsonRpcError::internal(format!(
+                            "failed to read withdrawal batch index: {e}"
+                        ))
+                    })?
+                    .unwrap_or_default();
+                let withdrawal_batch_index = value.to::<u64>();
+
+                (tempo_block_number, withdrawal_batch_index + 1)
+            };
+
+            tracing::info!(
+                target: "zone::rpc",
+                from, to, tempo_block_number, expected_withdrawal_batch_index,
+                "Building batch witness for RPC"
+            );
+
+            let witness = self
+                .proof_generator
+                .generate_batch_witness(
+                    from,
+                    to,
+                    tempo_block_number,
+                    prev_block_hash,
+                    expected_withdrawal_batch_index,
+                )
+                .await
+                .map_err(|e| JsonRpcError::internal(format!("failed to build witness: {e}")))?;
+
+            to_raw(&witness)
         })
     }
 }

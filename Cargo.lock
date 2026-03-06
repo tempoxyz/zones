@@ -13065,7 +13065,6 @@ dependencies = [
  "alloy-transport",
  "alloy-trie",
  "async-trait",
- "axum",
  "const-hex",
  "derive_more",
  "either",

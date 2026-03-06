@@ -147,6 +147,10 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `eth_uninstallFilter(id)` — removes a filter.
     fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `zone_getBatchWitness` — returns the batch witness for the latest unsubmitted batch.
+    /// Sequencer-only.
+    fn get_batch_witness(&self) -> BoxFut<'_>;
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
@@ -290,6 +294,9 @@ pub async fn dispatch(
         "eth_getFilterChanges" => handle_get_filter_changes(id, raw, auth, api).await,
         "eth_newBlockFilter" => handle_new_block_filter(id, auth, api).await,
         "eth_uninstallFilter" => handle_uninstall_filter(id, raw, auth, api).await,
+        "zone_getBatchWitness" => {
+            api_result(id, "zone_getBatchWitness", api.get_batch_witness().await)
+        }
         _ => {
             // Method is whitelisted but not yet implemented via direct API
             JsonRpcResponse::error(

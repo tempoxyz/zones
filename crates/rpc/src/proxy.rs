@@ -455,6 +455,12 @@ impl ZoneRpcApi for ProxyZoneRpc {
         })
     }
 
+    fn get_batch_witness(&self) -> BoxFut<'_> {
+        Box::pin(async move {
+            Err(JsonRpcError::internal("zone_getBatchWitness not available in proxy mode"))
+        })
+    }
+
     fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;

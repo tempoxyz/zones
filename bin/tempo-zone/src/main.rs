@@ -99,14 +99,7 @@ struct ZoneArgs {
     )]
     pub private_rpc_port: u16,
 
-    /// Port for the witness RPC server (`zone_getBatchWitness`).
-    /// Set to 0 to disable.
-    #[arg(
-        long = "witness-rpc.port",
-        env = "WITNESS_RPC_PORT",
-        default_value_t = 8546
-    )]
-    pub witness_rpc_port: u16,
+
 }
 
 fn main() {
@@ -169,20 +162,6 @@ fn main() {
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
             info!(target: "reth::cli", "Tempo Zone node started");
 
-            // Launch the private zone RPC server.
-            let eth_handlers = handle.node.eth_handlers().clone();
-            let private_rpc_config = zone::rpc::PrivateRpcConfig {
-                listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
-                zone_id: args.zone_id,
-                chain_id: handle.node.chain_spec().chain().id(),
-                zone_portal: args.portal_address,
-                sequencer: sequencer_addr,
-            };
-            let api: Arc<dyn zone::rpc::ZoneRpcApi> =
-                Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
-            let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
-            info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
-
             // Spawn sequencer background tasks.
             info!(
                 target: "reth::cli",
@@ -214,17 +193,24 @@ fn main() {
                     sequencer_addr,
                 ));
 
-            // Start the witness RPC server if a port is configured.
-            if args.witness_rpc_port != 0 {
-                let witness_addr = zone::witness_rpc::start_witness_rpc(
-                    ([0, 0, 0, 0], args.witness_rpc_port).into(),
+            // Launch the private zone RPC server.
+            let eth_handlers = handle.node.eth_handlers().clone();
+            let private_rpc_config = zone::rpc::PrivateRpcConfig {
+                listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
+                zone_id: args.zone_id,
+                chain_id: handle.node.chain_spec().chain().id(),
+                zone_portal: args.portal_address,
+                sequencer: sequencer_addr,
+            };
+            let api: Arc<dyn zone::rpc::ZoneRpcApi> =
+                Arc::new(zone::rpc::TempoZoneRpc::new(
+                    eth_handlers,
                     proof_generator.clone(),
                     witness_store.clone(),
                     Arc::new(handle.node.provider().clone()),
-                )
-                .await?;
-                info!(target: "reth::cli", %witness_addr, "Witness RPC server started");
-            }
+                ));
+            let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
+            info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
