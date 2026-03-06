@@ -1,5 +1,5 @@
 [workspace.package]
-version = "1.0.0-rc.5"
+version = "0.1.0"
 edition = "2024"
 rust-version = "1.91.0"
 license = "MIT OR Apache-2.0"
@@ -76,23 +76,23 @@ codegen-units = 1
 
 [workspace.dependencies]
 # tempo (from upstream)
-tempo-alloy = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1" }
-tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
-tempo-consensus = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
-tempo-evm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
-tempo-node = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1" }
-tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
-tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
-tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1" }
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false, features = [
+tempo-alloy = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0" }
+tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
+tempo-consensus = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
+tempo-contracts = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
+tempo-evm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
+tempo-node = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0" }
+tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
+tempo-precompiles = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
+tempo-precompiles-macros = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0" }
+tempo-primitives = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false, features = [
   "reth",
   "serde",
   "serde-bincode-compat",
   "reth-codec",
 ] }
-tempo-revm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
-tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0-rc1", default-features = false }
+tempo-revm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
+tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
 
 # zones
 zone-rpc = { path = "crates/rpc" }
