@@ -47,8 +47,8 @@ alloy_sol_types::sol! {
 /// precompile), this proxy has **no on-chain storage**. It intercepts EVM calls
 /// at the same address (`0x403C…0000`) and resolves authorization queries from
 /// the in-memory [`PolicyProvider`] (cache-first, L1 RPC fallback). The
-/// underlying cache is populated by the [`PolicyListener`](crate::l1_state::PolicyListener)
-/// which streams events from L1.
+/// underlying cache is populated by the unified [`L1Subscriber`](crate::l1::L1Subscriber)
+/// which extracts events from L1 block receipts.
 ///
 /// All mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) are
 /// rejected with `ReadOnlyRegistry` — policy state lives exclusively on L1.

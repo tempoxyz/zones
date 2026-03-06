@@ -200,7 +200,7 @@ impl L1StateProvider {
         Ok(value)
     }
 
-    /// Expose the shared cache handle for external use (e.g. the listener).
+    /// Expose the shared cache handle for external use (e.g. the engine).
     pub fn cache(&self) -> &SharedL1StateCache {
         &self.cache
     }

@@ -75,6 +75,15 @@ struct ZoneArgs {
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
     pub l1_genesis_block_number: Option<u64>,
 
+    /// Maximum number of concurrent L1 receipt fetches. Used directly for
+    /// the live stream; halved for backfill (which sends 2 requests per block).
+    #[arg(
+        long = "l1.fetch-concurrency",
+        env = "L1_FETCH_CONCURRENCY",
+        default_value_t = 4
+    )]
+    pub l1_fetch_concurrency: usize,
+
     /// Zone ID for the private RPC auth token validation.
     /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
@@ -140,6 +149,7 @@ fn main() {
                 args.l1_genesis_block_number,
                 sequencer_addr,
                 sequencer_secret_key,
+                args.l1_fetch_concurrency,
             );
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;

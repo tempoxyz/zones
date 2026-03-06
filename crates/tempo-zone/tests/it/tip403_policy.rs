@@ -2,7 +2,7 @@
 //!
 //! These tests verify that the `ZoneTip403ProxyRegistry` precompile correctly
 //! serves authorization queries from the `SharedPolicyCache` and rejects
-//! mutating calls. The cache is populated directly in tests (no L1 listener).
+//! mutating calls. The cache is populated directly in tests (no L1 subscriber).
 
 use alloy::primitives::{U256, address};
 use alloy_provider::ProviderBuilder;

@@ -23,7 +23,7 @@
 //!
 //! Users with no recorded membership event are treated as "unknown" — cache lookups return
 //! `None` so the caller falls back to RPC. This avoids silent false negatives when the
-//! listener started after a user was added to a whitelist. Users who were explicitly added
+//! subscriber started after a user was added to a whitelist. Users who were explicitly added
 //! or removed are tracked in [`MembershipSet::observed`].
 //!
 //! ## Compound policies (TIP-1015)
@@ -38,12 +38,15 @@
 //! per-block rollback.
 
 use alloy_primitives::Address;
+use alloy_provider::DynProvider;
+use alloy_sol_types::{SolEvent, SolEventInterface};
 use derive_more::Deref;
 use parking_lot::RwLock;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     sync::Arc,
 };
+use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 use tracing::info;
 
@@ -78,9 +81,9 @@ pub struct PolicyCache {
     /// `TransferPolicyUpdate`, so pre-caching all policies avoids RPC
     /// round-trips on policy switch. The memory overhead is negligible.
     policies: HashMap<u64, CachedPolicy>,
-    /// Highest L1 block number processed by the policy listener.
+    /// Highest L1 block number processed by the engine.
     ///
-    /// This equals the last block height the listener has fully processed and
+    /// This equals the last block height the engine has processed and
     /// should advance in lockstep with the L1 head tracked by the
     /// `TempoStateReader` contract. The
     /// [`PolicyResolutionTask`](super::PolicyResolutionTask) reads this to
@@ -124,6 +127,11 @@ impl PolicyCache {
     /// Returns a reference to the per-policy-ID records for direct inspection.
     pub fn policies(&self) -> &HashMap<u64, CachedPolicy> {
         &self.policies
+    }
+
+    /// Returns all token addresses currently tracked by the cache.
+    pub fn tracked_tokens(&self) -> Vec<Address> {
+        self.tokens.keys().copied().collect()
     }
 
     /// Returns the number of token-to-policy mappings in the cache.
@@ -263,18 +271,16 @@ impl PolicyCache {
 
     /// Apply a batch of decoded policy events for a single block.
     ///
-    /// This is the primary ingestion path for the [`PolicyListener`](super::PolicyListener).
+    /// This is the primary ingestion path used by [`L1Subscriber`](crate::l1::L1Subscriber).
     /// Events are decoded outside the write lock, then applied here in one batch.
     ///
     /// **NOTE:** When a `TokenPolicyChanged` event points to a policy ID that was created
-    /// before the listener started, the cache will have no membership data for that policy.
+    /// before the subscriber started, the cache will have no membership data for that policy.
     /// Authorization queries will return `None` (cache miss), causing the
     /// [`PolicyProvider`](super::PolicyProvider) to fall back to per-user L1 RPC. Ideally,
-    /// the listener should kick off background pre-fetching of the new policy's type and
+    /// the subscriber should kick off background pre-fetching of the new policy's type and
     /// membership set on `TokenPolicyChanged` to avoid cold-start RPC latency.
     pub fn apply_events(&mut self, block_number: u64, events: &[PolicyEvent]) {
-        self.last_l1_block = self.last_l1_block.max(block_number);
-
         for event in events {
             match event {
                 PolicyEvent::MembershipChanged {
@@ -312,9 +318,8 @@ impl PolicyCache {
         }
     }
 
-    /// Clears all cached policy data. `last_l1_block` is preserved because it
-    /// tracks the L1 cursor, not the cache contents — the caller (listener) will
-    /// re-set it when it reprocesses blocks after a reorg.
+    /// Clears all cached policy data. `last_l1_block` is preserved — the engine
+    /// will advance it when it reprocesses blocks after a reorg.
     pub fn clear(&mut self) {
         self.tokens.clear();
         self.policies.clear();
@@ -335,9 +340,10 @@ impl PolicyCache {
     /// Only the engine should call this after successfully processing a block.
     /// Advancing past unprocessed blocks would fold pending deltas prematurely,
     /// causing incorrect authorization decisions for in-flight blocks. The
-    /// listener writes events via [`apply_events`](Self::apply_events) but never
+    /// subscriber writes events via [`apply_events`](Self::apply_events) but never
     /// advances the cache.
     pub fn advance(&mut self, new_height: u64) {
+        self.last_l1_block = self.last_l1_block.max(new_height);
         info!(
             target: "zone::policy",
             new_height,
@@ -371,7 +377,7 @@ impl SharedPolicyCache {
     }
 
     /// Seeds the cache with the initial L1 block height so RPC fallback queries
-    /// target the correct block before the listener has processed any events.
+    /// target the correct block before the subscriber has processed any events.
     pub fn set_last_l1_block(&self, block_number: u64) {
         self.write().set_last_l1_block(block_number);
     }
@@ -379,19 +385,66 @@ impl SharedPolicyCache {
     /// Collapse versioned entries up to `block_number`.
     ///
     /// Called by the engine after successfully processing an L1 block. Only the
-    /// engine should drive this — the listener must not advance past blocks the
+    /// engine should drive this — the subscriber must not advance past blocks the
     /// engine hasn't consumed yet.
     pub fn advance(&self, block_number: u64) {
         self.write().advance(block_number);
+    }
+
+    /// Query the current `transferPolicyId` for each tracked token and seed it
+    /// into the cache. This ensures the cache knows about tokens that have never
+    /// had a `TransferPolicyUpdate` event (i.e. still using the default policy).
+    ///
+    /// Fails if any token's `transferPolicyId` cannot be resolved — all enabled
+    /// tokens must be seeded for the zone to enforce policies correctly.
+    pub async fn seed_token_policies(
+        &self,
+        portal_address: Address,
+        tracked_tokens: &[Address],
+        provider: &DynProvider<TempoNetwork>,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+
+        let block_number = self.last_l1_block();
+
+        let seeded = futures::future::join_all(tracked_tokens.iter().map(|token| {
+            let tip20 = ITIP20::new(*token, provider);
+            async move {
+                let policy_id = tip20
+                    .transferPolicyId()
+                    .block(alloy_rpc_types_eth::BlockId::number(block_number))
+                    .call()
+                    .await
+                    .map_err(|e| {
+                        eyre::eyre!(
+                            "failed to seed transferPolicyId for token {token} \
+                             (portal {portal_address}): {e}"
+                        )
+                    })?;
+                Ok::<_, eyre::Report>((*token, policy_id))
+            }
+        }))
+        .await
+        .into_iter()
+        .collect::<eyre::Result<Vec<_>>>()?;
+
+        let mut w = self.write();
+        for (token, policy_id) in seeded {
+            info!(%token, policy_id, block_number, "Seeded token policy from L1");
+            w.set_token_policy(token, block_number, policy_id);
+        }
+
+        Ok(())
     }
 }
 
 /// A decoded L1 policy event ready to be applied to the cache.
 ///
-/// The [`PolicyListener`](super::PolicyListener) decodes raw logs into these events
+/// The [`L1Subscriber`](crate::l1::L1Subscriber) decodes raw logs into these events
 /// outside the cache write lock, then applies them in batch via
 /// [`PolicyCache::apply_events`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub enum PolicyEvent {
     /// A user's membership in a policy set changed (`WhitelistUpdated` / `BlacklistUpdated`).
     MembershipChanged {
@@ -404,6 +457,7 @@ pub enum PolicyEvent {
     /// A new simple policy was created on L1 (`PolicyCreated`).
     PolicyCreated {
         policy_id: u64,
+        #[serde(with = "policy_type_serde")]
         policy_type: PolicyType,
     },
     /// A new compound policy was created on L1 (`CompoundPolicyCreated`).
@@ -413,6 +467,140 @@ pub enum PolicyEvent {
         recipient_policy_id: u64,
         mint_recipient_policy_id: u64,
     },
+}
+
+impl PolicyEvent {
+    /// Try to decode an `ITIP403Registry` log into a [`PolicyEvent`].
+    ///
+    /// Handles `WhitelistUpdated`, `BlacklistUpdated`, `PolicyCreated`, and
+    /// `CompoundPolicyCreated` events. `PolicyAdminUpdated` is logged but ignored
+    /// (returns `None`). Returns `None` for unrecognised logs.
+    pub fn decode_registry(log: &alloy_rpc_types_eth::Log) -> Option<Self> {
+        use tempo_contracts::precompiles::ITIP403Registry::{
+            BlacklistUpdated, CompoundPolicyCreated, ITIP403RegistryEvents, PolicyCreated,
+            WhitelistUpdated,
+        };
+
+        let event = match ITIP403RegistryEvents::decode_log(&log.inner) {
+            Ok(decoded) => decoded.data,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to decode TIP-403 event");
+                return None;
+            }
+        };
+
+        match event {
+            ITIP403RegistryEvents::BlacklistUpdated(BlacklistUpdated {
+                policyId,
+                account,
+                restricted,
+                ..
+            }) => {
+                tracing::info!(
+                    policy_id = policyId,
+                    account = %account,
+                    restricted,
+                    "Decoded BlacklistUpdated"
+                );
+                Some(Self::MembershipChanged {
+                    policy_id: policyId,
+                    account,
+                    in_set: restricted,
+                })
+            }
+            ITIP403RegistryEvents::WhitelistUpdated(WhitelistUpdated {
+                policyId,
+                account,
+                allowed,
+                ..
+            }) => {
+                tracing::info!(
+                    policy_id = policyId,
+                    account = %account,
+                    allowed,
+                    "Decoded WhitelistUpdated"
+                );
+                Some(Self::MembershipChanged {
+                    policy_id: policyId,
+                    account,
+                    in_set: allowed,
+                })
+            }
+            ITIP403RegistryEvents::PolicyCreated(PolicyCreated {
+                policyId,
+                policyType,
+                ..
+            }) => {
+                tracing::info!(
+                    policy_id = policyId,
+                    policy_type = ?policyType,
+                    "New policy created on L1"
+                );
+                Some(Self::PolicyCreated {
+                    policy_id: policyId,
+                    policy_type: policyType,
+                })
+            }
+            ITIP403RegistryEvents::CompoundPolicyCreated(CompoundPolicyCreated {
+                policyId,
+                senderPolicyId,
+                recipientPolicyId,
+                mintRecipientPolicyId,
+                ..
+            }) => {
+                tracing::info!(
+                    policy_id = policyId,
+                    sender_policy_id = senderPolicyId,
+                    recipient_policy_id = recipientPolicyId,
+                    mint_recipient_policy_id = mintRecipientPolicyId,
+                    "Compound policy created on L1"
+                );
+                Some(Self::CompoundPolicyCreated {
+                    policy_id: policyId,
+                    sender_policy_id: senderPolicyId,
+                    recipient_policy_id: recipientPolicyId,
+                    mint_recipient_policy_id: mintRecipientPolicyId,
+                })
+            }
+            ITIP403RegistryEvents::PolicyAdminUpdated(event) => {
+                tracing::debug!(
+                    policy_id = event.policyId,
+                    admin = %event.admin,
+                    "Policy admin updated on L1"
+                );
+                None
+            }
+        }
+    }
+
+    /// Try to decode a TIP-20 `TransferPolicyUpdate` log into a
+    /// [`PolicyEvent::TokenPolicyChanged`].
+    ///
+    /// The caller should pre-filter by topic hash before calling this — it will
+    /// return `None` (with a warning) if the log doesn't match.
+    pub fn decode_tip20(log: &alloy_rpc_types_eth::Log) -> Option<Self> {
+        use tempo_contracts::precompiles::ITIP20::TransferPolicyUpdate;
+
+        let event = match TransferPolicyUpdate::decode_log(&log.inner) {
+            Ok(decoded) => decoded.data,
+            Err(e) => {
+                tracing::warn!(error = %e, "Failed to decode TIP-20 TransferPolicyUpdate");
+                return None;
+            }
+        };
+
+        let token = log.address();
+        tracing::info!(
+            token = %token,
+            new_policy_id = event.newPolicyId,
+            updater = %event.updater,
+            "Decoded TransferPolicyUpdate"
+        );
+        Some(Self::TokenPolicyChanged {
+            token,
+            policy_id: event.newPolicyId,
+        })
+    }
 }
 
 /// Authorization role for policy checks.
@@ -470,7 +658,7 @@ pub struct MembershipSet {
     /// Per-block membership changes above `baseline_height`.
     pending: BTreeMap<u64, Vec<MembershipUpdate>>,
     /// All addresses for which we've ever recorded a membership event. Survives `advance()` so
-    /// we can distinguish "explicitly not a member" from "never observed by the listener".
+    /// we can distinguish "explicitly not a member" from "never observed by the subscriber".
     observed: HashSet<Address>,
 }
 
@@ -498,7 +686,7 @@ impl MembershipSet {
     /// Returns `true` if we've ever recorded a membership event for `user` (added or removed).
     ///
     /// When `false`, the caller should not trust [`is_member`](Self::is_member) returning `false`
-    /// because the user may have been added before the listener started.
+    /// because the user may have been added before the subscriber started.
     pub fn membership_known(&self, user: &Address) -> bool {
         self.observed.contains(user) || self.baseline.contains(user)
     }
@@ -599,6 +787,22 @@ pub(super) struct MembershipUpdate {
     pub account: Address,
     /// Whether the address was added to or removed from the set.
     pub change: MembershipChange,
+}
+
+/// Serde helper for [`PolicyType`] — the sol!-generated enum lacks serde support,
+/// so we serialize it as its `u8` repr.
+mod policy_type_serde {
+    use super::PolicyType;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(val: &PolicyType, s: S) -> Result<S::Ok, S::Error> {
+        (*val as u8).serialize(s)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PolicyType, D::Error> {
+        let v = u8::deserialize(d)?;
+        PolicyType::try_from(v).map_err(serde::de::Error::custom)
+    }
 }
 
 #[cfg(test)]

@@ -17,8 +17,6 @@ graph TD
     L1["Tempo L1"]
 
     L1Sub["L1Subscriber<br/><i>WebSocket + backfill</i>"]
-    L1Listen["L1StateListener"]
-    PolicyListen["PolicyListener<br/><i>TIP-403 events</i>"]
     DQ["DepositQueue"]
     Cache["L1StateCache"]
     PolicyCache["PolicyCache"]
@@ -33,11 +31,9 @@ graph TD
     Portal["ZonePortal (L1)"]
 
     L1 --> L1Sub
-    L1 --> L1Listen
-    L1 --> PolicyListen
     L1Sub --> DQ
-    L1Listen --> Cache
-    PolicyListen --> PolicyCache
+    L1Sub --> PolicyCache
+    L1Sub --> Cache
     PolicyCache --> Builder
     PolicyPrefetch --> PolicyCache
     DQ --> Engine
@@ -130,10 +126,10 @@ header chain linking back to the target block.
 The zone enforces TIP-403 transfer policies (whitelist, blacklist, compound)
 identically to L1. Policy state is mirrored via:
 
-1. **PolicyListener** — streams `PolicyCreated`, `WhitelistUpdated`,
+1. **L1Subscriber** — extracts `PolicyCreated`, `WhitelistUpdated`,
    `BlacklistUpdated`, `CompoundPolicyCreated`, and `TransferPolicyUpdate`
-   events from L1 via WebSocket and applies them to the in-memory
-   `PolicyCache`.
+   events from L1 block receipts (via `eth_getBlockReceipts`) and applies
+   them to the in-memory `PolicyCache`.
 2. **PolicyProvider** — cache-first, RPC-fallback resolution. On cache miss
    it queries L1 via `block_in_place` and populates the cache for subsequent
    lookups.

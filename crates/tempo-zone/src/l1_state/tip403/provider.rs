@@ -25,9 +25,9 @@ use super::{
 
 /// Cache-first, RPC-fallback provider for TIP-403 policy authorization.
 ///
-/// Wraps a [`SharedPolicyCache`] (populated by the [`PolicyListener`](super::PolicyListener))
+/// Wraps a [`SharedPolicyCache`] (populated by the [`L1Subscriber`](crate::l1::L1Subscriber))
 /// and an L1 HTTP provider. When the cache cannot resolve an authorization query (e.g. the
-/// policy existed before the listener started), the provider falls back to L1 RPC calls and
+/// policy existed before the subscriber started), the provider falls back to L1 RPC calls and
 /// caches the result for future lookups.
 ///
 /// # Sync dispatch safety
@@ -37,7 +37,7 @@ use super::{
 /// This is safe when the caller runs on a blocking thread (e.g. the payload builder).
 #[derive(Debug, Clone)]
 pub struct PolicyProvider {
-    /// Shared in-memory policy cache, populated by the listener and RPC fallback.
+    /// Shared in-memory policy cache, populated by the subscriber and RPC fallback.
     cache: SharedPolicyCache,
     /// L1 HTTP provider for RPC fallback on cache miss.
     provider: DynProvider<TempoNetwork>,
@@ -267,7 +267,7 @@ impl PolicyProvider {
 
         // Check cache first for this sub-policy.
         // If the policy type is known but the user's membership was never observed by the
-        // listener, `check_simple` returns `None` and we fall through to RPC.
+        // subscriber, `check_simple` returns `None` and we fall through to RPC.
         {
             let cache = self.cache.read();
             if let Some(result) = cache.check_simple(policy_id, user, block_number) {
