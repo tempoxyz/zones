@@ -64,12 +64,6 @@ pub(crate) struct SpamDeposits {
     lead_time: u64,
 }
 
-struct EncryptionSetup {
-    seq_pub_x: B256,
-    seq_pub_y_parity: u8,
-    key_index: U256,
-}
-
 impl SpamDeposits {
     pub(crate) async fn run(self) -> eyre::Result<()> {
         if self.per_block == 0 {
@@ -117,13 +111,11 @@ impl SpamDeposits {
             .map(|_| PrivateKeySigner::random())
             .collect();
 
-        // Budget: tokens for deposits + gas headroom
-        let gas_budget =
-            U256::from(deposits_per_signer + 1) * U256::from(500_000u64) * U256::from(gas_price);
+        // Budget: tokens for deposits + 10% headroom for gas (Tempo L1 pays gas in TIP-20)
         let token_budget = U256::from(self.amount) * U256::from(deposits_per_signer);
-        let funding_per_signer = token_budget + gas_budget;
+        let funding_per_signer = token_budget * U256::from(150) / U256::from(100);
 
-        println!("Funding {num_signers} signers with {funding_per_signer} tokens each...");
+        println!("Funding {num_signers} signers with {funding_per_signer} each...");
         let token_contract = ITIP20::new(self.token, &provider);
         for (i, signer) in signers.iter().enumerate() {
             token_contract
@@ -152,27 +144,23 @@ impl SpamDeposits {
                 .await?;
         }
 
-        // Fetch encryption key if needed
+        // Fetch encryption key if needed: (pub_x, y_parity, key_index)
         let enc_setup = if self.encrypted {
             let (key, key_index) = portal
                 .encryption_key()
                 .await
                 .wrap_err("failed to fetch encryption key — is one set?")?;
-            let seq_pub_y_parity = key.normalized_y_parity().ok_or_else(|| {
+            let y_parity = key.normalized_y_parity().ok_or_else(|| {
                 eyre!(
                     "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
                     key.yParity
                 )
             })?;
             println!(
-                "Encryption key index: {key_index}, x: {}, parity: {seq_pub_y_parity:#x}",
+                "Encryption key index: {key_index}, x: {}, parity: {y_parity:#x}",
                 key.x
             );
-            Some(EncryptionSetup {
-                seq_pub_x: key.x,
-                seq_pub_y_parity,
-                key_index,
-            })
+            Some((key.x, y_parity, key_index))
         } else {
             None
         };
@@ -208,20 +196,20 @@ impl SpamDeposits {
             );
 
             // Build and sign all deposits (pure computation, no IO)
+            let calldata = self.build_deposit_calldata(whale_addr, enc_setup.as_ref())?;
             let mut encoded_txs = Vec::with_capacity(batch_size);
             for signer in signers.iter().take(batch_size) {
                 let nonce_key = U256::from(rand::random::<u128>());
-                let calldata = self.build_deposit_calldata(whale_addr, &enc_setup)?;
 
                 let tx = tempo_primitives::TempoTransaction {
                     chain_id,
                     max_fee_per_gas: gas_price * 3,
                     max_priority_fee_per_gas: gas_price,
-                    gas_limit: 500_000,
+                    gas_limit: 2_000_000,
                     calls: vec![Call {
                         to: TxKind::Call(self.portal),
                         value: U256::ZERO,
-                        input: Bytes::from(calldata),
+                        input: Bytes::from(calldata.clone()),
                     }],
                     nonce_key,
                     nonce: 0,
@@ -260,7 +248,7 @@ impl SpamDeposits {
             let receipts: Vec<_> =
                 futures::future::join_all(pending_txs.into_iter().map(|p| p.get_receipt())).await;
 
-            for result in receipts {
+            for (i, result) in receipts.into_iter().enumerate() {
                 match result {
                     Ok(receipt) => {
                         if receipt.status() {
@@ -269,7 +257,11 @@ impl SpamDeposits {
                                 *block_counts.entry(block_num).or_default() += 1;
                             }
                         } else {
-                            eprintln!("  deposit reverted: {}", receipt.transaction_hash);
+                            let signer = signers.get(i).map(|s| s.address()).unwrap_or_default();
+                            eprintln!(
+                                "  deposit reverted: tx={} signer={signer}",
+                                receipt.transaction_hash,
+                            );
                         }
                     }
                     Err(e) => {
@@ -316,16 +308,11 @@ impl SpamDeposits {
     fn build_deposit_calldata(
         &self,
         recipient: Address,
-        enc_setup: &Option<EncryptionSetup>,
+        enc_setup: Option<&(B256, u8, U256)>,
     ) -> eyre::Result<Vec<u8>> {
-        if let Some(enc) = enc_setup {
+        if let Some(&(pub_x, y_parity, key_index)) = enc_setup {
             let encrypted = encrypt_deposit(
-                &enc.seq_pub_x,
-                enc.seq_pub_y_parity,
-                recipient,
-                B256::ZERO,
-                self.portal,
-                enc.key_index,
+                &pub_x, y_parity, recipient, B256::ZERO, self.portal, key_index,
             )
             .ok_or_else(|| eyre!("ECIES encryption failed"))?;
 
@@ -340,7 +327,7 @@ impl SpamDeposits {
             Ok(ZonePortal::depositEncryptedCall {
                 token: self.token,
                 amount: self.amount,
-                keyIndex: enc.key_index,
+                keyIndex: key_index,
                 encrypted: payload,
             }
             .abi_encode())

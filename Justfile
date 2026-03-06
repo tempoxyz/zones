@@ -656,8 +656,8 @@ deploy-zone name:
                       --sequencer-key "$SEQUENCER_KEY"
 
 [group('zone')]
-[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars.')]
-spam-deposits total="20" per-block="10" amount="1000000" token="0x20C0000000000000000000000000000000000000" encrypted="" lead-time="3":
+[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000 1 (10 txs, 10 per block, 200000 amount, encrypted)')]
+spam-deposits total="20" per-block="10" amount="1000000" encrypted="" token="0x20C0000000000000000000000000000000000000" lead-time="3":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
