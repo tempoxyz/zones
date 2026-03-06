@@ -1,5 +1,5 @@
 use alloy::{
-    primitives::{Address, U256},
+    primitives::{Address, U256, address},
     providers::ProviderBuilder,
 };
 use eyre::eyre;
@@ -19,7 +19,7 @@ pub(crate) struct ZoneInfoCmd {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    #[arg(long, default_value = "0x7F4528b1a555D704bC20f8328557240BED29488D")]
+    #[arg(long, default_value_t = address!("0x7F4528b1a555D704bC20f8328557240BED29488D"))]
     zone_factory: Address,
 }
 

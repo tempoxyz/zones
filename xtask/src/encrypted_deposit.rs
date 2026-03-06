@@ -5,7 +5,7 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, B256, Bytes, U256},
+    primitives::{Address, B256, Bytes, U256, address},
     providers::{Provider, ProviderBuilder},
     rpc::types::Filter,
     signers::local::PrivateKeySigner,
@@ -33,7 +33,7 @@ pub(crate) struct EncryptedDeposit {
     private_key: String,
 
     /// TIP-20 token address to deposit.
-    #[arg(long, default_value = "0x20C0000000000000000000000000000000000000")]
+    #[arg(long, default_value_t = address!("0x20C0000000000000000000000000000000000000"))]
     token: Address,
 
     /// Amount to deposit.
@@ -45,10 +45,7 @@ pub(crate) struct EncryptedDeposit {
     to: Option<Address>,
 
     /// Memo bytes32 (encrypted on-chain).
-    #[arg(
-        long,
-        default_value = "0x0000000000000000000000000000000000000000000000000000000000000000"
-    )]
+    #[arg(long, default_value_t = B256::ZERO)]
     memo: B256,
 
     /// Zone L2 RPC URL. If set, waits for the deposit to be processed on L2.
