@@ -71,7 +71,10 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
         let count = self.enabledTokenCount().call().await?;
         let mut tokens = Vec::with_capacity(count.to::<usize>());
         for i in 0..count.to::<u64>() {
-            let token = self.enabledTokenAt(alloy_primitives::U256::from(i)).call().await?;
+            let token = self
+                .enabledTokenAt(alloy_primitives::U256::from(i))
+                .call()
+                .await?;
             tokens.push(token);
         }
         Ok(tokens)
