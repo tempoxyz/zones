@@ -5,7 +5,7 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, B256, Bytes, U256, address},
+    primitives::{Address, B256, Bytes, address},
     providers::{Provider, ProviderBuilder},
     rpc::types::Filter,
     signers::local::PrivateKeySigner,
@@ -80,22 +80,13 @@ impl EncryptedDeposit {
 
         // Fetch sequencer encryption key
         println!("Fetching sequencer encryption key...");
-        let key = portal
-            .sequencerEncryptionKey()
-            .call()
+        let (key, key_index) = portal
+            .encryption_key()
             .await
-            .wrap_err("sequencerEncryptionKey() failed — is an encryption key set?")?;
-        let key_count: U256 = portal
-            .encryptionKeyCount()
-            .call()
-            .await
-            .wrap_err("encryptionKeyCount() failed")?;
-        let key_index = key_count
-            .checked_sub(U256::from(1))
-            .ok_or_else(|| eyre!("no encryption keys set on portal"))?;
+            .wrap_err("failed to fetch encryption key — is one set?")?;
 
         let seq_pub_x = key.x;
-        let seq_pub_y_parity = normalize_y_parity(key.yParity).ok_or_else(|| {
+        let seq_pub_y_parity = key.normalized_y_parity().ok_or_else(|| {
             eyre!(
                 "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
                 key.yParity
@@ -212,16 +203,5 @@ impl EncryptedDeposit {
 
             tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
-    }
-}
-
-/// Normalize yParity to SEC1 compressed prefix (0x02 or 0x03).
-///
-/// The contract may return 0/1 (parity bit) or 0x02/0x03 (SEC1 prefix).
-fn normalize_y_parity(y: u8) -> Option<u8> {
-    match y {
-        0x02 | 0x03 => Some(y),
-        0 | 1 => Some(0x02 + y),
-        _ => None,
     }
 }

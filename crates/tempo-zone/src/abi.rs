@@ -505,6 +505,44 @@ sol! {
     }
 }
 
+impl ZonePortal::sequencerEncryptionKeyReturn {
+    /// Normalize `yParity` to SEC1 compressed prefix (`0x02` or `0x03`).
+    ///
+    /// The contract may return `0`/`1` (parity bit) or `0x02`/`0x03` (SEC1 prefix).
+    pub fn normalized_y_parity(&self) -> Option<u8> {
+        match self.yParity {
+            0x02 | 0x03 => Some(self.yParity),
+            0 | 1 => Some(0x02 + self.yParity),
+            _ => None,
+        }
+    }
+}
+
+impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
+    ZonePortal::ZonePortalInstance<P, N>
+{
+    /// Fetches the active sequencer encryption key and its index.
+    ///
+    /// Returns `(key, key_index)` where `key` is the
+    /// [`sequencerEncryptionKeyReturn`](ZonePortal::sequencerEncryptionKeyReturn) and
+    /// `key_index` is the zero-based index of the current key.
+    pub async fn encryption_key(
+        &self,
+    ) -> Result<
+        (
+            ZonePortal::sequencerEncryptionKeyReturn,
+            alloy_primitives::U256,
+        ),
+        alloy_contract::Error,
+    > {
+        let key_call = self.sequencerEncryptionKey();
+        let count_call = self.encryptionKeyCount();
+        let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
+        let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
+        Ok((key, key_index))
+    }
+}
+
 impl std::fmt::Display for ZonePortal::ZonePortalErrors {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
