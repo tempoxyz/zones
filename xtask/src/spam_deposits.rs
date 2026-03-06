@@ -59,12 +59,8 @@ pub(crate) struct SpamDeposits {
     #[arg(long)]
     encrypted: bool,
 
-    /// Zone L2 RPC URL (optional, for verification).
-    #[arg(long, env = "ZONE_RPC_URL")]
-    zone_rpc_url: Option<String>,
-
     /// Seconds into the future for the valid_after timestamp.
-    #[arg(long, default_value_t = 5)]
+    #[arg(long, default_value_t = 3)]
     lead_time: u64,
 }
 
@@ -76,6 +72,10 @@ struct EncryptionSetup {
 
 impl SpamDeposits {
     pub(crate) async fn run(self) -> eyre::Result<()> {
+        if self.per_block == 0 {
+            return Err(eyre!("--per-block must be at least 1"));
+        }
+
         let start = Instant::now();
 
         // Parse whale key & create provider
@@ -154,20 +154,11 @@ impl SpamDeposits {
 
         // Fetch encryption key if needed
         let enc_setup = if self.encrypted {
-            let key = portal
-                .sequencerEncryptionKey()
-                .call()
+            let (key, key_index) = portal
+                .encryption_key()
                 .await
-                .wrap_err("sequencerEncryptionKey() failed — is an encryption key set?")?;
-            let key_count: U256 = portal
-                .encryptionKeyCount()
-                .call()
-                .await
-                .wrap_err("encryptionKeyCount() failed")?;
-            let key_index = key_count
-                .checked_sub(U256::from(1))
-                .ok_or_else(|| eyre!("no encryption keys set on portal"))?;
-            let seq_pub_y_parity = normalize_y_parity(key.yParity).ok_or_else(|| {
+                .wrap_err("failed to fetch encryption key — is one set?")?;
+            let seq_pub_y_parity = key.normalized_y_parity().ok_or_else(|| {
                 eyre!(
                     "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
                     key.yParity
@@ -216,11 +207,10 @@ impl SpamDeposits {
                 wave + 1
             );
 
-            // Build, sign, and send all deposits in this wave
-            let mut pending_txs = Vec::with_capacity(batch_size);
-            for (i, signer) in signers.iter().enumerate().take(batch_size) {
+            // Build and sign all deposits (pure computation, no IO)
+            let mut encoded_txs = Vec::with_capacity(batch_size);
+            for signer in signers.iter().take(batch_size) {
                 let nonce_key = U256::from(rand::random::<u128>());
-
                 let calldata = self.build_deposit_calldata(whale_addr, &enc_setup)?;
 
                 let tx = tempo_primitives::TempoTransaction {
@@ -243,22 +233,32 @@ impl SpamDeposits {
                 let sig = signer.sign_hash_sync(&sig_hash)?;
                 let tempo_sig = TempoSignature::Primitive(PrimitiveSignature::Secp256k1(sig));
                 let signed = tx.into_signed(tempo_sig);
-                let encoded = signed.encoded_2718();
-
-                match provider.send_raw_transaction(&encoded).await {
-                    Ok(pending) => {
-                        pending_txs.push(pending);
-                        total_sent += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  failed to send deposit {i}: {e}");
-                    }
-                }
+                encoded_txs.push(signed.encoded_2718());
             }
 
-            // Wait for all receipts
-            for pending in pending_txs {
-                match pending.get_receipt().await {
+            // Fire all sends concurrently
+            let send_results: Vec<_> = futures::future::join_all(
+                encoded_txs.iter().enumerate().map(|(i, encoded)| async move {
+                    provider
+                        .send_raw_transaction(encoded)
+                        .await
+                        .map_err(|e| {
+                            eprintln!("  failed to send deposit {i}: {e}");
+                            e
+                        })
+                }),
+            )
+            .await;
+
+            let pending_txs: Vec<_> = send_results.into_iter().flatten().collect();
+            total_sent += pending_txs.len();
+
+            // Wait for all receipts concurrently
+            let receipts: Vec<_> =
+                futures::future::join_all(pending_txs.into_iter().map(|p| p.get_receipt())).await;
+
+            for result in receipts {
+                match result {
                     Ok(receipt) => {
                         if receipt.status() {
                             total_confirmed += 1;
@@ -350,13 +350,5 @@ impl SpamDeposits {
             }
             .abi_encode())
         }
-    }
-}
-
-fn normalize_y_parity(y: u8) -> Option<u8> {
-    match y {
-        0x02 | 0x03 => Some(y),
-        0 | 1 => Some(0x02 + y),
-        _ => None,
     }
 }

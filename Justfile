@@ -657,15 +657,14 @@ deploy-zone name:
 
 [group('zone')]
 [doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars.')]
-spam-deposits total="20" per-block="10" amount="1000000" token="0x20C0000000000000000000000000000000000000" encrypted="" lead-time="5" rpc=zone_rpc:
+spam-deposits total="20" per-block="10" amount="1000000" token="0x20C0000000000000000000000000000000000000" encrypted="" lead-time="3":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     ARGS="--total {{total}} --per-block {{per-block}} --amount {{amount}} --token {{token}} --lead-time {{lead-time}}"
-    if [[ -n "{{encrypted}}" ]]; then
+    if [[ "{{encrypted}}" == "true" || "{{encrypted}}" == "1" ]]; then
         ARGS="$ARGS --encrypted"
     fi
-    ARGS="$ARGS --zone-rpc-url {{rpc}}"
     cargo run -p tempo-xtask -- spam-deposits --private-key "$PK" $ARGS
 
 [group('zone')]

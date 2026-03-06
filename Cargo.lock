@@ -11004,6 +11004,7 @@ dependencies = [
  "clap",
  "const-hex",
  "eyre",
+ "futures",
  "k256",
  "rand 0.8.5",
  "reth-evm",

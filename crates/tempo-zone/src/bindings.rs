@@ -50,6 +50,12 @@ sol! {
 
         /// Enabled token by index.
         function enabledTokenAt(uint256 index) external view returns (address);
+
+        /// Active sequencer encryption key (compressed secp256k1 point).
+        function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+
+        /// Total number of encryption keys ever registered.
+        function encryptionKeyCount() external view returns (uint256);
     }
 }
 
@@ -78,5 +84,24 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
             tokens.push(token);
         }
         Ok(tokens)
+    }
+
+    /// Fetches the active sequencer encryption key and its index.
+    ///
+    /// Returns `(key, key_index)` where `key` is the
+    /// [`sequencerEncryptionKeyReturn`](ZonePortal::sequencerEncryptionKeyReturn) and
+    /// `key_index` is the zero-based index of the current key.
+    pub async fn encryption_key(
+        &self,
+    ) -> Result<
+        (ZonePortal::sequencerEncryptionKeyReturn, alloy_primitives::U256),
+        alloy_contract::Error,
+    > {
+        let (key, count) = tokio::try_join!(
+            self.sequencerEncryptionKey().call(),
+            self.encryptionKeyCount().call(),
+        )?;
+        let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
+        Ok((key, key_index))
     }
 }

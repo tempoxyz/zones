@@ -644,18 +644,6 @@ fn check(receipt: &impl ReceiptResponse, label: &str) -> eyre::Result<()> {
     Ok(())
 }
 
-/// Normalize the Y-parity byte to the SEC1 compressed prefix format (`0x02` / `0x03`).
-///
-/// The portal may return parity as `0` / `1` (boolean) or already as `0x02` / `0x03`.
-/// The ECIES encryption function expects the SEC1 form.
-fn normalize_y_parity(y: u8) -> Option<u8> {
-    match y {
-        0x02 | 0x03 => Some(y),
-        0 | 1 => Some(0x02 + y),
-        _ => None,
-    }
-}
-
 /// Send an ECIES-encrypted deposit through the portal.
 ///
 /// Fetches the sequencer's current encryption public key, encrypts the
@@ -668,17 +656,13 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     to: Address,
     amount: u128,
 ) -> eyre::Result<()> {
-    let key = portal
-        .sequencerEncryptionKey()
-        .call()
+    let (key, key_index) = portal
+        .encryption_key()
         .await
-        .wrap_err("sequencerEncryptionKey() failed")?;
-    let key_count: U256 = portal.encryptionKeyCount().call().await?;
-    let key_index = key_count
-        .checked_sub(U256::from(1))
-        .ok_or_else(|| eyre!("no encryption keys set"))?;
+        .wrap_err("failed to fetch encryption key")?;
 
-    let y_parity = normalize_y_parity(key.yParity)
+    let y_parity = key
+        .normalized_y_parity()
         .ok_or_else(|| eyre!("unexpected yParity {:#x}", key.yParity))?;
 
     let enc = encrypt_deposit(&key.x, y_parity, to, B256::ZERO, portal_addr, key_index)
