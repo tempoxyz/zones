@@ -663,7 +663,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
 
     // --- Step 5: Pre-populate zone's policy cache ---
     // The builder checks PolicyCache during encrypted deposit processing.
-    // Since the policy listener may not have caught up yet, seed it manually.
+    // Since the L1 subscriber may not have caught up yet, seed it manually.
     {
         use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 

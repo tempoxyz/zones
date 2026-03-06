@@ -14,8 +14,8 @@
 //!
 //! ## Write path
 //!
-//! - The [`L1ChainNotificationListener`](super::listener::L1ChainNotificationListener) writes
-//!   storage diffs for tracked contracts as they arrive, tagged with the L1 tip block number.
+//! - The [`L1Subscriber`](crate::l1::L1Subscriber) writes storage diffs for tracked contracts
+//!   as they arrive, tagged with the L1 tip block number.
 //! - The [`L1StateProvider`](super::provider::L1StateProvider) writes RPC-fetched values on
 //!   cache miss, tagged with the block number that was requested.
 //!

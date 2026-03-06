@@ -17,7 +17,6 @@ graph TD
     L1["Tempo L1"]
 
     L1Sub["L1Subscriber<br/><i>WebSocket + backfill</i>"]
-    L1Listen["L1StateListener"]
     DQ["DepositQueue"]
     Cache["L1StateCache"]
     PolicyCache["PolicyCache"]
@@ -32,10 +31,9 @@ graph TD
     Portal["ZonePortal (L1)"]
 
     L1 --> L1Sub
-    L1 --> L1Listen
     L1Sub --> DQ
     L1Sub --> PolicyCache
-    L1Listen --> Cache
+    L1Sub --> Cache
     PolicyCache --> Builder
     PolicyPrefetch --> PolicyCache
     DQ --> Engine

@@ -282,7 +282,7 @@ impl ZoneEngine {
         }
 
         // GC stale versioned entries from the policy cache. Only the engine
-        // drives this — the listener must not advance past blocks the engine
+        // drives this — the subscriber must not advance past blocks the engine
         // hasn't processed yet, otherwise policy lookups for in-flight blocks
         // could return wrong results.
         self.policy_provider.cache().advance(l1_num_hash.number);

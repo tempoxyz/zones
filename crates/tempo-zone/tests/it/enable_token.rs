@@ -83,13 +83,7 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
 
     // Single L1 block with both TokenEnabled + deposit
     let block = fixture.next_block();
-    let deposit = L1Fixture::make_deposit_for_block(
-        block.header.inner.number,
-        beta_token,
-        sender,
-        recipient,
-        deposit_amount,
-    );
+    let deposit = L1Fixture::make_deposit_for_block(beta_token, sender, recipient, deposit_amount);
     let events = L1PortalEvents {
         deposits: vec![L1Deposit::Regular(deposit)],
         enabled_tokens: vec![enabled],

@@ -152,44 +152,20 @@ async fn test_two_zones_independent_deposits() -> eyre::Result<()> {
 
     // L1 block 1: deposit to Alice on zone1, empty on zone2
     let b1 = fixture.next_block();
-    let d1 = L1Fixture::make_deposit_for_block(
-        b1.header.inner.number,
-        PATH_USD_ADDRESS,
-        sender,
-        alice,
-        500_000,
-    );
+    let d1 = L1Fixture::make_deposit_for_block(PATH_USD_ADDRESS, sender, alice, 500_000);
     fixture.enqueue(&b1, zone1.deposit_queue(), vec![d1]);
     fixture.enqueue(&b1, zone2.deposit_queue(), vec![]);
 
     // L1 block 2: empty on zone1, deposit to Bob on zone2
     let b2 = fixture.next_block();
-    let d2 = L1Fixture::make_deposit_for_block(
-        b2.header.inner.number,
-        PATH_USD_ADDRESS,
-        sender,
-        bob,
-        700_000,
-    );
+    let d2 = L1Fixture::make_deposit_for_block(PATH_USD_ADDRESS, sender, bob, 700_000);
     fixture.enqueue(&b2, zone1.deposit_queue(), vec![]);
     fixture.enqueue(&b2, zone2.deposit_queue(), vec![d2]);
 
     // L1 block 3: deposits on both zones
     let b3 = fixture.next_block();
-    let d3a = L1Fixture::make_deposit_for_block(
-        b3.header.inner.number,
-        PATH_USD_ADDRESS,
-        sender,
-        alice,
-        300_000,
-    );
-    let d3b = L1Fixture::make_deposit_for_block(
-        b3.header.inner.number,
-        PATH_USD_ADDRESS,
-        sender,
-        bob,
-        200_000,
-    );
+    let d3a = L1Fixture::make_deposit_for_block(PATH_USD_ADDRESS, sender, alice, 300_000);
+    let d3b = L1Fixture::make_deposit_for_block(PATH_USD_ADDRESS, sender, bob, 200_000);
     fixture.enqueue(&b3, zone1.deposit_queue(), vec![d3a]);
     fixture.enqueue(&b3, zone2.deposit_queue(), vec![d3b]);
 
