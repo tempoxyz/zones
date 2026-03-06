@@ -316,7 +316,7 @@ impl L1Subscriber {
         // Map each incoming header to an async receipt fetch and buffer ahead
         // so the next block's receipts are already in flight while we process
         // the current one.
-        let concurrency = self.config.l1_fetch_concurrency;
+        let concurrency = self.config.l1_fetch_concurrency.max(1);
         let mut stream = sub
             .into_stream()
             .map(|header| {
