@@ -57,12 +57,8 @@ pub struct ZonePayloadFactory {
 }
 
 impl ZonePayloadFactory {
-    pub fn new(
-        witness_store: crate::witness::SharedWitnessStore,
-    ) -> Self {
-        Self {
-            witness_store,
-        }
+    pub fn new(witness_store: crate::witness::SharedWitnessStore) -> Self {
+        Self { witness_store }
     }
 }
 
@@ -124,8 +120,7 @@ where
         header_rlp: Option<Vec<u8>>,
     ) {
         use alloy_consensus::BlockHeader;
-        
-        
+
         use zone_prover::types::{DepositType, QueuedDeposit, ZoneBlock, ZoneHeader};
 
         let block_number = sealed_block.number();

@@ -238,8 +238,7 @@ where
                 "Fetching eth_getProof from Tempo L1"
             );
 
-            let storage_keys: Vec<alloy_primitives::StorageKey> =
-                slots.to_vec();
+            let storage_keys: Vec<alloy_primitives::StorageKey> = slots.to_vec();
 
             let proof_response: EIP1186AccountProofResponse = self
                 .l1_provider

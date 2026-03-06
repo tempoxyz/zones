@@ -75,14 +75,13 @@ impl SparseTrie {
         // in the branch node).
         let branch_keys: Vec<Nibbles> = entries
             .iter()
-            .filter(|&(_, v)| matches!(v, TrieEntry::Branch(_))).map(|(k, _)| *k)
+            .filter(|&(_, v)| matches!(v, TrieEntry::Branch(_)))
+            .map(|(k, _)| *k)
             .collect();
         for bk in branch_keys {
-            let has_descendant = entries
-                .range(bk..).nth(1)
-                .is_some_and(|(next_key, _)| {
-                    next_key.len() > bk.len() && bk.common_prefix_length(next_key) == bk.len()
-                });
+            let has_descendant = entries.range(bk..).nth(1).is_some_and(|(next_key, _)| {
+                next_key.len() > bk.len() && bk.common_prefix_length(next_key) == bk.len()
+            });
             if has_descendant {
                 entries.remove(&bk);
             }

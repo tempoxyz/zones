@@ -63,7 +63,9 @@ pub struct BlockExecutionResult {
 /// function so that the precompile has the correct Tempo block binding.
 ///
 /// Returns the transactions root and receipts root.
-pub fn execute_zone_block<DB: Database<Error: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static> + DatabaseCommit>(
+pub fn execute_zone_block<
+    DB: Database<Error: std::fmt::Display + std::fmt::Debug + Send + Sync + 'static> + DatabaseCommit,
+>(
     db: DB,
     block: &ZoneBlock,
     block_index: usize,
@@ -170,31 +172,30 @@ pub fn execute_zone_block<DB: Database<Error: std::fmt::Display + std::fmt::Debu
     }
 
     // 3. Execute finalizeWithdrawalBatch system tx (only in final block).
-    if is_last_block
-        && let Some(count) = block.finalize_withdrawal_batch_count {
-            let recovered_tx = build_finalize_withdrawal_batch_tx(count, block.number);
+    if is_last_block && let Some(count) = block.finalize_withdrawal_batch_count {
+        let recovered_tx = build_finalize_withdrawal_batch_tx(count, block.number);
 
-            let tx_env = <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
-                recovered_tx.inner(),
-                recovered_tx.signer(),
-            );
-            let ResultAndState { result, state } = evm.transact_raw(tx_env).map_err(|e| {
-                ProverError::ExecutionError(format!("finalizeWithdrawalBatch failed: {e:?}"))
-            })?;
+        let tx_env = <TempoTxEnv as FromRecoveredTx<TempoTxEnvelope>>::from_recovered_tx(
+            recovered_tx.inner(),
+            recovered_tx.signer(),
+        );
+        let ResultAndState { result, state } = evm.transact_raw(tx_env).map_err(|e| {
+            ProverError::ExecutionError(format!("finalizeWithdrawalBatch failed: {e:?}"))
+        })?;
 
-            evm.db_mut().commit(state);
+        evm.db_mut().commit(state);
 
-            cumulative_gas_used += result.gas_used();
-            let tx_type = recovered_tx.inner().tx_type();
+        cumulative_gas_used += result.gas_used();
+        let tx_type = recovered_tx.inner().tx_type();
 
-            receipt_envelopes.push(ReceiptData {
-                tx_type,
-                status: result.is_success(),
-                cumulative_gas_used,
-                logs: result.logs().to_vec(),
-            });
-            all_txs.push(recovered_tx.into_inner());
-        }
+        receipt_envelopes.push(ReceiptData {
+            tx_type,
+            status: result.is_success(),
+            cumulative_gas_used,
+            logs: result.logs().to_vec(),
+        });
+        all_txs.push(recovered_tx.into_inner());
+    }
 
     // Compute transactions root and receipts root.
     let transactions_root = compute_transactions_root(&all_txs);

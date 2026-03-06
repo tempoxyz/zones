@@ -30,7 +30,6 @@ sol! {
     }
 }
 
-
 #[test]
 fn advance_tempo_repro() {
     let mut evm = zone_test_utils::setup_zone_evm_default();
