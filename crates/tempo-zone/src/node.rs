@@ -338,7 +338,7 @@ where
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
-            let tokens = crate::bindings::ZonePortal::new(portal_address, &l1_provider)
+            let tokens = crate::abi::ZonePortal::new(portal_address, &l1_provider)
                 .enabled_tokens()
                 .await?;
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Discovered enabled tokens from L1");

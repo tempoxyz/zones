@@ -22,9 +22,7 @@ use crate::{
     abi::{
         self, EncryptedDeposit as AbiEncryptedDeposit,
         EncryptedDepositPayload as AbiEncryptedDepositPayload,
-    },
-    bindings::ZonePortal::{
-        self, DepositMade, EncryptedDepositMade, TokenEnabled, ZonePortalEvents,
+        ZonePortal::{self, DepositMade, EncryptedDepositMade, TokenEnabled, ZonePortalEvents},
     },
     l1_state::tip403::PolicyEvent,
 };
@@ -737,6 +735,7 @@ impl L1PortalEvents {
                     currency: event.currency,
                 });
             }
+            _ => {}
         }
         Ok(())
     }

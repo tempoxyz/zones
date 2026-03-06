@@ -12,7 +12,6 @@ pub mod abi;
 pub mod ext;
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub mod batch;
-pub mod bindings;
 pub mod builder;
 pub mod engine;
 pub mod evm;
