@@ -144,6 +144,26 @@ sol! {
         );
 
         #[derive(Debug)]
+        event EncryptedDepositMade(
+            bytes32 indexed newCurrentDepositQueueHash,
+            address indexed sender,
+            address token,
+            uint128 netAmount,
+            uint128 fee,
+            uint256 keyIndex,
+            bytes32 ephemeralPubkeyX,
+            uint8 ephemeralPubkeyYParity,
+            bytes ciphertext,
+            bytes12 nonce,
+            bytes16 tag
+        );
+
+        /// Event emitted when a new TIP-20 token is enabled for bridging.
+        /// Includes token metadata so the zone can create a matching TIP-20.
+        #[derive(Debug)]
+        event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
+        #[derive(Debug)]
         event BatchSubmitted(
             uint64 indexed withdrawalBatchIndex,
             bytes32 nextProcessedDepositQueueHash,
@@ -521,6 +541,25 @@ impl ZonePortal::sequencerEncryptionKeyReturn {
 impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     ZonePortal::ZonePortalInstance<P, N>
 {
+    /// Returns all token addresses currently enabled for bridging on this [`ZonePortal`].
+    ///
+    /// Calls [`enabledTokenCount`](ZonePortal::enabledTokenCountCall) followed by
+    /// [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) for each index.
+    pub async fn enabled_tokens(
+        &self,
+    ) -> Result<Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        let count = self.enabledTokenCount().call().await?;
+        let mut tokens = Vec::with_capacity(count.to::<usize>());
+        for i in 0..count.to::<u64>() {
+            let token = self
+                .enabledTokenAt(alloy_primitives::U256::from(i))
+                .call()
+                .await?;
+            tokens.push(token);
+        }
+        Ok(tokens)
+    }
+
     /// Fetches the active sequencer encryption key and its index.
     ///
     /// Returns `(key, key_index)` where `key` is the
