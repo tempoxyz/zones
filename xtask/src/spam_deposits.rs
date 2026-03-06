@@ -1,0 +1,362 @@
+//! Spam deposit transactions to a zone's L1 portal for throughput testing.
+//!
+//! Uses multiple funded signers and Tempo's `valid_after` field to queue
+//! deposits in the mempool, making them all eligible for inclusion at the
+//! same block.
+
+use alloy::{
+    network::{EthereumWallet, primitives::ReceiptResponse},
+    primitives::{Address, B256, Bytes, TxKind, U256},
+    providers::{Provider, ProviderBuilder},
+    signers::{SignerSync, local::PrivateKeySigner},
+    sol_types::SolCall,
+};
+use alloy_eips::Encodable2718;
+use eyre::{Context as _, eyre};
+use std::{collections::BTreeMap, time::Instant};
+use tempo_alloy::TempoNetwork;
+use tempo_contracts::precompiles::ITIP20;
+use tempo_primitives::{
+    TempoSignature,
+    transaction::{Call, PrimitiveSignature},
+};
+use zone::{
+    abi::{EncryptedDepositPayload, ZonePortal},
+    precompiles::ecies::encrypt_deposit,
+};
+
+#[derive(Debug, clap::Parser)]
+pub(crate) struct SpamDeposits {
+    /// Tempo L1 RPC URL.
+    #[arg(long, env = "L1_RPC_URL")]
+    l1_rpc_url: String,
+
+    /// ZonePortal contract address on Tempo L1.
+    #[arg(long, env = "L1_PORTAL_ADDRESS")]
+    portal: Address,
+
+    /// Private key (hex) of the funding/whale account.
+    #[arg(long, env = "PRIVATE_KEY")]
+    private_key: String,
+
+    /// Total number of deposits to send.
+    #[arg(long)]
+    total: usize,
+
+    /// Target deposits per block (= number of signers).
+    #[arg(long)]
+    per_block: usize,
+
+    /// Amount per deposit (in smallest token units, includes fee).
+    #[arg(long, default_value_t = 1_000_000)]
+    amount: u128,
+
+    /// TIP-20 token address to deposit.
+    #[arg(long, default_value = "0x20C0000000000000000000000000000000000000")]
+    token: Address,
+
+    /// Use encrypted deposits (ECIES).
+    #[arg(long)]
+    encrypted: bool,
+
+    /// Zone L2 RPC URL (optional, for verification).
+    #[arg(long, env = "ZONE_RPC_URL")]
+    zone_rpc_url: Option<String>,
+
+    /// Seconds into the future for the valid_after timestamp.
+    #[arg(long, default_value_t = 5)]
+    lead_time: u64,
+}
+
+struct EncryptionSetup {
+    seq_pub_x: B256,
+    seq_pub_y_parity: u8,
+    key_index: U256,
+}
+
+impl SpamDeposits {
+    pub(crate) async fn run(self) -> eyre::Result<()> {
+        let start = Instant::now();
+
+        // Parse whale key & create provider
+        let key_str = self
+            .private_key
+            .strip_prefix("0x")
+            .unwrap_or(&self.private_key);
+        let whale: PrivateKeySigner = key_str.parse()?;
+        let whale_addr = whale.address();
+        let wallet = EthereumWallet::from(whale);
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .wallet(wallet)
+            .connect(&self.l1_rpc_url)
+            .await?;
+
+        let chain_id = provider.get_chain_id().await?;
+        let gas_price = provider.get_gas_price().await?;
+        let portal = ZonePortal::new(self.portal, &provider);
+        let deposit_fee = portal.calculateDepositFee().call().await?;
+
+        println!("Chain ID: {chain_id}");
+        println!("Gas price: {gas_price}");
+        println!("Deposit fee: {deposit_fee}");
+
+        if self.amount <= deposit_fee {
+            return Err(eyre!(
+                "amount ({}) must exceed deposit fee ({deposit_fee})",
+                self.amount
+            ));
+        }
+
+        // ── Phase 1: Setup signers ──────────────────────────────────────
+
+        let num_signers = self.per_block;
+        let deposits_per_signer = self.total.div_ceil(num_signers);
+
+        println!("Generating {num_signers} signers ({deposits_per_signer} deposits each)...");
+        let signers: Vec<PrivateKeySigner> = (0..num_signers)
+            .map(|_| PrivateKeySigner::random())
+            .collect();
+
+        // Budget: tokens for deposits + gas headroom
+        let gas_budget =
+            U256::from(deposits_per_signer + 1) * U256::from(500_000u64) * U256::from(gas_price);
+        let token_budget = U256::from(self.amount) * U256::from(deposits_per_signer);
+        let funding_per_signer = token_budget + gas_budget;
+
+        println!("Funding {num_signers} signers with {funding_per_signer} tokens each...");
+        let token_contract = ITIP20::new(self.token, &provider);
+        for (i, signer) in signers.iter().enumerate() {
+            token_contract
+                .transfer(signer.address(), funding_per_signer)
+                .send()
+                .await
+                .wrap_err_with(|| format!("failed to fund signer {i}"))?
+                .get_receipt()
+                .await?;
+        }
+
+        println!("Approving portal for all signers...");
+        for (i, signer) in signers.iter().enumerate() {
+            let w = EthereumWallet::from(signer.clone());
+            let p = ProviderBuilder::new_with_network::<TempoNetwork>()
+                .wallet(w)
+                .connect(&self.l1_rpc_url)
+                .await?;
+            let token = ITIP20::new(self.token, &p);
+            token
+                .approve(self.portal, U256::MAX)
+                .send()
+                .await
+                .wrap_err_with(|| format!("failed to approve for signer {i}"))?
+                .get_receipt()
+                .await?;
+        }
+
+        // Fetch encryption key if needed
+        let enc_setup = if self.encrypted {
+            let key = portal
+                .sequencerEncryptionKey()
+                .call()
+                .await
+                .wrap_err("sequencerEncryptionKey() failed — is an encryption key set?")?;
+            let key_count: U256 = portal
+                .encryptionKeyCount()
+                .call()
+                .await
+                .wrap_err("encryptionKeyCount() failed")?;
+            let key_index = key_count
+                .checked_sub(U256::from(1))
+                .ok_or_else(|| eyre!("no encryption keys set on portal"))?;
+            let seq_pub_y_parity = normalize_y_parity(key.yParity).ok_or_else(|| {
+                eyre!(
+                    "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
+                    key.yParity
+                )
+            })?;
+            println!(
+                "Encryption key index: {key_index}, x: {}, parity: {seq_pub_y_parity:#x}",
+                key.x
+            );
+            Some(EncryptionSetup {
+                seq_pub_x: key.x,
+                seq_pub_y_parity,
+                key_index,
+            })
+        } else {
+            None
+        };
+
+        let setup_elapsed = start.elapsed();
+        println!("Setup complete in {:.1}s\n", setup_elapsed.as_secs_f64());
+
+        // ── Phase 2: Spam waves ─────────────────────────────────────────
+
+        let num_waves = deposits_per_signer;
+        let mut total_sent = 0usize;
+        let mut total_confirmed = 0usize;
+        let mut block_counts: BTreeMap<u64, usize> = BTreeMap::new();
+        let spam_start = Instant::now();
+
+        for wave in 0..num_waves {
+            let remaining = self.total - total_sent;
+            let batch_size = remaining.min(num_signers);
+            if batch_size == 0 {
+                break;
+            }
+
+            // Target timestamp: current time + lead_time
+            let target_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs()
+                + self.lead_time;
+
+            println!(
+                "Wave {}/{num_waves}: sending {batch_size} deposits (valid_after: {target_ts})...",
+                wave + 1
+            );
+
+            // Build, sign, and send all deposits in this wave
+            let mut pending_txs = Vec::with_capacity(batch_size);
+            for (i, signer) in signers.iter().enumerate().take(batch_size) {
+                let nonce_key = U256::from(rand::random::<u128>());
+
+                let calldata = self.build_deposit_calldata(whale_addr, &enc_setup)?;
+
+                let tx = tempo_primitives::TempoTransaction {
+                    chain_id,
+                    max_fee_per_gas: gas_price * 3,
+                    max_priority_fee_per_gas: gas_price,
+                    gas_limit: 500_000,
+                    calls: vec![Call {
+                        to: TxKind::Call(self.portal),
+                        value: U256::ZERO,
+                        input: Bytes::from(calldata),
+                    }],
+                    nonce_key,
+                    nonce: 0,
+                    valid_after: Some(target_ts),
+                    ..Default::default()
+                };
+
+                let sig_hash = tx.signature_hash();
+                let sig = signer.sign_hash_sync(&sig_hash)?;
+                let tempo_sig = TempoSignature::Primitive(PrimitiveSignature::Secp256k1(sig));
+                let signed = tx.into_signed(tempo_sig);
+                let encoded = signed.encoded_2718();
+
+                match provider.send_raw_transaction(&encoded).await {
+                    Ok(pending) => {
+                        pending_txs.push(pending);
+                        total_sent += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("  failed to send deposit {i}: {e}");
+                    }
+                }
+            }
+
+            // Wait for all receipts
+            for pending in pending_txs {
+                match pending.get_receipt().await {
+                    Ok(receipt) => {
+                        if receipt.status() {
+                            total_confirmed += 1;
+                            if let Some(block_num) = receipt.block_number {
+                                *block_counts.entry(block_num).or_default() += 1;
+                            }
+                        } else {
+                            eprintln!("  deposit reverted: {}", receipt.transaction_hash);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  failed to get receipt: {e}");
+                    }
+                }
+            }
+        }
+
+        // ── Phase 3: Report ─────────────────────────────────────────────
+
+        let spam_elapsed = spam_start.elapsed();
+        let total_elapsed = start.elapsed();
+
+        println!("\n== Results ==");
+        println!("  Total sent:      {total_sent}");
+        println!("  Total confirmed: {total_confirmed}");
+        println!("  Spam duration:   {:.1}s", spam_elapsed.as_secs_f64());
+        println!("  Total elapsed:   {:.1}s", total_elapsed.as_secs_f64());
+        if spam_elapsed.as_millis() > 0 {
+            println!(
+                "  Throughput:      {:.2} deposits/s",
+                total_confirmed as f64 / spam_elapsed.as_secs_f64()
+            );
+        }
+
+        if !block_counts.is_empty() {
+            println!("\n  Block Distribution:");
+            for (block, count) in &block_counts {
+                println!("    Block {block}: {count} deposits");
+            }
+
+            let counts: Vec<usize> = block_counts.values().copied().collect();
+            let avg = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
+            let max = counts.iter().max().unwrap_or(&0);
+            let min = counts.iter().min().unwrap_or(&0);
+            println!("\n  Avg/Max/Min deposits per block: {avg:.1} / {max} / {min}");
+        }
+
+        Ok(())
+    }
+
+    /// Build the calldata for a single deposit (plain or encrypted).
+    fn build_deposit_calldata(
+        &self,
+        recipient: Address,
+        enc_setup: &Option<EncryptionSetup>,
+    ) -> eyre::Result<Vec<u8>> {
+        if let Some(enc) = enc_setup {
+            let encrypted = encrypt_deposit(
+                &enc.seq_pub_x,
+                enc.seq_pub_y_parity,
+                recipient,
+                B256::ZERO,
+                self.portal,
+                enc.key_index,
+            )
+            .ok_or_else(|| eyre!("ECIES encryption failed"))?;
+
+            let payload = EncryptedDepositPayload {
+                ephemeralPubkeyX: encrypted.eph_pub_x,
+                ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
+                ciphertext: Bytes::from(encrypted.ciphertext),
+                nonce: encrypted.nonce.into(),
+                tag: encrypted.tag.into(),
+            };
+
+            Ok(ZonePortal::depositEncryptedCall {
+                token: self.token,
+                amount: self.amount,
+                keyIndex: enc.key_index,
+                encrypted: payload,
+            }
+            .abi_encode())
+        } else {
+            Ok(ZonePortal::depositCall {
+                token: self.token,
+                to: recipient,
+                amount: self.amount,
+                memo: B256::ZERO,
+            }
+            .abi_encode())
+        }
+    }
+}
+
+fn normalize_y_parity(y: u8) -> Option<u8> {
+    match y {
+        0x02 | 0x03 => Some(y),
+        0 | 1 => Some(0x02 + y),
+        _ => None,
+    }
+}

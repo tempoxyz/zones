@@ -2,7 +2,7 @@
 use crate::{
     create_zone::CreateZone, demo_blacklist::DemoBlacklist, encrypted_deposit::EncryptedDeposit,
     generate_zone_genesis::GenerateZoneGenesis, set_encryption_key::SetEncryptionKey,
-    zone_info::ZoneInfoCmd,
+    spam_deposits::SpamDeposits, zone_info::ZoneInfoCmd,
 };
 use clap::Parser as _;
 use eyre::Context;
@@ -12,6 +12,7 @@ mod demo_blacklist;
 mod encrypted_deposit;
 mod generate_zone_genesis;
 mod set_encryption_key;
+mod spam_deposits;
 mod zone_info;
 
 #[tokio::main]
@@ -32,6 +33,7 @@ async fn main() -> eyre::Result<()> {
             args.run().await.wrap_err("failed to generate zone genesis")
         }
         Action::SetEncryptionKey(args) => args.run().await.wrap_err("failed to set encryption key"),
+        Action::SpamDeposits(args) => args.run().await.wrap_err("failed to spam deposits"),
         Action::ZoneInfo(args) => args.run().await.wrap_err("failed to fetch zone info"),
     }
 }
@@ -53,5 +55,6 @@ enum Action {
     EncryptedDeposit(EncryptedDeposit),
     GenerateZoneGenesis(GenerateZoneGenesis),
     SetEncryptionKey(SetEncryptionKey),
+    SpamDeposits(SpamDeposits),
     ZoneInfo(ZoneInfoCmd),
 }

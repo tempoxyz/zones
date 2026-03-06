@@ -10999,11 +10999,13 @@ name = "tempo-xtask"
 version = "0.1.0"
 dependencies = [
  "alloy",
+ "alloy-eips",
  "alloy-rlp",
  "clap",
  "const-hex",
  "eyre",
  "k256",
+ "rand 0.8.5",
  "reth-evm",
  "rustls",
  "serde",
@@ -11013,6 +11015,7 @@ dependencies = [
  "tempo-contracts",
  "tempo-evm",
  "tempo-precompiles",
+ "tempo-primitives",
  "tempo-revm",
  "tokio",
  "zone",
