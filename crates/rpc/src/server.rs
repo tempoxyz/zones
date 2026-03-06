@@ -2,15 +2,23 @@
 //!
 //! An axum HTTP server backed by the zone node's EthApi, with
 //! authentication and privacy redactions applied per-method.
+//!
+//! Supports both HTTP POST and WebSocket transports. WebSocket clients
+//! authenticate by passing their token as a query parameter:
+//! `ws://host/?token=0x<hex>`.
 
 use axum::{
     Router,
     body::Bytes,
-    extract::State,
+    extract::{
+        Query, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    routing::post,
+    routing::{get, post},
 };
+use futures::stream::StreamExt;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -41,7 +49,10 @@ pub async fn start_private_rpc(
     let listen_addr = config.listen_addr;
     let state = Arc::new(RpcState { config, api });
 
-    let app = Router::new().route("/", post(handle_rpc)).with_state(state);
+    let app = Router::new()
+        .route("/", post(handle_rpc))
+        .route("/", get(handle_ws_upgrade))
+        .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     let local_addr = listener.local_addr()?;
@@ -135,7 +146,15 @@ fn authenticate(headers: &HeaderMap, config: &PrivateRpcConfig) -> Result<AuthCo
         .and_then(|v| v.to_str().ok())
         .ok_or(AuthError::Missing)?;
 
-    let token = auth::parse_auth_header(header_value)?;
+    authenticate_token(header_value, config)
+}
+
+/// Authenticate using a raw token string (shared by HTTP and WebSocket paths).
+fn authenticate_token(
+    token_value: &str,
+    config: &PrivateRpcConfig,
+) -> Result<AuthContext, AuthError> {
+    let token = auth::parse_auth_header(token_value)?;
 
     // Validate token fields against server config
     token.validate(config.zone_id, config.chain_id, config.zone_portal)?;
@@ -155,4 +174,113 @@ fn authenticate(headers: &HeaderMap, config: &PrivateRpcConfig) -> Result<AuthCo
         is_sequencer,
         expires_at: token.expires_at,
     })
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket transport
+// ---------------------------------------------------------------------------
+
+/// Query parameters for the WebSocket upgrade endpoint.
+#[derive(serde::Deserialize)]
+struct WsQuery {
+    token: String,
+}
+
+/// WebSocket upgrade handler — authenticates via `?token=` query param.
+async fn handle_ws_upgrade(
+    State(state): State<Arc<RpcState>>,
+    Query(query): Query<WsQuery>,
+    ws: WebSocketUpgrade,
+) -> impl IntoResponse {
+    // Authenticate before upgrading so we reject early on bad tokens.
+    let auth = match authenticate_token(&query.token, &state.config) {
+        Ok(auth) => auth,
+        Err(e) => {
+            warn!(target: "zone::rpc", err = %e, "ws auth failed");
+            let status = match &e {
+                AuthError::Missing => StatusCode::UNAUTHORIZED,
+                _ => StatusCode::FORBIDDEN,
+            };
+            return (status, "").into_response();
+        }
+    };
+
+    ws.on_upgrade(move |socket| handle_ws_session(socket, auth, state))
+        .into_response()
+}
+
+/// Run a single authenticated WebSocket session, dispatching JSON-RPC
+/// messages through the same pipeline as HTTP.
+async fn handle_ws_session(mut socket: WebSocket, auth: AuthContext, state: Arc<RpcState>) {
+    while let Some(msg) = socket.next().await {
+        let text = match msg {
+            Ok(Message::Text(t)) => t,
+            Ok(Message::Binary(b)) => match String::from_utf8(b.to_vec()) {
+                Ok(s) => s.into(),
+                Err(_) => {
+                    let _ = socket
+                            .send(Message::Text(
+                                r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"invalid UTF-8"},"id":null}"#.into(),
+                            ))
+                            .await;
+                    continue;
+                }
+            },
+            Ok(Message::Close(_)) => break,
+            Ok(_) => continue, // Ping/Pong handled by axum
+            Err(e) => {
+                warn!(target: "zone::rpc", err = %e, "ws recv error");
+                break;
+            }
+        };
+
+        let trimmed = text.trim_start();
+        let is_batch = trimmed.starts_with('[');
+
+        let response_json = if is_batch {
+            match serde_json::from_str::<Vec<JsonRpcRequest>>(trimmed) {
+                Ok(requests) => {
+                    let mut responses = Vec::with_capacity(requests.len());
+                    for req in &requests {
+                        responses.push(handlers::dispatch(req, &auth, state.api.as_ref()).await);
+                    }
+                    serde_json::to_string(&responses).unwrap_or_default()
+                }
+                Err(e) => {
+                    let err_resp = JsonRpcResponse::error(
+                        serde_json::Value::Null,
+                        JsonRpcError::invalid_params(format!("parse error: {e}")),
+                    );
+                    serde_json::to_string(&err_resp).unwrap_or_default()
+                }
+            }
+        } else {
+            let request: JsonRpcRequest = match serde_json::from_str(trimmed) {
+                Ok(req) => req,
+                Err(e) => {
+                    let err_resp = JsonRpcResponse::error(
+                        serde_json::Value::Null,
+                        JsonRpcError::invalid_params(format!("parse error: {e}")),
+                    );
+                    let _ = socket
+                        .send(Message::Text(
+                            serde_json::to_string(&err_resp).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    continue;
+                }
+            };
+
+            let response = handlers::dispatch(&request, &auth, state.api.as_ref()).await;
+            serde_json::to_string(&response).unwrap_or_default()
+        };
+
+        if socket
+            .send(Message::Text(response_json.into()))
+            .await
+            .is_err()
+        {
+            break;
+        }
+    }
 }
