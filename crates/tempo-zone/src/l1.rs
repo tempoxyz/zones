@@ -64,6 +64,8 @@ pub struct L1Subscriber {
     /// Mutable set of token addresses tracked for TIP-403 policy events.
     /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
     tracked_tokens: Vec<Address>,
+    /// TIP-403 metrics (cache sizes, events applied).
+    metrics: crate::l1_state::tip403::Tip403Metrics,
 }
 
 impl L1Subscriber {
@@ -81,6 +83,7 @@ impl L1Subscriber {
             config,
             deposit_queue,
             tracked_tokens,
+            metrics: Default::default(),
         };
 
         task_executor.spawn_critical(
@@ -304,6 +307,10 @@ impl L1Subscriber {
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
     pub async fn run(mut self) -> eyre::Result<()> {
+        // Re-read tracked tokens from the policy cache so we pick up any
+        // tokens discovered during a previous run (before a reconnect).
+        self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
+
         let provider = self.connect().await?;
 
         // Backfill to the current tip before subscribing.
@@ -452,10 +459,19 @@ impl L1Subscriber {
     /// cursor. The cursor is always updated — even for blocks with no policy events —
     /// so that cache-miss fallback queries target the correct L1 height.
     fn apply_policy_events(&self, block_number: u64, policy_events: &[PolicyEvent]) {
-        self.config
-            .policy_cache
-            .write()
-            .apply_events(block_number, policy_events);
+        let mut cache = self.config.policy_cache.write();
+        cache.apply_events(block_number, policy_events);
+        if !policy_events.is_empty() {
+            self.metrics
+                .listener_events_applied
+                .increment(policy_events.len() as u64);
+        }
+        self.metrics
+            .cached_policies
+            .set(cache.policies().len() as f64);
+        self.metrics
+            .cached_token_policies
+            .set(cache.num_token_policies() as f64);
     }
 
     /// Update the L1 state cache anchor. Detects reorgs by comparing

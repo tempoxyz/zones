@@ -134,6 +134,11 @@ impl PolicyCache {
         self.tokens.keys().copied().collect()
     }
 
+    /// Returns the number of token-to-policy mappings in the cache.
+    pub fn num_token_policies(&self) -> usize {
+        self.tokens.len()
+    }
+
     /// Returns the highest L1 block number processed by the cache.
     ///
     /// Returns `0` if no events have been applied yet.

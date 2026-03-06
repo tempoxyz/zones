@@ -35,4 +35,13 @@ pub struct Tip403Metrics {
 
     /// Number of in-flight concurrent resolution futures in the task.
     pub prefetch_in_flight: Gauge,
+
+    /// Number of cached policy records.
+    pub cached_policies: Gauge,
+
+    /// Number of cached token-to-policy mappings.
+    pub cached_token_policies: Gauge,
+
+    /// Policy events applied from L1 subscriber.
+    pub listener_events_applied: Counter,
 }
