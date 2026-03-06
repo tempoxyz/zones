@@ -72,7 +72,6 @@ jobs:
             ${{ steps.meta-tempo-zone.outputs.bake-file }}
           targets: default
           project: 0c6tg19qsp
-          push: ${{ github.event_name != 'pull_request' }}
         env:
           VERGEN_GIT_SHA: ${{ github.sha }}
           VERGEN_GIT_SHA_SHORT: ${{ steps.shortsha.outputs.shortsha }}
