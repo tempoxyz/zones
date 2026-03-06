@@ -271,7 +271,7 @@ impl ZoneEvmConfig {
         let recording = Arc::new(RecordingL1StateProvider::new(l1_reader));
         let recorded_reads = recording.recorded_reads();
         let zone_factory = ZoneEvmFactory::new(recording.clone() as Arc<dyn L1StorageReader>);
-        let inner = TempoEvmConfig::new_with_default_factory(chain_spec.clone());
+        let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
             inner,

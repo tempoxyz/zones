@@ -130,6 +130,7 @@ reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", branch = "temp
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v1.10.2" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v1.10.2" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v1.10.2" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v1.10.2" }
 revm = { version = "34.0.0", features = ["optional_fee_charge"] }
 
 # alloy
@@ -158,6 +159,7 @@ commonware-math = "2026.2.0"
 commonware-utils = "2026.2.0"
 
 # misc
+async-trait = "0.1"
 aes-gcm = "0.10.3"
 clap = { version = "4.5.45", features = ["derive"] }
 const-hex = { version = "1.15.0" }

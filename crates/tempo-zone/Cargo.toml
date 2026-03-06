@@ -21,6 +21,9 @@ tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-alloy = { workspace = true, features = ["tempo-compat"] }
+tempo-contracts.workspace = true
+tempo-precompiles.workspace = true
+tempo-precompiles-macros.workspace = true
 zone-rpc.workspace = true
 zone-prover.workspace = true
 

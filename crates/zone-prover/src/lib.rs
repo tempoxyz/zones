@@ -472,31 +472,37 @@ fn compute_state_root_from_bundle(
 /// Read a storage slot from a database (e.g., `State<WitnessDatabase>`).
 ///
 /// Converts the U256 value to a B256 for hash-type slots.
-fn read_storage_from_db(
-    db: &mut impl Database<Error = ProverError>,
+fn read_storage_from_db<E: core::fmt::Display>(
+    db: &mut impl Database<Error = E>,
     address: alloy_primitives::Address,
     slot: U256,
 ) -> Result<B256, ProverError> {
-    let value = db.storage(address, slot)?;
+    let value = db
+        .storage(address, slot)
+        .map_err(|e| ProverError::ExecutionError(e.to_string()))?;
     Ok(B256::from(value.to_be_bytes()))
 }
 
 /// Read ZoneOutbox.lastBatch from the zone state.
-fn read_last_batch_from_db(
-    db: &mut impl Database<Error = ProverError>,
+fn read_last_batch_from_db<E: core::fmt::Display>(
+    db: &mut impl Database<Error = E>,
 ) -> Result<LastBatch, ProverError> {
     // Read withdrawal_queue_hash from base slot.
-    let wqh_value = db.storage(
-        execute::ZONE_OUTBOX_ADDRESS,
-        storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
-    )?;
+    let wqh_value = db
+        .storage(
+            execute::ZONE_OUTBOX_ADDRESS,
+            storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
+        )
+        .map_err(|e| ProverError::ExecutionError(e.to_string()))?;
     let withdrawal_queue_hash = B256::from(wqh_value.to_be_bytes());
 
     // Read withdrawal_batch_index from base + 1.
-    let wbi_value = db.storage(
-        execute::ZONE_OUTBOX_ADDRESS,
-        storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1),
-    )?;
+    let wbi_value = db
+        .storage(
+            execute::ZONE_OUTBOX_ADDRESS,
+            storage::ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1),
+        )
+        .map_err(|e| ProverError::ExecutionError(e.to_string()))?;
     let withdrawal_batch_index = wbi_value.to::<u64>();
 
     Ok(LastBatch {
@@ -511,9 +517,9 @@ fn read_last_batch_from_db(
 /// `advanceTempo` header RLP). If no block advances Tempo, reads the hash
 /// from the zone state (TempoState slot 0), which carries over from the
 /// previous batch.
-fn compute_tempo_block_hash(
+fn compute_tempo_block_hash<E: core::fmt::Display>(
     witness: &BatchWitness,
-    db: &mut impl Database<Error = ProverError>,
+    db: &mut impl Database<Error = E>,
 ) -> Result<B256, ProverError> {
     // Find the last block with a Tempo header.
     for block in witness.zone_blocks.iter().rev() {

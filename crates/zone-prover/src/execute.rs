@@ -63,7 +63,7 @@ pub struct BlockExecutionResult {
 /// function so that the precompile has the correct Tempo block binding.
 ///
 /// Returns the transactions root and receipts root.
-pub fn execute_zone_block<DB: Database<Error = ProverError> + DatabaseCommit>(
+pub fn execute_zone_block<DB: Database<Error: core::fmt::Debug> + DatabaseCommit>(
     db: DB,
     block: &ZoneBlock,
     block_index: usize,

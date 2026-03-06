@@ -196,8 +196,6 @@ impl ZoneNode {
             .pool(ZonePoolBuilder)
             .executor(executor_builder)
             .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
-                deposit_queue,
-                sequencer,
                 witness_store,
             )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())

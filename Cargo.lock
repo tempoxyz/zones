@@ -11023,6 +11023,7 @@ name = "tempo-zone"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-provider",
  "alloy-signer-local",
  "clap",
  "const-hex",
@@ -11032,6 +11033,7 @@ dependencies = [
  "reth-ethereum",
  "reth-tracing",
  "rustls",
+ "tempo-alloy",
  "tempo-chainspec",
  "tokio",
  "tracing",
@@ -13061,6 +13063,8 @@ dependencies = [
  "alloy-signer-local",
  "alloy-sol-types",
  "alloy-transport",
+ "alloy-trie",
+ "async-trait",
  "const-hex",
  "derive_more",
  "either",
@@ -13113,7 +13117,34 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zone-prover",
  "zone-rpc",
+ "zone-test-utils",
+]
+
+[[package]]
+name = "zone-prover"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-sol-types",
+ "alloy-trie",
+ "nybbles",
+ "reth-primitives-traits",
+ "revm",
+ "serde",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-primitives",
+ "tempo-revm",
+ "thiserror 2.0.18",
+ "tracing",
+ "zone-prover",
+ "zone-test-utils",
 ]
 
 [[package]]
@@ -13140,38 +13171,11 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
- "zone-prover",
- "zone-test-utils",
-]
-
-[[package]]
-name = "zone-prover"
-version = "1.0.0-rc.5"
-dependencies = [
- "alloy-consensus",
- "alloy-eips",
- "alloy-evm",
- "alloy-primitives",
- "alloy-rlp",
- "alloy-sol-types",
- "alloy-trie",
- "nybbles",
- "reth-primitives-traits",
- "revm",
- "serde",
- "tempo-chainspec",
- "tempo-evm",
- "tempo-primitives",
- "tempo-revm",
- "thiserror 2.0.18",
- "tracing",
- "zone-prover",
- "zone-test-utils",
 ]
 
 [[package]]
 name = "zone-test-utils"
-version = "1.0.0-rc.5"
+version = "0.1.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
