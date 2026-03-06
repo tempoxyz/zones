@@ -116,12 +116,11 @@ impl EncryptedDeposit {
         };
 
         println!("Sending encrypted deposit of {} to {to}...", self.amount);
-        let pending = portal
+        let receipt = portal
             .depositEncrypted(self.token, self.amount, key_index, payload)
-            .send()
+            .send_sync()
             .await
             .wrap_err("failed to send depositEncrypted transaction")?;
-        let receipt = pending.get_receipt().await?;
         let tx_hash = receipt.transaction_hash;
         let block_number = receipt.block_number.unwrap_or_default();
 

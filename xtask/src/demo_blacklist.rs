@@ -215,11 +215,9 @@ impl DemoBlacklist {
                 admin,
                 salt,
             )
-            .send()
+            .send_sync()
             .await
-            .wrap_err("createToken send failed")?
-            .get_receipt()
-            .await?;
+            .wrap_err("createToken send failed")?;
         check(&receipt, "createToken")?;
         let tx = receipt.transaction_hash;
         println!("  Token created: DemoUSD (DUSD) at {token_addr}");
@@ -236,21 +234,14 @@ impl DemoBlacklist {
         // TIP-20 supply cap is uint128 internally, so u128::MAX is the effective maximum.
         let receipt = token
             .setSupplyCap(U256::from(u128::MAX))
-            .send()
-            .await?
-            .get_receipt()
+            .send_sync()
             .await?;
         check(&receipt, "setSupplyCap")?;
         println!("  Supply cap set to max");
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
 
         let roles = IRolesAuth::new(token_addr, &l1);
-        let receipt = roles
-            .grantRole(*ISSUER_ROLE, admin)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        let receipt = roles.grantRole(*ISSUER_ROLE, admin).send_sync().await?;
         check(&receipt, "grantRole")?;
         println!("  ISSUER_ROLE granted to {admin}");
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
@@ -260,20 +251,13 @@ impl DemoBlacklist {
         let mint_amount = self.amount * 4;
         let receipt = token
             .mint(admin, U256::from(mint_amount))
-            .send()
-            .await?
-            .get_receipt()
+            .send_sync()
             .await?;
         check(&receipt, "mint")?;
         println!("  Minted {mint_amount} DUSD to admin");
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
 
-        let receipt = token
-            .approve(self.portal, U256::MAX)
-            .send()
-            .await?
-            .get_receipt()
-            .await?;
+        let receipt = token.approve(self.portal, U256::MAX).send_sync().await?;
         check(&receipt, "approve")?;
         println!("  Portal approved for max spend");
         println!("  {L1_EXPLORER}/{}", receipt.transaction_hash);
@@ -400,9 +384,7 @@ impl DemoBlacklist {
 
         let receipt = registry
             .createPolicy(admin, TIP403Registry::PolicyType::BLACKLIST)
-            .send()
-            .await?
-            .get_receipt()
+            .send_sync()
             .await?;
         check(&receipt, "createPolicy(blacklist)")?;
 
@@ -421,9 +403,7 @@ impl DemoBlacklist {
 
         let receipt = registry
             .modifyPolicyBlacklist(blacklist_policy_id, target, true)
-            .send()
-            .await?
-            .get_receipt()
+            .send_sync()
             .await?;
         check(&receipt, "modifyPolicyBlacklist(add)")?;
         println!("  {target} added to blacklist");
@@ -440,9 +420,7 @@ impl DemoBlacklist {
         // Assign blacklist policy directly to the token
         let receipt = token
             .changeTransferPolicyId(blacklist_policy_id)
-            .send()
-            .await?
-            .get_receipt()
+            .send_sync()
             .await?;
         check(&receipt, "changeTransferPolicyId")?;
         let current_policy = token.transferPolicyId().call().await?;
@@ -482,9 +460,7 @@ impl DemoBlacklist {
         let pathusd_token = TIP20Token::new(PATH_USD_ADDRESS, &l1);
         let receipt = pathusd_token
             .approve(self.portal, U256::MAX)
-            .send()
-            .await?
-            .get_receipt()
+            .send_sync()
             .await?;
         check(&receipt, "approve pathUSD for portal")?;
 
@@ -492,9 +468,7 @@ impl DemoBlacklist {
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
         let receipt = portal
             .deposit(PATH_USD_ADDRESS, target, gas_fund, B256::ZERO)
-            .send()
-            .await?
-            .get_receipt()
+            .send_sync()
             .await?;
         check(&receipt, "deposit pathUSD to target for gas")?;
         let _ = wait_for_deposit_processed(&l2, l2_block_before, admin, target).await?;
@@ -507,9 +481,7 @@ impl DemoBlacklist {
 
         let receipt = registry
             .modifyPolicyBlacklist(blacklist_policy_id, target, false)
-            .send()
-            .await?
-            .get_receipt()
+            .send_sync()
             .await?;
         check(&receipt, "modifyPolicyBlacklist(remove)")?;
         println!("  {target} removed from blacklist");
@@ -569,11 +541,9 @@ impl DemoBlacklist {
         let receipt = outbox_token
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
             .gas(100_000)
-            .send()
+            .send_sync()
             .await
-            .wrap_err("approve outbox on L2")?
-            .get_receipt()
-            .await?;
+            .wrap_err("approve outbox on L2")?;
         check(&receipt, "approve outbox (L2)")?;
         println!(
             "  Outbox approved on L2  [tx: {}]",
@@ -599,9 +569,7 @@ impl DemoBlacklist {
                     Bytes::new(),
                 )
                 .gas(500_000)
-                .send()
-                .await?
-                .get_receipt()
+                .send_sync()
                 .await?;
             check(&receipt, "requestWithdrawal")?;
             println!(
@@ -678,11 +646,9 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
 
     let receipt = portal
         .depositEncrypted(token, amount, key_index, payload)
-        .send()
+        .send_sync()
         .await
-        .wrap_err("depositEncrypted send failed")?
-        .get_receipt()
-        .await?;
+        .wrap_err("depositEncrypted send failed")?;
     check(&receipt, "depositEncrypted")?;
     println!(
         "  Encrypted deposit sent (block {})",

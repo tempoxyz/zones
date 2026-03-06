@@ -134,9 +134,7 @@ impl CreateZone {
             "Creating zone on L1 via ZoneFactory at {}...",
             self.zone_factory
         );
-        let pending = factory.createZone(params).send().await?;
-        println!("Transaction sent, waiting for receipt...");
-        let receipt = pending.get_receipt().await?;
+        let receipt = factory.createZone(params).send_sync().await?;
         println!("Transaction confirmed in block {:?}", receipt.block_number);
         println!("Status: {}", receipt.status());
         println!("Gas used: {:?}", receipt.gas_used);
