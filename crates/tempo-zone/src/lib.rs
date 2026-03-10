@@ -4,6 +4,7 @@
 #![allow(unnameable_types)]
 #![allow(clippy::too_many_arguments)]
 use eyre as _;
+use zone_primitives as _;
 
 // Required by the `#[contract]` proc macro expansion (references `crate::storage` / `crate::error`).
 pub(crate) use tempo_precompiles::{error, storage};

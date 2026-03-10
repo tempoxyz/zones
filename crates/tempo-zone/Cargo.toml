@@ -24,6 +24,8 @@ tempo-alloy = { workspace = true, features = ["tempo-compat"] }
 tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
 tempo-precompiles-macros.workspace = true
+zone-primitives.workspace = true
+zone-prover.workspace = true
 zone-rpc.workspace = true
 
 # reth

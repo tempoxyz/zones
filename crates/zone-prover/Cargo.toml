@@ -1,0 +1,25 @@
+[package]
+name = "zone-prover"
+description = "Host-side zone batch prover using SP1"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zone-primitives = { path = "../zone-primitives" }
+
+# SP1
+sp1-sdk = { workspace = true }
+
+# alloy
+alloy-primitives.workspace = true
+
+# misc
+eyre.workspace = true
+tokio.workspace = true
+tracing.workspace = true

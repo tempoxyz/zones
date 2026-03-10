@@ -488,7 +488,7 @@ impl ZoneMonitor {
         let mut delay = INITIAL_RETRY_DELAY;
 
         for attempt in 1..=MAX_RETRIES {
-            match self.batch_submitter.submit_batch(batch_data).await {
+            match self.batch_submitter.submit_batch(batch_data, None).await {
                 Ok(tx_hash) => {
                     let blocks_in_batch = last_zone_block - self.last_submitted_zone_block;
                     info!(

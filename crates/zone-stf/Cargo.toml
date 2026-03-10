@@ -1,0 +1,32 @@
+[package]
+name = "zone-stf"
+description = "Zone batch state transition function for proving (no_std compatible)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+zone-primitives = { path = "../zone-primitives", default-features = false }
+
+# alloy (no_std compatible)
+alloy-primitives = { version = "1.5.4", default-features = false }
+alloy-sol-types = { version = "1.5.7", default-features = false }
+alloy-rlp = { version = "0.3.13", default-features = false }
+
+# revm (no_std compatible)
+revm = { version = "34.0.0", default-features = false, features = ["hashbrown"] }
+
+[features]
+default = ["std"]
+std = [
+    "zone-primitives/std",
+    "alloy-primitives/std",
+    "alloy-sol-types/std",
+    "alloy-rlp/std",
+    "revm/std",
+]

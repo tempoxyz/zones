@@ -19,6 +19,7 @@ use alloy_provider::{DynProvider, Provider};
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{info, instrument, warn};
+use zone_prover::ProofResult;
 
 /// EIP-2935 stores the last 8192 block hashes (~68 min at 500ms block time).
 /// Blocks older than this require ancestry mode.
@@ -104,19 +105,23 @@ impl BatchSubmitter {
     ///   the proof must include a block header chain from `recentTempoBlockNumber`
     ///   back to `tempoBlockNumber`.
     ///
-    /// # POC note
-    ///
-    /// `verifierConfig` and `proof` are set to empty bytes — the verifier
-    /// contract must be configured to accept empty proofs.
-    // TODO: pass real proof bytes once proof generation is implemented.
+    /// When `proof` is `None`, empty bytes are used for `verifierConfig` and
+    /// `proof` (POC mode — the verifier contract must accept empty proofs).
+    /// When `proof` is `Some`, the proof bytes from SP1 (or another backend)
+    /// are passed to the portal's verifier contract.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = batch.tempo_block_number,
         prev_block_hash = %batch.prev_block_hash,
         next_block_hash = %batch.next_block_hash,
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
+        has_proof = proof.is_some(),
     ))]
-    pub async fn submit_batch(&self, batch: &BatchData) -> Result<B256> {
+    pub async fn submit_batch(
+        &self,
+        batch: &BatchData,
+        proof: Option<&ProofResult>,
+    ) -> Result<B256> {
         if batch.tempo_block_number < self.genesis_tempo_block_number {
             return Err(eyre::eyre!(
                 "tempo_block_number ({}) is below genesis ({})",
@@ -145,6 +150,11 @@ impl BatchSubmitter {
 
         info!(?anchor_mode, "Submitting batch to ZonePortal on L1");
 
+        let (verifier_config, proof_bytes) = match proof {
+            Some(p) => (p.verifier_config.clone(), p.proof.clone()),
+            None => (Bytes::new(), Bytes::new()),
+        };
+
         let tx_hash = self
             .portal
             .submitBatch(
@@ -153,8 +163,8 @@ impl BatchSubmitter {
                 block_transition,
                 deposit_transition,
                 batch.withdrawal_queue_hash,
-                Bytes::new(),
-                Bytes::new(),
+                verifier_config,
+                proof_bytes,
             )
             .send()
             .await?

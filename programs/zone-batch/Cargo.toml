@@ -1,0 +1,21 @@
+[package]
+name = "zone-batch-program"
+description = "SP1 guest program for zone batch proving"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+zone-primitives = { path = "../../crates/zone-primitives", default-features = false }
+zone-stf = { path = "../../crates/zone-stf", default-features = false }
+sp1-zkvm = "6.0.2"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+# SP1 crypto acceleration patches — replaces standard crypto crates with
+# versions that use SP1's hardware-accelerated RISC-V precompiles.
+[patch.crates-io]
+sha2 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha2", tag = "patch-sha2-0.10.8-sp1-4.0.0" }
+sha3 = { git = "https://github.com/sp1-patches/RustCrypto-hashes", package = "sha3", tag = "patch-sha3-0.10.8-sp1-4.0.0" }
+tiny-keccak = { git = "https://github.com/sp1-patches/tiny-keccak", tag = "patch-2.0.2-sp1-4.0.0" }
+k256 = { git = "https://github.com/sp1-patches/elliptic-curves", tag = "patch-k256-13.4-sp1-4.1.0" }

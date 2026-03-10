@@ -10,8 +10,14 @@ members = [
   "bin/tempo-zone",
   "crates/tempo-zone",
   "crates/rpc",
+  "crates/zone-primitives",
+  "crates/zone-prover",
+  "crates/zone-stf",
   "xtask",
 ]
+# The SP1 guest program is excluded from the default workspace build because
+# it targets riscv32im and requires sp1-build tooling to compile.
+exclude = ["programs/zone-batch"]
 
 # Resolver 3 is available with edition 2024
 resolver = "3"
@@ -95,7 +101,12 @@ tempo-revm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", defaul
 tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
 
 # zones
+zone-primitives = { path = "crates/zone-primitives" }
+zone-prover = { path = "crates/zone-prover" }
 zone-rpc = { path = "crates/rpc" }
+
+# SP1
+sp1-sdk = "6.0.2"
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", branch = "tempo/v1.10.2" }
@@ -177,5 +188,4 @@ tokio = { version = "1.45.1", features = ["full"] }
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1.41"
-
-
+bincode = "1"
