@@ -495,6 +495,8 @@ impl BatchSubmitter {
         let outbox = ZoneOutbox::new(outbox_address, zone_provider.clone());
         let mut total_restored = 0u64;
 
+        // Steps 4+5: for each pending L1 portal queue slot, fetch the
+        // WithdrawalRequested events from zone L2, verify, and store.
         for slot in head..tail {
             let Some(event) = events.get(&slot) else {
                 warn!(
