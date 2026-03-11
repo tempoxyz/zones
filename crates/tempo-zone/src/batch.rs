@@ -521,31 +521,30 @@ impl BatchSubmitter {
             };
 
             let is_head_slot = slot == head;
-            let restored = self
-                .restore_slot(
-                    slot,
-                    is_head_slot,
-                    event,
-                    &outbox,
-                    zone_start,
-                    zone_end,
-                    store,
-                )
+            let withdrawals = self
+                .restore_slot(slot, is_head_slot, event, &outbox, zone_start, zone_end)
                 .await?;
-            total_restored += restored;
+
+            if !withdrawals.is_empty() {
+                let count = withdrawals.len();
+                let mut guard = store.lock();
+                for w in &withdrawals {
+                    guard.add_withdrawal(slot, w.clone());
+                }
+                info!(slot, count, "Restored withdrawals for portal queue slot");
+                total_restored += count as u64;
+            }
         }
 
         Ok(total_restored)
     }
 
-    /// Fetch, verify, and store withdrawals for a single pending L1 portal slot.
+    /// Fetch and verify withdrawals for a single pending L1 portal slot.
     ///
-    /// Queries `WithdrawalRequested` events from zone L2 blocks `[zone_start, zone_end]`,
-    /// verifies the hash chain against the L1 event, and stores the withdrawal structs.
-    /// For the head slot, already-processed withdrawals are trimmed by comparing
-    /// against the current on-chain slot hash.
-    ///
-    /// Returns the number of withdrawals stored.
+    /// Queries `WithdrawalRequested` events from zone L2 blocks `[zone_start, zone_end]`
+    /// and verifies the hash chain against the L1 event. For the head slot,
+    /// already-processed withdrawals are trimmed by comparing against the
+    /// current on-chain slot hash.
     async fn restore_slot(
         &self,
         slot: u64,
@@ -554,8 +553,7 @@ impl BatchSubmitter {
         outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
         zone_start: u64,
         zone_end: u64,
-        store: &SharedWithdrawalStore,
-    ) -> Result<u64> {
+    ) -> Result<Vec<abi::Withdrawal>> {
         // Fetch WithdrawalRequested events from zone L2.
         let withdrawals = fetch_slot_withdrawals(outbox, zone_start, zone_end).await?;
 
@@ -567,40 +565,28 @@ impl BatchSubmitter {
                 slot,
                 zone_start, zone_end, "withdrawal hash mismatch or empty"
             );
-            return Ok(0);
+            return Ok(vec![]);
         }
 
         // The head slot may be partially processed — the L1 withdrawal
         // processor could have consumed some withdrawals before the restart.
         // Compare against the current on-chain slot hash to find the offset.
-        let to_store = if is_head_slot {
+        if is_head_slot {
             let slot_hash: B256 = self
                 .portal
                 .withdrawalQueueSlot(U256::from(slot % WITHDRAWAL_QUEUE_CAPACITY))
                 .call()
                 .await?;
             match find_processed_offset(&withdrawals, slot_hash) {
-                Some(offset) => &withdrawals[offset..],
+                Some(offset) => Ok(withdrawals[offset..].to_vec()),
                 None => {
                     warn!(slot, %slot_hash, "cannot determine processed offset");
-                    return Ok(0);
+                    Ok(vec![])
                 }
             }
         } else {
-            &withdrawals[..]
-        };
-
-        if !to_store.is_empty() {
-            let count = to_store.len();
-            let mut guard = store.lock();
-            for w in to_store {
-                guard.add_withdrawal(slot, w.clone());
-            }
-            info!(slot, count, "Restored withdrawals for portal queue slot");
-            return Ok(count as u64);
+            Ok(withdrawals)
         }
-
-        Ok(0)
     }
 
     /// Walk **L1** backwards from `l1_tip` in 10k-block chunks to find
