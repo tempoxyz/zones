@@ -468,10 +468,15 @@ impl BatchSubmitter {
             self.read_portal_withdrawal_queue_tail(),
         )?;
 
+        if head >= tail {
+            info!(head, tail, "No pending withdrawals to restore");
+            return Ok(0);
+        }
+
         info!(
             head,
             tail,
-            pending = tail.saturating_sub(head),
+            pending = tail - head,
             "Restoring pending withdrawals"
         );
 

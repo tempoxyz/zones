@@ -95,12 +95,9 @@ impl WithdrawalStore {
             .push(withdrawal);
     }
 
-    /// Add all withdrawals for a batch at once.
+    /// Set all withdrawals for a batch at once, replacing any existing data.
     pub fn add_batch(&mut self, batch_index: u64, withdrawals: Vec<abi::Withdrawal>) {
-        self.batches
-            .entry(batch_index)
-            .or_default()
-            .extend(withdrawals);
+        self.batches.insert(batch_index, withdrawals);
     }
 
     /// Get all withdrawals for a batch.
@@ -520,9 +517,10 @@ mod tests {
         assert!(store.has_batch(0));
         assert_eq!(store.get_batch(0).unwrap().len(), 3);
 
+        // Calling add_batch again replaces existing data (idempotent).
         let more: Vec<_> = (0..2).map(|i| test_withdrawal(addr, i * 200)).collect();
         store.add_batch(0, more);
-        assert_eq!(store.get_batch(0).unwrap().len(), 5);
+        assert_eq!(store.get_batch(0).unwrap().len(), 2);
 
         store.add_batch(1, vec![test_withdrawal(addr, 999)]);
         assert_eq!(store.batch_count(), 2);
