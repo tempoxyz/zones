@@ -37,7 +37,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
-    batch::{BatchData, BatchSubmitter},
+    batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot},
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -287,10 +287,18 @@ impl ZoneMonitor {
         }
     }
 
-    /// Process a range of zone blocks as a single batch.
+    /// Process a range of zone blocks as a single batch, or split into multiple
+    /// sub-range submissions if stepping mode is required.
     ///
     /// Scans all blocks in `[from, to]`, collects withdrawal events, reads end-of-range
-    /// state, and submits one `submitBatch` call covering the entire range.
+    /// state, and submits `submitBatch` calls to L1.
+    ///
+    /// ## Stepping mode
+    ///
+    /// When the zone's `tempoBlockNumber` has fallen far outside the EIP-2935 window
+    /// (gap > 8192 blocks), a single submission would fail. The monitor splits the
+    /// range into multiple direct-mode submissions at intermediate zone blocks whose
+    /// `tempoBlockNumber` falls within the window relative to the current L1 tip.
     ///
     /// ## Withdrawal handling
     ///
@@ -308,32 +316,38 @@ impl ZoneMonitor {
         let block_count = to - from + 1;
         info!(from, to, block_count, "Processing zone block range");
 
-        // --- 1. Fetch withdrawal events, finalized hashes, and block state concurrently ---
-        let (all_withdrawals, finalized_hashes, end_state) = tokio::try_join!(
+        // Read end-of-range state to check the anchor gap class.
+        let end_state = self.fetch_block_snapshot(to).await?;
+
+        // Lightweight gap check — no header fetching, just arithmetic.
+        let gap_kind = self
+            .batch_submitter
+            .classify_anchor_gap(end_state.tempo_block_number)
+            .await?;
+
+        match gap_kind {
+            AnchorGapKind::Direct => self.process_block_range_single(from, to, end_state).await,
+            AnchorGapKind::Ancestry { step_size } => {
+                self.process_block_range_stepping(from, to, step_size).await
+            }
+        }
+    }
+
+    /// Process a block range as a single batch submission (direct or ancestry mode).
+    async fn process_block_range_single(
+        &mut self,
+        from: u64,
+        to: u64,
+        end_state: ZoneBlockSnapshot,
+    ) -> Result<()> {
+        // Fetch withdrawal events and finalized hashes concurrently.
+        let (all_withdrawals, finalized_hashes) = tokio::try_join!(
             self.fetch_withdrawals(from, to),
             self.fetch_finalized_hashes(from, to),
-            self.fetch_block_snapshot(to),
         )?;
 
-        // --- 2. Determine the withdrawal queue hash ---
-        let withdrawal_queue_hash = if finalized_hashes.len() == 1 {
-            // Single finalized batch — use the L2-authoritative hash directly.
-            finalized_hashes[0]
-        } else if finalized_hashes.len() > 1 || !all_withdrawals.is_empty() {
-            // Multiple finalized batches or withdrawals present — recompute
-            // a combined hash from all withdrawal structs.
-            abi::Withdrawal::queue_hash(&all_withdrawals)
-        } else {
-            B256::ZERO
-        };
-
-        // --- 3. Validate withdrawal data consistency ---
-        if !withdrawal_queue_hash.is_zero() && all_withdrawals.is_empty() {
-            return Err(eyre::eyre!(
-                "withdrawal_queue_hash is non-zero but no withdrawal events found — \
-                 RPC may have returned incomplete data"
-            ));
-        }
+        let withdrawal_queue_hash =
+            Self::compute_withdrawal_hash(&all_withdrawals, &finalized_hashes)?;
 
         if !all_withdrawals.is_empty() {
             info!(
@@ -342,11 +356,10 @@ impl ZoneMonitor {
                 count = all_withdrawals.len(),
                 finalized_batches = finalized_hashes.len(),
                 withdrawal_queue_hash = %withdrawal_queue_hash,
-                "📤 Collected withdrawal requests from zone"
+                "Collected withdrawal requests from zone"
             );
         }
 
-        // --- 4. Build and submit BatchData ---
         let batch_data = BatchData {
             tempo_block_number: end_state.tempo_block_number,
             prev_block_hash: self.prev_zone_block_hash,
@@ -356,11 +369,124 @@ impl ZoneMonitor {
             withdrawal_queue_hash,
         };
 
-        // Submit — state and withdrawal store only advance on success.
         self.submit_batch_with_retry(&batch_data, to, all_withdrawals)
             .await?;
 
         Ok(())
+    }
+
+    /// Process a block range using stepping mode: split into multiple direct-mode
+    /// sub-range submissions.
+    async fn process_block_range_stepping(
+        &mut self,
+        from: u64,
+        to: u64,
+        step_size: u64,
+    ) -> Result<()> {
+        // Read the tempo_block_number from the start of the range — this is the
+        // oldest value that needs to be anchored.
+        let start_state = self.fetch_block_snapshot(from).await?;
+        let current_l1_block = self
+            .batch_submitter
+            .l1_provider()
+            .get_block_number()
+            .await?;
+
+        let step_points = BatchSubmitter::compute_step_points(
+            from,
+            start_state.tempo_block_number,
+            current_l1_block,
+            step_size,
+            to,
+        );
+
+        if step_points.is_empty() {
+            return Err(eyre::eyre!(
+                "stepping mode required (tempo_block_number {} is outside EIP-2935 window) \
+                 but no valid step points found — zone may not have produced enough blocks yet",
+                start_state.tempo_block_number,
+            ));
+        }
+
+        // Collect all step zone block numbers, plus the final block.
+        // Sort + dedup defensively in case step points are not perfectly ordered.
+        let mut boundaries: Vec<u64> = step_points.iter().map(|sp| sp.zone_block).collect();
+        boundaries.push(to);
+        boundaries.sort_unstable();
+        boundaries.dedup();
+
+        let total_steps = boundaries.len();
+        info!(
+            total_steps,
+            from,
+            to,
+            first_step_zone_block = boundaries[0],
+            "Stepping mode: splitting batch into {} sub-range submissions",
+            total_steps
+        );
+
+        let mut range_start = from;
+
+        for (step_idx, &step_end) in boundaries.iter().enumerate() {
+            let step_state = self.fetch_block_snapshot(step_end).await?;
+
+            // Fetch withdrawal events for this sub-range.
+            let (step_withdrawals, step_finalized) = tokio::try_join!(
+                self.fetch_withdrawals(range_start, step_end),
+                self.fetch_finalized_hashes(range_start, step_end),
+            )?;
+
+            let withdrawal_queue_hash =
+                Self::compute_withdrawal_hash(&step_withdrawals, &step_finalized)?;
+
+            let batch_data = BatchData {
+                tempo_block_number: step_state.tempo_block_number,
+                prev_block_hash: self.prev_zone_block_hash,
+                next_block_hash: step_state.block_hash,
+                prev_processed_deposit_hash: self.prev_processed_deposit_hash,
+                next_processed_deposit_hash: step_state.processed_deposit_hash,
+                withdrawal_queue_hash,
+            };
+
+            info!(
+                step = step_idx + 1,
+                total_steps,
+                zone_from = range_start,
+                zone_to = step_end,
+                tempo_block_number = step_state.tempo_block_number,
+                "Submitting stepping sub-batch"
+            );
+
+            self.submit_batch_with_retry(&batch_data, step_end, step_withdrawals)
+                .await?;
+
+            range_start = step_end + 1;
+        }
+
+        Ok(())
+    }
+
+    /// Compute the withdrawal queue hash from withdrawal events and finalized hashes.
+    fn compute_withdrawal_hash(
+        all_withdrawals: &[abi::Withdrawal],
+        finalized_hashes: &[B256],
+    ) -> Result<B256> {
+        let withdrawal_queue_hash = if finalized_hashes.len() == 1 {
+            finalized_hashes[0]
+        } else if finalized_hashes.len() > 1 || !all_withdrawals.is_empty() {
+            abi::Withdrawal::queue_hash(all_withdrawals)
+        } else {
+            B256::ZERO
+        };
+
+        if !withdrawal_queue_hash.is_zero() && all_withdrawals.is_empty() {
+            return Err(eyre::eyre!(
+                "withdrawal_queue_hash is non-zero but no withdrawal events found — \
+                 RPC may have returned incomplete data"
+            ));
+        }
+
+        Ok(withdrawal_queue_hash)
     }
 
     /// Fetch all `WithdrawalRequested` events in the given block range and convert
@@ -642,17 +768,4 @@ fn decode_portal_revert(err: &eyre::Report) -> Option<String> {
     let bytes = alloy_primitives::hex::decode(&msg[start..end]).ok()?;
     let error = ContractError::<ZonePortal::ZonePortalErrors>::abi_decode(&bytes).ok()?;
     Some(error.to_string())
-}
-
-/// Zone L2 state read at the last block of a processed range, used to populate
-/// [`BatchData`] for the `submitBatch` call on L1.
-struct ZoneBlockSnapshot {
-    /// Latest Tempo L1 block number as seen by the zone (from the `TempoState`
-    /// predeploy). Submitted to the portal for EIP-2935 verification.
-    tempo_block_number: u64,
-    /// Cumulative hash of all deposits processed by the zone up to this block
-    /// (from `ZoneInbox.processedDepositQueueHash`).
-    processed_deposit_hash: B256,
-    /// Zone L2 block hash at the end of the range.
-    block_hash: B256,
 }

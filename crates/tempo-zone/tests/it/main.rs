@@ -8,6 +8,7 @@ mod l1_e2e;
 mod private_rpc;
 mod private_rpc_e2e;
 mod restart_e2e;
+mod stepping_e2e;
 mod tip403_policy;
 mod tip403_transfers;
 mod utils;
