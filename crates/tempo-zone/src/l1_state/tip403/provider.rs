@@ -542,6 +542,48 @@ impl PolicyProvider {
         })
     }
 
+    /// Cache-first, RPC-fallback policy existence check (sync).
+    ///
+    /// Returns `Ok(true)` if the policy exists, `Ok(false)` if it doesn't,
+    /// and propagates RPC errors instead of collapsing them into `false`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if called from within an async context on the same tokio runtime.
+    pub fn policy_exists_sync(&self, policy_id: u64) -> Result<bool> {
+        if policy_id < FIRST_USER_POLICY {
+            return Ok(true);
+        }
+
+        // Cache hit: if we have a policy record with a known type, it exists.
+        if let Some(policy) = self.cache.read().policies().get(&policy_id)
+            && policy.policy_type.is_some()
+        {
+            return Ok(true);
+        }
+
+        let block_number = self.cache.read().last_l1_block();
+        debug!(
+            policy_id,
+            block_number, "Policy exists cache miss, fetching from L1 RPC"
+        );
+        let registry = ITIP403Registry::new(TIP403_REGISTRY_ADDRESS, &self.provider);
+        tokio::task::block_in_place(|| {
+            self.runtime_handle.block_on(async {
+                registry
+                    .policyExists(policy_id)
+                    .block(BlockId::number(block_number))
+                    .call()
+                    .await
+                    .map_err(|e| {
+                        self.metrics.rpc_errors.increment(1);
+                        warn!(policy_id, block_number, %e, "policyExists RPC failed");
+                        eyre::eyre!("policyExists RPC failed for policy {policy_id}: {e}")
+                    })
+            })
+        })
+    }
+
     /// Call `isAuthorized(policyId, user)` on the TIP403Registry via L1 RPC.
     async fn rpc_is_authorized(
         &self,
@@ -608,10 +650,9 @@ impl PolicyCheck for PolicyProvider {
     }
 
     fn policy_exists(&self, policy_id: u64) -> Result<bool, PrecompileError> {
-        if policy_id < FIRST_USER_POLICY {
-            return Ok(true);
-        }
-        Ok(self.resolve_policy_type_sync(policy_id).is_ok())
+        self.policy_exists_sync(policy_id).map_err(|e| {
+            PrecompileError::other(format!("policyExists failed for policy {policy_id}: {e}"))
+        })
     }
 
     fn policy_id_counter(&self) -> u64 {
