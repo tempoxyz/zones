@@ -168,21 +168,23 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     )
     .await?;
 
-    let (_, tail_before) = portal_queue_state(&l1, portal_address).await?;
+    let (head_before, tail_before) = portal_queue_state(&l1, portal_address).await?;
+    assert!(
+        tail_before > head_before,
+        "expected pending withdrawal slot: tail={tail_before} head={head_before}"
+    );
 
     // --- Abort sequencer BEFORE the withdrawal is processed ---
-    seq_handle.monitor_handle.abort();
+    // Abort withdrawal processor first so it can't race to process the pending slot.
     seq_handle.withdrawal_handle.abort();
+    seq_handle.monitor_handle.abort();
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // --- Respawn sequencer (fetch_pending_withdrawals runs during init) ---
     let _seq_handle2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
-    // The OLD withdrawal from before the restart should be processed — either
-    // it was already processed before the abort, or the restored data lets the
-    // processor pick it up after restart. Wait for portal head to advance past
-    // it (don't use wait_for_withdrawal_on_l1 which captures balance_before at
-    // call time and would double-count if already processed).
+    // The OLD withdrawal from before the restart should be processed via
+    // restored data (withdrawal processor was aborted before head advanced).
     crate::utils::poll_until(
         WITHDRAWAL_TIMEOUT,
         std::time::Duration::from_millis(200),
