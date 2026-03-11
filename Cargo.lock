@@ -13068,6 +13068,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zone-primitives",
  "zone-rpc",
 ]
 

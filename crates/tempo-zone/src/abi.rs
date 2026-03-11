@@ -8,47 +8,14 @@
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
 //!   withdrawal hash chains, and exposes [`LastBatch`] state for proof generation.
 
-use alloy_primitives::{Address, B256, address, keccak256};
+use alloy_primitives::{B256, keccak256};
 use alloy_sol_types::{SolValue, sol};
 
-/// Sentinel value for empty withdrawal queue slots.
-/// Using 0xff...ff instead of 0x00 to avoid clearing storage.
-pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
-
-/// TempoState predeploy address on Zone L2.
-pub const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
-
-/// TempoState storage slot for `tempoBlockHash` (slot 0).
-pub const TEMPO_BLOCK_HASH_SLOT: B256 = B256::ZERO;
-
-/// TempoState storage slot for packed `(tempoBlockNumber, tempoGasLimit, tempoGasUsed, tempoTimestamp)` (slot 7).
-pub const TEMPO_PACKED_SLOT: B256 = {
-    let mut bytes = [0u8; 32];
-    bytes[31] = 7;
-    B256::new(bytes)
+pub use zone_primitives::constants::{
+    EMPTY_SENTINEL, TEMPO_BLOCK_HASH_SLOT, TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS,
+    TEMPO_STATE_READER_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZONE_TOKEN_ADDRESS,
 };
-
-/// ZoneInbox predeploy address on Zone L2.
-pub const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
-
-/// ZoneOutbox predeploy address on Zone L2.
-pub const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000002");
-
-/// ZoneConfig predeploy address on Zone L2.
-pub const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
-
-/// TempoStateReader predeploy address on Zone L2.
-/// Standalone precompile — separate from the TempoState contract.
-pub const TEMPO_STATE_READER_ADDRESS: Address =
-    address!("0x1c00000000000000000000000000000000000004");
-
-/// Default zone token address on Zone L2 — pathUSD TIP20 precompile.
-///
-/// This is the initial token enabled at zone creation. With multi-asset support,
-/// additional TIP-20 tokens can be enabled via the portal's `enableToken()`.
-/// This is the same TIP20 precompile address as on Tempo L1, initialized in zone genesis
-/// with the TIP20Factory so that `is_valid_fee_token` passes for user transactions.
-pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
 
 sol! {
     // ---------------------------------------------------------------
