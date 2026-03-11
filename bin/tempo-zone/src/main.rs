@@ -12,6 +12,7 @@ use alloy_provider::Provider;
 
 use alloy_primitives::Address;
 use clap::Parser;
+use eyre as _;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 
@@ -89,6 +90,30 @@ struct ZoneArgs {
         default_value_t = 8544
     )]
     pub private_rpc_port: u16,
+
+    /// Batch proof backend implementation.
+    #[arg(
+        long = "prover.backend",
+        env = "ZONE_PROVER_BACKEND",
+        value_enum,
+        default_value_t = ProverBackend::Soft
+    )]
+    pub prover_backend: ProverBackend,
+
+    /// Skip local SP1 simulation before dispatching to the Succinct prover network.
+    #[arg(
+        long = "prover.succinct.skip-simulation",
+        env = "ZONE_PROVER_SUCCINCT_SKIP_SIMULATION",
+        default_value_t = false
+    )]
+    pub prover_succinct_skip_simulation: bool,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Default)]
+enum ProverBackend {
+    #[default]
+    Soft,
+    Succinct,
 }
 
 fn main() {
@@ -176,13 +201,39 @@ fn main() {
                 .expect("valid L1 RPC URL for proof generator")
                 .erased();
 
-            let proof_generator: Arc<dyn zone::BatchProofGenerator> =
-                Arc::new(ProofGenerator::new(
+            let proof_generator: Arc<dyn zone::BatchProofGenerator> = match args.prover_backend {
+                ProverBackend::Soft => Arc::new(ProofGenerator::new(
                     handle.node.provider().clone(),
                     witness_store.clone(),
                     l1_proof_provider,
                     sequencer_addr,
-                ));
+                )),
+                ProverBackend::Succinct => {
+                    #[cfg(feature = "succinct-prover")]
+                    {
+                        info!(
+                            target: "reth::cli",
+                            "Using Succinct (SP1 prover network) batch proof backend"
+                        );
+                        Arc::new(zone::proof::SuccinctBatchProofGenerator::new(
+                            handle.node.provider().clone(),
+                            witness_store.clone(),
+                            l1_proof_provider,
+                            sequencer_addr,
+                            zone::proof::SuccinctNetworkProverConfig {
+                                skip_simulation: args.prover_succinct_skip_simulation,
+                            },
+                        ).await?)
+                    }
+                    #[cfg(not(feature = "succinct-prover"))]
+                    {
+                        return Err(eyre::eyre!(
+                            "prover backend 'succinct' requested, but this binary was built \
+                             without the 'succinct-prover' feature"
+                        ));
+                    }
+                }
+            };
 
             let zone_rpc_url = handle
                 .node

@@ -63,14 +63,17 @@ pub struct BlockExecutionResult {
 /// function so that the precompile has the correct Tempo block binding.
 ///
 /// Returns the transactions root and receipts root.
-pub fn execute_zone_block<DB: Database<Error = ProverError> + DatabaseCommit>(
+pub fn execute_zone_block<DB: Database + DatabaseCommit>(
     db: DB,
     block: &ZoneBlock,
     block_index: usize,
     tempo_state: &TempoStateAccessor,
     chain_id: u64,
     is_last_block: bool,
-) -> Result<(BlockExecutionResult, DB), ProverError> {
+) -> Result<(BlockExecutionResult, DB), ProverError>
+where
+    DB::Error: Into<ProverError>,
+{
     // Build the EVM environment for this block.
     let evm_env = build_evm_env(block, chain_id);
 

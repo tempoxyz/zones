@@ -39,6 +39,7 @@ const-hex.workspace = true
 k256.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+eyre.workspace = true
 
 [[bin]]
 name = "tempo-zone"
@@ -48,3 +49,4 @@ path = "src/main.rs"
 default = ["jemalloc"]
 
 jemalloc = ["reth-cli-util/jemalloc", "reth-ethereum/jemalloc"]
+succinct-prover = ["zone/succinct-prover"]

@@ -8,13 +8,22 @@
 //! The zone monitor calls [`ProofGenerator::generate_batch_proof`] once per
 //! batch instead of performing these steps itself.
 
-use alloy_primitives::B256;
+use alloy_primitives::{B256, Bytes};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::Result;
 use reth_provider::StateProviderFactory;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info};
+
+#[cfg(feature = "succinct-prover")]
+use sp1_sdk::{
+    HashableKey, NetworkProver, ProveRequest, Prover, ProverClient, ProvingKey, SP1Stdin,
+};
+#[cfg(feature = "succinct-prover")]
+use tokio::sync::Mutex as AsyncMutex;
+#[cfg(feature = "succinct-prover")]
+use zone_prover_sp1_program::ELF as ZONE_PROVER_SP1_ELF;
 
 use crate::witness::{
     AccessSnapshot, FetchedL1Proof, RecordedL1Read, SharedWitnessStore, WitnessGenerator,
@@ -77,10 +86,46 @@ where
         tempo_block_number: u64,
         prev_block_hash: B256,
         expected_withdrawal_batch_index: u64,
-    ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
+    ) -> Result<(Bytes, Bytes)> {
         // TODO(production): Replace soft proof (ABI-packed BatchOutput) with a
         // real ZK proof (SP1) or TEE attestation (SGX/TDX).
 
+        let batch_witness = self
+            .build_batch_witness(
+                from,
+                to,
+                tempo_block_number,
+                prev_block_hash,
+                expected_withdrawal_batch_index,
+            )
+            .await?;
+
+        // Run the prover.
+        let output = zone_prover::prove_zone_batch(batch_witness)
+            .map_err(|e| eyre::eyre!("prove_zone_batch failed: {e}"))?;
+
+        info!(
+            from,
+            to,
+            next_block_hash = %output.block_transition.next_block_hash,
+            withdrawal_queue_hash = %output.withdrawal_queue_hash,
+            "Proof generated successfully"
+        );
+
+        let proof_bytes = encode_batch_output(&output);
+        Ok((Bytes::new(), proof_bytes.into()))
+    }
+
+    /// Assemble a complete [`zone_prover::types::BatchWitness`] from the local
+    /// witness store, local zone state trie, and Tempo L1 account/storage proofs.
+    async fn build_batch_witness(
+        &self,
+        from: u64,
+        to: u64,
+        tempo_block_number: u64,
+        prev_block_hash: B256,
+        expected_withdrawal_batch_index: u64,
+    ) -> Result<zone_prover::types::BatchWitness> {
         // Take witness data from the store for the block range, and prune
         // any stale entries below `from` (e.g., leftover from resyncs).
         let block_witnesses = {
@@ -197,20 +242,7 @@ where
             tempo_state_proofs,
             tempo_ancestry_headers,
         );
-
-        // Run the prover.
-        let output = zone_prover::prove_zone_batch(batch_witness)
-            .map_err(|e| eyre::eyre!("prove_zone_batch failed: {e}"))?;
-
-        info!(
-            from, to,
-            next_block_hash = %output.block_transition.next_block_hash,
-            withdrawal_queue_hash = %output.withdrawal_queue_hash,
-            "Proof generated successfully"
-        );
-
-        let proof_bytes = encode_batch_output(&output);
-        Ok((alloy_primitives::Bytes::new(), proof_bytes.into()))
+        Ok(batch_witness)
     }
 
     /// Fetch `eth_getProof` responses from the Tempo L1 chain for all
@@ -277,7 +309,7 @@ pub trait BatchProofGenerator: Send + Sync {
         tempo_block_number: u64,
         prev_block_hash: B256,
         expected_withdrawal_batch_index: u64,
-    ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)>;
+    ) -> Result<(Bytes, Bytes)>;
 }
 
 #[async_trait::async_trait]
@@ -292,7 +324,7 @@ where
         tempo_block_number: u64,
         prev_block_hash: B256,
         expected_withdrawal_batch_index: u64,
-    ) -> Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
+    ) -> Result<(Bytes, Bytes)> {
         ProofGenerator::generate_batch_proof(
             self,
             from,
@@ -303,6 +335,172 @@ where
         )
         .await
     }
+}
+
+#[cfg(feature = "succinct-prover")]
+const SUCCINCT_VERIFIER_CONFIG_V1: u8 = 1;
+#[cfg(feature = "succinct-prover")]
+const SUCCINCT_PROOF_SYSTEM_SP1_PLONK: u8 = 1;
+#[cfg(feature = "succinct-prover")]
+const SP1_PUBLIC_VALUES_LEN_BATCH_OUTPUT: usize = 192;
+
+/// Configuration for the Succinct (SP1 prover network) proof backend.
+///
+/// The SDK reads credentials (private key, RPC endpoint) from the environment.
+/// See the SP1/Succinct SDK docs for the exact variables expected by
+/// `sp1_sdk::NetworkProver::new()`.
+#[cfg(feature = "succinct-prover")]
+#[derive(Debug, Clone)]
+pub struct SuccinctNetworkProverConfig {
+    /// Skip local simulation before dispatching the request to the prover
+    /// network. Useful when the caller already trusts witness generation.
+    pub skip_simulation: bool,
+}
+
+#[cfg(feature = "succinct-prover")]
+impl Default for SuccinctNetworkProverConfig {
+    fn default() -> Self {
+        Self {
+            skip_simulation: false,
+        }
+    }
+}
+
+#[cfg(feature = "succinct-prover")]
+struct SuccinctNetworkProverState {
+    prover: NetworkProver,
+    pk: sp1_sdk::SP1ProvingKey,
+    vk: sp1_sdk::SP1VerifyingKey,
+}
+
+/// Batch proof generator backed by Succinct's SP1 prover network.
+///
+/// This reuses the same witness assembly pipeline as [`ProofGenerator`], but
+/// sends the witness to an SP1 guest program that runs `zone_prover::prove_zone_batch`
+/// and commits the 192-byte batch-output encoding as public values.
+#[cfg(feature = "succinct-prover")]
+pub struct SuccinctBatchProofGenerator<Provider> {
+    inner: ProofGenerator<Provider>,
+    config: SuccinctNetworkProverConfig,
+    prover_state: AsyncMutex<SuccinctNetworkProverState>,
+}
+
+#[cfg(feature = "succinct-prover")]
+impl<P> SuccinctBatchProofGenerator<P>
+where
+    P: StateProviderFactory,
+{
+    /// Create a new Succinct-backed proof generator.
+    pub async fn new(
+        provider: P,
+        witness_store: SharedWitnessStore,
+        l1_provider: DynProvider<TempoNetwork>,
+        sequencer: alloy_primitives::Address,
+        config: SuccinctNetworkProverConfig,
+    ) -> Result<Self> {
+        let inner = ProofGenerator::new(provider, witness_store, l1_provider, sequencer);
+
+        let prover = ProverClient::builder().network().build().await;
+        let pk = prover
+            .setup(ZONE_PROVER_SP1_ELF)
+            .await
+            .map_err(|e| eyre::eyre!("SP1 network prover setup failed: {e}"))?;
+        let vk = pk.verifying_key().clone();
+
+        Ok(Self {
+            inner,
+            config,
+            prover_state: AsyncMutex::new(SuccinctNetworkProverState { prover, pk, vk }),
+        })
+    }
+}
+
+#[cfg(feature = "succinct-prover")]
+#[async_trait::async_trait]
+impl<P> BatchProofGenerator for SuccinctBatchProofGenerator<P>
+where
+    P: StateProviderFactory + Send + Sync,
+{
+    async fn generate_batch_proof(
+        &self,
+        from: u64,
+        to: u64,
+        tempo_block_number: u64,
+        prev_block_hash: B256,
+        expected_withdrawal_batch_index: u64,
+    ) -> Result<(Bytes, Bytes)> {
+        let batch_witness = self
+            .inner
+            .build_batch_witness(
+                from,
+                to,
+                tempo_block_number,
+                prev_block_hash,
+                expected_withdrawal_batch_index,
+            )
+            .await?;
+
+        let mut stdin = SP1Stdin::new();
+        stdin.write(&batch_witness);
+
+        info!(
+            from,
+            to, "Dispatching batch proof to Succinct prover network"
+        );
+
+        let state = self.prover_state.lock().await;
+        let proof = state
+            .prover
+            .prove(&state.pk, stdin)
+            .plonk()
+            .skip_simulation(self.config.skip_simulation)
+            .await
+            .map_err(|e| eyre::eyre!("SP1 network proof failed: {e}"))?;
+
+        let public_values = proof.public_values.to_vec();
+        if public_values.len() != SP1_PUBLIC_VALUES_LEN_BATCH_OUTPUT {
+            return Err(eyre::eyre!(
+                "unexpected SP1 public values length: got {}, expected {}",
+                public_values.len(),
+                SP1_PUBLIC_VALUES_LEN_BATCH_OUTPUT
+            ));
+        }
+
+        let vk_hash = B256::from(state.vk.bytes32_raw());
+        let verifier_config = encode_succinct_verifier_config(vk_hash, &public_values)?;
+        let proof_bytes: Bytes = proof.bytes().into();
+
+        info!(
+            from,
+            to,
+            proof_len = proof_bytes.len(),
+            public_values_len = public_values.len(),
+            vk_hash = %vk_hash,
+            "Succinct proof generated successfully"
+        );
+
+        Ok((verifier_config, proof_bytes))
+    }
+}
+
+#[cfg(feature = "succinct-prover")]
+fn encode_succinct_verifier_config(vk_hash: B256, public_values: &[u8]) -> Result<Bytes> {
+    let public_values_len = u32::try_from(public_values.len())
+        .map_err(|_| eyre::eyre!("SP1 public values too long: {}", public_values.len()))?;
+
+    // Binary encoding (v1):
+    // [0]      version (=1)
+    // [1]      proof system (=1 for SP1 Plonk)
+    // [2..34]  vk hash (bytes32)
+    // [34..38] public values len (u32, big-endian)
+    // [38..]   public values bytes
+    let mut buf = Vec::with_capacity(38 + public_values.len());
+    buf.push(SUCCINCT_VERIFIER_CONFIG_V1);
+    buf.push(SUCCINCT_PROOF_SYSTEM_SP1_PLONK);
+    buf.extend_from_slice(vk_hash.as_slice());
+    buf.extend_from_slice(&public_values_len.to_be_bytes());
+    buf.extend_from_slice(public_values);
+    Ok(buf.into())
 }
 
 /// Encode a [`BatchOutput`] into proof bytes.

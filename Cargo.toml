@@ -10,6 +10,7 @@ members = [
   "bin/tempo-zone",
   "crates/tempo-zone",
   "crates/zone-prover",
+  "crates/zone-prover-sp1-program",
   "crates/zone-test-utils",
   "xtask",
 ]
@@ -173,5 +174,3 @@ tokio = { version = "1.45.1", features = ["full"] }
 axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1.41"
-
-

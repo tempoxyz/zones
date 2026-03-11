@@ -192,49 +192,51 @@ where
             vec![]
         };
 
-        let (deposits, decryptions): (Vec<QueuedDeposit>, Vec<DecryptionData>) =
-            if let Some(lb) = l1_block {
-                let mut decryptions = Vec::new();
-                let deposits = lb
-                    .deposits
-                    .iter()
-                    .map(|d| match d {
-                        L1Deposit::Regular(d) => {
-                            let deposit = crate::abi::Deposit {
-                                sender: d.sender,
-                                to: d.to,
-                                amount: d.amount,
-                                memo: d.memo,
-                            };
-                            QueuedDeposit {
-                                deposit_type: DepositType::Regular,
-                                deposit_data: Bytes::from(deposit.abi_encode()),
-                            }
+        let (deposits, decryptions): (Vec<QueuedDeposit>, Vec<DecryptionData>) = if let Some(lb) =
+            l1_block
+        {
+            let mut decryptions = Vec::new();
+            let deposits = lb
+                .deposits
+                .iter()
+                .map(|d| match d {
+                    L1Deposit::Regular(d) => {
+                        let deposit = crate::abi::Deposit {
+                            token: d.token,
+                            sender: d.sender,
+                            to: d.to,
+                            amount: d.amount,
+                            memo: d.memo,
+                        };
+                        QueuedDeposit {
+                            deposit_type: DepositType::Regular,
+                            deposit_data: Bytes::from(deposit.abi_encode()),
                         }
-                        L1Deposit::Encrypted(d) => {
-                            let (queued, decryption) =
-                                build_encrypted_deposit(d, &self.sequencer_key, self.portal_address);
-                            decryptions.push(DecryptionData {
-                                shared_secret: decryption.sharedSecret,
-                                shared_secret_y_parity: decryption.sharedSecretYParity,
-                                to: decryption.to,
-                                memo: decryption.memo,
-                                cp_proof: ChaumPedersenProof {
-                                    s: decryption.cpProof.s,
-                                    c: decryption.cpProof.c,
-                                },
-                            });
-                            QueuedDeposit {
-                                deposit_type: DepositType::Encrypted,
-                                deposit_data: Bytes::from(queued.abi_encode()),
-                            }
+                    }
+                    L1Deposit::Encrypted(d) => {
+                        let (queued, decryption) =
+                            build_encrypted_deposit(d, &self.sequencer_key, self.portal_address);
+                        decryptions.push(DecryptionData {
+                            shared_secret: decryption.sharedSecret,
+                            shared_secret_y_parity: decryption.sharedSecretYParity,
+                            to: decryption.to,
+                            memo: decryption.memo,
+                            cp_proof: ChaumPedersenProof {
+                                s: decryption.cpProof.s,
+                                c: decryption.cpProof.c,
+                            },
+                        });
+                        QueuedDeposit {
+                            deposit_type: DepositType::Encrypted,
+                            deposit_data: Bytes::from(queued.abi_encode()),
                         }
-                    })
-                    .collect();
-                (deposits, decryptions)
-            } else {
-                (Vec::new(), Vec::new())
-            };
+                    }
+                })
+                .collect();
+            (deposits, decryptions)
+        } else {
+            (Vec::new(), Vec::new())
+        };
 
         let zone_block = ZoneBlock {
             number: block_number,
@@ -477,7 +479,6 @@ where
                     general_gas_limit,
                     shared_gas_limit,
                     timestamp_millis_part: attributes.timestamp_millis_part(),
-                    base_fee_per_gas: attributes.base_fee_per_gas(),
                     subblock_fee_recipients: Default::default(),
                 },
             )
@@ -496,7 +497,7 @@ where
         self.evm_config.set_l1_recording_block_index(0);
 
         // Execute advanceTempo system transaction — exactly one per zone block.
-        let header_rlp = alloy_rlp::encode(&l1_block.header);
+        let header_rlp = alloy_rlp::encode(&*l1_block.header);
         {
             // Log header details for debugging chain continuity
             info!(

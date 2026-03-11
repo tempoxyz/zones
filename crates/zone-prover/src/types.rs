@@ -441,3 +441,14 @@ pub enum ProverError {
 
 // Implement revm's DBErrorMarker so ProverError can be used as Database::Error.
 impl revm::database_interface::DBErrorMarker for ProverError {}
+
+impl From<revm::database_interface::bal::EvmDatabaseError<ProverError>> for ProverError {
+    fn from(error: revm::database_interface::bal::EvmDatabaseError<ProverError>) -> Self {
+        match error {
+            revm::database_interface::bal::EvmDatabaseError::Database(inner) => inner,
+            revm::database_interface::bal::EvmDatabaseError::Bal(inner) => {
+                ProverError::ExecutionError(format!("revm BAL database error: {inner}"))
+            }
+        }
+    }
+}

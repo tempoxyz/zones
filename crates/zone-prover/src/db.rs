@@ -115,6 +115,7 @@ impl WitnessDatabase {
                 balance: acct.balance,
                 nonce: acct.nonce,
                 code_hash: acct.code_hash,
+                account_id: None,
                 code: acct
                     .code
                     .as_ref()

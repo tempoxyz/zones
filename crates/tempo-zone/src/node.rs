@@ -21,7 +21,7 @@ use reth_node_builder::{
         NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock};
+use reth_primitives_traits::{AlloyBlockHeader as _, SealedBlock, SealedHeader};
 use reth_provider::ChainSpecProvider;
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
@@ -37,7 +37,7 @@ use tempo_node::{
     rpc::TempoReceiptConverter,
 };
 use tempo_payload_types::{TempoExecutionData, TempoPayloadAttributes, TempoPayloadTypes};
-use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType, TEMPO_BASE_FEE};
+use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType};
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
     amm::AmmLiquidityCache,
@@ -399,9 +399,7 @@ impl PayloadAttributesBuilder<TempoPayloadAttributes, TempoHeader>
     for ZonePayloadAttributesBuilder
 {
     fn build(&self, parent: &SealedHeader<TempoHeader>) -> TempoPayloadAttributes {
-        let mut attrs = self.inner.build(parent);
-        attrs.base_fee_per_gas = Some(TEMPO_BASE_FEE);
-        attrs
+        self.inner.build(parent)
     }
 }
 

@@ -21,7 +21,7 @@ tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-alloy = { workspace = true, features = ["tempo-compat"] }
-zone-prover.workspace = true
+zone-prover = { workspace = true, features = ["serde"] }
 
 # reth
 reth-basic-payload-builder.workspace = true
@@ -83,6 +83,8 @@ parking_lot.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+sp1-sdk = { version = "6.0.1", optional = true, features = ["network"] }
+zone-prover-sp1-program = { path = "../zone-prover-sp1-program", optional = true }
 
 [dev-dependencies]
 alloy = { workspace = true, features = [
@@ -117,3 +119,4 @@ zone-test-utils.workspace = true
 
 [features]
 default = []
+succinct-prover = ["dep:sp1-sdk", "dep:zone-prover-sp1-program"]
