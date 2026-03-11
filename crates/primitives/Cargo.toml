@@ -11,17 +11,17 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-alloy-primitives = { version = "1.5.4", default-features = false }
-alloy-rlp = { version = "0.3.13", default-features = false }
-alloy-sol-types = { version = "1.5.7", default-features = false }
-alloy-contract = { version = "1.6.1", optional = true }
-alloy-network = { version = "1.6.1", optional = true }
-alloy-provider = { version = "1.6.1", optional = true }
-tokio = { version = "1", optional = true }
-serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+alloy-primitives = { workspace = true }
+alloy-rlp = { workspace = true }
+alloy-sol-types = { workspace = true }
+alloy-contract = { workspace = true, optional = true }
+alloy-network = { workspace = true, optional = true }
+alloy-provider = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
 
 [dev-dependencies]
-const-hex = "1.15.0"
+const-hex.workspace = true
 
 [features]
 default = ["std", "serde", "rpc"]
