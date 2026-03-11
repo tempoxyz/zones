@@ -8,6 +8,9 @@
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
 //!   withdrawal hash chains, and exposes [`LastBatch`] state for proof generation.
 
+// The `sol!` macro generates functions whose arity we don't control.
+#![allow(clippy::too_many_arguments)]
+
 use alloy_primitives::{B256, keccak256};
 use alloy_sol_types::SolValue;
 
