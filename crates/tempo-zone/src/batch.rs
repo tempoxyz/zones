@@ -787,3 +787,77 @@ pub(crate) struct ZoneBlockSnapshot {
     /// Zone L2 block hash.
     pub block_hash: B256,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abi;
+    use alloy_primitives::{B256, address};
+
+    fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
+        abi::Withdrawal {
+            token: address!("0x0000000000000000000000000000000000001000"),
+            sender: address!("0x0000000000000000000000000000000000000001"),
+            to,
+            amount,
+            fee: 0,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackRecipient: to,
+            callbackData: Default::default(),
+        }
+    }
+
+    #[test]
+    fn find_offset_no_withdrawals_processed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let withdrawals = vec![w0, w1];
+        let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
+        assert_eq!(find_processed_offset(&withdrawals, full_hash), Some(0));
+    }
+
+    #[test]
+    fn find_offset_one_processed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let withdrawals = vec![w0, w1];
+        let hash = abi::Withdrawal::queue_hash(&withdrawals[1..]);
+        assert_eq!(find_processed_offset(&withdrawals, hash), Some(1));
+    }
+
+    #[test]
+    fn find_offset_all_processed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w0];
+        // B256::ZERO matches an empty slice, but the loop only checks offsets 0..len,
+        // so offset == len (the empty tail) is never tested.
+        assert_eq!(find_processed_offset(&withdrawals, B256::ZERO), None);
+    }
+
+    #[test]
+    fn find_offset_no_match() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w0];
+        let random_hash = B256::from([0xdeu8; 32]);
+        assert_eq!(find_processed_offset(&withdrawals, random_hash), None);
+    }
+
+    #[test]
+    fn find_offset_single_withdrawal_unprocessed() {
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 999);
+        let withdrawals = vec![w];
+        let hash = abi::Withdrawal::queue_hash(&withdrawals);
+        assert_eq!(find_processed_offset(&withdrawals, hash), Some(0));
+    }
+
+    #[test]
+    fn find_offset_partial_three_withdrawals() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+        let withdrawals = vec![w0, w1, w2];
+        let hash = abi::Withdrawal::queue_hash(&withdrawals[2..]);
+        assert_eq!(find_processed_offset(&withdrawals, hash), Some(2));
+    }
+}

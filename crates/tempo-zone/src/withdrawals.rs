@@ -509,4 +509,22 @@ mod tests {
         store.add_withdrawal(portal_tail, w);
         assert!(store.has_batch(portal_tail));
     }
+
+    #[test]
+    fn store_add_batch() {
+        let mut store = WithdrawalStore::new();
+        let addr = address!("0x0000000000000000000000000000000000000042");
+        let batch: Vec<_> = (0..3).map(|i| test_withdrawal(addr, i * 100)).collect();
+
+        store.add_batch(0, batch);
+        assert!(store.has_batch(0));
+        assert_eq!(store.get_batch(0).unwrap().len(), 3);
+
+        let more: Vec<_> = (0..2).map(|i| test_withdrawal(addr, i * 200)).collect();
+        store.add_batch(0, more);
+        assert_eq!(store.get_batch(0).unwrap().len(), 5);
+
+        store.add_batch(1, vec![test_withdrawal(addr, 999)]);
+        assert_eq!(store.batch_count(), 2);
+    }
 }
