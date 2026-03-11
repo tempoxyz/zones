@@ -563,6 +563,9 @@ impl BatchSubmitter {
     /// `BatchSubmitted` events for portal slots `[head, tail)` plus the
     /// predecessor slot `head - 1` (used to determine the zone L2 block
     /// range start of the first slot).
+    ///
+    /// Stops as soon as all needed events are found — pending slots are
+    /// recent, so the first chunk typically covers them all.
     async fn find_batch_events_backwards(
         &self,
         l1_tip: u64,
