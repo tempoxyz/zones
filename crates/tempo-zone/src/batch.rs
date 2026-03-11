@@ -550,8 +550,17 @@ impl BatchSubmitter {
     /// predecessor slot `head - 1` (used to determine the zone L2 block
     /// range start of the first slot).
     ///
-    /// Stops as soon as all needed events are found — pending slots are
-    /// recent, so the first chunk typically covers them all.
+    /// Portal queue slots are assigned by position: the n-th non-zero-hash
+    /// `BatchSubmitted` event (0-indexed, chronologically) corresponds to
+    /// portal queue slot n. This is because the L1 portal increments
+    /// `withdrawalBatchIndex` on every `submitBatch` call, but only advances
+    /// the withdrawal queue `tail` for batches with non-zero
+    /// `withdrawalQueueHash`. The two counters diverge whenever a batch has
+    /// no withdrawals, so we cannot use `withdrawalBatchIndex` as the slot
+    /// index.
+    ///
+    /// Stops as soon as enough events are found — pending slots are recent,
+    /// so the first chunk typically covers them all.
     async fn find_batch_events_backwards(
         &self,
         l1_tip: u64,
@@ -560,35 +569,53 @@ impl BatchSubmitter {
     ) -> Result<BTreeMap<u64, abi::ZonePortal::BatchSubmitted>> {
         let start = head.saturating_sub(1);
         let needed = (tail - start) as usize;
-        let mut found: BTreeMap<u64, abi::ZonePortal::BatchSubmitted> = BTreeMap::new();
+        if needed == 0 {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut all_events: Vec<abi::ZonePortal::BatchSubmitted> = Vec::new();
         let mut hi = l1_tip;
 
-        while found.len() < needed && hi >= self.genesis_tempo_block_number {
+        while hi >= self.genesis_tempo_block_number {
             let lo = hi
                 .saturating_sub(10_000)
                 .max(self.genesis_tempo_block_number);
 
-            for (event, _) in self
+            let chunk: Vec<_> = self
                 .portal
                 .BatchSubmitted_filter()
                 .from_block(lo)
                 .to_block(hi)
                 .query()
                 .await?
-            {
-                if event.withdrawalQueueHash.is_zero() {
-                    continue;
-                }
-                let idx = event.withdrawalBatchIndex;
-                if idx >= start && idx < tail {
-                    found.insert(idx, event);
-                }
-            }
+                .into_iter()
+                .filter(|(event, _)| !event.withdrawalQueueHash.is_zero())
+                .map(|(event, _)| event)
+                .collect();
 
+            all_events.extend(chunk);
+
+            if all_events.len() >= needed {
+                break;
+            }
             if lo == self.genesis_tempo_block_number {
                 break;
             }
             hi = lo - 1;
+        }
+
+        // Sort chronologically — the n-th event = portal queue slot n.
+        all_events.sort_by_key(|e| e.withdrawalBatchIndex);
+
+        // Assign portal slots: if we found M events total, the last M
+        // correspond to slots [tail - M, tail). Keep only [start, tail).
+        let mut found = BTreeMap::new();
+        let first_slot = tail.saturating_sub(all_events.len() as u64);
+        for (i, event) in all_events.into_iter().enumerate() {
+            let portal_slot = first_slot + i as u64;
+            if portal_slot >= start && portal_slot < tail {
+                found.insert(portal_slot, event);
+            }
         }
 
         Ok(found)
@@ -629,6 +656,10 @@ fn resolve_pending_slots(
         };
 
         let Some(withdrawals) = slot_withdrawals.get(&portal_slot) else {
+            warn!(
+                portal_slot,
+                "no withdrawal data fetched for pending portal slot"
+            );
             continue;
         };
 
@@ -648,7 +679,7 @@ fn resolve_pending_slots(
                     }
                 }
                 None => {
-                    warn!(portal_slot, %head_slot_hash, "cannot determine processed offset");
+                    warn!(portal_slot, %head_slot_hash, "cannot determine processed offset for head slot — slot may be fully consumed or hash chain corrupted");
                 }
             }
         } else {
@@ -661,12 +692,15 @@ fn resolve_pending_slots(
 
 /// Find the offset into `withdrawals` where the remaining hash chain matches
 /// `current_slot_hash`. Returns `Some(0)` if no withdrawals have been processed,
-/// `Some(n)` if n have been processed, or `None` if no match is found.
+/// `Some(n)` if n have been processed (n remaining), or `None` if no match is
+/// found.
+///
+/// Also checks `offset == len` (all consumed, hash chain = `B256::ZERO`).
 fn find_processed_offset(
     withdrawals: &[abi::Withdrawal],
     current_slot_hash: B256,
 ) -> Option<usize> {
-    for offset in 0..withdrawals.len() {
+    for offset in 0..=withdrawals.len() {
         let hash = abi::Withdrawal::queue_hash(&withdrawals[offset..]);
         if hash == current_slot_hash {
             return Some(offset);
@@ -832,9 +866,8 @@ mod tests {
     fn find_offset_all_processed() {
         let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
         let withdrawals = vec![w0];
-        // B256::ZERO matches an empty slice, but the loop only checks offsets 0..len,
-        // so offset == len (the empty tail) is never tested.
-        assert_eq!(find_processed_offset(&withdrawals, B256::ZERO), None);
+        // B256::ZERO = queue_hash(&[]), meaning all withdrawals have been consumed.
+        assert_eq!(find_processed_offset(&withdrawals, B256::ZERO), Some(1));
     }
 
     #[test]
@@ -928,7 +961,8 @@ mod tests {
         let mut slot_withdrawals = BTreeMap::new();
         slot_withdrawals.insert(5, withdrawals);
 
-        // B256::ZERO means all consumed; find_processed_offset returns None
+        // B256::ZERO = queue_hash(&[]), all consumed. find_processed_offset returns
+        // Some(1) (offset == len), so remaining is empty and slot is not stored.
         let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO);
         assert!(result.is_empty());
     }
@@ -988,6 +1022,55 @@ mod tests {
 
         // No event for slot 5
         let result = resolve_pending_slots(5, 6, &BTreeMap::new(), &slot_withdrawals, B256::ZERO);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_head_partial_with_non_head_slot() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+
+        let head_withdrawals = vec![w0, w1];
+        let non_head_withdrawals = vec![w2];
+
+        let head_hash = abi::Withdrawal::queue_hash(&head_withdrawals);
+        let non_head_hash = abi::Withdrawal::queue_hash(&non_head_withdrawals);
+        // w0 already processed, head_slot_hash = hash of [w1] only
+        let head_slot_hash = abi::Withdrawal::queue_hash(&head_withdrawals[1..]);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(head_hash));
+        events.insert(6, test_batch_event(non_head_hash));
+
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, head_withdrawals);
+        slot_withdrawals.insert(6, non_head_withdrawals);
+
+        let result = resolve_pending_slots(5, 7, &events, &slot_withdrawals, head_slot_hash);
+        // Head slot trimmed to 1 remaining withdrawal
+        assert_eq!(result.get(&5).unwrap().len(), 1);
+        assert_eq!(
+            abi::Withdrawal::queue_hash(result.get(&5).unwrap()),
+            head_slot_hash
+        );
+        // Non-head slot fully present
+        assert_eq!(result.get(&6).unwrap().len(), 1);
+        assert_eq!(
+            abi::Withdrawal::queue_hash(result.get(&6).unwrap()),
+            non_head_hash
+        );
+    }
+
+    #[test]
+    fn resolve_empty_withdrawals_vec_skipped() {
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(B256::from([0x11u8; 32])));
+
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, vec![]);
+
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO);
         assert!(result.is_empty());
     }
 }
