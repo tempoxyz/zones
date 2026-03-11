@@ -500,10 +500,10 @@ impl BatchSubmitter {
 
         // Steps 4+5: for each pending L1 portal queue slot, fetch the
         // WithdrawalRequested events from zone L2, verify, and store.
-        for slot in head..tail {
-            let Some(event) = events.get(&slot) else {
+        for l1_slot in head..tail {
+            let Some(event) = events.get(&l1_slot) else {
                 warn!(
-                    slot,
+                    l1_slot,
                     "no BatchSubmitted event found for pending portal slot"
                 );
                 continue;
@@ -513,22 +513,22 @@ impl BatchSubmitter {
             // slot's end. May be wider than the exact batch when non-withdrawal
             // batches exist in between, but those blocks have no
             // WithdrawalRequested events so the result is the same.
-            let zone_end = zone_blocks[&slot];
-            let zone_start = if slot > 0 {
-                zone_blocks.get(&(slot - 1)).map(|n| n + 1).unwrap_or(1)
+            let zone_end = zone_blocks[&l1_slot];
+            let zone_start = if l1_slot > 0 {
+                zone_blocks.get(&(l1_slot - 1)).map(|n| n + 1).unwrap_or(1)
             } else {
                 1
             };
 
-            let is_head_slot = slot == head;
+            let is_head_slot = l1_slot == head;
             let withdrawals = self
-                .restore_slot(slot, is_head_slot, event, &outbox, zone_start, zone_end)
+                .restore_slot(l1_slot, is_head_slot, event, &outbox, zone_start, zone_end)
                 .await?;
 
             if !withdrawals.is_empty() {
                 let count = withdrawals.len();
-                store.lock().add_batch(slot, withdrawals);
-                info!(slot, count, "Restored withdrawals for portal queue slot");
+                store.lock().add_batch(l1_slot, withdrawals);
+                info!(l1_slot, count, "Restored withdrawals for portal queue slot");
                 total_restored += count as u64;
             }
         }
