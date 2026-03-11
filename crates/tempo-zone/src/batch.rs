@@ -504,13 +504,16 @@ impl BatchSubmitter {
                 continue;
             }
             let zone_end = zone_end_by_slot[&portal_slot];
-            let zone_start = if portal_slot > 0 {
-                zone_end_by_slot
-                    .get(&(portal_slot - 1))
-                    .map(|n| n + 1)
-                    .unwrap_or(1)
-            } else {
+            let zone_start = if portal_slot == 0 {
                 1
+            } else if let Some(prev_end) = zone_end_by_slot.get(&(portal_slot - 1)) {
+                prev_end + 1
+            } else {
+                warn!(
+                    portal_slot,
+                    "predecessor event missing, cannot determine zone block range start"
+                );
+                continue;
             };
             let withdrawals = fetch_slot_withdrawals(&outbox, zone_start, zone_end).await?;
             slot_withdrawals.insert(portal_slot, withdrawals);
@@ -548,7 +551,9 @@ impl BatchSubmitter {
     /// Walk **L1** backwards from `l1_tip` in 10k-block chunks to find
     /// `BatchSubmitted` events for portal slots `[head, tail)` plus the
     /// predecessor slot `head - 1` (used to determine the zone L2 block
-    /// range start of the first slot).
+    /// range start of the first pending slot). When `head == 0` the
+    /// predecessor does not exist and is omitted; the caller falls back to
+    /// zone block 1.
     ///
     /// Portal queue slots are assigned by position: the n-th non-zero-hash
     /// `BatchSubmitted` event (0-indexed, chronologically) corresponds to
@@ -1071,6 +1076,37 @@ mod tests {
         slot_withdrawals.insert(5, vec![]);
 
         let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_missing_withdrawals_data_skipped() {
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(hash));
+        // slot_withdrawals has no entry for slot 5
+        let slot_withdrawals = BTreeMap::new();
+
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, hash);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_head_slot_corrupted_hash_skipped() {
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w];
+        let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
+        // head_slot_hash doesn't match any tail of the withdrawal list
+        let corrupted_hash = B256::from([0xdeu8; 32]);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(full_hash));
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, withdrawals);
+
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, corrupted_hash);
         assert!(result.is_empty());
     }
 }
