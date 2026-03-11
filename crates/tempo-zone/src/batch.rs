@@ -18,12 +18,13 @@
 //! | Gap | Mode | Description |
 //! |-----|------|-------------|
 //! | < [`EIP2935_EFFECTIVE_WINDOW`] | Direct | Portal reads hash from EIP-2935. |
-//! | [`EIP2935_EFFECTIVE_WINDOW`]–[`EIP2935_HISTORY_WINDOW`] | Ancestry | Anchor via recent block + header chain. |
-//! | > [`EIP2935_HISTORY_WINDOW`] | Stepping | Split into multiple direct-mode submissions. |
+//! | ≥ [`EIP2935_EFFECTIVE_WINDOW`] | Stepping | Split into multiple direct-mode submissions. |
 //!
-//! Stepping is resolved by [`AnchorGapKind`] in the zone monitor before
-//! `submit_batch` is called. Direct vs Ancestry is resolved inside
-//! `submit_batch` by [`AnchorMode`].
+//! [`AnchorGapKind`] classifies the gap in the zone monitor before
+//! `submit_batch` is called. Inside `submit_batch`, [`AnchorMode`] handles
+//! the rare case where the gap lands between [`EIP2935_EFFECTIVE_WINDOW`] and
+//! [`EIP2935_HISTORY_WINDOW`] (e.g. due to timing) by falling back to ancestry
+//! mode — a recent anchor block plus a parent-hash header chain.
 
 use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
 use alloy_primitives::{Address, B256, Bytes};
