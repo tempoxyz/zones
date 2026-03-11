@@ -455,14 +455,11 @@ impl BatchSubmitter {
             self.read_portal_withdrawal_queue_head(),
             self.read_portal_withdrawal_queue_tail(),
         )?;
-        if head >= tail {
-            return Ok(0);
-        }
 
         info!(
             head,
             tail,
-            pending = tail - head,
+            pending = tail.saturating_sub(head),
             "Restoring pending withdrawals"
         );
 
