@@ -82,10 +82,11 @@ impl ZoneEvmFactory {
             Some(ZoneTokenFactory::create(&cfg))
         });
         if let Some(ref policy_provider) = self.policy_provider {
-            let registry = ZoneTip403ProxyRegistry::new(policy_provider.clone());
+            let provider = policy_provider.clone();
+            let registry = ZoneTip403ProxyRegistry::new(provider.clone());
 
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
-                Some(ZoneTip403ProxyRegistry::create(policy_provider.clone()))
+                Some(ZoneTip403ProxyRegistry::create(provider.clone()))
             });
 
             // Override the TIP-20 precompile lookup so that all TIP-20 token

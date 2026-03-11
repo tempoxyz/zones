@@ -12,16 +12,17 @@ use alloy_primitives::Address;
 use alloy_provider::DynProvider;
 use alloy_rpc_types_eth::BlockId;
 use eyre::Result;
+use revm::precompile::PrecompileError;
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
     ITIP20, ITIP403Registry, ITIP403Registry::PolicyType, TIP403_REGISTRY_ADDRESS,
 };
 use tracing::{debug, info, warn};
+use zone_precompiles::policy::PolicyCheck;
 
-use super::{
-    AuthRole, CompoundData, FIRST_USER_POLICY, POLICY_ALLOW_ALL, SharedPolicyCache,
-    metrics::Tip403Metrics,
-};
+use zone_primitives::policy::{FIRST_USER_POLICY, POLICY_ALLOW_ALL};
+
+use super::{AuthRole, CompoundData, SharedPolicyCache, metrics::Tip403Metrics};
 
 /// Cache-first, RPC-fallback provider for TIP-403 policy authorization.
 ///
@@ -561,5 +562,60 @@ impl PolicyProvider {
             })?;
 
         Ok(authorized)
+    }
+}
+
+impl PolicyCheck for PolicyProvider {
+    fn is_authorized(
+        &self,
+        policy_id: u64,
+        user: Address,
+        role: AuthRole,
+    ) -> Result<bool, PrecompileError> {
+        self.is_authorized_by_policy(policy_id, user, role)
+            .map_err(|e| {
+                PrecompileError::other(format!(
+                    "auth check failed for policy {policy_id} user {user}: {e}"
+                ))
+            })
+    }
+
+    fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64, PrecompileError> {
+        Self::resolve_transfer_policy_id(self, token).map_err(|e| {
+            PrecompileError::other(format!(
+                "failed to resolve transfer_policy_id for {token}: {e}"
+            ))
+        })
+    }
+
+    fn policy_type_sync(&self, policy_id: u64) -> Result<PolicyType, PrecompileError> {
+        self.resolve_policy_type_sync(policy_id).map_err(|e| {
+            PrecompileError::other(format!("policyData failed for policy {policy_id}: {e}"))
+        })
+    }
+
+    fn compound_policy_data(&self, policy_id: u64) -> Result<(u64, u64, u64), PrecompileError> {
+        let compound = self.resolve_compound_data_sync(policy_id).map_err(|e| {
+            PrecompileError::other(format!(
+                "compoundPolicyData failed for policy {policy_id}: {e}"
+            ))
+        })?;
+        Ok((
+            compound.sender_policy_id,
+            compound.recipient_policy_id,
+            compound.mint_recipient_policy_id,
+        ))
+    }
+
+    fn policy_exists(&self, policy_id: u64) -> Result<bool, PrecompileError> {
+        if policy_id < FIRST_USER_POLICY {
+            return Ok(true);
+        }
+        Ok(self.resolve_policy_type_sync(policy_id).is_ok())
+    }
+
+    fn policy_id_counter(&self) -> u64 {
+        let cache = self.cache.read();
+        cache.policies().keys().max().map_or(2, |max| max + 1)
     }
 }

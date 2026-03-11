@@ -5,8 +5,7 @@
 //! `enableToken(address, string, string, string)` entrypoint.
 //!
 //! When the sequencer bridges a new TIP-20 token to the zone, the
-//! [`ZoneInbox`](crate::abi::ZoneInbox) contract calls `enableToken` during
-//! `advanceTempo` to:
+//! [`ZoneInbox`] contract calls `enableToken` during `advanceTempo` to:
 //!
 //! 1. Initialize the TIP-20 storage at the given address (name, symbol, currency).
 //! 2. Grant [`ISSUER_ROLE`] to both [`ZONE_INBOX_ADDRESS`] (for minting on
@@ -14,6 +13,8 @@
 //!
 //! Only [`ZONE_INBOX_ADDRESS`] may call this precompile; all other callers are
 //! reverted with `OnlyZoneInbox()`.
+
+use alloc::format;
 
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError};
@@ -23,8 +24,7 @@ use tempo_precompiles::{
     tip20::{ISSUER_ROLE, TIP20Token},
 };
 use tempo_precompiles_macros::contract;
-
-use crate::abi::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 alloy_sol_types::sol! {
     /// Initialize a TIP20 token on the zone and grant issuer roles.
@@ -40,8 +40,8 @@ pub const ZONE_TIP20_FACTORY_ADDRESS: Address = TIP20_FACTORY_ADDRESS;
 ///
 /// Replaces the L1 [`TIP20Factory`] at the same address (`0x20FC…0000`) with a
 /// zone-specific implementation that only supports [`enableToken`](enableTokenCall).
-/// This is called by [`ZoneInbox`](crate::abi::ZoneInbox) during `advanceTempo`
-/// to create matching TIP-20 tokens for assets bridged from L1.
+/// This is called by [`ZoneInbox`] during `advanceTempo` to create matching
+/// TIP-20 tokens for assets bridged from L1.
 #[contract(addr = TIP20_FACTORY_ADDRESS)]
 pub struct ZoneTokenFactory {}
 

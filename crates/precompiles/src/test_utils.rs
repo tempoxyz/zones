@@ -6,12 +6,12 @@ use k256::{
     elliptic_curve::{ops::Reduce, sec1::ToEncodedPoint},
 };
 
-use super::{
+use crate::{
     chaum_pedersen::{challenge_hash, recover_point},
     ecies::DecryptedDeposit,
 };
 
-pub(crate) use super::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
+pub(crate) use crate::ecies::{build_plaintext, compressed_x_and_parity, encrypt_plaintext};
 
 /// Assert that the Chaum-Pedersen proof inside a [`DecryptedDeposit`] is valid.
 pub(crate) fn assert_cp_proof_valid(
@@ -56,7 +56,7 @@ pub(crate) struct EncryptedDepositFixture {
 
 impl EncryptedDepositFixture {
     /// Create a fixture with deterministic keys for reproducible tests.
-    pub(super) fn new() -> Self {
+    pub(crate) fn new() -> Self {
         use sha2::{Digest, Sha256};
 
         // Deterministic sequencer key
@@ -82,8 +82,8 @@ impl EncryptedDepositFixture {
         let key_index = U256::from(42u64);
 
         // HKDF key derivation
-        let info = super::ecies::hkdf_info(&portal, &key_index, &eph_pub_x);
-        let aes_key = super::ecies::hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
+        let info = crate::ecies::hkdf_info(&portal, &key_index, &eph_pub_x);
+        let aes_key = crate::ecies::hkdf_sha256(&shared_secret_x, b"ecies-aes-key", &info);
 
         // Build and encrypt plaintext
         let to = Address::repeat_byte(0xBB);
@@ -108,8 +108,8 @@ impl EncryptedDepositFixture {
     }
 
     /// Decrypt using the fixture's sequencer key.
-    pub(super) fn decrypt(&self) -> Option<DecryptedDeposit> {
-        super::ecies::decrypt_deposit(
+    pub(crate) fn decrypt(&self) -> Option<DecryptedDeposit> {
+        crate::ecies::decrypt_deposit(
             &self.seq_key,
             &self.eph_pub_x,
             self.eph_pub_y_parity,

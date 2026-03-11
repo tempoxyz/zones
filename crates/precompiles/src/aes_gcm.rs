@@ -7,7 +7,7 @@
 //!
 //! Uses the NCC-audited [`aes-gcm`] crate (v0.10.3).
 
-use std::borrow::Cow;
+use alloc::{borrow::Cow, vec::Vec};
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
@@ -109,7 +109,7 @@ impl From<AesGcmDecrypt> for DynPrecompile {
 ///
 /// The ciphertext, AAD, and tag are passed separately (matching the Solidity interface).
 /// Returns `(plaintext, true)` on success, or `(empty, false)` on failure.
-pub(crate) fn decrypt_aes_gcm(
+pub fn decrypt_aes_gcm(
     key: &[u8; 32],
     nonce: &[u8; 12],
     ciphertext: &[u8],
