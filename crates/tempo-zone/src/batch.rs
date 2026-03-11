@@ -487,7 +487,10 @@ impl BatchSubmitter {
                 .get_block_by_hash(event.nextBlockHash)
                 .await?
                 .ok_or_else(|| {
-                    eyre::eyre!("zone block not found for hash {} (L1 slot {slot})", event.nextBlockHash)
+                    eyre::eyre!(
+                        "zone block not found for hash {} (L1 slot {slot})",
+                        event.nextBlockHash
+                    )
                 })?;
             zone_blocks.insert(slot, block.number());
         }
@@ -506,59 +509,98 @@ impl BatchSubmitter {
                 continue;
             };
 
+            // Zone L2 block range: from the previous slot's end + 1 to this
+            // slot's end. May be wider than the exact batch when non-withdrawal
+            // batches exist in between, but those blocks have no
+            // WithdrawalRequested events so the result is the same.
             let zone_end = zone_blocks[&slot];
-            // Previous slot's zone_end + 1. May be wider than the exact batch
-            // range when non-withdrawal batches exist in between, but those
-            // zone blocks have no WithdrawalRequested events so the result is
-            // the same.
             let zone_start = if slot > 0 {
                 zone_blocks.get(&(slot - 1)).map(|n| n + 1).unwrap_or(1)
             } else {
                 1
             };
 
-            let withdrawals = fetch_slot_withdrawals(&outbox, zone_start, zone_end).await?;
-
-            if withdrawals.is_empty()
-                || abi::Withdrawal::queue_hash(&withdrawals) != event.withdrawalQueueHash
-            {
-                warn!(
+            let is_head_slot = slot == head;
+            let restored = self
+                .restore_slot(
                     slot,
-                    zone_start, zone_end, "withdrawal hash mismatch or empty"
-                );
-                continue;
-            }
-
-            // For the head slot, trim already-processed withdrawals.
-            let to_store = if slot == head {
-                let slot_hash: B256 = self
-                    .portal
-                    .withdrawalQueueSlot(U256::from(slot % WITHDRAWAL_QUEUE_CAPACITY))
-                    .call()
-                    .await?;
-                match find_processed_offset(&withdrawals, slot_hash) {
-                    Some(offset) => &withdrawals[offset..],
-                    None => {
-                        warn!(slot, %slot_hash, "cannot determine processed offset");
-                        continue;
-                    }
-                }
-            } else {
-                &withdrawals[..]
-            };
-
-            if !to_store.is_empty() {
-                let count = to_store.len();
-                let mut guard = store.lock();
-                for w in to_store {
-                    guard.add_withdrawal(slot, w.clone());
-                }
-                info!(slot, count, "Restored withdrawals for portal queue slot");
-                total_restored += count as u64;
-            }
+                    is_head_slot,
+                    event,
+                    &outbox,
+                    zone_start,
+                    zone_end,
+                    store,
+                )
+                .await?;
+            total_restored += restored;
         }
 
         Ok(total_restored)
+    }
+
+    /// Fetch, verify, and store withdrawals for a single pending L1 portal slot.
+    ///
+    /// Queries `WithdrawalRequested` events from zone L2 blocks `[zone_start, zone_end]`,
+    /// verifies the hash chain against the L1 event, and stores the withdrawal structs.
+    /// For the head slot, already-processed withdrawals are trimmed by comparing
+    /// against the current on-chain slot hash.
+    ///
+    /// Returns the number of withdrawals stored.
+    async fn restore_slot(
+        &self,
+        slot: u64,
+        is_head_slot: bool,
+        event: &abi::ZonePortal::BatchSubmitted,
+        outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+        zone_start: u64,
+        zone_end: u64,
+        store: &SharedWithdrawalStore,
+    ) -> Result<u64> {
+        // Fetch WithdrawalRequested events from zone L2.
+        let withdrawals = fetch_slot_withdrawals(outbox, zone_start, zone_end).await?;
+
+        // Verify the hash chain matches the L1 event.
+        if withdrawals.is_empty()
+            || abi::Withdrawal::queue_hash(&withdrawals) != event.withdrawalQueueHash
+        {
+            warn!(
+                slot,
+                zone_start, zone_end, "withdrawal hash mismatch or empty"
+            );
+            return Ok(0);
+        }
+
+        // The head slot may be partially processed — the L1 withdrawal
+        // processor could have consumed some withdrawals before the restart.
+        // Compare against the current on-chain slot hash to find the offset.
+        let to_store = if is_head_slot {
+            let slot_hash: B256 = self
+                .portal
+                .withdrawalQueueSlot(U256::from(slot % WITHDRAWAL_QUEUE_CAPACITY))
+                .call()
+                .await?;
+            match find_processed_offset(&withdrawals, slot_hash) {
+                Some(offset) => &withdrawals[offset..],
+                None => {
+                    warn!(slot, %slot_hash, "cannot determine processed offset");
+                    return Ok(0);
+                }
+            }
+        } else {
+            &withdrawals[..]
+        };
+
+        if !to_store.is_empty() {
+            let count = to_store.len();
+            let mut guard = store.lock();
+            for w in to_store {
+                guard.add_withdrawal(slot, w.clone());
+            }
+            info!(slot, count, "Restored withdrawals for portal queue slot");
+            return Ok(count as u64);
+        }
+
+        Ok(0)
     }
 
     /// Walk **L1** backwards from `l1_tip` in 10k-block chunks to find
