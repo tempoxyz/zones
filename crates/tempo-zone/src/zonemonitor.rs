@@ -200,18 +200,16 @@ impl ZoneMonitor {
 
         // Restore pending withdrawal data from zone L2 events so the
         // withdrawal processor can pick up where it left off.
-        match batch_submitter
+        let restored = batch_submitter
             .restore_pending_withdrawals(&provider, config.outbox_address, &withdrawal_store)
             .await
-        {
-            Ok(count) if count > 0 => {
-                info!(count, "Restored pending withdrawals from zone L2 events");
-                withdrawal_notify.notify_one();
-            }
-            Ok(_) => {}
-            Err(e) => {
-                warn!(error = %e, "Failed to restore pending withdrawals");
-            }
+            .expect("failed to restore pending withdrawals");
+
+        if restored > 0 {
+            info!(restored, "Restored pending withdrawals from zone L2 events");
+            withdrawal_notify.notify_one();
+        } else {
+            info!("No pending withdrawals to restore");
         }
 
         Self {
