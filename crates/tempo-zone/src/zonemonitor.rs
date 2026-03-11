@@ -37,7 +37,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
-    batch::{BatchData, BatchSubmitter, ZoneBlockSnapshot},
+    batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot},
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -144,10 +144,7 @@ impl ZoneMonitor {
         let batch_submitter = BatchSubmitter::new(
             config.portal_address,
             l1_provider,
-            provider.clone(),
             genesis_tempo_block_number,
-            config.tempo_state_address,
-            config.inbox_address,
         );
 
         let (prev_zone_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
@@ -319,23 +316,21 @@ impl ZoneMonitor {
         let block_count = to - from + 1;
         info!(from, to, block_count, "Processing zone block range");
 
-        // Read end-of-range state to check the anchor mode.
+        // Read end-of-range state to check the anchor gap class.
         let end_state = self.fetch_block_snapshot(to).await?;
 
-        // Check if stepping is needed by peeking at the anchor mode.
-        let anchor_mode = self
+        // Lightweight gap check — no header fetching, just arithmetic.
+        let gap_kind = self
             .batch_submitter
-            .resolve_anchor_mode(end_state.tempo_block_number)
-            .await;
+            .classify_anchor_gap(end_state.tempo_block_number)
+            .await?;
 
-        if let Ok(crate::batch::AnchorMode::Stepping { step_size }) = &anchor_mode {
-            return self
-                .process_block_range_stepping(from, to, *step_size)
-                .await;
+        match gap_kind {
+            AnchorGapKind::Direct => self.process_block_range_single(from, to, end_state).await,
+            AnchorGapKind::Ancestry { step_size } => {
+                self.process_block_range_stepping(from, to, step_size).await
+            }
         }
-
-        // Direct or ancestry mode — single submission.
-        self.process_block_range_single(from, to, end_state).await
     }
 
     /// Process a block range as a single batch submission (direct or ancestry mode).
@@ -397,21 +392,27 @@ impl ZoneMonitor {
             .get_block_number()
             .await?;
 
-        let step_points = self
-            .batch_submitter
-            .find_step_points(start_state.tempo_block_number, current_l1_block, step_size)
-            .await?;
+        let step_points = BatchSubmitter::compute_step_points(
+            from,
+            start_state.tempo_block_number,
+            current_l1_block,
+            step_size,
+            to,
+        );
 
         if step_points.is_empty() {
-            // Fallback: no valid step points found, try single submission.
-            warn!("No step points found for stepping, falling back to single submission");
-            let end_state = self.fetch_block_snapshot(to).await?;
-            return self.process_block_range_single(from, to, end_state).await;
+            return Err(eyre::eyre!(
+                "stepping mode required (tempo_block_number {} is outside EIP-2935 window) \
+                 but no valid step points found — zone may not have produced enough blocks yet",
+                start_state.tempo_block_number,
+            ));
         }
 
         // Collect all step zone block numbers, plus the final block.
+        // Sort + dedup defensively in case step points are not perfectly ordered.
         let mut boundaries: Vec<u64> = step_points.iter().map(|sp| sp.zone_block).collect();
         boundaries.push(to);
+        boundaries.sort_unstable();
         boundaries.dedup();
 
         let total_steps = boundaries.len();
@@ -427,10 +428,6 @@ impl ZoneMonitor {
         let mut range_start = from;
 
         for (step_idx, &step_end) in boundaries.iter().enumerate() {
-            if step_end < range_start {
-                continue;
-            }
-
             let step_state = self.fetch_block_snapshot(step_end).await?;
 
             // Fetch withdrawal events for this sub-range.

@@ -32,6 +32,7 @@ const L1_TIMEOUT: Duration = Duration::from_secs(30);
 /// 8. Assert multiple BatchSubmitted events (stepping produces >=2 submissions).
 /// 9. Verify withdrawal works through stepped batches.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "slow: mines >8200 L1 blocks (~82s), run with --ignored or in nightly CI"]
 async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 

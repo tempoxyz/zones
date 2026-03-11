@@ -15,15 +15,17 @@
 //!
 //! # Anchor modes
 //!
-//! Three tiers based on the gap between `tempo_block_number` and the current L1 tip:
-//!
 //! | Gap | Mode | Description |
 //! |-----|------|-------------|
-//! | < 7832 | Direct | Portal reads hash from EIP-2935. |
-//! | 7832–8192 | Ancestry | Collect L1 headers as proof chain. Single submitBatch. |
-//! | > 8192 | Stepping | Split into multiple direct-mode submissions. |
+//! | < [`EIP2935_EFFECTIVE_WINDOW`] | Direct | Portal reads hash from EIP-2935. |
+//! | [`EIP2935_EFFECTIVE_WINDOW`]–[`EIP2935_HISTORY_WINDOW`] | Ancestry | Anchor via recent block + header chain. |
+//! | > [`EIP2935_HISTORY_WINDOW`] | Stepping | Split into multiple direct-mode submissions. |
+//!
+//! Stepping is resolved by [`AnchorGapKind`] in the zone monitor before
+//! `submit_batch` is called. Direct vs Ancestry is resolved inside
+//! `submit_batch` by [`AnchorMode`].
 
-use crate::abi::{BlockTransition, DepositQueueTransition, TempoState, ZoneInbox, ZonePortal};
+use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
@@ -33,14 +35,15 @@ use tempo_alloy::TempoNetwork;
 use tracing::{info, instrument, warn};
 
 /// EIP-2935 stores the last 8192 block hashes (~68 min at 500ms block time).
-/// Blocks older than this require ancestry mode.
 const EIP2935_HISTORY_WINDOW: u64 = 8192;
 
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 
-/// Effective EIP-2935 window after subtracting the safety margin.
+/// Effective EIP-2935 window after subtracting the safety margin. Batches with
+/// a gap below this threshold use direct mode; gaps at or above it require
+/// stepping (splitting into multiple direct-mode submissions).
 const EIP2935_EFFECTIVE_WINDOW: u64 = EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MARGIN;
 
 /// Maximum number of pending withdrawal queue slots in the portal ring buffer.
@@ -68,8 +71,7 @@ pub struct BatchData {
 /// Submits zone batches to the ZonePortal contract on Tempo L1.
 ///
 /// Holds a contract instance pointing at the portal, backed by a shared
-/// [`DynProvider`] with the sequencer's signing wallet. Also holds a zone L2
-/// provider for reading intermediate zone state during stepping mode.
+/// [`DynProvider`] with the sequencer's signing wallet.
 pub struct BatchSubmitter {
     /// ZonePortal contract address on Tempo L1 (used in tracing spans).
     portal_address: Address,
@@ -83,30 +85,18 @@ pub struct BatchSubmitter {
     /// The portal's `genesisTempoBlockNumber` — batches with a
     /// `tempo_block_number` below this value will be rejected on-chain.
     genesis_tempo_block_number: u64,
-    /// Read-only Zone L2 provider for querying intermediate zone state during
-    /// stepping mode.
-    zone_provider: DynProvider<TempoNetwork>,
-    /// TempoState predeploy address on Zone L2.
-    tempo_state_address: Address,
-    /// ZoneInbox contract address on Zone L2.
-    inbox_address: Address,
     /// Concurrency for pipelined L1 header fetching in ancestry mode.
     l1_fetch_concurrency: usize,
 }
 
 impl BatchSubmitter {
-    /// Create a new batch submitter from a shared L1 provider and a zone L2 provider.
+    /// Create a new batch submitter from a shared L1 provider.
     ///
-    /// The L1 provider must already include the sequencer wallet for signing.
-    /// The zone provider is read-only, used for querying intermediate zone state
-    /// during stepping mode.
+    /// The provider must already include the sequencer wallet for signing.
     pub fn new(
         portal_address: Address,
         l1_provider: DynProvider<TempoNetwork>,
-        zone_provider: DynProvider<TempoNetwork>,
         genesis_tempo_block_number: u64,
-        tempo_state_address: Address,
-        inbox_address: Address,
     ) -> Self {
         let portal = ZonePortal::new(portal_address, l1_provider.clone());
         Self {
@@ -114,28 +104,23 @@ impl BatchSubmitter {
             l1_provider,
             portal,
             genesis_tempo_block_number,
-            zone_provider,
-            tempo_state_address,
-            inbox_address,
             l1_fetch_concurrency: 16,
         }
     }
 
     /// Submit a batch to the ZonePortal on Tempo L1.
     ///
-    /// Automatically selects **direct mode** or **ancestry mode** based on how
-    /// old `tempoBlockNumber` is relative to the current L1 tip:
+    /// Resolves the anchor mode based on how old `tempo_block_number` is:
     ///
-    /// - **Direct** (`recentTempoBlockNumber = 0`): used when `tempoBlockNumber`
-    ///   is within the EIP-2935 history window (8192 blocks). The portal reads
-    ///   its hash directly from EIP-2935.
-    /// - **Ancestry** (`recentTempoBlockNumber > 0`): used when `tempoBlockNumber`
-    ///   has fallen out of the EIP-2935 window (e.g. sequencer was offline for
-    ///   >2 hours). A recent L1 block within the window is chosen as anchor and
-    ///   the proof must include a block header chain from `recentTempoBlockNumber`
-    ///   back to `tempoBlockNumber`.
+    /// - **Direct** — `tempo_block_number` is within [`EIP2935_EFFECTIVE_WINDOW`],
+    ///   the portal reads its hash directly from EIP-2935.
+    /// - **Ancestry** — `tempo_block_number` is outside the effective window but
+    ///   still within [`EIP2935_HISTORY_WINDOW`]. A recent anchor block is used
+    ///   and ancestry headers are collected (for future prover integration).
     ///
-    /// # POC note
+    /// The caller must ensure `tempo_block_number` is within the
+    /// [`EIP2935_HISTORY_WINDOW`] — use [`classify_anchor_gap`](Self::classify_anchor_gap)
+    /// first and split via stepping if the gap is too large.
     ///
     /// `verifierConfig` and `proof` are set to empty bytes — the verifier
     /// contract must be configured to accept empty proofs.
@@ -172,15 +157,13 @@ impl BatchSubmitter {
 
         let anchor_mode = self.resolve_anchor_mode(batch.tempo_block_number).await?;
 
-        let recent_tempo_block_number = anchor_mode.recent_block_number();
-
         info!(?anchor_mode, "Submitting batch to ZonePortal on L1");
 
         let tx_hash = self
             .portal
             .submitBatch(
                 batch.tempo_block_number,
-                recent_tempo_block_number,
+                anchor_mode.recent_block_number(),
                 block_transition,
                 deposit_transition,
                 batch.withdrawal_queue_hash,
@@ -199,25 +182,20 @@ impl BatchSubmitter {
         Ok(tx_hash)
     }
 
-    /// Determine the anchor mode for the given `tempo_block_number`.
+    /// Classify whether `tempo_block_number` can be submitted directly or
+    /// requires stepping (splitting into sub-batches).
     ///
-    /// Three tiers based on the gap between `tempo_block_number` and L1 tip:
+    /// Only performs a single `get_block_number` RPC call — no header fetching
+    /// or contract reads.
     ///
-    /// - **Direct** (gap < [`EIP2935_EFFECTIVE_WINDOW`]): the portal reads the
-    ///   hash directly from EIP-2935.
-    /// - **Ancestry** (gap within [`EIP2935_HISTORY_WINDOW`]): a recent L1 block
-    ///   within the window is used as anchor. The proof must include block headers
-    ///   linking the anchor back to `tempo_block_number`.
-    /// - **Stepping** (gap > [`EIP2935_HISTORY_WINDOW`]): the gap is too large
-    ///   for a single ancestry proof. The batch must be split into multiple
-    ///   direct-mode submissions.
-    pub(crate) async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
+    /// Returns an error if `tempo_block_number` is not yet confirmed on L1
+    /// (i.e. it equals or exceeds the current L1 tip).
+    pub(crate) async fn classify_anchor_gap(
+        &self,
+        tempo_block_number: u64,
+    ) -> Result<AnchorGapKind> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
-        // EIP-2935 stores the hash of block N when block N+1 is processed, so
-        // getBlockHash(N) only returns non-zero when block.number > N. If our
-        // tempo_block_number equals the current L1 tip the batch tx would land
-        // in the same or next block where getBlockHash would still return zero.
         if tempo_block_number >= current_l1_block {
             return Err(eyre::eyre!(
                 "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 (tip={current_l1_block}), \
@@ -228,51 +206,75 @@ impl BatchSubmitter {
         let gap = current_l1_block.saturating_sub(tempo_block_number);
 
         if gap < EIP2935_EFFECTIVE_WINDOW {
+            Ok(AnchorGapKind::Direct)
+        } else {
+            Ok(AnchorGapKind::Ancestry {
+                step_size: EIP2935_EFFECTIVE_WINDOW,
+            })
+        }
+    }
+
+    /// Resolve the anchor mode for the given `tempo_block_number`.
+    ///
+    /// - **Direct** (gap < [`EIP2935_EFFECTIVE_WINDOW`]): the portal reads the
+    ///   hash directly from EIP-2935.
+    /// - **Ancestry** (gap within [`EIP2935_HISTORY_WINDOW`]): a recent L1 block
+    ///   within the window is used as anchor. Ancestry headers are collected
+    ///   and validated for future prover integration.
+    ///
+    /// Returns an error if the gap exceeds [`EIP2935_HISTORY_WINDOW`] — the
+    /// caller must split via stepping before calling this.
+    async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
+        let current_l1_block = self.l1_provider.get_block_number().await?;
+
+        if tempo_block_number >= current_l1_block {
+            return Err(eyre::eyre!(
+                "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 \
+                 (tip={current_l1_block}), will retry after L1 advances"
+            ));
+        }
+
+        let gap = current_l1_block.saturating_sub(tempo_block_number);
+
+        if gap < EIP2935_EFFECTIVE_WINDOW {
             return Ok(AnchorMode::Direct);
         }
 
-        if gap <= EIP2935_HISTORY_WINDOW {
-            // Within ancestry range — collect L1 headers as proof chain.
-            let anchor_block = current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN);
-            let ancestry_headers = self
-                .fetch_ancestry_headers(tempo_block_number, anchor_block)
-                .await?;
-
-            warn!(
-                tempo_block_number,
-                current_l1_block,
-                anchor_block,
-                gap,
-                header_count = ancestry_headers.len(),
-                total_bytes = ancestry_headers.iter().map(|h| h.len()).sum::<usize>(),
-                "tempo_block_number outside EIP-2935 effective window, using ancestry mode"
-            );
-
-            return Ok(AnchorMode::Ancestry {
-                anchor_block,
-                ancestry_headers,
-            });
+        if gap > EIP2935_HISTORY_WINDOW {
+            return Err(eyre::eyre!(
+                "tempo_block_number ({tempo_block_number}) is outside the EIP-2935 history \
+                 window (gap={gap}, max={EIP2935_HISTORY_WINDOW}) — must split via stepping"
+            ));
         }
 
-        // Gap exceeds EIP-2935 history window — need stepping.
+        // Within ancestry range — collect L1 headers as proof chain.
+        let anchor_block = current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN);
+        let ancestry_headers = self
+            .fetch_ancestry_headers(tempo_block_number, anchor_block)
+            .await?;
+
         warn!(
             tempo_block_number,
             current_l1_block,
+            anchor_block,
             gap,
-            step_size = EIP2935_EFFECTIVE_WINDOW,
-            "tempo_block_number far outside EIP-2935 window, using stepping mode"
+            header_count = ancestry_headers.len(),
+            total_bytes = ancestry_headers.iter().map(|h| h.len()).sum::<usize>(),
+            "tempo_block_number outside EIP-2935 effective window, using ancestry mode"
         );
 
-        Ok(AnchorMode::Stepping {
-            step_size: EIP2935_EFFECTIVE_WINDOW,
+        Ok(AnchorMode::Ancestry {
+            anchor_block,
+            ancestry_headers,
         })
     }
 
     /// Fetch and RLP-encode L1 block headers from `from + 1` to `to` (inclusive),
     /// validating the parent-hash chain.
     ///
-    /// Returns headers in ascending block-number order. Uses the same concurrent
-    /// fetching pattern as the L1 subscriber backfill.
+    /// Returns headers in ascending block-number order. The first header's
+    /// `parent_hash` is validated against the hash of block `from`, ensuring the
+    /// chain is rooted at the expected block.
     async fn fetch_ancestry_headers(&self, from: u64, to: u64) -> Result<Vec<Bytes>> {
         use futures::stream;
 
@@ -283,6 +285,16 @@ impl BatchSubmitter {
         let concurrency = self.l1_fetch_concurrency;
         let range_start = from + 1;
         let count = (to - from) as usize;
+
+        // Fetch the base block's header to seed the parent-hash chain validation.
+        let base_header = self
+            .l1_provider
+            .get_header_by_number(from.into())
+            .await?
+            .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?;
+        let mut base_buf = Vec::with_capacity(600);
+        base_header.inner.inner.encode(&mut base_buf);
+        let base_hash = alloy_primitives::keccak256(&base_buf);
 
         let mut fetched = stream::iter(range_start..=to)
             .map(|block_number| {
@@ -300,11 +312,9 @@ impl BatchSubmitter {
             .buffered(concurrency);
 
         let mut headers = Vec::with_capacity(count);
-        let mut prev_hash: Option<B256> = None;
+        let mut prev_hash: Option<B256> = Some(base_hash);
 
         while let Some((block_number, header)) = fetched.try_next().await? {
-            // Validate parent-hash chain: each header's parent_hash must match
-            // the hash of the previous header.
             if let Some(expected_parent) = prev_hash
                 && header.inner.parent_hash != expected_parent
             {
@@ -315,7 +325,6 @@ impl BatchSubmitter {
                 ));
             }
 
-            // Compute this header's hash for the next iteration's check.
             let mut buf = Vec::with_capacity(600);
             header.encode(&mut buf);
             let header_hash = alloy_primitives::keccak256(&buf);
@@ -327,131 +336,40 @@ impl BatchSubmitter {
         Ok(headers)
     }
 
-    /// Find zone L2 block numbers whose `tempoBlockNumber` value can serve as
-    /// split points for stepping mode.
+    /// Compute zone L2 block numbers that serve as split points for stepping mode.
     ///
-    /// Starting from the zone's latest block, walks backwards to find zone blocks
-    /// where `tempoBlockNumber` falls on step boundaries (multiples of `step_size`
-    /// blocks from the target `tempo_block_number`). Returns split points in
-    /// ascending order.
-    pub(crate) async fn find_step_points(
-        &self,
-        tempo_block_number: u64,
+    /// Zone blocks and L1 blocks have a 1:1 mapping (each zone block processes
+    /// exactly one L1 block via `advanceTempo`), so the zone block for a target
+    /// `tempoBlockNumber` can be computed arithmetically:
+    ///
+    /// ```text
+    /// zone_block = from_zone_block + (target_tempo - from_tempo)
+    /// ```
+    ///
+    /// Returns split points in ascending order, all within `[from_zone_block, max_zone_block]`.
+    pub(crate) fn compute_step_points(
+        from_zone_block: u64,
+        from_tempo: u64,
         current_l1_block: u64,
         step_size: u64,
-    ) -> Result<Vec<StepPoint>> {
-        let tempo_state = TempoState::new(self.tempo_state_address, self.zone_provider.clone());
+        max_zone_block: u64,
+    ) -> Vec<StepPoint> {
+        let mut step_points = Vec::new();
+        let mut target = from_tempo + step_size;
 
-        // Compute target tempo block numbers for each step boundary.
-        let mut targets = Vec::new();
-        let mut target = tempo_block_number + step_size;
         while target < current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN) {
-            targets.push(target);
+            let zone_block = from_zone_block + (target - from_tempo);
+            if zone_block > max_zone_block {
+                break;
+            }
+            step_points.push(StepPoint {
+                zone_block,
+                target_tempo_block: target,
+            });
             target += step_size;
         }
 
-        if targets.is_empty() {
-            return Ok(Vec::new());
-        }
-
-        // Walk backwards from the latest zone block to find zone blocks that
-        // match each target tempo_block_number (or the closest one after it).
-        let latest_zone_block = self.zone_provider.get_block_number().await?;
-
-        let mut step_points = Vec::with_capacity(targets.len());
-        let mut target_idx = targets.len() - 1; // start from largest target
-
-        // Binary search for each target: find the first zone block whose
-        // tempoBlockNumber >= target.
-        for &target_tempo in targets.iter().rev() {
-            // Search for the zone block where tempoBlockNumber transitions past this target.
-            let zone_block = self
-                .find_zone_block_for_tempo(&tempo_state, target_tempo, 1, latest_zone_block)
-                .await?;
-
-            if let Some(zone_block) = zone_block {
-                step_points.push(StepPoint {
-                    zone_block,
-                    target_tempo_block: target_tempo,
-                });
-            }
-
-            if target_idx == 0 {
-                break;
-            }
-            target_idx -= 1;
-        }
-
-        step_points.reverse(); // ascending order
-        Ok(step_points)
-    }
-
-    /// Binary search for the smallest zone block whose `tempoBlockNumber >= target`.
-    async fn find_zone_block_for_tempo(
-        &self,
-        tempo_state: &TempoState::TempoStateInstance<DynProvider<TempoNetwork>, TempoNetwork>,
-        target_tempo: u64,
-        lo: u64,
-        hi: u64,
-    ) -> Result<Option<u64>> {
-        if lo > hi {
-            return Ok(None);
-        }
-
-        let mut low = lo;
-        let mut high = hi;
-        let mut result = None;
-
-        while low <= high {
-            let mid = low + (high - low) / 2;
-            let tempo_at_mid: u64 = tempo_state
-                .tempoBlockNumber()
-                .block(mid.into())
-                .call()
-                .await
-                .unwrap_or(0);
-
-            if tempo_at_mid >= target_tempo {
-                result = Some(mid);
-                if mid == 0 {
-                    break;
-                }
-                high = mid - 1;
-            } else {
-                low = mid + 1;
-            }
-        }
-
-        Ok(result)
-    }
-
-    /// Read intermediate zone state at the given zone block number for stepping.
-    #[allow(dead_code)]
-    pub(crate) async fn fetch_zone_snapshot(&self, zone_block: u64) -> Result<ZoneBlockSnapshot> {
-        let tempo_state = TempoState::new(self.tempo_state_address, self.zone_provider.clone());
-        let inbox = ZoneInbox::new(self.inbox_address, self.zone_provider.clone());
-
-        let tempo_call = tempo_state.tempoBlockNumber().block(zone_block.into());
-        let deposit_call = inbox.processedDepositQueueHash().block(zone_block.into());
-        let block_fut = async {
-            self.zone_provider
-                .get_block_by_number(zone_block.into())
-                .await
-                .map_err(Into::into)
-        };
-        let (tempo_block_number, processed_deposit_hash, block) =
-            tokio::try_join!(tempo_call.call(), deposit_call.call(), block_fut)?;
-
-        let block_hash = block
-            .ok_or_else(|| eyre::eyre!("zone block {zone_block} not found"))?
-            .header
-            .hash;
-
-        Ok(ZoneBlockSnapshot {
-            tempo_block_number,
-            processed_deposit_hash,
-            block_hash,
-        })
+        step_points
     }
 
     /// Returns a reference to the L1 provider.
@@ -515,17 +433,37 @@ impl BatchSubmitter {
     }
 }
 
-/// How the batch submitter should anchor `tempoBlockNumber` for EIP-2935
-/// verification on the ZonePortal.
+/// Classification of the EIP-2935 gap, returned by
+/// [`BatchSubmitter::classify_anchor_gap`].
 #[derive(Debug)]
-#[allow(dead_code)] // ancestry_headers available for future prover integration
-pub(crate) enum AnchorMode {
-    /// `tempoBlockNumber` is within the EIP-2935 window — the portal reads its
-    /// hash directly. No extra proof data required.
+pub(crate) enum AnchorGapKind {
+    /// Gap < [`EIP2935_EFFECTIVE_WINDOW`] — the portal can read the block hash
+    /// directly from EIP-2935. No extra proof data needed.
     Direct,
-    /// `tempoBlockNumber` has expired from EIP-2935 but is within the full
+    /// Gap ≥ [`EIP2935_EFFECTIVE_WINDOW`] — `tempo_block_number` is too old
+    /// for a direct EIP-2935 lookup. The batch must be split into multiple
+    /// direct-mode sub-range submissions (stepping).
+    Ancestry {
+        /// Each sub-batch covers at most this many L1 blocks.
+        step_size: u64,
+    },
+}
+
+/// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
+///
+/// Resolved by [`BatchSubmitter::resolve_anchor_mode`] inside `submit_batch`.
+/// Stepping is handled at a higher level by [`AnchorGapKind`] — by the time
+/// `submit_batch` is called, the gap must already be within
+/// [`EIP2935_HISTORY_WINDOW`].
+#[derive(Debug)]
+#[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
+enum AnchorMode {
+    /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
+    /// reads its hash directly. No extra proof data required.
+    Direct,
+    /// `tempoBlockNumber` is outside the effective window but within the full
     /// history window. A recent L1 block is used as anchor, and the collected
-    /// headers prove the parent-hash chain from anchor back to `tempoBlockNumber`.
+    /// headers prove the parent-hash chain.
     Ancestry {
         /// Recent L1 block number within the EIP-2935 window, used as the
         /// on-chain anchor for hash verification.
@@ -535,23 +473,15 @@ pub(crate) enum AnchorMode {
         /// consume when integrated.
         ancestry_headers: Vec<Bytes>,
     },
-    /// The gap exceeds the full EIP-2935 history window. The batch must be split
-    /// into multiple direct-mode submissions, each within the effective window.
-    Stepping {
-        /// Each sub-batch covers at most this many L1 blocks.
-        step_size: u64,
-    },
 }
 
 impl AnchorMode {
     /// Returns the `recentTempoBlockNumber` argument for `submitBatch`:
     /// `0` for direct mode, or the anchor block number for ancestry mode.
-    /// Panics if called on `Stepping` — the caller must split before submitting.
     const fn recent_block_number(&self) -> u64 {
         match self {
             Self::Direct => 0,
             Self::Ancestry { anchor_block, .. } => *anchor_block,
-            Self::Stepping { .. } => panic!("Stepping mode must be split before submitting"),
         }
     }
 }
