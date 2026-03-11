@@ -130,7 +130,7 @@ async fn test_sequencer_restart_resumes_batch_submission() -> eyre::Result<()> {
 /// 1. Deposit, spawn sequencer, request withdrawal.
 /// 2. Wait for the batch to be submitted (withdrawal enqueued on L1 portal).
 /// 3. Abort the sequencer BEFORE the withdrawal is processed.
-/// 4. Respawn the sequencer — `restore_pending_withdrawals` restores the data.
+/// 4. Respawn the sequencer — `fetch_pending_withdrawals` restores the data.
 /// 5. The OLD withdrawal from before the restart is processed on L1.
 /// 6. A NEW withdrawal after restart also works.
 #[tokio::test(flavor = "multi_thread")]
@@ -175,7 +175,7 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     seq_handle.withdrawal_handle.abort();
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
-    // --- Respawn sequencer (restore_pending_withdrawals runs during init) ---
+    // --- Respawn sequencer (fetch_pending_withdrawals runs during init) ---
     let _seq_handle2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     // The OLD withdrawal from before the restart should be processed via

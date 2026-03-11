@@ -28,10 +28,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::{
-    abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal},
-    withdrawals::SharedWithdrawalStore,
-};
+use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
@@ -452,16 +449,17 @@ impl BatchSubmitter {
     /// 3. Resolving each event's `nextBlockHash` to a **zone L2** block number.
     /// 4. Fetching `WithdrawalRequested` events from the **zone L2** outbox in
     ///    the corresponding block range.
-    /// 5. Verifying the hash chain and storing the withdrawal structs.
+    /// 5. Reading the head slot's current on-chain hash for partial processing
+    ///    detection.
+    /// 6. Verifying the hash chain and trimming already-processed withdrawals.
     ///
-    /// Returns the number of restored withdrawals.
+    /// Returns a map of portal_slot → verified withdrawals ready to be stored.
     #[instrument(skip_all, fields(portal = %self.portal_address))]
-    pub async fn restore_pending_withdrawals(
+    pub async fn fetch_pending_withdrawals(
         &self,
         zone_provider: &DynProvider<TempoNetwork>,
         outbox_address: Address,
-        store: &SharedWithdrawalStore,
-    ) -> Result<u64> {
+    ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
         // Step 1: read pending slot range from the L1 portal.
         let (head, tail) = tokio::try_join!(
             self.read_portal_withdrawal_queue_head(),
@@ -470,7 +468,7 @@ impl BatchSubmitter {
 
         if head >= tail {
             info!(head, tail, "No pending withdrawals to restore");
-            return Ok(0);
+            return Ok(BTreeMap::new());
         }
 
         info!(
@@ -525,32 +523,20 @@ impl BatchSubmitter {
         }
 
         // Step 5: read the head slot's current on-chain hash (for partial processing detection).
-        let head_slot_hash = if head < tail {
-            self.portal
-                .withdrawalQueueSlot(U256::from(head % WITHDRAWAL_QUEUE_CAPACITY))
-                .call()
-                .await?
-        } else {
-            B256::ZERO
-        };
+        let head_slot_hash = self
+            .portal
+            .withdrawalQueueSlot(U256::from(head % WITHDRAWAL_QUEUE_CAPACITY))
+            .call()
+            .await?;
 
         // Step 6: resolve all fetched data into verified withdrawal sets.
-        let resolved =
-            resolve_pending_slots(head, tail, &events, &slot_withdrawals, head_slot_hash);
-
-        // Step 7: store the resolved withdrawals.
-        let mut total_restored = 0u64;
-        for (portal_slot, withdrawals) in resolved {
-            let count = withdrawals.len();
-            store.lock().add_batch(portal_slot, withdrawals);
-            info!(
-                portal_slot,
-                count, "Restored withdrawals for portal queue slot"
-            );
-            total_restored += count as u64;
-        }
-
-        Ok(total_restored)
+        Ok(resolve_pending_slots(
+            head,
+            tail,
+            &events,
+            &slot_withdrawals,
+            head_slot_hash,
+        ))
     }
 
     /// Walk **L1** backwards from `l1_tip` in 10k-block chunks to find
