@@ -13076,8 +13076,11 @@ dependencies = [
 name = "zone-primitives"
 version = "0.1.0"
 dependencies = [
+ "alloy-contract",
  "alloy-primitives",
  "alloy-rlp",
+ "alloy-sol-types",
+ "const-hex",
  "serde",
 ]
 

@@ -4,6 +4,7 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use crate::{
+    abi::ZonePortalExt,
     ext::TempoStateExt,
     payload::{ZonePayloadAttributes, ZonePayloadTypes},
 };

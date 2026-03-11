@@ -7,6 +7,7 @@
 
 extern crate alloc;
 
+pub mod abi;
 pub mod constants;
 mod header;
 pub use header::ZoneHeader;

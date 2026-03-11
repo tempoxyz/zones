@@ -72,7 +72,10 @@ use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
 };
 use zone::{
-    abi::{EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox, ZonePortal},
+    abi::{
+        EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox, ZonePortal,
+        ZonePortalExt,
+    },
     precompiles::ecies::encrypt_deposit,
 };
 
