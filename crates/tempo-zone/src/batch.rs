@@ -438,10 +438,21 @@ impl BatchSubmitter {
         Ok(())
     }
 
-    /// Restore pending withdrawal data into the store by walking L1 backwards
-    /// from the chain tip to find `BatchSubmitted` events for pending portal
-    /// slots, then fetching the corresponding `WithdrawalRequested` events
-    /// from zone L2.
+    /// Re-populate the in-memory [`WithdrawalStore`](crate::withdrawals::WithdrawalStore)
+    /// after a sequencer restart.
+    ///
+    /// The L1 portal stores only hash chains, not the actual [`Withdrawal`](abi::Withdrawal)
+    /// structs. This method reconstructs them by:
+    ///
+    /// 1. Reading `withdrawalQueueHead` / `withdrawalQueueTail` from the **L1 portal**
+    ///    to determine which slots are still pending.
+    /// 2. Walking **L1** backwards from the chain tip to find the `BatchSubmitted`
+    ///    event for each pending slot (plus the predecessor for zone block range
+    ///    boundaries).
+    /// 3. Resolving each event's `nextBlockHash` to a **zone L2** block number.
+    /// 4. Fetching `WithdrawalRequested` events from the **zone L2** outbox in
+    ///    the corresponding block range.
+    /// 5. Verifying the hash chain and storing the withdrawal structs.
     ///
     /// Returns the number of restored withdrawals.
     #[instrument(skip_all, fields(portal = %self.portal_address))]
@@ -463,13 +474,12 @@ impl BatchSubmitter {
             "Restoring pending withdrawals"
         );
 
-        // Walk L1 backwards from the tip to find BatchSubmitted events for
-        // pending slots [head, tail) plus the predecessor (head-1) for
-        // determining the zone block start of the first slot.
-        let tip = self.l1_provider.get_block_number().await?;
-        let events = self.find_batch_events_backwards(tip, head, tail).await?;
+        // Step 2: walk L1 backwards from the L1 tip to find BatchSubmitted
+        // events for pending slots [head, tail) plus the predecessor (head-1).
+        let l1_tip = self.l1_provider.get_block_number().await?;
+        let events = self.find_batch_events_backwards(l1_tip, head, tail).await?;
 
-        // Resolve each event's nextBlockHash to a zone block number.
+        // Step 3: resolve each L1 event's nextBlockHash to a zone L2 block number.
         let mut zone_blocks: BTreeMap<u64, u64> = BTreeMap::new();
         for (&slot, event) in &events {
             let block = zone_provider
@@ -548,19 +558,20 @@ impl BatchSubmitter {
         Ok(total_restored)
     }
 
-    /// Walk L1 backwards from `tip` in 10k-block chunks to find
+    /// Walk **L1** backwards from `l1_tip` in 10k-block chunks to find
     /// `BatchSubmitted` events for portal slots `[head, tail)` plus the
-    /// predecessor slot `head - 1` (used for zone_start of the first slot).
+    /// predecessor slot `head - 1` (used to determine the zone L2 block
+    /// range start of the first slot).
     async fn find_batch_events_backwards(
         &self,
-        tip: u64,
+        l1_tip: u64,
         head: u64,
         tail: u64,
     ) -> Result<BTreeMap<u64, abi::ZonePortal::BatchSubmitted>> {
         let start = head.saturating_sub(1);
         let needed = (tail - start) as usize;
         let mut found: BTreeMap<u64, abi::ZonePortal::BatchSubmitted> = BTreeMap::new();
-        let mut hi = tip;
+        let mut hi = l1_tip;
 
         while found.len() < needed && hi >= self.genesis_tempo_block_number {
             let lo = hi
