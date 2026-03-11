@@ -16,7 +16,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 ## Non-goals
 
 - No attempt to solve data availability, forced inclusion, or censorship resistance.
-- No upgradeability or governance model.
+- No governance model. Upgradeability is handled via Tempo L1 hard forks (see [Hard fork activation](#hard-fork-activation)).
 - No general messaging. Multi-asset bridging is supported for all TIP-20 tokens enabled by the sequencer.
 
 ## Terminology
@@ -1699,6 +1699,110 @@ Tempo Node
     ├── In-memory State Store
     └── SP1 Prover (mock for dev)
 ```
+
+## Hard fork activation
+
+Zones activate hard fork upgrades in lockstep with Tempo L1 using same-block activation. The trigger is importing the fork L1 block: the zone block whose `advanceTempo` imports the fork L1 block uses the new execution rules for its entire scope. The new verifier is deployed on L1 as part of the Tempo hard fork; no on-chain action is required from the zone operator.
+
+### Definitions
+
+A zone hard fork is defined by:
+
+- Fork L1 block number (`F`): the L1 block number at which the fork activates. This is embedded in the zone node's chain specification and the prover program; the portal does not need to know it.
+- `forkVerifier`: the new `IVerifier` contract deployed on Tempo L1 as part of the hard fork.
+
+A zone block is a **post-fork zone block** if the L1 block it imports via `advanceTempo` has number `>= F`. A **fork-spanning batch** is a batch whose zone blocks include both pre-fork and post-fork zone blocks.
+
+### Activation rule
+
+The fork activates in the zone block that imports the fork L1 block, not the following block. The entire zone block — `advanceTempo`, user transactions, `finalizeWithdrawalBatch` — uses new execution rules. The EVM is configured with the new ruleset at the start of the block, before any transaction executes.
+
+The trigger is L1 block number, not timestamp. Each zone block maps to exactly one L1 block, so the block number is unambiguous even when the zone is catching up from behind.
+
+Same-block activation is necessary for correctness: if the fork changes the L1 header format, the new parsing code must be active in the zone block that first encounters the new format. Running `advanceTempo` under old rules against a post-fork L1 header would require fragile forward-compatibility shims.
+
+### Verifier routing
+
+The portal maintains two verifier slots. The batch submitter specifies which verifier to use; the portal checks that the specified address is one of the two active verifiers:
+
+```solidity
+address public verifier;         // pre-fork verifier
+address public forkVerifier;     // post-fork verifier (address(0) if no fork yet)
+
+function submitBatch(address targetVerifier, ...) external {
+    require(
+        targetVerifier == verifier || targetVerifier == forkVerifier,
+        "unknown verifier"
+    );
+    require(IVerifier(targetVerifier).verify(...), "invalid proof");
+    ...
+}
+```
+
+The sequencer knows which prover it used and passes the corresponding verifier. The portal does not need to interpret `tempoBlockNumber` or decide which verifier applies — it only enforces that the proof checks out against a recognized verifier.
+
+The `IVerifier` interface is unchanged across forks. New proof parameters are passed via the opaque `verifierConfig` bytes.
+
+### Two-verifier invariant
+
+At most two verifiers are active at any time. When a new fork occurs, the previous fork's verifier is promoted to the `verifier` slot, and the new fork verifier takes the `forkVerifier` slot. The verifier that was in the `verifier` slot (from two forks ago) is deprecated.
+
+The L1 hard fork executes:
+
+```
+verifier     = forkVerifier       // promote previous fork verifier
+forkVerifier = new_fork_verifier  // set new fork verifier
+```
+
+For the first fork, `verifier` retains its original value (set at zone creation) and `forkVerifier` is populated for the first time.
+
+This means the previous verifier remains active between forks, allowing zones that are behind to submit pre-fork batches. At the next fork, the N-2 verifier is deprecated. A zone that has not caught up past the N-2 fork boundary by the time the N-1 fork arrives can no longer submit those old batches.
+
+### Prover behavior
+
+The new prover program contains both old and new execution rules. For each zone block in a batch, it checks the L1 block number imported by `advanceTempo` and applies the corresponding rules:
+
+- Blocks importing L1 block `< F`: old rules
+- Blocks importing L1 block `>= F`: new rules
+
+The fork L1 block number is hardcoded in the prover program (same as how Ethereum clients embed fork block numbers). The resulting verification key reflects the complete dual-rule program. The fork verifier is deployed with this key.
+
+Each successive prover program is a superset: the fork N prover uses the fork N-1 prover's complete logic as its "old rules" branch. This means the fork N verifier can verify batches containing blocks from before fork N-1 as well — it applies old rules correctly for those blocks.
+
+Fork-spanning batches (containing both pre-fork and post-fork zone blocks) are proven in a single proof by the fork prover. The fork verifier validates them.
+
+### Zone node behavior
+
+The zone node determines the ruleset by inspecting the next L1 block in the deposit queue before building each zone block. The fork L1 block number is embedded in the node's chain specification. If the next L1 block has number `>= F`, the EVM is configured with new rules for that zone block.
+
+If the fork changes zone predeploy contract behavior (TempoState, ZoneInbox, ZoneOutbox, ZoneConfig), new contract bytecode is injected at the predeploy addresses as part of the fork zone block's state transition, before `advanceTempo` executes.
+
+#### Fork signaling
+
+`ZoneFactory` maintains a `protocolVersion` counter, incremented at each hard fork. Each zone node binary embeds the highest protocol version it supports. Before building a zone block, the node checks whether the L1 block it is about to import bumped `protocolVersion` beyond its supported version. If so, the node refuses to produce the block and halts with a clear error directing the operator to upgrade.
+
+This guarantees that an outdated node never produces zone blocks under incorrect rules — the zone halts cleanly rather than diverging.
+
+### L1 hard fork actions
+
+The Tempo L1 hard fork block executes:
+
+1. Deploy the fork `IVerifier` contract with the verification key for the new prover program.
+2. Call `ZoneFactory.setForkVerifier(forkVerifier)` via system transaction, which rotates verifiers on all registered portals and updates `_validVerifiers`.
+3. Increment `ZoneFactory.protocolVersion`.
+4. New zones created after the fork use the fork verifier as their initial verifier.
+
+### Sequencer upgrade path
+
+The new zone node binary and prover program are released before the fork. Operators upgrade off-chain at their convenience — no on-chain transaction is needed. When the fork L1 block arrives, the zone node activates new rules automatically and the sequencer uses the new prover for post-fork batches.
+
+If the operator does not upgrade before the fork, the zone node detects the unsupported protocol version and halts cleanly — no invalid blocks are produced. Settlement pauses because no new batches are submitted. User funds in the portal remain safe; the zone resumes once the operator upgrades.
+
+### Open questions
+
+- **Portal interface changes**: If a fork needs to change `submitBatch` or `IVerifier` signatures, portal bytecode must be upgraded. The `verifierConfig` opaque bytes handle most parameter extensions, but not interface-level changes.
+- **Predeploy upgrade mechanism**: Zone predeploy bytecode updates at fork time should be specified per-fork. A general injection mechanism (analogous to Ethereum EIPs specifying state changes at fork blocks) may be worth standardizing.
+- **L1 block number vs timestamp**: If L1 forks are timestamp-based, the zone node and prover must derive `F` as the first L1 block at or after the fork timestamp. Since the portal no longer needs `F`, this is purely an off-chain concern.
 
 ## Open questions
 
