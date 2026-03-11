@@ -13076,9 +13076,15 @@ dependencies = [
 name = "zone-primitives"
 version = "0.1.0"
 dependencies = [
+ "alloy-contract",
+ "alloy-network",
  "alloy-primitives",
+ "alloy-provider",
  "alloy-rlp",
+ "alloy-sol-types",
+ "const-hex",
  "serde",
+ "tokio",
 ]
 
 [[package]]

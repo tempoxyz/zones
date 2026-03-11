@@ -3,12 +3,12 @@
 use alloc::vec::Vec;
 use alloy_primitives::{Address, B256};
 use alloy_rlp::Encodable as _;
-use serde::{Deserialize, Serialize};
 
 /// Simplified zone block header for hash computation.
 ///
 /// The zone block hash is `keccak256(rlp_encode(header))`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct ZoneHeader {
     pub parent_hash: B256,
     pub beneficiary: Address,
