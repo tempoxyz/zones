@@ -487,7 +487,7 @@ impl BatchSubmitter {
                 .get_block_by_hash(event.nextBlockHash)
                 .await?
                 .ok_or_else(|| {
-                    eyre::eyre!("zone block not found for hash {}", event.nextBlockHash)
+                    eyre::eyre!("zone block not found for hash {} (L1 slot {slot})", event.nextBlockHash)
                 })?;
             zone_blocks.insert(slot, block.number());
         }
