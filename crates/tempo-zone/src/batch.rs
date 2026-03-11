@@ -462,6 +462,7 @@ impl BatchSubmitter {
         outbox_address: Address,
         store: &SharedWithdrawalStore,
     ) -> Result<u64> {
+        // Step 1: read pending slot range from the L1 portal.
         let (head, tail) = tokio::try_join!(
             self.read_portal_withdrawal_queue_head(),
             self.read_portal_withdrawal_queue_tail(),
