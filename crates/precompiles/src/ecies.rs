@@ -1,8 +1,10 @@
 //! Sequencer-side ECIES operations for encrypted deposit decryption.
 //!
 //! These functions run **off-chain** in the payload builder to produce the
-//! [`DecryptionData`](crate::abi::DecryptionData) that the on-chain ZoneInbox
-//! contract verifies via the Chaum-Pedersen and AES-GCM precompiles.
+//! [`DecryptionData`] that the on-chain ZoneInbox contract verifies via the
+//! Chaum-Pedersen and AES-GCM precompiles.
+
+use alloc::vec::Vec;
 
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use alloy_primitives::{Address, B256};
@@ -11,7 +13,7 @@ use k256::{
     elliptic_curve::{PrimeField, sec1::ToEncodedPoint},
 };
 
-use super::{
+use crate::{
     aes_gcm::decrypt_aes_gcm,
     chaum_pedersen::{challenge_hash, recover_point},
 };
@@ -227,7 +229,7 @@ fn generate_chaum_pedersen_proof(
 }
 
 /// HMAC-SHA256 implementation matching ZoneInbox._hmacSha256.
-pub(crate) fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
+pub fn hmac_sha256(key: &[u8], message: &[u8]) -> [u8; 32] {
     use sha2::{Digest, Sha256};
 
     // Pad/hash key to 64 bytes
@@ -291,7 +293,7 @@ pub fn build_plaintext(to: &Address, memo: &B256) -> [u8; ENCRYPTED_PAYLOAD_PLAI
 }
 
 /// Build the 84-byte HKDF info parameter: `[portal(20) | key_index(32) | eph_pub_x(32)]`.
-pub(crate) fn hkdf_info(
+pub fn hkdf_info(
     portal: &Address,
     key_index: &alloy_primitives::U256,
     eph_pub_x: &B256,
@@ -318,10 +320,8 @@ pub fn encrypt_plaintext(aes_key: &[u8; 32], plaintext: &[u8]) -> (Vec<u8>, [u8;
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        super::test_utils::{EncryptedDepositFixture, assert_cp_proof_valid},
-        compressed_x_and_parity, decrypt_deposit, hkdf_sha256, hmac_sha256,
-    };
+    use super::{compressed_x_and_parity, decrypt_deposit, hkdf_sha256, hmac_sha256};
+    use crate::test_utils::{EncryptedDepositFixture, assert_cp_proof_valid};
     use alloy_primitives::{Address, B256, U256};
 
     #[test]
@@ -500,8 +500,7 @@ mod tests {
             let info = super::hkdf_info(&f.portal, &f.key_index, &f.eph_pub_x);
             hkdf_sha256(&ss_x, b"ecies-aes-key", &info)
         };
-        let (ct, nonce, tag) =
-            super::super::test_utils::encrypt_plaintext(&aes_key, &short_plaintext);
+        let (ct, nonce, tag) = crate::test_utils::encrypt_plaintext(&aes_key, &short_plaintext);
 
         let result = decrypt_deposit(
             &f.seq_key,

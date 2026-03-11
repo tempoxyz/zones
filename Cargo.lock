@@ -13000,7 +13000,6 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 name = "zone"
 version = "0.1.0"
 dependencies = [
- "aes-gcm",
  "alloy",
  "alloy-consensus",
  "alloy-contract",
@@ -13025,7 +13024,6 @@ dependencies = [
  "k256",
  "metrics",
  "parking_lot",
- "rand 0.8.5",
  "reqwest 0.12.28",
  "reth-basic-payload-builder",
  "reth-chainspec",
@@ -13060,7 +13058,6 @@ dependencies = [
  "tempo-node",
  "tempo-payload-types",
  "tempo-precompiles",
- "tempo-precompiles-macros",
  "tempo-primitives",
  "tempo-revm",
  "tempo-transaction-pool",
@@ -13068,8 +13065,31 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "zone-precompiles",
  "zone-primitives",
  "zone-rpc",
+]
+
+[[package]]
+name = "zone-precompiles"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "alloy",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-sol-types",
+ "const-hex",
+ "k256",
+ "rand 0.8.5",
+ "revm",
+ "sha2 0.10.9",
+ "tempo-chainspec",
+ "tempo-contracts",
+ "tempo-precompiles",
+ "tempo-precompiles-macros",
+ "tracing",
+ "zone-primitives",
 ]
 
 [[package]]

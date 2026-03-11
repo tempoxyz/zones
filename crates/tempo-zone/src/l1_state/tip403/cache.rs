@@ -50,16 +50,9 @@ use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 use tracing::info;
 
+use zone_primitives::policy::{FIRST_USER_POLICY, POLICY_ALLOW_ALL};
+
 use crate::l1_state::versioned::HeightVersioned;
-
-/// Built-in "always reject" policy (policy ID 0). All addresses are unauthorized.
-pub(crate) const POLICY_REJECT_ALL: u64 = 0;
-
-/// Built-in "always allow" policy (policy ID 1). All addresses are authorized.
-pub(crate) const POLICY_ALLOW_ALL: u64 = 1;
-
-/// First user-created policy ID. IDs below this are reserved builtins.
-pub(crate) const FIRST_USER_POLICY: u64 = 2;
 
 /// Block-versioned cache of TIP-403 policy state from Tempo L1.
 ///
@@ -603,22 +596,7 @@ impl PolicyEvent {
     }
 }
 
-/// Authorization role for policy checks.
-///
-/// For simple policies (whitelist/blacklist), the role is ignored — the same membership set
-/// applies regardless. For compound policies (TIP-1015), the role selects which sub-policy
-/// to check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthRole {
-    /// Check both sender AND recipient. For compound policies, short-circuits on sender failure.
-    Transfer,
-    /// Check sender authorization only (compound: uses `senderPolicyId`).
-    Sender,
-    /// Check recipient authorization only (compound: uses `recipientPolicyId`).
-    Recipient,
-    /// Check mint recipient authorization only (compound: uses `mintRecipientPolicyId`).
-    MintRecipient,
-}
+pub(super) use zone_primitives::policy::AuthRole;
 
 /// Per-policy-ID cached record, mirroring `TIP403Registry.policy_records[id]`.
 #[derive(Debug, Default)]
