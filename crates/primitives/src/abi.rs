@@ -517,6 +517,51 @@ impl ZonePortal::sequencerEncryptionKeyReturn {
     }
 }
 
+#[cfg(feature = "rpc")]
+impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
+    ZonePortal::ZonePortalInstance<P, N>
+{
+    /// Returns all token addresses currently enabled for bridging on this [`ZonePortal`].
+    ///
+    /// Calls [`enabledTokenCount`](ZonePortal::enabledTokenCountCall) followed by
+    /// [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) for each index.
+    pub async fn enabled_tokens(
+        &self,
+    ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        let count = self.enabledTokenCount().call().await?;
+        let mut tokens = alloc::vec::Vec::with_capacity(count.to::<usize>());
+        for i in 0..count.to::<u64>() {
+            let token = self
+                .enabledTokenAt(alloy_primitives::U256::from(i))
+                .call()
+                .await?;
+            tokens.push(token);
+        }
+        Ok(tokens)
+    }
+
+    /// Fetches the active sequencer encryption key and its index.
+    ///
+    /// Returns `(key, key_index)` where `key` is the
+    /// [`sequencerEncryptionKeyReturn`](ZonePortal::sequencerEncryptionKeyReturn) and
+    /// `key_index` is the zero-based index of the current key.
+    pub async fn encryption_key(
+        &self,
+    ) -> Result<
+        (
+            ZonePortal::sequencerEncryptionKeyReturn,
+            alloy_primitives::U256,
+        ),
+        alloy_contract::Error,
+    > {
+        let key_call = self.sequencerEncryptionKey();
+        let count_call = self.encryptionKeyCount();
+        let (key, count) = tokio::try_join!(key_call.call(), count_call.call())?;
+        let key_index = count.saturating_sub(alloy_primitives::U256::from(1));
+        Ok((key, key_index))
+    }
+}
+
 impl core::fmt::Display for ZonePortal::ZonePortalErrors {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {

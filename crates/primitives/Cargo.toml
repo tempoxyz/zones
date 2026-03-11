@@ -15,6 +15,9 @@ alloy-primitives = { version = "1.5.4", default-features = false }
 alloy-rlp = { version = "0.3.13", default-features = false }
 alloy-sol-types = { version = "1.5.7", default-features = false }
 alloy-contract = { version = "1.6.1", optional = true }
+alloy-network = { version = "1.6.1", optional = true }
+alloy-provider = { version = "1.6.1", optional = true }
+tokio = { version = "1", optional = true }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
 
 [dev-dependencies]
@@ -29,4 +32,4 @@ std = [
     "serde?/std",
 ]
 serde = ["dep:serde", "alloy-primitives/serde"]
-rpc = ["dep:alloy-contract"]
+rpc = ["dep:alloy-contract", "dep:alloy-network", "dep:alloy-provider", "dep:tokio"]

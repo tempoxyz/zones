@@ -14,7 +14,7 @@ use alloy::{
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
 use zone::{
-    abi::{EncryptedDepositPayload, ZoneInbox, ZonePortal, ZonePortalExt},
+    abi::{EncryptedDepositPayload, ZoneInbox, ZonePortal},
     precompiles::ecies::encrypt_deposit,
 };
 

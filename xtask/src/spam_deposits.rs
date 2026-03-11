@@ -21,7 +21,7 @@ use tempo_primitives::{
     transaction::{Call, PrimitiveSignature},
 };
 use zone::{
-    abi::{EncryptedDepositPayload, ZonePortal, ZonePortalExt},
+    abi::{EncryptedDepositPayload, ZonePortal},
     precompiles::ecies::encrypt_deposit,
 };
 
