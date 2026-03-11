@@ -538,18 +538,15 @@ impl BatchSubmitter {
         if head2 != head || tail2 != tail {
             eyre::bail!(
                 "withdrawal queue changed during restore ({}..{} -> {}..{}), retry on next startup",
-                head, tail, head2, tail2
+                head,
+                tail,
+                head2,
+                tail2
             );
         }
 
         // Step 6: resolve all fetched data into verified withdrawal sets.
-        resolve_pending_slots(
-            head,
-            tail,
-            &events,
-            &slot_withdrawals,
-            head_slot_hash,
-        )
+        resolve_pending_slots(head, tail, &events, &slot_withdrawals, head_slot_hash)
     }
 
     /// Walk **L1** backwards from `l1_tip` in 10k-block chunks to find
@@ -913,7 +910,8 @@ mod tests {
 
     #[test]
     fn resolve_empty_range() {
-        let result = resolve_pending_slots(5, 5, &BTreeMap::new(), &BTreeMap::new(), B256::ZERO).unwrap();
+        let result =
+            resolve_pending_slots(5, 5, &BTreeMap::new(), &BTreeMap::new(), B256::ZERO).unwrap();
         assert!(result.is_empty());
     }
 
@@ -950,7 +948,8 @@ mod tests {
         let mut slot_withdrawals = BTreeMap::new();
         slot_withdrawals.insert(5, withdrawals);
 
-        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, head_slot_hash).unwrap();
+        let result =
+            resolve_pending_slots(5, 6, &events, &slot_withdrawals, head_slot_hash).unwrap();
         let returned = result.get(&5).unwrap();
         assert_eq!(returned.len(), 2);
         assert_eq!(abi::Withdrawal::queue_hash(returned), head_slot_hash);
@@ -1053,7 +1052,8 @@ mod tests {
         slot_withdrawals.insert(5, head_withdrawals);
         slot_withdrawals.insert(6, non_head_withdrawals);
 
-        let result = resolve_pending_slots(5, 7, &events, &slot_withdrawals, head_slot_hash).unwrap();
+        let result =
+            resolve_pending_slots(5, 7, &events, &slot_withdrawals, head_slot_hash).unwrap();
         // Head slot trimmed to 1 remaining withdrawal
         assert_eq!(result.get(&5).unwrap().len(), 1);
         assert_eq!(
