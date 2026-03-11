@@ -527,10 +527,7 @@ impl BatchSubmitter {
 
             if !withdrawals.is_empty() {
                 let count = withdrawals.len();
-                let mut guard = store.lock();
-                for w in &withdrawals {
-                    guard.add_withdrawal(slot, w.clone());
-                }
+                store.lock().add_batch(slot, withdrawals);
                 info!(slot, count, "Restored withdrawals for portal queue slot");
                 total_restored += count as u64;
             }

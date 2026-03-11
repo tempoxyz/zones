@@ -95,6 +95,14 @@ impl WithdrawalStore {
             .push(withdrawal);
     }
 
+    /// Add all withdrawals for a batch at once.
+    pub fn add_batch(&mut self, batch_index: u64, withdrawals: Vec<abi::Withdrawal>) {
+        self.batches
+            .entry(batch_index)
+            .or_default()
+            .extend(withdrawals);
+    }
+
     /// Get all withdrawals for a batch.
     pub fn get_batch(&self, batch_index: u64) -> Option<&Vec<abi::Withdrawal>> {
         self.batches.get(&batch_index)
