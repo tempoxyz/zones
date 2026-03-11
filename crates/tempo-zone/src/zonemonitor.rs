@@ -198,6 +198,22 @@ impl ZoneMonitor {
             "Initialized from portal state"
         );
 
+        // Restore pending withdrawal data from zone L2 events so the
+        // withdrawal processor can pick up where it left off.
+        match batch_submitter
+            .restore_pending_withdrawals(&provider, config.outbox_address, &withdrawal_store)
+            .await
+        {
+            Ok(count) if count > 0 => {
+                info!(count, "Restored pending withdrawals from zone L2 events");
+                withdrawal_notify.notify_one();
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!(error = %e, "Failed to restore pending withdrawals");
+            }
+        }
+
         Self {
             config,
             provider,

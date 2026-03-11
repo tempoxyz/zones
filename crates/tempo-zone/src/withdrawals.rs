@@ -125,9 +125,6 @@ impl Default for WithdrawalStore {
 /// This value is passed as `remainingQueue` to `processWithdrawal` on the portal contract.
 ///
 /// - If `processed_count >= withdrawals.len()`, returns `B256::ZERO` (no remaining items).
-/// - If `processed_count == withdrawals.len() - 1` (last item in the slot), returns `B256::ZERO`.
-///   The portal interprets `remainingQueue == 0` as the last withdrawal in the slot and internally
-///   converts it to `EMPTY_SENTINEL` before hash verification.
 /// - Otherwise, computes the hash chain over `withdrawals[processed_count..]` via
 ///   [`abi::Withdrawal::queue_hash`].
 pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count: usize) -> B256 {
@@ -136,10 +133,6 @@ pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count:
     }
 
     let remaining = &withdrawals[processed_count..];
-
-    if remaining.len() == 1 {
-        return B256::ZERO;
-    }
 
     abi::Withdrawal::queue_hash(remaining)
 }
@@ -438,9 +431,10 @@ mod tests {
     }
 
     #[test]
-    fn remaining_queue_last_item_is_zero() {
+    fn remaining_queue_single_item_is_hash() {
         let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
-        assert_eq!(compute_remaining_queue(&[w], 0), B256::ZERO);
+        let expected = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
+        assert_eq!(compute_remaining_queue(&[w], 0), expected);
     }
 
     #[test]
