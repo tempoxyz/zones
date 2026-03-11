@@ -168,7 +168,7 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     )
     .await?;
 
-    let (head_before, tail_before) = portal_queue_state(&l1, portal_address).await?;
+    let (_, tail_before) = portal_queue_state(&l1, portal_address).await?;
 
     // --- Abort sequencer BEFORE the withdrawal is processed ---
     seq_handle.monitor_handle.abort();
@@ -178,13 +178,26 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     // --- Respawn sequencer (fetch_pending_withdrawals runs during init) ---
     let _seq_handle2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
-    // The OLD withdrawal from before the restart should be processed via
-    // restored data (or was already processed before abort — either way this succeeds).
-    l1.wait_for_withdrawal_on_l1(
-        portal_address,
-        account.address(),
-        withdrawal_amount,
+    // The OLD withdrawal from before the restart should be processed — either
+    // it was already processed before the abort, or the restored data lets the
+    // processor pick it up after restart. Wait for portal head to advance past
+    // it (don't use wait_for_withdrawal_on_l1 which captures balance_before at
+    // call time and would double-count if already processed).
+    crate::utils::poll_until(
         WITHDRAWAL_TIMEOUT,
+        std::time::Duration::from_millis(200),
+        "portal head advances past first withdrawal",
+        || {
+            let l1 = &l1;
+            async move {
+                let (head, _) = portal_queue_state(l1, portal_address).await?;
+                if head >= tail_before {
+                    Ok(Some(head))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
     )
     .await?;
 
@@ -199,15 +212,15 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     )
     .await?;
 
-    // Portal queue should have advanced
+    // Portal queue should have advanced further
     let (head_after, tail_after) = portal_queue_state(&l1, portal_address).await?;
     assert!(
         tail_after > tail_before,
         "portal tail should advance after second withdrawal (before={tail_before}, after={tail_after})"
     );
     assert!(
-        head_after > head_before,
-        "portal head should advance as withdrawals are processed (before={head_before}, after={head_after})"
+        head_after >= tail_before,
+        "portal head should have processed at least the first withdrawal"
     );
 
     Ok(())
