@@ -438,9 +438,10 @@ impl BatchSubmitter {
         Ok(())
     }
 
-    /// Restore pending withdrawal data into the store by replaying L1 portal
-    /// `BatchSubmitted` events and fetching `WithdrawalRequested` events from
-    /// the zone L2 outbox.
+    /// Restore pending withdrawal data into the store by walking L1 backwards
+    /// from the chain tip to find `BatchSubmitted` events for pending portal
+    /// slots, then fetching the corresponding `WithdrawalRequested` events
+    /// from zone L2.
     ///
     /// Returns the number of restored withdrawals.
     #[instrument(skip_all, fields(portal = %self.portal_address))]
@@ -454,7 +455,6 @@ impl BatchSubmitter {
             self.read_portal_withdrawal_queue_head(),
             self.read_portal_withdrawal_queue_tail(),
         )?;
-
         if head >= tail {
             return Ok(0);
         }
@@ -463,110 +463,32 @@ impl BatchSubmitter {
             head,
             tail,
             pending = tail - head,
-            "Restoring pending withdrawals from zone L2 events"
+            "Restoring pending withdrawals"
         );
 
-        // For each pending slot, fetch its BatchSubmitted event using the
-        // indexed withdrawalBatchIndex — O(1) per slot, no full-chain scan.
-        //
-        // Also fetch the preceding slot (head - 1) to determine where the
-        // first pending batch's zone block range starts.
-        struct SlotInfo {
-            zone_start: u64,
-            zone_end: u64,
-            withdrawal_queue_hash: B256,
-        }
+        // Walk L1 backwards from the tip to find BatchSubmitted events for
+        // pending slots [head, tail) plus the predecessor (head-1) for
+        // determining the zone block start of the first slot.
+        let tip = self.l1_provider.get_block_number().await?;
+        let events = self.find_batch_events_backwards(tip, head, tail).await?;
 
-        let mut zone_ends: BTreeMap<u64, (B256, B256)> = BTreeMap::new(); // slot → (nextBlockHash, withdrawalQueueHash)
-
-        // Fetch the event for head-1 to determine zone_start of the first pending slot.
-        if head > 0
-            && let Some((event, _)) = self
-                .portal
-                .BatchSubmitted_filter()
-                .topic1(U256::from(head - 1))
-                .from_block(self.genesis_tempo_block_number)
-                .query()
-                .await?
-                .into_iter()
-                .next()
-        {
-            zone_ends.insert(head - 1, (event.nextBlockHash, B256::ZERO));
-        }
-
-        for slot in head..tail {
-            let events = self
-                .portal
-                .BatchSubmitted_filter()
-                .topic1(U256::from(slot))
-                .from_block(self.genesis_tempo_block_number)
-                .query()
-                .await?;
-
-            let Some((event, _)) = events.into_iter().next() else {
-                warn!(
-                    slot,
-                    "no BatchSubmitted event found for pending portal slot"
-                );
-                continue;
-            };
-
-            zone_ends.insert(slot, (event.nextBlockHash, event.withdrawalQueueHash));
-        }
-
-        // Resolve nextBlockHash → zone block number for each event.
-        let mut zone_block_numbers: BTreeMap<u64, u64> = BTreeMap::new();
-        for (&slot, &(next_block_hash, _)) in &zone_ends {
+        // Resolve each event's nextBlockHash to a zone block number.
+        let mut zone_blocks: BTreeMap<u64, u64> = BTreeMap::new();
+        for (&slot, event) in &events {
             let block = zone_provider
-                .get_block_by_hash(next_block_hash)
+                .get_block_by_hash(event.nextBlockHash)
                 .await?
-                .ok_or_else(|| eyre::eyre!("zone block not found for hash {next_block_hash}"))?;
-            zone_block_numbers.insert(slot, block.number());
-        }
-
-        // Build SlotInfo for each pending slot with withdrawals.
-        // zone_start = previous slot's zone_end + 1 (using the wider
-        // withdrawal-bearing slot boundary, which is safe because
-        // non-withdrawal batches in between produce no WithdrawalRequested events).
-        let mut slot_infos: BTreeMap<u64, SlotInfo> = BTreeMap::new();
-
-        for slot in head..tail {
-            let Some(&(_, withdrawal_queue_hash)) = zone_ends.get(&slot) else {
-                continue;
-            };
-            if withdrawal_queue_hash.is_zero() {
-                continue;
-            }
-            let zone_end = *zone_block_numbers.get(&slot).expect("resolved above");
-
-            // Use the previous slot's zone_end + 1 as zone_start.
-            // This may be wider than the exact batch range (if non-withdrawal
-            // batches existed in between), but that's correct — those intermediate
-            // zone blocks had no WithdrawalRequested events.
-            let zone_start = if slot > 0 {
-                zone_block_numbers
-                    .get(&(slot - 1))
-                    .map(|n| n + 1)
-                    .unwrap_or(1)
-            } else {
-                1
-            };
-
-            slot_infos.insert(
-                slot,
-                SlotInfo {
-                    zone_start,
-                    zone_end,
-                    withdrawal_queue_hash,
-                },
-            );
+                .ok_or_else(|| {
+                    eyre::eyre!("zone block not found for hash {}", event.nextBlockHash)
+                })?;
+            zone_blocks.insert(slot, block.number());
         }
 
         let outbox = ZoneOutbox::new(outbox_address, zone_provider.clone());
         let mut total_restored = 0u64;
 
         for slot in head..tail {
-            let Some(info) = slot_infos.get(&slot) else {
+            let Some(event) = events.get(&slot) else {
                 warn!(
                     slot,
                     "no BatchSubmitted event found for pending portal slot"
@@ -574,82 +496,40 @@ impl BatchSubmitter {
                 continue;
             };
 
-            // Fetch WithdrawalRequested events from zone L2 in the batch's block range.
-            let events = outbox
-                .WithdrawalRequested_filter()
-                .from_block(info.zone_start)
-                .to_block(info.zone_end)
-                .query()
-                .await?;
+            let zone_end = zone_blocks[&slot];
+            // Previous slot's zone_end + 1. May be wider than the exact batch
+            // range when non-withdrawal batches exist in between, but those
+            // zone blocks have no WithdrawalRequested events so the result is
+            // the same.
+            let zone_start = if slot > 0 {
+                zone_blocks.get(&(slot - 1)).map(|n| n + 1).unwrap_or(1)
+            } else {
+                1
+            };
 
-            // Sort by (block_number, tx_index, log_index) — same pattern as ZoneMonitor::fetch_withdrawals.
-            let mut events_sorted: Vec<_> = events
-                .into_iter()
-                .map(|(event, log)| {
-                    let key = (
-                        log.block_number.unwrap_or(0),
-                        log.transaction_index.unwrap_or(0),
-                        log.log_index.unwrap_or(0),
-                    );
-                    (key, event)
-                })
-                .collect();
-            events_sorted.sort_by_key(|(key, _)| *key);
+            let withdrawals = fetch_slot_withdrawals(&outbox, zone_start, zone_end).await?;
 
-            let withdrawals: Vec<abi::Withdrawal> = events_sorted
-                .into_iter()
-                .map(|(_, e)| abi::Withdrawal {
-                    token: e.token,
-                    sender: e.sender,
-                    to: e.to,
-                    amount: e.amount,
-                    fee: e.fee,
-                    memo: e.memo,
-                    gasLimit: e.gasLimit,
-                    fallbackRecipient: e.fallbackRecipient,
-                    callbackData: e.data,
-                })
-                .collect();
-
-            if withdrawals.is_empty() {
+            if withdrawals.is_empty()
+                || abi::Withdrawal::queue_hash(&withdrawals) != event.withdrawalQueueHash
+            {
                 warn!(
                     slot,
-                    zone_start = info.zone_start,
-                    zone_end = info.zone_end,
-                    "no withdrawal events found for slot with non-zero hash"
+                    zone_start, zone_end, "withdrawal hash mismatch or empty"
                 );
                 continue;
             }
 
-            // Verify hash chain matches the on-chain value.
-            let computed = abi::Withdrawal::queue_hash(&withdrawals);
-            if computed != info.withdrawal_queue_hash {
-                warn!(
-                    slot,
-                    computed = %computed,
-                    expected = %info.withdrawal_queue_hash,
-                    "withdrawal hash mismatch, skipping slot"
-                );
-                continue;
-            }
-
-            // For the head slot, determine how many withdrawals have already been
-            // processed by comparing against the current on-chain slot hash.
+            // For the head slot, trim already-processed withdrawals.
             let to_store = if slot == head {
                 let slot_hash: B256 = self
                     .portal
                     .withdrawalQueueSlot(U256::from(slot % WITHDRAWAL_QUEUE_CAPACITY))
                     .call()
                     .await?;
-
                 match find_processed_offset(&withdrawals, slot_hash) {
                     Some(offset) => &withdrawals[offset..],
                     None => {
-                        warn!(
-                            slot,
-                            %slot_hash,
-                            "could not determine processed offset for head slot"
-                        );
+                        warn!(slot, %slot_hash, "cannot determine processed offset");
                         continue;
                     }
                 }
@@ -670,6 +550,51 @@ impl BatchSubmitter {
 
         Ok(total_restored)
     }
+
+    /// Walk L1 backwards from `tip` in 10k-block chunks to find
+    /// `BatchSubmitted` events for portal slots `[head, tail)` plus the
+    /// predecessor slot `head - 1` (used for zone_start of the first slot).
+    async fn find_batch_events_backwards(
+        &self,
+        tip: u64,
+        head: u64,
+        tail: u64,
+    ) -> Result<BTreeMap<u64, abi::ZonePortal::BatchSubmitted>> {
+        let start = head.saturating_sub(1);
+        let needed = (tail - start) as usize;
+        let mut found: BTreeMap<u64, abi::ZonePortal::BatchSubmitted> = BTreeMap::new();
+        let mut hi = tip;
+
+        while found.len() < needed && hi >= self.genesis_tempo_block_number {
+            let lo = hi
+                .saturating_sub(10_000)
+                .max(self.genesis_tempo_block_number);
+
+            for (event, _) in self
+                .portal
+                .BatchSubmitted_filter()
+                .from_block(lo)
+                .to_block(hi)
+                .query()
+                .await?
+            {
+                if event.withdrawalQueueHash.is_zero() {
+                    continue;
+                }
+                let idx = event.withdrawalBatchIndex;
+                if idx >= start && idx < tail {
+                    found.insert(idx, event);
+                }
+            }
+
+            if lo == self.genesis_tempo_block_number {
+                break;
+            }
+            hi = lo - 1;
+        }
+
+        Ok(found)
+    }
 }
 
 /// Find the offset into `withdrawals` where the remaining hash chain matches
@@ -686,6 +611,47 @@ fn find_processed_offset(
         }
     }
     None
+}
+
+/// Fetch `WithdrawalRequested` events from zone L2 in the given block range,
+/// sorted by log order, and convert to [`abi::Withdrawal`] structs.
+async fn fetch_slot_withdrawals(
+    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    from: u64,
+    to: u64,
+) -> Result<Vec<abi::Withdrawal>> {
+    let mut events: Vec<_> = outbox
+        .WithdrawalRequested_filter()
+        .from_block(from)
+        .to_block(to)
+        .query()
+        .await?
+        .into_iter()
+        .map(|(e, log)| {
+            let key = (
+                log.block_number.unwrap_or(0),
+                log.transaction_index.unwrap_or(0),
+                log.log_index.unwrap_or(0),
+            );
+            (key, e)
+        })
+        .collect();
+    events.sort_by_key(|(k, _)| *k);
+
+    Ok(events
+        .into_iter()
+        .map(|(_, e)| abi::Withdrawal {
+            token: e.token,
+            sender: e.sender,
+            to: e.to,
+            amount: e.amount,
+            fee: e.fee,
+            memo: e.memo,
+            gasLimit: e.gasLimit,
+            fallbackRecipient: e.fallbackRecipient,
+            callbackData: e.data,
+        })
+        .collect())
 }
 
 /// Classification of the EIP-2935 gap, returned by
