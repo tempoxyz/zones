@@ -542,9 +542,16 @@ impl BatchSubmitter {
     /// Fetch and verify withdrawals for a single pending L1 portal slot.
     ///
     /// Queries `WithdrawalRequested` events from zone L2 blocks `[zone_start, zone_end]`
-    /// and verifies the hash chain against the L1 event. For the head slot,
-    /// already-processed withdrawals are trimmed by comparing against the
-    /// current on-chain slot hash.
+    /// and verifies the hash chain against the L1 event.
+    ///
+    /// The head slot requires special handling: the L1 portal processes
+    /// withdrawals one-by-one, updating the slot's on-chain hash after each.
+    /// If the sequencer crashed mid-slot, some withdrawals were already
+    /// processed but `head` hasn't advanced (it only advances when the entire
+    /// slot is consumed). We read the current slot hash from L1 and trim
+    /// already-processed withdrawals so the processor doesn't re-submit them
+    /// (which would fail — the hash chain wouldn't match).
+    /// Non-head slots are always fully unprocessed.
     async fn restore_slot(
         &self,
         slot: u64,
