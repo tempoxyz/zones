@@ -1,0 +1,26 @@
+[package]
+name = "zone-primitives"
+description = "Shared types for zone batch proving (no_std compatible)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives = { version = "1.5.4", default-features = false, features = ["serde"] }
+alloy-sol-types = { version = "1.5.7", default-features = false }
+alloy-rlp = { version = "0.3.13", default-features = false }
+serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
+
+[features]
+default = ["std"]
+std = [
+    "alloy-primitives/std",
+    "alloy-sol-types/std",
+    "alloy-rlp/std",
+    "serde/std",
+]

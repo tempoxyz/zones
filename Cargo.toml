@@ -8,6 +8,7 @@ publish = false
 [workspace]
 members = [
   "bin/tempo-zone",
+  "crates/primitives",
   "crates/tempo-zone",
   "crates/rpc",
   "xtask",
@@ -95,6 +96,7 @@ tempo-revm = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", defaul
 tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", tag = "v1.4.0", default-features = false }
 
 # zones
+zone-primitives = { path = "crates/primitives" }
 zone-rpc = { path = "crates/rpc" }
 
 # reth
