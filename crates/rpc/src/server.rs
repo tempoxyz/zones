@@ -83,11 +83,7 @@ enum RpcResult {
 
 /// Parse and dispatch a JSON-RPC text payload, handling both single and batch
 /// requests. Shared by HTTP and WebSocket transports.
-async fn process_rpc_text(
-    text: &str,
-    auth: &AuthContext,
-    api: &dyn ZoneRpcApi,
-) -> RpcResult {
+async fn process_rpc_text(text: &str, auth: &AuthContext, api: &dyn ZoneRpcApi) -> RpcResult {
     let trimmed = text.trim_start();
 
     if trimmed.starts_with('[') {
@@ -119,9 +115,7 @@ async fn process_rpc_text(
         }
     } else {
         match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(request) => {
-                RpcResult::Single(handlers::dispatch(&request, auth, api).await)
-            }
+            Ok(request) => RpcResult::Single(handlers::dispatch(&request, auth, api).await),
             Err(e) => RpcResult::Single(JsonRpcResponse::error(
                 serde_json::Value::Null,
                 JsonRpcError::parse_error(format!("parse error: {e}")),
@@ -198,7 +192,6 @@ fn authenticate_token(
     })
 }
 
-
 /// Query parameters for the WebSocket upgrade endpoint.
 #[derive(serde::Deserialize, Default)]
 struct WsQuery {
@@ -272,7 +265,11 @@ async fn handle_ws_session(mut socket: WebSocket, auth: AuthContext, state: Arc<
             RpcResult::Batch(resps) => serde_json::to_string(&resps).unwrap_or_default(),
         };
 
-        if socket.send(Message::Text(response_json.into())).await.is_err() {
+        if socket
+            .send(Message::Text(response_json.into()))
+            .await
+            .is_err()
+        {
             break;
         }
     }
