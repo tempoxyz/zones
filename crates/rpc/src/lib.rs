@@ -15,6 +15,7 @@ pub mod provider;
 pub mod proxy;
 pub mod server;
 pub mod types;
+mod ws;
 
 pub use config::PrivateRpcConfig;
 pub use handlers::ZoneRpcApi;
