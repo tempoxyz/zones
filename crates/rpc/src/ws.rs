@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::{
     auth::{self, AuthError},
-    server::{RpcState, authenticate_token, auth_error_status, process_rpc_text},
+    server::{RpcState, auth_error_status, authenticate_token, process_rpc_text},
 };
 
 /// Maximum WebSocket message size (1 MiB).
@@ -94,9 +94,15 @@ async fn handle_ws_session(
             }
         };
 
-        let response_json = process_rpc_text(&text, &auth, state.api.as_ref()).await.into_json();
+        let response_json = process_rpc_text(&text, &auth, state.api.as_ref())
+            .await
+            .into_json();
 
-        if socket.send(Message::Text(response_json.into())).await.is_err() {
+        if socket
+            .send(Message::Text(response_json.into()))
+            .await
+            .is_err()
+        {
             break;
         }
     }

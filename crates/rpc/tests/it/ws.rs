@@ -83,7 +83,9 @@ impl TestContext {
             zone_portal: PORTAL,
             sequencer: signer.address(),
         };
-        let addr = start_private_rpc(config, Arc::new(MockZoneRpcApi)).await.unwrap();
+        let addr = start_private_rpc(config, Arc::new(MockZoneRpcApi))
+            .await
+            .unwrap();
         Self { addr, signer }
     }
 
@@ -136,7 +138,10 @@ async fn connect_with_header(
     let req = tungstenite::http::Request::builder()
         .uri(ctx.ws_url())
         .header("x-authorization-token", &token)
-        .header("sec-websocket-key", tungstenite::handshake::client::generate_key())
+        .header(
+            "sec-websocket-key",
+            tungstenite::handshake::client::generate_key(),
+        )
         .header("host", ctx.addr.to_string())
         .header("upgrade", "websocket")
         .header("connection", "upgrade")
@@ -165,7 +170,11 @@ async fn ws_roundtrip_with_header_auth() {
     let ctx = TestContext::start().await;
     let mut ws = connect_with_header(&ctx).await;
 
-    ws.send(tungstenite::Message::Text(jsonrpc("eth_blockNumber", 1).into())).await.unwrap();
+    ws.send(tungstenite::Message::Text(
+        jsonrpc("eth_blockNumber", 1).into(),
+    ))
+    .await
+    .unwrap();
     let resp = parse_response(ws.next().await.unwrap().unwrap());
 
     assert_eq!(resp["id"], 1);
@@ -180,7 +189,11 @@ async fn ws_roundtrip_with_query_auth() {
 
     let (mut ws, _) = connect_async(&url).await.expect("ws connect failed");
 
-    ws.send(tungstenite::Message::Text(jsonrpc("eth_blockNumber", 1).into())).await.unwrap();
+    ws.send(tungstenite::Message::Text(
+        jsonrpc("eth_blockNumber", 1).into(),
+    ))
+    .await
+    .unwrap();
     let resp = parse_response(ws.next().await.unwrap().unwrap());
 
     assert_eq!(resp["id"], 1);
@@ -206,7 +219,10 @@ async fn ws_reject_invalid_token() {
     let req = tungstenite::http::Request::builder()
         .uri(ctx.ws_url())
         .header("x-authorization-token", "deadbeef")
-        .header("sec-websocket-key", tungstenite::handshake::client::generate_key())
+        .header(
+            "sec-websocket-key",
+            tungstenite::handshake::client::generate_key(),
+        )
         .header("host", ctx.addr.to_string())
         .header("upgrade", "websocket")
         .header("connection", "upgrade")
@@ -214,7 +230,9 @@ async fn ws_reject_invalid_token() {
         .body(())
         .unwrap();
 
-    let err = connect_async(req).await.expect_err("should fail with bad token");
+    let err = connect_async(req)
+        .await
+        .expect_err("should fail with bad token");
     let tungstenite::Error::Http(response) = err else {
         panic!("expected HTTP error, got {err:?}");
     };
@@ -227,7 +245,11 @@ async fn ws_multiple_requests() {
     let mut ws = connect_with_header(&ctx).await;
 
     for i in 1..=5 {
-        ws.send(tungstenite::Message::Text(jsonrpc("eth_blockNumber", i).into())).await.unwrap();
+        ws.send(tungstenite::Message::Text(
+            jsonrpc("eth_blockNumber", i).into(),
+        ))
+        .await
+        .unwrap();
         let resp = parse_response(ws.next().await.unwrap().unwrap());
         assert_eq!(resp["id"], i);
         assert_eq!(resp["result"], "0x42");
@@ -243,7 +265,9 @@ async fn ws_batch_request() {
         {"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1},
         {"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":2},
     ]);
-    ws.send(tungstenite::Message::Text(batch.to_string().into())).await.unwrap();
+    ws.send(tungstenite::Message::Text(batch.to_string().into()))
+        .await
+        .unwrap();
 
     let resp = parse_response(ws.next().await.unwrap().unwrap());
     let arr = resp.as_array().expect("expected batch response array");
@@ -259,7 +283,9 @@ async fn ws_invalid_json() {
     let ctx = TestContext::start().await;
     let mut ws = connect_with_header(&ctx).await;
 
-    ws.send(tungstenite::Message::Text("{broken".into())).await.unwrap();
+    ws.send(tungstenite::Message::Text("{broken".into()))
+        .await
+        .unwrap();
     let resp = parse_response(ws.next().await.unwrap().unwrap());
 
     assert_eq!(resp["error"]["code"], -32700);
@@ -270,7 +296,9 @@ async fn ws_unknown_method() {
     let ctx = TestContext::start().await;
     let mut ws = connect_with_header(&ctx).await;
 
-    ws.send(tungstenite::Message::Text(jsonrpc("eth_foobar", 1).into())).await.unwrap();
+    ws.send(tungstenite::Message::Text(jsonrpc("eth_foobar", 1).into()))
+        .await
+        .unwrap();
     let resp = parse_response(ws.next().await.unwrap().unwrap());
 
     assert_eq!(resp["id"], 1);
@@ -282,7 +310,11 @@ async fn ws_disabled_method() {
     let ctx = TestContext::start().await;
     let mut ws = connect_with_header(&ctx).await;
 
-    ws.send(tungstenite::Message::Text(jsonrpc("eth_subscribe", 1).into())).await.unwrap();
+    ws.send(tungstenite::Message::Text(
+        jsonrpc("eth_subscribe", 1).into(),
+    ))
+    .await
+    .unwrap();
     let resp = parse_response(ws.next().await.unwrap().unwrap());
 
     assert_eq!(resp["id"], 1);
@@ -294,7 +326,9 @@ async fn ws_empty_batch() {
     let ctx = TestContext::start().await;
     let mut ws = connect_with_header(&ctx).await;
 
-    ws.send(tungstenite::Message::Text("[]".into())).await.unwrap();
+    ws.send(tungstenite::Message::Text("[]".into()))
+        .await
+        .unwrap();
     let resp = parse_response(ws.next().await.unwrap().unwrap());
 
     assert_eq!(resp["error"]["code"], -32700);

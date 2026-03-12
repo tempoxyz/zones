@@ -168,7 +168,9 @@ async fn handle_rpc(
         }
     };
 
-    process_rpc_text(body_str, &auth, state.api.as_ref()).await.into_response()
+    process_rpc_text(body_str, &auth, state.api.as_ref())
+        .await
+        .into_response()
 }
 
 /// Authenticate the request using the `X-Authorization-Token` header.
