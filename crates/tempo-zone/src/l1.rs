@@ -1,22 +1,25 @@
 //! L1 chain subscription and deposit extraction.
 //!
-//! Subscribes to L1 block headers via WebSocket and extracts deposit events
-//! from the ZonePortal contract for each block.
+//! Subscribes to L1 block headers and extracts deposit events from the
+//! ZonePortal contract for each block. Supports both WebSocket (subscription)
+//! and HTTP (polling) transports — the transport is auto-detected from the URL
+//! scheme.
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
-use alloy_provider::{Provider, ProviderBuilder, WsConnect};
+use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_client::{ConnectionConfig, RpcClient};
 use alloy_rpc_types_eth::{BlockId, Log};
 use alloy_sol_types::{SolEvent, SolEventInterface, SolValue};
 use alloy_transport::Authorization;
-use futures::{StreamExt, TryStreamExt as _};
+use futures::{Stream, StreamExt, TryStreamExt as _};
 use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
-use std::sync::Arc;
+use std::{pin::Pin, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     abi::{
@@ -27,10 +30,13 @@ use crate::{
     l1_state::tip403::PolicyEvent,
 };
 
+/// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
+const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
+
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
 pub struct L1SubscriberConfig {
-    /// WebSocket URL of the L1 node.
+    /// RPC URL of the L1 node (HTTP or WebSocket).
     pub l1_rpc_url: String,
     /// ZonePortal contract address on L1.
     pub portal_address: Address,
@@ -71,8 +77,9 @@ pub struct L1Subscriber {
 impl L1Subscriber {
     /// Create and spawn the L1 subscriber as a critical background task.
     ///
-    /// The subscriber runs in a retry loop — if the WebSocket connection drops
-    /// or [`Self::run`] returns an error, it reconnects after a 5-second delay.
+    /// The subscriber runs in a retry loop — if the connection drops or
+    /// [`Self::run`] returns an error, it reconnects after the configured retry
+    /// interval.
     pub fn spawn(
         config: L1SubscriberConfig,
         deposit_queue: DepositQueue,
@@ -91,30 +98,138 @@ impl L1Subscriber {
             Box::pin(async move {
                 loop {
                     if let Err(e) = subscriber.clone().run().await {
-                        error!(error = %e, "L1 subscriber failed, reconnecting in 5s");
-                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        let retry_interval = subscriber.config.retry_connection_interval;
+                        error!(
+                            error = %e,
+                            retry_secs = retry_interval.as_secs_f32(),
+                            "L1 subscriber failed, reconnecting after retry interval"
+                        );
+                        tokio::time::sleep(retry_interval).await;
                     }
                 }
             }),
         );
     }
 
-    /// Connect to the L1 node via WebSocket.
-    async fn connect(&self) -> eyre::Result<impl Provider<TempoNetwork> + use<>> {
+    /// Connect to the L1 node.
+    ///
+    /// The transport (HTTP or WebSocket) is auto-detected from the URL scheme.
+    #[instrument(skip(self), fields(l1_rpc_url = %self.config.l1_rpc_url))]
+    async fn connect(&self) -> eyre::Result<DynProvider<TempoNetwork>> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
+
         let url: url::Url = self.config.l1_rpc_url.parse()?;
-        let mut ws = WsConnect::new(self.config.l1_rpc_url.clone())
+        let mut conn_config = ConnectionConfig::new()
             .with_max_retries(u32::MAX)
             .with_retry_interval(self.config.retry_connection_interval);
+
         if !url.username().is_empty() {
             let auth = Authorization::basic(url.username(), url.password().unwrap_or_default());
-            ws = ws.with_auth(auth);
+            conn_config = conn_config.with_auth(auth);
         }
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_ws(ws)
+
+        let client = RpcClient::builder()
+            .connect_with_config(&self.config.l1_rpc_url, conn_config)
             .await?;
+
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_client(client)
+            .erased();
         info!("Connected to L1 node");
         Ok(provider)
+    }
+
+    /// Returns a stream of new L1 block headers, abstracting over the transport.
+    ///
+    /// - **WebSocket**: uses `subscribe_blocks` for push-based delivery.
+    /// - **HTTP**: falls back to `watch_full_blocks` (filter-based polling via
+    ///   `eth_newBlockFilter` + `eth_getFilterChanges`), extracting the header
+    ///   from each block. The fallback is selected when `subscribe_blocks`
+    ///   returns `PubsubUnavailable`.
+    ///
+    /// Both paths produce the same header payloads; transport-specific polling
+    /// failures are surfaced as stream errors so [`run`](Self::run) can
+    /// reconnect and resync.
+    async fn header_stream<'a>(
+        &self,
+        provider: &'a DynProvider<TempoNetwork>,
+    ) -> eyre::Result<
+        Pin<
+            Box<
+                dyn Stream<
+                        Item = eyre::Result<
+                            <TempoNetwork as alloy_network::Network>::HeaderResponse,
+                        >,
+                    > + Send
+                    + 'a,
+            >,
+        >,
+    > {
+        match provider.subscribe_blocks().await {
+            Ok(sub) => {
+                info!("Using WebSocket block subscription");
+                Ok(Box::pin(sub.into_stream().map(Ok)))
+            }
+            Err(e) => {
+                if e.as_transport_err()
+                    .is_some_and(|t| t.is_pubsub_unavailable())
+                {
+                    info!("Pubsub unavailable, falling back to HTTP polling");
+                    let mut watcher = provider.watch_full_blocks().await?;
+                    watcher.set_poll_interval(HTTP_POLL_INTERVAL);
+                    let stream = watcher
+                        .into_stream()
+                        .map(|res| res.map(|block| block.header).map_err(Into::into));
+                    Ok(Box::pin(stream))
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
+
+    /// Build the live L1 block stream, fetching receipts for each new header
+    /// and buffering requests ahead of processing.
+    async fn l1_block_stream<'a>(
+        &self,
+        provider: &'a DynProvider<TempoNetwork>,
+    ) -> eyre::Result<
+        Pin<
+            Box<
+                dyn Stream<
+                        Item = eyre::Result<(
+                            <TempoNetwork as alloy_network::Network>::HeaderResponse,
+                            Vec<<TempoNetwork as alloy_network::Network>::ReceiptResponse>,
+                        )>,
+                    > + Send
+                    + 'a,
+            >,
+        >,
+    > {
+        let header_stream = self.header_stream(provider).await?;
+        let concurrency = self.config.l1_fetch_concurrency.max(1);
+        let stream = header_stream
+            .map_ok(move |header| {
+                let provider = provider;
+                async move {
+                    let block_number = header.number();
+                    let start = std::time::Instant::now();
+                    let receipts = provider
+                        .get_block_receipts(BlockId::number(block_number))
+                        .await?
+                        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
+                    let elapsed = start.elapsed();
+                    debug!(
+                        block_number,
+                        elapsed_ms = elapsed.as_millis() as u64,
+                        receipts = receipts.len(),
+                        "Fetched live block receipts"
+                    );
+                    Ok::<_, eyre::Report>((header, receipts))
+                }
+            })
+            .try_buffered(concurrency);
+        Ok(Box::pin(stream))
     }
 
     /// Determine the starting block number for backfill.
@@ -166,6 +281,7 @@ impl L1Subscriber {
     }
 
     /// Backfill deposit events from the starting block to the current L1 tip.
+    #[instrument(skip(self, l1_provider))]
     async fn sync_to_l1_tip(
         &mut self,
         l1_provider: &impl Provider<TempoNetwork>,
@@ -209,6 +325,7 @@ impl L1Subscriber {
     /// parallel, then processes them sequentially (event extraction, policy
     /// application, enqueue). This avoids the round-trip latency of fetching
     /// one block at a time.
+    #[instrument(skip(self, l1_provider), fields(from, to))]
     async fn backfill(
         &mut self,
         l1_provider: &impl Provider<TempoNetwork>,
@@ -297,10 +414,10 @@ impl L1Subscriber {
 
     /// Run the L1 subscriber until the stream ends or an error occurs.
     ///
-    /// Connects via WebSocket, backfills deposit events to the current L1 tip,
-    /// then subscribes to new block headers. Each block — with or without
-    /// deposits — is enqueued so the zone engine sees a strict sequential
-    /// chain.
+    /// Connects to the L1 node (HTTP or WebSocket), backfills deposit events
+    /// to the current L1 tip, then listens for new block headers. Each block —
+    /// with or without deposits — is enqueued so the zone engine sees a strict
+    /// sequential chain.
     ///
     /// Live-streamed blocks are buffered one block behind: a block is only
     /// flushed to the deposit queue once the next block arrives with a
@@ -319,35 +436,8 @@ impl L1Subscriber {
         // Backfilled blocks are historical and considered confirmed.
         self.sync_to_l1_tip(&provider).await?;
 
-        let sub = provider.subscribe_blocks().await?;
-        info!(portal = %self.config.portal_address, "Subscribed to L1 blocks");
-
-        // Map each incoming header to an async receipt fetch and buffer ahead
-        // so the next block's receipts are already in flight while we process
-        // the current one.
-        let concurrency = self.config.l1_fetch_concurrency.max(1);
-        let mut stream = sub
-            .into_stream()
-            .map(|header| {
-                let provider = &provider;
-                async move {
-                    let block_number = header.number();
-                    let start = std::time::Instant::now();
-                    let receipts = provider
-                        .get_block_receipts(BlockId::number(block_number))
-                        .await?
-                        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
-                    let elapsed = start.elapsed();
-                    debug!(
-                        block_number,
-                        elapsed_ms = elapsed.as_millis() as u64,
-                        receipts = receipts.len(),
-                        "Fetched live block receipts"
-                    );
-                    Ok::<_, eyre::Report>((header, receipts))
-                }
-            })
-            .buffered(concurrency);
+        info!(portal = %self.config.portal_address, "Listening for L1 blocks");
+        let mut stream = self.l1_block_stream(&provider).await?;
 
         // Confirmation buffer: holds the latest unconfirmed L1 block.
         // A block is only flushed to the deposit queue once the NEXT block
