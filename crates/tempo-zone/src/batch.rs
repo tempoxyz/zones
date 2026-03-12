@@ -26,8 +26,10 @@
 //! [`EIP2935_HISTORY_WINDOW`] (e.g. due to timing) by falling back to ancestry
 //! mode — a recent anchor block plus a parent-hash header chain.
 
-use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
-use alloy_primitives::{Address, B256, Bytes};
+use std::collections::BTreeMap;
+
+use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
+use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
 use eyre::Result;
@@ -432,6 +434,323 @@ impl BatchSubmitter {
         }
         Ok(())
     }
+
+    /// Re-populate the in-memory [`WithdrawalStore`](crate::withdrawals::WithdrawalStore)
+    /// after a sequencer restart.
+    ///
+    /// The L1 portal stores only hash chains, not the actual [`Withdrawal`](abi::Withdrawal)
+    /// structs. This method reconstructs them by:
+    ///
+    /// 1. Reading `withdrawalQueueHead` / `withdrawalQueueTail` from the **L1 portal**
+    ///    to determine which slots are still pending.
+    /// 2. Walking **L1** backwards from the chain tip to find the `BatchSubmitted`
+    ///    event for each pending slot (plus the predecessor for zone block range
+    ///    boundaries).
+    /// 3. Resolving each event's `nextBlockHash` to a **zone L2** block number.
+    /// 4. Fetching `WithdrawalRequested` events from the **zone L2** outbox in
+    ///    the corresponding block range.
+    /// 5. Reading the head slot's current on-chain hash for partial processing
+    ///    detection.
+    /// 6. Verifying the hash chain and trimming already-processed withdrawals.
+    ///
+    /// Returns a map of portal_slot → verified withdrawals ready to be stored.
+    #[instrument(skip_all, fields(portal = %self.portal_address))]
+    pub async fn fetch_pending_withdrawals(
+        &self,
+        zone_provider: &DynProvider<TempoNetwork>,
+        outbox_address: Address,
+    ) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
+        // Step 1: read pending slot range from the L1 portal.
+        let (head, tail) = tokio::try_join!(
+            self.read_portal_withdrawal_queue_head(),
+            self.read_portal_withdrawal_queue_tail(),
+        )?;
+
+        if head >= tail {
+            info!(head, tail, "No pending withdrawals to restore");
+            return Ok(BTreeMap::new());
+        }
+
+        info!(
+            head,
+            tail,
+            pending = tail - head,
+            "Restoring pending withdrawals"
+        );
+
+        // Step 2: walk L1 backwards from the L1 tip to find BatchSubmitted
+        // events for pending slots [head, tail) plus the predecessor (head-1).
+        let l1_tip = self.l1_provider.get_block_number().await?;
+        let events = self.find_batch_events_backwards(l1_tip, head, tail).await?;
+
+        // Step 3: resolve each L1 event's nextBlockHash to a zone L2 block number.
+        // Maps portal_slot → last zone L2 block in that batch.
+        let mut zone_end_by_slot: BTreeMap<u64, u64> = BTreeMap::new();
+        for (&portal_slot, event) in &events {
+            let block = zone_provider
+                .get_block_by_hash(event.nextBlockHash)
+                .await?
+                .ok_or_else(|| {
+                    eyre::eyre!(
+                        "zone block not found for hash {} (portal slot {portal_slot})",
+                        event.nextBlockHash
+                    )
+                })?;
+            zone_end_by_slot.insert(portal_slot, block.number());
+        }
+
+        // Step 4: fetch WithdrawalRequested events from zone L2 for each pending slot.
+        let outbox = ZoneOutbox::new(outbox_address, zone_provider.clone());
+        let mut slot_withdrawals: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
+        for portal_slot in head..tail {
+            if !events.contains_key(&portal_slot) {
+                continue;
+            }
+            let zone_end = zone_end_by_slot[&portal_slot];
+            let zone_start = if portal_slot == 0 {
+                1
+            } else if let Some(prev_end) = zone_end_by_slot.get(&(portal_slot - 1)) {
+                prev_end + 1
+            } else {
+                warn!(
+                    portal_slot,
+                    "predecessor event missing, cannot determine zone block range start"
+                );
+                continue;
+            };
+            let withdrawals = fetch_slot_withdrawals(&outbox, zone_start, zone_end).await?;
+            slot_withdrawals.insert(portal_slot, withdrawals);
+        }
+
+        // Step 5: read the head slot's current on-chain hash (for partial processing detection).
+        let head_slot_hash = self
+            .portal
+            .withdrawalQueueSlot(U256::from(head % WITHDRAWAL_QUEUE_CAPACITY))
+            .call()
+            .await?;
+
+        // Guard: verify the queue didn't change during the multi-RPC replay.
+        let (head2, tail2) = tokio::try_join!(
+            self.read_portal_withdrawal_queue_head(),
+            self.read_portal_withdrawal_queue_tail(),
+        )?;
+
+        if head2 != head || tail2 != tail {
+            eyre::bail!(
+                "withdrawal queue changed during restore ({}..{} -> {}..{}), retry on next startup",
+                head,
+                tail,
+                head2,
+                tail2
+            );
+        }
+
+        // Step 6: resolve all fetched data into verified withdrawal sets.
+        resolve_pending_slots(head, tail, &events, &slot_withdrawals, head_slot_hash)
+    }
+
+    /// Walk **L1** backwards from `l1_tip` in 10k-block chunks to find
+    /// `BatchSubmitted` events for portal slots `[head, tail)` plus the
+    /// predecessor slot `head - 1` (used to determine the zone L2 block
+    /// range start of the first pending slot). When `head == 0` the
+    /// predecessor does not exist and is omitted; the caller falls back to
+    /// zone block 1.
+    ///
+    /// Portal queue slots are assigned by position: the n-th non-zero-hash
+    /// `BatchSubmitted` event (0-indexed, chronologically) corresponds to
+    /// portal queue slot n. This is because the L1 portal increments
+    /// `withdrawalBatchIndex` on every `submitBatch` call, but only advances
+    /// the withdrawal queue `tail` for batches with non-zero
+    /// `withdrawalQueueHash`. The two counters diverge whenever a batch has
+    /// no withdrawals, so we cannot use `withdrawalBatchIndex` as the slot
+    /// index.
+    ///
+    /// Stops as soon as enough events are found — pending slots are recent,
+    /// so the first chunk typically covers them all.
+    async fn find_batch_events_backwards(
+        &self,
+        l1_tip: u64,
+        head: u64,
+        tail: u64,
+    ) -> Result<BTreeMap<u64, abi::ZonePortal::BatchSubmitted>> {
+        let start = head.saturating_sub(1);
+        let needed = (tail - start) as usize;
+        if needed == 0 {
+            return Ok(BTreeMap::new());
+        }
+
+        let mut all_events: Vec<abi::ZonePortal::BatchSubmitted> = Vec::new();
+        let mut hi = l1_tip;
+
+        while hi >= self.genesis_tempo_block_number {
+            let lo = hi
+                .saturating_sub(10_000)
+                .max(self.genesis_tempo_block_number);
+
+            let chunk: Vec<_> = self
+                .portal
+                .BatchSubmitted_filter()
+                .from_block(lo)
+                .to_block(hi)
+                .query()
+                .await?
+                .into_iter()
+                .filter(|(event, _)| !event.withdrawalQueueHash.is_zero())
+                .map(|(event, _)| event)
+                .collect();
+
+            all_events.extend(chunk);
+
+            if all_events.len() >= needed {
+                break;
+            }
+            if lo == self.genesis_tempo_block_number {
+                break;
+            }
+            hi = lo - 1;
+        }
+
+        // Sort chronologically — the n-th event = portal queue slot n.
+        all_events.sort_by_key(|e| e.withdrawalBatchIndex);
+
+        // Assign portal slots: if we found M events total, the last M
+        // correspond to slots [tail - M, tail). Keep only [start, tail).
+        // Truncate to at most `needed` events (the most recent ones) to
+        // guard against extra events from race conditions.
+        if all_events.len() > needed {
+            all_events.drain(..all_events.len() - needed);
+        }
+
+        let mut found = BTreeMap::new();
+        let first_slot = tail.saturating_sub(all_events.len() as u64);
+        for (i, event) in all_events.into_iter().enumerate() {
+            let portal_slot = first_slot + i as u64;
+            if portal_slot >= start && portal_slot < tail {
+                found.insert(portal_slot, event);
+            }
+        }
+
+        Ok(found)
+    }
+}
+
+/// Pure function that resolves pre-fetched data into verified withdrawal sets
+/// ready to be stored.
+///
+/// For each pending portal slot in `[head, tail)`:
+/// 1. Skips slots with no `BatchSubmitted` event or no fetched withdrawals.
+/// 2. Verifies the hash chain of fetched withdrawals matches the L1 event's
+///    `withdrawalQueueHash`.
+/// 3. For the head slot, trims already-processed withdrawals using
+///    `head_slot_hash` (the current on-chain slot hash). The L1 portal
+///    processes withdrawals one-by-one, updating the slot hash after each.
+///    If the sequencer crashed mid-slot, some are already consumed but `head`
+///    hasn't advanced yet.
+/// 4. Non-head slots are always fully unprocessed.
+///
+/// Returns a map of portal_slot → verified withdrawals to store.
+fn resolve_pending_slots(
+    head: u64,
+    tail: u64,
+    events: &BTreeMap<u64, abi::ZonePortal::BatchSubmitted>,
+    slot_withdrawals: &BTreeMap<u64, Vec<abi::Withdrawal>>,
+    head_slot_hash: B256,
+) -> Result<BTreeMap<u64, Vec<abi::Withdrawal>>> {
+    let mut result: BTreeMap<u64, Vec<abi::Withdrawal>> = BTreeMap::new();
+
+    for portal_slot in head..tail {
+        let Some(event) = events.get(&portal_slot) else {
+            eyre::bail!("no BatchSubmitted event found for pending portal slot {portal_slot}");
+        };
+
+        let Some(withdrawals) = slot_withdrawals.get(&portal_slot) else {
+            eyre::bail!("no withdrawal data fetched for pending portal slot {portal_slot}");
+        };
+
+        if withdrawals.is_empty()
+            || abi::Withdrawal::queue_hash(withdrawals) != event.withdrawalQueueHash
+        {
+            eyre::bail!("withdrawal hash mismatch or empty for portal slot {portal_slot}");
+        }
+
+        if portal_slot == head {
+            match find_processed_offset(withdrawals, head_slot_hash) {
+                Some(offset) => {
+                    let remaining = withdrawals[offset..].to_vec();
+                    if !remaining.is_empty() {
+                        result.insert(portal_slot, remaining);
+                    }
+                }
+                None => {
+                    eyre::bail!("cannot determine processed offset for head slot {portal_slot}");
+                }
+            }
+        } else {
+            result.insert(portal_slot, withdrawals.clone());
+        }
+    }
+
+    Ok(result)
+}
+
+/// Find the offset into `withdrawals` where the remaining hash chain matches
+/// `current_slot_hash`. Returns `Some(0)` if no withdrawals have been processed,
+/// `Some(n)` if n have been processed (n remaining), or `None` if no match is
+/// found.
+///
+/// Also checks `offset == len` (all consumed, hash chain = `B256::ZERO`).
+fn find_processed_offset(
+    withdrawals: &[abi::Withdrawal],
+    current_slot_hash: B256,
+) -> Option<usize> {
+    for offset in 0..=withdrawals.len() {
+        let hash = abi::Withdrawal::queue_hash(&withdrawals[offset..]);
+        if hash == current_slot_hash {
+            return Some(offset);
+        }
+    }
+    None
+}
+
+/// Fetch `WithdrawalRequested` events from zone L2 in the given block range,
+/// sorted by log order, and convert to [`abi::Withdrawal`] structs.
+async fn fetch_slot_withdrawals(
+    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    from: u64,
+    to: u64,
+) -> Result<Vec<abi::Withdrawal>> {
+    let mut events: Vec<_> = outbox
+        .WithdrawalRequested_filter()
+        .from_block(from)
+        .to_block(to)
+        .query()
+        .await?
+        .into_iter()
+        .map(|(e, log)| {
+            let key = (
+                log.block_number.unwrap_or(0),
+                log.transaction_index.unwrap_or(0),
+                log.log_index.unwrap_or(0),
+            );
+            (key, e)
+        })
+        .collect();
+    events.sort_by_key(|(k, _)| *k);
+
+    Ok(events
+        .into_iter()
+        .map(|(_, e)| abi::Withdrawal {
+            token: e.token,
+            sender: e.sender,
+            to: e.to,
+            amount: e.amount,
+            fee: e.fee,
+            memo: e.memo,
+            gasLimit: e.gasLimit,
+            fallbackRecipient: e.fallbackRecipient,
+            callbackData: e.data,
+        })
+        .collect())
 }
 
 /// Classification of the EIP-2935 gap, returned by
@@ -506,4 +825,289 @@ pub(crate) struct ZoneBlockSnapshot {
     pub processed_deposit_hash: B256,
     /// Zone L2 block hash.
     pub block_hash: B256,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::abi;
+    use alloy_primitives::{B256, address};
+
+    fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
+        abi::Withdrawal {
+            token: address!("0x0000000000000000000000000000000000001000"),
+            sender: address!("0x0000000000000000000000000000000000000001"),
+            to,
+            amount,
+            fee: 0,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackRecipient: to,
+            callbackData: Default::default(),
+        }
+    }
+
+    #[test]
+    fn find_offset_no_withdrawals_processed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let withdrawals = vec![w0, w1];
+        let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
+        assert_eq!(find_processed_offset(&withdrawals, full_hash), Some(0));
+    }
+
+    #[test]
+    fn find_offset_one_processed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let withdrawals = vec![w0, w1];
+        let hash = abi::Withdrawal::queue_hash(&withdrawals[1..]);
+        assert_eq!(find_processed_offset(&withdrawals, hash), Some(1));
+    }
+
+    #[test]
+    fn find_offset_all_processed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w0];
+        // B256::ZERO = queue_hash(&[]), meaning all withdrawals have been consumed.
+        assert_eq!(find_processed_offset(&withdrawals, B256::ZERO), Some(1));
+    }
+
+    #[test]
+    fn find_offset_no_match() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w0];
+        let random_hash = B256::from([0xdeu8; 32]);
+        assert_eq!(find_processed_offset(&withdrawals, random_hash), None);
+    }
+
+    #[test]
+    fn find_offset_single_withdrawal_unprocessed() {
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 999);
+        let withdrawals = vec![w];
+        let hash = abi::Withdrawal::queue_hash(&withdrawals);
+        assert_eq!(find_processed_offset(&withdrawals, hash), Some(0));
+    }
+
+    #[test]
+    fn find_offset_partial_three_withdrawals() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+        let withdrawals = vec![w0, w1, w2];
+        let hash = abi::Withdrawal::queue_hash(&withdrawals[2..]);
+        assert_eq!(find_processed_offset(&withdrawals, hash), Some(2));
+    }
+
+    fn test_batch_event(withdrawal_queue_hash: B256) -> abi::ZonePortal::BatchSubmitted {
+        abi::ZonePortal::BatchSubmitted {
+            withdrawalBatchIndex: 0,
+            nextProcessedDepositQueueHash: B256::ZERO,
+            nextBlockHash: B256::ZERO,
+            withdrawalQueueHash: withdrawal_queue_hash,
+        }
+    }
+
+    #[test]
+    fn resolve_empty_range() {
+        let result =
+            resolve_pending_slots(5, 5, &BTreeMap::new(), &BTreeMap::new(), B256::ZERO).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_single_slot_unprocessed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let withdrawals = vec![w0, w1];
+        let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(full_hash));
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, withdrawals);
+
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, full_hash).unwrap();
+        let returned = result.get(&5).unwrap();
+        assert_eq!(returned.len(), 2);
+        assert_eq!(abi::Withdrawal::queue_hash(returned), full_hash);
+    }
+
+    #[test]
+    fn resolve_single_slot_partially_processed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+        let withdrawals = vec![w0, w1, w2];
+        let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
+        // head_slot_hash reflects that w0 has been processed (hash of remaining [w1, w2])
+        let head_slot_hash = abi::Withdrawal::queue_hash(&withdrawals[1..]);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(full_hash));
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, withdrawals);
+
+        let result =
+            resolve_pending_slots(5, 6, &events, &slot_withdrawals, head_slot_hash).unwrap();
+        let returned = result.get(&5).unwrap();
+        assert_eq!(returned.len(), 2);
+        assert_eq!(abi::Withdrawal::queue_hash(returned), head_slot_hash);
+    }
+
+    #[test]
+    fn resolve_single_slot_fully_processed() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w0];
+        let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(full_hash));
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, withdrawals);
+
+        // B256::ZERO = queue_hash(&[]), all consumed. find_processed_offset returns
+        // Some(1) (offset == len), so remaining is empty and slot is not stored.
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn resolve_multiple_slots() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+
+        let head_withdrawals = vec![w0];
+        let tail_withdrawals = vec![w1, w2];
+
+        let head_hash = abi::Withdrawal::queue_hash(&head_withdrawals);
+        let tail_hash = abi::Withdrawal::queue_hash(&tail_withdrawals);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(head_hash));
+        events.insert(6, test_batch_event(tail_hash));
+
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, head_withdrawals);
+        slot_withdrawals.insert(6, tail_withdrawals);
+
+        // head slot fully unprocessed (head_slot_hash == full hash of slot 5)
+        let result = resolve_pending_slots(5, 7, &events, &slot_withdrawals, head_hash).unwrap();
+        let slot5 = result.get(&5).unwrap();
+        let slot6 = result.get(&6).unwrap();
+        assert_eq!(slot5.len(), 1);
+        assert_eq!(slot6.len(), 2);
+        assert_eq!(abi::Withdrawal::queue_hash(slot5), head_hash);
+        assert_eq!(abi::Withdrawal::queue_hash(slot6), tail_hash);
+    }
+
+    #[test]
+    fn resolve_hash_mismatch_skipped() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w0];
+        let wrong_hash = B256::from([0xabu8; 32]);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(wrong_hash));
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, withdrawals);
+
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_missing_event_skipped() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w0];
+
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, withdrawals);
+
+        // No event for slot 5
+        let result = resolve_pending_slots(5, 6, &BTreeMap::new(), &slot_withdrawals, B256::ZERO);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_head_partial_with_non_head_slot() {
+        let w0 = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let w1 = test_withdrawal(address!("0x0000000000000000000000000000000000000002"), 200);
+        let w2 = test_withdrawal(address!("0x0000000000000000000000000000000000000003"), 300);
+
+        let head_withdrawals = vec![w0, w1];
+        let non_head_withdrawals = vec![w2];
+
+        let head_hash = abi::Withdrawal::queue_hash(&head_withdrawals);
+        let non_head_hash = abi::Withdrawal::queue_hash(&non_head_withdrawals);
+        // w0 already processed, head_slot_hash = hash of [w1] only
+        let head_slot_hash = abi::Withdrawal::queue_hash(&head_withdrawals[1..]);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(head_hash));
+        events.insert(6, test_batch_event(non_head_hash));
+
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, head_withdrawals);
+        slot_withdrawals.insert(6, non_head_withdrawals);
+
+        let result =
+            resolve_pending_slots(5, 7, &events, &slot_withdrawals, head_slot_hash).unwrap();
+        // Head slot trimmed to 1 remaining withdrawal
+        assert_eq!(result.get(&5).unwrap().len(), 1);
+        assert_eq!(
+            abi::Withdrawal::queue_hash(result.get(&5).unwrap()),
+            head_slot_hash
+        );
+        // Non-head slot fully present
+        assert_eq!(result.get(&6).unwrap().len(), 1);
+        assert_eq!(
+            abi::Withdrawal::queue_hash(result.get(&6).unwrap()),
+            non_head_hash
+        );
+    }
+
+    #[test]
+    fn resolve_empty_withdrawals_vec_skipped() {
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(B256::from([0x11u8; 32])));
+
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, vec![]);
+
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, B256::ZERO);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_missing_withdrawals_data_skipped() {
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(hash));
+        // slot_withdrawals has no entry for slot 5
+        let slot_withdrawals = BTreeMap::new();
+
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, hash);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_head_slot_corrupted_hash_skipped() {
+        let w = test_withdrawal(address!("0x0000000000000000000000000000000000000001"), 100);
+        let withdrawals = vec![w];
+        let full_hash = abi::Withdrawal::queue_hash(&withdrawals);
+        // head_slot_hash doesn't match any tail of the withdrawal list
+        let corrupted_hash = B256::from([0xdeu8; 32]);
+
+        let mut events = BTreeMap::new();
+        events.insert(5, test_batch_event(full_hash));
+        let mut slot_withdrawals = BTreeMap::new();
+        slot_withdrawals.insert(5, withdrawals);
+
+        let result = resolve_pending_slots(5, 6, &events, &slot_withdrawals, corrupted_hash);
+        assert!(result.is_err());
+    }
 }
