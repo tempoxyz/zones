@@ -52,6 +52,8 @@ pub struct L1SubscriberConfig {
     /// Maximum number of concurrent L1 RPC receipt fetches. Used directly for
     /// the live stream and halved for backfill (which sends 2 requests per block).
     pub l1_fetch_concurrency: usize,
+    /// Interval between WebSocket reconnection attempts.
+    pub retry_connection_interval: std::time::Duration,
 }
 
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
@@ -101,7 +103,9 @@ impl L1Subscriber {
     async fn connect(&self) -> eyre::Result<impl Provider<TempoNetwork> + use<>> {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
         let url: url::Url = self.config.l1_rpc_url.parse()?;
-        let mut ws = WsConnect::new(self.config.l1_rpc_url.clone());
+        let mut ws = WsConnect::new(self.config.l1_rpc_url.clone())
+            .with_max_retries(u32::MAX)
+            .with_retry_interval(self.config.retry_connection_interval);
         if !url.username().is_empty() {
             let auth = Authorization::basic(url.username(), url.password().unwrap_or_default());
             ws = ws.with_auth(auth);

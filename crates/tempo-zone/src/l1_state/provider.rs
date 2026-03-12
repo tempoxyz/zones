@@ -12,7 +12,7 @@
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_client::RpcClient;
+use alloy_rpc_client::{ConnectionConfig, RpcClient};
 use alloy_rpc_types_eth::BlockId;
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
@@ -32,6 +32,9 @@ pub struct L1StateProviderConfig {
     /// Initial backoff in milliseconds for the transport-level retry layer.
     /// Defaults to 20ms.
     pub initial_backoff_ms: u64,
+    /// Interval between WebSocket reconnection attempts.
+    /// Defaults to 100ms.
+    pub retry_connection_interval: std::time::Duration,
 }
 
 impl Default for L1StateProviderConfig {
@@ -40,6 +43,7 @@ impl Default for L1StateProviderConfig {
             l1_rpc_url: String::new(),
             max_retries: 10,
             initial_backoff_ms: 20,
+            retry_connection_interval: std::time::Duration::from_millis(100),
         }
     }
 }
@@ -87,9 +91,13 @@ impl L1StateProvider {
         let retry_layer =
             RetryBackoffLayer::new(config.max_retries, config.initial_backoff_ms, u64::MAX);
 
+        let conn_config = ConnectionConfig::new()
+            .with_max_retries(u32::MAX)
+            .with_retry_interval(config.retry_connection_interval);
+
         let client = RpcClient::builder()
             .layer(retry_layer)
-            .connect(&config.l1_rpc_url)
+            .connect_with_config(&config.l1_rpc_url, conn_config)
             .await
             .map_err(|e| {
                 eyre::eyre!(
