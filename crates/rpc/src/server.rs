@@ -3,23 +3,16 @@
 //! An axum HTTP server backed by the zone node's EthApi, with
 //! authentication and privacy redactions applied per-method.
 //!
-//! Supports both HTTP POST and WebSocket transports. WebSocket clients
-//! authenticate via the `X-Authorization-Token` header (preferred) or
-//! a `?token=0x<hex>` query parameter (for browser clients that cannot
-//! set custom headers on the upgrade request).
+//! Supports both HTTP POST and WebSocket transports.
 
 use axum::{
     Router,
     body::Bytes,
-    extract::{
-        Query, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
-    },
+    extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
 };
-use futures::stream::StreamExt;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -28,13 +21,11 @@ use crate::{
     config::PrivateRpcConfig,
     handlers::{self, ZoneRpcApi},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
+    ws::handle_ws_upgrade,
 };
 
 /// Maximum number of requests in a single JSON-RPC batch.
 const MAX_BATCH_SIZE: usize = 100;
-
-/// Maximum WebSocket message size (1 MiB).
-const MAX_WS_MESSAGE_SIZE: usize = 1 << 20;
 
 /// Shared state for the private RPC server.
 #[derive(Clone)]
@@ -76,14 +67,38 @@ pub async fn start_private_rpc(
 }
 
 /// Result of processing a JSON-RPC text payload (single or batch).
-enum RpcResult {
+pub(crate) enum RpcResult {
     Single(JsonRpcResponse),
     Batch(Vec<JsonRpcResponse>),
 }
 
+impl RpcResult {
+    /// Serialize to a JSON string for the WebSocket transport.
+    pub(crate) fn into_json(self) -> String {
+        match self {
+            Self::Single(resp) => serde_json::to_string(&resp),
+            Self::Batch(resps) => serde_json::to_string(&resps),
+        }
+        .expect("JsonRpcResponse serialization is infallible")
+    }
+}
+
+impl IntoResponse for RpcResult {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Single(resp) => axum::Json(resp).into_response(),
+            Self::Batch(resps) => axum::Json(resps).into_response(),
+        }
+    }
+}
+
 /// Parse and dispatch a JSON-RPC text payload, handling both single and batch
 /// requests. Shared by HTTP and WebSocket transports.
-async fn process_rpc_text(text: &str, auth: &AuthContext, api: &dyn ZoneRpcApi) -> RpcResult {
+pub(crate) async fn process_rpc_text(
+    text: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> RpcResult {
     let trimmed = text.trim_start();
 
     if trimmed.starts_with('[') {
@@ -124,6 +139,14 @@ async fn process_rpc_text(text: &str, auth: &AuthContext, api: &dyn ZoneRpcApi) 
     }
 }
 
+/// Map an [`AuthError`] to the appropriate HTTP status code.
+pub(crate) fn auth_error_status(err: &AuthError) -> StatusCode {
+    match err {
+        AuthError::Missing => StatusCode::UNAUTHORIZED,
+        _ => StatusCode::FORBIDDEN,
+    }
+}
+
 /// Main HTTP RPC handler — authenticates, dispatches, returns response.
 async fn handle_rpc(
     State(state): State<Arc<RpcState>>,
@@ -133,12 +156,8 @@ async fn handle_rpc(
     let auth = match authenticate(&headers, &state.config) {
         Ok(auth) => auth,
         Err(e) => {
-            let status = match &e {
-                AuthError::Missing => StatusCode::UNAUTHORIZED,
-                _ => StatusCode::FORBIDDEN,
-            };
             warn!(target: "zone::rpc", err = %e, "auth failed");
-            return (status, "").into_response();
+            return (auth_error_status(&e), "").into_response();
         }
     };
 
@@ -149,10 +168,7 @@ async fn handle_rpc(
         }
     };
 
-    match process_rpc_text(body_str, &auth, state.api.as_ref()).await {
-        RpcResult::Single(resp) => (StatusCode::OK, axum::Json(resp)).into_response(),
-        RpcResult::Batch(resps) => (StatusCode::OK, axum::Json(resps)).into_response(),
-    }
+    process_rpc_text(body_str, &auth, state.api.as_ref()).await.into_response()
 }
 
 /// Authenticate the request using the `X-Authorization-Token` header.
@@ -166,7 +182,7 @@ fn authenticate(headers: &HeaderMap, config: &PrivateRpcConfig) -> Result<AuthCo
 }
 
 /// Authenticate using a raw token string (shared by HTTP and WebSocket paths).
-fn authenticate_token(
+pub(crate) fn authenticate_token(
     token_value: &str,
     config: &PrivateRpcConfig,
 ) -> Result<AuthContext, AuthError> {
@@ -190,87 +206,4 @@ fn authenticate_token(
         is_sequencer,
         expires_at: token.expires_at,
     })
-}
-
-/// Query parameters for the WebSocket upgrade endpoint.
-#[derive(serde::Deserialize, Default)]
-struct WsQuery {
-    /// Auth token passed as query param (fallback when headers are unavailable).
-    token: Option<String>,
-}
-
-/// WebSocket upgrade handler — authenticates via header or `?token=` query param.
-async fn handle_ws_upgrade(
-    State(state): State<Arc<RpcState>>,
-    headers: HeaderMap,
-    Query(query): Query<WsQuery>,
-    ws: WebSocketUpgrade,
-) -> impl IntoResponse {
-    // Prefer header auth; fall back to query param for browser clients.
-    let auth = match headers
-        .get(auth::X_AUTHORIZATION_TOKEN)
-        .and_then(|v| v.to_str().ok())
-    {
-        Some(header_value) => authenticate_token(header_value, &state.config),
-        None => match &query.token {
-            Some(token) => authenticate_token(token, &state.config),
-            None => Err(AuthError::Missing),
-        },
-    };
-
-    let auth = match auth {
-        Ok(auth) => auth,
-        Err(e) => {
-            warn!(target: "zone::rpc", err = %e, "ws auth failed");
-            let status = match &e {
-                AuthError::Missing => StatusCode::UNAUTHORIZED,
-                _ => StatusCode::FORBIDDEN,
-            };
-            return (status, "").into_response();
-        }
-    };
-
-    ws.max_message_size(MAX_WS_MESSAGE_SIZE)
-        .on_upgrade(move |socket| handle_ws_session(socket, auth, state))
-        .into_response()
-}
-
-/// Run a single authenticated WebSocket session, dispatching JSON-RPC
-/// messages through the same pipeline as HTTP.
-async fn handle_ws_session(mut socket: WebSocket, auth: AuthContext, state: Arc<RpcState>) {
-    while let Some(msg) = socket.next().await {
-        let text = match msg {
-            Ok(Message::Text(t)) => t,
-            Ok(Message::Binary(b)) => match String::from_utf8(b.to_vec()) {
-                Ok(s) => s.into(),
-                Err(_) => {
-                    let _ = socket
-                        .send(Message::Text(
-                            r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"invalid UTF-8"},"id":null}"#.into(),
-                        ))
-                        .await;
-                    continue;
-                }
-            },
-            Ok(Message::Close(_)) => break,
-            Ok(_) => continue, // Ping/Pong handled by axum
-            Err(e) => {
-                warn!(target: "zone::rpc", err = %e, "ws recv error");
-                break;
-            }
-        };
-
-        let response_json = match process_rpc_text(&text, &auth, state.api.as_ref()).await {
-            RpcResult::Single(resp) => serde_json::to_string(&resp).unwrap_or_default(),
-            RpcResult::Batch(resps) => serde_json::to_string(&resps).unwrap_or_default(),
-        };
-
-        if socket
-            .send(Message::Text(response_json.into()))
-            .await
-            .is_err()
-        {
-            break;
-        }
-    }
 }
