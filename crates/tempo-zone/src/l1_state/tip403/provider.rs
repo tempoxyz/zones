@@ -616,7 +616,7 @@ impl PolicyCheck for PolicyProvider {
     ) -> Result<bool, PrecompileError> {
         self.is_authorized_by_policy(policy_id, user, role)
             .map_err(|e| {
-                PrecompileError::other(format!(
+                zone_precompiles::zone_rpc_error(format!(
                     "auth check failed for policy {policy_id} user {user}: {e}"
                 ))
             })
@@ -624,7 +624,7 @@ impl PolicyCheck for PolicyProvider {
 
     fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64, PrecompileError> {
         Self::resolve_transfer_policy_id(self, token).map_err(|e| {
-            PrecompileError::other(format!(
+            zone_precompiles::zone_rpc_error(format!(
                 "failed to resolve transfer_policy_id for {token}: {e}"
             ))
         })
@@ -632,13 +632,15 @@ impl PolicyCheck for PolicyProvider {
 
     fn policy_type_sync(&self, policy_id: u64) -> Result<PolicyType, PrecompileError> {
         self.resolve_policy_type_sync(policy_id).map_err(|e| {
-            PrecompileError::other(format!("policyData failed for policy {policy_id}: {e}"))
+            zone_precompiles::zone_rpc_error(format!(
+                "policyData failed for policy {policy_id}: {e}"
+            ))
         })
     }
 
     fn compound_policy_data(&self, policy_id: u64) -> Result<(u64, u64, u64), PrecompileError> {
         let compound = self.resolve_compound_data_sync(policy_id).map_err(|e| {
-            PrecompileError::other(format!(
+            zone_precompiles::zone_rpc_error(format!(
                 "compoundPolicyData failed for policy {policy_id}: {e}"
             ))
         })?;
