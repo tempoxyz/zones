@@ -421,6 +421,7 @@ impl ZoneTestNode {
             Address::ZERO, // sequencer address (overridden by sequencer_key)
             sequencer_key,
             4,
+            std::time::Duration::from_millis(100),
         )
         .with_initial_tokens(vec![]);
 

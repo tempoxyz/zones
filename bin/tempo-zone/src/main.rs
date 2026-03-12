@@ -84,6 +84,14 @@ struct ZoneArgs {
     )]
     pub l1_fetch_concurrency: usize,
 
+    /// Interval in milliseconds between WebSocket reconnection attempts to L1.
+    #[arg(
+        long = "l1.retry-connection-interval",
+        env = "L1_RETRY_CONNECTION_INTERVAL_MS",
+        default_value_t = 100
+    )]
+    pub l1_retry_connection_interval_ms: u64,
+
     /// Zone ID for the private RPC auth token validation.
     /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
@@ -150,6 +158,7 @@ fn main() {
                 sequencer_addr,
                 sequencer_secret_key,
                 args.l1_fetch_concurrency,
+                Duration::from_millis(args.l1_retry_connection_interval_ms),
             );
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;

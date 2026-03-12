@@ -105,6 +105,7 @@ impl ZoneNode {
         sequencer: alloy_primitives::Address,
         sequencer_key: k256::SecretKey,
         l1_fetch_concurrency: usize,
+        retry_connection_interval: std::time::Duration,
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
@@ -119,10 +120,12 @@ impl ZoneNode {
             policy_cache: policy_cache.clone(),
             l1_state_cache: l1_state_cache.clone(),
             l1_fetch_concurrency,
+            retry_connection_interval,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
             l1_rpc_url,
+            retry_connection_interval,
             ..Default::default()
         };
 
