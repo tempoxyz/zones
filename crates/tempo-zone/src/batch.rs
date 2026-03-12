@@ -9,9 +9,9 @@
 //!
 //! # POC limitations
 //!
-//! Proof validation is currently **skipped**: both `verifierConfig` and `proof`
-//! are submitted as empty bytes. The L1 verifier contract must be configured to
-//! accept empty proofs for this to work.
+//! Proof validation on L1 is currently handled by a stub verifier contract that
+//! always returns `true`. Different prover backends can still populate
+//! `verifierConfig` and `proof` for integration testing.
 
 use crate::abi::{BlockTransition, DepositQueueTransition, ZonePortal};
 use alloy_primitives::{Address, B256, Bytes};
@@ -51,9 +51,9 @@ pub struct BatchData {
     pub next_processed_deposit_hash: B256,
     /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
     pub withdrawal_queue_hash: B256,
-    /// Verifier configuration bytes (empty for POC, populated when prover is active).
+    /// Verifier configuration bytes (backend-specific payload).
     pub verifier_config: Bytes,
-    /// Proof bytes (empty for POC, populated by `zone_prover::prove_zone_batch`).
+    /// Proof bytes (backend-specific payload).
     pub proof: Bytes,
 }
 
@@ -111,9 +111,6 @@ impl BatchSubmitter {
     /// Submit a batch to the ZonePortal on Tempo L1.
     ///
     /// Uses the `verifier_config` and `proof` bytes from [`BatchData`].
-    /// When proof generation is enabled, these are populated by
-    /// `zone_prover::prove_zone_batch`. When disabled (POC mode), they default
-    /// to empty bytes and the verifier contract must accept empty proofs.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = batch.tempo_block_number,

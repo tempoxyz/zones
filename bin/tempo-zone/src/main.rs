@@ -107,13 +107,50 @@ struct ZoneArgs {
         default_value_t = false
     )]
     pub prover_succinct_skip_simulation: bool,
+
+    /// Nitro TEE prover endpoint URL.
+    #[arg(
+        long = "prover.tee.endpoint",
+        env = "ZONE_PROVER_TEE_ENDPOINT",
+        default_value = "http://127.0.0.1:8080/prove-batch"
+    )]
+    pub prover_tee_endpoint: String,
+
+    /// Timeout in milliseconds for Nitro TEE prover HTTP calls.
+    #[arg(
+        long = "prover.tee.timeout-ms",
+        env = "ZONE_PROVER_TEE_TIMEOUT_MS",
+        default_value_t = 30_000
+    )]
+    pub prover_tee_timeout_ms: u64,
+
+    /// Maximum response body size accepted from the Nitro TEE prover.
+    #[arg(
+        long = "prover.tee.max-response-bytes",
+        env = "ZONE_PROVER_TEE_MAX_RESPONSE_BYTES",
+        default_value_t = 1_048_576
+    )]
+    pub prover_tee_max_response_bytes: usize,
+
+    /// Optional signer address expected from Nitro TEE proof responses.
+    #[arg(
+        long = "prover.tee.expected-signer",
+        env = "ZONE_PROVER_TEE_EXPECTED_SIGNER"
+    )]
+    pub prover_tee_expected_signer: Option<Address>,
 }
 
 #[derive(Debug, Clone, Copy, clap::ValueEnum, Default)]
 enum ProverBackend {
     #[default]
+    /// Native in-process prover (no external proof network).
     Soft,
+    /// External Nitro TEE prover service (TEE-only, no SP1).
+    NitroTee,
+    /// Succinct public prover network.
     Succinct,
+    /// Succinct private TEE prover endpoint (reserved strategy + TEE attestation).
+    Tee,
 }
 
 fn main() {
@@ -208,6 +245,26 @@ fn main() {
                     l1_proof_provider,
                     sequencer_addr,
                 )),
+                ProverBackend::NitroTee => {
+                    info!(
+                        target: "reth::cli",
+                        endpoint = %args.prover_tee_endpoint,
+                        "Using Nitro TEE batch proof backend"
+                    );
+                    Arc::new(zone::proof::NitroTeeBatchProofGenerator::new(
+                        handle.node.provider().clone(),
+                        witness_store.clone(),
+                        l1_proof_provider,
+                        sequencer_addr,
+                        zone::proof::NitroTeeProverConfig {
+                            endpoint: args.prover_tee_endpoint.clone(),
+                            timeout: Duration::from_millis(args.prover_tee_timeout_ms),
+                            max_response_bytes: args.prover_tee_max_response_bytes,
+                            expected_signer: args.prover_tee_expected_signer,
+                            portal_address: args.portal_address,
+                        },
+                    )?)
+                }
                 ProverBackend::Succinct => {
                     #[cfg(feature = "succinct-prover")]
                     {
@@ -222,6 +279,7 @@ fn main() {
                             sequencer_addr,
                             zone::proof::SuccinctNetworkProverConfig {
                                 skip_simulation: args.prover_succinct_skip_simulation,
+                                mode: zone::proof::SuccinctNetworkMode::Public,
                             },
                         ).await?)
                     }
@@ -229,6 +287,32 @@ fn main() {
                     {
                         return Err(eyre::eyre!(
                             "prover backend 'succinct' requested, but this binary was built \
+                             without the 'succinct-prover' feature"
+                        ));
+                    }
+                }
+                ProverBackend::Tee => {
+                    #[cfg(feature = "succinct-prover")]
+                    {
+                        info!(
+                            target: "reth::cli",
+                            "Using Succinct private TEE batch proof backend"
+                        );
+                        Arc::new(zone::proof::SuccinctBatchProofGenerator::new(
+                            handle.node.provider().clone(),
+                            witness_store.clone(),
+                            l1_proof_provider,
+                            sequencer_addr,
+                            zone::proof::SuccinctNetworkProverConfig {
+                                skip_simulation: args.prover_succinct_skip_simulation,
+                                mode: zone::proof::SuccinctNetworkMode::TeePrivate,
+                            },
+                        ).await?)
+                    }
+                    #[cfg(not(feature = "succinct-prover"))]
+                    {
+                        return Err(eyre::eyre!(
+                            "prover backend 'tee' requested, but this binary was built \
                              without the 'succinct-prover' feature"
                         ));
                     }

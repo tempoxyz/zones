@@ -8,17 +8,21 @@
 //! The zone monitor calls [`ProofGenerator::generate_batch_proof`] once per
 //! batch instead of performing these steps itself.
 
-use alloy_primitives::{B256, Bytes};
+use std::time::Duration;
+
+use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use eyre::Result;
 use reth_provider::StateProviderFactory;
+use serde::{Deserialize, Serialize};
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info};
 
 #[cfg(feature = "succinct-prover")]
 use sp1_sdk::{
     HashableKey, NetworkProver, ProveRequest, Prover, ProverClient, ProvingKey, SP1Stdin,
+    network::{FulfillmentStrategy, NetworkMode, signer::NetworkSigner},
 };
 #[cfg(feature = "succinct-prover")]
 use tokio::sync::Mutex as AsyncMutex;
@@ -337,24 +341,392 @@ where
     }
 }
 
+const NITRO_TEE_REQUEST_VERSION_V1: u8 = 1;
+const NITRO_TEE_RESPONSE_VERSION_V1: u8 = 1;
+const NITRO_TEE_VERIFIER_CONFIG_V1: u8 = 1;
+const NITRO_TEE_PROOF_SYSTEM_SECP256K1: u8 = 2;
+const NITRO_TEE_PROOF_V1: u8 = 1;
+const NITRO_TEE_SIGNATURE_LEN: usize = 65;
+const NITRO_TEE_SIGNING_DOMAIN: &[u8] = b"tempo.zone.nitro-tee.batch.v1";
+const ENCODED_BATCH_OUTPUT_LEN: usize = 192;
+
+/// Configuration for the Nitro TEE proof backend.
+#[derive(Debug, Clone)]
+pub struct NitroTeeProverConfig {
+    /// Full URL for the TEE proving endpoint.
+    pub endpoint: String,
+    /// HTTP timeout applied to the TEE request.
+    pub timeout: Duration,
+    /// Max response body size accepted from the TEE endpoint.
+    pub max_response_bytes: usize,
+    /// Optional signer pinning for response signature verification.
+    pub expected_signer: Option<Address>,
+    /// ZonePortal address this proof is bound to.
+    pub portal_address: Address,
+}
+
+/// Batch proof generator backed by a Nitro enclave proving service.
+///
+/// The service receives a full `BatchWitness`, re-executes `prove_zone_batch`,
+/// and signs the batch commitment with an enclave-controlled key.
+pub struct NitroTeeBatchProofGenerator<Provider> {
+    inner: ProofGenerator<Provider>,
+    config: NitroTeeProverConfig,
+    endpoint: reqwest::Url,
+    http_client: reqwest::Client,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NitroTeeSignContext {
+    chain_id: u64,
+    portal_address: Address,
+    sequencer: Address,
+    tempo_block_number: u64,
+    anchor_block_number: u64,
+    anchor_block_hash: B256,
+    expected_withdrawal_batch_index: u64,
+    block_from: u64,
+    block_to: u64,
+    prev_block_hash: B256,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct NitroTeeProveRequest {
+    version: u8,
+    context: NitroTeeSignContext,
+    witness: zone_prover::types::BatchWitness,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct NitroTeeProveResponse {
+    version: u8,
+    signer: Address,
+    signature: Bytes,
+    output: zone_prover::types::BatchOutput,
+}
+
+fn build_nitro_tee_context(
+    from: u64,
+    to: u64,
+    portal_address: Address,
+    witness: &zone_prover::types::BatchWitness,
+) -> NitroTeeSignContext {
+    NitroTeeSignContext {
+        chain_id: witness.chain_id,
+        portal_address,
+        sequencer: witness.public_inputs.sequencer,
+        tempo_block_number: witness.public_inputs.tempo_block_number,
+        anchor_block_number: witness.public_inputs.anchor_block_number,
+        anchor_block_hash: witness.public_inputs.anchor_block_hash,
+        expected_withdrawal_batch_index: witness.public_inputs.expected_withdrawal_batch_index,
+        block_from: from,
+        block_to: to,
+        prev_block_hash: witness.public_inputs.prev_block_hash,
+    }
+}
+
+fn nitro_tee_message_digest(
+    context: &NitroTeeSignContext,
+    output: &zone_prover::types::BatchOutput,
+) -> B256 {
+    let mut preimage = Vec::with_capacity(32 + 8 * 8 + 20 * 2 + 32 * 7);
+
+    preimage.extend_from_slice(keccak256(NITRO_TEE_SIGNING_DOMAIN).as_slice());
+    preimage.extend_from_slice(&context.chain_id.to_be_bytes());
+    preimage.extend_from_slice(context.portal_address.as_slice());
+    preimage.extend_from_slice(context.sequencer.as_slice());
+    preimage.extend_from_slice(&context.tempo_block_number.to_be_bytes());
+    preimage.extend_from_slice(&context.anchor_block_number.to_be_bytes());
+    preimage.extend_from_slice(context.anchor_block_hash.as_slice());
+    preimage.extend_from_slice(&context.expected_withdrawal_batch_index.to_be_bytes());
+    preimage.extend_from_slice(&context.block_from.to_be_bytes());
+    preimage.extend_from_slice(&context.block_to.to_be_bytes());
+    preimage.extend_from_slice(context.prev_block_hash.as_slice());
+
+    preimage.extend_from_slice(output.block_transition.prev_block_hash.as_slice());
+    preimage.extend_from_slice(output.block_transition.next_block_hash.as_slice());
+    preimage.extend_from_slice(
+        output
+            .deposit_queue_transition
+            .prev_processed_hash
+            .as_slice(),
+    );
+    preimage.extend_from_slice(
+        output
+            .deposit_queue_transition
+            .next_processed_hash
+            .as_slice(),
+    );
+    preimage.extend_from_slice(output.withdrawal_queue_hash.as_slice());
+    preimage.extend_from_slice(&output.last_batch.withdrawal_batch_index.to_be_bytes());
+
+    keccak256(preimage)
+}
+
+fn verify_nitro_tee_output(
+    context: &NitroTeeSignContext,
+    output: &zone_prover::types::BatchOutput,
+) -> Result<()> {
+    if output.block_transition.prev_block_hash != context.prev_block_hash {
+        return Err(eyre::eyre!(
+            "TEE output prev_block_hash mismatch: got {}, expected {}",
+            output.block_transition.prev_block_hash,
+            context.prev_block_hash
+        ));
+    }
+
+    if output.last_batch.withdrawal_batch_index != context.expected_withdrawal_batch_index {
+        return Err(eyre::eyre!(
+            "TEE output withdrawal_batch_index mismatch: got {}, expected {}",
+            output.last_batch.withdrawal_batch_index,
+            context.expected_withdrawal_batch_index
+        ));
+    }
+
+    Ok(())
+}
+
+fn recover_nitro_tee_signer(message_digest: B256, signature: &[u8]) -> Result<Address> {
+    use k256::ecdsa::{RecoveryId, Signature, VerifyingKey};
+
+    if signature.len() != NITRO_TEE_SIGNATURE_LEN {
+        return Err(eyre::eyre!(
+            "invalid TEE signature length: got {}, expected {}",
+            signature.len(),
+            NITRO_TEE_SIGNATURE_LEN
+        ));
+    }
+
+    let sig = Signature::from_slice(&signature[..64])
+        .map_err(|e| eyre::eyre!("invalid TEE signature bytes: {e}"))?;
+    let mut recovery_id = signature[64];
+    if recovery_id >= 27 {
+        recovery_id -= 27;
+    }
+    let recid = RecoveryId::from_byte(recovery_id)
+        .ok_or_else(|| eyre::eyre!("invalid TEE recovery id: {recovery_id}"))?;
+    let key = VerifyingKey::recover_from_prehash(message_digest.as_slice(), &sig, recid)
+        .map_err(|e| eyre::eyre!("failed recovering TEE signer from signature: {e}"))?;
+    Ok(Address::from_public_key(&key))
+}
+
+fn encode_nitro_tee_verifier_config(signer: Address) -> Bytes {
+    // Binary encoding (v1):
+    // [0]      version (=1)
+    // [1]      proof system (=2 for Nitro TEE secp256k1)
+    // [2..22]  signer address
+    // [22..54] domain hash (keccak256("tempo.zone.nitro-tee.batch.v1"))
+    let mut buf = Vec::with_capacity(54);
+    buf.push(NITRO_TEE_VERIFIER_CONFIG_V1);
+    buf.push(NITRO_TEE_PROOF_SYSTEM_SECP256K1);
+    buf.extend_from_slice(signer.as_slice());
+    buf.extend_from_slice(keccak256(NITRO_TEE_SIGNING_DOMAIN).as_slice());
+    buf.into()
+}
+
+fn encode_nitro_tee_proof(
+    output: &zone_prover::types::BatchOutput,
+    signature: &[u8],
+) -> Result<Bytes> {
+    if signature.len() != NITRO_TEE_SIGNATURE_LEN {
+        return Err(eyre::eyre!(
+            "invalid TEE signature length: got {}, expected {}",
+            signature.len(),
+            NITRO_TEE_SIGNATURE_LEN
+        ));
+    }
+
+    // Binary encoding (v1):
+    // [0]        proof format version (=1)
+    // [1..193]   ABI-packed BatchOutput (192 bytes)
+    // [193..258] secp256k1 signature (r||s||v, 65 bytes)
+    let output_bytes = encode_batch_output(output);
+    if output_bytes.len() != ENCODED_BATCH_OUTPUT_LEN {
+        return Err(eyre::eyre!(
+            "unexpected encoded batch output length: got {}, expected {}",
+            output_bytes.len(),
+            ENCODED_BATCH_OUTPUT_LEN
+        ));
+    }
+
+    let mut buf = Vec::with_capacity(1 + ENCODED_BATCH_OUTPUT_LEN + NITRO_TEE_SIGNATURE_LEN);
+    buf.push(NITRO_TEE_PROOF_V1);
+    buf.extend_from_slice(&output_bytes);
+    buf.extend_from_slice(signature);
+    Ok(buf.into())
+}
+
+impl<P> NitroTeeBatchProofGenerator<P>
+where
+    P: StateProviderFactory,
+{
+    /// Create a new Nitro-TEE-backed proof generator.
+    pub fn new(
+        provider: P,
+        witness_store: SharedWitnessStore,
+        l1_provider: DynProvider<TempoNetwork>,
+        sequencer: alloy_primitives::Address,
+        config: NitroTeeProverConfig,
+    ) -> Result<Self> {
+        let endpoint = reqwest::Url::parse(&config.endpoint).map_err(|e| {
+            eyre::eyre!("invalid Nitro TEE endpoint URL '{}': {e}", config.endpoint)
+        })?;
+        let http_client = reqwest::Client::builder()
+            .timeout(config.timeout)
+            .build()
+            .map_err(|e| eyre::eyre!("failed building Nitro TEE HTTP client: {e}"))?;
+
+        Ok(Self {
+            inner: ProofGenerator::new(provider, witness_store, l1_provider, sequencer),
+            config,
+            endpoint,
+            http_client,
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl<P> BatchProofGenerator for NitroTeeBatchProofGenerator<P>
+where
+    P: StateProviderFactory + Send + Sync,
+{
+    async fn generate_batch_proof(
+        &self,
+        from: u64,
+        to: u64,
+        tempo_block_number: u64,
+        prev_block_hash: B256,
+        expected_withdrawal_batch_index: u64,
+    ) -> Result<(Bytes, Bytes)> {
+        let batch_witness = self
+            .inner
+            .build_batch_witness(
+                from,
+                to,
+                tempo_block_number,
+                prev_block_hash,
+                expected_withdrawal_batch_index,
+            )
+            .await?;
+
+        let context = build_nitro_tee_context(from, to, self.config.portal_address, &batch_witness);
+        let request = NitroTeeProveRequest {
+            version: NITRO_TEE_REQUEST_VERSION_V1,
+            context: context.clone(),
+            witness: batch_witness,
+        };
+
+        let response = self
+            .http_client
+            .post(self.endpoint.clone())
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| eyre::eyre!("Nitro TEE prove request failed: {e}"))?;
+        let status = response.status();
+        let body = response
+            .bytes()
+            .await
+            .map_err(|e| eyre::eyre!("failed reading Nitro TEE response body: {e}"))?;
+        if body.len() > self.config.max_response_bytes {
+            return Err(eyre::eyre!(
+                "Nitro TEE response exceeds limit: got {} bytes, max {}",
+                body.len(),
+                self.config.max_response_bytes
+            ));
+        }
+        if !status.is_success() {
+            let preview_len = body.len().min(256);
+            let preview = String::from_utf8_lossy(&body[..preview_len]);
+            return Err(eyre::eyre!(
+                "Nitro TEE endpoint returned {}: {}",
+                status,
+                preview
+            ));
+        }
+
+        let response: NitroTeeProveResponse = serde_json::from_slice(&body)
+            .map_err(|e| eyre::eyre!("invalid Nitro TEE response JSON: {e}"))?;
+        if response.version != NITRO_TEE_RESPONSE_VERSION_V1 {
+            return Err(eyre::eyre!(
+                "unsupported Nitro TEE response version: got {}, expected {}",
+                response.version,
+                NITRO_TEE_RESPONSE_VERSION_V1
+            ));
+        }
+        verify_nitro_tee_output(&context, &response.output)?;
+
+        let digest = nitro_tee_message_digest(&context, &response.output);
+        let recovered_signer = recover_nitro_tee_signer(digest, &response.signature)?;
+        if recovered_signer != response.signer {
+            return Err(eyre::eyre!(
+                "TEE signer mismatch: response={}, recovered={}",
+                response.signer,
+                recovered_signer
+            ));
+        }
+        if let Some(expected) = self.config.expected_signer {
+            if expected != recovered_signer {
+                return Err(eyre::eyre!(
+                    "unexpected TEE signer: got {}, expected {}",
+                    recovered_signer,
+                    expected
+                ));
+            }
+        }
+
+        let verifier_config = encode_nitro_tee_verifier_config(recovered_signer);
+        let proof = encode_nitro_tee_proof(&response.output, &response.signature)?;
+
+        info!(
+            from,
+            to,
+            signer = %recovered_signer,
+            proof_len = proof.len(),
+            next_block_hash = %response.output.block_transition.next_block_hash,
+            withdrawal_queue_hash = %response.output.withdrawal_queue_hash,
+            "Nitro TEE proof generated successfully"
+        );
+
+        Ok((verifier_config, proof))
+    }
+}
+
 #[cfg(feature = "succinct-prover")]
 const SUCCINCT_VERIFIER_CONFIG_V1: u8 = 1;
 #[cfg(feature = "succinct-prover")]
 const SUCCINCT_PROOF_SYSTEM_SP1_PLONK: u8 = 1;
 #[cfg(feature = "succinct-prover")]
 const SP1_PUBLIC_VALUES_LEN_BATCH_OUTPUT: usize = 192;
+#[cfg(feature = "succinct-prover")]
+const SUCCINCT_TEE_RPC_URL: &str = "https://tee.sp1-lumiere.xyz";
 
 /// Configuration for the Succinct (SP1 prover network) proof backend.
 ///
 /// The SDK reads credentials (private key, RPC endpoint) from the environment.
 /// See the SP1/Succinct SDK docs for the exact variables expected by
 /// `sp1_sdk::NetworkProver::new()`.
+///
+/// `TeePrivate` routes requests to Succinct's private TEE endpoint and enables
+/// TEE attestation (`tee_2fa`) for the proof response.
+/// Optional override: `ZONE_PROVER_TEE_RPC_URL`.
 #[cfg(feature = "succinct-prover")]
 #[derive(Debug, Clone)]
 pub struct SuccinctNetworkProverConfig {
     /// Skip local simulation before dispatching the request to the prover
     /// network. Useful when the caller already trusts witness generation.
     pub skip_simulation: bool,
+    /// Which Succinct prover network mode to use.
+    pub mode: SuccinctNetworkMode,
+}
+
+#[cfg(feature = "succinct-prover")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuccinctNetworkMode {
+    /// Standard public prover network endpoint.
+    Public,
+    /// Private TEE endpoint with attestation attached to proof bytes.
+    TeePrivate,
 }
 
 #[cfg(feature = "succinct-prover")]
@@ -362,6 +734,43 @@ impl Default for SuccinctNetworkProverConfig {
     fn default() -> Self {
         Self {
             skip_simulation: false,
+            mode: SuccinctNetworkMode::Public,
+        }
+    }
+}
+
+#[cfg(feature = "succinct-prover")]
+fn succinct_network_signer_from_env() -> Result<NetworkSigner> {
+    let private_key = std::env::var("NETWORK_PRIVATE_KEY")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .ok_or_else(|| eyre::eyre!("missing required env: NETWORK_PRIVATE_KEY"))?;
+
+    NetworkSigner::local(&private_key).map_err(|e| eyre::eyre!("invalid NETWORK_PRIVATE_KEY: {e}"))
+}
+
+#[cfg(feature = "succinct-prover")]
+async fn build_succinct_network_prover(mode: SuccinctNetworkMode) -> Result<NetworkProver> {
+    match mode {
+        SuccinctNetworkMode::Public => Ok(ProverClient::builder().network().build().await),
+        SuccinctNetworkMode::TeePrivate => {
+            // In sp1-sdk 6.0.1, `builder().network().private()` uses the TEE RPC URL
+            // but leaves `NetworkMode` as `Mainnet`, which routes requests through
+            // auction RPC methods and fails with gRPC Unimplemented on the TEE endpoint.
+            // We force Reserved mode here so request routing matches the private backend.
+            let signer = succinct_network_signer_from_env()?;
+            let tee_signers = sp1_sdk::network::tee::get_tee_signers()
+                .await
+                .map_err(|e| eyre::eyre!("failed to fetch TEE signers: {e}"))?;
+            let tee_rpc_url = std::env::var("ZONE_PROVER_TEE_RPC_URL")
+                .ok()
+                .filter(|v| !v.trim().is_empty())
+                .unwrap_or_else(|| SUCCINCT_TEE_RPC_URL.to_string());
+
+            let prover = NetworkProver::new(signer, &tee_rpc_url, NetworkMode::Reserved)
+                .await
+                .with_tee_signers(tee_signers);
+            Ok(prover)
         }
     }
 }
@@ -400,7 +809,7 @@ where
     ) -> Result<Self> {
         let inner = ProofGenerator::new(provider, witness_store, l1_provider, sequencer);
 
-        let prover = ProverClient::builder().network().build().await;
+        let prover = build_succinct_network_prover(config.mode).await?;
         let pk = prover
             .setup(ZONE_PROVER_SP1_ELF)
             .await
@@ -449,11 +858,19 @@ where
         );
 
         let state = self.prover_state.lock().await;
-        let proof = state
+        let mut request = state
             .prover
             .prove(&state.pk, stdin)
             .plonk()
-            .skip_simulation(self.config.skip_simulation)
+            .skip_simulation(self.config.skip_simulation);
+        if self.config.mode == SuccinctNetworkMode::TeePrivate {
+            request = request
+                // Required when using the private TEE endpoint.
+                .strategy(FulfillmentStrategy::Reserved)
+                // Attach TEE attestation bytes to proof output.
+                .tee_2fa();
+        }
+        let proof = request
             .await
             .map_err(|e| eyre::eyre!("SP1 network proof failed: {e}"))?;
 
@@ -474,6 +891,7 @@ where
             from,
             to,
             proof_len = proof_bytes.len(),
+            tee_attested = proof.tee_proof.is_some(),
             public_values_len = public_values.len(),
             vk_hash = %vk_hash,
             "Succinct proof generated successfully"
@@ -536,4 +954,73 @@ fn encode_batch_output(output: &zone_prover::types::BatchOutput) -> Vec<u8> {
         &alloy_primitives::U256::from(output.last_batch.withdrawal_batch_index).to_be_bytes::<32>(),
     );
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use k256::ecdsa::SigningKey;
+
+    use super::*;
+
+    fn sample_context() -> NitroTeeSignContext {
+        NitroTeeSignContext {
+            chain_id: 13371,
+            portal_address: Address::with_last_byte(0x11),
+            sequencer: Address::with_last_byte(0x22),
+            tempo_block_number: 10,
+            anchor_block_number: 10,
+            anchor_block_hash: B256::with_last_byte(0x33),
+            expected_withdrawal_batch_index: 7,
+            block_from: 100,
+            block_to: 120,
+            prev_block_hash: B256::with_last_byte(0x44),
+        }
+    }
+
+    fn sample_output() -> zone_prover::types::BatchOutput {
+        zone_prover::types::BatchOutput {
+            block_transition: zone_prover::types::BlockTransition {
+                prev_block_hash: B256::with_last_byte(0x44),
+                next_block_hash: B256::with_last_byte(0x55),
+            },
+            deposit_queue_transition: zone_prover::types::DepositQueueTransition {
+                prev_processed_hash: B256::with_last_byte(0x66),
+                next_processed_hash: B256::with_last_byte(0x77),
+            },
+            withdrawal_queue_hash: B256::with_last_byte(0x88),
+            last_batch: zone_prover::types::LastBatchCommitment {
+                withdrawal_batch_index: 7,
+            },
+        }
+    }
+
+    #[test]
+    fn nitro_tee_signature_recovery_roundtrip() {
+        let context = sample_context();
+        let output = sample_output();
+        let digest = nitro_tee_message_digest(&context, &output);
+
+        let sk = SigningKey::from_slice(&[7u8; 32]).expect("valid test key");
+        let (sig, recid) = sk
+            .sign_prehash_recoverable(digest.as_slice())
+            .expect("signing should succeed");
+        let mut sig_bytes = sig.to_bytes().to_vec();
+        sig_bytes.push(recid.to_byte() + 27);
+
+        let recovered = recover_nitro_tee_signer(digest, &sig_bytes).expect("recover signer");
+        let expected = Address::from_public_key(sk.verifying_key());
+        assert_eq!(recovered, expected);
+    }
+
+    #[test]
+    fn nitro_tee_proof_encoding_layout_is_stable() {
+        let output = sample_output();
+        let signature = vec![0u8; NITRO_TEE_SIGNATURE_LEN];
+        let proof = encode_nitro_tee_proof(&output, &signature).expect("encoding should succeed");
+        assert_eq!(
+            proof.len(),
+            1 + ENCODED_BATCH_OUTPUT_LEN + NITRO_TEE_SIGNATURE_LEN
+        );
+        assert_eq!(proof[0], NITRO_TEE_PROOF_V1);
+    }
 }
