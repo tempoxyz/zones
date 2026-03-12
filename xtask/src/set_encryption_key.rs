@@ -75,12 +75,9 @@ impl SetEncryptionKey {
         let portal = ZonePortal::new(self.portal, &provider);
         let receipt = portal
             .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
-            .send()
+            .send_sync()
             .await
-            .wrap_err("failed to send setSequencerEncryptionKey")?
-            .get_receipt()
-            .await
-            .wrap_err("failed to get receipt")?;
+            .wrap_err("failed to send setSequencerEncryptionKey")?;
 
         let tx_hash = receipt.transaction_hash;
         if !receipt.status() {

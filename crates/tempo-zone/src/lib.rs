@@ -5,14 +5,10 @@
 #![allow(clippy::too_many_arguments)]
 use eyre as _;
 
-// Required by the `#[contract]` proc macro expansion (references `crate::storage` / `crate::error`).
-pub(crate) use tempo_precompiles::{error, storage};
-
 pub mod abi;
 pub mod ext;
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub mod batch;
-pub mod bindings;
 pub mod builder;
 pub mod engine;
 pub mod evm;

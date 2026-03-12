@@ -312,6 +312,12 @@ where
                     }
                     continue;
                 }
+                Err(reth_evm::block::BlockExecutionError::Internal(
+                    reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
+                )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
+                    warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
+                    continue;
+                }
                 Err(err) => return Err(PayloadBuilderError::evm(err)),
             }
         }

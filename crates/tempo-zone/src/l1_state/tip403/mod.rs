@@ -69,10 +69,10 @@ pub mod provider;
 pub mod task;
 
 pub use cache::{
-    AuthRole, CachedPolicy, CompoundData, MembershipSet, PolicyCache, PolicyEvent,
-    SharedPolicyCache,
+    CachedPolicy, CompoundData, MembershipSet, PolicyCache, PolicyEvent, SharedPolicyCache,
 };
-pub(crate) use cache::{FIRST_USER_POLICY, POLICY_ALLOW_ALL, POLICY_REJECT_ALL};
+pub use zone_primitives::policy::AuthRole;
+
 pub use metrics::Tip403Metrics;
 pub use pool_prefetch::spawn_pool_prefetch_task;
 pub use provider::PolicyProvider;

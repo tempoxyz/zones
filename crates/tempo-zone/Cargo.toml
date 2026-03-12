@@ -23,7 +23,8 @@ tempo-transaction-pool.workspace = true
 tempo-alloy = { workspace = true, features = ["tempo-compat"] }
 tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
-tempo-precompiles-macros.workspace = true
+zone-precompiles = { workspace = true, features = ["std"] }
+zone-primitives = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-rpc.workspace = true
 
 # reth
@@ -48,9 +49,7 @@ reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
 
 # alloy
-alloy.workspace = true
 alloy-consensus.workspace = true
-alloy-contract.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-network.workspace = true
@@ -69,10 +68,7 @@ revm.workspace = true
 
 # misc
 metrics.workspace = true
-aes-gcm.workspace = true
 k256.workspace = true
-rand.workspace = true
-sha2.workspace = true
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 either.workspace = true
@@ -111,6 +107,7 @@ thiserror.workspace = true
 tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
 tempo-payload-types.workspace = true
+sha2.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 

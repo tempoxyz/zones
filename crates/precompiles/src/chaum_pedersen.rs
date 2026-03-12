@@ -8,7 +8,7 @@
 //!
 //! Uses the NCC-audited [`k256`] crate (v0.13.4) for secp256k1 operations.
 
-use std::borrow::Cow;
+use alloc::{borrow::Cow, vec::Vec};
 
 use alloy_evm::precompiles::{DynPrecompile, Precompile, PrecompileInput};
 use alloy_primitives::{Address, Bytes, address};
@@ -122,7 +122,7 @@ impl From<ChaumPedersenVerify> for DynPrecompile {
 /// Recover a secp256k1 affine point from compressed form (x coordinate + y parity).
 ///
 /// `y_parity` follows SEC1: `0x02` for even y, `0x03` for odd y.
-pub(crate) fn recover_point(x_bytes: &[u8; 32], y_parity: u8) -> Option<AffinePoint> {
+pub fn recover_point(x_bytes: &[u8; 32], y_parity: u8) -> Option<AffinePoint> {
     let mut encoded = [0u8; 33];
     encoded[0] = y_parity;
     encoded[1..].copy_from_slice(x_bytes);
@@ -136,7 +136,7 @@ pub(crate) fn recover_point(x_bytes: &[u8; 32], y_parity: u8) -> Option<AffinePo
 /// `c = keccak256(G || ephemeralPub || pubSeq || sharedSecretPoint || R1 || R2)`
 ///
 /// Shared between the verifier (precompile) and prover (ecies module).
-pub(crate) fn challenge_hash(
+pub fn challenge_hash(
     ephemeral_pub: &AffinePoint,
     sequencer_pub: &AffinePoint,
     shared_secret: &AffinePoint,

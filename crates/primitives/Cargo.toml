@@ -1,0 +1,35 @@
+[package]
+name = "zone-primitives"
+description = "Primitive types used by the zone"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives = { workspace = true }
+alloy-rlp = { workspace = true }
+alloy-sol-types = { workspace = true }
+alloy-contract = { workspace = true, optional = true }
+alloy-network = { workspace = true, optional = true }
+alloy-provider = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+
+[dev-dependencies]
+const-hex.workspace = true
+
+[features]
+default = ["std", "serde", "rpc"]
+std = [
+    "alloy-primitives/std",
+    "alloy-rlp/std",
+    "alloy-sol-types/std",
+    "serde?/std",
+]
+serde = ["dep:serde", "alloy-primitives/serde"]
+rpc = ["dep:alloy-contract", "dep:alloy-network", "dep:alloy-provider", "dep:tokio"]

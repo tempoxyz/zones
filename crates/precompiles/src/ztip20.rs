@@ -1,4 +1,4 @@
-//! Zone-specific TIP-20 token precompile with PolicyProvider-backed authorization.
+//! Zone-specific TIP-20 token precompile with PolicyCheck-backed authorization.
 //!
 //! On L1, the vanilla [`TIP20Token`] checks transfer/mint authorization by
 //! instantiating a `TIP403Registry` in Rust which reads EVM storage at
@@ -7,13 +7,8 @@
 //!
 //! This wrapper intercepts transfer and mint calls, checks authorization
 //! against the zone's [`ZoneTip403ProxyRegistry`] (which delegates to
-//! [`PolicyProvider`] — cache-first, L1 RPC fallback), and only then delegates
-//! to the vanilla `TIP20Token` implementation. The vanilla call's internal
-//! `TIP403Registry::new()` check still runs but always passes (empty storage →
-//! allow-all), so the real enforcement has already happened.
-//!
-//! NOTE: This is a temporary solution until the vanilla TIP-20 implementation
-//! is made configurable to accept an external authorization provider.
+//! [`PolicyCheck`] — cache-first, L1 RPC fallback), and only then delegates
+//! to the vanilla `TIP20Token` implementation.
 
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
@@ -25,9 +20,12 @@ use tempo_precompiles::{
     tip20::{ITIP20, TIP20Token},
 };
 use tracing::{debug, trace};
+use zone_primitives::policy::AuthRole;
 
-use super::tip403_proxy::{AUTH_CHECK_GAS, ZoneTip403ProxyRegistry};
-use crate::l1_state::tip403::AuthRole;
+use crate::{
+    policy::PolicyCheck,
+    tip403_proxy::{AUTH_CHECK_GAS, ZoneTip403ProxyRegistry},
+};
 
 /// Decode ABI args or return a reverted precompile output.
 ///
@@ -48,67 +46,17 @@ macro_rules! decode_or_revert {
 /// Zone-specific TIP-20 token precompile.
 ///
 /// Wraps the vanilla [`TIP20Token`] and the [`ZoneTip403ProxyRegistry`] to add
-/// PolicyProvider-backed authorization for transfers and mints. All other calls
+/// PolicyCheck-backed authorization for transfers and mints. All other calls
 /// (balanceOf, approve, metadata, roles, rewards, etc.) are passed through
 /// unmodified to the vanilla implementation.
-pub struct ZoneTip20Token {
-    registry: ZoneTip403ProxyRegistry,
+pub struct ZoneTip20Token<P> {
+    registry: ZoneTip403ProxyRegistry<P>,
 }
 
-impl ZoneTip20Token {
+impl<P: PolicyCheck> ZoneTip20Token<P> {
     /// Create a new wrapper with the given registry.
-    pub fn new(registry: ZoneTip403ProxyRegistry) -> Self {
+    pub fn new(registry: ZoneTip403ProxyRegistry<P>) -> Self {
         Self { registry }
-    }
-
-    /// Create a [`DynPrecompile`] for a zone-side TIP-20 token at `address`.
-    ///
-    /// The returned precompile:
-    /// 1. Checks the 4-byte selector for transfer/mint calls.
-    /// 2. For those calls, reads `transfer_policy_id` from EVM storage and
-    ///    checks authorization via the [`ZoneTip403ProxyRegistry`].
-    /// 3. Delegates to the vanilla `TIP20Token::call()` for execution.
-    pub fn create(
-        address: Address,
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-        registry: ZoneTip403ProxyRegistry,
-    ) -> DynPrecompile {
-        let spec = cfg.spec;
-        let gas_params = cfg.gas_params.clone();
-        let token = Self::new(registry);
-
-        DynPrecompile::new_stateful(
-            PrecompileId::Custom("ZoneTip20Token".into()),
-            move |input| {
-                if !input.is_direct_call() {
-                    return Ok(PrecompileOutput::new_reverted(
-                        0,
-                        SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
-                    ));
-                }
-
-                let mut storage = EvmPrecompileStorageProvider::new(
-                    input.internals,
-                    input.gas,
-                    spec,
-                    input.is_static,
-                    gas_params.clone(),
-                );
-
-                StorageCtx::enter(&mut storage, || {
-                    // Pre-check: enforce zone policy for transfer/mint calls.
-                    // Returns Some(reverted output) if policy forbids, None if allowed.
-                    if let Some(revert) = token.check_policy(address, input.data, input.caller) {
-                        return revert;
-                    }
-
-                    // Policy passed (or non-transfer call) — delegate to vanilla TIP20Token
-                    let mut tip20 =
-                        TIP20Token::from_address(address).expect("TIP20 prefix already verified");
-                    tip20.call(input.data, input.caller)
-                })
-            },
-        )
     }
 
     /// Check policy authorization for transfer/mint selectors.
@@ -169,9 +117,6 @@ impl ZoneTip20Token {
         let policy_id = match self.resolve_transfer_policy_id(token) {
             Ok(id) => id,
             Err(e) => {
-                // Can't resolve policy — token may be uninitialized or RPC
-                // unreachable. Fall through to vanilla TIP20Token which will
-                // handle it (revert for uninitialized, or read from EVM storage).
                 debug!(
                     target: "zone::precompile",
                     %token, error = %e,
@@ -239,7 +184,7 @@ impl ZoneTip20Token {
         }
     }
 
-    /// Resolve the `transfer_policy_id` for a token — cache first, L1 RPC fallback.
+    /// Resolve the `transfer_policy_id` for a token.
     fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64, PrecompileError> {
         self.registry.resolve_transfer_policy_id(token)
     }
@@ -251,6 +196,57 @@ impl ZoneTip20Token {
             tempo_contracts::precompiles::TIP20Error::policy_forbids()
                 .selector()
                 .into(),
+        )
+    }
+}
+
+impl<P: PolicyCheck + Clone + Send + Sync + 'static> ZoneTip20Token<P> {
+    /// Create a [`DynPrecompile`] for a zone-side TIP-20 token at `address`.
+    ///
+    /// The returned precompile:
+    /// 1. Checks the 4-byte selector for transfer/mint calls.
+    /// 2. For those calls, reads `transfer_policy_id` from EVM storage and
+    ///    checks authorization via the [`ZoneTip403ProxyRegistry`].
+    /// 3. Delegates to the vanilla `TIP20Token::call()` for execution.
+    pub fn create(
+        address: Address,
+        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
+        registry: ZoneTip403ProxyRegistry<P>,
+    ) -> DynPrecompile {
+        let spec = cfg.spec;
+        let gas_params = cfg.gas_params.clone();
+        let token = Self::new(registry);
+
+        DynPrecompile::new_stateful(
+            PrecompileId::Custom("ZoneTip20Token".into()),
+            move |input| {
+                if !input.is_direct_call() {
+                    return Ok(PrecompileOutput::new_reverted(
+                        0,
+                        SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
+                    ));
+                }
+
+                let mut storage = EvmPrecompileStorageProvider::new(
+                    input.internals,
+                    input.gas,
+                    spec,
+                    input.is_static,
+                    gas_params.clone(),
+                );
+
+                StorageCtx::enter(&mut storage, || {
+                    // Pre-check: enforce zone policy for transfer/mint calls.
+                    if let Some(revert) = token.check_policy(address, input.data, input.caller) {
+                        return revert;
+                    }
+
+                    // Policy passed (or non-transfer call) — delegate to vanilla TIP20Token
+                    let mut tip20 =
+                        TIP20Token::from_address(address).expect("TIP20 prefix already verified");
+                    tip20.call(input.data, input.caller)
+                })
+            },
         )
     }
 }
