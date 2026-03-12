@@ -1624,7 +1624,7 @@ Each zone runs as separate Tempo zone node (based on the Tempo client). It uses 
 ### State commitments
 
 - **Zone block hash**: Computed from the zone block header after execution. The zone block header is a simplified Ethereum header that includes:
-  - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`
+  - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`, `protocolVersion`
   - **Omitted fields**: `gasLimit`, `gasUsed` (zones have no hard gas limit), `logsBloom`, `extraData` (not needed for proofs)
 - **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo?, user txs..., finalizeWithdrawalBatch?]`.
 - **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
@@ -1642,6 +1642,7 @@ Each zone runs as separate Tempo zone node (based on the Tempo client). It uses 
 | `receiptsRoot` | ✓ | ✗ | Committed but not proven on-chain; batch params read from state instead |
 | `number` | ✓ | ✓ | Proof validates block number as part of the header transition |
 | `timestamp` | ✓ | ✓ | Proof validates timestamp is monotonically increasing from previous block |
+| `protocolVersion` | ✓ | ✓ | Proof validates version matches the expected fork for the imported L1 block |
 | `gasLimit` | ✗ | N/A | Omitted — zones have no hard gas limit |
 | `gasUsed` | ✗ | N/A | Omitted — zones have no hard gas limit |
 | `logsBloom` | ✗ | N/A | Omitted — not needed for proofs |
@@ -1726,20 +1727,26 @@ Same-block activation is necessary for correctness: if the fork changes the L1 h
 The portal maintains two verifier slots. The batch submitter specifies which verifier to use; the portal checks that the specified address is one of the two active verifiers:
 
 ```solidity
-address public verifier;         // pre-fork verifier
-address public forkVerifier;     // post-fork verifier (address(0) if no fork yet)
+address public verifier;              // pre-fork verifier
+address public forkVerifier;          // post-fork verifier (address(0) if no fork yet)
+uint64  public forkActivationBlock;   // L1 block at which forkVerifier was set (0 = no fork)
 
-function submitBatch(address targetVerifier, ...) external {
+function submitBatch(address targetVerifier, uint64 tempoBlockNumber, ...) external {
     require(
         targetVerifier == verifier || targetVerifier == forkVerifier,
         "unknown verifier"
     );
+    if (targetVerifier == verifier && forkActivationBlock != 0) {
+        require(tempoBlockNumber < forkActivationBlock, "use fork verifier");
+    }
     require(IVerifier(targetVerifier).verify(...), "invalid proof");
     ...
 }
 ```
 
-The sequencer knows which prover it used and passes the corresponding verifier. The portal does not need to interpret `tempoBlockNumber` or decide which verifier applies — it only enforces that the proof checks out against a recognized verifier.
+The sequencer knows which prover it used and passes the corresponding verifier. The portal enforces that the old verifier is only used for batches whose `tempoBlockNumber` predates the fork. `forkActivationBlock` is set to `block.number` during `setForkVerifier` — no explicit `F` parameter is needed since the system transaction executes at the fork block itself.
+
+This prevents a non-upgraded node (or a malicious one that bypasses fork signaling) from submitting post-fork batches proved under old rules to the old verifier.
 
 The `IVerifier` interface is unchanged across forks. New proof parameters are passed via the opaque `verifierConfig` bytes.
 
@@ -1750,13 +1757,23 @@ At most two verifiers are active at any time. When a new fork occurs, the previo
 The L1 hard fork executes:
 
 ```
-verifier     = forkVerifier       // promote previous fork verifier
-forkVerifier = new_fork_verifier  // set new fork verifier
+verifier            = forkVerifier       // promote previous fork verifier
+forkVerifier        = new_fork_verifier  // set new fork verifier
+forkActivationBlock = block.number       // record cutoff for old verifier
 ```
 
 For the first fork, `verifier` retains its original value (set at zone creation) and `forkVerifier` is populated for the first time.
 
 This means the previous verifier remains active between forks, allowing zones that are behind to submit pre-fork batches. At the next fork, the N-2 verifier is deprecated. A zone that has not caught up past the N-2 fork boundary by the time the N-1 fork arrives can no longer submit those old batches.
+
+### Prover selection
+
+The zone node decides which prover to invoke. The new prover produces proofs against a new verification key, which only the fork verifier accepts. Since the fork verifier is not deployed until block `F`, the node must use the old prover for all batches submitted before `F`:
+
+- **Pre-fork batches** (all zone blocks import L1 block `< F`): proved with the old prover, submitted to the old verifier.
+- **Post-fork and fork-spanning batches** (any zone block imports L1 block `>= F`): proved with the new prover, submitted to the fork verifier. These can only be submitted after block `F`.
+
+The node determines which prover to use by checking the L1 block numbers in the batch against `F` from its chain specification.
 
 ### Prover behavior
 
