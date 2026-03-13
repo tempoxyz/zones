@@ -100,27 +100,15 @@ impl L1Subscriber {
             "l1-deposit-subscriber",
             Box::pin(async move {
                 loop {
-                    let retry_interval = subscriber.config.retry_connection_interval;
-                    match subscriber.clone().run().await {
-                        Ok(()) => {
-                            subscriber.subscriber_metrics.connected.set(0.0);
-                            subscriber.subscriber_metrics.reconnects_total.increment(1);
-                            warn!(
-                                retry_secs = retry_interval.as_secs_f32(),
-                                "L1 subscriber stream ended, reconnecting after retry interval"
-                            );
-                            tokio::time::sleep(retry_interval).await;
-                        }
-                        Err(e) => {
-                            subscriber.subscriber_metrics.connected.set(0.0);
-                            subscriber.subscriber_metrics.reconnects_total.increment(1);
-                            error!(
-                                error = %e,
-                                retry_secs = retry_interval.as_secs_f32(),
-                                "L1 subscriber failed, reconnecting after retry interval"
-                            );
-                            tokio::time::sleep(retry_interval).await;
-                        }
+                    if let Err(e) = subscriber.clone().run().await {
+                        let retry_interval = subscriber.config.retry_connection_interval;
+                        subscriber.subscriber_metrics.reconnects_total.increment(1);
+                        error!(
+                            error = %e,
+                            retry_secs = retry_interval.as_secs_f32(),
+                            "L1 subscriber failed, reconnecting after retry interval"
+                        );
+                        tokio::time::sleep(retry_interval).await;
                     }
                 }
             }),
@@ -151,7 +139,6 @@ impl L1Subscriber {
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_client(client)
             .erased();
-        self.subscriber_metrics.connected.set(1.0);
         info!("Connected to L1 node");
         Ok(provider)
     }
@@ -233,20 +220,24 @@ impl L1Subscriber {
                 async move {
                     let block_number = header.number();
                     let start = std::time::Instant::now();
-                    let receipts = match provider
+                    let missing_receipts_metrics = subscriber_metrics.clone();
+                    let receipt_error_metrics = subscriber_metrics.clone();
+                    let receipts = provider
                         .get_block_receipts(BlockId::number(block_number))
                         .await
-                    {
-                        Ok(Some(receipts)) => receipts,
-                        Ok(None) => {
-                            subscriber_metrics.receipt_fetch_failures_total.increment(1);
-                            return Err(eyre::eyre!("no receipts for block {block_number}"));
-                        }
-                        Err(err) => {
-                            subscriber_metrics.receipt_fetch_failures_total.increment(1);
-                            return Err(err.into());
-                        }
-                    };
+                        .inspect(|receipts| {
+                            if receipts.is_none() {
+                                missing_receipts_metrics
+                                    .receipt_fetch_failures_total
+                                    .increment(1);
+                            }
+                        })
+                        .inspect_err(|_| {
+                            receipt_error_metrics
+                                .receipt_fetch_failures_total
+                                .increment(1);
+                        })?
+                        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
@@ -393,20 +384,24 @@ impl L1Subscriber {
                     let start = std::time::Instant::now();
                     let (receipts, header_resp) = tokio::try_join!(
                         async {
-                            match provider
+                            let missing_receipts_metrics = subscriber_metrics.clone();
+                            let receipt_error_metrics = subscriber_metrics.clone();
+                            provider
                                 .get_block_receipts(BlockId::number(block_number))
                                 .await
-                            {
-                                Ok(Some(receipts)) => Ok(receipts),
-                                Ok(None) => {
-                                    subscriber_metrics.receipt_fetch_failures_total.increment(1);
-                                    Err(eyre::eyre!("no receipts for block {block_number}"))
-                                }
-                                Err(err) => {
-                                    subscriber_metrics.receipt_fetch_failures_total.increment(1);
-                                    Err(err.into())
-                                }
-                            }
+                                .inspect(|receipts| {
+                                    if receipts.is_none() {
+                                        missing_receipts_metrics
+                                            .receipt_fetch_failures_total
+                                            .increment(1);
+                                    }
+                                })
+                                .inspect_err(|_| {
+                                    receipt_error_metrics
+                                        .receipt_fetch_failures_total
+                                        .increment(1);
+                                })?
+                                .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
                         },
                         async {
                             provider
@@ -442,21 +437,10 @@ impl L1Subscriber {
 
             let sealed = SealedHeader::seal_slow(header);
             self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
-            match self
-                .deposit_queue
-                .try_enqueue(sealed, events, policy_events)
-            {
-                EnqueueOutcome::Accepted => {
-                    enqueued += 1;
-                    self.subscriber_metrics.blocks_enqueued_total.increment(1);
-                }
-                EnqueueOutcome::Duplicate => {}
-                EnqueueOutcome::NeedBackfill { from, to } => {
-                    panic!(
-                        "backfill enqueue expected Accepted or Duplicate, got NeedBackfill({from}..={to})"
-                    );
-                }
-            }
+            self.deposit_queue
+                .enqueue_sealed(sealed, events, policy_events);
+            enqueued += 1;
+            self.subscriber_metrics.blocks_enqueued_total.increment(1);
 
             if enqueued.is_multiple_of(100) {
                 let elapsed = backfill_start.elapsed();
@@ -520,7 +504,15 @@ impl L1Subscriber {
             Vec<PolicyEvent>,
         )> = None;
 
-        while let Some((header, receipts)) = stream.try_next().await? {
+        loop {
+            let stream_wait_start = std::time::Instant::now();
+            let next = stream.try_next().await?;
+            self.subscriber_metrics
+                .stream_try_next_duration_seconds
+                .record(stream_wait_start.elapsed().as_secs_f64());
+            let Some((header, receipts)) = next else {
+                break;
+            };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
             let (events, policy_events) = self.extract_events(block_number, &receipts);
@@ -575,7 +567,6 @@ impl L1Subscriber {
             unconfirmed_tip = Some((sealed, events, policy_events));
         }
 
-        self.subscriber_metrics.connected.set(0.0);
         warn!("L1 block subscription stream ended");
         Ok(())
     }

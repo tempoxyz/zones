@@ -9,9 +9,6 @@ use reth_metrics::{
 #[derive(Metrics, Clone)]
 #[metrics(scope = "zone_l1_subscriber")]
 pub(crate) struct L1SubscriberMetrics {
-    /// Whether the subscriber is currently connected to L1 (1) or disconnected (0).
-    pub connected: Gauge,
-
     /// Whether a backfill is currently running (1) or idle (0).
     pub backfill_in_progress: Gauge,
 
@@ -47,6 +44,9 @@ pub(crate) struct L1SubscriberMetrics {
 
     /// Number of failed L1 receipt fetches.
     pub receipt_fetch_failures_total: Counter,
+
+    /// Time spent waiting for the next live L1 block from the stream.
+    pub stream_try_next_duration_seconds: Histogram,
 
     /// Number of reconnect attempts after the subscriber exits or errors.
     pub reconnects_total: Counter,
