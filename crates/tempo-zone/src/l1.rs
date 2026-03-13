@@ -220,20 +220,18 @@ impl L1Subscriber {
                 async move {
                     let block_number = header.number();
                     let start = std::time::Instant::now();
-                    let receipt_fetch_failures_total =
-                        &subscriber_metrics.receipt_fetch_failures_total;
+                    let fetch_failures_total = &subscriber_metrics.fetch_failures_total;
                     let receipts = provider
                         .get_block_receipts(BlockId::number(block_number))
                         .await
-                        .inspect(|receipts| {
-                            if receipts.is_none() {
-                                receipt_fetch_failures_total.increment(1);
-                            }
+                        .map_err(eyre::Report::from)
+                        .and_then(|receipts| {
+                            receipts
+                                .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
                         })
                         .inspect_err(|_| {
-                            receipt_fetch_failures_total.increment(1);
-                        })?
-                        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
+                            fetch_failures_total.increment(1);
+                        })?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
@@ -378,21 +376,13 @@ impl L1Subscriber {
                 let subscriber_metrics = subscriber_metrics.clone();
                 async move {
                     let start = std::time::Instant::now();
+                    let fetch_failures_total = &subscriber_metrics.fetch_failures_total;
                     let (receipts, header_resp) = tokio::try_join!(
                         async {
-                            let receipt_fetch_failures_total =
-                                &subscriber_metrics.receipt_fetch_failures_total;
                             provider
                                 .get_block_receipts(BlockId::number(block_number))
                                 .await
-                                .inspect(|receipts| {
-                                    if receipts.is_none() {
-                                        receipt_fetch_failures_total.increment(1);
-                                    }
-                                })
-                                .inspect_err(|_| {
-                                    receipt_fetch_failures_total.increment(1);
-                                })?
+                                .map_err(eyre::Report::from)?
                                 .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
                         },
                         async {
@@ -403,7 +393,10 @@ impl L1Subscriber {
                                     eyre::eyre!("L1 header not found for block {block_number}")
                                 })
                         },
-                    )?;
+                    )
+                    .inspect_err(|_| {
+                        fetch_failures_total.increment(1);
+                    })?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
