@@ -7,4 +7,4 @@ test-threads = "num-cpus"
 # resource contention and flaky timeouts on CI runners.
 [[profile.ci.overrides]]
 filter = "test(/^(e2e|l1_e2e|restart_e2e)::/) | test(advance_tempo)"
-threads-required = 4
+threads-required = 8
