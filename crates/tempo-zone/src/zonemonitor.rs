@@ -37,7 +37,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
-    batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot},
+    batch::{AnchorGapKind, AnchorModeKind, BatchData, BatchSubmitter, ZoneBlockSnapshot},
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -77,6 +77,8 @@ pub struct ZoneMonitorConfig {
 /// portal's on-chain `blockHash()`.
 pub struct ZoneMonitor {
     config: ZoneMonitorConfig,
+    /// Metrics for zone observation and L1 batch submission.
+    metrics: crate::zone_monitor_metrics::ZoneMonitorMetrics,
     /// Read-only HTTP provider pointed at the **Zone L2** RPC node.
     provider: DynProvider<TempoNetwork>,
     /// ZoneOutbox contract on **Zone L2** — source of `WithdrawalRequested` and
@@ -110,6 +112,8 @@ pub struct ZoneMonitor {
     /// and incremented each time a batch with a non-zero
     /// `withdrawal_queue_hash` is successfully submitted to L1.
     portal_withdrawal_queue_tail: u64,
+    /// Most recent zone block observed from the L2 RPC.
+    latest_observed_zone_block: u64,
 }
 
 impl ZoneMonitor {
@@ -124,6 +128,7 @@ impl ZoneMonitor {
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
     ) -> Self {
+        let metrics = crate::zone_monitor_metrics::ZoneMonitorMetrics::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect(&config.zone_rpc_url)
             .await
@@ -224,8 +229,17 @@ impl ZoneMonitor {
             info!("No pending withdrawals to restore");
         }
 
+        metrics
+            .latest_zone_block_observed
+            .set(last_submitted_zone_block as f64);
+        metrics
+            .latest_zone_block_submitted_to_l1
+            .set(last_submitted_zone_block as f64);
+        metrics.zone_to_l1_submission_lag_blocks.set(0.0);
+
         Self {
             config,
+            metrics,
             provider,
             outbox,
             inbox,
@@ -237,6 +251,7 @@ impl ZoneMonitor {
             prev_processed_deposit_hash,
             prev_zone_block_hash,
             portal_withdrawal_queue_tail,
+            latest_observed_zone_block: last_submitted_zone_block,
         }
     }
 
@@ -267,6 +282,7 @@ impl ZoneMonitor {
             let Ok(latest_zone_block) = self.provider.get_block_number().await else {
                 continue;
             };
+            self.record_observed_zone_block(latest_zone_block);
             if latest_zone_block <= self.last_submitted_zone_block {
                 continue;
             }
@@ -640,8 +656,12 @@ impl ZoneMonitor {
         let mut delay = INITIAL_RETRY_DELAY;
 
         for attempt in 1..=MAX_RETRIES {
+            let submit_started = std::time::Instant::now();
             match self.batch_submitter.submit_batch(batch_data).await {
-                Ok(tx_hash) => {
+                Ok((tx_hash, anchor_mode_kind)) => {
+                    self.metrics
+                        .batch_submit_latency_seconds
+                        .record(submit_started.elapsed().as_secs_f64());
                     let blocks_in_batch = last_zone_block - self.last_submitted_zone_block;
                     info!(
                         last_zone_block,
@@ -651,11 +671,30 @@ impl ZoneMonitor {
                         withdrawal_queue_hash = %batch_data.withdrawal_queue_hash,
                         "Batch successfully submitted to L1"
                     );
+                    self.metrics.batch_submit_success_total.increment(1);
+                    self.metrics
+                        .batch_size_blocks
+                        .record(blocks_in_batch as f64);
+                    self.metrics
+                        .withdrawals_per_batch
+                        .record(withdrawals.len() as f64);
+                    match anchor_mode_kind {
+                        AnchorModeKind::Direct => {
+                            self.metrics.direct_mode_submissions_total.increment(1)
+                        }
+                        AnchorModeKind::Ancestry => {
+                            self.metrics.ancestry_mode_submissions_total.increment(1)
+                        }
+                    }
 
                     // Only advance local state on success.
                     self.prev_zone_block_hash = batch_data.next_block_hash;
                     self.prev_processed_deposit_hash = batch_data.next_processed_deposit_hash;
                     self.last_submitted_zone_block = last_zone_block;
+                    self.metrics
+                        .latest_zone_block_submitted_to_l1
+                        .set(last_zone_block as f64);
+                    self.update_submission_lag();
 
                     // Store withdrawals and advance portal queue tail if this batch had withdrawals.
                     if !batch_data.withdrawal_queue_hash.is_zero() {
@@ -680,7 +719,11 @@ impl ZoneMonitor {
                     return Ok(());
                 }
                 Err(e) => {
+                    self.metrics
+                        .batch_submit_latency_seconds
+                        .record(submit_started.elapsed().as_secs_f64());
                     if attempt < MAX_RETRIES {
+                        self.metrics.batch_submit_retry_total.increment(1);
                         warn!(
                             attempt,
                             max_retries = MAX_RETRIES,
@@ -691,6 +734,7 @@ impl ZoneMonitor {
                         tokio::time::sleep(delay).await;
                         delay *= 2;
                     } else {
+                        self.metrics.batch_submit_failure_total.increment(1);
                         let revert_reason = decode_portal_revert(&e);
                         error!(
                             error = %e,
@@ -720,6 +764,7 @@ impl ZoneMonitor {
     /// rather than stale local values. Does NOT advance `last_submitted_zone_block`
     /// — the same block range will be retried on the next poll cycle.
     async fn resync_from_portal(&mut self) {
+        self.metrics.resync_from_portal_total.increment(1);
         let old_hash = self.prev_zone_block_hash;
         let old_tail = self.portal_withdrawal_queue_tail;
         match tokio::try_join!(
@@ -746,6 +791,7 @@ impl ZoneMonitor {
                 self.prev_zone_block_hash = portal_hash;
                 self.portal_withdrawal_queue_tail = portal_tail;
                 self.prev_processed_deposit_hash = deposit_hash;
+                self.update_submission_lag();
             }
             Err(e) => {
                 error!(
@@ -754,6 +800,21 @@ impl ZoneMonitor {
                 );
             }
         }
+    }
+
+    fn record_observed_zone_block(&mut self, latest_zone_block: u64) {
+        self.latest_observed_zone_block = latest_zone_block;
+        self.metrics
+            .latest_zone_block_observed
+            .set(latest_zone_block as f64);
+        self.update_submission_lag();
+    }
+
+    fn update_submission_lag(&self) {
+        self.metrics.zone_to_l1_submission_lag_blocks.set(
+            self.latest_observed_zone_block
+                .saturating_sub(self.last_submitted_zone_block) as f64,
+        );
     }
 }
 
