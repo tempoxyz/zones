@@ -10,6 +10,7 @@ pub mod auth;
 pub mod config;
 pub mod filter;
 pub mod handlers;
+mod metrics;
 pub mod policy;
 pub mod provider;
 pub mod proxy;

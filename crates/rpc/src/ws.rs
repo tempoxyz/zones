@@ -16,12 +16,18 @@ use axum::{
     response::IntoResponse,
 };
 use futures::stream::StreamExt;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::Ordering};
 use tracing::warn;
 
 use crate::{
     auth::{self, AuthError},
-    server::{RpcState, auth_error_status, authenticate_token, process_rpc_text},
+    metrics::{
+        PrivateRpcWsDisconnectMetrics, PrivateRpcWsSessionMetrics, RpcTransport, WsDisconnectReason,
+    },
+    server::{
+        RpcState, auth_error_status, authenticate_token, log_auth_error, process_rpc_text,
+        record_authenticate_error,
+    },
 };
 
 /// Maximum WebSocket message size (1 MiB).
@@ -48,14 +54,15 @@ pub(crate) async fn handle_ws_upgrade(
         .or(query.token.as_deref());
 
     let auth = match token_str {
-        Some(token) => authenticate_token(token, &state.config),
-        None => Err(AuthError::Missing),
+        Some(token) => authenticate_token(token, &state.config, state.api.as_ref()).await,
+        None => Err(AuthError::Missing.into()),
     };
 
     let auth = match auth {
         Ok(auth) => auth,
         Err(e) => {
-            warn!(target: "zone::rpc", err = %e, "ws auth failed");
+            record_authenticate_error(&e, RpcTransport::Ws);
+            log_auth_error(&e, "ws");
             return (auth_error_status(&e), "").into_response();
         }
     };
@@ -72,29 +79,42 @@ async fn handle_ws_session(
     auth: crate::auth::AuthContext,
     state: Arc<RpcState>,
 ) {
-    while let Some(msg) = socket.next().await {
+    let ws_metrics = PrivateRpcWsSessionMetrics::default();
+    let active = state.ws_sessions_active.fetch_add(1, Ordering::Relaxed) + 1;
+    ws_metrics.sessions_active.set(active as f64);
+    ws_metrics.sessions_opened_total.increment(1);
+
+    let disconnect_reason = loop {
+        let Some(msg) = socket.next().await else {
+            break WsDisconnectReason::StreamEnded;
+        };
+
         let text = match msg {
             Ok(Message::Text(t)) => t,
             Ok(Message::Binary(b)) => match std::str::from_utf8(&b) {
                 Ok(s) => s.into(),
                 Err(_) => {
-                    let _ = socket
+                    if socket
                         .send(Message::Text(
                             r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"invalid UTF-8"},"id":null}"#.into(),
                         ))
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        break WsDisconnectReason::SendError;
+                    }
                     continue;
                 }
             },
-            Ok(Message::Close(_)) => break,
+            Ok(Message::Close(_)) => break WsDisconnectReason::ClientClose,
             Ok(_) => continue, // Ping/Pong handled by axum
             Err(e) => {
                 warn!(target: "zone::rpc", err = %e, "ws recv error");
-                break;
+                break WsDisconnectReason::RecvError;
             }
         };
 
-        let response_json = process_rpc_text(&text, &auth, state.api.as_ref())
+        let response_json = process_rpc_text(&text, &auth, state.api.as_ref(), RpcTransport::Ws)
             .await
             .into_json();
 
@@ -103,7 +123,13 @@ async fn handle_ws_session(
             .await
             .is_err()
         {
-            break;
+            break WsDisconnectReason::SendError;
         }
-    }
+    };
+
+    let active = state.ws_sessions_active.fetch_sub(1, Ordering::Relaxed) - 1;
+    ws_metrics.sessions_active.set(active as f64);
+    PrivateRpcWsDisconnectMetrics::new_for(disconnect_reason)
+        .disconnects_total
+        .increment(1);
 }

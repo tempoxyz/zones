@@ -13,13 +13,22 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use std::sync::Arc;
-use tracing::{info, warn};
+use std::{
+    sync::{Arc, atomic::AtomicU64},
+    time::{Instant, SystemTime, UNIX_EPOCH},
+};
+use tempo_contracts::precompiles::account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType;
+use tempo_primitives::transaction::{
+    SignatureType as TempoSignatureType,
+    tt_signature::{KeychainSignature, TempoSignature},
+};
+use tracing::{error, info, warn};
 
 use crate::{
-    auth::{self, AuthContext, AuthError, SignatureType},
+    auth::{self, AuthContext, AuthError},
     config::PrivateRpcConfig,
     handlers::{self, ZoneRpcApi},
+    metrics::{PrivateRpcCallMetrics, RpcTransport, record_auth_failure},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
     ws::handle_ws_upgrade,
 };
@@ -34,6 +43,8 @@ pub struct RpcState {
     pub config: PrivateRpcConfig,
     /// Type-erased EthApi for handling RPC methods.
     pub api: Arc<dyn ZoneRpcApi>,
+    /// Number of currently active WebSocket sessions.
+    pub ws_sessions_active: Arc<AtomicU64>,
 }
 
 /// Start the private zone RPC server.
@@ -45,7 +56,11 @@ pub async fn start_private_rpc(
     api: Arc<dyn ZoneRpcApi>,
 ) -> eyre::Result<std::net::SocketAddr> {
     let listen_addr = config.listen_addr;
-    let state = Arc::new(RpcState { config, api });
+    let state = Arc::new(RpcState {
+        config,
+        api,
+        ws_sessions_active: Arc::new(AtomicU64::new(0)),
+    });
 
     let app = Router::new()
         .route("/", post(handle_rpc))
@@ -98,6 +113,7 @@ pub(crate) async fn process_rpc_text(
     text: &str,
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
+    transport: RpcTransport,
 ) -> RpcResult {
     let trimmed = text.trim_start();
 
@@ -119,7 +135,7 @@ pub(crate) async fn process_rpc_text(
             Ok(requests) => {
                 let mut responses = Vec::with_capacity(requests.len());
                 for req in &requests {
-                    responses.push(handlers::dispatch(req, auth, api).await);
+                    responses.push(dispatch_metered(req, auth, api, transport).await);
                 }
                 RpcResult::Batch(responses)
             }
@@ -130,7 +146,9 @@ pub(crate) async fn process_rpc_text(
         }
     } else {
         match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(request) => RpcResult::Single(handlers::dispatch(&request, auth, api).await),
+            Ok(request) => {
+                RpcResult::Single(dispatch_metered(&request, auth, api, transport).await)
+            }
             Err(e) => RpcResult::Single(JsonRpcResponse::error(
                 serde_json::Value::Null,
                 JsonRpcError::parse_error(format!("parse error: {e}")),
@@ -139,11 +157,62 @@ pub(crate) async fn process_rpc_text(
     }
 }
 
+async fn dispatch_metered(
+    req: &JsonRpcRequest,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+    transport: RpcTransport,
+) -> JsonRpcResponse {
+    let metrics = PrivateRpcCallMetrics::new_for(transport, &req.method);
+    let started_at = Instant::now();
+
+    metrics.started_total.increment(1);
+    let response = handlers::dispatch(req, auth, api).await;
+    metrics
+        .time_seconds
+        .record(started_at.elapsed().as_secs_f64());
+
+    if response.error.is_some() {
+        metrics.failed_total.increment(1);
+    } else {
+        metrics.successful_total.increment(1);
+    }
+
+    response
+}
+
 /// Map an [`AuthError`] to the appropriate HTTP status code.
-pub(crate) fn auth_error_status(err: &AuthError) -> StatusCode {
+pub(crate) fn auth_error_status(err: &AuthenticateError) -> StatusCode {
     match err {
-        AuthError::Missing => StatusCode::UNAUTHORIZED,
-        _ => StatusCode::FORBIDDEN,
+        AuthenticateError::Invalid(AuthError::Missing) => StatusCode::UNAUTHORIZED,
+        AuthenticateError::Invalid(_) => StatusCode::FORBIDDEN,
+        AuthenticateError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Authentication failures split into invalid caller credentials vs server-side failures.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum AuthenticateError {
+    #[error(transparent)]
+    Invalid(#[from] AuthError),
+    #[error(transparent)]
+    Internal(#[from] eyre::Report),
+}
+
+pub(crate) fn log_auth_error(err: &AuthenticateError, transport: &str) {
+    match err {
+        AuthenticateError::Invalid(cause) => {
+            warn!(target: "zone::rpc", %transport, err = %cause, "auth failed");
+        }
+        AuthenticateError::Internal(cause) => {
+            error!(target: "zone::rpc", %transport, err = %cause, "auth failed");
+        }
+    }
+}
+
+pub(crate) fn record_authenticate_error(err: &AuthenticateError, transport: RpcTransport) {
+    if let AuthenticateError::Invalid(cause) = err {
+        record_auth_failure(transport, cause);
     }
 }
 
@@ -153,10 +222,11 @@ async fn handle_rpc(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let auth = match authenticate(&headers, &state.config) {
+    let auth = match authenticate(&headers, &state.config, state.api.as_ref()).await {
         Ok(auth) => auth,
         Err(e) => {
-            warn!(target: "zone::rpc", err = %e, "auth failed");
+            record_authenticate_error(&e, RpcTransport::Http);
+            log_auth_error(&e, "http");
             return (auth_error_status(&e), "").into_response();
         }
     };
@@ -168,38 +238,45 @@ async fn handle_rpc(
         }
     };
 
-    process_rpc_text(body_str, &auth, state.api.as_ref())
+    process_rpc_text(body_str, &auth, state.api.as_ref(), RpcTransport::Http)
         .await
         .into_response()
 }
 
 /// Authenticate the request using the `X-Authorization-Token` header.
-fn authenticate(headers: &HeaderMap, config: &PrivateRpcConfig) -> Result<AuthContext, AuthError> {
+async fn authenticate(
+    headers: &HeaderMap,
+    config: &PrivateRpcConfig,
+    api: &dyn ZoneRpcApi,
+) -> Result<AuthContext, AuthenticateError> {
     let header_value = headers
         .get(auth::X_AUTHORIZATION_TOKEN)
         .and_then(|v| v.to_str().ok())
         .ok_or(AuthError::Missing)?;
 
-    authenticate_token(header_value, config)
+    authenticate_token(header_value, config, api).await
 }
 
 /// Authenticate using a raw token string (shared by HTTP and WebSocket paths).
-pub(crate) fn authenticate_token(
+pub(crate) async fn authenticate_token(
     token_value: &str,
     config: &PrivateRpcConfig,
-) -> Result<AuthContext, AuthError> {
+    api: &dyn ZoneRpcApi,
+) -> Result<AuthContext, AuthenticateError> {
     let token = auth::parse_auth_header(token_value)?;
 
     // Validate token fields against server config
     token.validate(config.zone_id, config.chain_id, config.zone_portal)?;
 
-    // Verify the signature and recover the signer address
-    let sig_type = token.signature_type()?;
-    let caller = match sig_type {
-        SignatureType::Secp256k1 => auth::recover_secp256k1(&token.signature, &token.digest)?,
-        // P256 / WebAuthn / Keychain signature types are not yet supported
-        _ => return Err(AuthError::UnsupportedSignatureType),
-    };
+    let signature =
+        TempoSignature::from_bytes(&token.signature).map_err(|_| AuthError::InvalidSignature)?;
+    let caller = signature
+        .recover_signer(&token.digest)
+        .map_err(|_| AuthError::InvalidSignature)?;
+
+    if let TempoSignature::Keychain(keychain_signature) = &signature {
+        validate_keychain_signature(api, caller, keychain_signature, &token.digest).await?;
+    }
 
     let is_sequencer = caller == config.sequencer;
 
@@ -208,4 +285,45 @@ pub(crate) fn authenticate_token(
         is_sequencer,
         expires_at: token.expires_at,
     })
+}
+
+async fn validate_keychain_signature(
+    api: &dyn ZoneRpcApi,
+    caller: alloy_primitives::Address,
+    keychain_signature: &KeychainSignature,
+    digest: &alloy_primitives::B256,
+) -> Result<(), AuthenticateError> {
+    let key_id = keychain_signature
+        .key_id(digest)
+        .map_err(|_| AuthError::InvalidSignature)?;
+    let key_info = api.get_keychain_key(caller, key_id).await?;
+
+    if key_info.keyId.is_zero() {
+        return Err(AuthError::UnauthorizedKeychainKey.into());
+    }
+    if key_info.isRevoked {
+        return Err(AuthError::RevokedKeychainKey.into());
+    }
+    if key_info.expiry <= now_unix_seconds() {
+        return Err(AuthError::ExpiredKeychainKey.into());
+    }
+
+    let expected_signature_type = match keychain_signature.signature.signature_type() {
+        TempoSignatureType::Secp256k1 => KeyInfoSignatureType::Secp256k1,
+        TempoSignatureType::P256 => KeyInfoSignatureType::P256,
+        TempoSignatureType::WebAuthn => KeyInfoSignatureType::WebAuthn,
+    };
+
+    if key_info.signatureType != expected_signature_type {
+        return Err(AuthError::KeychainSignatureTypeMismatch.into());
+    }
+
+    Ok(())
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs()
 }

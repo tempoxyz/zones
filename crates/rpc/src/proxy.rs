@@ -6,11 +6,16 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use alloy_primitives::{Address, Bytes};
+use alloy_primitives::{Address, Bytes, hex};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, Log, state::StateOverride};
+use alloy_sol_types::SolCall;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use tempo_alloy::rpc::TempoTransactionRequest;
+use tempo_contracts::precompiles::{
+    ACCOUNT_KEYCHAIN_ADDRESS,
+    account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
+};
 use tokio::sync::Mutex;
 
 use crate::{
@@ -18,7 +23,7 @@ use crate::{
     filter,
     handlers::ZoneRpcApi,
     policy,
-    types::{BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
+    types::{BoxEyreFut, BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
 };
 
 /// Upstream JSON-RPC response envelope.
@@ -120,6 +125,33 @@ fn json_from(value: &serde_json::Value) -> Option<Address> {
 }
 
 impl ZoneRpcApi for ProxyZoneRpc {
+    fn get_keychain_key(&self, account: Address, key_id: Address) -> BoxEyreFut<'_, KeyInfo> {
+        Box::pin(async move {
+            let call_data = getKeyCall {
+                account,
+                keyId: key_id,
+            }
+            .abi_encode();
+
+            let result = self
+                .forward(
+                    "eth_call",
+                    serde_json::json!([
+                        {
+                            "to": format!("{ACCOUNT_KEYCHAIN_ADDRESS:#x}"),
+                            "input": format!("0x{}", hex::encode(call_data)),
+                        },
+                        "latest"
+                    ]),
+                )
+                .await
+                .map_err(|err| eyre::eyre!(err.to_string()))?;
+            let output: Bytes = serde_json::from_str(result.get())?;
+
+            IAccountKeychain::getKeyCall::abi_decode_returns(output.as_ref()).map_err(Into::into)
+        })
+    }
+
     fn block_number(&self) -> BoxFut<'_> {
         Box::pin(async move { self.forward("eth_blockNumber", serde_json::json!([])).await })
     }

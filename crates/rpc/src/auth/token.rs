@@ -150,7 +150,7 @@ impl AuthorizationToken {
             130 if self.signature[0] == 0x01 => Ok(SignatureType::P256),
             _ => match self.signature[0] {
                 0x02 => Ok(SignatureType::WebAuthn),
-                0x03 => Ok(SignatureType::Keychain),
+                0x03 | 0x04 => Ok(SignatureType::Keychain),
                 _ => Err(AuthError::UnsupportedSignatureType),
             },
         }
@@ -193,6 +193,14 @@ pub enum AuthError {
     InvalidSignature,
     #[error("unsupported signature type")]
     UnsupportedSignatureType,
+    #[error("keychain key not authorized")]
+    UnauthorizedKeychainKey,
+    #[error("keychain key revoked")]
+    RevokedKeychainKey,
+    #[error("keychain key expired")]
+    ExpiredKeychainKey,
+    #[error("keychain signature type mismatch")]
+    KeychainSignatureTypeMismatch,
 }
 
 /// Build the unsigned token fields and their signing digest.
