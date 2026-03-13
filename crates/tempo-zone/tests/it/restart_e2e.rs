@@ -17,6 +17,11 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 /// Timeout for waiting on withdrawals (includes batch submission + processing).
 const WITHDRAWAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Restart recovery can take longer on loaded CI runners because the new
+/// sequencer restores pending withdrawal data from historical L2 events before
+/// the processor can advance the portal head.
+const RESTART_RECOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Read the portal's `blockHash()` — the last submitted zone block hash.
 async fn portal_block_hash(
     l1: &L1TestNode,
@@ -155,7 +160,7 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
 
     // Wait for the batch to land on L1 (portal tail advances)
     crate::utils::poll_until(
-        WITHDRAWAL_TIMEOUT,
+        RESTART_RECOVERY_TIMEOUT,
         std::time::Duration::from_millis(200),
         "portal withdrawal queue tail > 0",
         || {
@@ -186,7 +191,7 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     // The OLD withdrawal from before the restart should be processed via
     // restored data (withdrawal processor was aborted before head advanced).
     crate::utils::poll_until(
-        WITHDRAWAL_TIMEOUT,
+        RESTART_RECOVERY_TIMEOUT,
         std::time::Duration::from_millis(200),
         "portal head advances past first withdrawal",
         || {
