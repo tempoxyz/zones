@@ -8,15 +8,39 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use alloy::{
-    primitives::{Address, B256, address},
+    primitives::{Address, B256, U256, address, hex},
     signers::local::PrivateKeySigner,
 };
-use tempo_precompiles::PATH_USD_ADDRESS;
+use alloy_provider::ProviderBuilder;
+use alloy_sol_types::SolCall;
+use p256::ecdsa::SigningKey as P256SigningKey;
+use rand::thread_rng;
+use tempo_contracts::precompiles::{
+    ITIP20 as ContractTip20,
+    account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
+};
+use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
+use tokio::time::sleep;
+use zone::abi::ZONE_TOKEN_ADDRESS;
 
 use crate::utils::{
     DEFAULT_TIMEOUT, ZoneAccount, start_zone_with_private_rpc, start_zone_with_private_rpc_l1,
     start_zone_with_private_rpc_l1_with_encryption,
 };
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
+fn corrupt_token_hex(token: &str) -> String {
+    let mut bytes = hex::decode(token).expect("token hex should decode");
+    let idx = usize::from(bytes.len() > 1);
+    bytes[idx] ^= 0x01;
+    hex::encode(bytes)
+}
 
 /// Auth enforcement: missing header → 401, garbage token → 401/403, wrong chain ID → 403.
 #[tokio::test(flavor = "multi_thread")]
@@ -51,6 +75,210 @@ async fn test_auth_rejection() -> eyre::Result<()> {
         .call_raw("eth_blockNumber", serde_json::json!([]), &bad_token)
         .await?;
     assert_eq!(status.as_u16(), 403, "wrong chain ID should return 403");
+
+    Ok(())
+}
+
+/// Real P256 and WebAuthn auth tokens are accepted by the private RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_non_secp_auth_tokens() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc().await?;
+    let p256_signer = P256SigningKey::random(&mut thread_rng());
+    let webauthn_signer = P256SigningKey::random(&mut thread_rng());
+
+    for token in [
+        ctx.p256_token(&p256_signer),
+        ctx.webauthn_token(&webauthn_signer),
+    ] {
+        let resp = ctx
+            .call(
+                "zone_getAuthorizationTokenInfo",
+                serde_json::json!([]),
+                &token,
+            )
+            .await?;
+        assert!(
+            resp.get("error").is_none(),
+            "auth token should succeed: {resp}"
+        );
+        assert!(
+            resp["result"]["account"].as_str().is_some(),
+            "successful auth should include an account",
+        );
+    }
+
+    Ok(())
+}
+
+/// Invalid P256 signatures and WebAuthn challenge mismatches are rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_invalid_non_secp_auth_tokens_are_rejected() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc().await?;
+    let p256_signer = P256SigningKey::random(&mut thread_rng());
+    let webauthn_signer = P256SigningKey::random(&mut thread_rng());
+
+    let bad_p256 = corrupt_token_hex(&ctx.p256_token(&p256_signer));
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &bad_p256)
+        .await?;
+    assert_eq!(status.as_u16(), 403, "invalid P256 token should return 403");
+
+    let bad_webauthn = ctx.webauthn_token_with_challenge(&webauthn_signer, B256::repeat_byte(0x77));
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &bad_webauthn)
+        .await?;
+    assert_eq!(
+        status.as_u16(),
+        403,
+        "WebAuthn token with wrong challenge should return 403",
+    );
+
+    Ok(())
+}
+
+/// Authorized P256 keychain tokens authenticate as the root account in both V1 and V2 encodings.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_keychain_auth_tokens_v1_and_v2() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+    let root_signer = PrivateKeySigner::random();
+    let access_signer = P256SigningKey::random(&mut thread_rng());
+
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000001111"),
+        root_signer.address(),
+        1_000_000,
+    )
+    .await?;
+
+    let (_, key_id) = ctx.keychain_p256_token(root_signer.address(), &access_signer, 0x04);
+    ctx.authorize_keychain_key(
+        &root_signer,
+        key_id,
+        KeyInfoSignatureType::P256,
+        now_secs() + 300,
+    )
+    .await?;
+
+    for version in [0x03, 0x04] {
+        let (token, _) = ctx.keychain_p256_token(root_signer.address(), &access_signer, version);
+        let resp = ctx
+            .call(
+                "zone_getAuthorizationTokenInfo",
+                serde_json::json!([]),
+                &token,
+            )
+            .await?;
+        assert_eq!(
+            resp["result"]["account"].as_str().unwrap(),
+            format!("{:#x}", root_signer.address()),
+            "keychain auth should resolve to the root account",
+        );
+    }
+
+    Ok(())
+}
+
+/// Keychain auth rejects missing, revoked, expired, and signature-type-mismatched keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_keychain_auth_rejection_cases() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+
+    let missing_root = PrivateKeySigner::random();
+    let missing_access = P256SigningKey::random(&mut thread_rng());
+    let (missing_token, _) = ctx.keychain_p256_token(missing_root.address(), &missing_access, 0x04);
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &missing_token)
+        .await?;
+    assert_eq!(
+        status.as_u16(),
+        403,
+        "missing keychain auth should return 403"
+    );
+
+    let revoked_root = PrivateKeySigner::random();
+    let revoked_access = P256SigningKey::random(&mut thread_rng());
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000002222"),
+        revoked_root.address(),
+        1_000_000,
+    )
+    .await?;
+    let (revoked_token, revoked_key_id) =
+        ctx.keychain_p256_token(revoked_root.address(), &revoked_access, 0x04);
+    ctx.authorize_keychain_key(
+        &revoked_root,
+        revoked_key_id,
+        KeyInfoSignatureType::P256,
+        now_secs() + 300,
+    )
+    .await?;
+    ctx.revoke_keychain_key(&revoked_root, revoked_key_id)
+        .await?;
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &revoked_token)
+        .await?;
+    assert_eq!(status.as_u16(), 403, "revoked key should return 403");
+
+    let expired_root = PrivateKeySigner::random();
+    let expired_access = P256SigningKey::random(&mut thread_rng());
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000003333"),
+        expired_root.address(),
+        1_000_000,
+    )
+    .await?;
+    let (expired_token, expired_key_id) =
+        ctx.keychain_p256_token(expired_root.address(), &expired_access, 0x04);
+    ctx.authorize_keychain_key(
+        &expired_root,
+        expired_key_id,
+        KeyInfoSignatureType::P256,
+        now_secs() + 1,
+    )
+    .await?;
+    sleep(std::time::Duration::from_secs(2)).await;
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &expired_token)
+        .await?;
+    assert_eq!(status.as_u16(), 403, "expired key should return 403");
+
+    let mismatch_root = PrivateKeySigner::random();
+    let mismatch_access = P256SigningKey::random(&mut thread_rng());
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000004444"),
+        mismatch_root.address(),
+        1_000_000,
+    )
+    .await?;
+    let (mismatch_token, mismatch_key_id) =
+        ctx.keychain_p256_token(mismatch_root.address(), &mismatch_access, 0x04);
+    ctx.authorize_keychain_key(
+        &mismatch_root,
+        mismatch_key_id,
+        KeyInfoSignatureType::Secp256k1,
+        now_secs() + 300,
+    )
+    .await?;
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &mismatch_token)
+        .await?;
+    assert_eq!(
+        status.as_u16(),
+        403,
+        "signature-type mismatch should return 403",
+    );
 
     Ok(())
 }
@@ -446,6 +674,135 @@ async fn test_zone_get_deposit_status_encrypted() -> eyre::Result<()> {
     assert_eq!(
         recipient_deposits[0]["sender"].as_str().unwrap(),
         format!("{:#x}", depositor.address()),
+    );
+
+    Ok(())
+}
+
+/// `eth_call` against the zone TIP-20 enforces read privacy for `balanceOf` and
+/// `allowance`, while the configured sequencer retains access.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc_l1().await?;
+    let l1 = ctx.l1();
+    let portal_address = ctx.portal_address();
+
+    let owner_signer = l1.user_signer();
+    let owner = owner_signer.address();
+    let spender_signer = l1.signer_at(2);
+    let spender = spender_signer.address();
+    let outsider_signer = PrivateKeySigner::random();
+
+    let deposit_amount: u128 = 1_000_000;
+    let allowance_amount: u128 = 333_333;
+
+    let mut owner_account =
+        ZoneAccount::with_signer(owner_signer.clone(), l1, &ctx.zone, portal_address);
+    l1.fund_user(owner, deposit_amount).await?;
+    owner_account
+        .deposit(deposit_amount, DEFAULT_TIMEOUT, &ctx.zone)
+        .await?;
+
+    let owner_provider = ProviderBuilder::new()
+        .wallet(owner_signer)
+        .connect_http(ctx.zone.http_url().clone());
+    let approve_receipt = ContractTip20::new(ZONE_TOKEN_ADDRESS, &owner_provider)
+        .approve(spender, U256::from(allowance_amount))
+        .send()
+        .await?
+        .get_receipt()
+        .await?;
+    assert!(approve_receipt.status(), "approve should succeed");
+
+    let balance_call = PrecompileTip20::balanceOfCall { account: owner };
+    let balance_data = format!("0x{}", hex::encode(balance_call.abi_encode()));
+    let allowance_call = PrecompileTip20::allowanceCall { owner, spender };
+    let allowance_data = format!("0x{}", hex::encode(allowance_call.abi_encode()));
+
+    let outsider_balance = ctx
+        .call_as_user(
+            "eth_call",
+            serde_json::json!([
+                {
+                    "to": format!("{ZONE_TOKEN_ADDRESS:#x}"),
+                    "data": balance_data,
+                },
+                "latest"
+            ]),
+            &outsider_signer,
+        )
+        .await?;
+    assert!(
+        outsider_balance.get("error").is_some(),
+        "non-owner balanceOf(other) should revert"
+    );
+
+    let outsider_allowance = ctx
+        .call_as_user(
+            "eth_call",
+            serde_json::json!([
+                {
+                    "to": format!("{ZONE_TOKEN_ADDRESS:#x}"),
+                    "data": allowance_data,
+                },
+                "latest"
+            ]),
+            &outsider_signer,
+        )
+        .await?;
+    assert!(
+        outsider_allowance.get("error").is_some(),
+        "unrelated caller allowance(owner, spender) should revert"
+    );
+
+    let sequencer_balance = ctx
+        .call_as_sequencer(
+            "eth_call",
+            serde_json::json!([
+                {
+                    "from": format!("{:#x}", ctx.config.sequencer),
+                    "to": format!("{ZONE_TOKEN_ADDRESS:#x}"),
+                    "data": format!("0x{}", hex::encode(balance_call.abi_encode())),
+                },
+                "latest"
+            ]),
+        )
+        .await?;
+    let sequencer_balance_bytes = hex::decode(
+        sequencer_balance["result"]
+            .as_str()
+            .expect("sequencer balanceOf should return hex")
+            .trim_start_matches("0x"),
+    )?;
+    assert_eq!(
+        PrecompileTip20::balanceOfCall::abi_decode_returns(&sequencer_balance_bytes)?,
+        U256::from(deposit_amount)
+    );
+
+    let sequencer_allowance = ctx
+        .call_as_sequencer(
+            "eth_call",
+            serde_json::json!([
+                {
+                    "from": format!("{:#x}", ctx.config.sequencer),
+                    "to": format!("{ZONE_TOKEN_ADDRESS:#x}"),
+                    "data": format!("0x{}", hex::encode(allowance_call.abi_encode())),
+                },
+                "latest"
+            ]),
+        )
+        .await?;
+    let sequencer_allowance_bytes = hex::decode(
+        sequencer_allowance["result"]
+            .as_str()
+            .expect("sequencer allowance should return hex")
+            .trim_start_matches("0x"),
+    )?;
+    assert_eq!(
+        PrecompileTip20::allowanceCall::abi_decode_returns(&sequencer_allowance_bytes)?,
+        U256::from(allowance_amount)
     );
 
     Ok(())

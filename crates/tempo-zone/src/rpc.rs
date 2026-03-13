@@ -25,6 +25,10 @@ use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoHeaderResponse, TempoTransactionRequest},
 };
+use tempo_contracts::precompiles::{
+    ACCOUNT_KEYCHAIN_ADDRESS,
+    account_keychain::IAccountKeychain::{IAccountKeychainInstance, KeyInfo},
+};
 use tempo_primitives::TempoTxEnvelope;
 use tokio::sync::Mutex;
 
@@ -33,7 +37,7 @@ use crate::abi::{
 };
 use zone_rpc::{
     auth::AuthContext,
-    types::{BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
+    types::{BoxEyreFut, BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
 };
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
@@ -305,6 +309,14 @@ impl<Api> zone_rpc::ZoneRpcApi for TempoZoneRpc<Api>
 where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
 {
+    fn get_keychain_key(&self, account: Address, key_id: Address) -> BoxEyreFut<'_, KeyInfo> {
+        Box::pin(async move {
+            let keychain =
+                IAccountKeychainInstance::new(ACCOUNT_KEYCHAIN_ADDRESS, &self.zone_provider);
+            Ok(keychain.getKey(account, key_id).call().await?)
+        })
+    }
+
     fn block_number(&self) -> BoxFut<'_> {
         Box::pin(async move {
             let info = EthApiSpec::chain_info(&self.eth.api).map_err(internal)?;

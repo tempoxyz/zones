@@ -18,7 +18,7 @@ This document specifies the RPC interface for Tempo privacy zones. The design st
 
 Every RPC request must include an authorization token in the `X-Authorization-Token` HTTP header (or as the first element of a JSON-RPC batch params wrapper — see [Transport](#transport)). The authorization token proves that the caller controls a Tempo account and scopes all responses to that account.
 
-Tempo accounts support multiple signature types (secp256k1, P256, and WebAuthn), so the authorization token scheme must support all of them. Additionally, accounts that have authorized Access Keys via the [AccountKeychain](/protocol/transactions/AccountKeychain) precompile can use those Access Keys to authenticate to the RPC on behalf of their root account.
+Tempo accounts support multiple signature types (secp256k1, P256, and WebAuthn), so the authorization token scheme must support all of them. Additionally, accounts that have authorized Access Keys via the [AccountKeychain](/protocol/transactions/AccountKeychain) precompile can use those Access Keys to authenticate to the RPC on behalf of their root account. The RPC server uses the same signature parser and recovery rules as Tempo transactions, so auth tokens accept the same wire formats as transaction signatures.
 
 ### Message
 
@@ -49,7 +49,7 @@ The authorization token signature follows the same format as [Tempo transaction 
 | **secp256k1** | Exactly 65 bytes, no type prefix | `address(uint160(uint256(keccak256(abi.encode(x, y)))))` — standard `ecrecover` |
 | **P256** | First byte `0x01`, 130 bytes total | `address(uint160(uint256(keccak256(abi.encodePacked(pubKeyX, pubKeyY)))))` — public key is embedded in the signature |
 | **WebAuthn** | First byte `0x02`, variable length (max 2KB) | Same as P256 (WebAuthn uses P256 keys) |
-| **Keychain** | First byte `0x03`, variable length | Authenticated account is the `user_address` field, not the signing key's address (see [Keychain Access Keys](#keychain-access-keys)) |
+| **Keychain** | First byte `0x03` (legacy V1) or `0x04` (V2), variable length | Authenticated account is the `user_address` field, not the signing key's address (see [Keychain Access Keys](#keychain-access-keys)) |
 
 #### secp256k1
 
@@ -85,18 +85,23 @@ The account address is derived from the public key in the signature, following t
 
 Accounts that have authorized Access Keys via the zone's `AccountKeychain` precompile can use those keys to authenticate to the RPC. The zone has its own independent `AccountKeychain` instance — it is **not** mirrored from Tempo L1. Users must register Keychain keys on the zone directly via transactions submitted to the zone's `AccountKeychain` precompile. This means a key registered on Tempo L1 does not automatically grant RPC access to the zone; the user must separately authorize it on the zone.
 
-A Keychain signature wraps an inner signature (secp256k1, P256, or WebAuthn) and includes the root account address:
+A Keychain signature wraps an inner signature (secp256k1, P256, or WebAuthn) and includes the root account address. The RPC server accepts both the legacy V1 and current V2 encodings supported by Tempo transaction signatures:
 
 ```
-keychain_signature = 0x03 || user_address (20 bytes) || inner_signature
+keychain_signature_v1 = 0x03 || user_address (20 bytes) || inner_signature
+keychain_signature_v2 = 0x04 || user_address (20 bytes) || inner_signature
 ```
+
+V2 is recommended. V2 binds `user_address` into the access-key signing hash, while V1 signs the raw authorization-token hash directly for backward compatibility.
 
 The server:
 
-1. Verifies the inner signature against `authorizationTokenHash`.
-2. Derives the signing key's address from the inner signature.
-3. Queries the zone's `AccountKeychain` precompile to verify that `user_address` has authorized the signing key (i.e., `getKey(user_address, keyId)` returns an active, non-expired, non-revoked key).
-4. Sets the authenticated account to `user_address` (the root account), not the Access Key's address.
+1. Parses the signature using the same rules as Tempo transactions.
+2. Verifies the inner signature against `authorizationTokenHash` for V1, or against `keccak256(0x04 || authorizationTokenHash || user_address)` for V2.
+3. Derives the signing key's address from the inner signature.
+4. Queries the zone's `AccountKeychain` precompile to verify that `user_address` has authorized the signing key (i.e., `getKey(user_address, keyId)` returns an active, non-expired, non-revoked key).
+5. Verifies that the stored `signatureType` matches the inner signature type (secp256k1, P256, or WebAuthn).
+6. Sets the authenticated account to `user_address` (the root account), not the Access Key's address.
 
 This allows session keys and scoped Access Keys to authenticate to the RPC with the same permissions as the root account. The AccountKeychain's spending limits and expiry are orthogonal to the RPC authorization token — the Keychain key must be active to authenticate, but its token-spending limits only apply to on-chain transactions, not RPC reads.
 
@@ -135,7 +140,7 @@ The `X-Authorization-Token` value is a single hex-encoded blob containing the co
 <signature bytes><version: 1 byte><zoneId: 8 bytes><chainId: 8 bytes><zonePortal: 20 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
 ```
 
-The authorization token fields are always exactly 53 bytes (1 + 8 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 53 bytes** as the authorization token fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
+The authorization token fields are always exactly 53 bytes (1 + 8 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 53 bytes** as the authorization token fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` for legacy V1 or `0x04` for V2 and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
 
 Requests without a valid authorization token receive a `401 Unauthorized` HTTP response. Requests with an expired or malformed token receive `403 Forbidden`.
 

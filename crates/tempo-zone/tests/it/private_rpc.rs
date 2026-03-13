@@ -1,6 +1,16 @@
 //! Tests for the private zone RPC module.
 
 use alloy_primitives::{Address, keccak256};
+use base64::Engine as _;
+use p256::{
+    EncodedPoint,
+    ecdsa::{SigningKey as P256SigningKey, signature::hazmat::PrehashSigner},
+};
+use rand::thread_rng;
+use sha2::{Digest, Sha256};
+use tempo_primitives::transaction::tt_signature::{
+    KeychainSignature, PrimitiveSignature, TempoSignature, WebAuthnSignature, normalize_p256_s,
+};
 use zone::rpc::{
     auth::{AuthorizationToken, SignatureType, build_token_fields},
     types::{MethodTier, classify_method},
@@ -46,6 +56,101 @@ fn make_test_token(
 ) -> AuthorizationToken {
     let blob = build_token_blob(version, zone_id, chain_id, portal, issued_at, expires_at);
     AuthorizationToken::parse(&blob).unwrap()
+}
+
+fn build_signed_token_blob(signature: TempoSignature, fields: &[u8]) -> Vec<u8> {
+    let mut blob = Vec::with_capacity(signature.encoded_length() + fields.len());
+    blob.extend_from_slice(signature.to_bytes().as_ref());
+    blob.extend_from_slice(fields);
+    blob
+}
+
+fn p256_public_key(
+    signing_key: &P256SigningKey,
+) -> (alloy_primitives::B256, alloy_primitives::B256) {
+    let encoded = EncodedPoint::from(signing_key.verifying_key());
+    (
+        alloy_primitives::B256::from_slice(encoded.x().expect("x coordinate present")),
+        alloy_primitives::B256::from_slice(encoded.y().expect("y coordinate present")),
+    )
+}
+
+fn sign_p256_signature(
+    digest: alloy_primitives::B256,
+    signing_key: &P256SigningKey,
+) -> TempoSignature {
+    let pre_hashed = Sha256::digest(digest);
+    let signature: p256::ecdsa::Signature = signing_key
+        .sign_prehash(&pre_hashed)
+        .expect("p256 signing should succeed");
+    let sig_bytes = signature.to_bytes();
+    let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
+
+    TempoSignature::Primitive(PrimitiveSignature::P256(
+        tempo_primitives::transaction::tt_signature::P256SignatureWithPreHash {
+            r: alloy_primitives::B256::from_slice(&sig_bytes[0..32]),
+            s: normalize_p256_s(&sig_bytes[32..64]),
+            pub_key_x,
+            pub_key_y,
+            pre_hash: true,
+        },
+    ))
+}
+
+fn sign_webauthn_signature(
+    digest: alloy_primitives::B256,
+    signing_key: &P256SigningKey,
+) -> TempoSignature {
+    let mut authenticator_data = vec![0u8; 37];
+    authenticator_data[0..32].copy_from_slice(&[0xAA; 32]);
+    authenticator_data[32] = 0x01;
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
+    let client_data_json = format!(
+        r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"https://example.com","crossOrigin":false}}"#
+    );
+    let client_data_hash = Sha256::digest(client_data_json.as_bytes());
+    let mut final_hasher = Sha256::new();
+    final_hasher.update(&authenticator_data);
+    final_hasher.update(client_data_hash);
+    let message_hash = final_hasher.finalize();
+    let signature: p256::ecdsa::Signature = signing_key
+        .sign_prehash(&message_hash)
+        .expect("webauthn signing should succeed");
+    let sig_bytes = signature.to_bytes();
+    let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
+    let mut webauthn_data = authenticator_data;
+    webauthn_data.extend_from_slice(client_data_json.as_bytes());
+
+    TempoSignature::Primitive(PrimitiveSignature::WebAuthn(WebAuthnSignature {
+        webauthn_data: alloy_primitives::Bytes::from(webauthn_data),
+        r: alloy_primitives::B256::from_slice(&sig_bytes[0..32]),
+        s: normalize_p256_s(&sig_bytes[32..64]),
+        pub_key_x,
+        pub_key_y,
+    }))
+}
+
+fn sign_keychain_signature(
+    digest: alloy_primitives::B256,
+    signing_key: &P256SigningKey,
+    root_account: Address,
+    version: u8,
+) -> TempoSignature {
+    let keychain_digest = match version {
+        0x03 => digest,
+        0x04 => KeychainSignature::signing_hash(digest, root_account),
+        _ => panic!("unsupported keychain version"),
+    };
+    let primitive = match sign_p256_signature(keychain_digest, signing_key) {
+        TempoSignature::Primitive(primitive) => primitive,
+        TempoSignature::Keychain(_) => unreachable!("primitive signature expected"),
+    };
+
+    if version == 0x03 {
+        TempoSignature::Keychain(KeychainSignature::new_v1(root_account, primitive))
+    } else {
+        TempoSignature::Keychain(KeychainSignature::new(root_account, primitive))
+    }
 }
 
 // ============ Auth Token Parsing ============
@@ -118,6 +223,25 @@ fn parse_p256_signature_type() {
     let token = AuthorizationToken::parse(&blob).unwrap();
     assert_eq!(token.signature.len(), 130);
     assert_eq!(token.signature_type().unwrap(), SignatureType::P256);
+}
+
+#[test]
+fn parse_keychain_v2_signature_type() {
+    let now = now_secs();
+
+    let mut blob = vec![0x04];
+    blob.extend_from_slice(Address::repeat_byte(0x11).as_slice());
+    blob.push(0x01);
+    blob.extend_from_slice(&[0u8; 129]);
+    blob.push(0);
+    blob.extend_from_slice(&1u64.to_be_bytes());
+    blob.extend_from_slice(&1u64.to_be_bytes());
+    blob.extend_from_slice(&[0u8; 20]);
+    blob.extend_from_slice(&now.to_be_bytes());
+    blob.extend_from_slice(&(now + 600).to_be_bytes());
+
+    let token = AuthorizationToken::parse(&blob).unwrap();
+    assert_eq!(token.signature_type().unwrap(), SignatureType::Keychain);
 }
 
 #[test]
@@ -253,6 +377,91 @@ fn secp256k1_rejects_wrong_length() {
     assert!(recover_secp256k1(&[0u8; 64], &digest).is_err());
     assert!(recover_secp256k1(&[0u8; 66], &digest).is_err());
     assert!(recover_secp256k1(&[], &digest).is_err());
+}
+
+#[test]
+fn tempo_signature_roundtrip_p256_from_token_bytes() {
+    let signing_key = P256SigningKey::random(&mut thread_rng());
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
+    let expected = sign_p256_signature(digest, &signing_key)
+        .recover_signer(&digest)
+        .expect("p256 recovery should succeed");
+    let blob = build_signed_token_blob(sign_p256_signature(digest, &signing_key), &fields);
+    let token = AuthorizationToken::parse(&blob).unwrap();
+    let parsed = TempoSignature::from_bytes(&token.signature).unwrap();
+
+    assert_eq!(parsed.recover_signer(&token.digest).unwrap(), expected);
+}
+
+#[test]
+fn tempo_signature_roundtrip_webauthn_from_token_bytes() {
+    let signing_key = P256SigningKey::random(&mut thread_rng());
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
+    let signature = sign_webauthn_signature(digest, &signing_key);
+    let expected = signature
+        .recover_signer(&digest)
+        .expect("webauthn recovery should succeed");
+    let blob = build_signed_token_blob(signature, &fields);
+    let token = AuthorizationToken::parse(&blob).unwrap();
+    let parsed = TempoSignature::from_bytes(&token.signature).unwrap();
+
+    assert_eq!(parsed.recover_signer(&token.digest).unwrap(), expected);
+}
+
+#[test]
+fn tempo_signature_roundtrip_keychain_v1_from_token_bytes() {
+    let signing_key = P256SigningKey::random(&mut thread_rng());
+    let root_account = Address::repeat_byte(0x44);
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
+    let signature = sign_keychain_signature(digest, &signing_key, root_account, 0x03);
+    let expected_key_id = match &signature {
+        TempoSignature::Keychain(keychain) => keychain.key_id(&digest).unwrap(),
+        TempoSignature::Primitive(_) => unreachable!("keychain signature expected"),
+    };
+    let blob = build_signed_token_blob(signature, &fields);
+    let token = AuthorizationToken::parse(&blob).unwrap();
+    let parsed = TempoSignature::from_bytes(&token.signature).unwrap();
+
+    assert_eq!(parsed.recover_signer(&token.digest).unwrap(), root_account);
+    match parsed {
+        TempoSignature::Keychain(keychain) => {
+            assert_eq!(keychain.key_id(&token.digest).unwrap(), expected_key_id);
+        }
+        TempoSignature::Primitive(_) => panic!("expected keychain signature"),
+    }
+}
+
+#[test]
+fn tempo_signature_roundtrip_keychain_v2_from_token_bytes() {
+    let signing_key = P256SigningKey::random(&mut thread_rng());
+    let root_account = Address::repeat_byte(0x55);
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
+    let signature = sign_keychain_signature(digest, &signing_key, root_account, 0x04);
+    let expected_key_id = match &signature {
+        TempoSignature::Keychain(keychain) => keychain.key_id(&digest).unwrap(),
+        TempoSignature::Primitive(_) => unreachable!("keychain signature expected"),
+    };
+    let blob = build_signed_token_blob(signature, &fields);
+    let token = AuthorizationToken::parse(&blob).unwrap();
+    let parsed = TempoSignature::from_bytes(&token.signature).unwrap();
+
+    assert_eq!(parsed.recover_signer(&token.digest).unwrap(), root_account);
+    match parsed {
+        TempoSignature::Keychain(keychain) => {
+            assert_eq!(keychain.key_id(&token.digest).unwrap(), expected_key_id);
+        }
+        TempoSignature::Primitive(_) => panic!("expected keychain signature"),
+    }
+}
+
+#[test]
+fn tempo_signature_rejects_malformed_signature_bytes() {
+    let malformed = [0x04, 0x11, 0x22];
+    assert!(TempoSignature::from_bytes(&malformed).is_err());
 }
 
 // ============ Method Classification ============

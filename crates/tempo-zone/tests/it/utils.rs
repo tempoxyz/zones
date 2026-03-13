@@ -4,12 +4,18 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::{SolEvent, SolValue};
+use base64::Engine as _;
 use eyre::WrapErr;
+use p256::{
+    EncodedPoint,
+    ecdsa::{SigningKey as P256SigningKey, signature::hazmat::PrehashSigner},
+};
 use reth_ethereum::tasks::TaskManager;
 use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
 use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
+use sha2::{Digest, Sha256};
 use std::{
     sync::{
         Arc,
@@ -18,7 +24,18 @@ use std::{
     time::Duration,
 };
 use tempo_chainspec::spec::TempoChainSpec;
-use tempo_primitives::TempoHeader;
+use tempo_contracts::precompiles::{
+    ACCOUNT_KEYCHAIN_ADDRESS,
+    account_keychain::IAccountKeychain::{
+        IAccountKeychainInstance, SignatureType as KeyInfoSignatureType,
+    },
+};
+use tempo_primitives::{
+    TempoHeader,
+    transaction::tt_signature::{
+        KeychainSignature, PrimitiveSignature, TempoSignature, WebAuthnSignature, normalize_p256_s,
+    },
+};
 use zone::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents,
     SharedL1StateCache, ZoneNode,
@@ -34,6 +51,15 @@ static NEXT_CHAIN_ID: AtomicU64 = AtomicU64::new(71_000);
 
 fn next_unique_chain_id() -> u64 {
     NEXT_CHAIN_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+fn test_dev_signer() -> alloy_signer_local::PrivateKeySigner {
+    MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .index(0)
+        .expect("valid derivation index")
+        .build()
+        .expect("valid test mnemonic")
 }
 
 /// Default timeout for polling loops in e2e tests.
@@ -336,6 +362,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
+            test_dev_signer().address(),
             throwaway_key,
         )
         .await
@@ -360,6 +387,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
+            test_dev_signer().address(),
             sequencer_key,
         )
         .await
@@ -403,6 +431,7 @@ impl ZoneTestNode {
             genesis_tempo_block_number,
             chain_id,
             None,
+            Address::ZERO,
             throwaway_key,
         )
         .await
@@ -414,6 +443,7 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
         custom_genesis: Option<Genesis>,
+        sequencer: Address,
         sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
         let tasks = TaskManager::current();
@@ -429,7 +459,7 @@ impl ZoneTestNode {
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
-            Address::ZERO, // sequencer address (overridden by sequencer_key)
+            sequencer,
             sequencer_key,
             4,
             std::time::Duration::from_millis(100),
@@ -1938,6 +1968,170 @@ fn build_auth_token(
     alloy_primitives::hex::encode(&blob)
 }
 
+fn build_auth_token_with_signature(
+    signature: TempoSignature,
+    zone_id: u64,
+    chain_id: u64,
+    portal: Address,
+) -> String {
+    use zone::rpc::auth::build_token_fields;
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expires_at = now + 600;
+
+    let (fields, _) = build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    let mut blob = Vec::with_capacity(signature.encoded_length() + fields.len());
+    blob.extend_from_slice(signature.to_bytes().as_ref());
+    blob.extend_from_slice(&fields);
+    alloy_primitives::hex::encode(&blob)
+}
+
+fn p256_public_key(signing_key: &P256SigningKey) -> (B256, B256) {
+    let encoded = EncodedPoint::from(signing_key.verifying_key());
+    (
+        B256::from_slice(encoded.x().expect("x coordinate present")),
+        B256::from_slice(encoded.y().expect("y coordinate present")),
+    )
+}
+
+fn sign_p256_auth_signature(digest: B256, signing_key: &P256SigningKey) -> TempoSignature {
+    let pre_hashed = Sha256::digest(digest);
+    let signature: p256::ecdsa::Signature = signing_key
+        .sign_prehash(&pre_hashed)
+        .expect("p256 signing failed");
+    let sig_bytes = signature.to_bytes();
+    let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
+
+    TempoSignature::Primitive(PrimitiveSignature::P256(
+        tempo_primitives::transaction::tt_signature::P256SignatureWithPreHash {
+            r: B256::from_slice(&sig_bytes[0..32]),
+            s: normalize_p256_s(&sig_bytes[32..64]),
+            pub_key_x,
+            pub_key_y,
+            pre_hash: true,
+        },
+    ))
+}
+
+fn sign_webauthn_auth_signature(
+    signing_key: &P256SigningKey,
+    challenge_digest: B256,
+) -> TempoSignature {
+    let mut authenticator_data = vec![0u8; 37];
+    authenticator_data[0..32].copy_from_slice(&[0xAA; 32]);
+    authenticator_data[32] = 0x01;
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge_digest);
+    let client_data_json = format!(
+        r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"https://example.com","crossOrigin":false}}"#
+    );
+    let client_data_hash = Sha256::digest(client_data_json.as_bytes());
+    let mut final_hasher = Sha256::new();
+    final_hasher.update(&authenticator_data);
+    final_hasher.update(client_data_hash);
+    let message_hash = final_hasher.finalize();
+    let signature: p256::ecdsa::Signature = signing_key
+        .sign_prehash(&message_hash)
+        .expect("webauthn signing failed");
+    let sig_bytes = signature.to_bytes();
+    let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
+    let mut webauthn_data = authenticator_data;
+    webauthn_data.extend_from_slice(client_data_json.as_bytes());
+
+    TempoSignature::Primitive(PrimitiveSignature::WebAuthn(WebAuthnSignature {
+        webauthn_data: alloy_primitives::Bytes::from(webauthn_data),
+        r: B256::from_slice(&sig_bytes[0..32]),
+        s: normalize_p256_s(&sig_bytes[32..64]),
+        pub_key_x,
+        pub_key_y,
+    }))
+}
+
+fn build_p256_auth_token(
+    signing_key: &P256SigningKey,
+    zone_id: u64,
+    chain_id: u64,
+    portal: Address,
+) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expires_at = now + 600;
+    let (_, digest) =
+        zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    build_auth_token_with_signature(
+        sign_p256_auth_signature(digest, signing_key),
+        zone_id,
+        chain_id,
+        portal,
+    )
+}
+
+fn build_webauthn_auth_token(
+    signing_key: &P256SigningKey,
+    zone_id: u64,
+    chain_id: u64,
+    portal: Address,
+    challenge_digest: Option<B256>,
+) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expires_at = now + 600;
+    let (_, digest) =
+        zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    build_auth_token_with_signature(
+        sign_webauthn_auth_signature(signing_key, challenge_digest.unwrap_or(digest)),
+        zone_id,
+        chain_id,
+        portal,
+    )
+}
+
+fn build_keychain_auth_token(
+    signing_key: &P256SigningKey,
+    root_account: Address,
+    version: u8,
+    zone_id: u64,
+    chain_id: u64,
+    portal: Address,
+) -> (String, Address) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let expires_at = now + 600;
+    let (_, digest) =
+        zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    let keychain_digest = match version {
+        0x03 => digest,
+        0x04 => KeychainSignature::signing_hash(digest, root_account),
+        _ => panic!("unsupported keychain version"),
+    };
+    let primitive = match sign_p256_auth_signature(keychain_digest, signing_key) {
+        TempoSignature::Primitive(primitive) => primitive,
+        TempoSignature::Keychain(_) => unreachable!("primitive signature expected"),
+    };
+    let signature = if version == 0x03 {
+        TempoSignature::Keychain(KeychainSignature::new_v1(root_account, primitive))
+    } else {
+        TempoSignature::Keychain(KeychainSignature::new(root_account, primitive))
+    };
+    let key_id = match &signature {
+        TempoSignature::Keychain(keychain) => keychain.key_id(&digest).unwrap(),
+        TempoSignature::Primitive(_) => unreachable!("keychain signature expected"),
+    };
+
+    (
+        build_auth_token_with_signature(signature, zone_id, chain_id, portal),
+        key_id,
+    )
+}
+
 /// Send a JSON-RPC request to the private zone RPC and return the parsed response.
 ///
 /// Returns the full JSON response body (including `jsonrpc`, `id`, `result`/`error`).
@@ -2059,6 +2253,59 @@ impl PrivateRpcTestCtx {
     pub(crate) fn user_token(&self, signer: &alloy_signer_local::PrivateKeySigner) -> String {
         build_auth_token(
             signer,
+            self.config.zone_id,
+            self.config.chain_id,
+            self.config.zone_portal,
+        )
+    }
+
+    /// Build a P256 auth token for a non-sequencer caller.
+    pub(crate) fn p256_token(&self, signing_key: &P256SigningKey) -> String {
+        build_p256_auth_token(
+            signing_key,
+            self.config.zone_id,
+            self.config.chain_id,
+            self.config.zone_portal,
+        )
+    }
+
+    /// Build a WebAuthn auth token for a non-sequencer caller.
+    pub(crate) fn webauthn_token(&self, signing_key: &P256SigningKey) -> String {
+        build_webauthn_auth_token(
+            signing_key,
+            self.config.zone_id,
+            self.config.chain_id,
+            self.config.zone_portal,
+            None,
+        )
+    }
+
+    /// Build a WebAuthn auth token with an overridden challenge digest.
+    pub(crate) fn webauthn_token_with_challenge(
+        &self,
+        signing_key: &P256SigningKey,
+        challenge_digest: B256,
+    ) -> String {
+        build_webauthn_auth_token(
+            signing_key,
+            self.config.zone_id,
+            self.config.chain_id,
+            self.config.zone_portal,
+            Some(challenge_digest),
+        )
+    }
+
+    /// Build a Keychain auth token signed by a P256 access key.
+    pub(crate) fn keychain_p256_token(
+        &self,
+        root_account: Address,
+        signing_key: &P256SigningKey,
+        version: u8,
+    ) -> (String, Address) {
+        build_keychain_auth_token(
+            signing_key,
+            root_account,
+            version,
             self.config.zone_id,
             self.config.chain_id,
             self.config.zone_portal,
@@ -2217,6 +2464,45 @@ impl PrivateRpcTestCtx {
     /// Returns the real portal address for tests that require one.
     pub(crate) fn portal_address(&self) -> Address {
         self.portal_address.expect("real portal address required")
+    }
+
+    /// Authorize an access key for a root account on the zone keychain precompile.
+    pub(crate) async fn authorize_keychain_key(
+        &mut self,
+        root_signer: &alloy_signer_local::PrivateKeySigner,
+        key_id: Address,
+        signature_type: KeyInfoSignatureType,
+        expiry: u64,
+    ) -> eyre::Result<()> {
+        let provider = ProviderBuilder::new()
+            .wallet(root_signer.clone())
+            .connect_http(self.zone.http_url().clone());
+        let keychain = IAccountKeychainInstance::new(ACCOUNT_KEYCHAIN_ADDRESS, &provider);
+        let pending = keychain
+            .authorizeKey(key_id, signature_type, expiry, false, vec![])
+            .send()
+            .await?;
+        self.fixture.inject_empty_block(self.zone.deposit_queue());
+        let receipt = pending.get_receipt().await?;
+        eyre::ensure!(receipt.status(), "authorizeKey failed");
+        Ok(())
+    }
+
+    /// Revoke an access key from a root account on the zone keychain precompile.
+    pub(crate) async fn revoke_keychain_key(
+        &mut self,
+        root_signer: &alloy_signer_local::PrivateKeySigner,
+        key_id: Address,
+    ) -> eyre::Result<()> {
+        let provider = ProviderBuilder::new()
+            .wallet(root_signer.clone())
+            .connect_http(self.zone.http_url().clone());
+        let keychain = IAccountKeychainInstance::new(ACCOUNT_KEYCHAIN_ADDRESS, &provider);
+        let pending = keychain.revokeKey(key_id).send().await?;
+        self.fixture.inject_empty_block(self.zone.deposit_queue());
+        let receipt = pending.get_receipt().await?;
+        eyre::ensure!(receipt.status(), "revokeKey failed");
+        Ok(())
     }
 }
 

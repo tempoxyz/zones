@@ -16,7 +16,10 @@ use alloy_signer_local::PrivateKeySigner;
 use parking_lot::Mutex;
 use tempo_alloy::TempoNetwork;
 
-use crate::auth::{X_AUTHORIZATION_TOKEN, build_token_fields};
+use crate::{
+    auth::{X_AUTHORIZATION_TOKEN, build_token_fields},
+    metrics::ZoneProviderMetrics,
+};
 
 /// How many seconds before expiry to refresh the token.
 const REFRESH_BUFFER_SECS: u64 = 30;
@@ -47,6 +50,7 @@ pub struct ZoneProviderConfig {
 pub struct ZoneProvider {
     config: ZoneProviderConfig,
     state: Arc<Mutex<CachedState>>,
+    metrics: ZoneProviderMetrics,
 }
 
 struct CachedState {
@@ -66,6 +70,7 @@ impl ZoneProvider {
                 provider,
                 expires_at,
             })),
+            metrics: ZoneProviderMetrics::default(),
         })
     }
 
@@ -78,14 +83,27 @@ impl ZoneProvider {
         if now + REFRESH_BUFFER_SECS < state.expires_at {
             return state.provider.clone();
         }
-        // Refresh
-        match build_provider_with_token(&self.config) {
+        self.refresh_provider_with(&mut state, build_provider_with_token)
+    }
+
+    fn refresh_provider_with<F>(
+        &self,
+        state: &mut CachedState,
+        builder: F,
+    ) -> DynProvider<TempoNetwork>
+    where
+        F: FnOnce(&ZoneProviderConfig) -> eyre::Result<(DynProvider<TempoNetwork>, u64)>,
+    {
+        self.metrics.token_refresh_attempts_total.increment(1);
+
+        match builder(&self.config) {
             Ok((provider, expires_at)) => {
                 state.provider = provider;
                 state.expires_at = expires_at;
                 state.provider.clone()
             }
             Err(e) => {
+                self.metrics.token_refresh_failures_total.increment(1);
                 tracing::warn!(target: "zone::rpc", err = %e, "failed to refresh zone auth token, reusing stale");
                 state.provider.clone()
             }
@@ -142,4 +160,122 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
         .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use metrics_util::{
+        CompositeKey, MetricKind,
+        debugging::{DebugValue, DebuggingRecorder, Snapshotter},
+    };
+    use reth_metrics::metrics::{SharedString, Unit};
+    use std::{
+        collections::HashMap,
+        sync::{Mutex as StdMutex, OnceLock},
+    };
+
+    type SnapshotMap = HashMap<CompositeKey, (Option<Unit>, Option<SharedString>, DebugValue)>;
+
+    fn snapshotter() -> &'static Snapshotter {
+        static SNAPSHOTTER: OnceLock<Snapshotter> = OnceLock::new();
+
+        SNAPSHOTTER.get_or_init(|| {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _ = recorder.install();
+            snapshotter
+        })
+    }
+
+    fn metric_lock() -> &'static StdMutex<()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    fn with_metrics_snapshot<T>(action: impl FnOnce() -> T) -> (T, SnapshotMap) {
+        let _guard = metric_lock().lock().unwrap();
+        let _ = snapshotter().snapshot();
+        let result = action();
+        let snapshot = snapshotter().snapshot().into_hashmap();
+        (result, snapshot)
+    }
+
+    fn counter(snapshot: &SnapshotMap, name: &str) -> u64 {
+        snapshot
+            .iter()
+            .find(|(key, _)| key.kind() == MetricKind::Counter && key.key().name() == name)
+            .map(|(_, (_, _, value))| match value {
+                DebugValue::Counter(value) => *value,
+                other => panic!("expected counter for {name}, got {other:?}"),
+            })
+            .unwrap_or_else(|| panic!("metric {name} not found"))
+    }
+
+    fn test_config() -> ZoneProviderConfig {
+        ZoneProviderConfig {
+            signer: PrivateKeySigner::random(),
+            zone_id: 1,
+            chain_id: 42,
+            zone_portal: Address::ZERO,
+            token_ttl: Duration::from_secs(600),
+            rpc_url: "http://127.0.0.1:8545".parse().unwrap(),
+        }
+    }
+
+    #[test]
+    fn refresh_success_increments_attempt_metric() {
+        let (_, snapshot) = with_metrics_snapshot(|| {
+            let provider = ZoneProvider::new(test_config()).unwrap();
+            let mut state = provider.state.lock();
+            state.expires_at = 0;
+            let _ = provider.refresh_provider_with(&mut state, build_provider_with_token);
+        });
+
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_private_rpc.provider.token_refresh_attempts_total",
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_private_rpc.provider.token_refresh_failures_total",
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn refresh_failure_reuses_stale_provider() {
+        let ((before, after, expires_at), snapshot) = with_metrics_snapshot(|| {
+            let provider = ZoneProvider::new(test_config()).unwrap();
+            let mut state = provider.state.lock();
+            state.expires_at = 0;
+            let before = state.provider.clone();
+            let after = provider
+                .refresh_provider_with(&mut state, |_| Err(eyre::eyre!("forced refresh failure")));
+            let expires_at = state.expires_at;
+            (before, after, expires_at)
+        });
+
+        assert!(std::ptr::eq(before.root(), after.root()));
+        assert_eq!(expires_at, 0);
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_private_rpc.provider.token_refresh_attempts_total",
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_private_rpc.provider.token_refresh_failures_total",
+            ),
+            1
+        );
+    }
 }

@@ -159,6 +159,7 @@ commonware-utils = "2026.2.0"
 
 # misc
 aes-gcm = "0.10.3"
+base64 = "0.22.1"
 clap = { version = "4.5.45", features = ["derive"] }
 const-hex = { version = "1.15.0" }
 derive_more = { version = "2.0.0" }
@@ -168,8 +169,10 @@ futures = "0.3.31"
 indicatif = "0.18"
 itertools = "0.14.0"
 metrics = "0.24.3"
+metrics-util = "0.20.1"
 k256 = { version = "0.13.4", features = ["arithmetic", "ecdh"] }
 parking_lot = "0.12.4"
+p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
 rand = "0.8.5"
 sha2 = "0.10.9"
 rayon = "1.10"
@@ -182,5 +185,3 @@ axum = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio-tungstenite = "0.28"
 tracing = "0.1.41"
-
-
