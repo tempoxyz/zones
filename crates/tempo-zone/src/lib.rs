@@ -21,7 +21,6 @@ pub mod payload;
 pub mod precompiles;
 pub mod rpc;
 pub mod withdrawals;
-mod zone_monitor_metrics;
 pub mod zonemonitor;
 
 pub use batch::{BatchData, BatchSubmitter};

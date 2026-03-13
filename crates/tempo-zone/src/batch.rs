@@ -135,7 +135,7 @@ impl BatchSubmitter {
         next_block_hash = %batch.next_block_hash,
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
     ))]
-    pub(crate) async fn submit_batch(&self, batch: &BatchData) -> Result<(B256, AnchorModeKind)> {
+    pub async fn submit_batch(&self, batch: &BatchData) -> Result<B256> {
         if batch.tempo_block_number < self.genesis_tempo_block_number {
             return Err(eyre::eyre!(
                 "tempo_block_number ({}) is below genesis ({})",
@@ -159,7 +159,6 @@ impl BatchSubmitter {
         };
 
         let anchor_mode = self.resolve_anchor_mode(batch.tempo_block_number).await?;
-        let anchor_mode_kind = anchor_mode.kind();
 
         info!(?anchor_mode, "Submitting batch to ZonePortal on L1");
 
@@ -183,7 +182,7 @@ impl BatchSubmitter {
 
         info!(%tx_hash, "Batch submitted to L1");
 
-        Ok((tx_hash, anchor_mode_kind))
+        Ok(tx_hash)
     }
 
     /// Classify whether `tempo_block_number` can be submitted directly or
@@ -770,13 +769,6 @@ pub(crate) enum AnchorGapKind {
     },
 }
 
-/// The submission anchor mode used for a successfully submitted batch.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum AnchorModeKind {
-    Direct,
-    Ancestry,
-}
-
 /// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
 ///
 /// Resolved by [`BatchSubmitter::resolve_anchor_mode`] inside `submit_batch`.
@@ -810,13 +802,6 @@ impl AnchorMode {
         match self {
             Self::Direct => 0,
             Self::Ancestry { anchor_block, .. } => *anchor_block,
-        }
-    }
-
-    const fn kind(&self) -> AnchorModeKind {
-        match self {
-            Self::Direct => AnchorModeKind::Direct,
-            Self::Ancestry { .. } => AnchorModeKind::Ancestry,
         }
     }
 }

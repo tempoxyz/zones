@@ -37,7 +37,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
-    batch::{AnchorGapKind, AnchorModeKind, BatchData, BatchSubmitter, ZoneBlockSnapshot},
+    batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot},
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -78,7 +78,7 @@ pub struct ZoneMonitorConfig {
 pub struct ZoneMonitor {
     config: ZoneMonitorConfig,
     /// Metrics for zone observation and L1 batch submission.
-    metrics: crate::zone_monitor_metrics::ZoneMonitorMetrics,
+    metrics: crate::metrics::ZoneMonitorMetrics,
     /// Read-only HTTP provider pointed at the **Zone L2** RPC node.
     provider: DynProvider<TempoNetwork>,
     /// ZoneOutbox contract on **Zone L2** — source of `WithdrawalRequested` and
@@ -128,7 +128,7 @@ impl ZoneMonitor {
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
     ) -> Self {
-        let metrics = crate::zone_monitor_metrics::ZoneMonitorMetrics::default();
+        let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect(&config.zone_rpc_url)
             .await
@@ -658,7 +658,7 @@ impl ZoneMonitor {
         for attempt in 1..=MAX_RETRIES {
             let submit_started = std::time::Instant::now();
             match self.batch_submitter.submit_batch(batch_data).await {
-                Ok((tx_hash, anchor_mode_kind)) => {
+                Ok(tx_hash) => {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
@@ -678,14 +678,6 @@ impl ZoneMonitor {
                     self.metrics
                         .withdrawals_per_batch
                         .record(withdrawals.len() as f64);
-                    match anchor_mode_kind {
-                        AnchorModeKind::Direct => {
-                            self.metrics.direct_mode_submissions_total.increment(1)
-                        }
-                        AnchorModeKind::Ancestry => {
-                            self.metrics.ancestry_mode_submissions_total.increment(1)
-                        }
-                    }
 
                     // Only advance local state on success.
                     self.prev_zone_block_hash = batch_data.next_block_hash;
