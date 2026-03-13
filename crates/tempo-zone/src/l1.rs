@@ -220,13 +220,20 @@ impl L1Subscriber {
                 async move {
                     let block_number = header.number();
                     let start = std::time::Instant::now();
-                    let receipts = track_receipt_fetch(
-                        provider
-                            .get_block_receipts(BlockId::number(block_number))
-                            .await,
-                        block_number,
-                        &subscriber_metrics,
-                    )?;
+                    let receipt_fetch_failures_total =
+                        &subscriber_metrics.receipt_fetch_failures_total;
+                    let receipts = provider
+                        .get_block_receipts(BlockId::number(block_number))
+                        .await
+                        .inspect(|receipts| {
+                            if receipts.is_none() {
+                                receipt_fetch_failures_total.increment(1);
+                            }
+                        })
+                        .inspect_err(|_| {
+                            receipt_fetch_failures_total.increment(1);
+                        })?
+                        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
@@ -373,13 +380,20 @@ impl L1Subscriber {
                     let start = std::time::Instant::now();
                     let (receipts, header_resp) = tokio::try_join!(
                         async {
-                            track_receipt_fetch(
-                                provider
-                                    .get_block_receipts(BlockId::number(block_number))
-                                    .await,
-                                block_number,
-                                &subscriber_metrics,
-                            )
+                            let receipt_fetch_failures_total =
+                                &subscriber_metrics.receipt_fetch_failures_total;
+                            provider
+                                .get_block_receipts(BlockId::number(block_number))
+                                .await
+                                .inspect(|receipts| {
+                                    if receipts.is_none() {
+                                        receipt_fetch_failures_total.increment(1);
+                                    }
+                                })
+                                .inspect_err(|_| {
+                                    receipt_fetch_failures_total.increment(1);
+                                })?
+                                .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
                         },
                         async {
                             provider
@@ -666,27 +680,6 @@ impl L1Subscriber {
         }
         guard.update_anchor(NumHash { number, hash });
     }
-}
-
-fn track_receipt_fetch<T, E>(
-    result: Result<Option<T>, E>,
-    block_number: u64,
-    subscriber_metrics: &crate::metrics::L1SubscriberMetrics,
-) -> eyre::Result<T>
-where
-    E: Into<eyre::Report>,
-{
-    result
-        .inspect(|receipts| {
-            if receipts.is_none() {
-                subscriber_metrics.receipt_fetch_failures_total.increment(1);
-            }
-        })
-        .inspect_err(|_| {
-            subscriber_metrics.receipt_fetch_failures_total.increment(1);
-        })
-        .map_err(Into::into)?
-        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
 }
 
 /// A deposit extracted from L1.
