@@ -37,6 +37,7 @@ use zone_rpc::{
 
 struct MockZoneRpcApi {
     key_infos: Mutex<HashMap<(Address, Address), KeyInfo>>,
+    key_lookup_error: Option<&'static str>,
 }
 
 impl MockZoneRpcApi {
@@ -54,6 +55,14 @@ impl MockZoneRpcApi {
         );
         Self {
             key_infos: Mutex::new(key_infos),
+            key_lookup_error: None,
+        }
+    }
+
+    fn with_key_lookup_error(message: &'static str) -> Self {
+        Self {
+            key_infos: Mutex::new(HashMap::new()),
+            key_lookup_error: Some(message),
         }
     }
 }
@@ -68,6 +77,9 @@ macro_rules! stub {
 
 impl ZoneRpcApi for MockZoneRpcApi {
     fn get_keychain_key(&self, account: Address, key_id: Address) -> BoxEyreFut<'_, KeyInfo> {
+        if let Some(message) = self.key_lookup_error {
+            return Box::pin(async move { Err(eyre::eyre!(message)) });
+        }
         let key_info = self
             .key_infos
             .lock()
@@ -167,6 +179,7 @@ impl TestContext {
 fn default_api() -> MockZoneRpcApi {
     MockZoneRpcApi {
         key_infos: Mutex::new(HashMap::new()),
+        key_lookup_error: None,
     }
 }
 
@@ -618,4 +631,28 @@ async fn ws_reject_unauthorized_keychain_token() {
         panic!("expected HTTP error, got {err:?}");
     };
     assert_eq!(response.status(), 403);
+}
+
+#[tokio::test]
+async fn ws_keychain_lookup_failure_returns_500() {
+    let _guard = test_lock().lock().await;
+    let root_account = Address::repeat_byte(0x66);
+    let access_signer = P256SigningKey::random(&mut thread_rng());
+    let ctx = TestContext::start(MockZoneRpcApi::with_key_lookup_error("key lookup failed")).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+    let (signature, _key_id) =
+        sign_keychain_token(digest, &access_signer, root_account, 0x04).unwrap();
+    let token = build_token_with_signature(signature, &fields);
+
+    let err = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect_err("keychain lookup failure should fail");
+    let tungstenite::Error::Http(response) = err else {
+        panic!("expected HTTP error, got {err:?}");
+    };
+    assert_eq!(response.status(), 500);
 }
