@@ -145,12 +145,14 @@ impl AuthorizationToken {
             return Err(AuthError::InvalidSignature);
         }
 
-        match self.signature[0] {
-            0x01 if self.signature.len() == 130 => Ok(SignatureType::P256),
-            0x02 => Ok(SignatureType::WebAuthn),
-            0x03 => Ok(SignatureType::Keychain),
-            _ if self.signature.len() == 65 => Ok(SignatureType::Secp256k1),
-            _ => Err(AuthError::UnsupportedSignatureType),
+        match self.signature.len() {
+            65 => Ok(SignatureType::Secp256k1),
+            130 if self.signature[0] == 0x01 => Ok(SignatureType::P256),
+            _ => match self.signature[0] {
+                0x02 => Ok(SignatureType::WebAuthn),
+                0x03 => Ok(SignatureType::Keychain),
+                _ => Err(AuthError::UnsupportedSignatureType),
+            },
         }
     }
 }

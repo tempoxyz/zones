@@ -95,29 +95,16 @@ impl TestContext {
             .unwrap()
             .as_secs();
 
-        // Retry with shifted timestamps to avoid signatures whose first byte
-        // of `r` is 0x01/0x02/0x03 — the server classifies those as
-        // P256/WebAuthn/Keychain instead of secp256k1.
-        for offset in 0u64..64 {
-            let issued = now + offset;
-            let (fields, digest) =
-                build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, issued, issued + 600);
-            let sig = self.signer.sign_hash_sync(&digest).expect("signing failed");
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+        let sig = self.signer.sign_hash_sync(&digest).expect("signing failed");
 
-            let r_bytes = sig.r().to_be_bytes::<32>();
-            if matches!(r_bytes[0], 0x01..=0x03) {
-                continue;
-            }
+        let mut blob = Vec::with_capacity(65 + fields.len());
+        blob.extend_from_slice(&sig.r().to_be_bytes::<32>());
+        blob.extend_from_slice(&sig.s().to_be_bytes::<32>());
+        blob.push(sig.v() as u8);
+        blob.extend_from_slice(&fields);
 
-            let mut blob = Vec::with_capacity(65 + fields.len());
-            blob.extend_from_slice(&r_bytes);
-            blob.extend_from_slice(&sig.s().to_be_bytes::<32>());
-            blob.push(sig.v() as u8);
-            blob.extend_from_slice(&fields);
-
-            return alloy_primitives::hex::encode(&blob);
-        }
-        panic!("could not produce a secp256k1-typed signature after 64 attempts");
+        alloy_primitives::hex::encode(&blob)
     }
 
     fn ws_url(&self) -> String {
