@@ -17,8 +17,9 @@ use tokio_tungstenite::{connect_async, tungstenite};
 use zone_rpc::{
     PrivateRpcConfig,
     auth::build_token_fields,
-    handlers::{BoxWsSubscriptionFut, WsSubscription, ZoneRpcApi},
+    handlers::ZoneRpcApi,
     start_private_rpc,
+    subscription::{BoxWsSubscriptionFut, WsSubscription},
     types::{BoxFut, JsonRpcError},
 };
 

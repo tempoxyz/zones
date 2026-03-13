@@ -30,7 +30,7 @@ use tokio::sync::{Mutex, mpsc};
 
 use zone_rpc::{
     auth::AuthContext,
-    handlers::{BoxWsSubscriptionFut, WsSubscription, WsSubscriptionStream},
+    subscription::{BoxWsSubscriptionFut, WsSubscription, WsSubscriptionStream},
     types::{BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
 };
 

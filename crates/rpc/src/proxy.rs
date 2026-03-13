@@ -26,8 +26,9 @@ use tokio::{
 use crate::{
     auth::AuthContext,
     filter,
-    handlers::{BoxWsSubscriptionFut, WsSubscription, WsSubscriptionStream, ZoneRpcApi},
+    handlers::ZoneRpcApi,
     policy,
+    subscription::{BoxWsSubscriptionFut, WsSubscription, WsSubscriptionStream},
     types::{BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
 };
 

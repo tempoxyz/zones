@@ -28,8 +28,9 @@ use tracing::warn;
 
 use crate::{
     auth::{self, AuthContext, AuthError},
-    handlers::{self, WsSubscription, ZoneRpcApi},
+    handlers::{self, ZoneRpcApi},
     server::{MAX_BATCH_SIZE, RpcState, auth_error_status, authenticate_token},
+    subscription::{WsSubscription, WsSubscriptionStream},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, to_raw},
 };
 
@@ -125,7 +126,7 @@ fn subscription_notification_raw(subscription_id: &FilterId, result: &RawValue) 
 
 fn spawn_subscription(
     subscription_id: FilterId,
-    mut stream: handlers::WsSubscriptionStream,
+    mut stream: WsSubscriptionStream,
     notifications: NotificationTx,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
