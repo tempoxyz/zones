@@ -262,12 +262,16 @@ where
                 .await
                 .map_err(internal)?;
 
-            let Some(receipt) = receipt else {
+            let Some(mut receipt) = receipt else {
                 return Ok(raw_null());
             };
 
-            if !auth.is_sequencer && receipt.from() != auth.caller {
-                return Ok(raw_null());
+            if !auth.is_sequencer {
+                if receipt.from() != auth.caller {
+                    return Ok(raw_null());
+                }
+
+                receipt = zone_rpc::filter::filter_receipt_logs(receipt);
             }
 
             to_raw(&receipt)
@@ -351,9 +355,14 @@ where
                 zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
             }
 
-            let receipt = EthTransactions::send_raw_transaction_sync(&self.eth.api, data)
+            let mut receipt = EthTransactions::send_raw_transaction_sync(&self.eth.api, data)
                 .await
                 .map_err(internal)?;
+
+            if !auth.is_sequencer {
+                receipt = zone_rpc::filter::filter_receipt_logs(receipt);
+            }
+
             to_raw(&receipt)
         })
     }
