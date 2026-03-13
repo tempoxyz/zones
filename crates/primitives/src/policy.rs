@@ -17,3 +17,6 @@ pub enum AuthRole {
     /// Check mint recipient authorization only (compound: uses `mintRecipientPolicyId`).
     MintRecipient,
 }
+
+/// First user-created policy ID. IDs below this are builtins.
+pub const FIRST_USER_POLICY: u64 = 2;

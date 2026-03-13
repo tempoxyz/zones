@@ -449,7 +449,6 @@ pub enum PolicyEvent {
     /// A new simple policy was created on L1 (`PolicyCreated`).
     PolicyCreated {
         policy_id: u64,
-        #[serde(with = "policy_type_serde")]
         policy_type: PolicyType,
     },
     /// A new compound policy was created on L1 (`CompoundPolicyCreated`).
@@ -764,22 +763,6 @@ pub(super) struct MembershipUpdate {
     pub account: Address,
     /// Whether the address was added to or removed from the set.
     pub change: MembershipChange,
-}
-
-/// Serde helper for [`PolicyType`] — the sol!-generated enum lacks serde support,
-/// so we serialize it as its `u8` repr.
-mod policy_type_serde {
-    use super::PolicyType;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(val: &PolicyType, s: S) -> Result<S::Ok, S::Error> {
-        (*val as u8).serialize(s)
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PolicyType, D::Error> {
-        let v = u8::deserialize(d)?;
-        PolicyType::try_from(v).map_err(serde::de::Error::custom)
-    }
 }
 
 #[cfg(test)]
