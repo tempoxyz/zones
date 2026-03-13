@@ -71,7 +71,9 @@ pub struct L1Subscriber {
     /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
     tracked_tokens: Vec<Address>,
     /// TIP-403 metrics (cache sizes, events applied).
-    metrics: crate::l1_state::tip403::Tip403Metrics,
+    tip403_metrics: crate::l1_state::tip403::Tip403Metrics,
+    /// L1 subscriber metrics for connection health, backfill, and event ingestion.
+    subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }
 
 impl L1Subscriber {
@@ -90,7 +92,8 @@ impl L1Subscriber {
             config,
             deposit_queue,
             tracked_tokens,
-            metrics: Default::default(),
+            tip403_metrics: Default::default(),
+            subscriber_metrics: Default::default(),
         };
 
         task_executor.spawn_critical(
@@ -99,6 +102,7 @@ impl L1Subscriber {
                 loop {
                     if let Err(e) = subscriber.clone().run().await {
                         let retry_interval = subscriber.config.retry_connection_interval;
+                        subscriber.subscriber_metrics.reconnects_total.increment(1);
                         error!(
                             error = %e,
                             retry_secs = retry_interval.as_secs_f32(),
@@ -208,16 +212,26 @@ impl L1Subscriber {
     > {
         let header_stream = self.header_stream(provider).await?;
         let concurrency = self.config.l1_fetch_concurrency.max(1);
+        let subscriber_metrics = self.subscriber_metrics.clone();
         let stream = header_stream
             .map_ok(move |header| {
                 let provider = provider;
+                let subscriber_metrics = subscriber_metrics.clone();
                 async move {
                     let block_number = header.number();
                     let start = std::time::Instant::now();
+                    let fetch_failures_total = &subscriber_metrics.fetch_failures_total;
                     let receipts = provider
                         .get_block_receipts(BlockId::number(block_number))
-                        .await?
-                        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
+                        .await
+                        .map_err(eyre::Report::from)
+                        .and_then(|receipts| {
+                            receipts
+                                .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
+                        })
+                        .inspect_err(|_| {
+                            fetch_failures_total.increment(1);
+                        })?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
@@ -287,6 +301,7 @@ impl L1Subscriber {
         l1_provider: &impl Provider<TempoNetwork>,
     ) -> eyre::Result<()> {
         let Some(mut from) = self.resolve_start_block(l1_provider).await? else {
+            self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
         };
 
@@ -305,8 +320,10 @@ impl L1Subscriber {
         }
 
         let tip = l1_provider.get_block_number().await?;
+        self.record_seen_block(tip, 0);
         if from > tip {
             info!(from, tip, "Already synced to L1 tip");
+            self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
         }
 
@@ -316,7 +333,21 @@ impl L1Subscriber {
             blocks = tip - from + 1,
             "Backfilling deposit events"
         );
-        self.backfill(l1_provider, from, tip).await
+        self.subscriber_metrics.backfill_in_progress.set(1.0);
+        self.subscriber_metrics
+            .backfill_start_block
+            .set(from as f64);
+        self.subscriber_metrics.backfill_end_block.set(tip as f64);
+        let start = std::time::Instant::now();
+        let result = self.backfill(l1_provider, from, tip).await;
+        self.subscriber_metrics.backfill_in_progress.set(0.0);
+        self.subscriber_metrics
+            .backfill_duration_seconds
+            .record(start.elapsed().as_secs_f64());
+        if result.is_ok() {
+            self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
+        }
+        result
     }
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
@@ -337,17 +368,21 @@ impl L1Subscriber {
         // Backfill sends 2 requests per block (receipts + header), so halve
         // the concurrency to stay within the configured fetch budget.
         let concurrency = (self.config.l1_fetch_concurrency / 2).max(1);
+        let subscriber_metrics = self.subscriber_metrics.clone();
 
         let mut fetched = stream::iter(from..=to)
-            .map(|block_number| {
+            .map(move |block_number| {
                 let provider = l1_provider;
+                let subscriber_metrics = subscriber_metrics.clone();
                 async move {
                     let start = std::time::Instant::now();
+                    let fetch_failures_total = &subscriber_metrics.fetch_failures_total;
                     let (receipts, header_resp) = tokio::try_join!(
                         async {
                             provider
                                 .get_block_receipts(BlockId::number(block_number))
-                                .await?
+                                .await
+                                .map_err(eyre::Report::from)?
                                 .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
                         },
                         async {
@@ -358,7 +393,10 @@ impl L1Subscriber {
                                     eyre::eyre!("L1 header not found for block {block_number}")
                                 })
                         },
-                    )?;
+                    )
+                    .inspect_err(|_| {
+                        fetch_failures_total.increment(1);
+                    })?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
@@ -378,6 +416,7 @@ impl L1Subscriber {
         while let Some((header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
             let (events, policy_events) = self.extract_events(block_number, &receipts);
+            self.record_seen_block(block_number, to.saturating_sub(block_number));
 
             self.apply_policy_events(block_number, &policy_events);
 
@@ -386,6 +425,7 @@ impl L1Subscriber {
             self.deposit_queue
                 .enqueue_sealed(sealed, events, policy_events);
             enqueued += 1;
+            self.subscriber_metrics.blocks_enqueued_total.increment(1);
 
             if enqueued.is_multiple_of(100) {
                 let elapsed = backfill_start.elapsed();
@@ -449,10 +489,19 @@ impl L1Subscriber {
             Vec<PolicyEvent>,
         )> = None;
 
-        while let Some((header, receipts)) = stream.try_next().await? {
+        loop {
+            let stream_wait_start = std::time::Instant::now();
+            let next = stream.try_next().await?;
+            self.subscriber_metrics
+                .stream_try_next_duration_seconds
+                .record(stream_wait_start.elapsed().as_secs_f64());
+            let Some((header, receipts)) = next else {
+                break;
+            };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
             let (events, policy_events) = self.extract_events(block_number, &receipts);
+            self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.
             if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
@@ -468,7 +517,10 @@ impl L1Subscriber {
                         .deposit_queue
                         .try_enqueue(tip_header, tip_events, tip_policy_events)
                     {
-                        EnqueueOutcome::Accepted | EnqueueOutcome::Duplicate => {}
+                        EnqueueOutcome::Accepted => {
+                            self.subscriber_metrics.blocks_enqueued_total.increment(1);
+                        }
+                        EnqueueOutcome::Duplicate => {}
                         EnqueueOutcome::NeedBackfill { from, to } => {
                             // Gap between queue head and confirmed tip — backfill
                             // the missing range including the tip (re-fetched from
@@ -484,6 +536,7 @@ impl L1Subscriber {
                     }
                 } else {
                     // Reorg — discard the buffered tip and clear L1 state cache.
+                    self.subscriber_metrics.reorgs_detected_total.increment(1);
                     warn!(
                         discarded_block = tip_header.number(),
                         discarded_hash = %tip_header.hash(),
@@ -544,7 +597,43 @@ impl L1Subscriber {
             }
         }
 
+        self.record_portal_event_metrics(&portal_events);
         (portal_events, policy_events)
+    }
+
+    fn record_seen_block(&self, block_number: u64, lag_blocks: u64) {
+        self.subscriber_metrics
+            .latest_l1_block_seen
+            .set(block_number as f64);
+        self.subscriber_metrics
+            .current_l1_lag_blocks
+            .set(lag_blocks as f64);
+    }
+
+    fn record_portal_event_metrics(&self, portal_events: &L1PortalEvents) {
+        let mut regular = 0u64;
+        let mut encrypted = 0u64;
+        for deposit in &portal_events.deposits {
+            match deposit {
+                L1Deposit::Regular(_) => regular += 1,
+                L1Deposit::Encrypted(_) => encrypted += 1,
+            }
+        }
+        if regular > 0 {
+            self.subscriber_metrics
+                .regular_deposit_events_total
+                .increment(regular);
+        }
+        if encrypted > 0 {
+            self.subscriber_metrics
+                .encrypted_deposit_events_total
+                .increment(encrypted);
+        }
+        if !portal_events.enabled_tokens.is_empty() {
+            self.subscriber_metrics
+                .token_enabled_events_total
+                .increment(portal_events.enabled_tokens.len() as u64);
+        }
     }
 
     /// Write decoded policy events into the shared cache and advance its L1 block
@@ -554,14 +643,14 @@ impl L1Subscriber {
         let mut cache = self.config.policy_cache.write();
         cache.apply_events(block_number, policy_events);
         if !policy_events.is_empty() {
-            self.metrics
+            self.tip403_metrics
                 .listener_events_applied
                 .increment(policy_events.len() as u64);
         }
-        self.metrics
+        self.tip403_metrics
             .cached_policies
             .set(cache.policies().len() as f64);
-        self.metrics
+        self.tip403_metrics
             .cached_token_policies
             .set(cache.num_token_policies() as f64);
     }
@@ -573,6 +662,7 @@ impl L1Subscriber {
         let mut guard = self.config.l1_state_cache.write();
         let anchor = guard.anchor();
         if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
+            self.subscriber_metrics.reorgs_detected_total.increment(1);
             warn!(
                 old_anchor = %anchor.hash,
                 new_parent = %parent_hash,

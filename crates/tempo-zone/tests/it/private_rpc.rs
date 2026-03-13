@@ -68,6 +68,29 @@ fn parse_token_fields() {
 }
 
 #[test]
+fn parse_secp256k1_signature_type_with_reserved_prefix_bytes() {
+    let now = now_secs();
+
+    for prefix in [0x02, 0x03] {
+        let mut blob = vec![prefix];
+        blob.extend_from_slice(&[0u8; 64]);
+        blob.push(0);
+        blob.extend_from_slice(&1u64.to_be_bytes());
+        blob.extend_from_slice(&1u64.to_be_bytes());
+        blob.extend_from_slice(&[0u8; 20]);
+        blob.extend_from_slice(&now.to_be_bytes());
+        blob.extend_from_slice(&(now + 600).to_be_bytes());
+
+        let token = AuthorizationToken::parse(&blob).unwrap();
+        assert_eq!(
+            token.signature_type().unwrap(),
+            SignatureType::Secp256k1,
+            "65-byte signatures must remain secp256k1 even when starting with {prefix:#04x}",
+        );
+    }
+}
+
+#[test]
 fn parse_token_too_short() {
     // 53 bytes = exactly the message length, no room for a signature
     let blob = vec![0u8; 53];

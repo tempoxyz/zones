@@ -15,6 +15,7 @@ pub mod evm;
 mod executor;
 pub mod l1;
 pub mod l1_state;
+mod metrics;
 mod node;
 pub mod nonce_keys;
 pub mod payload;
