@@ -4,31 +4,21 @@
 //! applies privacy redactions on the responses. This allows the private RPC
 //! service to run as a standalone process without linking against reth.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    future::Future,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, sync::Arc};
 
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256, Bytes};
+use alloy_primitives::{Address, Bytes};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, Log, state::StateOverride};
-use futures::stream;
 use serde::Deserialize;
-use serde_json::{Value, value::RawValue};
+use serde_json::value::RawValue;
 use tempo_alloy::rpc::{TempoTransactionReceipt, TempoTransactionRequest};
-use tokio::{
-    sync::Mutex,
-    time::{self, MissedTickBehavior},
-};
+use tokio::sync::Mutex;
 
 use crate::{
     auth::AuthContext,
     filter,
     handlers::ZoneRpcApi,
     policy,
-    subscription::{BoxWsSubscriptionFut, WsSubscription, WsSubscriptionStream},
     types::{BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
 };
 
@@ -113,8 +103,6 @@ impl ProxyZoneRpc {
     }
 }
 
-const WS_SUBSCRIPTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
-
 /// Strip privacy-sensitive fields from a block JSON object for non-sequencer callers.
 ///
 /// Zeroes `logsBloom` and replaces `transactions` with an empty array.
@@ -131,46 +119,6 @@ fn redact_block_json(value: &mut serde_json::Value) {
 /// Extract the `from` address from a JSON transaction or receipt object.
 fn json_from(value: &serde_json::Value) -> Option<Address> {
     value.get("from")?.as_str()?.parse().ok()
-}
-
-fn polling_subscription_stream<F, Fut>(poll: F) -> WsSubscriptionStream
-where
-    F: FnMut() -> Fut + Send + 'static,
-    Fut: Future<Output = Result<Vec<Box<RawValue>>, JsonRpcError>> + Send + 'static,
-{
-    let mut interval = time::interval(WS_SUBSCRIPTION_POLL_INTERVAL);
-    interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-
-    Box::pin(stream::unfold(
-        (interval, VecDeque::<Box<RawValue>>::new(), poll, false),
-        |(mut interval, mut pending, mut poll, done)| async move {
-            loop {
-                if let Some(item) = pending.pop_front() {
-                    return Some((Ok(item), (interval, pending, poll, done)));
-                }
-
-                if done {
-                    return None;
-                }
-
-                interval.tick().await;
-                match poll().await {
-                    Ok(items) if items.is_empty() => continue,
-                    Ok(items) => pending = items.into_iter().collect(),
-                    Err(err) => return Some((Err(err), (interval, pending, poll, true))),
-                }
-            }
-        },
-    ))
-}
-
-fn strip_new_head_fields(raw: Box<RawValue>) -> Result<Box<RawValue>, JsonRpcError> {
-    let mut header: Value = serde_json::from_str(raw.get()).map_err(internal)?;
-    if let Some(obj) = header.as_object_mut() {
-        obj.remove("transactions");
-        obj.remove("uncles");
-    }
-    to_raw(&header)
 }
 
 impl ZoneRpcApi for ProxyZoneRpc {
@@ -536,59 +484,6 @@ impl ZoneRpcApi for ProxyZoneRpc {
             }
 
             Ok(result)
-        })
-    }
-
-    fn ws_subscribe_new_heads(&self, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
-        Box::pin(async move {
-            let raw = self.new_block_filter(auth.clone()).await?;
-            let upstream_filter_id: FilterId = serde_json::from_str(raw.get()).map_err(internal)?;
-            let this = self.clone();
-            let filter_id = upstream_filter_id.clone();
-            let stream = polling_subscription_stream(move || {
-                let this = this.clone();
-                let auth = auth.clone();
-                let filter_id = filter_id.clone();
-                async move {
-                    let raw = this.get_filter_changes(filter_id, auth.clone()).await?;
-                    let hashes: Vec<B256> = serde_json::from_str(raw.get()).map_err(internal)?;
-                    let mut headers = Vec::with_capacity(hashes.len());
-                    for hash in hashes {
-                        let block = this.block_by_hash(hash, false, auth.clone()).await?;
-                        headers.push(strip_new_head_fields(block)?);
-                    }
-                    Ok(headers)
-                }
-            });
-
-            Ok(WsSubscription::with_upstream_filter(
-                stream,
-                upstream_filter_id,
-            ))
-        })
-    }
-
-    fn ws_subscribe_logs(&self, filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
-        Box::pin(async move {
-            let raw = self.new_filter(filter, auth.clone()).await?;
-            let upstream_filter_id: FilterId = serde_json::from_str(raw.get()).map_err(internal)?;
-            let this = self.clone();
-            let filter_id = upstream_filter_id.clone();
-            let stream = polling_subscription_stream(move || {
-                let this = this.clone();
-                let auth = auth.clone();
-                let filter_id = filter_id.clone();
-                async move {
-                    let raw = this.get_filter_changes(filter_id, auth).await?;
-                    let logs: Vec<Log> = serde_json::from_str(raw.get()).map_err(internal)?;
-                    logs.into_iter().map(|log| to_raw(&log)).collect()
-                }
-            });
-
-            Ok(WsSubscription::with_upstream_filter(
-                stream,
-                upstream_filter_id,
-            ))
         })
     }
 }

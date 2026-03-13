@@ -150,10 +150,14 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_>;
 
     /// `eth_subscribe("newHeads")` — opens a stream of new block headers.
-    fn ws_subscribe_new_heads(&self, auth: AuthContext) -> BoxWsSubscriptionFut<'_>;
+    fn ws_subscribe_new_heads(&self, _auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
 
     /// `eth_subscribe("logs", filter)` — opens a stream of matching logs.
-    fn ws_subscribe_logs(&self, filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_>;
+    fn ws_subscribe_logs(&self, _filter: Filter, _auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
