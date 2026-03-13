@@ -15,7 +15,7 @@ Privacy zones modify the zone token's TIP-20 precompile in four areas: balance p
 On a standard zone (and on Tempo), `balanceOf(address account)` is a public view function — any caller can read any account's balance. On a privacy zone, the function enforces caller restrictions:
 
 - If `msg.sender == account`, the call succeeds and returns the balance.
-- If `msg.sender` is the sequencer (as read from `ZoneConfig.sequencer()`), the call succeeds.
+- If `msg.sender` is the zone node's configured sequencer address, the call succeeds.
 - Otherwise, the call reverts with `Unauthorized()`.
 
 This means:
@@ -71,9 +71,9 @@ The TIP-20 precompile on a privacy zone extends the mint/burn authorization to i
 | Operation | Standard TIP-20 access | Privacy zone access |
 |-----------|----------------------|-------------------|
 | `mint(to, amount)` | `ISSUER_ROLE` only | `ISSUER_ROLE` **or** ZoneInbox (`0x1c...0001`) |
-| `burn(from, amount)` | `ISSUER_ROLE` only | `ISSUER_ROLE` **or** ZoneOutbox (`0x1c...0002`) |
+| `burn(amount)` | `ISSUER_ROLE` only | `ISSUER_ROLE` **or** ZoneOutbox (`0x1c...0002`) |
 
-Authorization is **operation-specific**: ZoneInbox access applies to `mint` only, and ZoneOutbox access applies to `burn` only. Implementations MUST NOT use a shared "inbox-or-outbox" check for both operations.
+Authorization is **operation-specific**: ZoneInbox access applies to `mint` only, and ZoneOutbox access applies to `burn` only. Implementations MUST NOT use a shared "inbox-or-outbox" check for both operations. Crossed system calls must revert before they reach the vanilla TIP-20 role checks.
 
 **ZoneInbox mints** during deposit processing in `advanceTempo()`:
 
@@ -84,7 +84,7 @@ Authorization is **operation-specific**: ZoneInbox access applies to `mint` only
 **ZoneOutbox burns** during withdrawal requests in `requestWithdrawal()`:
 
 - The user approves the ZoneOutbox to spend `amount + fee`.
-- ZoneOutbox calls `transferFrom(user, self, amount + fee)`, then `burn(self, amount + fee)`.
+- ZoneOutbox calls `transferFrom(user, address(this), amount + fee)`, then `burn(amount + fee)`.
 - The burned tokens are released on Tempo when the sequencer processes the withdrawal.
 
 **Gas costs**: `mint` and `burn` retain standard variable gas costs (not the fixed 100,000). These functions are only called by system contracts during sequencer operations, so there is no user-exploitable gas side channel.

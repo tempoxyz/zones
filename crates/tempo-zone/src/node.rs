@@ -7,7 +7,7 @@ use crate::{
     ext::TempoStateExt,
     payload::{ZonePayloadAttributes, ZonePayloadTypes},
 };
-use alloy_primitives::U256;
+use alloy_primitives::{Address, U256};
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
@@ -459,6 +459,7 @@ where
             self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
+            self.sequencer,
         );
         Self::components(executor_builder)
     }
@@ -530,6 +531,7 @@ pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: SharedL1StateCache,
     policy_cache: crate::SharedPolicyCache,
+    sequencer: Address,
 }
 
 impl ZoneExecutorBuilder {
@@ -537,11 +539,13 @@ impl ZoneExecutorBuilder {
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: SharedL1StateCache,
         policy_cache: crate::SharedPolicyCache,
+        sequencer: Address,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_cache,
             policy_cache,
+            sequencer,
         }
     }
 }
@@ -561,7 +565,7 @@ where
         )
         .await?;
 
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
+        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider, self.sequencer);
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()

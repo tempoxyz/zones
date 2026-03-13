@@ -3,7 +3,7 @@ use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
-use alloy_sol_types::{SolEvent, SolValue};
+use alloy_sol_types::{SolCall, SolEvent, SolValue};
 use eyre::WrapErr;
 use reth_ethereum::tasks::TaskManager;
 use reth_node_api::FullNodeComponents;
@@ -211,16 +211,12 @@ impl ZoneTestNode {
         min_balance: U256,
         timeout: Duration,
     ) -> eyre::Result<U256> {
-        use tempo_contracts::precompiles::ITIP20;
-
-        let tip20 = ITIP20::new(token, self.provider());
         poll_until(timeout, DEFAULT_POLL, "token balance", || {
-            let tip20 = &tip20;
             async move {
                 // balanceOf may revert with Uninitialized() if the token hasn't
                 // been created yet (e.g. waiting for a TokenEnabled event to be
                 // processed). Treat reverts as "not ready" rather than fatal.
-                let balance = match tip20.balanceOf(account).call().await {
+                let balance = match self.read_zone_balance_of(token, account).await {
                     Ok(b) => b,
                     Err(_) => return Ok(None),
                 };
@@ -262,11 +258,34 @@ impl ZoneTestNode {
 
     /// Read a TIP-20 token balance on this zone (single-shot, no polling).
     pub(crate) async fn balance_of(&self, token: Address, account: Address) -> eyre::Result<U256> {
+        self.read_zone_balance_of(token, account).await
+    }
+
+    async fn read_zone_balance_of(&self, token: Address, account: Address) -> eyre::Result<U256> {
+        use alloy_provider::Provider;
         use tempo_contracts::precompiles::ITIP20;
-        Ok(ITIP20::new(token, self.provider())
-            .balanceOf(account)
-            .call()
-            .await?)
+
+        let result: String = self
+            .provider()
+            .raw_request(
+                "eth_call".into(),
+                serde_json::json!([
+                    {
+                        "from": format!("{account:#x}"),
+                        "to": format!("{token:#x}"),
+                        "data": format!(
+                            "0x{}",
+                            alloy_primitives::hex::encode(
+                                ITIP20::balanceOfCall { account }.abi_encode()
+                            )
+                        ),
+                    },
+                    "latest"
+                ]),
+            )
+            .await?;
+        let bytes = alloy_primitives::hex::decode(result.trim_start_matches("0x"))?;
+        Ok(ITIP20::balanceOfCall::abi_decode_returns(&bytes)?)
     }
 
     /// Wait for the zone L2 to finalize an L1 block beyond `after_block`.
@@ -322,7 +341,14 @@ impl ZoneTestNode {
 
     /// Start a zone node pointing at a real L1 WebSocket URL.
     pub(crate) async fn start(l1_ws_url: String, portal_address: Address) -> eyre::Result<Self> {
-        Self::launch(l1_ws_url, portal_address, None, next_unique_chain_id()).await
+        Self::launch(
+            l1_ws_url,
+            portal_address,
+            None,
+            next_unique_chain_id(),
+            Address::ZERO,
+        )
+        .await
     }
 
     /// Start a zone node connected to a real L1, generating genesis from the L1's
@@ -344,6 +370,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
+            Address::ZERO,
             throwaway_key,
         )
         .await
@@ -368,6 +395,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
+            Address::ZERO,
             sequencer_key,
         )
         .await
@@ -385,6 +413,7 @@ impl ZoneTestNode {
             Address::ZERO,
             None,
             next_unique_chain_id(),
+            Address::ZERO,
         )
         .await
     }
@@ -394,7 +423,14 @@ impl ZoneTestNode {
     /// Useful for running multiple zone nodes in a single test — each needs
     /// a unique chain ID to avoid datadir collisions.
     pub(crate) async fn start_local_with_chain_id(chain_id: u64) -> eyre::Result<Self> {
-        Self::launch(DUMMY_L1_URL.to_string(), Address::ZERO, None, chain_id).await
+        Self::launch(
+            DUMMY_L1_URL.to_string(),
+            Address::ZERO,
+            None,
+            chain_id,
+            Address::ZERO,
+        )
+        .await
     }
 
     async fn launch(
@@ -402,6 +438,7 @@ impl ZoneTestNode {
         portal_address: Address,
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
+        sequencer: Address,
     ) -> eyre::Result<Self> {
         // Generate a throwaway key for tests that don't use encrypted deposits.
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
@@ -411,6 +448,7 @@ impl ZoneTestNode {
             genesis_tempo_block_number,
             chain_id,
             None,
+            sequencer,
             throwaway_key,
         )
         .await
@@ -422,6 +460,7 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
         custom_genesis: Option<Genesis>,
+        sequencer: Address,
         sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
         let tasks = TaskManager::current();
@@ -437,7 +476,7 @@ impl ZoneTestNode {
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
-            Address::ZERO, // sequencer address (overridden by sequencer_key)
+            sequencer,
             sequencer_key,
             4,
             std::time::Duration::from_millis(100),
@@ -2021,6 +2060,7 @@ impl ZoneAccount {
         // Approve outbox for this token
         ITIP20::new(token, &self.l2_provider)
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+            .gas(150_000)
             .send()
             .await?
             .get_receipt()
@@ -2040,6 +2080,7 @@ impl ZoneAccount {
                 fallback_recipient,
                 args.data,
             )
+            .gas(300_000)
             .send()
             .await?
             .get_receipt()
@@ -2387,7 +2428,17 @@ impl PrivateRpcTestCtx {
 pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTestCtx> {
     use alloy_provider::Provider;
 
-    let zone = ZoneTestNode::start_local().await?;
+    let sequencer_signer = alloy_signer_local::PrivateKeySigner::random();
+    let sequencer_address = sequencer_signer.address();
+
+    let zone = ZoneTestNode::launch(
+        DUMMY_L1_URL.to_string(),
+        Address::ZERO,
+        None,
+        next_unique_chain_id(),
+        sequencer_address,
+    )
+    .await?;
     let fixture = L1Fixture::new();
 
     fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, 20);
@@ -2397,9 +2448,6 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
         .raw_request("eth_chainId".into(), ())
         .await?;
     let chain_id = chain_id.to::<u64>();
-
-    let sequencer_signer = alloy_signer_local::PrivateKeySigner::random();
-    let sequencer_address = sequencer_signer.address();
 
     let config = zone::rpc::PrivateRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
