@@ -19,8 +19,9 @@ use tempo_contracts::precompiles::{
     ITIP403Registry::{self, PolicyType},
     TIP403_REGISTRY_ADDRESS,
 };
+use tempo_precompiles::tip403_registry::{ALLOW_ALL_POLICY_ID, REJECT_ALL_POLICY_ID};
 use tracing::{debug, warn};
-use zone_primitives::policy::{AuthRole, FIRST_USER_POLICY, POLICY_REJECT_ALL};
+use zone_primitives::policy::AuthRole;
 
 use crate::policy::PolicyCheck;
 
@@ -191,13 +192,13 @@ impl<P: PolicyCheck> ZoneTip403ProxyRegistry<P> {
         let call = ITIP403Registry::policyDataCall::abi_decode(data)
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 
-        // Builtins
-        if call.policyId < FIRST_USER_POLICY {
-            let policy_type = if call.policyId == POLICY_REJECT_ALL {
-                PolicyType::WHITELIST
-            } else {
-                PolicyType::BLACKLIST
-            };
+        // Builtins: reject-all is an empty whitelist, allow-all is an empty blacklist
+        let builtin_type = match call.policyId {
+            REJECT_ALL_POLICY_ID => Some(PolicyType::WHITELIST),
+            ALLOW_ALL_POLICY_ID => Some(PolicyType::BLACKLIST),
+            _ => None,
+        };
+        if let Some(policy_type) = builtin_type {
             let ret = ITIP403Registry::policyDataReturn {
                 policyType: policy_type,
                 admin: Address::ZERO,
@@ -239,7 +240,7 @@ impl<P: PolicyCheck> ZoneTip403ProxyRegistry<P> {
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 
         // Builtins always exist
-        if call.policyId < FIRST_USER_POLICY {
+        if matches!(call.policyId, REJECT_ALL_POLICY_ID | ALLOW_ALL_POLICY_ID) {
             let encoded = ITIP403Registry::policyExistsCall::abi_encode_returns(&true);
             return Ok(PrecompileOutput::new(POLICY_DATA_GAS, encoded.into()));
         }
