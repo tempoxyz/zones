@@ -40,7 +40,7 @@ use std::{sync::Arc, time::Duration};
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use tempo_alloy::{TempoNetwork, fillers::NonceKeyFiller};
+use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tokio::sync::Notify;
 
 /// Configuration for all zone sequencer background tasks.
@@ -102,7 +102,7 @@ pub async fn spawn_zone_sequencer(
     let wallet = alloy_network::EthereumWallet::from(signer);
     let l1_provider: DynProvider<TempoNetwork> =
         ProviderBuilder::new_with_network::<TempoNetwork>()
-            .filler(NonceKeyFiller::default())
+            .with_nonce_key_filler()
             .wallet(wallet)
             .connect(&config.l1_rpc_url)
             .await
