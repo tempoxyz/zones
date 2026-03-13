@@ -71,7 +71,18 @@ pub mod task;
 pub use cache::{
     CachedPolicy, CompoundData, MembershipSet, PolicyCache, PolicyEvent, SharedPolicyCache,
 };
+use tempo_precompiles::tip403_registry::{ALLOW_ALL_POLICY_ID, REJECT_ALL_POLICY_ID};
 pub use zone_primitives::policy::AuthRole;
+
+/// Returns authorization result for built-in policies, `None` for user-created ones.
+#[inline]
+fn builtin_authorization(policy_id: u64) -> Option<bool> {
+    match policy_id {
+        ALLOW_ALL_POLICY_ID => Some(true),
+        REJECT_ALL_POLICY_ID => Some(false),
+        _ => None,
+    }
+}
 
 pub use metrics::Tip403Metrics;
 pub use pool_prefetch::spawn_pool_prefetch_task;

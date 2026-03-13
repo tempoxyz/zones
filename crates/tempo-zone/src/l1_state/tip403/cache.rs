@@ -50,7 +50,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 use tracing::info;
 
-use zone_primitives::policy::{FIRST_USER_POLICY, POLICY_ALLOW_ALL};
+use super::builtin_authorization;
 
 use crate::l1_state::versioned::HeightVersioned;
 
@@ -185,9 +185,8 @@ impl PolicyCache {
         block_number: u64,
         role: AuthRole,
     ) -> Option<bool> {
-        if policy_id < FIRST_USER_POLICY {
-            // Policy 0 = reject all (empty whitelist), policy 1 = allow all (empty blacklist).
-            return Some(policy_id == POLICY_ALLOW_ALL);
+        if let Some(authorized) = builtin_authorization(policy_id) {
+            return Some(authorized);
         }
 
         let policy = self.policies.get(&policy_id)?;
@@ -238,8 +237,8 @@ impl PolicyCache {
     /// Handles builtins and whitelist/blacklist. Returns `None` for compound sub-policies
     /// (compound-of-compound is invalid on L1).
     pub fn check_simple(&self, policy_id: u64, user: Address, block_number: u64) -> Option<bool> {
-        if policy_id < FIRST_USER_POLICY {
-            return Some(policy_id == POLICY_ALLOW_ALL);
+        if let Some(authorized) = builtin_authorization(policy_id) {
+            return Some(authorized);
         }
 
         let policy = self.policies.get(&policy_id)?;

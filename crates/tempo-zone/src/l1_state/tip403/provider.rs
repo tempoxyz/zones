@@ -20,7 +20,7 @@ use tempo_contracts::precompiles::{
 use tracing::{debug, info, warn};
 use zone_precompiles::policy::PolicyCheck;
 
-use zone_primitives::policy::{FIRST_USER_POLICY, POLICY_ALLOW_ALL};
+use super::builtin_authorization;
 
 use super::{AuthRole, CompoundData, SharedPolicyCache, metrics::Tip403Metrics};
 
@@ -154,14 +154,14 @@ impl PolicyProvider {
         let policy_id = self.resolve_policy_id(token, block_number).await?;
 
         // Builtins — no RPC needed
-        if policy_id < FIRST_USER_POLICY {
+        if let Some(authorized) = builtin_authorization(policy_id) {
             self.cache
                 .write()
                 .set_token_policy(token, block_number, policy_id);
             self.metrics
                 .rpc_resolution_duration_seconds
                 .record(start.elapsed().as_secs_f64());
-            return Ok(policy_id == POLICY_ALLOW_ALL);
+            return Ok(authorized);
         }
 
         let result = self
@@ -262,8 +262,8 @@ impl PolicyProvider {
         block_number: u64,
     ) -> Result<bool> {
         // Builtins
-        if policy_id < FIRST_USER_POLICY {
-            return Ok(policy_id == POLICY_ALLOW_ALL);
+        if let Some(authorized) = builtin_authorization(policy_id) {
+            return Ok(authorized);
         }
 
         // Check cache first for this sub-policy.
@@ -410,9 +410,9 @@ impl PolicyProvider {
         self.metrics.authorization_checks_total.increment(1);
 
         // Builtins
-        if policy_id < FIRST_USER_POLICY {
+        if let Some(authorized) = builtin_authorization(policy_id) {
             self.metrics.cache_hits.increment(1);
-            return Ok(policy_id == POLICY_ALLOW_ALL);
+            return Ok(authorized);
         }
 
         // Try cache first
@@ -551,7 +551,7 @@ impl PolicyProvider {
     ///
     /// Panics if called from within an async context on the same tokio runtime.
     pub fn policy_exists_sync(&self, policy_id: u64) -> Result<bool> {
-        if policy_id < FIRST_USER_POLICY {
+        if builtin_authorization(policy_id).is_some() {
             return Ok(true);
         }
 
