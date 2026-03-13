@@ -5,8 +5,9 @@
 //! and HTTP (polling) transports — the transport is auto-detected from the URL
 //! scheme.
 
-use alloy_consensus::BlockHeader as _;
+use alloy_consensus::{BlockHeader as _, Sealable as _};
 use alloy_eips::NumHash;
+use alloy_network::primitives::HeaderResponse as _;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::{ConnectionConfig, RpcClient};
@@ -213,17 +214,22 @@ impl L1Subscriber {
                 let provider = provider;
                 async move {
                     let block_number = header.number();
+                    let block_hash = header.hash();
                     let start = std::time::Instant::now();
-                    let receipts = provider
-                        .get_block_receipts(BlockId::number(block_number))
-                        .await?
-                        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))?;
+                    let receipts = fetch_receipts_for_header(
+                        provider,
+                        block_number,
+                        block_hash,
+                        header.receipts_root(),
+                    )
+                    .await?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
+                        %block_hash,
                         elapsed_ms = elapsed.as_millis() as u64,
                         receipts = receipts.len(),
-                        "Fetched live block receipts"
+                        "Fetched and validated live block receipts"
                     );
                     Ok::<_, eyre::Report>((header, receipts))
                 }
@@ -343,30 +349,29 @@ impl L1Subscriber {
                 let provider = l1_provider;
                 async move {
                     let start = std::time::Instant::now();
-                    let (receipts, header_resp) = tokio::try_join!(
-                        async {
-                            provider
-                                .get_block_receipts(BlockId::number(block_number))
-                                .await?
-                                .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
-                        },
-                        async {
-                            provider
-                                .get_header_by_number(block_number.into())
-                                .await?
-                                .ok_or_else(|| {
-                                    eyre::eyre!("L1 header not found for block {block_number}")
-                                })
-                        },
-                    )?;
+                    let header_resp = provider
+                        .get_header_by_number(block_number.into())
+                        .await?
+                        .ok_or_else(|| {
+                            eyre::eyre!("L1 header not found for block {block_number}")
+                        })?;
+                    let header = header_resp.inner.inner;
+                    let block_hash = header.hash_slow();
+                    let receipts = fetch_receipts_for_header(
+                        provider,
+                        block_number,
+                        block_hash,
+                        header.receipts_root(),
+                    )
+                    .await?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
+                        %block_hash,
                         elapsed_ms = elapsed.as_millis() as u64,
                         receipts = receipts.len(),
-                        "Fetched L1 block data"
+                        "Fetched and validated L1 block data"
                     );
-                    let header = header_resp.inner.inner;
                     Ok::<_, eyre::Report>((header, receipts))
                 }
             })
@@ -583,6 +588,51 @@ impl L1Subscriber {
         }
         guard.update_anchor(NumHash { number, hash });
     }
+}
+
+async fn fetch_receipts_for_header(
+    provider: &impl Provider<TempoNetwork>,
+    block_number: u64,
+    block_hash: B256,
+    expected_receipts_root: B256,
+) -> eyre::Result<Vec<tempo_alloy::rpc::TempoTransactionReceipt>> {
+    let receipts = provider
+        .get_block_receipts(BlockId::hash(block_hash))
+        .await?
+        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number} ({block_hash})"))?;
+    validate_receipts_root(block_number, block_hash, expected_receipts_root, &receipts)?;
+    Ok(receipts)
+}
+
+fn validate_receipts_root(
+    block_number: u64,
+    block_hash: B256,
+    expected_receipts_root: B256,
+    receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
+) -> eyre::Result<()> {
+    let computed_receipts_root = compute_receipts_root(receipts);
+    if computed_receipts_root != expected_receipts_root {
+        eyre::bail!(
+            "receipt root mismatch for L1 block {block_number} ({block_hash}): expected {expected_receipts_root}, got {computed_receipts_root}"
+        );
+    }
+    Ok(())
+}
+
+fn compute_receipts_root(receipts: &[tempo_alloy::rpc::TempoTransactionReceipt]) -> B256 {
+    let receipts = receipts
+        .iter()
+        .map(|receipt| {
+            let receipt = &receipt.inner.inner.receipt;
+            tempo_primitives::TempoReceipt {
+                tx_type: receipt.tx_type,
+                success: receipt.success,
+                cumulative_gas_used: receipt.cumulative_gas_used,
+                logs: receipt.logs.iter().cloned().map(Into::into).collect(),
+            }
+        })
+        .collect::<Vec<_>>();
+    tempo_primitives::TempoReceipt::calculate_receipt_root_no_memo(&receipts)
 }
 
 /// A deposit extracted from L1.
@@ -1528,8 +1578,11 @@ impl Default for DepositQueue {
 mod tests {
     use super::*;
     use crate::abi::DepositType;
-    use alloy_consensus::Header;
-    use alloy_primitives::{FixedBytes, address};
+    use alloy_consensus::{Header, ReceiptWithBloom};
+    use alloy_primitives::{Bloom, FixedBytes, address};
+    use alloy_rpc_types_eth::TransactionReceipt;
+    use tempo_alloy::rpc::TempoTransactionReceipt;
+    use tempo_primitives::{TempoReceipt, TempoTxType};
 
     fn make_test_header(number: u64) -> TempoHeader {
         TempoHeader {
@@ -1557,6 +1610,41 @@ mod tests {
         SealedHeader::seal_slow(header)
     }
 
+    fn make_test_receipt(
+        block_number: u64,
+        block_hash: B256,
+        tx_hash: B256,
+        tx_index: u64,
+        cumulative_gas_used: u64,
+    ) -> TempoTransactionReceipt {
+        TempoTransactionReceipt {
+            inner: TransactionReceipt {
+                inner: ReceiptWithBloom::new(
+                    TempoReceipt {
+                        tx_type: TempoTxType::Legacy,
+                        success: true,
+                        cumulative_gas_used,
+                        logs: vec![],
+                    },
+                    Bloom::ZERO,
+                ),
+                transaction_hash: tx_hash,
+                transaction_index: Some(tx_index),
+                block_hash: Some(block_hash),
+                block_number: Some(block_number),
+                gas_used: cumulative_gas_used,
+                effective_gas_price: 0,
+                blob_gas_used: None,
+                blob_gas_price: None,
+                from: Address::ZERO,
+                to: Some(Address::ZERO),
+                contract_address: None,
+            },
+            fee_token: None,
+            fee_payer: Address::ZERO,
+        }
+    }
+
     fn header_hash(header: &TempoHeader) -> B256 {
         keccak256(alloy_rlp::encode(header))
     }
@@ -1571,6 +1659,60 @@ mod tests {
     fn confirm_shared(queue: &DepositQueue) -> L1BlockDeposits {
         let num_hash = queue.peek().expect("queue is empty").header.num_hash();
         queue.confirm(num_hash).expect("confirm mismatch")
+    }
+
+    #[test]
+    fn test_validate_receipts_root_accepts_matching_root() {
+        let block_number = 42;
+        let mut header = make_test_header(block_number);
+        let block_hash = header.hash_slow();
+        let receipts = vec![
+            make_test_receipt(
+                block_number,
+                block_hash,
+                B256::with_last_byte(0x01),
+                0,
+                21_000,
+            ),
+            make_test_receipt(
+                block_number,
+                block_hash,
+                B256::with_last_byte(0x02),
+                1,
+                42_000,
+            ),
+        ];
+        header.inner.receipts_root = compute_receipts_root(&receipts);
+
+        validate_receipts_root(block_number, block_hash, header.receipts_root(), &receipts)
+            .expect("matching receipts root should validate");
+    }
+
+    #[test]
+    fn test_validate_receipts_root_rejects_mismatch() {
+        let block_number = 42;
+        let header = make_test_header(block_number);
+        let block_hash = header.hash_slow();
+        let receipts = vec![make_test_receipt(
+            block_number,
+            block_hash,
+            B256::with_last_byte(0x01),
+            0,
+            21_000,
+        )];
+
+        let err = validate_receipts_root(
+            block_number,
+            block_hash,
+            B256::with_last_byte(0xFF),
+            &receipts,
+        )
+        .expect_err("mismatched receipts root should fail");
+
+        assert!(
+            err.to_string().contains("receipt root mismatch"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
