@@ -25,6 +25,7 @@ extern crate alloc;
 // Required by the `#[contract]` proc macro expansion (references `crate::storage` / `crate::error`).
 pub(crate) use tempo_precompiles::{error, storage};
 
+pub mod abi;
 pub mod aes_gcm;
 pub mod chaum_pedersen;
 pub mod ecies;

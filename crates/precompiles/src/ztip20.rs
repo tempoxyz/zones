@@ -26,15 +26,12 @@ use zone_primitives::{
 };
 
 use crate::{
+    abi::Unauthorized,
     policy::PolicyCheck,
     tip403_proxy::{AUTH_CHECK_GAS, ZoneTip403ProxyRegistry},
 };
 
 const FIXED_TRANSFER_GAS: u64 = 100_000;
-
-alloy_sol_types::sol! {
-    error Unauthorized();
-}
 
 /// Decode ABI args or return a reverted precompile output.
 ///

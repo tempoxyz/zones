@@ -53,7 +53,7 @@ pub struct ZoneEvmFactory {
 }
 
 impl ZoneEvmFactory {
-    /// Create a new factory with the given L1 state provider.
+    /// Create a new factory with the given L1 state provider and sequencer.
     pub fn new(l1_provider: L1StateProvider, sequencer: Address) -> Self {
         Self {
             l1_provider,
@@ -230,7 +230,8 @@ pub struct ZoneEvmConfig {
 }
 
 impl ZoneEvmConfig {
-    /// Create a new zone EVM config with the given chain spec and L1 state provider.
+    /// Create a new zone EVM config with the given chain spec, L1 state
+    /// provider, and configured sequencer address.
     pub fn new(
         chain_spec: Arc<TempoChainSpec>,
         l1_provider: L1StateProvider,
@@ -250,7 +251,8 @@ impl ZoneEvmConfig {
     ///
     /// Intended for CLI subcommands (import, stage, re-execute) that need a type-compatible
     /// EVM config but don't have access to an L1 RPC connection. Transactions calling the
-    /// TempoStateReader precompile will get a reverted / empty response.
+    /// TempoStateReader precompile will get a reverted / empty response. The
+    /// sequencer defaults to the zero address in this mode.
     pub fn new_without_l1(chain_spec: Arc<TempoChainSpec>) -> Self {
         let cache = SharedL1StateCache::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
