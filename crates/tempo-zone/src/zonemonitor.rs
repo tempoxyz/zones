@@ -47,6 +47,12 @@ const MAX_RETRIES: u32 = 3;
 /// Initial delay between retries (doubles on each attempt).
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
 
+/// Startup replay can briefly race zone RPC log availability after a restart.
+/// Retry restoring pending withdrawals instead of panicking the monitor task on
+/// the first mismatch.
+const MAX_PENDING_WITHDRAWAL_RESTORE_RETRIES: u32 = 6;
+const INITIAL_PENDING_WITHDRAWAL_RESTORE_RETRY_DELAY: Duration = Duration::from_millis(500);
+
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
@@ -200,10 +206,29 @@ impl ZoneMonitor {
 
         // Restore pending withdrawal data from zone L2 events so the
         // withdrawal processor can pick up where it left off.
-        let pending = batch_submitter
-            .fetch_pending_withdrawals(&provider, config.outbox_address)
-            .await
-            .expect("failed to fetch pending withdrawals");
+        let mut restore_attempt = 0;
+        let mut restore_delay = INITIAL_PENDING_WITHDRAWAL_RESTORE_RETRY_DELAY;
+        let pending = loop {
+            match batch_submitter
+                .fetch_pending_withdrawals(&provider, config.outbox_address)
+                .await
+            {
+                Ok(pending) => break pending,
+                Err(err) if restore_attempt < MAX_PENDING_WITHDRAWAL_RESTORE_RETRIES => {
+                    restore_attempt += 1;
+                    warn!(
+                        attempt = restore_attempt,
+                        max_attempts = MAX_PENDING_WITHDRAWAL_RESTORE_RETRIES,
+                        retry_delay_ms = restore_delay.as_millis() as u64,
+                        error = %err,
+                        "Failed to restore pending withdrawals, retrying"
+                    );
+                    tokio::time::sleep(restore_delay).await;
+                    restore_delay = restore_delay.saturating_mul(2);
+                }
+                Err(err) => panic!("failed to fetch pending withdrawals: {err}"),
+            }
+        };
 
         if !pending.is_empty() {
             let mut store = withdrawal_store.lock();
