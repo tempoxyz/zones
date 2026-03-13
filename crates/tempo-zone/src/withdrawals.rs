@@ -34,7 +34,11 @@ use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
-use crate::abi::{self, ZonePortal};
+use crate::{
+    abi::{self, ZonePortal},
+    nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
+};
+use tempo_alloy::rpc::TempoCallBuilderExt;
 
 /// Shared handle to the withdrawal store.
 #[derive(Clone)]
@@ -274,7 +278,8 @@ impl WithdrawalProcessor {
 
             let call = self
                 .portal
-                .processWithdrawal(withdrawal.clone(), remaining_queue);
+                .processWithdrawal(withdrawal.clone(), remaining_queue)
+                .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY);
 
             // When the withdrawal has a callback (`gasLimit > 0`), we must
             // override `eth_estimateGas` because the estimate only covers the
