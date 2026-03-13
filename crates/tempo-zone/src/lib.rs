@@ -17,6 +17,7 @@ pub mod l1;
 pub mod l1_state;
 mod metrics;
 mod node;
+pub mod nonce_keys;
 pub mod payload;
 pub mod precompiles;
 pub mod rpc;
@@ -40,7 +41,7 @@ use std::{sync::Arc, time::Duration};
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
-use tempo_alloy::TempoNetwork;
+use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tokio::sync::Notify;
 
 /// Configuration for all zone sequencer background tasks.
@@ -95,10 +96,14 @@ pub async fn spawn_zone_sequencer(
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
+    //
+    // `NonceKeyFiller` reads initial nonce values from the L1 NonceManager
+    // precompile on first use per (address, nonce_key) pair and caches them
+    // locally for subsequent sends.
     let wallet = alloy_network::EthereumWallet::from(signer);
-    // FIXME: dyn provider, check if not needed
     let l1_provider: DynProvider<TempoNetwork> =
         ProviderBuilder::new_with_network::<TempoNetwork>()
+            .with_nonce_key_filler()
             .wallet(wallet)
             .connect(&config.l1_rpc_url)
             .await

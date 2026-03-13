@@ -4,8 +4,11 @@
 //! the caller's address appears in an eligible indexed topic position for that
 //! event type. This prevents users from observing other users' token activity.
 
+use alloy_consensus::TxReceipt;
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, b256};
 use alloy_rpc_types_eth::{Filter, FilterSet, Log};
+use tempo_alloy::rpc::TempoTransactionReceipt;
 
 /// `Transfer(address,address,uint256)`
 pub const TRANSFER_TOPIC: B256 =
@@ -82,6 +85,15 @@ pub fn filter_logs(logs: Vec<Log>, caller: &Address) -> Vec<Log> {
         .collect()
 }
 
+/// Filters a receipt's logs for its sender and recomputes `logsBloom`.
+pub fn filter_receipt_logs(mut receipt: TempoTransactionReceipt) -> TempoTransactionReceipt {
+    let caller = receipt.from();
+    let logs = core::mem::take(&mut receipt.inner.inner.receipt.logs);
+    receipt.inner.inner.receipt.logs = filter_logs(logs, &caller);
+    receipt.inner.inner.logs_bloom = receipt.inner.inner.receipt.bloom();
+    receipt
+}
+
 /// Scopes a user-supplied filter to only match whitelisted TIP-20 event topics.
 ///
 /// Intersects the user's requested topic0 with [`WHITELISTED_TOPICS`].
@@ -119,7 +131,11 @@ pub fn scope_filter(filter: &mut Filter) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_primitives::{Address, Bytes, LogData, address, keccak256};
+    use alloy_consensus::ReceiptWithBloom;
+    use alloy_primitives::{Address, Bytes, LogData, TxHash, address, keccak256};
+    use alloy_rpc_types_eth::TransactionReceipt;
+    use tempo_alloy::rpc::TempoTransactionReceipt;
+    use tempo_primitives::{TempoReceipt, TempoTxType};
 
     /// Build a test `Log` with the given emitting address and topics.
     fn make_log(emitter: Address, topics: Vec<B256>) -> Log {
@@ -140,6 +156,34 @@ mod tests {
 
     fn caller_word(addr: &Address) -> B256 {
         B256::left_padding_from(addr.as_slice())
+    }
+
+    fn make_receipt(from: Address, logs: Vec<Log>) -> TempoTransactionReceipt {
+        let receipt = TempoReceipt {
+            tx_type: TempoTxType::Legacy,
+            success: true,
+            cumulative_gas_used: 21_000,
+            logs,
+        };
+
+        TempoTransactionReceipt {
+            inner: TransactionReceipt {
+                inner: ReceiptWithBloom::from(receipt),
+                transaction_hash: TxHash::with_last_byte(1),
+                transaction_index: Some(0),
+                block_hash: Some(B256::with_last_byte(2)),
+                block_number: Some(1),
+                gas_used: 21_000,
+                effective_gas_price: 1,
+                blob_gas_used: None,
+                blob_gas_price: None,
+                from,
+                to: Some(Address::ZERO),
+                contract_address: None,
+            },
+            fee_token: None,
+            fee_payer: from,
+        }
     }
 
     // ---------------------------------------------------------------
@@ -374,6 +418,47 @@ mod tests {
         let caller = address!("0x0000000000000000000000000000000000000001");
         let result = filter_logs(vec![], &caller);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_receipt_logs_recomputes_logs_and_bloom() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let other = address!("0x0000000000000000000000000000000000000002");
+        let third = address!("0x0000000000000000000000000000000000000003");
+        let hidden_topic = keccak256(b"PolicyUpdated(address,uint256)");
+
+        let visible = make_log(
+            Address::ZERO,
+            vec![TRANSFER_TOPIC, caller_word(&caller), caller_word(&other)],
+        );
+        let hidden_transfer = make_log(
+            Address::ZERO,
+            vec![TRANSFER_TOPIC, caller_word(&other), caller_word(&third)],
+        );
+        let hidden_event = make_log(Address::ZERO, vec![hidden_topic, caller_word(&caller)]);
+
+        let filtered = filter_receipt_logs(make_receipt(
+            caller,
+            vec![
+                visible.clone(),
+                hidden_transfer.clone(),
+                hidden_event.clone(),
+            ],
+        ));
+
+        assert_eq!(filtered.inner.logs(), std::slice::from_ref(&visible));
+        assert_eq!(
+            filtered.inner.inner.logs_bloom,
+            alloy_primitives::logs_bloom(filtered.inner.logs().iter().map(|log| log.as_ref())),
+        );
+        assert_ne!(
+            filtered.inner.inner.logs_bloom,
+            alloy_primitives::logs_bloom(
+                [visible, hidden_transfer, hidden_event]
+                    .iter()
+                    .map(|log| log.as_ref())
+            ),
+        );
     }
 
     // ---------------------------------------------------------------
