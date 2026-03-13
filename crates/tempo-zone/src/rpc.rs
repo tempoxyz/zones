@@ -5,13 +5,7 @@
 
 pub use zone_rpc::*;
 
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{collections::HashMap, sync::Arc};
 
 use alloy_network::{ReceiptResponse, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U256};
@@ -72,10 +66,6 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
     /// After bumping reth, use its `ActiveFilters` API to periodically sync this
     /// map and remove entries for filters that no longer exist on the reth side.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
-    /// Maps logical private-RPC filter IDs to the concrete backend filter IDs
-    /// needed to express caller-scoped event matching.
-    scoped_filters: Arc<Mutex<HashMap<FilterId, Vec<FilterId>>>>,
-    next_scoped_filter_id: AtomicU64,
 }
 
 impl<Api: EthApiTypes> TempoZoneRpc<Api> {
@@ -84,8 +74,6 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
         Self {
             eth,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
-            scoped_filters: Arc::new(Mutex::new(HashMap::new())),
-            next_scoped_filter_id: AtomicU64::new(1),
         }
     }
 
@@ -113,17 +101,6 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
             Some(owner) if *owner == auth.caller => Ok(()),
             _ => Err(JsonRpcError::invalid_params("filter not found")),
         }
-    }
-
-    fn next_scoped_filter_id(&self) -> FilterId {
-        FilterId::from(format!(
-            "zone-scoped-{}",
-            self.next_scoped_filter_id.fetch_add(1, Ordering::Relaxed)
-        ))
-    }
-
-    async fn scoped_backend_filters(&self, id: &FilterId) -> Option<Vec<FilterId>> {
-        self.scoped_filters.lock().await.get(id).cloned()
     }
 }
 
@@ -398,7 +375,7 @@ where
         })
     }
 
-    fn get_logs(&self, filter: Filter, auth: AuthContext) -> BoxFut<'_> {
+    fn get_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             if auth.is_sequencer {
                 let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
@@ -407,93 +384,35 @@ where
                 return to_raw(&logs);
             }
 
-            let scoped_filters = zone_rpc::filter::scope_filter(&filter, &auth.caller);
-            if scoped_filters.is_empty() {
-                return to_raw(&Vec::<alloy_rpc_types_eth::Log>::new());
-            }
-
-            let mut logs = Vec::new();
-            for scoped_filter in scoped_filters {
-                logs.extend(
-                    EthFilterApiServer::logs(&self.eth.filter, scoped_filter)
-                        .await
-                        .map_err(internal)?,
-                );
-            }
-
-            let filtered =
-                zone_rpc::filter::filter_logs(zone_rpc::filter::dedup_logs(logs), &auth.caller);
+            zone_rpc::filter::scope_filter(&mut filter);
+            let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
+                .await
+                .map_err(internal)?;
+            let filtered = zone_rpc::filter::filter_logs(logs, &auth.caller);
             to_raw(&filtered)
         })
     }
 
-    fn new_filter(&self, filter: Filter, auth: AuthContext) -> BoxFut<'_> {
+    fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if auth.is_sequencer {
-                let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
-                    .await
-                    .map_err(internal)?;
-                self.filter_owners
-                    .lock()
-                    .await
-                    .insert(id.clone(), auth.caller);
-                return to_raw(&id);
+            if !auth.is_sequencer {
+                zone_rpc::filter::scope_filter(&mut filter);
             }
 
-            let scoped_filters = zone_rpc::filter::scope_filter(&filter, &auth.caller);
-            let mut backend_ids = Vec::with_capacity(scoped_filters.len());
-
-            for scoped_filter in scoped_filters {
-                match EthFilterApiServer::new_filter(&self.eth.filter, scoped_filter).await {
-                    Ok(id) => backend_ids.push(id),
-                    Err(err) => {
-                        for backend_id in backend_ids {
-                            let _ =
-                                EthFilterApiServer::uninstall_filter(&self.eth.filter, backend_id)
-                                    .await;
-                        }
-                        return Err(internal(err));
-                    }
-                }
-            }
-
-            let public_id = self.next_scoped_filter_id();
+            let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
+                .await
+                .map_err(internal)?;
             self.filter_owners
                 .lock()
                 .await
-                .insert(public_id.clone(), auth.caller);
-            self.scoped_filters
-                .lock()
-                .await
-                .insert(public_id.clone(), backend_ids);
-            to_raw(&public_id)
+                .insert(id.clone(), auth.caller);
+            to_raw(&id)
         })
     }
 
     fn get_filter_logs(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
-
-            if !auth.is_sequencer {
-                if let Some(backend_ids) = self.scoped_backend_filters(&id).await {
-                    let mut logs = Vec::new();
-                    for backend_id in backend_ids {
-                        logs.extend(
-                            self.eth
-                                .filter
-                                .filter_logs(backend_id)
-                                .await
-                                .map_err(internal)?,
-                        );
-                    }
-
-                    let filtered = zone_rpc::filter::filter_logs(
-                        zone_rpc::filter::dedup_logs(logs),
-                        &auth.caller,
-                    );
-                    return to_raw(&filtered);
-                }
-            }
 
             let logs = self.eth.filter.filter_logs(id).await.map_err(internal)?;
 
@@ -509,41 +428,6 @@ where
     fn get_filter_changes(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
-
-            if !auth.is_sequencer {
-                if let Some(backend_ids) = self.scoped_backend_filters(&id).await {
-                    let mut logs = Vec::new();
-                    for backend_id in backend_ids {
-                        let changes = self
-                            .eth
-                            .filter
-                            .filter_changes(backend_id)
-                            .await
-                            .map_err(internal)?;
-
-                        match changes {
-                            FilterChanges::Logs(new_logs) => logs.extend(new_logs),
-                            FilterChanges::Empty => {}
-                            FilterChanges::Hashes(_) | FilterChanges::Transactions(_) => {}
-                        }
-                    }
-
-                    let filtered = zone_rpc::filter::filter_logs(
-                        zone_rpc::filter::dedup_logs(logs),
-                        &auth.caller,
-                    );
-
-                    if filtered.is_empty() {
-                        return to_raw(
-                            &FilterChanges::<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>>::Empty,
-                        );
-                    }
-
-                    return to_raw(&FilterChanges::<
-                        alloy_rpc_types_eth::Transaction<TempoTxEnvelope>,
-                    >::Logs(filtered));
-                }
-            }
 
             let changes = self.eth.filter.filter_changes(id).await.map_err(internal)?;
 
@@ -588,19 +472,6 @@ where
     fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
-
-            if let Some(backend_ids) = self.scoped_backend_filters(&id).await {
-                let mut removed = true;
-                for backend_id in backend_ids {
-                    removed &= EthFilterApiServer::uninstall_filter(&self.eth.filter, backend_id)
-                        .await
-                        .map_err(internal)?;
-                }
-
-                self.scoped_filters.lock().await.remove(&id);
-                self.filter_owners.lock().await.remove(&id);
-                return to_raw(&removed);
-            }
 
             let result = EthFilterApiServer::uninstall_filter(&self.eth.filter, id.clone())
                 .await

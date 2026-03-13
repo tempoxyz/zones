@@ -37,9 +37,6 @@ pub const WHITELISTED_TOPICS: [B256; 5] = [
     BURN_TOPIC,
 ];
 
-const DUAL_PARTY_TOPIC_POSITIONS: [usize; 2] = [1, 2];
-const SINGLE_PARTY_TOPIC_POSITIONS: [usize; 1] = [1];
-
 /// Returns `true` if `caller` appears in an eligible indexed-topic position
 /// for the log's event type.
 ///
@@ -80,29 +77,11 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
 pub fn filter_logs(logs: Vec<Log>, caller: &Address) -> Vec<Log> {
     logs.into_iter()
         .filter(|log| {
-            log.topic0().is_some_and(|t| WHITELISTED_TOPICS.contains(t))
+            log.address() == ZONE_TOKEN_ADDRESS
+                && log.topic0().is_some_and(|t| WHITELISTED_TOPICS.contains(t))
                 && is_caller_eligible(log, caller)
         })
         .collect()
-}
-
-/// Removes duplicate logs while preserving the backend's original ordering.
-pub fn dedup_logs(logs: Vec<Log>) -> Vec<Log> {
-    let mut unique = Vec::with_capacity(logs.len());
-    for log in logs {
-        if !unique.iter().any(|existing| existing == &log) {
-            unique.push(log);
-        }
-    }
-    unique
-}
-
-fn relevant_topic_positions(topic0: B256) -> &'static [usize] {
-    match topic0 {
-        TRANSFER_TOPIC | APPROVAL_TOPIC | TRANSFER_WITH_MEMO_TOPIC => &DUAL_PARTY_TOPIC_POSITIONS,
-        MINT_TOPIC | BURN_TOPIC => &SINGLE_PARTY_TOPIC_POSITIONS,
-        _ => &[],
-    }
 }
 
 fn scoped_topic0(filter: &Filter) -> Vec<B256> {
@@ -118,64 +97,31 @@ fn scoped_topic0(filter: &Filter) -> Vec<B256> {
     }
 }
 
-fn scoped_address(filter: &Filter) -> Option<FilterSet<Address>> {
-    if filter.address.is_empty() {
-        return Some(FilterSet::from(ZONE_TOKEN_ADDRESS));
-    }
-
-    filter
-        .address
-        .iter()
-        .all(|address| *address == ZONE_TOKEN_ADDRESS)
-        .then_some(FilterSet::from(ZONE_TOKEN_ADDRESS))
-}
-
-fn scoped_topic(filter: &FilterSet<B256>, caller_word: B256) -> Option<FilterSet<B256>> {
-    if filter.is_empty() {
-        return Some(FilterSet::from(caller_word));
-    }
-
-    filter
-        .contains(&caller_word)
-        .then_some(FilterSet::from(caller_word))
-}
-
-/// Scopes a user-supplied log filter to the zone token and the authenticated
-/// caller's relevant TIP-20 event topic positions.
+/// Scopes a user-supplied log filter to the zone token and whitelisted TIP-20
+/// event topics.
 ///
-/// Ethereum filters can express OR within a single topic position, but not
-/// across different topic positions. To encode rules like
-/// `Transfer.from == caller OR Transfer.to == caller`, this returns a small
-/// set of backend filters that can be queried independently and unioned.
-///
-/// The post-filter in [`filter_logs`] remains the final privacy check; these
-/// scoped filters reduce backend scan volume and timing side-channels.
-pub fn scope_filter(filter: &Filter, caller: &Address) -> Vec<Filter> {
-    let Some(address) = scoped_address(filter) else {
-        return Vec::new();
+/// The post-filter in [`filter_logs`] is the authoritative privacy check; this
+/// pre-scope keeps backend scans aligned with the zone token surface and avoids
+/// storing separate internal filter IDs for private callers.
+pub fn scope_filter(filter: &mut Filter) {
+    filter.address = if filter.address.is_empty()
+        || filter
+            .address
+            .iter()
+            .all(|address| *address == ZONE_TOKEN_ADDRESS)
+    {
+        FilterSet::from(ZONE_TOKEN_ADDRESS)
+    } else {
+        filter.topics[0] = FilterSet::from(B256::ZERO);
+        FilterSet::from(ZONE_TOKEN_ADDRESS)
     };
 
-    let caller_word = B256::left_padding_from(caller.as_slice());
-    let mut scoped_filters = Vec::new();
-
-    for topic0 in scoped_topic0(filter) {
-        for &position in relevant_topic_positions(topic0) {
-            let Some(topic_filter) = scoped_topic(&filter.topics[position], caller_word) else {
-                continue;
-            };
-
-            let mut scoped = filter.clone();
-            scoped.address = address.clone();
-            scoped.topics[0] = FilterSet::from(topic0);
-            scoped.topics[position] = topic_filter;
-
-            if !scoped_filters.contains(&scoped) {
-                scoped_filters.push(scoped);
-            }
-        }
+    let scoped_topic0 = scoped_topic0(filter);
+    if scoped_topic0.is_empty() {
+        filter.topics[0] = FilterSet::from(B256::ZERO);
+    } else {
+        filter.topics[0] = FilterSet::from(scoped_topic0);
     }
-
-    scoped_filters
 }
 
 #[cfg(test)]
@@ -407,24 +353,27 @@ mod tests {
 
     #[test]
     fn filter_logs_keeps_eligible_and_drops_others() {
-        let zone_token = address!("0x000000000000000000000000000000000000aaaa");
         let caller = address!("0x0000000000000000000000000000000000000001");
         let other = address!("0x0000000000000000000000000000000000000002");
 
         let eligible = make_log(
-            zone_token,
+            ZONE_TOKEN_ADDRESS,
             vec![TRANSFER_TOPIC, caller_word(&caller), caller_word(&other)],
         );
         let wrong_topic = make_log(
-            zone_token,
+            ZONE_TOKEN_ADDRESS,
             vec![B256::with_last_byte(0x01), caller_word(&caller)],
         );
+        let wrong_address = make_log(
+            address!("0x000000000000000000000000000000000000dead"),
+            vec![TRANSFER_TOPIC, caller_word(&caller), caller_word(&other)],
+        );
         let not_eligible = make_log(
-            zone_token,
+            ZONE_TOKEN_ADDRESS,
             vec![TRANSFER_TOPIC, caller_word(&other), caller_word(&other)],
         );
 
-        let logs = vec![eligible.clone(), wrong_topic, not_eligible];
+        let logs = vec![eligible.clone(), wrong_topic, wrong_address, not_eligible];
         let result = filter_logs(logs, &caller);
 
         assert_eq!(result.len(), 1);
@@ -443,128 +392,61 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn scope_filter_expands_all_whitelisted_topics() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let filters = scope_filter(&Filter::default(), &caller);
+    fn scope_filter_scopes_zone_token_and_whitelisted_topics() {
+        let mut filter = Filter::default();
+        scope_filter(&mut filter);
 
-        assert_eq!(filters.len(), 8);
-        assert!(
-            filters
-                .iter()
-                .all(|filter| filter.address == FilterSet::from(ZONE_TOKEN_ADDRESS))
-        );
+        assert_eq!(filter.address, FilterSet::from(ZONE_TOKEN_ADDRESS));
+        for topic in &WHITELISTED_TOPICS {
+            assert!(filter.topics[0].contains(topic));
+        }
+        assert_eq!(filter.topics[0].len(), WHITELISTED_TOPICS.len());
     }
 
     #[test]
     fn scope_filter_intersects_topic0() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
         let bogus_topic = B256::with_last_byte(0xff);
         let mut filter = Filter::default();
         filter.topics[0] = FilterSet::from(vec![TRANSFER_TOPIC, bogus_topic]);
-        let filters = scope_filter(&filter, &caller);
+        scope_filter(&mut filter);
 
-        assert_eq!(filters.len(), 2);
-        assert!(
-            filters
-                .iter()
-                .all(|filter| filter.topics[0] == FilterSet::from(TRANSFER_TOPIC))
-        );
+        assert_eq!(filter.address, FilterSet::from(ZONE_TOKEN_ADDRESS));
+        assert!(filter.topics[0].contains(&TRANSFER_TOPIC));
+        assert!(!filter.topics[0].contains(&bogus_topic));
+        assert_eq!(filter.topics[0].len(), 1);
     }
 
     #[test]
     fn scope_filter_empty_intersection() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
         let bogus = B256::with_last_byte(0xff);
         let mut filter = Filter::default();
         filter.topics[0] = FilterSet::from(bogus);
-        assert!(scope_filter(&filter, &caller).is_empty());
+        scope_filter(&mut filter);
+
+        assert_eq!(filter.address, FilterSet::from(ZONE_TOKEN_ADDRESS));
+        assert_eq!(filter.topics[0], FilterSet::from(B256::ZERO));
     }
 
     #[test]
     fn scope_filter_rejects_non_zone_token_addresses() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
         let mut filter = Filter::default();
         filter.address = FilterSet::from(address!("0x000000000000000000000000000000000000dead"));
+        scope_filter(&mut filter);
 
-        assert!(scope_filter(&filter, &caller).is_empty());
+        assert_eq!(filter.address, FilterSet::from(ZONE_TOKEN_ADDRESS));
+        assert_eq!(filter.topics[0], FilterSet::from(B256::ZERO));
     }
 
     #[test]
     fn scope_filter_rejects_mixed_address_sets() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
         let mut filter = Filter::default();
         filter.address = FilterSet::from(vec![
             ZONE_TOKEN_ADDRESS,
             address!("0x000000000000000000000000000000000000dead"),
         ]);
+        scope_filter(&mut filter);
 
-        assert!(scope_filter(&filter, &caller).is_empty());
-    }
-
-    #[test]
-    fn scope_filter_injects_caller_into_dual_party_positions() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let mut filter = Filter::default();
-        filter.topics[0] = FilterSet::from(TRANSFER_TOPIC);
-
-        let filters = scope_filter(&filter, &caller);
-        assert_eq!(filters.len(), 2);
-
-        let caller_word = caller_word(&caller);
-        assert!(
-            filters
-                .iter()
-                .any(|filter| filter.topics[1] == FilterSet::from(caller_word))
-        );
-        assert!(
-            filters
-                .iter()
-                .any(|filter| filter.topics[2] == FilterSet::from(caller_word))
-        );
-    }
-
-    #[test]
-    fn scope_filter_respects_existing_topic_constraints() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let other = address!("0x0000000000000000000000000000000000000002");
-        let mut filter = Filter::default();
-        filter.topics[0] = FilterSet::from(TRANSFER_TOPIC);
-        filter.topics[1] = FilterSet::from(caller_word(&other));
-
-        let filters = scope_filter(&filter, &caller);
-
-        assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].topics[1], FilterSet::from(caller_word(&other)));
-        assert_eq!(filters[0].topics[2], FilterSet::from(caller_word(&caller)));
-    }
-
-    #[test]
-    fn scope_filter_dedups_identical_variants() {
-        let caller = address!("0x0000000000000000000000000000000000000001");
-        let mut filter = Filter::default();
-        filter.topics[0] = FilterSet::from(TRANSFER_TOPIC);
-        filter.topics[1] = FilterSet::from(caller_word(&caller));
-        filter.topics[2] = FilterSet::from(caller_word(&caller));
-
-        let filters = scope_filter(&filter, &caller);
-
-        assert_eq!(filters.len(), 1);
-        assert_eq!(filters[0].topics[1], FilterSet::from(caller_word(&caller)));
-        assert_eq!(filters[0].topics[2], FilterSet::from(caller_word(&caller)));
-    }
-
-    #[test]
-    fn dedup_logs_preserves_first_copy() {
-        let log = make_log(
-            ZONE_TOKEN_ADDRESS,
-            vec![
-                TRANSFER_TOPIC,
-                caller_word(&Address::ZERO),
-                caller_word(&Address::ZERO),
-            ],
-        );
-
-        let deduped = dedup_logs(vec![log.clone(), log.clone()]);
-        assert_eq!(deduped, vec![log]);
+        assert_eq!(filter.address, FilterSet::from(ZONE_TOKEN_ADDRESS));
+        assert_eq!(filter.topics[0], FilterSet::from(B256::ZERO));
     }
 }
