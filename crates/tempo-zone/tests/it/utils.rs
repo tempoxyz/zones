@@ -42,6 +42,13 @@ pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 /// Default poll interval for e2e tests.
 pub(crate) const DEFAULT_POLL: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// Gas limit for `ZoneOutbox.requestWithdrawal` test transactions.
+///
+/// The call now needs enough headroom for a fixed-gas `transferFrom`, the
+/// subsequent `burn`, and storage writes for callback payloads in router-based
+/// withdrawals.
+const WITHDRAWAL_TX_GAS: u64 = 1_000_000;
+
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
 
@@ -2080,7 +2087,7 @@ impl ZoneAccount {
                 fallback_recipient,
                 args.data,
             )
-            .gas(300_000)
+            .gas(WITHDRAWAL_TX_GAS)
             .send()
             .await?
             .get_receipt()

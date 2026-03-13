@@ -19,15 +19,20 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
+use revm::precompile::PrecompileError;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::TempoChainSpec;
+use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 use tempo_evm::{
     TempoBlockAssembler, TempoBlockEnv, TempoBlockExecutionCtx, TempoEvmConfig, TempoEvmError,
     TempoHaltReason, TempoNextBlockEnvAttributes,
     evm::{TempoEvm, TempoEvmFactory},
 };
 use tempo_payload_types::TempoExecutionData;
+use tempo_precompiles::tip403_registry::{ALLOW_ALL_POLICY_ID, REJECT_ALL_POLICY_ID};
 use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
+use zone_precompiles::policy::PolicyCheck;
+use zone_primitives::policy::AuthRole;
 
 use crate::executor::ZoneBlockExecutor;
 
@@ -42,6 +47,75 @@ use crate::{
 };
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
+
+/// Policy backend used by the zone TIP-20 wrapper in both online and offline execution modes.
+///
+/// Offline/replay paths do not have live L1 policy data, but they still need the
+/// zone TIP-20 wrapper for privacy, fixed-gas accounting, and bridge auth checks.
+/// In that mode we preserve the prior allow-all transfer policy behavior.
+#[derive(Debug, Clone)]
+enum ZonePolicyBackend {
+    Configured(PolicyProvider),
+    AllowAll,
+}
+
+impl PolicyCheck for ZonePolicyBackend {
+    fn is_authorized(
+        &self,
+        policy_id: u64,
+        user: Address,
+        role: AuthRole,
+    ) -> Result<bool, PrecompileError> {
+        match self {
+            Self::Configured(provider) => {
+                PolicyCheck::is_authorized(provider, policy_id, user, role)
+            }
+            Self::AllowAll => Ok(true),
+        }
+    }
+
+    fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64, PrecompileError> {
+        match self {
+            Self::Configured(provider) => PolicyCheck::resolve_transfer_policy_id(provider, token),
+            Self::AllowAll => Ok(ALLOW_ALL_POLICY_ID),
+        }
+    }
+
+    fn policy_type_sync(&self, policy_id: u64) -> Result<PolicyType, PrecompileError> {
+        match self {
+            Self::Configured(provider) => PolicyCheck::policy_type_sync(provider, policy_id),
+            Self::AllowAll => Ok(PolicyType::BLACKLIST),
+        }
+    }
+
+    fn compound_policy_data(&self, policy_id: u64) -> Result<(u64, u64, u64), PrecompileError> {
+        match self {
+            Self::Configured(provider) => PolicyCheck::compound_policy_data(provider, policy_id),
+            Self::AllowAll => Ok((
+                ALLOW_ALL_POLICY_ID,
+                ALLOW_ALL_POLICY_ID,
+                ALLOW_ALL_POLICY_ID,
+            )),
+        }
+    }
+
+    fn policy_exists(&self, policy_id: u64) -> Result<bool, PrecompileError> {
+        match self {
+            Self::Configured(provider) => PolicyCheck::policy_exists(provider, policy_id),
+            Self::AllowAll => Ok(matches!(
+                policy_id,
+                ALLOW_ALL_POLICY_ID | REJECT_ALL_POLICY_ID
+            )),
+        }
+    }
+
+    fn policy_id_counter(&self) -> u64 {
+        match self {
+            Self::Configured(provider) => PolicyCheck::policy_id_counter(provider),
+            Self::AllowAll => ALLOW_ALL_POLICY_ID,
+        }
+    }
+}
 
 /// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the
 /// [`TempoStateReader`] precompile for reading Tempo L1 storage from zone contracts.
@@ -84,60 +158,66 @@ impl ZoneEvmFactory {
         precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
             Some(ZoneTokenFactory::create(&cfg))
         });
-        if let Some(ref policy_provider) = self.policy_provider {
-            let provider = policy_provider.clone();
-            let registry = ZoneTip403ProxyRegistry::new(provider.clone());
-            let sequencer = self.sequencer;
+        let policy_backend = self
+            .policy_provider
+            .clone()
+            .map(ZonePolicyBackend::Configured)
+            .unwrap_or(ZonePolicyBackend::AllowAll);
+        let registry = ZoneTip403ProxyRegistry::new(policy_backend.clone());
+        let sequencer = self.sequencer;
 
+        if let Some(provider) = self.policy_provider.clone() {
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
-                Some(ZoneTip403ProxyRegistry::create(provider.clone()))
-            });
-
-            // Override the TIP-20 precompile lookup so that all TIP-20 token
-            // calls go through ZoneTip20Token (which checks the registry)
-            // instead of the vanilla TIP20Precompile (which reads empty local
-            // TIP403Registry storage).
-            //
-            // This replaces the upstream `extend_tempo_precompiles` lookup, so
-            // we must also handle the non-TIP-20 Tempo precompiles that are
-            // only registered via that lookup (FeeManager, StablecoinDEX, etc.).
-            // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
-            // static map via `apply_precompile` and take priority over this.
-            let zone_cfg = cfg.clone();
-            precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
-                use tempo_precompiles::{
-                    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
-                    TIP_FEE_MANAGER_ADDRESS, VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
-                    account_keychain::AccountKeychain, nonce::NonceManager,
-                    stablecoin_dex::StablecoinDEX, tip_fee_manager::TipFeeManager,
-                    tip20::is_tip20_prefix, validator_config::ValidatorConfig,
-                    validator_config_v2::ValidatorConfigV2,
-                };
-
-                if is_tip20_prefix(*address) {
-                    Some(ZoneTip20Token::create(
-                        *address,
-                        &zone_cfg,
-                        registry.clone(),
-                        sequencer,
-                    ))
-                } else if *address == TIP_FEE_MANAGER_ADDRESS {
-                    Some(TipFeeManager::create_precompile(&zone_cfg))
-                } else if *address == STABLECOIN_DEX_ADDRESS {
-                    Some(StablecoinDEX::create_precompile(&zone_cfg))
-                } else if *address == NONCE_PRECOMPILE_ADDRESS {
-                    Some(NonceManager::create_precompile(&zone_cfg))
-                } else if *address == VALIDATOR_CONFIG_ADDRESS {
-                    Some(ValidatorConfig::create_precompile(&zone_cfg))
-                } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-                    Some(AccountKeychain::create_precompile(&zone_cfg))
-                } else if *address == VALIDATOR_CONFIG_V2_ADDRESS {
-                    Some(ValidatorConfigV2::create_precompile(&zone_cfg))
-                } else {
-                    None
-                }
+                Some(ZoneTip403ProxyRegistry::create(
+                    ZonePolicyBackend::Configured(provider.clone()),
+                ))
             });
         }
+
+        // Override the TIP-20 precompile lookup so that all TIP-20 token
+        // calls go through ZoneTip20Token (which checks the registry)
+        // instead of the vanilla TIP20Precompile (which reads empty local
+        // TIP403Registry storage).
+        //
+        // This replaces the upstream `extend_tempo_precompiles` lookup, so
+        // we must also handle the non-TIP-20 Tempo precompiles that are
+        // only registered via that lookup (FeeManager, StablecoinDEX, etc.).
+        // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
+        // static map via `apply_precompile` and take priority over this.
+        let zone_cfg = cfg.clone();
+        precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
+            use tempo_precompiles::{
+                ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
+                TIP_FEE_MANAGER_ADDRESS, VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
+                account_keychain::AccountKeychain, nonce::NonceManager,
+                stablecoin_dex::StablecoinDEX, tip_fee_manager::TipFeeManager,
+                tip20::is_tip20_prefix, validator_config::ValidatorConfig,
+                validator_config_v2::ValidatorConfigV2,
+            };
+
+            if is_tip20_prefix(*address) {
+                Some(ZoneTip20Token::create(
+                    *address,
+                    &zone_cfg,
+                    registry.clone(),
+                    sequencer,
+                ))
+            } else if *address == TIP_FEE_MANAGER_ADDRESS {
+                Some(TipFeeManager::create_precompile(&zone_cfg))
+            } else if *address == STABLECOIN_DEX_ADDRESS {
+                Some(StablecoinDEX::create_precompile(&zone_cfg))
+            } else if *address == NONCE_PRECOMPILE_ADDRESS {
+                Some(NonceManager::create_precompile(&zone_cfg))
+            } else if *address == VALIDATOR_CONFIG_ADDRESS {
+                Some(ValidatorConfig::create_precompile(&zone_cfg))
+            } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
+                Some(AccountKeychain::create_precompile(&zone_cfg))
+            } else if *address == VALIDATOR_CONFIG_V2_ADDRESS {
+                Some(ValidatorConfigV2::create_precompile(&zone_cfg))
+            } else {
+                None
+            }
+        });
         evm
     }
 }
