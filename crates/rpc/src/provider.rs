@@ -78,6 +78,7 @@ impl ZoneProvider {
         if now + REFRESH_BUFFER_SECS < state.expires_at {
             return state.provider.clone();
         }
+        // Refresh
         match build_provider_with_token(&self.config) {
             Ok((provider, expires_at)) => {
                 state.provider = provider;

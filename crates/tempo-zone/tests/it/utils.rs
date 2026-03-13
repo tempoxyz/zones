@@ -53,15 +53,6 @@ fn next_unique_chain_id() -> u64 {
     NEXT_CHAIN_ID.fetch_add(1, Ordering::Relaxed)
 }
 
-fn test_dev_signer() -> alloy_signer_local::PrivateKeySigner {
-    MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .index(0)
-        .expect("valid derivation index")
-        .build()
-        .expect("valid test mnemonic")
-}
-
 /// Default timeout for polling loops in e2e tests.
 pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
@@ -351,7 +342,6 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
-            test_dev_signer().address(),
             throwaway_key,
         )
         .await
@@ -376,7 +366,6 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
-            test_dev_signer().address(),
             sequencer_key,
         )
         .await
@@ -420,7 +409,6 @@ impl ZoneTestNode {
             genesis_tempo_block_number,
             chain_id,
             None,
-            Address::ZERO,
             throwaway_key,
         )
         .await
@@ -432,7 +420,6 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
         custom_genesis: Option<Genesis>,
-        sequencer: Address,
         sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
         let tasks = TaskManager::current();
@@ -448,7 +435,7 @@ impl ZoneTestNode {
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
-            sequencer,
+            Address::ZERO, // sequencer address (overridden by sequencer_key)
             sequencer_key,
             4,
             std::time::Duration::from_millis(100),
