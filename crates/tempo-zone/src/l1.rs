@@ -25,7 +25,9 @@ use crate::{
     abi::{
         self, EncryptedDeposit as AbiEncryptedDeposit,
         EncryptedDepositPayload as AbiEncryptedDepositPayload,
-        ZonePortal::{self, DepositMade, EncryptedDepositMade, TokenEnabled, ZonePortalEvents},
+        ZonePortal::{
+            self, BounceBack, DepositMade, EncryptedDepositMade, TokenEnabled, ZonePortalEvents,
+        },
     },
     l1_state::tip403::PolicyEvent,
 };
@@ -704,6 +706,18 @@ impl Deposit {
             memo: event.memo,
         }
     }
+
+    /// Create a bounce-back deposit from an event.
+    pub fn from_bounce_back(event: BounceBack, portal_address: Address) -> Self {
+        Self {
+            token: event.token,
+            sender: portal_address,
+            to: event.fallbackRecipient,
+            amount: event.amount,
+            fee: 0,
+            memo: B256::ZERO,
+        }
+    }
 }
 
 /// An encrypted deposit extracted from L1.
@@ -852,9 +866,10 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 3] = [
+    const SIGNATURE_HASHES: [B256; 4] = [
         DepositMade::SIGNATURE_HASH,
         EncryptedDepositMade::SIGNATURE_HASH,
+        BounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
     ];
 
@@ -902,6 +917,20 @@ impl L1PortalEvents {
                 );
                 self.deposits
                     .push(L1Deposit::Encrypted(EncryptedDeposit::from_event(event)));
+            }
+            ZonePortalEvents::BounceBack(event) => {
+                info!(
+                    l1_block = block_number,
+                    token = %event.token,
+                    to = %event.fallbackRecipient,
+                    amount = %event.amount,
+                    "↩️ Bounce-back deposit from L1"
+                );
+                self.deposits
+                    .push(L1Deposit::Regular(Deposit::from_bounce_back(
+                        event,
+                        log.address(),
+                    )));
             }
             ZonePortalEvents::TokenEnabled(event) => {
                 info!(
