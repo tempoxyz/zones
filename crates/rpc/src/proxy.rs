@@ -4,10 +4,18 @@
 //! applies privacy redactions on the responses. This allows the private RPC
 //! service to run as a standalone process without linking against reth.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+};
 
 use alloy_primitives::{Address, Bytes};
-use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, Log, state::StateOverride};
+use alloy_rpc_types_eth::{
+    BlockId, BlockNumberOrTag, Filter, FilterChanges, FilterId, Log, state::StateOverride,
+};
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use tempo_alloy::rpc::TempoTransactionRequest;
@@ -37,6 +45,10 @@ pub struct ProxyZoneRpc {
     upstream_url: String,
     /// Maps filter IDs to the authenticated account that created them.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
+    /// Maps logical private-RPC filter IDs to the upstream filter IDs that
+    /// encode caller-scoped event matching.
+    scoped_filters: Arc<Mutex<HashMap<FilterId, Vec<FilterId>>>>,
+    next_scoped_filter_id: AtomicU64,
 }
 
 impl ProxyZoneRpc {
@@ -46,6 +58,8 @@ impl ProxyZoneRpc {
             client: reqwest::Client::new(),
             upstream_url,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
+            scoped_filters: Arc::new(Mutex::new(HashMap::new())),
+            next_scoped_filter_id: AtomicU64::new(1),
         }
     }
 
@@ -98,6 +112,17 @@ impl ProxyZoneRpc {
             Some(owner) if *owner == auth.caller => Ok(()),
             _ => Err(JsonRpcError::invalid_params("filter not found")),
         }
+    }
+
+    fn next_scoped_filter_id(&self) -> FilterId {
+        FilterId::from(format!(
+            "zone-scoped-{}",
+            self.next_scoped_filter_id.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    async fn scoped_backend_filters(&self, id: &FilterId) -> Option<Vec<FilterId>> {
+        self.scoped_filters.lock().await.get(id).cloned()
     }
 }
 
@@ -371,7 +396,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
         })
     }
 
-    fn get_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
+    fn get_logs(&self, filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             if auth.is_sequencer {
                 return self
@@ -379,33 +404,91 @@ impl ZoneRpcApi for ProxyZoneRpc {
                     .await;
             }
 
-            filter::scope_filter(&mut filter);
-            let result = self
-                .forward("eth_getLogs", serde_json::json!([filter]))
-                .await?;
-            let logs: Vec<Log> = serde_json::from_str(result.get()).map_err(internal)?;
-            let filtered = filter::filter_logs(logs, &auth.caller);
+            let scoped_filters = filter::scope_filter(&filter, &auth.caller);
+            if scoped_filters.is_empty() {
+                return to_raw(&Vec::<Log>::new());
+            }
+
+            let mut logs = Vec::new();
+            for scoped_filter in scoped_filters {
+                let result = self
+                    .forward("eth_getLogs", serde_json::json!([scoped_filter]))
+                    .await?;
+                logs.extend(serde_json::from_str::<Vec<Log>>(result.get()).map_err(internal)?);
+            }
+
+            let filtered = filter::filter_logs(filter::dedup_logs(logs), &auth.caller);
             to_raw(&filtered)
         })
     }
 
-    fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
+    fn new_filter(&self, filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                filter::scope_filter(&mut filter);
+            if auth.is_sequencer {
+                let result = self
+                    .forward("eth_newFilter", serde_json::json!([filter]))
+                    .await?;
+                let id: FilterId = serde_json::from_str(result.get()).map_err(internal)?;
+                self.filter_owners.lock().await.insert(id, auth.caller);
+                return Ok(result);
             }
-            let result = self
-                .forward("eth_newFilter", serde_json::json!([filter]))
-                .await?;
-            let id: FilterId = serde_json::from_str(result.get()).map_err(internal)?;
-            self.filter_owners.lock().await.insert(id, auth.caller);
-            Ok(result)
+
+            let scoped_filters = filter::scope_filter(&filter, &auth.caller);
+            let mut backend_ids = Vec::with_capacity(scoped_filters.len());
+
+            for scoped_filter in scoped_filters {
+                match self
+                    .forward("eth_newFilter", serde_json::json!([scoped_filter]))
+                    .await
+                {
+                    Ok(result) => {
+                        let id: FilterId = serde_json::from_str(result.get()).map_err(internal)?;
+                        backend_ids.push(id);
+                    }
+                    Err(err) => {
+                        for backend_id in backend_ids {
+                            let _ = self
+                                .forward("eth_uninstallFilter", serde_json::json!([backend_id]))
+                                .await;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+
+            let public_id = self.next_scoped_filter_id();
+            self.filter_owners
+                .lock()
+                .await
+                .insert(public_id.clone(), auth.caller);
+            self.scoped_filters
+                .lock()
+                .await
+                .insert(public_id.clone(), backend_ids);
+            to_raw(&public_id)
         })
     }
 
     fn get_filter_logs(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
+
+            if !auth.is_sequencer {
+                if let Some(backend_ids) = self.scoped_backend_filters(&id).await {
+                    let mut logs = Vec::new();
+                    for backend_id in backend_ids {
+                        let result = self
+                            .forward("eth_getFilterLogs", serde_json::json!([backend_id]))
+                            .await?;
+                        logs.extend(
+                            serde_json::from_str::<Vec<Log>>(result.get()).map_err(internal)?,
+                        );
+                    }
+
+                    let filtered = filter::filter_logs(filter::dedup_logs(logs), &auth.caller);
+                    return to_raw(&filtered);
+                }
+            }
 
             let result = self
                 .forward("eth_getFilterLogs", serde_json::json!([id]))
@@ -424,6 +507,34 @@ impl ZoneRpcApi for ProxyZoneRpc {
     fn get_filter_changes(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
+
+            if !auth.is_sequencer {
+                if let Some(backend_ids) = self.scoped_backend_filters(&id).await {
+                    let mut logs = Vec::new();
+                    for backend_id in backend_ids {
+                        let result = self
+                            .forward("eth_getFilterChanges", serde_json::json!([backend_id]))
+                            .await?;
+                        let changes: FilterChanges =
+                            serde_json::from_str(result.get()).map_err(internal)?;
+
+                        match changes {
+                            FilterChanges::Logs(new_logs) => logs.extend(new_logs),
+                            FilterChanges::Empty => {}
+                            FilterChanges::Hashes(_) | FilterChanges::Transactions(_) => {}
+                        }
+                    }
+
+                    let filtered = filter::filter_logs(filter::dedup_logs(logs), &auth.caller);
+                    if filtered.is_empty() {
+                        return to_raw(&FilterChanges::<alloy_rpc_types_eth::Transaction>::Empty);
+                    }
+
+                    return to_raw(&FilterChanges::<alloy_rpc_types_eth::Transaction>::Logs(
+                        filtered,
+                    ));
+                }
+            }
 
             let result = self
                 .forward("eth_getFilterChanges", serde_json::json!([id]))
@@ -458,6 +569,20 @@ impl ZoneRpcApi for ProxyZoneRpc {
     fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
+
+            if let Some(backend_ids) = self.scoped_backend_filters(&id).await {
+                let mut removed = true;
+                for backend_id in backend_ids {
+                    let result = self
+                        .forward("eth_uninstallFilter", serde_json::json!([backend_id]))
+                        .await?;
+                    removed &= serde_json::from_str::<bool>(result.get()).map_err(internal)?;
+                }
+
+                self.scoped_filters.lock().await.remove(&id);
+                self.filter_owners.lock().await.remove(&id);
+                return to_raw(&removed);
+            }
 
             let result = self
                 .forward("eth_uninstallFilter", serde_json::json!([id]))
