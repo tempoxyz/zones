@@ -1693,6 +1693,52 @@ mod tests {
     }
 
     #[test]
+    fn test_push_log_decodes_bounce_back_as_regular_deposit() {
+        let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+        let fallback_recipient = address!("0x00000000000000000000000000000000000000F1");
+        let token = address!("0x0000000000000000000000000000000000002000");
+        let event = BounceBack {
+            newCurrentDepositQueueHash: B256::with_last_byte(0x42),
+            fallbackRecipient: fallback_recipient,
+            token,
+            amount: 123_456,
+        };
+        let log = Log {
+            inner: alloy_primitives::Log {
+                address: portal_address,
+                data: event.encode_log_data(),
+            },
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_hash: None,
+            transaction_index: None,
+            log_index: None,
+            removed: false,
+        };
+
+        let mut events = L1PortalEvents::default();
+        events
+            .push_log(&log, 123)
+            .expect("bounce-back should decode");
+
+        assert_eq!(events.deposits.len(), 1, "should enqueue one deposit");
+        let L1Deposit::Regular(deposit) = &events.deposits[0] else {
+            panic!("bounce-back should be mapped to a regular deposit");
+        };
+        assert_eq!(deposit.token, token);
+        assert_eq!(deposit.sender, portal_address);
+        assert_eq!(deposit.to, fallback_recipient);
+        assert_eq!(deposit.amount, event.amount);
+        assert_eq!(deposit.fee, 0, "bounce-back deposits should be fee-free");
+        assert_eq!(
+            deposit.memo,
+            B256::ZERO,
+            "bounce-back deposits should clear memo"
+        );
+    }
+
+    #[test]
     fn test_deposit_queue_hash_chain() {
         let mut queue = PendingDeposits::default();
         assert_eq!(queue.enqueued_head_hash(), B256::ZERO);
