@@ -544,19 +544,17 @@ mod tests {
         CompositeKey, MetricKind,
         debugging::{DebugValue, DebuggingRecorder},
     };
-    use std::{
-        collections::HashMap,
-        sync::{Mutex as StdMutex, OnceLock},
-    };
+    use std::sync::{Mutex as StdMutex, OnceLock};
 
-    type SnapshotMap = HashMap<
+    type SnapshotEntry = (
         CompositeKey,
         (
             Option<metrics::Unit>,
             Option<metrics::SharedString>,
             DebugValue,
         ),
-    >;
+    );
+    type SnapshotMap = Vec<SnapshotEntry>;
 
     fn metric_lock() -> &'static StdMutex<()> {
         static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
@@ -568,7 +566,7 @@ mod tests {
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
         let result = metrics::with_local_recorder(&recorder, action);
-        let snapshot = snapshotter.snapshot().into_hashmap();
+        let snapshot = snapshotter.snapshot().into_hashmap().into_iter().collect();
         (result, snapshot)
     }
 

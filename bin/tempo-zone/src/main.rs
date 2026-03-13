@@ -9,7 +9,7 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
-use alloy_provider::ProviderBuilder;
+use alloy_provider::{Provider, ProviderBuilder};
 use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
@@ -184,7 +184,7 @@ fn main() {
                 .await?
                 .erased();
             let zone_provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
-                .connect_http(zone_rpc_url.clone())
+                .connect_http(zone_rpc_url.parse()?)
                 .erased();
             let api: Arc<dyn zone::rpc::ZoneRpcApi> = Arc::new(zone::rpc::TempoZoneRpc::new(
                 eth_handlers,

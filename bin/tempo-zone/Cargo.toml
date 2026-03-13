@@ -25,7 +25,9 @@ reth-tracing.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
+alloy-provider.workspace = true
 alloy-signer-local.workspace = true
+tempo-alloy.workspace = true
 
 # tls
 rustls = { version = "0.23", features = ["aws-lc-rs"] }

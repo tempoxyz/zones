@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, OnceLock},
-};
+use std::sync::{Arc, OnceLock};
 
 use alloy_primitives::Address;
 use alloy_signer::SignerSync;
@@ -195,7 +192,11 @@ fn parse_response(msg: tungstenite::Message) -> Value {
     }
 }
 
-type SnapshotMap = HashMap<CompositeKey, (Option<Unit>, Option<SharedString>, DebugValue)>;
+type SnapshotEntry = (
+    CompositeKey,
+    (Option<Unit>, Option<SharedString>, DebugValue),
+);
+type SnapshotMap = Vec<SnapshotEntry>;
 
 fn test_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -214,7 +215,11 @@ fn snapshotter() -> &'static Snapshotter {
 }
 
 fn snapshot_metrics() -> SnapshotMap {
-    snapshotter().snapshot().into_hashmap()
+    snapshotter()
+        .snapshot()
+        .into_hashmap()
+        .into_iter()
+        .collect()
 }
 
 fn metric_value<'a>(
@@ -687,14 +692,13 @@ async fn ws_session_metrics_track_connect_and_disconnect() {
     for _ in 0..50 {
         tokio::task::yield_now().await;
         let snapshot = snapshot_metrics();
-        if let Some(value) = try_gauge(&snapshot, "zone_private_rpc.ws.sessions_active", &[]) {
-            if value == 1.0
-                && try_counter(&snapshot, "zone_private_rpc.ws.sessions_opened_total", &[])
-                    == Some(1)
-            {
-                open_snapshot = Some(snapshot);
-                break;
-            }
+        if matches!(
+            try_gauge(&snapshot, "zone_private_rpc.ws.sessions_active", &[]),
+            Some(1.0)
+        ) && try_counter(&snapshot, "zone_private_rpc.ws.sessions_opened_total", &[]) == Some(1)
+        {
+            open_snapshot = Some(snapshot);
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
@@ -721,17 +725,17 @@ async fn ws_session_metrics_track_connect_and_disconnect() {
     for _ in 0..50 {
         tokio::task::yield_now().await;
         let snapshot = snapshot_metrics();
-        if let Some(value) = try_gauge(&snapshot, "zone_private_rpc.ws.sessions_active", &[]) {
-            if value == 0.0
-                && try_counter(
-                    &snapshot,
-                    "zone_private_rpc.ws.disconnects_total",
-                    &[("reason", "client_close")],
-                ) == Some(1)
-            {
-                close_snapshot = Some(snapshot);
-                break;
-            }
+        if matches!(
+            try_gauge(&snapshot, "zone_private_rpc.ws.sessions_active", &[]),
+            Some(0.0)
+        ) && try_counter(
+            &snapshot,
+            "zone_private_rpc.ws.disconnects_total",
+            &[("reason", "client_close")],
+        ) == Some(1)
+        {
+            close_snapshot = Some(snapshot);
+            break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }

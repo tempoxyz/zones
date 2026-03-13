@@ -170,12 +170,13 @@ mod tests {
         debugging::{DebugValue, DebuggingRecorder, Snapshotter},
     };
     use reth_metrics::metrics::{SharedString, Unit};
-    use std::{
-        collections::HashMap,
-        sync::{Mutex as StdMutex, OnceLock},
-    };
+    use std::sync::{Mutex as StdMutex, OnceLock};
 
-    type SnapshotMap = HashMap<CompositeKey, (Option<Unit>, Option<SharedString>, DebugValue)>;
+    type SnapshotEntry = (
+        CompositeKey,
+        (Option<Unit>, Option<SharedString>, DebugValue),
+    );
+    type SnapshotMap = Vec<SnapshotEntry>;
 
     fn snapshotter() -> &'static Snapshotter {
         static SNAPSHOTTER: OnceLock<Snapshotter> = OnceLock::new();
@@ -197,7 +198,11 @@ mod tests {
         let _guard = metric_lock().lock().unwrap();
         let _ = snapshotter().snapshot();
         let result = action();
-        let snapshot = snapshotter().snapshot().into_hashmap();
+        let snapshot = snapshotter()
+            .snapshot()
+            .into_hashmap()
+            .into_iter()
+            .collect();
         (result, snapshot)
     }
 

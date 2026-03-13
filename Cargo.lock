@@ -11024,6 +11024,7 @@ name = "tempo-zone"
 version = "0.1.0"
 dependencies = [
  "alloy-primitives",
+ "alloy-provider",
  "alloy-signer-local",
  "clap",
  "const-hex",
@@ -11033,6 +11034,7 @@ dependencies = [
  "reth-ethereum",
  "reth-tracing",
  "rustls",
+ "tempo-alloy",
  "tempo-chainspec",
  "tokio",
  "tracing",
