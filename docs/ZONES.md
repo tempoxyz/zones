@@ -22,6 +22,7 @@ This single command will:
 6. Build and start the zone node
 
 > The sequencer key is saved in `generated/<name>/zone.json` — `zone-up` reads it automatically.
+> `zone.json` now also stores `zoneFactory`, and `just deploy-router` appends `swapAndDepositRouter`.
 
 Once running, generate a user wallet and deposit some tokens:
 
@@ -119,7 +120,7 @@ just create-zone my-zone
 
 This creates `generated/my-zone/` containing:
 - **`genesis.json`** — Zone L2 genesis state (system contracts, fee token, etc.)
-- **`zone.json`** — Deployment metadata (portal address, zone ID, anchor block)
+- **`zone.json`** — Deployment metadata (portal address, zone ID, anchor block, `zoneFactory`, and optional router/sequencer metadata)
 
 You can also run the xtask directly for more control:
 
@@ -217,6 +218,38 @@ just send-withdrawal 1000000 <recipient-address>   # withdraw to a specific addr
 ```
 
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
+
+#### Router Swap + Deposit Demo (Same Zone)
+
+This demo exercises the `SwapAndDepositRouter` flow against a running zone. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone.
+
+Prerequisites:
+- A running zone with an active sequencer
+- `L1_RPC_URL` and `PRIVATE_KEY` set
+- `generated/<name>/zone.json` present
+- `SEQUENCER_KEY` set if `zone.json` does not already contain `sequencerKey`
+
+Deploy the router once for the zone:
+
+```bash
+just deploy-router my-zone
+```
+
+That command saves the router address to `generated/my-zone/zone.json` as `swapAndDepositRouter`.
+
+Run the demo:
+
+```bash
+just demo-swap-and-deposit my-zone
+```
+
+Optional parameters:
+
+```bash
+just demo-swap-and-deposit my-zone amount=100000000 tick=0
+```
+
+This is a same-zone demo only. The command creates its own temporary tokens and DEX liquidity automatically, so you do not need to pre-create assets or seed the order book yourself.
 
 #### Check balance via Private RPC
 
@@ -432,6 +465,7 @@ graph TB
 |---------|-------------|
 | `just deploy-zone <name>` | One-shot: keygen → fund → create → genesis → start node |
 | `just create-zone <name>` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`) |
+| `just deploy-router <name>` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal` | Approve portal to spend tokens on L1 |
 | `just send-deposit [to]` | Deposit tokens from L1 to zone (defaults to sender) |
@@ -439,6 +473,7 @@ graph TB
 | `just enable-token <token>` | Enable a TIP-20 token on the portal for bridging (sequencer only) |
 | `just max-approve-outbox` | Approve outbox to spend tokens on zone |
 | `just send-withdrawal [to]` | Withdraw tokens from zone to L1 (defaults to sender) |
+| `just demo-swap-and-deposit <name>` | Self-contained same-zone router demo: create tokens, seed DEX liquidity, swap on L1, deposit output back into the zone |
 | `just check-balance <addr>` | Check token balance on the zone |
 | `just zone-auth-token <name>` | Generate a signed private RPC auth token (10 min TTL) |
 | `just check-balance-private <name>` | Check balance via the private RPC (auto-generates auth token) |
