@@ -16,6 +16,7 @@ mod executor;
 pub mod l1;
 pub mod l1_state;
 mod node;
+mod observability;
 pub mod payload;
 pub mod precompiles;
 pub mod rpc;
