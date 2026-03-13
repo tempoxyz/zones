@@ -1,3 +1,8 @@
+//! Private RPC metric definitions and label helpers.
+//!
+//! The helpers in this module keep label cardinality bounded so the in-process
+//! recorder stays safe for long-running nodes.
+
 use reth_metrics::{
     Metrics,
     metrics::{Counter, Gauge, Histogram},
@@ -105,6 +110,7 @@ pub(crate) struct ZoneProviderMetrics {
     pub(crate) token_refresh_failures_total: Counter,
 }
 
+/// Normalize JSON-RPC method names into the fixed label set used by metrics.
 pub(crate) fn canonical_method_label(method: &str) -> &str {
     match classify_method(method) {
         Some(_) if method.starts_with("admin_") => "admin_*",

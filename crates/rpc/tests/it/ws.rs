@@ -196,7 +196,9 @@ type SnapshotEntry = (
     CompositeKey,
     (Option<Unit>, Option<SharedString>, DebugValue),
 );
-type SnapshotMap = Vec<SnapshotEntry>;
+// `CompositeKey` trips clippy's `mutable_key_type`, so these tests keep
+// snapshot data as a flat list and do linear lookups.
+type SnapshotEntries = Vec<SnapshotEntry>;
 
 fn test_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -214,7 +216,7 @@ fn snapshotter() -> &'static Snapshotter {
     })
 }
 
-fn snapshot_metrics() -> SnapshotMap {
+fn snapshot_metrics() -> SnapshotEntries {
     snapshotter()
         .snapshot()
         .into_hashmap()
@@ -223,7 +225,7 @@ fn snapshot_metrics() -> SnapshotMap {
 }
 
 fn metric_value<'a>(
-    snapshot: &'a SnapshotMap,
+    snapshot: &'a SnapshotEntries,
     kind: MetricKind,
     name: &str,
     labels: &[(&str, &str)],
@@ -247,14 +249,14 @@ fn labels_match<'a>(labels: impl Iterator<Item = &'a Label>, expected: &[(&str, 
     actual == expected
 }
 
-fn counter(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> u64 {
+fn counter(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> u64 {
     match metric_value(snapshot, MetricKind::Counter, name, labels) {
         DebugValue::Counter(value) => *value,
         other => panic!("expected counter for {name}, got {other:?}"),
     }
 }
 
-fn try_counter(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> Option<u64> {
+fn try_counter(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> Option<u64> {
     snapshot
         .iter()
         .find(|(key, _)| {
@@ -268,14 +270,14 @@ fn try_counter(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> O
         })
 }
 
-fn gauge(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> f64 {
+fn gauge(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> f64 {
     match metric_value(snapshot, MetricKind::Gauge, name, labels) {
         DebugValue::Gauge(value) => value.into_inner(),
         other => panic!("expected gauge for {name}, got {other:?}"),
     }
 }
 
-fn try_gauge(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
+fn try_gauge(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> Option<f64> {
     snapshot
         .iter()
         .find(|(key, _)| {
@@ -289,11 +291,24 @@ fn try_gauge(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> Opt
         })
 }
 
-fn histogram_len(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> usize {
+fn histogram_len(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> usize {
     match metric_value(snapshot, MetricKind::Histogram, name, labels) {
         DebugValue::Histogram(values) => values.len(),
         other => panic!("expected histogram for {name}, got {other:?}"),
     }
+}
+
+async fn wait_for_snapshot(mut predicate: impl FnMut(&SnapshotEntries) -> bool) -> SnapshotEntries {
+    for _ in 0..50 {
+        tokio::task::yield_now().await;
+        let snapshot = snapshot_metrics();
+        if predicate(&snapshot) {
+            return snapshot;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    panic!("timed out waiting for expected metrics to be recorded");
 }
 
 // ---------------------------------------------------------------------------
@@ -688,23 +703,13 @@ async fn ws_session_metrics_track_connect_and_disconnect() {
     let _ = snapshotter().snapshot();
 
     let mut ws = connect_with_header(&ctx).await;
-    let mut open_snapshot = None;
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
-        let snapshot = snapshot_metrics();
-        if matches!(
-            try_gauge(&snapshot, "zone_private_rpc.ws.sessions_active", &[]),
+    let open_snapshot = wait_for_snapshot(|snapshot| {
+        matches!(
+            try_gauge(snapshot, "zone_private_rpc.ws.sessions_active", &[]),
             Some(1.0)
-        ) && try_counter(&snapshot, "zone_private_rpc.ws.sessions_opened_total", &[]) == Some(1)
-        {
-            open_snapshot = Some(snapshot);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let open_snapshot = open_snapshot.expect(
-        "sessions_active gauge and sessions_opened_total counter should be recorded on open",
-    );
+        ) && try_counter(snapshot, "zone_private_rpc.ws.sessions_opened_total", &[]) == Some(1)
+    })
+    .await;
     assert_eq!(
         gauge(&open_snapshot, "zone_private_rpc.ws.sessions_active", &[]),
         1.0
@@ -721,26 +726,17 @@ async fn ws_session_metrics_track_connect_and_disconnect() {
     ws.close(None).await.unwrap();
     drop(ws);
 
-    let mut close_snapshot = None;
-    for _ in 0..50 {
-        tokio::task::yield_now().await;
-        let snapshot = snapshot_metrics();
-        if matches!(
-            try_gauge(&snapshot, "zone_private_rpc.ws.sessions_active", &[]),
+    let close_snapshot = wait_for_snapshot(|snapshot| {
+        matches!(
+            try_gauge(snapshot, "zone_private_rpc.ws.sessions_active", &[]),
             Some(0.0)
         ) && try_counter(
-            &snapshot,
+            snapshot,
             "zone_private_rpc.ws.disconnects_total",
             &[("reason", "client_close")],
         ) == Some(1)
-        {
-            close_snapshot = Some(snapshot);
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-    }
-    let close_snapshot =
-        close_snapshot.expect("sessions_active gauge and disconnect counter should be recorded");
+    })
+    .await;
     assert_eq!(
         gauge(&close_snapshot, "zone_private_rpc.ws.sessions_active", &[]),
         0.0

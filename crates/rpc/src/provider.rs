@@ -176,7 +176,9 @@ mod tests {
         CompositeKey,
         (Option<Unit>, Option<SharedString>, DebugValue),
     );
-    type SnapshotMap = Vec<SnapshotEntry>;
+    // `CompositeKey` trips clippy's `mutable_key_type`, so these tests keep
+    // snapshot data as a flat list and do linear lookups.
+    type SnapshotEntries = Vec<SnapshotEntry>;
 
     fn snapshotter() -> &'static Snapshotter {
         static SNAPSHOTTER: OnceLock<Snapshotter> = OnceLock::new();
@@ -194,7 +196,7 @@ mod tests {
         LOCK.get_or_init(|| StdMutex::new(()))
     }
 
-    fn with_metrics_snapshot<T>(action: impl FnOnce() -> T) -> (T, SnapshotMap) {
+    fn with_metrics_snapshot<T>(action: impl FnOnce() -> T) -> (T, SnapshotEntries) {
         let _guard = metric_lock().lock().unwrap();
         let _ = snapshotter().snapshot();
         let result = action();
@@ -206,7 +208,7 @@ mod tests {
         (result, snapshot)
     }
 
-    fn counter(snapshot: &SnapshotMap, name: &str) -> u64 {
+    fn counter(snapshot: &SnapshotEntries, name: &str) -> u64 {
         snapshot
             .iter()
             .find(|(key, _)| key.kind() == MetricKind::Counter && key.key().name() == name)

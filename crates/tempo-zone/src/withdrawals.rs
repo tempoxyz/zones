@@ -224,6 +224,8 @@ fn record_queue_metrics(
         .set(tracker.observe(head, tail, now));
 }
 
+/// Small helper that records per-slot attempt/success/failure counters and the
+/// total time spent processing that slot.
 #[derive(Clone)]
 struct SlotProcessingRecorder {
     metrics: WithdrawalProcessorMetrics,
@@ -554,14 +556,16 @@ mod tests {
             DebugValue,
         ),
     );
-    type SnapshotMap = Vec<SnapshotEntry>;
+    // `CompositeKey` trips clippy's `mutable_key_type`, so these tests keep
+    // snapshot data as a flat list and do linear lookups.
+    type SnapshotEntries = Vec<SnapshotEntry>;
 
     fn metric_lock() -> &'static StdMutex<()> {
         static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| StdMutex::new(()))
     }
 
-    fn with_metrics_snapshot<T>(action: impl FnOnce() -> T) -> (T, SnapshotMap) {
+    fn with_metrics_snapshot<T>(action: impl FnOnce() -> T) -> (T, SnapshotEntries) {
         let _guard = metric_lock().lock().unwrap();
         let recorder = DebuggingRecorder::new();
         let snapshotter = recorder.snapshotter();
@@ -571,7 +575,7 @@ mod tests {
     }
 
     fn metric_value<'a>(
-        snapshot: &'a SnapshotMap,
+        snapshot: &'a SnapshotEntries,
         kind: MetricKind,
         name: &str,
         labels: &[(&str, &str)],
@@ -598,21 +602,21 @@ mod tests {
         actual == expected
     }
 
-    fn counter(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> u64 {
+    fn counter(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> u64 {
         match metric_value(snapshot, MetricKind::Counter, name, labels) {
             DebugValue::Counter(value) => *value,
             other => panic!("expected counter for {name}, got {other:?}"),
         }
     }
 
-    fn gauge(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> f64 {
+    fn gauge(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> f64 {
         match metric_value(snapshot, MetricKind::Gauge, name, labels) {
             DebugValue::Gauge(value) => value.into_inner(),
             other => panic!("expected gauge for {name}, got {other:?}"),
         }
     }
 
-    fn histogram(snapshot: &SnapshotMap, name: &str, labels: &[(&str, &str)]) -> Vec<f64> {
+    fn histogram(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> Vec<f64> {
         match metric_value(snapshot, MetricKind::Histogram, name, labels) {
             DebugValue::Histogram(values) => {
                 values.iter().map(|value| value.into_inner()).collect()
