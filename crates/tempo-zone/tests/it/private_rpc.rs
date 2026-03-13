@@ -286,6 +286,9 @@ fn classify_public_methods() {
         "net_listening",
         "web3_clientVersion",
         "web3_sha3",
+        "zone_getAuthorizationTokenInfo",
+        "zone_getZoneInfo",
+        "zone_getDepositStatus",
     ] {
         assert_eq!(
             classify_method(method),

@@ -471,4 +471,29 @@ impl ZoneRpcApi for ProxyZoneRpc {
             Ok(result)
         })
     }
+
+    fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            to_raw(&serde_json::json!({
+                "account": auth.caller,
+                "expiresAt": alloy_primitives::U64::from(auth.expires_at),
+            }))
+        })
+    }
+
+    fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            Err(JsonRpcError::internal(
+                "zone-specific methods are not supported by the proxy backend",
+            ))
+        })
+    }
+
+    fn zone_get_deposit_status(&self, _tempo_block_number: u64, _auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            Err(JsonRpcError::internal(
+                "zone-specific methods are not supported by the proxy backend",
+            ))
+        })
+    }
 }

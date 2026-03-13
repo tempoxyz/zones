@@ -147,6 +147,17 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `eth_uninstallFilter(id)` — removes a filter.
     fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `zone_getAuthorizationTokenInfo()` — returns the authenticated account
+    /// and token expiry.
+    fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `zone_getZoneInfo()` — returns zone metadata.
+    fn zone_get_zone_info(&self, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `zone_getDepositStatus(tempoBlockNumber)` — returns per-caller deposit
+    /// processing state for a Tempo L1 block.
+    fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_>;
 }
 
 /// Deserialize JSON-RPC params, returning an error response on failure.
@@ -168,6 +179,38 @@ struct CallParams(
     Option<BlockId>,
     Option<StateOverride>,
 );
+
+/// `u64` JSON-RPC param that accepts either a JSON number or a hex quantity.
+#[derive(Debug)]
+enum QuantityU64 {
+    Number(u64),
+    Quantity(alloy_primitives::U64),
+}
+
+impl QuantityU64 {
+    fn into_u64(self) -> u64 {
+        match self {
+            Self::Number(value) => value,
+            Self::Quantity(value) => value.to(),
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for QuantityU64 {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Number(u64),
+            Quantity(alloy_primitives::U64),
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Number(value) => Ok(Self::Number(value)),
+            Repr::Quantity(value) => Ok(Self::Quantity(value)),
+        }
+    }
+}
 
 impl<'de> serde::Deserialize<'de> for CallParams {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -290,6 +333,17 @@ pub async fn dispatch(
         "eth_getFilterChanges" => handle_get_filter_changes(id, raw, auth, api).await,
         "eth_newBlockFilter" => handle_new_block_filter(id, auth, api).await,
         "eth_uninstallFilter" => handle_uninstall_filter(id, raw, auth, api).await,
+        "zone_getAuthorizationTokenInfo" => api_result(
+            id,
+            "zone_getAuthorizationTokenInfo",
+            api.zone_get_authorization_token_info(auth.clone()).await,
+        ),
+        "zone_getZoneInfo" => api_result(
+            id,
+            "zone_getZoneInfo",
+            api.zone_get_zone_info(auth.clone()).await,
+        ),
+        "zone_getDepositStatus" => handle_zone_get_deposit_status(id, raw, auth, api).await,
         _ => {
             // Method is whitelisted but not yet implemented via direct API
             JsonRpcResponse::error(
@@ -669,4 +723,188 @@ async fn handle_uninstall_filter(
         "eth_uninstallFilter",
         api.uninstall_filter(filter_id, auth.clone()).await,
     )
+}
+
+/// Handle `zone_getDepositStatus(tempoBlockNumber)`.
+async fn handle_zone_get_deposit_status(
+    id: Value,
+    raw: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let (tempo_block_number,) =
+        match parse_params::<(QuantityU64,)>(raw, &id, "expected [tempoBlockNumber]") {
+            Ok((tempo_block_number,)) => (tempo_block_number.into_u64(),),
+            Err(resp) => return resp,
+        };
+
+    api_result(
+        id,
+        "zone_getDepositStatus",
+        api.zone_get_deposit_status(tempo_block_number, auth.clone())
+            .await,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use alloy_primitives::Address;
+    use serde_json::json;
+
+    use super::*;
+    use crate::types::to_raw;
+
+    struct MockZoneRpcApi {
+        last_tempo_block_number: AtomicU64,
+    }
+
+    impl Default for MockZoneRpcApi {
+        fn default() -> Self {
+            Self {
+                last_tempo_block_number: AtomicU64::new(0),
+            }
+        }
+    }
+
+    macro_rules! stub {
+        ($method:ident $(, $arg:ident : $ty:ty)*) => {
+            fn $method(&self $(, $arg: $ty)*) -> BoxFut<'_> {
+                Box::pin(async { Err(JsonRpcError::internal("not implemented")) })
+            }
+        };
+    }
+
+    impl ZoneRpcApi for MockZoneRpcApi {
+        stub!(block_number);
+        stub!(chain_id);
+        stub!(net_version);
+        stub!(gas_price);
+        stub!(max_priority_fee_per_gas);
+        stub!(fee_history, _block_count: u64, _newest_block: BlockNumberOrTag, _reward_percentiles: Option<Vec<f64>>);
+        stub!(get_balance, _address: Address, _block: Option<BlockId>, _auth: AuthContext);
+        stub!(get_transaction_count, _address: Address, _block: Option<BlockId>, _auth: AuthContext);
+        stub!(block_by_number, _number: BlockNumberOrTag, _full: bool, _auth: AuthContext);
+        stub!(block_by_hash, _hash: B256, _full: bool, _auth: AuthContext);
+        stub!(transaction_by_hash, _hash: B256, _auth: AuthContext);
+        stub!(transaction_receipt, _hash: B256, _auth: AuthContext);
+        stub!(call, _request: TempoTransactionRequest, _block: Option<BlockId>, _state_override: Option<StateOverride>, _auth: AuthContext);
+        stub!(estimate_gas, _request: TempoTransactionRequest, _block: Option<BlockId>, _state_override: Option<StateOverride>, _auth: AuthContext);
+        stub!(send_raw_transaction, _data: Bytes, _auth: AuthContext);
+        stub!(send_raw_transaction_sync, _data: Bytes, _auth: AuthContext);
+        stub!(fill_transaction, _request: TempoTransactionRequest, _auth: AuthContext);
+        stub!(get_logs, _filter: Filter, _auth: AuthContext);
+        stub!(new_filter, _filter: Filter, _auth: AuthContext);
+        stub!(get_filter_logs, _id: FilterId, _auth: AuthContext);
+        stub!(get_filter_changes, _id: FilterId, _auth: AuthContext);
+        stub!(new_block_filter, _auth: AuthContext);
+        stub!(uninstall_filter, _id: FilterId, _auth: AuthContext);
+
+        fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
+            Box::pin(async move {
+                to_raw(&json!({
+                    "account": auth.caller,
+                    "expiresAt": alloy_primitives::U64::from(auth.expires_at),
+                }))
+            })
+        }
+
+        fn zone_get_zone_info(&self, auth: AuthContext) -> BoxFut<'_> {
+            Box::pin(async move {
+                to_raw(&json!({
+                    "zoneId": "0x1",
+                    "zoneToken": format!("{:#x}", Address::repeat_byte(0x11)),
+                    "sequencer": format!("{:#x}", auth.caller),
+                    "chainId": "0x2a",
+                }))
+            })
+        }
+
+        fn zone_get_deposit_status(
+            &self,
+            tempo_block_number: u64,
+            _auth: AuthContext,
+        ) -> BoxFut<'_> {
+            self.last_tempo_block_number
+                .store(tempo_block_number, Ordering::Relaxed);
+            Box::pin(async move {
+                to_raw(&json!({
+                    "tempoBlockNumber": alloy_primitives::U64::from(tempo_block_number),
+                    "zoneProcessedThrough": alloy_primitives::U64::from(tempo_block_number),
+                    "processed": true,
+                    "deposits": [],
+                }))
+            })
+        }
+    }
+
+    fn auth() -> AuthContext {
+        AuthContext {
+            caller: Address::repeat_byte(0xaa),
+            is_sequencer: false,
+            expires_at: 1_700_000_000,
+        }
+    }
+
+    fn request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
+        serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": params,
+            "id": 1
+        }))
+        .expect("request should deserialize")
+    }
+
+    #[tokio::test]
+    async fn dispatches_zone_get_authorization_token_info() {
+        let api = MockZoneRpcApi::default();
+        let resp = dispatch(
+            &request("zone_getAuthorizationTokenInfo", json!([])),
+            &auth(),
+            &api,
+        )
+        .await;
+
+        assert!(resp.error.is_none());
+        let body: serde_json::Value =
+            serde_json::from_str(resp.result.as_ref().unwrap().get()).unwrap();
+        assert_eq!(
+            body["account"].as_str().unwrap(),
+            format!("{:#x}", Address::repeat_byte(0xaa)),
+        );
+        assert_eq!(body["expiresAt"], "0x6553f100");
+    }
+
+    #[tokio::test]
+    async fn dispatches_zone_get_zone_info() {
+        let api = MockZoneRpcApi::default();
+        let resp = dispatch(&request("zone_getZoneInfo", json!([])), &auth(), &api).await;
+
+        assert!(resp.error.is_none());
+        let body: serde_json::Value =
+            serde_json::from_str(resp.result.as_ref().unwrap().get()).unwrap();
+        assert_eq!(body["zoneId"], "0x1");
+        assert_eq!(body["chainId"], "0x2a");
+    }
+
+    #[tokio::test]
+    async fn dispatches_zone_get_deposit_status_for_hex_and_numeric_quantities() {
+        let api = MockZoneRpcApi::default();
+
+        let hex_resp = dispatch(
+            &request("zone_getDepositStatus", json!(["0x2a"])),
+            &auth(),
+            &api,
+        )
+        .await;
+        assert!(hex_resp.error.is_none());
+        assert_eq!(api.last_tempo_block_number.load(Ordering::Relaxed), 42);
+
+        let numeric_resp =
+            dispatch(&request("zone_getDepositStatus", json!([7])), &auth(), &api).await;
+        assert!(numeric_resp.error.is_none());
+        assert_eq!(api.last_tempo_block_number.load(Ordering::Relaxed), 7);
+    }
 }
