@@ -1,10 +1,18 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::Duration,
+};
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256, b256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use futures::{SinkExt, StreamExt};
-use serde_json::Value;
+use serde_json::{Value, json};
+use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite};
 use zone_rpc::{
     PrivateRpcConfig,
@@ -18,7 +26,25 @@ use zone_rpc::{
 // Mock API
 // ---------------------------------------------------------------------------
 
-struct MockZoneRpcApi;
+#[derive(Default)]
+struct MockZoneRpcApi {
+    next_filter_id: AtomicU64,
+    filters: Mutex<HashMap<alloy_rpc_types_eth::FilterId, MockFilterKind>>,
+}
+
+enum MockFilterKind {
+    Logs { emitted: bool },
+    Blocks { emitted: bool },
+}
+
+impl MockZoneRpcApi {
+    fn next_filter_id(&self, prefix: &str) -> alloy_rpc_types_eth::FilterId {
+        alloy_rpc_types_eth::FilterId::from(format!(
+            "{prefix}-{}",
+            self.next_filter_id.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+}
 
 macro_rules! stub {
     ($method:ident $(, $arg:ident : $ty:ty)*) => {
@@ -44,7 +70,25 @@ impl ZoneRpcApi for MockZoneRpcApi {
     stub!(get_balance, _a: Address, _b: Option<alloy_rpc_types_eth::BlockId>, _c: zone_rpc::auth::AuthContext);
     stub!(get_transaction_count, _a: Address, _b: Option<alloy_rpc_types_eth::BlockId>, _c: zone_rpc::auth::AuthContext);
     stub!(block_by_number, _a: alloy_rpc_types_eth::BlockNumberOrTag, _b: bool, _c: zone_rpc::auth::AuthContext);
-    stub!(block_by_hash, _a: alloy_primitives::B256, _b: bool, _c: zone_rpc::auth::AuthContext);
+
+    fn block_by_hash(
+        &self,
+        hash: alloy_primitives::B256,
+        _b: bool,
+        _c: zone_rpc::auth::AuthContext,
+    ) -> BoxFut<'_> {
+        Box::pin(async move {
+            zone_rpc::types::to_raw(&json!({
+                "hash": format!("{hash:#x}"),
+                "number": "0x42",
+                "parentHash": format!("{:#x}", B256::ZERO),
+                "logsBloom": format!("0x{}", "0".repeat(512)),
+                "transactions": [],
+                "uncles": [],
+            }))
+        })
+    }
+
     stub!(transaction_by_hash, _a: alloy_primitives::B256, _c: zone_rpc::auth::AuthContext);
     stub!(transaction_receipt, _a: alloy_primitives::B256, _c: zone_rpc::auth::AuthContext);
     stub!(call, _a: tempo_alloy::rpc::TempoTransactionRequest, _b: Option<alloy_rpc_types_eth::BlockId>, _c: Option<alloy_rpc_types_eth::state::StateOverride>, _d: zone_rpc::auth::AuthContext);
@@ -53,11 +97,89 @@ impl ZoneRpcApi for MockZoneRpcApi {
     stub!(send_raw_transaction_sync, _a: alloy_primitives::Bytes, _c: zone_rpc::auth::AuthContext);
     stub!(fill_transaction, _a: tempo_alloy::rpc::TempoTransactionRequest, _c: zone_rpc::auth::AuthContext);
     stub!(get_logs, _a: alloy_rpc_types_eth::Filter, _c: zone_rpc::auth::AuthContext);
-    stub!(new_filter, _a: alloy_rpc_types_eth::Filter, _c: zone_rpc::auth::AuthContext);
+
+    fn new_filter(
+        &self,
+        _a: alloy_rpc_types_eth::Filter,
+        _c: zone_rpc::auth::AuthContext,
+    ) -> BoxFut<'_> {
+        Box::pin(async move {
+            let id = self.next_filter_id("logs");
+            self.filters
+                .lock()
+                .await
+                .insert(id.clone(), MockFilterKind::Logs { emitted: false });
+            zone_rpc::types::to_raw(&id)
+        })
+    }
+
     stub!(get_filter_logs, _a: alloy_rpc_types_eth::FilterId, _c: zone_rpc::auth::AuthContext);
-    stub!(get_filter_changes, _a: alloy_rpc_types_eth::FilterId, _c: zone_rpc::auth::AuthContext);
-    stub!(new_block_filter, _c: zone_rpc::auth::AuthContext);
-    stub!(uninstall_filter, _a: alloy_rpc_types_eth::FilterId, _c: zone_rpc::auth::AuthContext);
+
+    fn get_filter_changes(
+        &self,
+        id: alloy_rpc_types_eth::FilterId,
+        _c: zone_rpc::auth::AuthContext,
+    ) -> BoxFut<'_> {
+        Box::pin(async move {
+            let mut filters = self.filters.lock().await;
+            let Some(kind) = filters.get_mut(&id) else {
+                return Err(JsonRpcError::invalid_params("filter not found"));
+            };
+
+            match kind {
+                MockFilterKind::Logs { emitted } => {
+                    if *emitted {
+                        zone_rpc::types::to_raw(&Vec::<Value>::new())
+                    } else {
+                        *emitted = true;
+                        zone_rpc::types::to_raw(&vec![json!({
+                            "address": format!("{:#x}", Address::ZERO),
+                            "topics": [format!("{:#x}", b256!("0x1111111111111111111111111111111111111111111111111111111111111111"))],
+                            "data": "0x",
+                            "blockHash": format!("{:#x}", b256!("0x2222222222222222222222222222222222222222222222222222222222222222")),
+                            "blockNumber": "0x42",
+                            "transactionHash": format!("{:#x}", b256!("0x3333333333333333333333333333333333333333333333333333333333333333")),
+                            "transactionIndex": "0x0",
+                            "logIndex": "0x0",
+                            "removed": false
+                        })])
+                    }
+                }
+                MockFilterKind::Blocks { emitted } => {
+                    if *emitted {
+                        zone_rpc::types::to_raw(&Vec::<B256>::new())
+                    } else {
+                        *emitted = true;
+                        zone_rpc::types::to_raw(&vec![b256!(
+                            "0x4444444444444444444444444444444444444444444444444444444444444444"
+                        )])
+                    }
+                }
+            }
+        })
+    }
+
+    fn new_block_filter(&self, _c: zone_rpc::auth::AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            let id = self.next_filter_id("blocks");
+            self.filters
+                .lock()
+                .await
+                .insert(id.clone(), MockFilterKind::Blocks { emitted: false });
+            zone_rpc::types::to_raw(&id)
+        })
+    }
+
+    fn uninstall_filter(
+        &self,
+        id: alloy_rpc_types_eth::FilterId,
+        _c: zone_rpc::auth::AuthContext,
+    ) -> BoxFut<'_> {
+        Box::pin(async move {
+            let removed = self.filters.lock().await.remove(&id).is_some();
+            zone_rpc::types::to_raw(&removed)
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +205,7 @@ impl TestContext {
             zone_portal: PORTAL,
             sequencer: signer.address(),
         };
-        let addr = start_private_rpc(config, Arc::new(MockZoneRpcApi))
+        let addr = start_private_rpc(config, Arc::new(MockZoneRpcApi::default()))
             .await
             .unwrap();
         Self { addr, signer }
@@ -115,6 +237,10 @@ impl TestContext {
 /// Build a JSON-RPC request string.
 fn jsonrpc(method: &str, id: u64) -> String {
     serde_json::json!({"jsonrpc":"2.0","method":method,"params":[],"id":id}).to_string()
+}
+
+fn jsonrpc_with_params(method: &str, params: Value, id: u64) -> String {
+    serde_json::json!({"jsonrpc":"2.0","method":method,"params":params,"id":id}).to_string()
 }
 
 /// Connect to the WS endpoint using the X-Authorization-Token header.
@@ -293,12 +419,113 @@ async fn ws_unknown_method() {
 }
 
 #[tokio::test]
-async fn ws_disabled_method() {
+async fn ws_subscribe_logs_emits_notifications() {
     let ctx = TestContext::start().await;
     let mut ws = connect_with_header(&ctx).await;
 
     ws.send(tungstenite::Message::Text(
-        jsonrpc("eth_subscribe", 1).into(),
+        jsonrpc_with_params("eth_subscribe", json!(["logs", {}]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+
+    assert_eq!(resp["id"], 1);
+    let subscription_id = resp["result"]
+        .as_str()
+        .expect("subscription id")
+        .to_string();
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("timed out waiting for log notification")
+        .unwrap()
+        .unwrap();
+    let notification = parse_response(notification);
+
+    assert_eq!(notification["method"], "eth_subscription");
+    assert_eq!(notification["params"]["subscription"], subscription_id);
+    assert_eq!(notification["params"]["result"]["blockNumber"], "0x42");
+}
+
+#[tokio::test]
+async fn ws_subscribe_new_heads_emits_redacted_headers() {
+    let ctx = TestContext::start().await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["newHeads"]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+
+    assert_eq!(resp["id"], 1);
+    let subscription_id = resp["result"]
+        .as_str()
+        .expect("subscription id")
+        .to_string();
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("timed out waiting for newHeads notification")
+        .unwrap()
+        .unwrap();
+    let notification = parse_response(notification);
+
+    assert_eq!(notification["method"], "eth_subscription");
+    assert_eq!(notification["params"]["subscription"], subscription_id);
+    assert_eq!(
+        notification["params"]["result"]["hash"],
+        format!(
+            "{:#x}",
+            b256!("0x4444444444444444444444444444444444444444444444444444444444444444")
+        )
+    );
+    assert!(
+        notification["params"]["result"]
+            .get("transactions")
+            .is_none()
+    );
+    assert!(notification["params"]["result"].get("uncles").is_none());
+}
+
+#[tokio::test]
+async fn ws_unsubscribe_removes_subscription() {
+    let ctx = TestContext::start().await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["logs", {}]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+    let subscription_id = resp["result"].clone();
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_unsubscribe", json!([subscription_id]), 2).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = loop {
+        let message = parse_response(ws.next().await.unwrap().unwrap());
+        if message["id"] == 2 {
+            break message;
+        }
+    };
+
+    assert_eq!(resp["id"], 2);
+    assert_eq!(resp["result"], true);
+}
+
+#[tokio::test]
+async fn ws_rejects_unsupported_subscription_kind() {
+    let ctx = TestContext::start().await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["newPendingTransactions"]), 1).into(),
     ))
     .await
     .unwrap();

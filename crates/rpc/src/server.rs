@@ -25,7 +25,7 @@ use crate::{
 };
 
 /// Maximum number of requests in a single JSON-RPC batch.
-const MAX_BATCH_SIZE: usize = 100;
+pub(crate) const MAX_BATCH_SIZE: usize = 100;
 
 /// Shared state for the private RPC server.
 #[derive(Clone)]
@@ -70,17 +70,6 @@ pub async fn start_private_rpc(
 pub(crate) enum RpcResult {
     Single(JsonRpcResponse),
     Batch(Vec<JsonRpcResponse>),
-}
-
-impl RpcResult {
-    /// Serialize to a JSON string for the WebSocket transport.
-    pub(crate) fn into_json(self) -> String {
-        match self {
-            Self::Single(resp) => serde_json::to_string(&resp),
-            Self::Batch(resps) => serde_json::to_string(&resps),
-        }
-        .expect("JsonRpcResponse serialization is infallible")
-    }
 }
 
 impl IntoResponse for RpcResult {
