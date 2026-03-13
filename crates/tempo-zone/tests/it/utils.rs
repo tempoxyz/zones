@@ -459,8 +459,9 @@ impl ZoneTestNode {
         genesis.config.chain_id = chain_id;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
+        let sequencer_key_bytes = sequencer_key.to_bytes();
         let sequencer_signer =
-            alloy_signer_local::PrivateKeySigner::from_bytes(&sequencer_key.to_bytes())
+            alloy_signer_local::PrivateKeySigner::from_slice(sequencer_key_bytes.as_ref())
                 .expect("valid sequencer key");
         let sequencer_addr = sequencer_signer.address();
 
@@ -1705,6 +1706,25 @@ pub(crate) async fn spawn_sequencer(
     portal_address: Address,
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
 ) -> zone::ZoneSequencerHandle {
+    struct NoopProofGenerator;
+
+    #[async_trait::async_trait]
+    impl zone::BatchProofGenerator for NoopProofGenerator {
+        async fn generate_batch_proof(
+            &self,
+            _from: u64,
+            _to: u64,
+            _tempo_block_number: u64,
+            _prev_block_hash: B256,
+            _expected_withdrawal_batch_index: u64,
+        ) -> eyre::Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
+            Ok((
+                alloy_primitives::Bytes::new(),
+                alloy_primitives::Bytes::new(),
+            ))
+        }
+    }
+
     use zone::abi::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone::ZoneSequencerConfig {
@@ -1719,7 +1739,7 @@ pub(crate) async fn spawn_sequencer(
         batch_interval: Duration::from_millis(500),
     };
 
-    zone::spawn_zone_sequencer(config, sequencer_signer).await
+    zone::spawn_zone_sequencer(config, sequencer_signer, Arc::new(NoopProofGenerator)).await
 }
 
 /// Start a local zone node with an L1Fixture already seeded for `seed_blocks` blocks.

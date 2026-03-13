@@ -390,14 +390,14 @@ struct NitroTeeSignContext {
     prev_block_hash: B256,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NitroTeeProveRequest {
     version: u8,
     context: NitroTeeSignContext,
     witness: zone_prover::types::BatchWitness,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct NitroTeeProveResponse {
     version: u8,
     signer: Address,
@@ -583,32 +583,13 @@ where
             http_client,
         })
     }
-}
 
-#[async_trait::async_trait]
-impl<P> BatchProofGenerator for NitroTeeBatchProofGenerator<P>
-where
-    P: StateProviderFactory + Send + Sync,
-{
-    async fn generate_batch_proof(
+    async fn prove_batch_witness_via_tee(
         &self,
         from: u64,
         to: u64,
-        tempo_block_number: u64,
-        prev_block_hash: B256,
-        expected_withdrawal_batch_index: u64,
+        batch_witness: zone_prover::types::BatchWitness,
     ) -> Result<(Bytes, Bytes)> {
-        let batch_witness = self
-            .inner
-            .build_batch_witness(
-                from,
-                to,
-                tempo_block_number,
-                prev_block_hash,
-                expected_withdrawal_batch_index,
-            )
-            .await?;
-
         let context = build_nitro_tee_context(from, to, self.config.portal_address, &batch_witness);
         let request = NitroTeeProveRequest {
             version: NITRO_TEE_REQUEST_VERSION_V1,
@@ -689,6 +670,34 @@ where
         );
 
         Ok((verifier_config, proof))
+    }
+}
+
+#[async_trait::async_trait]
+impl<P> BatchProofGenerator for NitroTeeBatchProofGenerator<P>
+where
+    P: StateProviderFactory + Send + Sync,
+{
+    async fn generate_batch_proof(
+        &self,
+        from: u64,
+        to: u64,
+        tempo_block_number: u64,
+        prev_block_hash: B256,
+        expected_withdrawal_batch_index: u64,
+    ) -> Result<(Bytes, Bytes)> {
+        let batch_witness = self
+            .inner
+            .build_batch_witness(
+                from,
+                to,
+                tempo_block_number,
+                prev_block_hash,
+                expected_withdrawal_batch_index,
+            )
+            .await?;
+        self.prove_batch_witness_via_tee(from, to, batch_witness)
+            .await
     }
 }
 
@@ -958,13 +967,35 @@ fn encode_batch_output(output: &zone_prover::types::BatchOutput) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use alloy_primitives::{U256, keccak256};
+    use alloy_provider::ProviderBuilder;
+    use axum::{Json, Router, extract::State, routing::post};
     use k256::ecdsa::SigningKey;
+    use reth_storage_api::noop::NoopProvider;
+    use tokio::{net::TcpListener, task::JoinHandle};
+    use zone_prover::{
+        execute::{
+            self,
+            storage::{
+                TEMPO_STATE_BLOCK_HASH_SLOT, TEMPO_STATE_PACKED_SLOT, TEMPO_STATE_STATE_ROOT_SLOT,
+                ZONE_INBOX_PROCESSED_HASH_SLOT, ZONE_OUTBOX_LAST_BATCH_BASE_SLOT,
+            },
+        },
+        testutil::{TestAccount, build_zone_state_fixture_with_absent, compute_state_root},
+        types::*,
+    };
 
     use super::*;
 
+    const TEST_CHAIN_ID: u64 = 13371;
+    const TEST_SEQUENCER: Address = Address::ZERO;
+    const TEST_PORTAL_ADDRESS: Address = Address::repeat_byte(0x99);
+
     fn sample_context() -> NitroTeeSignContext {
         NitroTeeSignContext {
-            chain_id: 13371,
+            chain_id: TEST_CHAIN_ID,
             portal_address: Address::with_last_byte(0x11),
             sequencer: Address::with_last_byte(0x22),
             tempo_block_number: 10,
@@ -1022,5 +1053,262 @@ mod tests {
             1 + ENCODED_BATCH_OUTPUT_LEN + NITRO_TEE_SIGNATURE_LEN
         );
         assert_eq!(proof[0], NITRO_TEE_PROOF_V1);
+    }
+
+    fn pack_tempo_state(block_number: u64) -> U256 {
+        U256::from(block_number)
+    }
+
+    fn build_initial_accounts(block_numbers: &[u64]) -> Vec<(Address, TestAccount)> {
+        let tempo_block_number = 100u64;
+        let history_slots: Vec<(U256, U256)> = block_numbers
+            .iter()
+            .filter(|&&n| n > 0)
+            .map(|&n| {
+                let slot = U256::from((n - 1) % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
+                (slot, U256::ZERO)
+            })
+            .collect();
+        let history_code = alloy_eips::eip2935::HISTORY_STORAGE_CODE.to_vec();
+
+        vec![
+            (
+                execute::TEMPO_STATE_ADDRESS,
+                TestAccount {
+                    nonce: 1,
+                    storage: vec![
+                        (TEMPO_STATE_BLOCK_HASH_SLOT.into(), U256::from(0xdead)),
+                        (TEMPO_STATE_STATE_ROOT_SLOT.into(), U256::from(0xcafe)),
+                        (
+                            TEMPO_STATE_PACKED_SLOT.into(),
+                            pack_tempo_state(tempo_block_number),
+                        ),
+                    ],
+                    ..Default::default()
+                },
+            ),
+            (
+                execute::ZONE_INBOX_ADDRESS,
+                TestAccount {
+                    nonce: 1,
+                    storage: vec![(ZONE_INBOX_PROCESSED_HASH_SLOT.into(), U256::ZERO)],
+                    ..Default::default()
+                },
+            ),
+            (
+                execute::ZONE_OUTBOX_ADDRESS,
+                TestAccount {
+                    nonce: 1,
+                    storage: vec![
+                        (ZONE_OUTBOX_LAST_BATCH_BASE_SLOT.into(), U256::ZERO),
+                        (
+                            (ZONE_OUTBOX_LAST_BATCH_BASE_SLOT + U256::from(1)).into(),
+                            U256::from(1),
+                        ),
+                    ],
+                    ..Default::default()
+                },
+            ),
+            (
+                alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS,
+                TestAccount {
+                    nonce: 1,
+                    code_hash: keccak256(&history_code),
+                    code: Some(history_code),
+                    storage: history_slots,
+                    ..Default::default()
+                },
+            ),
+            (Address::ZERO, TestAccount::default()),
+        ]
+    }
+
+    fn apply_eip2935_writes(
+        accounts: &[(Address, TestAccount)],
+        block_number: u64,
+        parent_hash: B256,
+    ) -> Vec<(Address, TestAccount)> {
+        let mut result = accounts.to_vec();
+        let slot =
+            U256::from((block_number - 1) % alloy_eips::eip2935::HISTORY_SERVE_WINDOW as u64);
+        let value = U256::from_be_bytes(parent_hash.0);
+
+        if let Some((_, acct)) = result
+            .iter_mut()
+            .find(|(address, _)| *address == alloy_eips::eip2935::HISTORY_STORAGE_ADDRESS)
+        {
+            if let Some((_, existing)) = acct.storage.iter_mut().find(|(s, _)| *s == slot) {
+                *existing = value;
+            } else {
+                acct.storage.push((slot, value));
+            }
+        }
+
+        result
+    }
+
+    fn build_genesis_header(state_root: B256) -> ZoneHeader {
+        ZoneHeader {
+            parent_hash: B256::ZERO,
+            beneficiary: TEST_SEQUENCER,
+            state_root,
+            transactions_root: alloy_trie::EMPTY_ROOT_HASH,
+            receipts_root: alloy_trie::EMPTY_ROOT_HASH,
+            number: 0,
+            timestamp: 0,
+        }
+    }
+
+    fn build_minimal_batch_witness() -> BatchWitness {
+        let absent = [alloy_eips::eip4788::SYSTEM_ADDRESS];
+        let initial_accounts = build_initial_accounts(&[1]);
+        let fixture = build_zone_state_fixture_with_absent(&initial_accounts, &absent);
+
+        let genesis_header = build_genesis_header(fixture.state_root);
+        let genesis_hash = genesis_header.block_hash();
+        let post_accounts = apply_eip2935_writes(&initial_accounts, 1, genesis_hash);
+        let expected_state_root = compute_state_root(&post_accounts);
+
+        let zone_block = ZoneBlock {
+            number: 1,
+            parent_hash: genesis_hash,
+            timestamp: 1000,
+            beneficiary: TEST_SEQUENCER,
+            gas_limit: u64::MAX,
+            base_fee_per_gas: 0,
+            expected_state_root,
+            tempo_header_rlp: None,
+            deposits: vec![],
+            decryptions: vec![],
+            finalize_withdrawal_batch_count: Some(U256::ZERO),
+            transactions: vec![],
+        };
+
+        let public_inputs = PublicInputs {
+            prev_block_hash: genesis_hash,
+            tempo_block_number: 100,
+            anchor_block_number: 100,
+            anchor_block_hash: B256::from(U256::from(0xdead)),
+            expected_withdrawal_batch_index: 1,
+            sequencer: TEST_SEQUENCER,
+        };
+
+        BatchWitness {
+            public_inputs,
+            chain_id: TEST_CHAIN_ID,
+            prev_block_header: genesis_header,
+            zone_blocks: vec![zone_block],
+            initial_zone_state: fixture.witness,
+            tempo_state_proofs: BatchStateProof {
+                node_pool: alloy_primitives::map::HashMap::default(),
+                reads: vec![],
+                account_proofs: vec![],
+            },
+            tempo_ancestry_headers: vec![],
+        }
+    }
+
+    #[derive(Clone)]
+    struct MockNitroTeeState {
+        signing_key: SigningKey,
+    }
+
+    async fn mock_nitro_tee_handler(
+        State(state): State<MockNitroTeeState>,
+        Json(request): Json<NitroTeeProveRequest>,
+    ) -> Json<NitroTeeProveResponse> {
+        assert_eq!(request.version, NITRO_TEE_REQUEST_VERSION_V1);
+
+        let output =
+            zone_prover::prove_zone_batch(request.witness).expect("mock TEE prover should succeed");
+        let digest = nitro_tee_message_digest(&request.context, &output);
+        let (signature, recid) = state
+            .signing_key
+            .sign_prehash_recoverable(digest.as_slice())
+            .expect("mock TEE signer should sign");
+        let mut sig_bytes = signature.to_bytes().to_vec();
+        sig_bytes.push(recid.to_byte() + 27);
+
+        Json(NitroTeeProveResponse {
+            version: NITRO_TEE_RESPONSE_VERSION_V1,
+            signer: Address::from_public_key(state.signing_key.verifying_key()),
+            signature: sig_bytes.into(),
+            output,
+        })
+    }
+
+    async fn spawn_mock_nitro_tee_server(signing_key: SigningKey) -> (String, JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock Nitro TEE server");
+        let addr = listener.local_addr().expect("mock Nitro TEE local addr");
+        let app = Router::new()
+            .route("/prove-batch", post(mock_nitro_tee_handler))
+            .with_state(MockNitroTeeState { signing_key });
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("mock Nitro TEE server should run");
+        });
+
+        (format!("http://{addr}/prove-batch"), handle)
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn nitro_tee_batch_proof_roundtrip_via_http() {
+        let signing_key = SigningKey::from_slice(&[9u8; 32]).expect("valid test key");
+        let expected_signer = Address::from_public_key(signing_key.verifying_key());
+        let (endpoint, server_handle) = spawn_mock_nitro_tee_server(signing_key).await;
+
+        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_http("http://127.0.0.1:1".parse().expect("valid dummy URL"))
+            .erased();
+        let generator = NitroTeeBatchProofGenerator::new(
+            NoopProvider::default(),
+            Arc::default(),
+            l1_provider,
+            TEST_SEQUENCER,
+            NitroTeeProverConfig {
+                endpoint,
+                timeout: Duration::from_secs(5),
+                max_response_bytes: 1 << 20,
+                expected_signer: Some(expected_signer),
+                portal_address: TEST_PORTAL_ADDRESS,
+            },
+        )
+        .expect("Nitro TEE generator should build");
+
+        let batch_witness = build_minimal_batch_witness();
+        let expected_output = zone_prover::prove_zone_batch(build_minimal_batch_witness())
+            .expect("local prover should succeed");
+        let context = build_nitro_tee_context(1, 1, TEST_PORTAL_ADDRESS, &batch_witness);
+        let (verifier_config, proof) = generator
+            .prove_batch_witness_via_tee(1, 1, batch_witness)
+            .await
+            .expect("Nitro TEE roundtrip should succeed");
+
+        server_handle.abort();
+
+        assert_eq!(verifier_config.len(), 54);
+        assert_eq!(verifier_config[0], NITRO_TEE_VERIFIER_CONFIG_V1);
+        assert_eq!(verifier_config[1], NITRO_TEE_PROOF_SYSTEM_SECP256K1);
+        assert_eq!(&verifier_config[2..22], expected_signer.as_slice());
+
+        assert_eq!(
+            proof.len(),
+            1 + ENCODED_BATCH_OUTPUT_LEN + NITRO_TEE_SIGNATURE_LEN
+        );
+        assert_eq!(proof[0], NITRO_TEE_PROOF_V1);
+        assert_eq!(
+            &proof[1..1 + ENCODED_BATCH_OUTPUT_LEN],
+            encode_batch_output(&expected_output).as_slice()
+        );
+
+        let recovered = recover_nitro_tee_signer(
+            nitro_tee_message_digest(&context, &expected_output),
+            &proof[1 + ENCODED_BATCH_OUTPUT_LEN..],
+        )
+        .expect("proof signature should recover");
+        assert_eq!(recovered, expected_signer);
     }
 }
