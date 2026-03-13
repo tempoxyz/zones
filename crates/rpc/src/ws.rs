@@ -7,7 +7,6 @@
 //! Auth is validated once during the HTTP upgrade handshake — individual
 //! messages are not re-authenticated since WS frames don't carry auth headers.
 
-use alloy_primitives::B256;
 use alloy_rpc_types_eth::{
     Filter, FilterId,
     pubsub::{Params as SubscriptionParams, SubscriptionKind},
@@ -22,25 +21,20 @@ use axum::{
 };
 use futures::{SinkExt, stream::StreamExt};
 use serde::de::DeserializeOwned;
-use serde_json::Value;
-use std::{collections::HashMap, sync::Arc, time::Duration};
-use tokio::{
-    sync::mpsc,
-    task::JoinHandle,
-    time::{self, MissedTickBehavior},
-};
+use serde_json::{Value, value::RawValue};
+use std::{collections::HashMap, sync::Arc};
+use tokio::{sync::mpsc, task::JoinHandle};
 use tracing::warn;
 
 use crate::{
     auth::{self, AuthContext, AuthError},
-    handlers::{self, ZoneRpcApi},
+    handlers::{self, WsSubscription, ZoneRpcApi},
     server::{MAX_BATCH_SIZE, RpcState, auth_error_status, authenticate_token},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, to_raw},
 };
 
 /// Maximum WebSocket message size (1 MiB).
 const MAX_WS_MESSAGE_SIZE: usize = 1 << 20;
-const WS_SUBSCRIPTION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 type NotificationTx = mpsc::UnboundedSender<String>;
 
@@ -52,7 +46,7 @@ pub(crate) struct WsQuery {
 }
 
 struct ActiveSubscription {
-    upstream_filter_id: FilterId,
+    upstream_filter_id: Option<FilterId>,
     task: JoinHandle<()>,
 }
 
@@ -104,166 +98,62 @@ fn parse_ws_params<T: DeserializeOwned>(
         .map_err(|_| JsonRpcResponse::error(req.id.clone(), JsonRpcError::invalid_params(message)))
 }
 
-fn subscription_notification(subscription_id: &FilterId, result: Value) -> String {
-    serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "eth_subscription",
-        "params": {
-            "subscription": subscription_id,
-            "result": result,
-        }
-    })
-    .to_string()
+#[derive(serde::Serialize)]
+struct SubscriptionNotification<'a> {
+    jsonrpc: &'static str,
+    method: &'static str,
+    params: SubscriptionNotificationParams<'a>,
 }
 
-fn spawn_logs_subscription(
+#[derive(serde::Serialize)]
+struct SubscriptionNotificationParams<'a> {
+    subscription: &'a FilterId,
+    result: &'a RawValue,
+}
+
+fn subscription_notification_raw(subscription_id: &FilterId, result: &RawValue) -> String {
+    serde_json::to_string(&SubscriptionNotification {
+        jsonrpc: "2.0",
+        method: "eth_subscription",
+        params: SubscriptionNotificationParams {
+            subscription: subscription_id,
+            result,
+        },
+    })
+    .expect("subscription notification serialization is infallible")
+}
+
+fn spawn_subscription(
     subscription_id: FilterId,
-    upstream_filter_id: FilterId,
-    auth: AuthContext,
-    api: Arc<dyn ZoneRpcApi>,
+    mut stream: handlers::WsSubscriptionStream,
     notifications: NotificationTx,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = time::interval(WS_SUBSCRIPTION_POLL_INTERVAL);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        interval.tick().await;
+        // Let the subscribe response get enqueued before the first notification.
+        tokio::task::yield_now().await;
 
-        loop {
-            interval.tick().await;
+        while let Some(item) = stream.next().await {
+            let result = match item {
+                Ok(result) => result,
+                Err(err) => {
+                    warn!(
+                        target: "zone::rpc",
+                        subscription = ?subscription_id,
+                        err = %err,
+                        "ws subscription stream failed"
+                    );
+                    break;
+                }
+            };
 
-            let changes = match api
-                .get_filter_changes(upstream_filter_id.clone(), auth.clone())
-                .await
+            if notifications
+                .send(subscription_notification_raw(
+                    &subscription_id,
+                    result.as_ref(),
+                ))
+                .is_err()
             {
-                Ok(changes) => changes,
-                Err(err) => {
-                    warn!(
-                        target: "zone::rpc",
-                        subscription = ?subscription_id,
-                        upstream_filter = ?upstream_filter_id,
-                        err = %err,
-                        "ws logs subscription poll failed"
-                    );
-                    break;
-                }
-            };
-
-            let logs: Vec<Value> = match serde_json::from_str(changes.get()) {
-                Ok(logs) => logs,
-                Err(err) => {
-                    warn!(
-                        target: "zone::rpc",
-                        subscription = ?subscription_id,
-                        upstream_filter = ?upstream_filter_id,
-                        err = %err,
-                        "ws logs subscription returned invalid payload"
-                    );
-                    break;
-                }
-            };
-
-            for log in logs {
-                if notifications
-                    .send(subscription_notification(&subscription_id, log))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        }
-    })
-}
-
-fn spawn_new_heads_subscription(
-    subscription_id: FilterId,
-    upstream_filter_id: FilterId,
-    auth: AuthContext,
-    api: Arc<dyn ZoneRpcApi>,
-    notifications: NotificationTx,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = time::interval(WS_SUBSCRIPTION_POLL_INTERVAL);
-        interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        interval.tick().await;
-
-        loop {
-            interval.tick().await;
-
-            let changes = match api
-                .get_filter_changes(upstream_filter_id.clone(), auth.clone())
-                .await
-            {
-                Ok(changes) => changes,
-                Err(err) => {
-                    warn!(
-                        target: "zone::rpc",
-                        subscription = ?subscription_id,
-                        upstream_filter = ?upstream_filter_id,
-                        err = %err,
-                        "ws newHeads subscription poll failed"
-                    );
-                    break;
-                }
-            };
-
-            let hashes: Vec<B256> = match serde_json::from_str(changes.get()) {
-                Ok(hashes) => hashes,
-                Err(err) => {
-                    warn!(
-                        target: "zone::rpc",
-                        subscription = ?subscription_id,
-                        upstream_filter = ?upstream_filter_id,
-                        err = %err,
-                        "ws newHeads subscription returned invalid payload"
-                    );
-                    break;
-                }
-            };
-
-            for hash in hashes {
-                let header = match api.block_by_hash(hash, false, auth.clone()).await {
-                    Ok(header) => header,
-                    Err(err) => {
-                        warn!(
-                            target: "zone::rpc",
-                            subscription = ?subscription_id,
-                            upstream_filter = ?upstream_filter_id,
-                            err = %err,
-                            "ws newHeads subscription failed to load block header"
-                        );
-                        return;
-                    }
-                };
-
-                let mut header_json: Value = match serde_json::from_str(header.get()) {
-                    Ok(value) => value,
-                    Err(err) => {
-                        warn!(
-                            target: "zone::rpc",
-                            subscription = ?subscription_id,
-                            upstream_filter = ?upstream_filter_id,
-                            err = %err,
-                            "ws newHeads subscription returned invalid block payload"
-                        );
-                        return;
-                    }
-                };
-
-                if header_json.is_null() {
-                    continue;
-                }
-
-                if let Some(obj) = header_json.as_object_mut() {
-                    obj.remove("transactions");
-                    obj.remove("uncles");
-                }
-
-                if notifications
-                    .send(subscription_notification(&subscription_id, header_json))
-                    .is_err()
-                {
-                    return;
-                }
+                return;
             }
         }
     })
@@ -291,28 +181,17 @@ async fn handle_subscribe(
                 );
             }
 
-            let raw = match state.api.new_block_filter(auth.clone()).await {
-                Ok(raw) => raw,
+            let subscription = match state.api.ws_subscribe_new_heads(auth.clone()).await {
+                Ok(subscription) => subscription,
                 Err(err) => return JsonRpcResponse::error(req.id.clone(), err),
-            };
-            let upstream_filter_id: FilterId = match serde_json::from_str(raw.get()) {
-                Ok(id) => id,
-                Err(err) => {
-                    return JsonRpcResponse::error(
-                        req.id.clone(),
-                        JsonRpcError::internal(err.to_string()),
-                    );
-                }
             };
 
             let subscription_id = session.next_subscription_id();
-            let task = spawn_new_heads_subscription(
-                subscription_id.clone(),
-                upstream_filter_id.clone(),
-                auth.clone(),
-                state.api.clone(),
-                notifications.clone(),
-            );
+            let WsSubscription {
+                stream,
+                upstream_filter_id,
+            } = subscription;
+            let task = spawn_subscription(subscription_id.clone(), stream, notifications.clone());
             session.subscriptions.insert(
                 subscription_id.clone(),
                 ActiveSubscription {
@@ -334,28 +213,17 @@ async fn handle_subscribe(
                 }
             };
 
-            let raw = match state.api.new_filter(filter, auth.clone()).await {
-                Ok(raw) => raw,
+            let subscription = match state.api.ws_subscribe_logs(filter, auth.clone()).await {
+                Ok(subscription) => subscription,
                 Err(err) => return JsonRpcResponse::error(req.id.clone(), err),
-            };
-            let upstream_filter_id: FilterId = match serde_json::from_str(raw.get()) {
-                Ok(id) => id,
-                Err(err) => {
-                    return JsonRpcResponse::error(
-                        req.id.clone(),
-                        JsonRpcError::internal(err.to_string()),
-                    );
-                }
             };
 
             let subscription_id = session.next_subscription_id();
-            let task = spawn_logs_subscription(
-                subscription_id.clone(),
-                upstream_filter_id.clone(),
-                auth.clone(),
-                state.api.clone(),
-                notifications.clone(),
-            );
+            let WsSubscription {
+                stream,
+                upstream_filter_id,
+            } = subscription;
+            let task = spawn_subscription(subscription_id.clone(), stream, notifications.clone());
             session.subscriptions.insert(
                 subscription_id.clone(),
                 ActiveSubscription {
@@ -388,13 +256,16 @@ async fn handle_unsubscribe(
     };
 
     active.task.abort();
-    let removed = match state
-        .api
-        .uninstall_filter(active.upstream_filter_id, auth.clone())
-        .await
-    {
-        Ok(raw) => serde_json::from_str(raw.get()).unwrap_or(false),
-        Err(err) => return JsonRpcResponse::error(req.id.clone(), err),
+    let removed = match active.upstream_filter_id {
+        Some(upstream_filter_id) => match state
+            .api
+            .uninstall_filter(upstream_filter_id, auth.clone())
+            .await
+        {
+            Ok(raw) => serde_json::from_str(raw.get()).unwrap_or(false),
+            Err(err) => return JsonRpcResponse::error(req.id.clone(), err),
+        },
+        None => true,
     };
 
     success_response(req.id.clone(), &removed)
@@ -465,9 +336,9 @@ async fn process_ws_text(
 async fn cleanup_ws_session(session: WsSession, auth: &AuthContext, api: Arc<dyn ZoneRpcApi>) {
     for (_, active) in session.subscriptions {
         active.task.abort();
-        let _ = api
-            .uninstall_filter(active.upstream_filter_id, auth.clone())
-            .await;
+        if let Some(upstream_filter_id) = active.upstream_filter_id {
+            let _ = api.uninstall_filter(upstream_filter_id, auth.clone()).await;
+        }
     }
 }
 

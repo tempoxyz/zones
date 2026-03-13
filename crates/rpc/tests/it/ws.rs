@@ -10,14 +10,14 @@ use std::{
 use alloy_primitives::{Address, B256, b256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, stream};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 use tokio_tungstenite::{connect_async, tungstenite};
 use zone_rpc::{
     PrivateRpcConfig,
     auth::build_token_fields,
-    handlers::ZoneRpcApi,
+    handlers::{BoxWsSubscriptionFut, WsSubscription, ZoneRpcApi},
     start_private_rpc,
     types::{BoxFut, JsonRpcError},
 };
@@ -178,6 +178,61 @@ impl ZoneRpcApi for MockZoneRpcApi {
         Box::pin(async move {
             let removed = self.filters.lock().await.remove(&id).is_some();
             zone_rpc::types::to_raw(&removed)
+        })
+    }
+
+    fn ws_subscribe_new_heads(&self, _c: zone_rpc::auth::AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            let id = self.next_filter_id("blocks");
+            self.filters
+                .lock()
+                .await
+                .insert(id.clone(), MockFilterKind::Blocks { emitted: false });
+            let stream = stream::iter(vec![zone_rpc::types::to_raw(&json!({
+                "hash": format!(
+                    "{:#x}",
+                    b256!("0x4444444444444444444444444444444444444444444444444444444444444444")
+                ),
+                "number": "0x42",
+                "parentHash": format!("{:#x}", B256::ZERO),
+                "logsBloom": format!("0x{}", "0".repeat(512)),
+            }))]);
+            Ok(WsSubscription::with_upstream_filter(Box::pin(stream), id))
+        })
+    }
+
+    fn ws_subscribe_logs(
+        &self,
+        _a: alloy_rpc_types_eth::Filter,
+        _c: zone_rpc::auth::AuthContext,
+    ) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            let id = self.next_filter_id("logs");
+            self.filters
+                .lock()
+                .await
+                .insert(id.clone(), MockFilterKind::Logs { emitted: false });
+            let stream = stream::iter(vec![zone_rpc::types::to_raw(&json!({
+                "address": format!("{:#x}", Address::ZERO),
+                "topics": [format!(
+                    "{:#x}",
+                    b256!("0x1111111111111111111111111111111111111111111111111111111111111111")
+                )],
+                "data": "0x",
+                "blockHash": format!(
+                    "{:#x}",
+                    b256!("0x2222222222222222222222222222222222222222222222222222222222222222")
+                ),
+                "blockNumber": "0x42",
+                "transactionHash": format!(
+                    "{:#x}",
+                    b256!("0x3333333333333333333333333333333333333333333333333333333333333333")
+                ),
+                "transactionIndex": "0x0",
+                "logIndex": "0x0",
+                "removed": false
+            }))]);
+            Ok(WsSubscription::with_upstream_filter(Box::pin(stream), id))
         })
     }
 }
