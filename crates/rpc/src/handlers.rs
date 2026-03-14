@@ -7,11 +7,15 @@ use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, state::StateOverride};
 use serde_json::{Value, value::RawValue};
 use tempo_alloy::rpc::TempoTransactionRequest;
+use tempo_contracts::precompiles::account_keychain::IAccountKeychain::KeyInfo;
 use tracing::warn;
 
 use crate::{
     auth::AuthContext,
-    types::{BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, MethodTier, classify_method},
+    types::{
+        BoxEyreFut, BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, MethodTier,
+        classify_method,
+    },
 };
 
 /// Interface to the underlying reth EthApi for the private zone RPC.
@@ -23,6 +27,10 @@ use crate::{
 ///   `logsBloom`, clearing transaction lists) on typed responses *before*
 ///   serializing to JSON.
 pub trait ZoneRpcApi: Send + Sync + 'static {
+    /// `AccountKeychain.getKey(account, keyId)` — returns the current keychain
+    /// authorization for a recovered access key.
+    fn get_keychain_key(&self, account: Address, key_id: Address) -> BoxEyreFut<'_, KeyInfo>;
+
     /// `eth_blockNumber` — returns the latest block number.
     fn block_number(&self) -> BoxFut<'_>;
 

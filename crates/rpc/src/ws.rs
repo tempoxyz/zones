@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::{
     auth::{self, AuthError},
-    server::{RpcState, auth_error_status, authenticate_token, process_rpc_text},
+    server::{RpcState, authenticate_token, process_rpc_text},
 };
 
 /// Maximum WebSocket message size (1 MiB).
@@ -48,15 +48,15 @@ pub(crate) async fn handle_ws_upgrade(
         .or(query.token.as_deref());
 
     let auth = match token_str {
-        Some(token) => authenticate_token(token, &state.config),
-        None => Err(AuthError::Missing),
+        Some(token) => authenticate_token(token, &state.config, state.api.as_ref()).await,
+        None => Err(AuthError::Missing.into()),
     };
 
     let auth = match auth {
         Ok(auth) => auth,
         Err(e) => {
-            warn!(target: "zone::rpc", err = %e, "ws auth failed");
-            return (auth_error_status(&e), "").into_response();
+            e.log("ws");
+            return (e.status_code(), "").into_response();
         }
     };
 
@@ -78,11 +78,15 @@ async fn handle_ws_session(
             Ok(Message::Binary(b)) => match std::str::from_utf8(&b) {
                 Ok(s) => s.into(),
                 Err(_) => {
-                    let _ = socket
+                    if socket
                         .send(Message::Text(
                             r#"{"jsonrpc":"2.0","error":{"code":-32700,"message":"invalid UTF-8"},"id":null}"#.into(),
                         ))
-                        .await;
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
                     continue;
                 }
             },

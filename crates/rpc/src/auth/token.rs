@@ -1,6 +1,8 @@
 use alloy_primitives::{Address, B256, hex, keccak256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::error::AuthError;
+
 /// Magic prefix: "TempoZoneRPC" left-padded to 32 bytes.
 const TEMPO_ZONE_RPC_MAGIC: [u8; 32] = {
     let mut buf = [0u8; 32];
@@ -138,61 +140,6 @@ impl AuthorizationToken {
 
         Ok(())
     }
-
-    /// Detect the signature type from the raw signature bytes.
-    pub fn signature_type(&self) -> Result<SignatureType, AuthError> {
-        if self.signature.is_empty() {
-            return Err(AuthError::InvalidSignature);
-        }
-
-        match self.signature.len() {
-            65 => Ok(SignatureType::Secp256k1),
-            130 if self.signature[0] == 0x01 => Ok(SignatureType::P256),
-            _ => match self.signature[0] {
-                0x02 => Ok(SignatureType::WebAuthn),
-                0x03 => Ok(SignatureType::Keychain),
-                _ => Err(AuthError::UnsupportedSignatureType),
-            },
-        }
-    }
-}
-
-/// The type of signature used in an authorization token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureType {
-    Secp256k1,
-    P256,
-    WebAuthn,
-    Keychain,
-}
-
-/// Errors during authorization token parsing/validation.
-#[derive(Debug, thiserror::Error)]
-pub enum AuthError {
-    #[error("missing X-Authorization-Token header")]
-    Missing,
-    #[error("invalid hex encoding")]
-    InvalidHex,
-    #[error("token too short")]
-    TooShort,
-    #[error("unsupported version: {0}")]
-    UnsupportedVersion(u8),
-    #[error("zone ID mismatch")]
-    ZoneIdMismatch,
-    #[error("chain ID mismatch")]
-    ChainIdMismatch,
-    #[error("zone portal mismatch")]
-    ZonePortalMismatch,
-    #[error("validity window too large (max 1800s)")]
-    WindowTooLarge,
-    #[error("authorization token expired")]
-    Expired,
-    #[error("issuedAt too far in the future")]
-    IssuedInFuture,
-    #[error("invalid signature")]
-    InvalidSignature,
-    #[error("unsupported signature type")]
-    UnsupportedSignatureType,
 }
 
 /// Build the unsigned token fields and their signing digest.
