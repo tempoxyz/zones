@@ -22,11 +22,12 @@ use tempo_primitives::transaction::{
     SignatureType as TempoSignatureType,
     tt_signature::{KeychainSignature, TempoSignature},
 };
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::{
-    auth::{self, AuthContext, AuthError},
+    auth::{self, AuthContext},
     config::PrivateRpcConfig,
+    error::{AuthError, AuthenticateError},
     handlers::{self, ZoneRpcApi},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
     ws::handle_ws_upgrade,
@@ -147,38 +148,6 @@ pub(crate) async fn process_rpc_text(
     }
 }
 
-/// Authentication failures split into invalid caller credentials vs server-side failures.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum AuthenticateError {
-    #[error(transparent)]
-    Invalid(#[from] AuthError),
-    #[error(transparent)]
-    Internal(#[from] eyre::Report),
-}
-
-impl AuthenticateError {
-    /// Map the authentication failure to the corresponding HTTP status code.
-    pub(crate) fn status_code(&self) -> StatusCode {
-        match self {
-            Self::Invalid(AuthError::Missing) => StatusCode::UNAUTHORIZED,
-            Self::Invalid(_) => StatusCode::FORBIDDEN,
-            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-
-    /// Log the authentication failure at the appropriate level for the transport.
-    pub(crate) fn log(&self, transport: &str) {
-        match self {
-            Self::Invalid(cause) => {
-                warn!(target: "zone::rpc", %transport, err = %cause, "auth failed");
-            }
-            Self::Internal(cause) => {
-                error!(target: "zone::rpc", %transport, err = %cause, "auth failed");
-            }
-        }
-    }
-}
-
 /// Main HTTP RPC handler — authenticates, dispatches, returns response.
 async fn handle_rpc(
     State(state): State<Arc<RpcState>>,
@@ -292,10 +261,11 @@ fn now_unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthenticateError, authenticate_token};
+    use super::authenticate_token;
     use crate::{
         PrivateRpcConfig,
         auth::build_token_fields,
+        error::AuthenticateError,
         handlers::ZoneRpcApi,
         types::{BoxEyreFut, BoxFut, JsonRpcError},
     };

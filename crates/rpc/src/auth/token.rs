@@ -1,6 +1,8 @@
 use alloy_primitives::{Address, B256, hex, keccak256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::error::AuthError;
+
 /// Magic prefix: "TempoZoneRPC" left-padded to 32 bytes.
 const TEMPO_ZONE_RPC_MAGIC: [u8; 32] = {
     let mut buf = [0u8; 32];
@@ -138,41 +140,6 @@ impl AuthorizationToken {
 
         Ok(())
     }
-}
-
-/// Errors during authorization token parsing/validation.
-#[derive(Debug, thiserror::Error)]
-pub enum AuthError {
-    #[error("missing X-Authorization-Token header")]
-    Missing,
-    #[error("invalid hex encoding")]
-    InvalidHex,
-    #[error("token too short")]
-    TooShort,
-    #[error("unsupported version: {0}")]
-    UnsupportedVersion(u8),
-    #[error("zone ID mismatch")]
-    ZoneIdMismatch,
-    #[error("chain ID mismatch")]
-    ChainIdMismatch,
-    #[error("zone portal mismatch")]
-    ZonePortalMismatch,
-    #[error("validity window too large (max 1800s)")]
-    WindowTooLarge,
-    #[error("authorization token expired")]
-    Expired,
-    #[error("issuedAt too far in the future")]
-    IssuedInFuture,
-    #[error("invalid signature")]
-    InvalidSignature,
-    #[error("keychain key not authorized")]
-    UnauthorizedKeychainKey,
-    #[error("keychain key revoked")]
-    RevokedKeychainKey,
-    #[error("keychain key expired")]
-    ExpiredKeychainKey,
-    #[error("keychain signature type mismatch")]
-    KeychainSignatureTypeMismatch,
 }
 
 /// Build the unsigned token fields and their signing digest.
