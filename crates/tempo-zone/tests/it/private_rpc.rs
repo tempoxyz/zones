@@ -1,6 +1,6 @@
 //! Tests for the private zone RPC module.
 
-use alloy_primitives::{Address, keccak256};
+use alloy_primitives::Address;
 use base64::Engine as _;
 use p256::{
     EncodedPoint,
@@ -12,7 +12,7 @@ use tempo_primitives::transaction::tt_signature::{
     KeychainSignature, PrimitiveSignature, TempoSignature, WebAuthnSignature, normalize_p256_s,
 };
 use zone::rpc::{
-    auth::{AuthorizationToken, SignatureType, build_token_fields},
+    auth::{AuthorizationToken, build_token_fields},
     types::{MethodTier, classify_method},
 };
 
@@ -169,30 +169,6 @@ fn parse_token_fields() {
     assert_eq!(token.issued_at, now);
     assert_eq!(token.expires_at, now + 600);
     assert_eq!(token.signature.len(), 65);
-    assert_eq!(token.signature_type().unwrap(), SignatureType::Secp256k1);
-}
-
-#[test]
-fn parse_secp256k1_signature_type_with_reserved_prefix_bytes() {
-    let now = now_secs();
-
-    for prefix in [0x02, 0x03] {
-        let mut blob = vec![prefix];
-        blob.extend_from_slice(&[0u8; 64]);
-        blob.push(0);
-        blob.extend_from_slice(&1u64.to_be_bytes());
-        blob.extend_from_slice(&1u64.to_be_bytes());
-        blob.extend_from_slice(&[0u8; 20]);
-        blob.extend_from_slice(&now.to_be_bytes());
-        blob.extend_from_slice(&(now + 600).to_be_bytes());
-
-        let token = AuthorizationToken::parse(&blob).unwrap();
-        assert_eq!(
-            token.signature_type().unwrap(),
-            SignatureType::Secp256k1,
-            "65-byte signatures must remain secp256k1 even when starting with {prefix:#04x}",
-        );
-    }
 }
 
 #[test]
@@ -203,45 +179,6 @@ fn parse_token_too_short() {
 
     // Even shorter
     assert!(AuthorizationToken::parse(&[0u8; 10]).is_err());
-}
-
-#[test]
-fn parse_p256_signature_type() {
-    let now = now_secs();
-
-    // P256 sig: 0x01 prefix + 129 zero bytes = 130 total
-    let mut blob = vec![0x01];
-    blob.extend_from_slice(&[0u8; 129]);
-    // Append 53 bytes of message fields
-    blob.push(0); // version
-    blob.extend_from_slice(&1u64.to_be_bytes());
-    blob.extend_from_slice(&1u64.to_be_bytes());
-    blob.extend_from_slice(&[0u8; 20]); // portal
-    blob.extend_from_slice(&now.to_be_bytes());
-    blob.extend_from_slice(&(now + 600).to_be_bytes());
-
-    let token = AuthorizationToken::parse(&blob).unwrap();
-    assert_eq!(token.signature.len(), 130);
-    assert_eq!(token.signature_type().unwrap(), SignatureType::P256);
-}
-
-#[test]
-fn parse_keychain_v2_signature_type() {
-    let now = now_secs();
-
-    let mut blob = vec![0x04];
-    blob.extend_from_slice(Address::repeat_byte(0x11).as_slice());
-    blob.push(0x01);
-    blob.extend_from_slice(&[0u8; 129]);
-    blob.push(0);
-    blob.extend_from_slice(&1u64.to_be_bytes());
-    blob.extend_from_slice(&1u64.to_be_bytes());
-    blob.extend_from_slice(&[0u8; 20]);
-    blob.extend_from_slice(&now.to_be_bytes());
-    blob.extend_from_slice(&(now + 600).to_be_bytes());
-
-    let token = AuthorizationToken::parse(&blob).unwrap();
-    assert_eq!(token.signature_type().unwrap(), SignatureType::Keychain);
 }
 
 #[test]
@@ -258,7 +195,7 @@ fn parse_unknown_signature_length() {
     blob.extend_from_slice(&(now + 600).to_be_bytes());
 
     let token = AuthorizationToken::parse(&blob).unwrap();
-    assert!(token.signature_type().is_err());
+    assert!(TempoSignature::from_bytes(&token.signature).is_err());
 }
 
 #[test]
@@ -347,36 +284,38 @@ fn validate_rejects_issued_at_far_future() {
     assert!(token.validate(42, 1337, portal).is_err());
 }
 
-// ============ secp256k1 Recovery ============
-
 #[tokio::test]
-async fn secp256k1_recovery_roundtrip() {
+async fn tempo_signature_roundtrip_secp256k1_from_token_bytes() {
     use alloy::signers::{Signer, local::PrivateKeySigner};
-    use zone::rpc::auth::recover_secp256k1;
 
     let signer = PrivateKeySigner::random();
-    let expected_addr = signer.address();
-
-    let digest = keccak256(b"test message");
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
     let sig = signer.sign_hash(&digest).await.unwrap();
 
     let mut sig_bytes = Vec::with_capacity(65);
     sig_bytes.extend_from_slice(&sig.r().to_be_bytes::<32>());
     sig_bytes.extend_from_slice(&sig.s().to_be_bytes::<32>());
     sig_bytes.push(sig.v() as u8);
+    let blob = {
+        let mut blob = sig_bytes.clone();
+        blob.extend_from_slice(&fields);
+        blob
+    };
+    let token = AuthorizationToken::parse(&blob).unwrap();
+    let parsed = TempoSignature::from_bytes(&token.signature).unwrap();
 
-    let recovered = recover_secp256k1(&sig_bytes, &digest).unwrap();
-    assert_eq!(recovered, expected_addr);
+    assert_eq!(
+        parsed.recover_signer(&token.digest).unwrap(),
+        signer.address()
+    );
 }
 
 #[test]
-fn secp256k1_rejects_wrong_length() {
-    use zone::rpc::auth::recover_secp256k1;
-
-    let digest = keccak256(b"test");
-    assert!(recover_secp256k1(&[0u8; 64], &digest).is_err());
-    assert!(recover_secp256k1(&[0u8; 66], &digest).is_err());
-    assert!(recover_secp256k1(&[], &digest).is_err());
+fn tempo_signature_rejects_wrong_secp256k1_lengths() {
+    assert!(TempoSignature::from_bytes(&[0u8; 64]).is_err());
+    assert!(TempoSignature::from_bytes(&[0u8; 66]).is_err());
+    assert!(TempoSignature::from_bytes(&[]).is_err());
 }
 
 #[test]

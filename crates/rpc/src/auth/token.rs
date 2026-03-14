@@ -138,32 +138,6 @@ impl AuthorizationToken {
 
         Ok(())
     }
-
-    /// Detect the signature type from the raw signature bytes.
-    pub fn signature_type(&self) -> Result<SignatureType, AuthError> {
-        if self.signature.is_empty() {
-            return Err(AuthError::InvalidSignature);
-        }
-
-        match self.signature.len() {
-            65 => Ok(SignatureType::Secp256k1),
-            130 if self.signature[0] == 0x01 => Ok(SignatureType::P256),
-            _ => match self.signature[0] {
-                0x02 => Ok(SignatureType::WebAuthn),
-                0x03 | 0x04 => Ok(SignatureType::Keychain),
-                _ => Err(AuthError::UnsupportedSignatureType),
-            },
-        }
-    }
-}
-
-/// The type of signature used in an authorization token.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SignatureType {
-    Secp256k1,
-    P256,
-    WebAuthn,
-    Keychain,
 }
 
 /// Errors during authorization token parsing/validation.
@@ -191,8 +165,6 @@ pub enum AuthError {
     IssuedInFuture,
     #[error("invalid signature")]
     InvalidSignature,
-    #[error("unsupported signature type")]
-    UnsupportedSignatureType,
     #[error("keychain key not authorized")]
     UnauthorizedKeychainKey,
     #[error("keychain key revoked")]
