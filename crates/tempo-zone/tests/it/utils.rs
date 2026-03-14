@@ -1,6 +1,6 @@
 use alloy::genesis::Genesis;
 use alloy_consensus::Header;
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::{SolEvent, SolValue};
@@ -59,6 +59,25 @@ pub(crate) const DEFAULT_POLL: std::time::Duration = std::time::Duration::from_m
 
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
+
+pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
+    address!("0xDEc0000000000000000000000000000000000000");
+
+alloy_sol_types::sol! {
+    #[sol(rpc)]
+    contract TestStablecoinDEX {
+        function createPair(address base) external returns (bytes32 key);
+        function place(address token, uint128 amount, bool isBid, int16 tick) external returns (uint128 orderId);
+        function quoteSwapExactAmountIn(address tokenIn, address tokenOut, uint128 amountIn) external view returns (uint128 amountOut);
+    }
+
+    #[sol(rpc)]
+    contract TestZonePortalAdmin {
+        function pauseDeposits(address token) external;
+        function resumeDeposits(address token) external;
+        function areDepositsActive(address token) external view returns (bool);
+    }
+}
 
 /// Deterministic salt for the zone test token.
 pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
@@ -653,6 +672,35 @@ impl L1TestNode {
         Ok(())
     }
 
+    /// Assert that a `WithdrawalProcessed` event exists with the expected callback result.
+    pub(crate) async fn assert_withdrawal_processed_with_status(
+        &self,
+        portal_address: Address,
+        to: Address,
+        token: Address,
+        amount: u128,
+        callback_success: bool,
+    ) -> eyre::Result<()> {
+        use zone::abi::ZonePortal;
+        let portal = ZonePortal::new(portal_address, self.provider());
+        let events = portal
+            .WithdrawalProcessed_filter()
+            .from_block(0)
+            .query()
+            .await?;
+        let found = events.iter().any(|(e, _)| {
+            e.to == to
+                && e.token == token
+                && e.amount == amount
+                && e.callbackSuccess == callback_success
+        });
+        eyre::ensure!(
+            found,
+            "expected WithdrawalProcessed event for {to} with token {token} amount {amount} and callbackSuccess={callback_success}"
+        );
+        Ok(())
+    }
+
     /// Returns an HTTP provider with the dev account wallet attached.
     pub(crate) fn dev_provider(&self) -> alloy_provider::DynProvider {
         ProviderBuilder::new()
@@ -709,6 +757,102 @@ impl L1TestNode {
         self.assert_batch_submitted(portal_address).await?;
         self.assert_withdrawal_processed(portal_address, account, amount)
             .await
+    }
+
+    /// Create a StablecoinDEX pair for a base token.
+    pub(crate) async fn create_dex_pair(&self, base_token: Address) -> eyre::Result<()> {
+        let provider = self.dev_provider();
+        let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
+        let receipt = dex
+            .createPair(base_token)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "createPair failed for {base_token}");
+        Ok(())
+    }
+
+    /// Place a bid order on the StablecoinDEX using the dev account.
+    pub(crate) async fn place_dex_bid_order(
+        &self,
+        base_token: Address,
+        amount: u128,
+        tick: i16,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+
+        let provider = self.dev_provider();
+        let quote_token = ITIP20::new(base_token, &provider)
+            .quoteToken()
+            .call()
+            .await?;
+
+        ITIP20::new(quote_token, &provider)
+            .approve(STABLECOIN_DEX_ADDRESS, U256::MAX)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+
+        let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
+        let receipt = dex
+            .place(base_token, amount, true, tick)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(
+            receipt.status(),
+            "place bid order failed for {base_token} amount {amount} at tick {tick}"
+        );
+        Ok(())
+    }
+
+    /// Place an ask order on the StablecoinDEX using the dev account.
+    pub(crate) async fn place_dex_ask_order(
+        &self,
+        base_token: Address,
+        amount: u128,
+        tick: i16,
+    ) -> eyre::Result<()> {
+        use tempo_contracts::precompiles::ITIP20;
+
+        let provider = self.dev_provider();
+        ITIP20::new(base_token, &provider)
+            .approve(STABLECOIN_DEX_ADDRESS, U256::MAX)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+
+        let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
+        let receipt = dex
+            .place(base_token, amount, false, tick)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(
+            receipt.status(),
+            "place ask order failed for {base_token} amount {amount} at tick {tick}"
+        );
+        Ok(())
+    }
+
+    /// Quote a StablecoinDEX swap without executing it.
+    pub(crate) async fn quote_dex_swap_exact_amount_in(
+        &self,
+        token_in: Address,
+        token_out: Address,
+        amount_in: u128,
+    ) -> eyre::Result<u128> {
+        let provider = self.provider();
+        let dex = TestStablecoinDEX::new(STABLECOIN_DEX_ADDRESS, &provider);
+        Ok(dex
+            .quoteSwapExactAmountIn(token_in, token_out, amount_in)
+            .call()
+            .await?)
     }
 
     /// Deploy the ZoneFactory contract on L1 from the Foundry artifact.
@@ -917,6 +1061,28 @@ impl L1TestNode {
         Ok(())
     }
 
+    /// Pause deposits for a token on the ZonePortal.
+    pub(crate) async fn pause_deposits_on_portal(
+        &self,
+        portal_address: Address,
+        token: Address,
+    ) -> eyre::Result<()> {
+        let provider = self.dev_provider();
+        let portal = TestZonePortalAdmin::new(portal_address, &provider);
+        let receipt = portal
+            .pauseDeposits(token)
+            .send()
+            .await?
+            .get_receipt()
+            .await?;
+        eyre::ensure!(receipt.status(), "pauseDeposits failed");
+        eyre::ensure!(
+            !portal.areDepositsActive(token).call().await?,
+            "deposits should be paused for {token}"
+        );
+        Ok(())
+    }
+
     /// Set the sequencer encryption key on the ZonePortal.
     ///
     /// The sequencer must sign a proof-of-possession with the encryption key's
@@ -962,6 +1128,46 @@ impl L1TestNode {
             .await?;
         eyre::ensure!(receipt.status(), "setSequencerEncryptionKey failed");
         Ok(())
+    }
+
+    /// Build a valid encrypted deposit payload for the current portal key.
+    pub(crate) async fn encrypt_deposit_for_portal(
+        &self,
+        portal_address: Address,
+        recipient: Address,
+        memo: B256,
+    ) -> eyre::Result<(U256, zone::abi::EncryptedDepositPayload)> {
+        use zone::{abi::ZonePortal, precompiles::ecies};
+
+        let portal = ZonePortal::new(portal_address, self.provider());
+        let key_result = portal.sequencerEncryptionKey().call().await?;
+        let key_count = portal.encryptionKeyCount().call().await?;
+        eyre::ensure!(
+            key_count > U256::ZERO,
+            "no encryption key registered on portal"
+        );
+        let key_index = key_count - U256::from(1);
+
+        let enc = ecies::encrypt_deposit(
+            &key_result.x,
+            key_result.yParity,
+            recipient,
+            memo,
+            portal_address,
+            key_index,
+        )
+        .ok_or_else(|| eyre::eyre!("ECIES encryption failed"))?;
+
+        Ok((
+            key_index,
+            zone::abi::EncryptedDepositPayload {
+                ephemeralPubkeyX: enc.eph_pub_x,
+                ephemeralPubkeyYParity: enc.eph_pub_y_parity,
+                ciphertext: enc.ciphertext.into(),
+                nonce: alloy_primitives::FixedBytes(enc.nonce),
+                tag: alloy_primitives::FixedBytes(enc.tag),
+            },
+        ))
     }
 
     /// Transfer a specific TIP-20 token from the dev account to a recipient on L1.
@@ -1421,6 +1627,74 @@ impl WithdrawalArgs {
         }
     }
 
+    /// Plaintext router callback: optionally swap, then deposit into `target_portal`.
+    pub(crate) fn swap_and_deposit_via_router(
+        amount: u128,
+        router: Address,
+        token_out: Address,
+        target_portal: Address,
+        recipient: Address,
+        memo: B256,
+        min_amount_out: u128,
+    ) -> Self {
+        use alloy_sol_types::SolValue;
+
+        // SwapAndDepositRouter plaintext callback format:
+        // (bool isEncrypted, address tokenOut, address targetPortal, address recipient, bytes32 memo, uint128 minAmountOut)
+        let callback_data = (
+            false,
+            token_out,
+            target_portal,
+            recipient,
+            memo,
+            min_amount_out,
+        )
+            .abi_encode();
+
+        Self {
+            amount,
+            to: Some(router),
+            memo,
+            gas_limit: 2_000_000,
+            fallback_recipient: None, // defaults to self
+            data: alloy_primitives::Bytes::from(callback_data),
+        }
+    }
+
+    /// Encrypted router callback: optionally swap, then deposit encrypted into `target_portal`.
+    pub(crate) fn swap_and_deposit_encrypted_via_router(
+        amount: u128,
+        router: Address,
+        token_out: Address,
+        target_portal: Address,
+        key_index: U256,
+        encrypted: zone::abi::EncryptedDepositPayload,
+        min_amount_out: u128,
+    ) -> Self {
+        use alloy_sol_types::SolValue;
+
+        // SwapAndDepositRouter encrypted callback format:
+        // (bool isEncrypted, address tokenOut, address targetPortal, uint256 keyIndex, EncryptedDepositPayload encrypted, uint128 minAmountOut)
+        let callback_data = (
+            true,
+            token_out,
+            target_portal,
+            key_index,
+            encrypted,
+            min_amount_out,
+        )
+            .abi_encode();
+
+        Self {
+            amount,
+            to: Some(router),
+            memo: B256::ZERO,
+            gas_limit: 2_000_000,
+            fallback_recipient: None, // defaults to self
+            data: alloy_primitives::Bytes::from(callback_data),
+        }
+    }
+
     /// Cross-zone withdrawal via the [`SwapAndDepositRouter`].
     ///
     /// The withdrawal callback sends tokens to the router, which deposits them
@@ -1433,21 +1707,15 @@ impl WithdrawalArgs {
         token: Address,
         recipient: Address,
     ) -> Self {
-        use alloy_sol_types::SolValue;
-
-        // SwapAndDepositRouter plaintext callback format:
-        // (bool isEncrypted, address tokenOut, address targetPortal, address recipient, bytes32 memo, uint128 minAmountOut)
-        let callback_data =
-            (false, token, target_portal, recipient, B256::ZERO, 0u128).abi_encode();
-
-        Self {
+        Self::swap_and_deposit_via_router(
             amount,
-            to: Some(router),
-            memo: B256::ZERO,
-            gas_limit: 2_000_000,
-            fallback_recipient: None, // defaults to self
-            data: alloy_primitives::Bytes::from(callback_data),
-        }
+            router,
+            token,
+            target_portal,
+            recipient,
+            B256::ZERO,
+            0,
+        )
     }
 }
 

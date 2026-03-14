@@ -6,13 +6,14 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, Bytes, hex};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, Log, state::StateOverride};
 use alloy_sol_types::SolCall;
 use eyre::WrapErr;
 use serde::Deserialize;
 use serde_json::value::RawValue;
-use tempo_alloy::rpc::TempoTransactionRequest;
+use tempo_alloy::rpc::{TempoTransactionReceipt, TempoTransactionRequest};
 use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
@@ -305,18 +306,22 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 .forward("eth_getTransactionReceipt", serde_json::json!([hash]))
                 .await?;
 
-            let receipt: serde_json::Value =
+            let receipt: Option<TempoTransactionReceipt> =
                 serde_json::from_str(result.get()).map_err(internal)?;
 
-            if receipt.is_null() {
+            let Some(receipt) = receipt else {
+                return Ok(result);
+            };
+
+            if auth.is_sequencer {
                 return Ok(result);
             }
 
-            if !auth.is_sequencer && json_from(&receipt) != Some(auth.caller) {
+            if receipt.from() != auth.caller {
                 return Ok(raw_null());
             }
 
-            Ok(result)
+            to_raw(&filter::filter_receipt_logs(receipt))
         })
     }
 
@@ -385,8 +390,17 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 policy::verify_raw_tx_sender(&data, &auth)?;
             }
 
-            self.forward("eth_sendRawTransactionSync", serde_json::json!([data]))
-                .await
+            let result = self
+                .forward("eth_sendRawTransactionSync", serde_json::json!([data]))
+                .await?;
+
+            if auth.is_sequencer {
+                return Ok(result);
+            }
+
+            let receipt: TempoTransactionReceipt =
+                serde_json::from_str(result.get()).map_err(internal)?;
+            to_raw(&filter::filter_receipt_logs(receipt))
         })
     }
 
@@ -504,5 +518,142 @@ impl ZoneRpcApi for ProxyZoneRpc {
 
             Ok(result)
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::ReceiptWithBloom;
+    use alloy_primitives::{B256, Bytes as PrimitiveBytes, LogData, TxHash, address};
+    use alloy_rpc_types_eth::TransactionReceipt;
+    use axum::{Json, Router, routing::post};
+    use tempo_primitives::{TempoReceipt, TempoTxType};
+
+    fn make_log(emitter: Address, topics: Vec<B256>) -> Log {
+        Log {
+            inner: alloy_primitives::Log {
+                address: emitter,
+                data: LogData::new_unchecked(topics, PrimitiveBytes::new()),
+            },
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_hash: None,
+            transaction_index: None,
+            log_index: None,
+            removed: false,
+        }
+    }
+
+    fn caller_word(addr: &Address) -> B256 {
+        B256::left_padding_from(addr.as_slice())
+    }
+
+    fn make_receipt(from: Address, logs: Vec<Log>) -> TempoTransactionReceipt {
+        let receipt = TempoReceipt {
+            tx_type: TempoTxType::Legacy,
+            success: true,
+            cumulative_gas_used: 21_000,
+            logs,
+        };
+
+        TempoTransactionReceipt {
+            inner: TransactionReceipt {
+                inner: ReceiptWithBloom::from(receipt),
+                transaction_hash: TxHash::with_last_byte(1),
+                transaction_index: Some(0),
+                block_hash: Some(B256::with_last_byte(2)),
+                block_number: Some(1),
+                gas_used: 21_000,
+                effective_gas_price: 1,
+                blob_gas_used: None,
+                blob_gas_price: None,
+                from,
+                to: Some(Address::ZERO),
+                contract_address: None,
+            },
+            fee_token: None,
+            fee_payer: from,
+        }
+    }
+
+    async fn spawn_upstream(result: serde_json::Value) -> String {
+        let response = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": result,
+        });
+
+        let app = Router::new().route(
+            "/",
+            post(move || {
+                let response = response.clone();
+                async move { Json(response) }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind upstream test server");
+        let addr = listener.local_addr().expect("read upstream addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve upstream test server");
+        });
+
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn transaction_receipt_filters_logs_for_non_sequencer() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let other = address!("0x0000000000000000000000000000000000000002");
+        let third = address!("0x0000000000000000000000000000000000000003");
+
+        let visible = make_log(
+            Address::ZERO,
+            vec![
+                filter::TRANSFER_TOPIC,
+                caller_word(&caller),
+                caller_word(&other),
+            ],
+        );
+        let hidden = make_log(
+            Address::ZERO,
+            vec![
+                filter::TRANSFER_TOPIC,
+                caller_word(&other),
+                caller_word(&third),
+            ],
+        );
+        let upstream = make_receipt(caller, vec![visible.clone(), hidden]);
+        let proxy =
+            ProxyZoneRpc::new(spawn_upstream(serde_json::to_value(&upstream).unwrap()).await);
+
+        let raw = proxy
+            .transaction_receipt(
+                TxHash::with_last_byte(1),
+                AuthContext {
+                    caller,
+                    is_sequencer: false,
+                    expires_at: u64::MAX,
+                },
+            )
+            .await
+            .expect("proxy should return receipt");
+
+        let receipt: TempoTransactionReceipt =
+            serde_json::from_str(raw.get()).expect("deserialize filtered receipt");
+        assert_eq!(receipt.inner.logs(), std::slice::from_ref(&visible));
+        assert_eq!(
+            receipt.inner.inner.logs_bloom,
+            alloy_primitives::logs_bloom(receipt.inner.logs().iter().map(|log| log.as_ref())),
+        );
+        assert_ne!(
+            receipt.inner.inner.logs_bloom,
+            upstream.inner.inner.logs_bloom
+        );
     }
 }

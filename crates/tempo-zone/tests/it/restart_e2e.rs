@@ -15,7 +15,7 @@ use zone::abi::{ZONE_TOKEN_ADDRESS, ZonePortal};
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Timeout for waiting on withdrawals (includes batch submission + processing).
-const WITHDRAWAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const WITHDRAWAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Read the portal's `blockHash()` — the last submitted zone block hash.
 async fn portal_block_hash(

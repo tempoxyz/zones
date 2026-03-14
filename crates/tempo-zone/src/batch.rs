@@ -34,8 +34,10 @@ use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
-use tempo_alloy::TempoNetwork;
+use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
 use tracing::{info, instrument, warn};
+
+use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
 /// EIP-2935 stores the last 8192 block hashes (~68 min at 500ms block time).
 const EIP2935_HISTORY_WINDOW: u64 = 8192;
@@ -173,6 +175,7 @@ impl BatchSubmitter {
                 Bytes::new(),
                 Bytes::new(),
             )
+            .nonce_key(SUBMIT_BATCH_NONCE_KEY)
             .send()
             .await?
             .with_required_confirmations(1)
