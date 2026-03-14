@@ -21,7 +21,7 @@ use tracing::warn;
 
 use crate::{
     auth::{self, AuthError},
-    server::{RpcState, authenticate_token, log_auth_error, process_rpc_text},
+    server::{RpcState, authenticate_token, process_rpc_text},
 };
 
 /// Maximum WebSocket message size (1 MiB).
@@ -55,7 +55,7 @@ pub(crate) async fn handle_ws_upgrade(
     let auth = match auth {
         Ok(auth) => auth,
         Err(e) => {
-            log_auth_error(&e, "ws");
+            e.log("ws");
             return (e.status_code(), "").into_response();
         }
     };

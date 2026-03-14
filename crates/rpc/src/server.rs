@@ -165,15 +165,16 @@ impl AuthenticateError {
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
-}
 
-pub(crate) fn log_auth_error(err: &AuthenticateError, transport: &str) {
-    match err {
-        AuthenticateError::Invalid(cause) => {
-            warn!(target: "zone::rpc", %transport, err = %cause, "auth failed");
-        }
-        AuthenticateError::Internal(cause) => {
-            error!(target: "zone::rpc", %transport, err = %cause, "auth failed");
+    /// Log the authentication failure at the appropriate level for the transport.
+    pub(crate) fn log(&self, transport: &str) {
+        match self {
+            Self::Invalid(cause) => {
+                warn!(target: "zone::rpc", %transport, err = %cause, "auth failed");
+            }
+            Self::Internal(cause) => {
+                error!(target: "zone::rpc", %transport, err = %cause, "auth failed");
+            }
         }
     }
 }
@@ -187,7 +188,7 @@ async fn handle_rpc(
     let auth = match authenticate(&headers, &state.config, state.api.as_ref()).await {
         Ok(auth) => auth,
         Err(e) => {
-            log_auth_error(&e, "http");
+            e.log("http");
             return (e.status_code(), "").into_response();
         }
     };
