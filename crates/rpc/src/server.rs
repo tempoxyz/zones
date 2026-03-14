@@ -147,15 +147,6 @@ pub(crate) async fn process_rpc_text(
     }
 }
 
-/// Map an [`AuthError`] to the appropriate HTTP status code.
-pub(crate) fn auth_error_status(err: &AuthenticateError) -> StatusCode {
-    match err {
-        AuthenticateError::Invalid(AuthError::Missing) => StatusCode::UNAUTHORIZED,
-        AuthenticateError::Invalid(_) => StatusCode::FORBIDDEN,
-        AuthenticateError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
-    }
-}
-
 /// Authentication failures split into invalid caller credentials vs server-side failures.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum AuthenticateError {
@@ -163,6 +154,17 @@ pub(crate) enum AuthenticateError {
     Invalid(#[from] AuthError),
     #[error(transparent)]
     Internal(#[from] eyre::Report),
+}
+
+impl AuthenticateError {
+    /// Map the authentication failure to the corresponding HTTP status code.
+    pub(crate) fn status_code(&self) -> StatusCode {
+        match self {
+            Self::Invalid(AuthError::Missing) => StatusCode::UNAUTHORIZED,
+            Self::Invalid(_) => StatusCode::FORBIDDEN,
+            Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
 }
 
 pub(crate) fn log_auth_error(err: &AuthenticateError, transport: &str) {
@@ -186,7 +188,7 @@ async fn handle_rpc(
         Ok(auth) => auth,
         Err(e) => {
             log_auth_error(&e, "http");
-            return (auth_error_status(&e), "").into_response();
+            return (e.status_code(), "").into_response();
         }
     };
 
@@ -289,7 +291,7 @@ fn now_unix_seconds() -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthenticateError, auth_error_status, authenticate_token};
+    use super::{AuthenticateError, authenticate_token};
     use crate::{
         PrivateRpcConfig,
         auth::build_token_fields,
@@ -484,6 +486,6 @@ mod tests {
             err,
             AuthenticateError::Invalid(crate::auth::AuthError::RevokedKeychainKey)
         ));
-        assert_eq!(auth_error_status(&err), StatusCode::FORBIDDEN);
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
     }
 }
