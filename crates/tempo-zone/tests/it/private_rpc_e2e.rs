@@ -7,18 +7,30 @@
 //! - Block redaction (logsBloom zeroed, transactions cleared for non-sequencers)
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
+use crate::utils::{TEST_MNEMONIC, now_secs, start_zone_with_private_rpc};
 use alloy::{
-    primitives::{Address, U256, address, hex},
+    primitives::{Address, B256, U256, address, hex},
     signers::local::PrivateKeySigner,
 };
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::SolCall;
+use p256::ecdsa::SigningKey as P256SigningKey;
+use rand::thread_rng;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
-use tempo_contracts::precompiles::ITIP20 as ContractTip20;
+use tempo_contracts::precompiles::{
+    ITIP20 as ContractTip20,
+    account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
+};
 use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
+use tokio::time::sleep;
 
-use crate::utils::{TEST_MNEMONIC, start_zone_with_private_rpc};
+fn corrupt_token_hex(token: &str) -> String {
+    let mut bytes = hex::decode(token).expect("token hex should decode");
+    let idx = usize::from(bytes.len() > 1);
+    bytes[idx] ^= 0x01;
+    hex::encode(bytes)
+}
 
 /// Auth enforcement: missing header → 401, garbage token → 401/403, wrong chain ID → 403.
 #[tokio::test(flavor = "multi_thread")]
@@ -53,6 +65,213 @@ async fn test_auth_rejection() -> eyre::Result<()> {
         .call_raw("eth_blockNumber", serde_json::json!([]), &bad_token)
         .await?;
     assert_eq!(status.as_u16(), 403, "wrong chain ID should return 403");
+
+    Ok(())
+}
+
+/// Real P256 and WebAuthn auth tokens are accepted by the private RPC.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_non_secp_auth_tokens() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc().await?;
+    let p256_signer = P256SigningKey::random(&mut thread_rng());
+    let webauthn_signer = P256SigningKey::random(&mut thread_rng());
+
+    for token in [
+        ctx.p256_token(&p256_signer),
+        ctx.webauthn_token(&webauthn_signer),
+    ] {
+        let resp = ctx
+            .call("eth_blockNumber", serde_json::json!([]), &token)
+            .await?;
+        assert!(
+            resp.get("error").is_none(),
+            "auth token should succeed: {resp}"
+        );
+        assert!(
+            resp["result"].as_str().is_some(),
+            "expected block number result"
+        );
+    }
+
+    Ok(())
+}
+
+/// Invalid P256 signatures and WebAuthn challenge mismatches are rejected.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_invalid_non_secp_auth_tokens_are_rejected() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc().await?;
+    let p256_signer = P256SigningKey::random(&mut thread_rng());
+    let webauthn_signer = P256SigningKey::random(&mut thread_rng());
+
+    let bad_p256 = corrupt_token_hex(&ctx.p256_token(&p256_signer));
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &bad_p256)
+        .await?;
+    assert_eq!(status.as_u16(), 403, "invalid P256 token should return 403");
+
+    let bad_webauthn = ctx.webauthn_token_with_challenge(&webauthn_signer, B256::repeat_byte(0x77));
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &bad_webauthn)
+        .await?;
+    assert_eq!(
+        status.as_u16(),
+        403,
+        "WebAuthn token with wrong challenge should return 403",
+    );
+
+    Ok(())
+}
+
+/// Authorized P256 keychain tokens authenticate as the root account in both V1 and V2 encodings.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_keychain_auth_tokens_v1_and_v2() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+    let root_signer = PrivateKeySigner::random();
+    let access_signer = P256SigningKey::random(&mut thread_rng());
+
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000001111"),
+        root_signer.address(),
+        1_000_000,
+    )
+    .await?;
+
+    let (_, key_id) = ctx.keychain_p256_token(root_signer.address(), &access_signer, 0x04);
+    ctx.authorize_keychain_key(
+        &root_signer,
+        key_id,
+        KeyInfoSignatureType::P256,
+        now_secs() + 300,
+    )
+    .await?;
+
+    for version in [0x03, 0x04] {
+        let (token, _) = ctx.keychain_p256_token(root_signer.address(), &access_signer, version);
+        let resp = ctx
+            .call(
+                "eth_call",
+                serde_json::json!([
+                    {
+                        "from": format!("{:#x}", root_signer.address()),
+                        "to": format!("{:#x}", root_signer.address()),
+                        "input": "0x"
+                    },
+                    "latest"
+                ]),
+                &token,
+            )
+            .await?;
+        assert_eq!(
+            resp["result"].as_str().unwrap(),
+            "0x",
+            "keychain auth should allow calls from the root account",
+        );
+    }
+
+    Ok(())
+}
+
+/// Keychain auth rejects missing, revoked, expired, and signature-type-mismatched keys.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_keychain_auth_rejection_cases() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+
+    let missing_root = PrivateKeySigner::random();
+    let missing_access = P256SigningKey::random(&mut thread_rng());
+    let (missing_token, _) = ctx.keychain_p256_token(missing_root.address(), &missing_access, 0x04);
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &missing_token)
+        .await?;
+    assert_eq!(
+        status.as_u16(),
+        403,
+        "missing keychain auth should return 403"
+    );
+
+    let revoked_root = PrivateKeySigner::random();
+    let revoked_access = P256SigningKey::random(&mut thread_rng());
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000002222"),
+        revoked_root.address(),
+        1_000_000,
+    )
+    .await?;
+    let (revoked_token, revoked_key_id) =
+        ctx.keychain_p256_token(revoked_root.address(), &revoked_access, 0x04);
+    ctx.authorize_keychain_key(
+        &revoked_root,
+        revoked_key_id,
+        KeyInfoSignatureType::P256,
+        now_secs() + 300,
+    )
+    .await?;
+    ctx.revoke_keychain_key(&revoked_root, revoked_key_id)
+        .await?;
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &revoked_token)
+        .await?;
+    assert_eq!(status.as_u16(), 403, "revoked key should return 403");
+
+    let expired_root = PrivateKeySigner::random();
+    let expired_access = P256SigningKey::random(&mut thread_rng());
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000003333"),
+        expired_root.address(),
+        1_000_000,
+    )
+    .await?;
+    let (expired_token, expired_key_id) =
+        ctx.keychain_p256_token(expired_root.address(), &expired_access, 0x04);
+    ctx.authorize_keychain_key(
+        &expired_root,
+        expired_key_id,
+        KeyInfoSignatureType::P256,
+        now_secs() + 1,
+    )
+    .await?;
+    sleep(std::time::Duration::from_secs(2)).await;
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &expired_token)
+        .await?;
+    assert_eq!(status.as_u16(), 403, "expired key should return 403");
+
+    let mismatch_root = PrivateKeySigner::random();
+    let mismatch_access = P256SigningKey::random(&mut thread_rng());
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        address!("0x0000000000000000000000000000000000004444"),
+        mismatch_root.address(),
+        1_000_000,
+    )
+    .await?;
+    let (mismatch_token, mismatch_key_id) =
+        ctx.keychain_p256_token(mismatch_root.address(), &mismatch_access, 0x04);
+    ctx.authorize_keychain_key(
+        &mismatch_root,
+        mismatch_key_id,
+        KeyInfoSignatureType::Secp256k1,
+        now_secs() + 300,
+    )
+    .await?;
+    let (status, _) = ctx
+        .call_raw("eth_blockNumber", serde_json::json!([]), &mismatch_token)
+        .await?;
+    assert_eq!(
+        status.as_u16(),
+        403,
+        "signature-type mismatch should return 403",
+    );
 
     Ok(())
 }
