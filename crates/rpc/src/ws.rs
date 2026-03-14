@@ -21,11 +21,12 @@ use tracing::warn;
 
 use crate::{
     auth::{self, AuthError},
+    error::AuthenticateError,
     metrics::{
         PrivateRpcWsDisconnectMetrics, PrivateRpcWsSessionMetrics, RpcTransport,
         WsDisconnectReason, record_auth_failure,
     },
-    server::{RpcState, auth_error_status, authenticate_token, process_rpc_text},
+    server::{RpcState, authenticate_token, process_rpc_text},
 };
 
 /// Maximum WebSocket message size (1 MiB).
@@ -52,16 +53,18 @@ pub(crate) async fn handle_ws_upgrade(
         .or(query.token.as_deref());
 
     let auth = match token_str {
-        Some(token) => authenticate_token(token, &state.config),
-        None => Err(AuthError::Missing),
+        Some(token) => authenticate_token(token, &state.config, state.api.as_ref()).await,
+        None => Err(AuthError::Missing.into()),
     };
 
     let auth = match auth {
         Ok(auth) => auth,
         Err(e) => {
-            record_auth_failure(RpcTransport::Ws, &e);
-            warn!(target: "zone::rpc", err = %e, "ws auth failed");
-            return (auth_error_status(&e), "").into_response();
+            if let AuthenticateError::Invalid(cause) = &e {
+                record_auth_failure(RpcTransport::Ws, cause);
+            }
+            e.log("ws");
+            return (e.status_code(), "").into_response();
         }
     };
 

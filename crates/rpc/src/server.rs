@@ -15,13 +15,19 @@ use axum::{
 };
 use std::{
     sync::{Arc, atomic::AtomicU64},
-    time::Instant,
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tracing::{info, warn};
+use tempo_contracts::precompiles::account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType;
+use tempo_primitives::transaction::{
+    SignatureType as TempoSignatureType,
+    tt_signature::{KeychainSignature, TempoSignature},
+};
+use tracing::info;
 
 use crate::{
-    auth::{self, AuthContext, AuthError, SignatureType},
+    auth::{self, AuthContext},
     config::PrivateRpcConfig,
+    error::{AuthError, AuthenticateError},
     handlers::{self, ZoneRpcApi},
     metrics::{PrivateRpcCallMetrics, RpcTransport, record_auth_failure},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
@@ -175,27 +181,20 @@ async fn dispatch_metered(
 
     response
 }
-
-/// Map an [`AuthError`] to the appropriate HTTP status code.
-pub(crate) fn auth_error_status(err: &AuthError) -> StatusCode {
-    match err {
-        AuthError::Missing => StatusCode::UNAUTHORIZED,
-        _ => StatusCode::FORBIDDEN,
-    }
-}
-
 /// Main HTTP RPC handler — authenticates, dispatches, returns response.
 async fn handle_rpc(
     State(state): State<Arc<RpcState>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let auth = match authenticate(&headers, &state.config) {
+    let auth = match authenticate(&headers, &state.config, state.api.as_ref()).await {
         Ok(auth) => auth,
         Err(e) => {
-            record_auth_failure(RpcTransport::Http, &e);
-            warn!(target: "zone::rpc", err = %e, "auth failed");
-            return (auth_error_status(&e), "").into_response();
+            if let AuthenticateError::Invalid(cause) = &e {
+                record_auth_failure(RpcTransport::Http, cause);
+            }
+            e.log("http");
+            return (e.status_code(), "").into_response();
         }
     };
 
@@ -212,32 +211,39 @@ async fn handle_rpc(
 }
 
 /// Authenticate the request using the `X-Authorization-Token` header.
-fn authenticate(headers: &HeaderMap, config: &PrivateRpcConfig) -> Result<AuthContext, AuthError> {
+async fn authenticate(
+    headers: &HeaderMap,
+    config: &PrivateRpcConfig,
+    api: &dyn ZoneRpcApi,
+) -> Result<AuthContext, AuthenticateError> {
     let header_value = headers
         .get(auth::X_AUTHORIZATION_TOKEN)
         .and_then(|v| v.to_str().ok())
         .ok_or(AuthError::Missing)?;
 
-    authenticate_token(header_value, config)
+    authenticate_token(header_value, config, api).await
 }
 
 /// Authenticate using a raw token string (shared by HTTP and WebSocket paths).
-pub(crate) fn authenticate_token(
+pub(crate) async fn authenticate_token(
     token_value: &str,
     config: &PrivateRpcConfig,
-) -> Result<AuthContext, AuthError> {
+    api: &dyn ZoneRpcApi,
+) -> Result<AuthContext, AuthenticateError> {
     let token = auth::parse_auth_header(token_value)?;
 
     // Validate token fields against server config
     token.validate(config.zone_id, config.chain_id, config.zone_portal)?;
 
-    // Verify the signature and recover the signer address
-    let sig_type = token.signature_type()?;
-    let caller = match sig_type {
-        SignatureType::Secp256k1 => auth::recover_secp256k1(&token.signature, &token.digest)?,
-        // P256 / WebAuthn / Keychain signature types are not yet supported
-        _ => return Err(AuthError::UnsupportedSignatureType),
-    };
+    let signature =
+        TempoSignature::from_bytes(&token.signature).map_err(|_| AuthError::InvalidSignature)?;
+    let caller = signature
+        .recover_signer(&token.digest)
+        .map_err(|_| AuthError::InvalidSignature)?;
+
+    if let TempoSignature::Keychain(keychain_signature) = &signature {
+        validate_keychain_signature(api, caller, keychain_signature, &token.digest).await?;
+    }
 
     let is_sequencer = caller == config.sequencer;
 
@@ -246,4 +252,221 @@ pub(crate) fn authenticate_token(
         is_sequencer,
         expires_at: token.expires_at,
     })
+}
+
+async fn validate_keychain_signature(
+    api: &dyn ZoneRpcApi,
+    caller: alloy_primitives::Address,
+    keychain_signature: &KeychainSignature,
+    digest: &alloy_primitives::B256,
+) -> Result<(), AuthenticateError> {
+    let key_id = keychain_signature
+        .key_id(digest)
+        .map_err(|_| AuthError::InvalidSignature)?;
+    let key_info = api.get_keychain_key(caller, key_id).await?;
+
+    if key_info.isRevoked {
+        return Err(AuthError::RevokedKeychainKey.into());
+    }
+    if key_info.keyId.is_zero() {
+        return Err(AuthError::UnauthorizedKeychainKey.into());
+    }
+    if key_info.expiry <= now_unix_seconds() {
+        return Err(AuthError::ExpiredKeychainKey.into());
+    }
+
+    let expected_signature_type = match keychain_signature.signature.signature_type() {
+        TempoSignatureType::Secp256k1 => KeyInfoSignatureType::Secp256k1,
+        TempoSignatureType::P256 => KeyInfoSignatureType::P256,
+        TempoSignatureType::WebAuthn => KeyInfoSignatureType::WebAuthn,
+    };
+
+    if key_info.signatureType != expected_signature_type {
+        return Err(AuthError::KeychainSignatureTypeMismatch.into());
+    }
+
+    Ok(())
+}
+
+fn now_unix_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_secs()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::authenticate_token;
+    use crate::{
+        PrivateRpcConfig,
+        auth::build_token_fields,
+        error::AuthenticateError,
+        handlers::ZoneRpcApi,
+        types::{BoxEyreFut, BoxFut, JsonRpcError, to_raw},
+    };
+    use alloy_primitives::{Address, Bytes};
+    use axum::http::StatusCode;
+    use p256::ecdsa::SigningKey as P256SigningKey;
+    use parking_lot::Mutex;
+    use rand::thread_rng;
+    use std::collections::HashMap;
+    use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
+        KeyInfo, SignatureType as KeyInfoSignatureType,
+    };
+
+    #[allow(dead_code)]
+    mod auth_tokens {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-utils/auth_tokens.rs"
+        ));
+    }
+
+    use auth_tokens::{build_token_with_signature, now_secs, sign_keychain_signature};
+
+    const ZONE_ID: u64 = 7;
+    const CHAIN_ID: u64 = 99;
+    const PORTAL: Address = Address::repeat_byte(0x22);
+
+    struct TestApi {
+        key_infos: Mutex<HashMap<(Address, Address), KeyInfo>>,
+    }
+
+    impl TestApi {
+        fn with_key_info(account: Address, key_id: Address, key_info: KeyInfo) -> Self {
+            let mut key_infos = HashMap::new();
+            key_infos.insert((account, key_id), key_info);
+            Self {
+                key_infos: Mutex::new(key_infos),
+            }
+        }
+    }
+
+    macro_rules! stub {
+        ($method:ident $(, $arg:ident : $ty:ty)*) => {
+            fn $method(&self $(, $arg: $ty)*) -> BoxFut<'_> {
+                Box::pin(async { Err(JsonRpcError::internal("not implemented")) })
+            }
+        };
+    }
+
+    impl ZoneRpcApi for TestApi {
+        fn get_keychain_key(&self, account: Address, key_id: Address) -> BoxEyreFut<'_, KeyInfo> {
+            let key_info = self
+                .key_infos
+                .lock()
+                .get(&(account, key_id))
+                .cloned()
+                .unwrap_or(KeyInfo {
+                    signatureType: KeyInfoSignatureType::Secp256k1,
+                    keyId: Address::ZERO,
+                    expiry: 0,
+                    enforceLimits: false,
+                    isRevoked: false,
+                });
+            Box::pin(async move { Ok(key_info) })
+        }
+
+        stub!(block_number);
+        stub!(chain_id);
+        stub!(net_version);
+        stub!(gas_price);
+        stub!(max_priority_fee_per_gas);
+        stub!(fee_history, _a: u64, _b: alloy_rpc_types_eth::BlockNumberOrTag, _c: Option<Vec<f64>>);
+        stub!(get_balance, _a: Address, _b: Option<alloy_rpc_types_eth::BlockId>, _c: crate::auth::AuthContext);
+        stub!(get_transaction_count, _a: Address, _b: Option<alloy_rpc_types_eth::BlockId>, _c: crate::auth::AuthContext);
+        stub!(block_by_number, _a: alloy_rpc_types_eth::BlockNumberOrTag, _b: bool, _c: crate::auth::AuthContext);
+        stub!(block_by_hash, _a: alloy_primitives::B256, _b: bool, _c: crate::auth::AuthContext);
+        stub!(transaction_by_hash, _a: alloy_primitives::B256, _c: crate::auth::AuthContext);
+        stub!(transaction_receipt, _a: alloy_primitives::B256, _c: crate::auth::AuthContext);
+        stub!(call, _a: tempo_alloy::rpc::TempoTransactionRequest, _b: Option<alloy_rpc_types_eth::BlockId>, _c: Option<alloy_rpc_types_eth::state::StateOverride>, _d: crate::auth::AuthContext);
+        stub!(estimate_gas, _a: tempo_alloy::rpc::TempoTransactionRequest, _b: Option<alloy_rpc_types_eth::BlockId>, _c: Option<alloy_rpc_types_eth::state::StateOverride>, _d: crate::auth::AuthContext);
+        stub!(send_raw_transaction, _a: Bytes, _c: crate::auth::AuthContext);
+        stub!(send_raw_transaction_sync, _a: Bytes, _c: crate::auth::AuthContext);
+        stub!(fill_transaction, _a: tempo_alloy::rpc::TempoTransactionRequest, _c: crate::auth::AuthContext);
+        stub!(get_logs, _a: alloy_rpc_types_eth::Filter, _c: crate::auth::AuthContext);
+        stub!(new_filter, _a: alloy_rpc_types_eth::Filter, _c: crate::auth::AuthContext);
+        stub!(get_filter_logs, _a: alloy_rpc_types_eth::FilterId, _c: crate::auth::AuthContext);
+        stub!(get_filter_changes, _a: alloy_rpc_types_eth::FilterId, _c: crate::auth::AuthContext);
+        stub!(new_block_filter, _c: crate::auth::AuthContext);
+        stub!(uninstall_filter, _a: alloy_rpc_types_eth::FilterId, _c: crate::auth::AuthContext);
+
+        fn zone_get_authorization_token_info(&self, auth: crate::auth::AuthContext) -> BoxFut<'_> {
+            Box::pin(async move {
+                to_raw(&serde_json::json!({
+                    "account": auth.caller,
+                    "expiresAt": alloy_primitives::U64::from(auth.expires_at),
+                }))
+            })
+        }
+
+        fn zone_get_zone_info(&self, auth: crate::auth::AuthContext) -> BoxFut<'_> {
+            Box::pin(async move {
+                to_raw(&serde_json::json!({
+                    "zoneId": "0x1",
+                    "zoneToken": format!("{:#x}", Address::repeat_byte(0x11)),
+                    "sequencer": format!("{:#x}", auth.caller),
+                    "chainId": "0x2a",
+                }))
+            })
+        }
+
+        fn zone_get_deposit_status(
+            &self,
+            tempo_block_number: u64,
+            _auth: crate::auth::AuthContext,
+        ) -> BoxFut<'_> {
+            Box::pin(async move {
+                to_raw(&serde_json::json!({
+                    "tempoBlockNumber": alloy_primitives::U64::from(tempo_block_number),
+                    "zoneProcessedThrough": alloy_primitives::U64::from(tempo_block_number),
+                    "processed": true,
+                    "deposits": [],
+                }))
+            })
+        }
+    }
+
+    fn test_config() -> PrivateRpcConfig {
+        PrivateRpcConfig {
+            listen_addr: ([127, 0, 0, 1], 0).into(),
+            zone_id: ZONE_ID,
+            chain_id: CHAIN_ID,
+            zone_portal: PORTAL,
+            sequencer: Address::ZERO,
+        }
+    }
+
+    #[tokio::test]
+    async fn revoked_keychain_key_is_classified_as_revoked() {
+        let root_account = Address::repeat_byte(0x55);
+        let access_signer = P256SigningKey::random(&mut thread_rng());
+        let now = now_secs();
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+        let (signature, key_id) =
+            sign_keychain_signature(digest, &access_signer, root_account, 0x04)
+                .expect("keychain signing failed");
+        let token = build_token_with_signature(signature, &fields);
+        let api = TestApi::with_key_info(
+            root_account,
+            key_id,
+            KeyInfo {
+                signatureType: KeyInfoSignatureType::P256,
+                keyId: Address::ZERO,
+                expiry: 0,
+                enforceLimits: false,
+                isRevoked: true,
+            },
+        );
+
+        let err = authenticate_token(&token, &test_config(), &api)
+            .await
+            .expect_err("revoked key should fail authentication");
+        assert!(matches!(
+            err,
+            AuthenticateError::Invalid(crate::auth::AuthError::RevokedKeychainKey)
+        ));
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
+    }
 }

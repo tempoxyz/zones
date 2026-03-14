@@ -653,7 +653,7 @@ mod tests {
         let w = test_withdrawal(address!("0x0000000000000000000000000000000000000042"), 1000);
         let hash = abi::Withdrawal::queue_hash(std::slice::from_ref(&w));
 
-        let expected = keccak256((w, EMPTY_SENTINEL).abi_encode());
+        let expected = keccak256((w, EMPTY_SENTINEL).abi_encode_params());
         assert_eq!(hash, expected);
     }
 
@@ -664,9 +664,38 @@ mod tests {
 
         let hash = abi::Withdrawal::queue_hash(&[w0.clone(), w1.clone()]);
 
-        let inner = keccak256((w1, EMPTY_SENTINEL).abi_encode());
-        let expected = keccak256((w0, inner).abi_encode());
+        let inner = keccak256((w1, EMPTY_SENTINEL).abi_encode_params());
+        let expected = keccak256((w0, inner).abi_encode_params());
         assert_eq!(hash, expected);
+    }
+
+    #[test]
+    fn withdrawal_hash_requires_param_encoding() {
+        let w = abi::Withdrawal {
+            token: address!("0x20c0000000000000000000000000000000000000"),
+            sender: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+            to: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+            amount: 500_000,
+            fee: 0,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackRecipient: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+            callbackData: Default::default(),
+        };
+
+        let tuple_value_hash = keccak256((w.clone(), EMPTY_SENTINEL).abi_encode());
+        let param_hash = keccak256((w, EMPTY_SENTINEL).abi_encode_params());
+
+        assert_ne!(
+            tuple_value_hash, param_hash,
+            "tuple-value encoding must differ from Solidity abi.encode(args...) here"
+        );
+        assert_eq!(
+            param_hash,
+            alloy_primitives::b256!(
+                "b48c451d87f74a89050368265aab8eeebe85b871f9239f60f53f5eec2b68e509"
+            )
+        );
     }
 
     #[test]

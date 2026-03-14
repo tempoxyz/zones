@@ -594,7 +594,7 @@ impl Withdrawal {
 
         let mut hash = EMPTY_SENTINEL;
         for w in withdrawals.iter().rev() {
-            hash = keccak256((w.clone(), hash).abi_encode());
+            hash = keccak256((w.clone(), hash).abi_encode_params());
         }
         hash
     }

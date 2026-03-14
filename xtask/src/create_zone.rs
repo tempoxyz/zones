@@ -205,6 +205,7 @@ impl CreateZone {
             "initialToken": format!("{}", self.initial_token),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": confirm_header.inner.number,
+            "zoneFactory": format!("{}", self.zone_factory),
         });
         let zone_json_path = self.output.join("zone.json");
         std::fs::write(
@@ -218,6 +219,7 @@ impl CreateZone {
         println!("  Portal: {portal}");
         println!("  Initial Token: {}", self.initial_token);
         println!("  Sequencer: {}", self.sequencer);
+        println!("  ZoneFactory: {}", self.zone_factory);
         println!("  Tempo anchor block: {}", confirm_header.inner.number);
         println!(
             "  Genesis written to: {}",

@@ -138,6 +138,50 @@ create-zone name:
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
 
 [group('zone')]
+[doc('Deploys SwapAndDepositRouter on L1 for an existing zone and saves it to generated/<name>/zone.json. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+deploy-router name dex="0xDEc0000000000000000000000000000000000000":
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    ZONE_DIR="generated/{{name}}"
+    ZONE_JSON="$ZONE_DIR/zone.json"
+    if [[ ! -f "$ZONE_JSON" ]]; then
+        echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    echo "Building Solidity specs..."
+    (cd docs/specs && forge build --skip test) || true
+    cargo run -p tempo-xtask -- deploy-router \
+        --zone-dir "$ZONE_DIR" \
+        --l1-rpc-url "$HTTP_RPC" \
+        --private-key "$PK" \
+        --stablecoin-dex "{{dex}}"
+
+[group('zone')]
+[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    ZONE_DIR="generated/{{name}}"
+    ZONE_JSON="$ZONE_DIR/zone.json"
+    if [[ ! -f "$ZONE_JSON" ]]; then
+        echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    cargo run -p tempo-xtask -- demo-swap-and-deposit \
+        --zone-dir "$ZONE_DIR" \
+        --l1-rpc-url "$HTTP_RPC" \
+        --zone-rpc-url "{{rpc}}" \
+        --private-key "$PK" \
+        --amount "{{amount}}" \
+        --tick "{{tick}}"
+
+[group('zone')]
 [doc('Starts a Tempo Zone L2 node, subscribing to L1 deposits. Pass the zone name used in create-zone. Use profile=release for production.')]
 zone-up name reset="false" profile="dev" args="":
     #!/bin/bash

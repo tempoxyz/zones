@@ -14,6 +14,9 @@ use serde_json::{Value, value::RawValue};
 pub type BoxFut<'a> =
     Pin<Box<dyn Future<Output = Result<Box<RawValue>, JsonRpcError>> + Send + 'a>>;
 
+/// Shorthand for typed boxed futures returned by internal async helpers.
+pub type BoxEyreFut<'a, T> = Pin<Box<dyn Future<Output = eyre::Result<T>> + Send + 'a>>;
+
 /// A JSON-RPC 2.0 request.
 #[derive(Debug, Clone, Deserialize)]
 pub struct JsonRpcRequest {

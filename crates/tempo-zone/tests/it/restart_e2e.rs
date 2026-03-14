@@ -9,7 +9,7 @@
 
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::{Address, U256};
-use zone::abi::{ZONE_TOKEN_ADDRESS, ZonePortal};
+use zone::abi::{ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneOutbox, ZonePortal};
 
 /// Longer timeout for real L1 tests.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -39,6 +39,45 @@ async fn batch_submitted_count(l1: &L1TestNode, portal_address: Address) -> eyre
     let portal = ZonePortal::new(portal_address, l1.provider());
     let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
     Ok(events.len())
+}
+
+async fn wait_for_withdrawal_requested(
+    zone: &ZoneTestNode,
+    sender: Address,
+    amount: u128,
+) -> eyre::Result<()> {
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
+    let expected_amount = U256::from(amount);
+
+    crate::utils::poll_until(
+        WITHDRAWAL_TIMEOUT,
+        std::time::Duration::from_millis(200),
+        "WithdrawalRequested visible on zone L2",
+        || {
+            let outbox = &outbox;
+            async move {
+                let events = outbox
+                    .WithdrawalRequested_filter()
+                    .from_block(0)
+                    .query()
+                    .await?;
+                if events
+                    .iter()
+                    .any(|(event, _)| event.sender == sender && expected_amount == event.amount)
+                {
+                    Ok(Some(()))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await
+}
+
+async fn abort_task(handle: tokio::task::JoinHandle<()>) {
+    handle.abort();
+    let _ = handle.await;
 }
 
 /// Sequencer restart after a successful batch + withdrawal cycle.
@@ -147,11 +186,19 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     l1.fund_user(account.address(), deposit_amount).await?;
     account.deposit(deposit_amount, L1_TIMEOUT, &zone).await?;
 
-    let seq_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+    let zone::ZoneSequencerHandle {
+        withdrawal_handle,
+        monitor_handle,
+    } = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+
+    // Keep batch submission running, but stop L1 processing so the portal queue
+    // is guaranteed to remain pending until after the restart.
+    abort_task(withdrawal_handle).await;
 
     // Request withdrawal — wait for the batch to be submitted to L1
     let withdrawal_amount: u128 = 500_000;
     account.withdraw(withdrawal_amount).await?;
+    wait_for_withdrawal_requested(&zone, account.address(), withdrawal_amount).await?;
 
     // Wait for the batch to land on L1 (portal tail advances)
     crate::utils::poll_until(
@@ -175,13 +222,10 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
     );
 
     // --- Abort sequencer BEFORE the withdrawal is processed ---
-    // Abort withdrawal processor first so it can't race to process the pending slot.
-    seq_handle.withdrawal_handle.abort();
-    seq_handle.monitor_handle.abort();
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    abort_task(monitor_handle).await;
 
     // --- Respawn sequencer (fetch_pending_withdrawals runs during init) ---
-    let _seq_handle2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+    let seq_handle2 = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
     // The OLD withdrawal from before the restart should be processed via
     // restored data (withdrawal processor was aborted before head advanced).
@@ -191,7 +235,16 @@ async fn test_sequencer_restart_with_pending_withdrawal_queue() -> eyre::Result<
         "portal head advances past first withdrawal",
         || {
             let l1 = &l1;
+            let seq_handle2 = &seq_handle2;
             async move {
+                if seq_handle2.monitor_handle.is_finished() {
+                    eyre::bail!("restarted monitor task exited before restoring the pending withdrawal");
+                }
+                if seq_handle2.withdrawal_handle.is_finished() {
+                    eyre::bail!(
+                        "restarted withdrawal processor exited before processing the pending withdrawal"
+                    );
+                }
                 let (head, _) = portal_queue_state(l1, portal_address).await?;
                 if head >= tail_before {
                     Ok(Some(head))

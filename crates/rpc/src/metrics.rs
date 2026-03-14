@@ -138,6 +138,9 @@ fn auth_reason_label(error: &AuthError) -> &'static str {
         AuthError::Expired => "expired",
         AuthError::IssuedInFuture => "issued_in_future",
         AuthError::InvalidSignature => "invalid_signature",
-        AuthError::UnsupportedSignatureType => "unsupported_signature_type",
+        AuthError::UnauthorizedKeychainKey => "unauthorized_keychain_key",
+        AuthError::RevokedKeychainKey => "revoked_keychain_key",
+        AuthError::ExpiredKeychainKey => "expired_keychain_key",
+        AuthError::KeychainSignatureTypeMismatch => "keychain_signature_type_mismatch",
     }
 }
