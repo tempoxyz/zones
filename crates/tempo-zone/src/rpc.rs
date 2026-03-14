@@ -11,6 +11,7 @@ use alloy_network::{ReceiptResponse, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U256};
 use alloy_rpc_types_eth::{
     Block, BlockId, BlockNumberOrTag, BlockTransactions, Filter, FilterChanges, FilterId,
+    TransactionRequest,
     state::{EvmOverrides, StateOverride},
 };
 use alloy_sol_types::SolCall;
@@ -116,14 +117,19 @@ where
 {
     fn get_keychain_key(&self, account: Address, key_id: Address) -> BoxEyreFut<'_, KeyInfo> {
         Box::pin(async move {
-            let mut request = TempoTransactionRequest::default();
-            request.to = Some(ACCOUNT_KEYCHAIN_ADDRESS.into());
-            request.input = getKeyCall {
-                account,
-                keyId: key_id,
-            }
-            .abi_encode()
-            .into();
+            let request = TempoTransactionRequest {
+                inner: TransactionRequest {
+                    to: Some(ACCOUNT_KEYCHAIN_ADDRESS.into()),
+                    input: getKeyCall {
+                        account,
+                        keyId: key_id,
+                    }
+                    .abi_encode()
+                    .into(),
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
 
             let output = EthCall::call(&self.eth.api, request, None, EvmOverrides::default())
                 .await
