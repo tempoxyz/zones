@@ -9,6 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use alloy_primitives::{Address, Bytes, hex};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, Log, state::StateOverride};
 use alloy_sol_types::SolCall;
+use eyre::WrapErr;
 use serde::Deserialize;
 use serde_json::value::RawValue;
 use tempo_alloy::rpc::TempoTransactionRequest;
@@ -145,8 +146,9 @@ impl ZoneRpcApi for ProxyZoneRpc {
                     ]),
                 )
                 .await
-                .map_err(|err| eyre::eyre!(err.to_string()))?;
-            let output: Bytes = serde_json::from_str(result.get())?;
+                .map_err(|err| eyre::eyre!("AccountKeychain.getKey eth_call failed: {err}"))?;
+            let output: Bytes = serde_json::from_str(result.get())
+                .wrap_err("AccountKeychain.getKey returned invalid bytes")?;
 
             IAccountKeychain::getKeyCall::abi_decode_returns(output.as_ref()).map_err(Into::into)
         })

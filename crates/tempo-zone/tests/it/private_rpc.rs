@@ -1,29 +1,17 @@
 //! Tests for the private zone RPC module.
 
+use crate::utils::{
+    build_signed_token_blob, now_secs, sign_keychain_signature, sign_p256_signature,
+    sign_webauthn_signature,
+};
 use alloy_primitives::Address;
-use base64::Engine as _;
-use p256::{
-    EncodedPoint,
-    ecdsa::{SigningKey as P256SigningKey, signature::hazmat::PrehashSigner},
-};
+use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
-use sha2::{Digest, Sha256};
-use tempo_primitives::transaction::tt_signature::{
-    KeychainSignature, PrimitiveSignature, TempoSignature, WebAuthnSignature, normalize_p256_s,
-};
+use tempo_primitives::transaction::tt_signature::TempoSignature;
 use zone::rpc::{
     auth::{AuthorizationToken, build_token_fields},
     types::{MethodTier, classify_method},
 };
-
-// ============ Helpers ============
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
 
 /// Build a raw token blob from the given fields with a fake 65-byte secp256k1 signature.
 ///
@@ -56,101 +44,6 @@ fn make_test_token(
 ) -> AuthorizationToken {
     let blob = build_token_blob(version, zone_id, chain_id, portal, issued_at, expires_at);
     AuthorizationToken::parse(&blob).unwrap()
-}
-
-fn build_signed_token_blob(signature: TempoSignature, fields: &[u8]) -> Vec<u8> {
-    let mut blob = Vec::with_capacity(signature.encoded_length() + fields.len());
-    blob.extend_from_slice(signature.to_bytes().as_ref());
-    blob.extend_from_slice(fields);
-    blob
-}
-
-fn p256_public_key(
-    signing_key: &P256SigningKey,
-) -> (alloy_primitives::B256, alloy_primitives::B256) {
-    let encoded = EncodedPoint::from(signing_key.verifying_key());
-    (
-        alloy_primitives::B256::from_slice(encoded.x().expect("x coordinate present")),
-        alloy_primitives::B256::from_slice(encoded.y().expect("y coordinate present")),
-    )
-}
-
-fn sign_p256_signature(
-    digest: alloy_primitives::B256,
-    signing_key: &P256SigningKey,
-) -> TempoSignature {
-    let pre_hashed = Sha256::digest(digest);
-    let signature: p256::ecdsa::Signature = signing_key
-        .sign_prehash(&pre_hashed)
-        .expect("p256 signing should succeed");
-    let sig_bytes = signature.to_bytes();
-    let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
-
-    TempoSignature::Primitive(PrimitiveSignature::P256(
-        tempo_primitives::transaction::tt_signature::P256SignatureWithPreHash {
-            r: alloy_primitives::B256::from_slice(&sig_bytes[0..32]),
-            s: normalize_p256_s(&sig_bytes[32..64]),
-            pub_key_x,
-            pub_key_y,
-            pre_hash: true,
-        },
-    ))
-}
-
-fn sign_webauthn_signature(
-    digest: alloy_primitives::B256,
-    signing_key: &P256SigningKey,
-) -> TempoSignature {
-    let mut authenticator_data = vec![0u8; 37];
-    authenticator_data[0..32].copy_from_slice(&[0xAA; 32]);
-    authenticator_data[32] = 0x01;
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest);
-    let client_data_json = format!(
-        r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"https://example.com","crossOrigin":false}}"#
-    );
-    let client_data_hash = Sha256::digest(client_data_json.as_bytes());
-    let mut final_hasher = Sha256::new();
-    final_hasher.update(&authenticator_data);
-    final_hasher.update(client_data_hash);
-    let message_hash = final_hasher.finalize();
-    let signature: p256::ecdsa::Signature = signing_key
-        .sign_prehash(&message_hash)
-        .expect("webauthn signing should succeed");
-    let sig_bytes = signature.to_bytes();
-    let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
-    let mut webauthn_data = authenticator_data;
-    webauthn_data.extend_from_slice(client_data_json.as_bytes());
-
-    TempoSignature::Primitive(PrimitiveSignature::WebAuthn(WebAuthnSignature {
-        webauthn_data: alloy_primitives::Bytes::from(webauthn_data),
-        r: alloy_primitives::B256::from_slice(&sig_bytes[0..32]),
-        s: normalize_p256_s(&sig_bytes[32..64]),
-        pub_key_x,
-        pub_key_y,
-    }))
-}
-
-fn sign_keychain_signature(
-    digest: alloy_primitives::B256,
-    signing_key: &P256SigningKey,
-    root_account: Address,
-    version: u8,
-) -> TempoSignature {
-    let keychain_digest = match version {
-        0x03 => digest,
-        0x04 => KeychainSignature::signing_hash(digest, root_account),
-        _ => panic!("unsupported keychain version"),
-    };
-    let primitive = match sign_p256_signature(keychain_digest, signing_key) {
-        TempoSignature::Primitive(primitive) => primitive,
-        TempoSignature::Keychain(_) => unreachable!("primitive signature expected"),
-    };
-
-    if version == 0x03 {
-        TempoSignature::Keychain(KeychainSignature::new_v1(root_account, primitive))
-    } else {
-        TempoSignature::Keychain(KeychainSignature::new(root_account, primitive))
-    }
 }
 
 // ============ Auth Token Parsing ============
@@ -324,9 +217,13 @@ fn tempo_signature_roundtrip_p256_from_token_bytes() {
     let now = now_secs();
     let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
     let expected = sign_p256_signature(digest, &signing_key)
+        .expect("p256 signing should succeed")
         .recover_signer(&digest)
         .expect("p256 recovery should succeed");
-    let blob = build_signed_token_blob(sign_p256_signature(digest, &signing_key), &fields);
+    let blob = build_signed_token_blob(
+        sign_p256_signature(digest, &signing_key).expect("p256 signing should succeed"),
+        &fields,
+    );
     let token = AuthorizationToken::parse(&blob).unwrap();
     let parsed = TempoSignature::from_bytes(&token.signature).unwrap();
 
@@ -338,7 +235,8 @@ fn tempo_signature_roundtrip_webauthn_from_token_bytes() {
     let signing_key = P256SigningKey::random(&mut thread_rng());
     let now = now_secs();
     let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
-    let signature = sign_webauthn_signature(digest, &signing_key);
+    let signature =
+        sign_webauthn_signature(&signing_key, digest).expect("webauthn signing should succeed");
     let expected = signature
         .recover_signer(&digest)
         .expect("webauthn recovery should succeed");
@@ -355,11 +253,9 @@ fn tempo_signature_roundtrip_keychain_v1_from_token_bytes() {
     let root_account = Address::repeat_byte(0x44);
     let now = now_secs();
     let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
-    let signature = sign_keychain_signature(digest, &signing_key, root_account, 0x03);
-    let expected_key_id = match &signature {
-        TempoSignature::Keychain(keychain) => keychain.key_id(&digest).unwrap(),
-        TempoSignature::Primitive(_) => unreachable!("keychain signature expected"),
-    };
+    let (signature, expected_key_id) =
+        sign_keychain_signature(digest, &signing_key, root_account, 0x03)
+            .expect("keychain signing should succeed");
     let blob = build_signed_token_blob(signature, &fields);
     let token = AuthorizationToken::parse(&blob).unwrap();
     let parsed = TempoSignature::from_bytes(&token.signature).unwrap();
@@ -379,11 +275,9 @@ fn tempo_signature_roundtrip_keychain_v2_from_token_bytes() {
     let root_account = Address::repeat_byte(0x55);
     let now = now_secs();
     let (fields, digest) = build_token_fields(1, 2, Address::ZERO, now, now + 600);
-    let signature = sign_keychain_signature(digest, &signing_key, root_account, 0x04);
-    let expected_key_id = match &signature {
-        TempoSignature::Keychain(keychain) => keychain.key_id(&digest).unwrap(),
-        TempoSignature::Primitive(_) => unreachable!("keychain signature expected"),
-    };
+    let (signature, expected_key_id) =
+        sign_keychain_signature(digest, &signing_key, root_account, 0x04)
+            .expect("keychain signing should succeed");
     let blob = build_signed_token_blob(signature, &fields);
     let token = AuthorizationToken::parse(&blob).unwrap();
     let parsed = TempoSignature::from_bytes(&token.signature).unwrap();

@@ -298,22 +298,25 @@ mod tests {
         handlers::ZoneRpcApi,
         types::{BoxEyreFut, BoxFut, JsonRpcError},
     };
-    use alloy_primitives::{Address, B256, Bytes};
+    use alloy_primitives::{Address, Bytes};
     use axum::http::StatusCode;
-    use p256::{
-        EncodedPoint,
-        ecdsa::{SigningKey as P256SigningKey, signature::hazmat::PrehashSigner},
-    };
+    use p256::ecdsa::SigningKey as P256SigningKey;
     use parking_lot::Mutex;
     use rand::thread_rng;
-    use sha2::{Digest, Sha256};
     use std::collections::HashMap;
     use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
         KeyInfo, SignatureType as KeyInfoSignatureType,
     };
-    use tempo_primitives::transaction::tt_signature::{
-        KeychainSignature, PrimitiveSignature, TempoSignature, normalize_p256_s,
-    };
+
+    #[allow(dead_code)]
+    mod auth_tokens {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/test-utils/auth_tokens.rs"
+        ));
+    }
+
+    use auth_tokens::{build_token_with_signature, now_secs, sign_keychain_signature};
 
     const ZONE_ID: u64 = 7;
     const CHAIN_ID: u64 = 99;
@@ -393,79 +396,15 @@ mod tests {
         }
     }
 
-    fn p256_public_key(signing_key: &P256SigningKey) -> (B256, B256) {
-        let encoded = EncodedPoint::from(signing_key.verifying_key());
-        (
-            B256::from_slice(encoded.x().expect("x coordinate present")),
-            B256::from_slice(encoded.y().expect("y coordinate present")),
-        )
-    }
-
-    fn sign_p256_token(digest: B256, signing_key: &P256SigningKey) -> TempoSignature {
-        let pre_hashed = Sha256::digest(digest);
-        let signature: p256::ecdsa::Signature = signing_key
-            .sign_prehash(&pre_hashed)
-            .expect("p256 signing failed");
-        let sig_bytes = signature.to_bytes();
-        let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
-
-        TempoSignature::Primitive(PrimitiveSignature::P256(
-            tempo_primitives::transaction::tt_signature::P256SignatureWithPreHash {
-                r: B256::from_slice(&sig_bytes[0..32]),
-                s: normalize_p256_s(&sig_bytes[32..64]),
-                pub_key_x,
-                pub_key_y,
-                pre_hash: true,
-            },
-        ))
-    }
-
-    fn sign_keychain_token(
-        digest: B256,
-        access_signer: &P256SigningKey,
-        root_account: Address,
-        version: u8,
-    ) -> (TempoSignature, Address) {
-        let signing_hash = match version {
-            0x03 => digest,
-            0x04 => KeychainSignature::signing_hash(digest, root_account),
-            _ => panic!("unsupported keychain version"),
-        };
-        let primitive = match sign_p256_token(signing_hash, access_signer) {
-            TempoSignature::Primitive(primitive) => primitive,
-            TempoSignature::Keychain(_) => unreachable!("primitive signature expected"),
-        };
-        let signature = if version == 0x03 {
-            TempoSignature::Keychain(KeychainSignature::new_v1(root_account, primitive))
-        } else {
-            TempoSignature::Keychain(KeychainSignature::new(root_account, primitive))
-        };
-        let key_id = match &signature {
-            TempoSignature::Keychain(keychain) => keychain
-                .key_id(&digest)
-                .expect("inner key recovery should succeed"),
-            TempoSignature::Primitive(_) => unreachable!("keychain signature expected"),
-        };
-        (signature, key_id)
-    }
-
-    fn build_token_with_signature(signature: TempoSignature, fields: &[u8]) -> String {
-        let mut blob = Vec::with_capacity(signature.encoded_length() + fields.len());
-        blob.extend_from_slice(signature.to_bytes().as_ref());
-        blob.extend_from_slice(fields);
-        alloy_primitives::hex::encode(blob)
-    }
-
     #[tokio::test]
     async fn revoked_keychain_key_is_classified_as_revoked() {
         let root_account = Address::repeat_byte(0x55);
         let access_signer = P256SigningKey::random(&mut thread_rng());
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+        let now = now_secs();
         let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
-        let (signature, key_id) = sign_keychain_token(digest, &access_signer, root_account, 0x04);
+        let (signature, key_id) =
+            sign_keychain_signature(digest, &access_signer, root_account, 0x04)
+                .expect("keychain signing failed");
         let token = build_token_with_signature(signature, &fields);
         let api = TestApi::with_key_info(
             root_account,

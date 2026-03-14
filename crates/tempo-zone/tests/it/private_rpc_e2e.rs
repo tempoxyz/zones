@@ -7,7 +7,7 @@
 //! - Block redaction (logsBloom zeroed, transactions cleared for non-sequencers)
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
-use crate::utils::start_zone_with_private_rpc;
+use crate::utils::{now_secs, start_zone_with_private_rpc};
 use alloy::{
     primitives::{Address, B256, address, hex},
     signers::local::PrivateKeySigner,
@@ -17,13 +17,6 @@ use rand::thread_rng;
 use tempo_contracts::precompiles::account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tokio::time::sleep;
-
-fn now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs()
-}
 
 fn corrupt_token_hex(token: &str) -> String {
     let mut bytes = hex::decode(token).expect("token hex should decode");

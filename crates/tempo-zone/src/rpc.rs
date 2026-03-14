@@ -14,6 +14,7 @@ use alloy_rpc_types_eth::{
     state::{EvmOverrides, StateOverride},
 };
 use alloy_sol_types::SolCall;
+use eyre::WrapErr;
 use reth_rpc::EthFilter;
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
@@ -126,7 +127,7 @@ where
 
             let output = EthCall::call(&self.eth.api, request, None, EvmOverrides::default())
                 .await
-                .map_err(|err| eyre::eyre!(err.to_string()))?;
+                .wrap_err("AccountKeychain.getKey eth_call failed")?;
 
             IAccountKeychain::getKeyCall::abi_decode_returns(output.as_ref()).map_err(Into::into)
         })

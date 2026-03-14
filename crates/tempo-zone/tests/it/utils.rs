@@ -4,18 +4,13 @@ use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::{SolEvent, SolValue};
-use base64::Engine as _;
 use eyre::WrapErr;
-use p256::{
-    EncodedPoint,
-    ecdsa::{SigningKey as P256SigningKey, signature::hazmat::PrehashSigner},
-};
+use p256::ecdsa::SigningKey as P256SigningKey;
 use reth_ethereum::tasks::TaskManager;
 use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
 use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
-use sha2::{Digest, Sha256};
 use std::{
     sync::{
         Arc,
@@ -30,12 +25,7 @@ use tempo_contracts::precompiles::{
         IAccountKeychainInstance, SignatureType as KeyInfoSignatureType,
     },
 };
-use tempo_primitives::{
-    TempoHeader,
-    transaction::tt_signature::{
-        KeychainSignature, PrimitiveSignature, TempoSignature, WebAuthnSignature, normalize_p256_s,
-    },
-};
+use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
 use zone::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents,
     SharedL1StateCache, ZoneNode,
@@ -45,6 +35,14 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_alloy::TempoNetwork;
+
+#[path = "../../../rpc/test-utils/auth_tokens.rs"]
+mod auth_tokens;
+
+pub(crate) use auth_tokens::{
+    build_signed_token_blob, now_secs, sign_keychain_signature, sign_p256_signature,
+    sign_webauthn_signature,
+};
 
 /// Atomic counter for unique chain IDs across concurrent tests.
 static NEXT_CHAIN_ID: AtomicU64 = AtomicU64::new(71_000);
@@ -1855,10 +1853,7 @@ fn build_auth_token(
     use alloy_signer::SignerSync;
     use zone::rpc::auth::build_token_fields;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = now_secs();
     let expires_at = now + 600;
 
     let (fields, digest) = build_token_fields(zone_id, chain_id, portal, now, expires_at);
@@ -1881,77 +1876,11 @@ fn build_auth_token_with_signature(
 ) -> String {
     use zone::rpc::auth::build_token_fields;
 
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = now_secs();
     let expires_at = now + 600;
 
     let (fields, _) = build_token_fields(zone_id, chain_id, portal, now, expires_at);
-    let mut blob = Vec::with_capacity(signature.encoded_length() + fields.len());
-    blob.extend_from_slice(signature.to_bytes().as_ref());
-    blob.extend_from_slice(&fields);
-    alloy_primitives::hex::encode(&blob)
-}
-
-fn p256_public_key(signing_key: &P256SigningKey) -> (B256, B256) {
-    let encoded = EncodedPoint::from(signing_key.verifying_key());
-    (
-        B256::from_slice(encoded.x().expect("x coordinate present")),
-        B256::from_slice(encoded.y().expect("y coordinate present")),
-    )
-}
-
-fn sign_p256_auth_signature(digest: B256, signing_key: &P256SigningKey) -> TempoSignature {
-    let pre_hashed = Sha256::digest(digest);
-    let signature: p256::ecdsa::Signature = signing_key
-        .sign_prehash(&pre_hashed)
-        .expect("p256 signing failed");
-    let sig_bytes = signature.to_bytes();
-    let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
-
-    TempoSignature::Primitive(PrimitiveSignature::P256(
-        tempo_primitives::transaction::tt_signature::P256SignatureWithPreHash {
-            r: B256::from_slice(&sig_bytes[0..32]),
-            s: normalize_p256_s(&sig_bytes[32..64]),
-            pub_key_x,
-            pub_key_y,
-            pre_hash: true,
-        },
-    ))
-}
-
-fn sign_webauthn_auth_signature(
-    signing_key: &P256SigningKey,
-    challenge_digest: B256,
-) -> TempoSignature {
-    let mut authenticator_data = vec![0u8; 37];
-    authenticator_data[0..32].copy_from_slice(&[0xAA; 32]);
-    authenticator_data[32] = 0x01;
-    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(challenge_digest);
-    let client_data_json = format!(
-        r#"{{"type":"webauthn.get","challenge":"{challenge}","origin":"https://example.com","crossOrigin":false}}"#
-    );
-    let client_data_hash = Sha256::digest(client_data_json.as_bytes());
-    let mut final_hasher = Sha256::new();
-    final_hasher.update(&authenticator_data);
-    final_hasher.update(client_data_hash);
-    let message_hash = final_hasher.finalize();
-    let signature: p256::ecdsa::Signature = signing_key
-        .sign_prehash(&message_hash)
-        .expect("webauthn signing failed");
-    let sig_bytes = signature.to_bytes();
-    let (pub_key_x, pub_key_y) = p256_public_key(signing_key);
-    let mut webauthn_data = authenticator_data;
-    webauthn_data.extend_from_slice(client_data_json.as_bytes());
-
-    TempoSignature::Primitive(PrimitiveSignature::WebAuthn(WebAuthnSignature {
-        webauthn_data: alloy_primitives::Bytes::from(webauthn_data),
-        r: B256::from_slice(&sig_bytes[0..32]),
-        s: normalize_p256_s(&sig_bytes[32..64]),
-        pub_key_x,
-        pub_key_y,
-    }))
+    auth_tokens::build_token_with_signature(signature, &fields)
 }
 
 fn build_p256_auth_token(
@@ -1960,15 +1889,12 @@ fn build_p256_auth_token(
     chain_id: u64,
     portal: Address,
 ) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = now_secs();
     let expires_at = now + 600;
     let (_, digest) =
         zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
     build_auth_token_with_signature(
-        sign_p256_auth_signature(digest, signing_key),
+        sign_p256_signature(digest, signing_key).expect("p256 signing failed"),
         zone_id,
         chain_id,
         portal,
@@ -1982,15 +1908,13 @@ fn build_webauthn_auth_token(
     portal: Address,
     challenge_digest: Option<B256>,
 ) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = now_secs();
     let expires_at = now + 600;
     let (_, digest) =
         zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
     build_auth_token_with_signature(
-        sign_webauthn_auth_signature(signing_key, challenge_digest.unwrap_or(digest)),
+        sign_webauthn_signature(signing_key, challenge_digest.unwrap_or(digest))
+            .expect("webauthn signing failed"),
         zone_id,
         chain_id,
         portal,
@@ -2005,31 +1929,12 @@ fn build_keychain_auth_token(
     chain_id: u64,
     portal: Address,
 ) -> (String, Address) {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = now_secs();
     let expires_at = now + 600;
     let (_, digest) =
         zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
-    let keychain_digest = match version {
-        0x03 => digest,
-        0x04 => KeychainSignature::signing_hash(digest, root_account),
-        _ => panic!("unsupported keychain version"),
-    };
-    let primitive = match sign_p256_auth_signature(keychain_digest, signing_key) {
-        TempoSignature::Primitive(primitive) => primitive,
-        TempoSignature::Keychain(_) => unreachable!("primitive signature expected"),
-    };
-    let signature = if version == 0x03 {
-        TempoSignature::Keychain(KeychainSignature::new_v1(root_account, primitive))
-    } else {
-        TempoSignature::Keychain(KeychainSignature::new(root_account, primitive))
-    };
-    let key_id = match &signature {
-        TempoSignature::Keychain(keychain) => keychain.key_id(&digest).unwrap(),
-        TempoSignature::Primitive(_) => unreachable!("keychain signature expected"),
-    };
+    let (signature, key_id) = sign_keychain_signature(digest, signing_key, root_account, version)
+        .expect("keychain signing failed");
 
     (
         build_auth_token_with_signature(signature, zone_id, chain_id, portal),
