@@ -748,6 +748,15 @@ interface IZoneConfig {
 
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
+
+    /// @notice Emitted when a deployer is added or removed.
+    event DeployerWhitelistUpdated(address indexed deployer, bool allowed);
+
+    /// @notice Returns true if the address is allowed to execute CREATE/CREATE2.
+    function isWhitelistedDeployer(address deployer) external view returns (bool);
+
+    /// @notice Add or remove a deployer. Callable only by the sequencer.
+    function setWhitelistedDeployer(address deployer, bool allowed) external;
 }
 ```
 

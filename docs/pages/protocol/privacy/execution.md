@@ -93,11 +93,32 @@ Authorization is **operation-specific**: ZoneInbox access applies to `mint` only
 
 ## EVM restrictions
 
-### Contract creation disabled
+### Contract creation restricted
 
-Privacy zones disable the `CREATE` and `CREATE2` opcodes. The zone runs a fixed set of predeploys (system contracts and the zone token); user-deployed contracts are not supported. Any transaction or call that attempts contract creation reverts.
+Privacy zones restrict the `CREATE` and `CREATE2` opcodes to a set of **whitelisted deployer addresses**. Any `CREATE` or `CREATE2` executed by a non-whitelisted address reverts. By default the whitelist is empty — the zone launches with no user-deployable contracts, only the fixed predeploys.
 
-**Rationale**: Arbitrary contract deployment would allow users to deploy contracts that circumvent execution-level privacy protections — for example, a contract that calls `balanceOf` on behalf of a third party and emits the result as an event.
+**Whitelist management**: The sequencer manages the deployer whitelist via `ZoneConfig`:
+
+```solidity
+/// @notice Emitted when a deployer is added or removed.
+event DeployerWhitelistUpdated(address indexed deployer, bool allowed);
+
+/// @notice Returns true if the address is allowed to execute CREATE/CREATE2.
+function isWhitelistedDeployer(address deployer) external view returns (bool);
+
+/// @notice Add or remove a deployer. Callable only by the sequencer.
+function setWhitelistedDeployer(address deployer, bool allowed) external;
+```
+
+`setWhitelistedDeployer` is a sequencer-only system transaction — it reverts if `msg.sender != sequencer()`. The whitelist is stored in `ZoneConfig` contract state and checked by the EVM at opcode execution time.
+
+**EVM enforcement**: When the EVM encounters `CREATE` or `CREATE2`, it checks `ZoneConfig.isWhitelistedDeployer(executingAddress)` where `executingAddress` is the account whose code is running. If the check fails, the opcode reverts. For a direct deployment transaction (a tx with `to` = null), the executing address is the sender EOA. For a factory call, it is the factory contract. This means the same whitelist controls both EOA-initiated deployments and factory-initiated deployments.
+
+**Contracts deployed by whitelisted deployers are not themselves whitelisted** — they cannot deploy further contracts unless the sequencer explicitly adds them.
+
+**Bootstrapping a factory**: The sequencer whitelists their own EOA, deploys the factory contract via a direct deployment transaction, whitelists the factory address, and removes their own EOA. After this sequence only the factory can create new contracts.
+
+**Rationale**: Arbitrary contract deployment would allow users to deploy contracts that circumvent execution-level privacy protections — for example, a contract that calls `balanceOf` on behalf of a third party and emits the result as an event. The whitelist preserves this protection while allowing the sequencer to enable vetted factory contracts (e.g., a Safe proxy factory) whose deployed children have known, audited behavior.
 
 ## Interaction with RPC
 

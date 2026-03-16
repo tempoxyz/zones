@@ -12,7 +12,7 @@ This document specifies the RPC interface for Tempo privacy zones. The design st
 ## Non-goals
 
 - Public block explorers or permissionless indexing. The zone is a private validium; only authenticated participants and the sequencer can observe state.
-- Support for arbitrary smart contract deployment. Zones run a fixed set of predeploys; contract creation is disabled.
+- Support for arbitrary smart contract deployment. Contract creation is restricted to [whitelisted deployer addresses](./execution#contract-creation-restricted) managed by the sequencer.
 
 ## Authorization tokens
 
