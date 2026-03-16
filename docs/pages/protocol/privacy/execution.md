@@ -118,7 +118,12 @@ function setWhitelistedDeployer(address deployer, bool allowed) external;
 
 **Bootstrapping a factory**: The sequencer whitelists their own EOA, deploys the factory contract via a direct deployment transaction, whitelists the factory address, and removes their own EOA. After this sequence only the factory can create new contracts.
 
-**Rationale**: Arbitrary contract deployment would allow users to deploy contracts that circumvent execution-level privacy protections — for example, a contract that calls `balanceOf` on behalf of a third party and emits the result as an event. The whitelist preserves this protection while allowing the sequencer to enable vetted factory contracts (e.g., a Safe proxy factory) whose deployed children have known, audited behavior.
+**Rationale**: While per-function access control (`balanceOf`, `allowance`) blocks direct balance reads by third-party contracts, arbitrary deployment still poses risks:
+
+1. **Gas side channels**: Standard EVM gas costs leak information. For example, a TIP-20 transfer to a new account (zero → non-zero storage) costs more than a transfer to an existing account. The zone's [fixed gas cost](#fixed-gas-constant-transfer-cost) mitigates this for the TIP-20 precompile, but user-deployed contracts with their own storage would reintroduce the same class of side channel — any storage write whose cost depends on the target's prior state reveals one bit of information per call.
+2. **No automatic privacy**: Contracts deployed on a privacy zone are not automatically private. Keeping user data confidential requires deliberate design — scoped view functions, fixed gas costs, and careful event filtering. Unrestricted deployment would create a false expectation that any contract inherits the zone's privacy properties, when in practice most contracts would leak information through public storage, events, or gas patterns.
+
+The whitelist ensures that only contracts with audited privacy behavior are deployed, and sets a clear expectation that each whitelisted contract has been reviewed for information leakage.
 
 ## Interaction with RPC
 
