@@ -560,7 +560,7 @@ zone-auth-token name:
     EXPIRES=$((NOW + 600))
     MAGIC="54656d706f5a6f6e655250430000000000000000000000000000000000000000"
     VERSION="00"
-    ZONE_ID_HEX=$(printf '%016x' "$ZONE_ID")
+    ZONE_ID_HEX=$(printf '%08x' "$ZONE_ID")
     CHAIN_ID_HEX=$(printf '%016x' "$CHAIN_ID")
     PORTAL_HEX=$(echo "$PORTAL" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
     ISSUED_HEX=$(printf '%016x' "$NOW")
