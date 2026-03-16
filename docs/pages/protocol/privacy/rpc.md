@@ -183,7 +183,7 @@ These methods are available to any authenticated caller but filter results to on
 
 Contracts that implement `getOwners()` (returning `address[]`) can grant read access to their owners through the RPC. When the authenticated account is an owner of a contract, the RPC server treats that contract as an associated account for scoping purposes.
 
-**Resolution**: When a scoped method targets an address with code, the RPC server calls `getOwners()` on that address. If the call succeeds and the authenticated account is in the returned list, the caller is granted read access to the contract's state. If the call reverts or the account is not in the list, normal scoping applies (the request is denied or returns a dummy value).
+**Resolution**: When a scoped method targets an address with code, the RPC server calls `getOwners()` on that address with a gas limit of **100,000 gas**. If the call succeeds within this budget and the authenticated account is in the returned list, the caller is granted read access to the contract's state. If the call reverts, exceeds the gas limit, or the account is not in the list, normal scoping applies (the request is denied or returns a dummy value). The gas cap prevents malicious contracts from consuming unbounded RPC resources via expensive `getOwners()` implementations.
 
 **Scope of access**: A delegated read grants the caller the same visibility they would have if the contract were their own account:
 
@@ -204,7 +204,7 @@ Delegated read access is strictly read-only. It does not allow the caller to sen
 function getOwners() external view returns (address[] memory);
 ```
 
-Contracts without this function, or where the call reverts, are not eligible for read delegation. The RPC server MUST NOT attempt other ownership-checking methods as a fallback — a single standard interface avoids ambiguity and prevents probing attacks where the server tries multiple selectors on unknown contracts.
+Contracts without this function, or where the call reverts or exceeds 100,000 gas, are not eligible for read delegation. The gas cap is sufficient for Safes with up to ~50 owners; contracts that exceed it are silently treated as non-delegated. The RPC server MUST NOT attempt other ownership-checking methods as a fallback — a single standard interface avoids ambiguity and prevents probing attacks where the server tries multiple selectors on unknown contracts.
 
 #### Transaction access
 
