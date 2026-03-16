@@ -174,10 +174,37 @@ These methods are available to any authenticated caller but filter results to on
 
 | Method | Scoping rule |
 |--------|-------------|
-| `eth_getBalance` | Returns the native balance for the authenticated account only. Queries for other accounts return `0x0`. |
-| `eth_getTransactionCount` | Returns the nonce for the authenticated account only. Queries for other accounts return `0x0`. |
-| `eth_call` | Executes the call with `from` set to the authenticated account. The [execution environment](./execution) enforces `balanceOf` access control at the EVM level, so callers can only query their own balance. Calls that attempt to read other accounts' state will revert. |
+| `eth_getBalance` | Returns the native balance for the authenticated account only, or for a [delegated contract](#contract-read-delegation). Queries for other accounts return `0x0`. |
+| `eth_getTransactionCount` | Returns the nonce for the authenticated account only, or for a [delegated contract](#contract-read-delegation). Queries for other accounts return `0x0`. |
+| `eth_call` | Executes the call with `from` set to the authenticated account. The [execution environment](./execution) enforces `balanceOf` access control at the EVM level, so callers can only query their own balance. Calls targeting a [delegated contract](#contract-read-delegation) bypass this restriction — the execution environment allows the call to read the contract's state. |
 | `eth_estimateGas` | Only allowed when `from` equals the authenticated account. TIP-20 transfers always return the [fixed 100,000 gas](./execution#fixed-gas-constant-transfer-cost). |
+
+#### Contract read delegation
+
+Contracts that implement `getOwners()` (returning `address[]`) can grant read access to their owners through the RPC. When the authenticated account is an owner of a contract, the RPC server treats that contract as an associated account for scoping purposes.
+
+**Resolution**: When a scoped method targets an address with code, the RPC server calls `getOwners()` on that address. If the call succeeds and the authenticated account is in the returned list, the caller is granted read access to the contract's state. If the call reverts or the account is not in the list, normal scoping applies (the request is denied or returns a dummy value).
+
+**Scope of access**: A delegated read grants the caller the same visibility they would have if the contract were their own account:
+
+- `eth_getBalance` for the contract address returns the contract's real balance.
+- `eth_getTransactionCount` for the contract address returns the contract's real nonce.
+- `eth_call` with `to` set to the contract address is allowed — the caller can invoke view functions on the contract (e.g., `getOwners()`, `nonce()`, `getThreshold()`).
+- `eth_getLogs` returns events where the contract address is a relevant party, following the same [event filtering rules](#event-filtering-rules) applied to the authenticated account.
+
+Delegated read access is strictly read-only. It does not allow the caller to send transactions from the contract or bypass the contract's own execution logic (e.g., multisig threshold).
+
+**Caching**: The RPC server SHOULD cache `getOwners()` results per contract address and invalidate the cache when the contract's state changes (detected via block import). The cache TTL SHOULD NOT exceed the authorization token validity window. This avoids calling `getOwners()` on every request while ensuring removed owners lose access promptly.
+
+**Use case — multisig wallets**: A Gnosis Safe deployed on the zone stores its owners in contract state and exposes them via `getOwners()`. Each Safe owner authenticates to the RPC with their own key, and the RPC server grants them read access to the Safe's balances, nonce, and configuration. To execute transactions, owners collect the required k-of-n signatures off-chain and submit a Safe `execTransaction` call via `eth_sendRawTransaction`. The multisig threshold is enforced by the Safe contract, not the RPC layer.
+
+**Interface requirement**: The contract MUST implement the following view function for read delegation to apply:
+
+```solidity
+function getOwners() external view returns (address[] memory);
+```
+
+Contracts without this function, or where the call reverts, are not eligible for read delegation. The RPC server MUST NOT attempt other ownership-checking methods as a fallback — a single standard interface avoids ambiguity and prevents probing attacks where the server tries multiple selectors on unknown contracts.
 
 #### Transaction access
 
@@ -213,8 +240,8 @@ To close this side channel, the RPC server MUST enforce a **minimum response tim
 **Implementation**: The server records the wall-clock time at the start of request processing. After computing the response, if less than 100 ms have elapsed, the server sleeps for the remainder before sending the response. This applies regardless of whether the response is populated or empty. The 100 ms floor is chosen to be comfortably above the worst-case database lookup time while remaining imperceptible to interactive users.
 
 Methods that do **not** need the speed bump include those where authorization can be checked before any data fetch:
-- `eth_getBalance` / `eth_getTransactionCount`: The server checks if the queried address matches the caller *before* reading state. Non-matching addresses return `0x0` without a lookup.
-- `eth_call` / `eth_estimateGas`: The `from` field is validated against the authenticated account before execution begins.
+- `eth_getBalance` / `eth_getTransactionCount`: The server checks if the queried address matches the caller *before* reading state. Non-matching addresses return `0x0` without a lookup. **Exception**: when the target is a contract address, the server must call `getOwners()` to check [contract read delegation](#contract-read-delegation) before it can decide — this path MUST apply the 100 ms speed bump.
+- `eth_call` / `eth_estimateGas`: The `from` field is validated against the authenticated account before execution begins. When the `to` address is a delegated contract, the `getOwners()` check adds a data-dependent path — the 100 ms speed bump MUST apply.
 - `eth_sendRawTransaction`: Sender verification happens during transaction decoding, before any state access.
 
 #### Event filtering
@@ -374,6 +401,8 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 - **Metadata leakage**: Even with content-level privacy, connection-level metadata (IP addresses, request timing, request frequency) can leak information. Deployments SHOULD use TLS and MAY require additional transport-level privacy measures.
 - **Fixed gas and transfer receipts**: The [fixed 100,000 gas cost](./execution#fixed-gas-constant-transfer-cost) on TIP-20 transfers ensures that `gasUsed` in transaction receipts is identical for all transfers. Without this, an observer who obtains a receipt (e.g., the sender) could infer whether the recipient was a new or existing account.
 - **Block header sanitization**: Block headers returned to non-sequencer callers have `logsBloom` zeroed (see [Block responses](#block-responses)). The Bloom filter would otherwise allow probing whether a specific address had activity in a given block, defeating per-account event scoping. This applies to all code paths that return block headers: `eth_getBlockByNumber`, `eth_getBlockByHash`, and `eth_subscribe("newHeads")`. Aggregate fields like `gasUsed` are intentionally public — the zone does not hide overall activity volume, only per-account details.
+- **Contract read delegation and owner removal**: When an owner is removed from a contract (e.g., via a Safe `removeOwner` call), the cached `getOwners()` result becomes stale. The RPC server MUST invalidate the cache within one block of the state change. Until invalidation, the removed owner retains read access. Implementations SHOULD watch for state changes to known delegated contracts during block import and eagerly evict stale entries. The 100 ms speed bump applies to delegated reads to prevent probing whether a given address is an owner of a contract.
+- **Contract read delegation and malicious contracts**: A contract could implement `getOwners()` to return arbitrary addresses, granting them read access to the contract's state. This is not a privacy concern for other accounts — delegated access only reveals the contract's own state, not the state of the returned addresses. The risk is limited to the contract author granting unintended read access to their own contract.
 
 ## Implementation notes
 
