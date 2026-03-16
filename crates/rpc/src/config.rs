@@ -9,7 +9,7 @@ pub struct PrivateRpcConfig {
     /// Address to listen on for the private RPC server.
     pub listen_addr: SocketAddr,
     /// The zone's numeric identifier.
-    pub zone_id: u64,
+    pub zone_id: u32,
     /// The zone's chain ID.
     pub chain_id: u64,
     /// The ZonePortal contract address on L1.

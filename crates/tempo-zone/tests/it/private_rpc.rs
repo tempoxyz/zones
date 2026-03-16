@@ -19,7 +19,7 @@ use zone::rpc::{
 /// version byte when a non-zero version is requested (for negative tests).
 fn build_token_blob(
     version: u8,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
     issued_at: u64,
@@ -36,7 +36,7 @@ fn build_token_blob(
 
 fn make_test_token(
     version: u8,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
     issued_at: u64,
@@ -80,7 +80,7 @@ fn parse_unknown_signature_length() {
     let mut blob = vec![0u8; 50];
     // 53 bytes of fields
     blob.push(0);
-    blob.extend_from_slice(&1u64.to_be_bytes());
+    blob.extend_from_slice(&1u32.to_be_bytes());
     blob.extend_from_slice(&1u64.to_be_bytes());
     blob.extend_from_slice(&[0u8; 20]);
     let now = now_secs();

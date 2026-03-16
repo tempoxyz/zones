@@ -47,7 +47,7 @@ impl ZoneInfoCmd {
             found.ok_or_else(|| eyre!("no zone found with portal address {portal}"))?
         } else {
             self.identifier
-                .parse::<u64>()
+                .parse::<u32>()
                 .map_err(|_| eyre!("expected a zone ID (integer) or portal address (0x...)"))?
         };
 

@@ -95,7 +95,7 @@ struct ZoneArgs {
     /// Zone ID for the private RPC auth token validation.
     /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
-    pub zone_id: u64,
+    pub zone_id: u32,
 
     /// Port for the private zone RPC server (0 for OS-assigned).
     #[arg(

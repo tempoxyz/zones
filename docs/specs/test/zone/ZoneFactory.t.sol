@@ -39,7 +39,7 @@ contract ZoneFactoryTest is BaseTest {
             })
         });
 
-        (uint64 zoneId, address portal) = zoneFactory.createZone(params);
+        (uint32 zoneId, address portal) = zoneFactory.createZone(params);
 
         assertEq(zoneId, 1);
         assertTrue(portal != address(0));
@@ -69,7 +69,7 @@ contract ZoneFactoryTest is BaseTest {
             })
         });
 
-        (uint64 zoneId, address portal) = zoneFactory.createZone(params);
+        (uint32 zoneId, address portal) = zoneFactory.createZone(params);
 
         ZoneInfo memory info = zoneFactory.zones(zoneId);
         address messengerAddr = info.messenger;
@@ -95,7 +95,7 @@ contract ZoneFactoryTest is BaseTest {
             })
         });
 
-        (uint64 zoneId1, address portal1) = zoneFactory.createZone(params1);
+        (uint32 zoneId1, address portal1) = zoneFactory.createZone(params1);
 
         IZoneFactory.CreateZoneParams memory params2 = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
@@ -108,7 +108,7 @@ contract ZoneFactoryTest is BaseTest {
             })
         });
 
-        (uint64 zoneId2, address portal2) = zoneFactory.createZone(params2);
+        (uint32 zoneId2, address portal2) = zoneFactory.createZone(params2);
 
         assertEq(zoneId1, 1);
         assertEq(zoneId2, 2);
@@ -137,7 +137,7 @@ contract ZoneFactoryTest is BaseTest {
 
         // Record logs and verify ZoneCreated event was emitted
         vm.recordLogs();
-        (uint64 zoneId, address portal) = zoneFactory.createZone(params);
+        (uint32 zoneId, address portal) = zoneFactory.createZone(params);
 
         // Verify logs contain ZoneCreated event with correct data
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -147,7 +147,7 @@ contract ZoneFactoryTest is BaseTest {
             if (
                 logs[i].topics[0]
                     == keccak256(
-                        "ZoneCreated(uint64,address,address,address,address,address,bytes32,bytes32,uint64)"
+                        "ZoneCreated(uint32,address,address,address,address,address,bytes32,bytes32,uint64)"
                     )
             ) {
                 found = true;

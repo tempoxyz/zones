@@ -17,9 +17,9 @@ contract ZoneFactory is IZoneFactory {
 
     /// @notice Next zone ID to be assigned
     /// @dev Starts at 1, reserving zone ID 0 for potential future use (e.g., mainnet as zone 0)
-    uint64 internal _nextZoneId = 1;
+    uint32 internal _nextZoneId = 1;
 
-    mapping(uint64 => ZoneInfo) internal _zones;
+    mapping(uint32 => ZoneInfo) internal _zones;
     mapping(address => bool) internal _isZonePortal;
     mapping(address => bool) internal _isZoneMessenger;
     mapping(address => bool) internal _validVerifiers;
@@ -46,7 +46,7 @@ contract ZoneFactory is IZoneFactory {
 
     function createZone(CreateZoneParams calldata params)
         external
-        returns (uint64 zoneId, address portal)
+        returns (uint32 zoneId, address portal)
     {
         // Validate initial token is a TIP-20
         if (!TempoUtilities.isTIP20(params.initialToken)) revert InvalidToken();
@@ -153,11 +153,11 @@ contract ZoneFactory is IZoneFactory {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Returns the number of zones created (not including reserved zone 0)
-    function zoneCount() external view returns (uint64) {
+    function zoneCount() external view returns (uint32) {
         return _nextZoneId - 1;
     }
 
-    function zones(uint64 zoneId) external view returns (ZoneInfo memory) {
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
         return _zones[zoneId];
     }
 

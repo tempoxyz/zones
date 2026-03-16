@@ -328,7 +328,7 @@ interface IZoneToken {
 }
 
 struct ZoneInfo {
-    uint64 zoneId;
+    uint32 zoneId;
     address portal;
     address messenger;
     address initialToken;       // first TIP-20 enabled at creation
@@ -471,7 +471,7 @@ interface IZoneFactory {
     }
 
     event ZoneCreated(
-        uint64 indexed zoneId,
+        uint32 indexed zoneId,
         address indexed portal,
         address indexed messenger,
         address initialToken,
@@ -482,9 +482,9 @@ interface IZoneFactory {
         uint64 genesisTempoBlockNumber
     );
 
-    function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
-    function zoneCount() external view returns (uint64);
-    function zones(uint64 zoneId) external view returns (ZoneInfo memory);
+    function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
+    function zoneCount() external view returns (uint32);
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
 }
 ```
@@ -563,7 +563,7 @@ interface IZonePortal {
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas).
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
 
-    function zoneId() external view returns (uint64);
+    function zoneId() external view returns (uint32);
     function messenger() external view returns (address);
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);

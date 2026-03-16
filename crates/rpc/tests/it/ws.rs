@@ -128,7 +128,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
 // Test context
 // ---------------------------------------------------------------------------
 
-const ZONE_ID: u64 = 1;
+const ZONE_ID: u32 = 1;
 const CHAIN_ID: u64 = 42;
 const PORTAL: Address = Address::ZERO;
 
