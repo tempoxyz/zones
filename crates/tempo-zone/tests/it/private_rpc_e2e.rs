@@ -575,7 +575,7 @@ async fn test_zone_get_deposit_status_regular_and_empty() -> eyre::Result<()> {
     );
     assert_eq!(
         sender_deposits[0]["recipient"].as_str().unwrap(),
-        format!("{:#x}", recipient),
+        format!("{recipient:#x}"),
     );
     assert_eq!(sender_deposits[0]["amount"], "0xf4240");
 
@@ -589,7 +589,7 @@ async fn test_zone_get_deposit_status_regular_and_empty() -> eyre::Result<()> {
     assert_eq!(recipient_deposits.len(), 1);
     assert_eq!(
         recipient_deposits[0]["recipient"].as_str().unwrap(),
-        format!("{:#x}", recipient),
+        format!("{recipient:#x}"),
     );
 
     let unrelated_signer = PrivateKeySigner::random();
@@ -641,7 +641,7 @@ async fn test_zone_get_deposit_status_encrypted() -> eyre::Result<()> {
     assert_eq!(sender_deposits[0]["status"], "processed");
     assert_eq!(
         sender_deposits[0]["recipient"].as_str().unwrap(),
-        format!("{:#x}", recipient),
+        format!("{recipient:#x}"),
     );
     assert_eq!(
         sender_deposits[0]["memo"].as_str().unwrap(),
@@ -658,7 +658,7 @@ async fn test_zone_get_deposit_status_encrypted() -> eyre::Result<()> {
     assert_eq!(recipient_deposits.len(), 1);
     assert_eq!(
         recipient_deposits[0]["recipient"].as_str().unwrap(),
-        format!("{:#x}", recipient),
+        format!("{recipient:#x}"),
     );
     assert_eq!(
         recipient_deposits[0]["sender"].as_str().unwrap(),

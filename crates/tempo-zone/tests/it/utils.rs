@@ -164,19 +164,15 @@ where
 /// - [`start_local_with_chain_id()`](Self::start_local_with_chain_id) — standalone with custom chain ID (multi-zone tests)
 /// - [`start_from_l1()`](Self::start_from_l1) — connected to a real [`L1TestNode`], genesis patched from L1 header
 /// - [`start()`](Self::start) — connected to an external L1 via WebSocket URL
+type RpcApiFuture = Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone::rpc::ZoneRpcApi>>>>>;
+type RpcApiFactory = dyn Fn(zone::rpc::PrivateRpcConfig) -> RpcApiFuture + Send + Sync;
+
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
     deposit_queue: DepositQueue,
     l1_state_cache: SharedL1StateCache,
     policy_cache: zone::SharedPolicyCache,
-    rpc_api_factory: Arc<
-        dyn Fn(
-                zone::rpc::PrivateRpcConfig,
-            )
-                -> Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone::rpc::ZoneRpcApi>>>>>
-            + Send
-            + Sync,
-    >,
+    rpc_api_factory: Arc<RpcApiFactory>,
     node_handle: Box<dyn TestNodeHandle>,
     _tasks: Runtime,
 }
