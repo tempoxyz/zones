@@ -5,44 +5,10 @@
 
 use reth_metrics::{
     Metrics,
-    metrics::{Counter, Gauge, Histogram},
+    metrics::{Counter, Histogram},
 };
 
 use crate::{auth::AuthError, types::classify_method};
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum RpcTransport {
-    Http,
-    Ws,
-}
-
-impl RpcTransport {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::Http => "http",
-            Self::Ws => "ws",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(crate) enum WsDisconnectReason {
-    ClientClose,
-    StreamEnded,
-    RecvError,
-    SendError,
-}
-
-impl WsDisconnectReason {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::ClientClose => "client_close",
-            Self::StreamEnded => "stream_ended",
-            Self::RecvError => "recv_error",
-            Self::SendError => "send_error",
-        }
-    }
-}
 
 #[derive(Metrics, Clone)]
 #[metrics(scope = "zone_private_rpc.calls")]
@@ -58,11 +24,8 @@ pub(crate) struct PrivateRpcCallMetrics {
 }
 
 impl PrivateRpcCallMetrics {
-    pub(crate) fn new_for(transport: RpcTransport, method: &str) -> Self {
-        Self::new_with_labels(&[
-            ("transport", transport.as_str().to_string()),
-            ("method", canonical_method_label(method).to_string()),
-        ])
+    pub(crate) fn new_for(method: &str) -> Self {
+        Self::new_with_labels(&[("method", canonical_method_label(method).to_string())])
     }
 }
 
@@ -74,30 +37,8 @@ pub(crate) struct PrivateRpcAuthMetrics {
 }
 
 impl PrivateRpcAuthMetrics {
-    fn new_for(transport: RpcTransport, reason: &'static str) -> Self {
-        Self::new_with_labels(&[("transport", transport.as_str()), ("reason", reason)])
-    }
-}
-
-#[derive(Metrics, Clone)]
-#[metrics(scope = "zone_private_rpc.ws")]
-pub(crate) struct PrivateRpcWsSessionMetrics {
-    /// Number of active private RPC WebSocket sessions.
-    pub(crate) sessions_active: Gauge,
-    /// Number of private RPC WebSocket sessions opened.
-    pub(crate) sessions_opened_total: Counter,
-}
-
-#[derive(Metrics, Clone)]
-#[metrics(scope = "zone_private_rpc.ws")]
-pub(crate) struct PrivateRpcWsDisconnectMetrics {
-    /// Number of private RPC WebSocket session disconnects.
-    pub(crate) disconnects_total: Counter,
-}
-
-impl PrivateRpcWsDisconnectMetrics {
-    pub(crate) fn new_for(reason: WsDisconnectReason) -> Self {
-        Self::new_with_labels(&[("reason", reason.as_str())])
+    fn new_for(reason: &'static str) -> Self {
+        Self::new_with_labels(&[("reason", reason)])
     }
 }
 
@@ -119,8 +60,8 @@ pub(crate) fn canonical_method_label(method: &str) -> &str {
     }
 }
 
-pub(crate) fn record_auth_failure(transport: RpcTransport, error: &AuthError) {
-    PrivateRpcAuthMetrics::new_for(transport, auth_reason_label(error))
+pub(crate) fn record_auth_failure(error: &AuthError) {
+    PrivateRpcAuthMetrics::new_for(auth_reason_label(error))
         .failures_total
         .increment(1);
 }

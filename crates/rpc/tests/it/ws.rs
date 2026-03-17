@@ -1,7 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{Arc, OnceLock},
-};
+use std::{collections::HashMap, sync::Arc};
 
 use alloy_primitives::Address;
 use alloy_signer::SignerSync;
@@ -221,18 +218,12 @@ fn parse_response(msg: tungstenite::Message) -> Value {
     }
 }
 
-fn test_lock() -> &'static tokio::sync::Mutex<()> {
-    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 async fn ws_roundtrip_with_header_auth() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
 
@@ -245,12 +236,10 @@ async fn ws_roundtrip_with_header_auth() {
 
     assert_eq!(resp["id"], 1);
     assert_eq!(resp["result"], "0x42");
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_roundtrip_with_query_auth() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let token = ctx.build_token();
     let url = format!("{}/?token={token}", ctx.ws_url());
@@ -266,12 +255,10 @@ async fn ws_roundtrip_with_query_auth() {
 
     assert_eq!(resp["id"], 1);
     assert_eq!(resp["result"], "0x42");
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_reject_no_auth() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let result = connect_async(ctx.ws_url()).await;
     // Server should reject the upgrade — tungstenite surfaces this as an error
@@ -285,7 +272,6 @@ async fn ws_reject_no_auth() {
 
 #[tokio::test]
 async fn ws_reject_invalid_token() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let req = tungstenite::http::Request::builder()
         .uri(ctx.ws_url())
@@ -312,7 +298,6 @@ async fn ws_reject_invalid_token() {
 
 #[tokio::test]
 async fn ws_multiple_requests() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
 
@@ -326,13 +311,10 @@ async fn ws_multiple_requests() {
         assert_eq!(resp["id"], i);
         assert_eq!(resp["result"], "0x42");
     }
-
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_batch_request() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
 
@@ -351,12 +333,10 @@ async fn ws_batch_request() {
     assert_eq!(arr[0]["result"], "0x42");
     assert_eq!(arr[1]["id"], 2);
     assert_eq!(arr[1]["result"], "0x1");
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_invalid_json() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
 
@@ -366,12 +346,10 @@ async fn ws_invalid_json() {
     let resp = parse_response(ws.next().await.unwrap().unwrap());
 
     assert_eq!(resp["error"]["code"], -32700);
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_unknown_method() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
 
@@ -382,12 +360,10 @@ async fn ws_unknown_method() {
 
     assert_eq!(resp["id"], 1);
     assert_eq!(resp["error"]["code"], -32601);
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_disabled_method() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
 
@@ -400,12 +376,10 @@ async fn ws_disabled_method() {
 
     assert_eq!(resp["id"], 1);
     assert_eq!(resp["error"]["code"], -32006);
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_empty_batch() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
 
@@ -415,12 +389,10 @@ async fn ws_empty_batch() {
     let resp = parse_response(ws.next().await.unwrap().unwrap());
 
     assert_eq!(resp["error"]["code"], -32700);
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_roundtrip_with_p256_auth() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let signing_key = P256SigningKey::random(&mut thread_rng());
     let now = now_secs();
@@ -442,12 +414,10 @@ async fn ws_roundtrip_with_p256_auth() {
 
     assert_eq!(resp["id"], 9);
     assert_eq!(resp["result"], "0x42");
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_roundtrip_with_webauthn_auth() {
-    let _guard = test_lock().lock().await;
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let signing_key = P256SigningKey::random(&mut thread_rng());
     let now = now_secs();
@@ -469,12 +439,10 @@ async fn ws_roundtrip_with_webauthn_auth() {
 
     assert_eq!(resp["id"], 10);
     assert_eq!(resp["result"], "0x1");
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_roundtrip_with_keychain_auth() {
-    let _guard = test_lock().lock().await;
     let root_account = Address::repeat_byte(0x55);
     let access_signer = P256SigningKey::random(&mut thread_rng());
     let now = now_secs();
@@ -501,12 +469,10 @@ async fn ws_roundtrip_with_keychain_auth() {
 
     assert_eq!(resp["id"], 11);
     assert_eq!(resp["result"], "0x42");
-    ws.close(None).await.unwrap();
 }
 
 #[tokio::test]
 async fn ws_reject_unauthorized_keychain_token() {
-    let _guard = test_lock().lock().await;
     let root_account = Address::repeat_byte(0x44);
     let access_signer = P256SigningKey::random(&mut thread_rng());
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
@@ -527,7 +493,6 @@ async fn ws_reject_unauthorized_keychain_token() {
 
 #[tokio::test]
 async fn ws_keychain_lookup_failure_returns_500() {
-    let _guard = test_lock().lock().await;
     let root_account = Address::repeat_byte(0x66);
     let access_signer = P256SigningKey::random(&mut thread_rng());
     let ctx = TestContext::start(MockZoneRpcApi::with_key_lookup_error("key lookup failed")).await;

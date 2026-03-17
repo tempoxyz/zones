@@ -16,16 +16,11 @@ use axum::{
     response::IntoResponse,
 };
 use futures::stream::StreamExt;
-use std::sync::{Arc, atomic::Ordering};
+use std::sync::Arc;
 use tracing::warn;
 
 use crate::{
     auth::{self, AuthError},
-    error::AuthenticateError,
-    metrics::{
-        PrivateRpcWsDisconnectMetrics, PrivateRpcWsSessionMetrics, RpcTransport,
-        WsDisconnectReason, record_auth_failure,
-    },
     server::{RpcState, authenticate_token, process_rpc_text},
 };
 
@@ -60,9 +55,6 @@ pub(crate) async fn handle_ws_upgrade(
     let auth = match auth {
         Ok(auth) => auth,
         Err(e) => {
-            if let AuthenticateError::Invalid(cause) = &e {
-                record_auth_failure(RpcTransport::Ws, cause);
-            }
             e.log("ws");
             return (e.status_code(), "").into_response();
         }
@@ -80,16 +72,7 @@ async fn handle_ws_session(
     auth: crate::auth::AuthContext,
     state: Arc<RpcState>,
 ) {
-    let session_metrics = PrivateRpcWsSessionMetrics::default();
-    let active = state.ws_sessions_active.fetch_add(1, Ordering::Relaxed) + 1;
-    session_metrics.sessions_active.set(active as f64);
-    session_metrics.sessions_opened_total.increment(1);
-
-    let disconnect_reason = loop {
-        let Some(msg) = socket.next().await else {
-            break WsDisconnectReason::StreamEnded;
-        };
-
+    while let Some(msg) = socket.next().await {
         let text = match msg {
             Ok(Message::Text(t)) => t,
             Ok(Message::Binary(b)) => match std::str::from_utf8(&b) {
@@ -102,20 +85,20 @@ async fn handle_ws_session(
                         .await
                         .is_err()
                     {
-                        break WsDisconnectReason::SendError;
+                        break;
                     }
                     continue;
                 }
             },
-            Ok(Message::Close(_)) => break WsDisconnectReason::ClientClose,
+            Ok(Message::Close(_)) => break,
             Ok(_) => continue, // Ping/Pong handled by axum
             Err(e) => {
                 warn!(target: "zone::rpc", err = %e, "ws recv error");
-                break WsDisconnectReason::RecvError;
+                break;
             }
         };
 
-        let response_json = process_rpc_text(&text, &auth, state.api.as_ref(), RpcTransport::Ws)
+        let response_json = process_rpc_text(&text, &auth, state.api.as_ref())
             .await
             .into_json();
 
@@ -124,13 +107,7 @@ async fn handle_ws_session(
             .await
             .is_err()
         {
-            break WsDisconnectReason::SendError;
+            break;
         }
-    };
-
-    let active = state.ws_sessions_active.fetch_sub(1, Ordering::Relaxed) - 1;
-    session_metrics.sessions_active.set(active as f64);
-    PrivateRpcWsDisconnectMetrics::new_for(disconnect_reason)
-        .disconnects_total
-        .increment(1);
+    }
 }

@@ -14,7 +14,7 @@ use axum::{
     routing::{get, post},
 };
 use std::{
-    sync::{Arc, atomic::AtomicU64},
+    sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tempo_contracts::precompiles::account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType;
@@ -29,7 +29,7 @@ use crate::{
     config::PrivateRpcConfig,
     error::{AuthError, AuthenticateError},
     handlers::{self, ZoneRpcApi},
-    metrics::{PrivateRpcCallMetrics, RpcTransport, record_auth_failure},
+    metrics::{PrivateRpcCallMetrics, record_auth_failure},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
     ws::handle_ws_upgrade,
 };
@@ -44,8 +44,6 @@ pub struct RpcState {
     pub config: PrivateRpcConfig,
     /// Type-erased EthApi for handling RPC methods.
     pub api: Arc<dyn ZoneRpcApi>,
-    /// Number of currently active WebSocket sessions.
-    pub ws_sessions_active: Arc<AtomicU64>,
 }
 
 /// Start the private zone RPC server.
@@ -57,11 +55,7 @@ pub async fn start_private_rpc(
     api: Arc<dyn ZoneRpcApi>,
 ) -> eyre::Result<std::net::SocketAddr> {
     let listen_addr = config.listen_addr;
-    let state = Arc::new(RpcState {
-        config,
-        api,
-        ws_sessions_active: Arc::new(AtomicU64::new(0)),
-    });
+    let state = Arc::new(RpcState { config, api });
 
     let app = Router::new()
         .route("/", post(handle_rpc))
@@ -114,7 +108,23 @@ pub(crate) async fn process_rpc_text(
     text: &str,
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
-    transport: RpcTransport,
+) -> RpcResult {
+    process_rpc_text_inner(text, auth, api, false).await
+}
+
+async fn process_rpc_text_metered(
+    text: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> RpcResult {
+    process_rpc_text_inner(text, auth, api, true).await
+}
+
+async fn process_rpc_text_inner(
+    text: &str,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+    metered: bool,
 ) -> RpcResult {
     let trimmed = text.trim_start();
 
@@ -136,7 +146,7 @@ pub(crate) async fn process_rpc_text(
             Ok(requests) => {
                 let mut responses = Vec::with_capacity(requests.len());
                 for req in &requests {
-                    responses.push(dispatch_metered(req, auth, api, transport).await);
+                    responses.push(dispatch_request(req, auth, api, metered).await);
                 }
                 RpcResult::Batch(responses)
             }
@@ -147,9 +157,7 @@ pub(crate) async fn process_rpc_text(
         }
     } else {
         match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(request) => {
-                RpcResult::Single(dispatch_metered(&request, auth, api, transport).await)
-            }
+            Ok(request) => RpcResult::Single(dispatch_request(&request, auth, api, metered).await),
             Err(e) => RpcResult::Single(JsonRpcResponse::error(
                 serde_json::Value::Null,
                 JsonRpcError::parse_error(format!("parse error: {e}")),
@@ -158,13 +166,25 @@ pub(crate) async fn process_rpc_text(
     }
 }
 
+async fn dispatch_request(
+    req: &JsonRpcRequest,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+    metered: bool,
+) -> JsonRpcResponse {
+    if metered {
+        dispatch_metered(req, auth, api).await
+    } else {
+        handlers::dispatch(req, auth, api).await
+    }
+}
+
 async fn dispatch_metered(
     req: &JsonRpcRequest,
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
-    transport: RpcTransport,
 ) -> JsonRpcResponse {
-    let metrics = PrivateRpcCallMetrics::new_for(transport, &req.method);
+    let metrics = PrivateRpcCallMetrics::new_for(&req.method);
     let started_at = Instant::now();
 
     metrics.started_total.increment(1);
@@ -192,7 +212,7 @@ async fn handle_rpc(
         Ok(auth) => auth,
         Err(e) => {
             if let AuthenticateError::Invalid(cause) = &e {
-                record_auth_failure(RpcTransport::Http, cause);
+                record_auth_failure(cause);
             }
             e.log("http");
             return (e.status_code(), "").into_response();
@@ -206,7 +226,7 @@ async fn handle_rpc(
         }
     };
 
-    process_rpc_text(body_str, &auth, state.api.as_ref(), RpcTransport::Http)
+    process_rpc_text_metered(body_str, &auth, state.api.as_ref())
         .await
         .into_response()
 }
