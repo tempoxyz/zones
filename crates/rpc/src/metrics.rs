@@ -30,16 +30,10 @@ impl PrivateRpcCallMetrics {
 }
 
 #[derive(Metrics, Clone)]
-#[metrics(scope = "zone_private_rpc.auth")]
+#[metrics(scope = "zone_private_rpc")]
 pub(crate) struct PrivateRpcAuthMetrics {
     /// Number of authentication failures.
-    pub(crate) failures_total: Counter,
-}
-
-impl PrivateRpcAuthMetrics {
-    fn new_for(reason: &'static str) -> Self {
-        Self::new_with_labels(&[("reason", reason)])
-    }
+    pub(crate) auth_failures_total: Counter,
 }
 
 #[derive(Metrics, Clone)]
@@ -60,28 +54,8 @@ pub(crate) fn canonical_method_label(method: &str) -> &str {
     }
 }
 
-pub(crate) fn record_auth_failure(error: &AuthError) {
-    PrivateRpcAuthMetrics::new_for(auth_reason_label(error))
-        .failures_total
+pub(crate) fn record_auth_failure(_: &AuthError) {
+    PrivateRpcAuthMetrics::default()
+        .auth_failures_total
         .increment(1);
-}
-
-fn auth_reason_label(error: &AuthError) -> &'static str {
-    match error {
-        AuthError::Missing => "missing",
-        AuthError::InvalidHex => "invalid_hex",
-        AuthError::TooShort => "too_short",
-        AuthError::UnsupportedVersion(_) => "unsupported_version",
-        AuthError::ZoneIdMismatch => "zone_id_mismatch",
-        AuthError::ChainIdMismatch => "chain_id_mismatch",
-        AuthError::ZonePortalMismatch => "zone_portal_mismatch",
-        AuthError::WindowTooLarge => "window_too_large",
-        AuthError::Expired => "expired",
-        AuthError::IssuedInFuture => "issued_in_future",
-        AuthError::InvalidSignature => "invalid_signature",
-        AuthError::UnauthorizedKeychainKey => "unauthorized_keychain_key",
-        AuthError::RevokedKeychainKey => "revoked_keychain_key",
-        AuthError::ExpiredKeychainKey => "expired_keychain_key",
-        AuthError::KeychainSignatureTypeMismatch => "keychain_signature_type_mismatch",
-    }
 }
