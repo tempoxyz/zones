@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use alloy_network::{ReceiptResponse, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256};
-use alloy_provider::{DynProvider, Provider};
+use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{
     Block, BlockId, BlockNumberOrTag, BlockTransactions, Filter, FilterChanges, FilterId,
     TransactionRequest,
@@ -164,21 +164,31 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
 
 impl<Api: EthApiTypes> TempoZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
-    pub fn new(
+    pub async fn new(
         eth: EthHandlers<Api>,
         config: zone_rpc::PrivateRpcConfig,
-        l1_provider: DynProvider<TempoNetwork>,
-        zone_provider: DynProvider<TempoNetwork>,
-    ) -> Self {
+    ) -> eyre::Result<Self> {
+        let l1_rpc_url = config.l1_rpc_url.clone();
+        let zone_rpc_url = config.zone_rpc_url.clone();
+        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect(&l1_rpc_url)
+            .await
+            .wrap_err("failed to connect private RPC L1 provider")?
+            .erased();
+        let zone_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect(&zone_rpc_url)
+            .await
+            .wrap_err("failed to connect private RPC zone provider")?
+            .erased();
         let tempo_state = crate::abi::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider.clone());
-        Self {
+        Ok(Self {
             eth,
             config,
             l1_provider,
             zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
-        }
+        })
     }
 
     /// Returns a reference to the inner [`EthFilter`] handler.

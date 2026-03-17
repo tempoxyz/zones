@@ -12,6 +12,8 @@ use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::Runtime;
 use std::{
+    future::Future,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -170,8 +172,8 @@ pub(crate) struct ZoneTestNode {
     rpc_api_factory: Arc<
         dyn Fn(
                 zone::rpc::PrivateRpcConfig,
-                alloy_provider::DynProvider<TempoNetwork>,
-            ) -> Arc<dyn zone::rpc::ZoneRpcApi>
+            )
+                -> Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone::rpc::ZoneRpcApi>>>>>
             + Send
             + Sync,
     >,
@@ -208,12 +210,11 @@ impl ZoneTestNode {
     }
 
     /// Builds the real private RPC API backed by the node's EthHandlers.
-    pub(crate) fn rpc_api(
+    pub(crate) async fn rpc_api(
         &self,
         config: zone::rpc::PrivateRpcConfig,
-        l1_provider: alloy_provider::DynProvider<TempoNetwork>,
-    ) -> Arc<dyn zone::rpc::ZoneRpcApi> {
-        (self.rpc_api_factory)(config, l1_provider)
+    ) -> eyre::Result<Arc<dyn zone::rpc::ZoneRpcApi>> {
+        (self.rpc_api_factory)(config).await
     }
 
     /// Subscribe to canonical state notifications.
@@ -507,21 +508,16 @@ impl ZoneTestNode {
         // Build the real private RPC API while the handle is still concrete,
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
-        let zone_http_url = http_url.clone();
-        let rpc_api_factory = Arc::new(
-            move |config: zone::rpc::PrivateRpcConfig,
-                  l1_provider: alloy_provider::DynProvider<TempoNetwork>| {
-                let zone_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-                    .connect_http(zone_http_url.clone())
-                    .erased();
-                Arc::new(zone::rpc::TempoZoneRpc::new(
-                    eth_handlers.clone(),
-                    config,
-                    l1_provider,
-                    zone_provider,
-                )) as Arc<dyn zone::rpc::ZoneRpcApi>
-            },
-        );
+        let rpc_api_factory = Arc::new(move |config: zone::rpc::PrivateRpcConfig| {
+            let eth_handlers = eth_handlers.clone();
+            Box::pin(async move {
+                Ok(
+                    Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers, config).await?)
+                        as Arc<dyn zone::rpc::ZoneRpcApi>,
+                )
+            })
+                as Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone::rpc::ZoneRpcApi>>>>>
+        });
 
         Ok(Self {
             deposit_queue,
@@ -2691,18 +2687,16 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
 
     let config = zone::rpc::PrivateRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
+        l1_rpc_url: DUMMY_L1_URL.to_string(),
+        zone_rpc_url: zone.http_url().to_string(),
         zone_id: 0,
         chain_id,
         zone_portal: Address::ZERO,
         sequencer: sequencer_address,
     };
 
-    let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .connect_http(DUMMY_L1_URL.parse::<url::Url>()?)
-        .erased();
     let local_addr =
-        zone::rpc::start_private_rpc(config.clone(), zone.rpc_api(config.clone(), l1_provider))
-            .await?;
+        zone::rpc::start_private_rpc(config.clone(), zone.rpc_api(config.clone()).await?).await?;
     let private_rpc_url: url::Url = format!("http://{local_addr}").parse()?;
 
     Ok(PrivateRpcTestCtx {
@@ -2767,18 +2761,16 @@ async fn start_zone_with_private_rpc_l1_inner(
 
     let config = zone::rpc::PrivateRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
+        l1_rpc_url: l1.http_url().to_string(),
+        zone_rpc_url: zone.http_url().to_string(),
         zone_id: 1,
         chain_id,
         zone_portal: portal_address,
         sequencer: l1.dev_address(),
     };
 
-    let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .connect_http(l1.http_url().clone())
-        .erased();
     let local_addr =
-        zone::rpc::start_private_rpc(config.clone(), zone.rpc_api(config.clone(), l1_provider))
-            .await?;
+        zone::rpc::start_private_rpc(config.clone(), zone.rpc_api(config.clone()).await?).await?;
     let private_rpc_url: url::Url = format!("http://{local_addr}").parse()?;
     let sequencer_signer = l1.dev_signer();
 

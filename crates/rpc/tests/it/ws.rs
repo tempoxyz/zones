@@ -177,6 +177,8 @@ impl TestContext {
         let signer = PrivateKeySigner::random();
         let config = PrivateRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
+            l1_rpc_url: "http://127.0.0.1:1".to_string(),
+            zone_rpc_url: "http://127.0.0.1:1".to_string(),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
             zone_portal: PORTAL,

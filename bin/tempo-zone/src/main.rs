@@ -9,7 +9,6 @@
 use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
-use alloy_provider::ProviderBuilder;
 use clap::Parser;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
@@ -167,31 +166,25 @@ fn main() {
 
             // Launch the private zone RPC server.
             let eth_handlers = handle.node.eth_handlers().clone();
-            let private_rpc_config = zone::rpc::PrivateRpcConfig {
-                listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
-                zone_id: args.zone_id,
-                chain_id: handle.node.chain_spec().chain().id(),
-                zone_portal: args.portal_address,
-                sequencer: sequencer_addr,
-            };
             let zone_rpc_url = handle
                 .node
                 .rpc_server_handle()
                 .http_url()
                 .expect("HTTP RPC server must be enabled for sequencer mode");
-            let l1_provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
-                .connect(&args.l1_rpc_url)
-                .await?
-                .erased();
-            let zone_provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
-                .connect_http(zone_rpc_url.clone())
-                .erased();
+            let private_rpc_config = zone::rpc::PrivateRpcConfig {
+                listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
+                l1_rpc_url: args.l1_rpc_url.clone(),
+                zone_rpc_url: zone_rpc_url.clone(),
+                zone_id: args.zone_id,
+                chain_id: handle.node.chain_spec().chain().id(),
+                zone_portal: args.portal_address,
+                sequencer: sequencer_addr,
+            };
             let api: Arc<dyn zone::rpc::ZoneRpcApi> = Arc::new(zone::rpc::TempoZoneRpc::new(
                 eth_handlers,
                 private_rpc_config.clone(),
-                l1_provider,
-                zone_provider,
-            ));
+            )
+            .await?);
             let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
             info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 
