@@ -39,63 +39,14 @@ use crate::abi::{
 };
 use zone_rpc::{
     auth::AuthContext,
-    types::{BoxEyreFut, BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
+    types::{
+        AuthorizationTokenInfoResponse, BoxEyreFut, BoxFut, DepositKind, DepositState,
+        DepositStatusEntry, DepositStatusResponse, JsonRpcError, ZoneInfoResponse, internal,
+        raw_null, raw_zero, to_raw,
+    },
 };
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct AuthorizationTokenInfoResponse {
-    account: Address,
-    expires_at: U64,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ZoneInfoResponse {
-    zone_id: U64,
-    zone_token: Address,
-    sequencer: Address,
-    chain_id: U64,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DepositStatusResponse {
-    tempo_block_number: U64,
-    zone_processed_through: U64,
-    processed: bool,
-    deposits: Vec<DepositStatusEntry>,
-}
-
-#[derive(Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct DepositStatusEntry {
-    deposit_hash: B256,
-    kind: DepositKind,
-    token: Address,
-    sender: Address,
-    recipient: Option<Address>,
-    amount: U256,
-    memo: Option<B256>,
-    status: DepositState,
-}
-
-#[derive(Debug, Clone, Copy, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum DepositKind {
-    Regular,
-    Encrypted,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
-#[serde(rename_all = "lowercase")]
-enum DepositState {
-    Pending,
-    Processed,
-    Failed,
-}
 
 #[derive(Debug, Clone)]
 enum PortalDepositRecord {
