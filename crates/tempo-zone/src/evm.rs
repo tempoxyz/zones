@@ -10,11 +10,12 @@ use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
     block::{BlockExecutorFactory, BlockExecutorFor},
     precompiles::PrecompilesMap,
-    revm::{Inspector, database::State, inspector::NoOpInspector},
+    revm::{Inspector, inspector::NoOpInspector},
 };
 use alloy_provider::{Provider, ProviderBuilder};
 use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+    block::StateDB,
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
@@ -276,12 +277,12 @@ impl BlockExecutorFactory for ZoneEvmConfig {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: TempoEvm<&'a mut State<DB>, I>,
+        evm: TempoEvm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
     ) -> impl BlockExecutorFor<'a, Self, DB, I>
     where
-        DB: Database + 'a,
-        I: Inspector<TempoCtx<&'a mut State<DB>>> + 'a,
+        DB: StateDB + 'a,
+        I: Inspector<TempoCtx<DB>> + 'a,
     {
         ZoneBlockExecutor::new(evm, ctx, self.chain_spec())
     }
@@ -327,7 +328,11 @@ impl ConfigureEvm for ZoneEvmConfig {
                 parent_hash: block.header().parent_hash(),
                 parent_beacon_block_root: block.header().parent_beacon_block_root(),
                 ommers: &[],
-                withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
+                withdrawals: block
+                    .body()
+                    .withdrawals
+                    .as_ref()
+                    .map(|withdrawals| Cow::Borrowed(withdrawals.as_slice())),
                 extra_data: block.header().extra_data().clone(),
                 tx_count_hint: Some(block.body().transactions.len()),
             },

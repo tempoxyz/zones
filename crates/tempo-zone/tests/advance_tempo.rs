@@ -256,23 +256,18 @@ fn advance_tempo_repro() {
     match &config_result {
         Ok(result) => {
             println!("config() result: {:?}", result.result);
+            let gas_used = result.result.gas_used();
             match &result.result {
-                ExecutionResult::Success {
-                    output, gas_used, ..
-                } => {
+                ExecutionResult::Success { output, .. } => {
                     if let Output::Call(data) = output {
                         println!("config() returned: {data}");
                     }
                     println!("config() gas_used: {gas_used}");
                 }
-                ExecutionResult::Revert {
-                    output, gas_used, ..
-                } => {
+                ExecutionResult::Revert { output, .. } => {
                     println!("config() REVERTED: {output}, gas_used: {gas_used}");
                 }
-                ExecutionResult::Halt {
-                    reason, gas_used, ..
-                } => {
+                ExecutionResult::Halt { reason, .. } => {
                     println!("config() HALTED: {reason:?}, gas_used: {gas_used}");
                 }
             }
@@ -288,22 +283,21 @@ fn advance_tempo_repro() {
     let hash_result =
         evm.transact_system_call(sequencer, TEMPO_STATE_ADDRESS, Bytes::from(hash_calldata));
     match &hash_result {
-        Ok(result) => match &result.result {
-            ExecutionResult::Success {
-                output, gas_used, ..
-            } => {
-                if let Output::Call(data) = output {
-                    println!("tempoBlockHash() returned: {data}");
+        Ok(result) => {
+            let gas_used = result.result.gas_used();
+            match &result.result {
+                ExecutionResult::Success { output, .. } => {
+                    if let Output::Call(data) = output {
+                        println!("tempoBlockHash() returned: {data}");
+                    }
+                    println!("tempoBlockHash() gas_used: {gas_used}");
                 }
-                println!("tempoBlockHash() gas_used: {gas_used}");
+                ExecutionResult::Revert { output, .. } => {
+                    println!("tempoBlockHash() REVERTED: {output}, gas_used: {gas_used}");
+                }
+                other => println!("tempoBlockHash() other: {other:?}"),
             }
-            ExecutionResult::Revert {
-                output, gas_used, ..
-            } => {
-                println!("tempoBlockHash() REVERTED: {output}, gas_used: {gas_used}");
-            }
-            other => println!("tempoBlockHash() other: {other:?}"),
-        },
+        }
         Err(e) => println!("tempoBlockHash() ERROR: {e:?}"),
     }
 
@@ -390,38 +384,35 @@ fn advance_tempo_repro() {
     let advance_result =
         evm.transact_system_call(sequencer, ZONE_INBOX_ADDRESS, Bytes::from(advance_calldata));
     match &advance_result {
-        Ok(result) => match &result.result {
-            ExecutionResult::Success {
-                output, gas_used, ..
-            } => {
-                if let Output::Call(data) = output {
-                    println!("advanceTempo() SUCCESS, output: {data}");
+        Ok(result) => {
+            let gas_used = result.result.gas_used();
+            match &result.result {
+                ExecutionResult::Success { output, .. } => {
+                    if let Output::Call(data) = output {
+                        println!("advanceTempo() SUCCESS, output: {data}");
+                    }
+                    println!("advanceTempo() gas_used: {gas_used}");
                 }
-                println!("advanceTempo() gas_used: {gas_used}");
-            }
-            ExecutionResult::Revert {
-                output, gas_used, ..
-            } => {
-                println!("advanceTempo() REVERTED: {output}");
-                println!("advanceTempo() gas_used: {gas_used}");
-                if output.len() >= 4 {
-                    let sel = &output[..4];
-                    println!("  error selector: 0x{}", const_hex::encode(sel));
-                    if sel == [0x08, 0xc3, 0x79, 0xa0]
-                        && output.len() > 4
-                        && let Ok(msg) = <alloy_sol_types::sol_data::String as alloy_sol_types::SolType>::abi_decode(&output[4..])
-                    {
-                        println!("  Error message: {msg}");
+                ExecutionResult::Revert { output, .. } => {
+                    println!("advanceTempo() REVERTED: {output}");
+                    println!("advanceTempo() gas_used: {gas_used}");
+                    if output.len() >= 4 {
+                        let sel = &output[..4];
+                        println!("  error selector: 0x{}", const_hex::encode(sel));
+                        if sel == [0x08, 0xc3, 0x79, 0xa0]
+                            && output.len() > 4
+                            && let Ok(msg) = <alloy_sol_types::sol_data::String as alloy_sol_types::SolType>::abi_decode(&output[4..])
+                        {
+                            println!("  Error message: {msg}");
+                        }
                     }
                 }
+                ExecutionResult::Halt { reason, .. } => {
+                    println!("advanceTempo() HALTED: {reason:?}");
+                    println!("advanceTempo() gas_used: {gas_used}");
+                }
             }
-            ExecutionResult::Halt {
-                reason, gas_used, ..
-            } => {
-                println!("advanceTempo() HALTED: {reason:?}");
-                println!("advanceTempo() gas_used: {gas_used}");
-            }
-        },
+        }
         Err(e) => println!("advanceTempo() ERROR: {e:?}"),
     }
 

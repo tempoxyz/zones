@@ -87,7 +87,7 @@ impl L1Subscriber {
     pub fn spawn(
         config: L1SubscriberConfig,
         deposit_queue: DepositQueue,
-        task_executor: impl reth_ethereum::tasks::TaskSpawner,
+        task_executor: reth_tasks::Runtime,
     ) {
         let tracked_tokens = config.policy_cache.read().tracked_tokens();
         let subscriber = Self {
@@ -98,7 +98,7 @@ impl L1Subscriber {
             subscriber_metrics: Default::default(),
         };
 
-        task_executor.spawn_critical(
+        task_executor.spawn_critical_task(
             "l1-deposit-subscriber",
             Box::pin(async move {
                 loop {
