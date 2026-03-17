@@ -48,31 +48,6 @@ use zone_rpc::{
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
 
-#[derive(Debug, Clone)]
-enum PortalDepositRecord {
-    Regular {
-        deposit_hash: B256,
-        sender: Address,
-        recipient: Address,
-        token: Address,
-        amount: u128,
-        memo: B256,
-    },
-    Encrypted {
-        deposit_hash: B256,
-        sender: Address,
-        token: Address,
-        amount: u128,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum TerminalDepositEvent {
-    RegularProcessed,
-    EncryptedProcessed { recipient: Address, memo: B256 },
-    EncryptedFailed,
-}
-
 /// [`ZoneRpcApi`] implementation backed by reth's [`EthHandlers`].
 ///
 /// This is the privacy enforcement layer for the zone's JSON-RPC surface.
@@ -111,6 +86,31 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
     /// After bumping reth, use its `ActiveFilters` API to periodically sync this
     /// map and remove entries for filters that no longer exist on the reth side.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
+}
+
+#[derive(Debug, Clone)]
+enum PortalDepositRecord {
+    Regular {
+        deposit_hash: B256,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: u128,
+        memo: B256,
+    },
+    Encrypted {
+        deposit_hash: B256,
+        sender: Address,
+        token: Address,
+        amount: u128,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum TerminalDepositEvent {
+    RegularProcessed,
+    EncryptedProcessed { recipient: Address, memo: B256 },
+    EncryptedFailed,
 }
 
 impl<Api: EthApiTypes> TempoZoneRpc<Api> {
