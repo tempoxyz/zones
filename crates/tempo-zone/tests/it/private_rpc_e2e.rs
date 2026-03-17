@@ -7,7 +7,10 @@
 //! - Block redaction (logsBloom zeroed, transactions cleared for non-sequencers)
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
-use crate::utils::{now_secs, start_zone_with_private_rpc};
+use crate::utils::{
+    DEFAULT_TIMEOUT, ZoneAccount, now_secs, start_zone_with_private_rpc,
+    start_zone_with_private_rpc_l1, start_zone_with_private_rpc_l1_with_encryption,
+};
 use alloy::{
     primitives::{Address, B256, address, hex},
     signers::local::PrivateKeySigner,
@@ -483,6 +486,183 @@ async fn test_method_tiers() -> eyre::Result<()> {
         error["code"].as_i64().unwrap(),
         -32601,
         "unknown method should return -32601"
+    );
+
+    Ok(())
+}
+
+/// Zone-specific metadata methods return the authenticated account/token expiry
+/// and the configured zone metadata.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_metadata_methods() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc_l1().await?;
+    let user_signer = PrivateKeySigner::random();
+
+    let auth_info = ctx
+        .call_as_user(
+            "zone_getAuthorizationTokenInfo",
+            serde_json::json!([]),
+            &user_signer,
+        )
+        .await?;
+    assert_eq!(
+        auth_info["result"]["account"].as_str().unwrap(),
+        format!("{:#x}", user_signer.address()),
+    );
+    assert!(
+        auth_info["result"]["expiresAt"].as_str().is_some(),
+        "expiresAt should be a quantity string",
+    );
+
+    let zone_info = ctx
+        .call_as_user("zone_getZoneInfo", serde_json::json!([]), &user_signer)
+        .await?;
+    assert_eq!(zone_info["result"]["zoneId"], "0x1");
+    assert_eq!(
+        zone_info["result"]["zoneToken"].as_str().unwrap(),
+        "0x20c0000000000000000000000000000000000000",
+    );
+    assert_eq!(
+        zone_info["result"]["sequencer"].as_str().unwrap(),
+        format!("{:#x}", ctx.config.sequencer),
+    );
+    assert_eq!(
+        zone_info["result"]["chainId"].as_str().unwrap(),
+        format!("0x{:x}", ctx.config.chain_id),
+    );
+
+    Ok(())
+}
+
+/// `zone_getDepositStatus` returns relevant regular deposits for both the sender
+/// and the plaintext recipient, and returns an empty list for unrelated callers.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_get_deposit_status_regular_and_empty() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc_l1().await?;
+    let l1 = ctx.l1();
+    let portal_address = ctx.portal_address();
+
+    let depositor_signer = l1.user_signer();
+    let recipient_signer = l1.signer_at(2);
+    let recipient = recipient_signer.address();
+
+    let mut depositor =
+        ZoneAccount::with_signer(depositor_signer.clone(), l1, &ctx.zone, portal_address);
+    let deposit_amount: u128 = 1_000_000;
+    l1.fund_user(depositor.address(), deposit_amount).await?;
+
+    let (tempo_block_number, _) = depositor
+        .deposit_to_with_block(recipient, deposit_amount, DEFAULT_TIMEOUT, &ctx.zone)
+        .await?;
+
+    let sender_status = ctx
+        .get_deposit_status_as_user(tempo_block_number, &depositor_signer)
+        .await?;
+    let sender_deposits = sender_status["result"]["deposits"]
+        .as_array()
+        .expect("sender deposits should be an array");
+    assert_eq!(sender_status["result"]["processed"], true);
+    assert_eq!(sender_deposits.len(), 1);
+    assert_eq!(sender_deposits[0]["kind"], "regular");
+    assert_eq!(sender_deposits[0]["status"], "processed");
+    assert_eq!(
+        sender_deposits[0]["sender"].as_str().unwrap(),
+        format!("{:#x}", depositor.address()),
+    );
+    assert_eq!(
+        sender_deposits[0]["recipient"].as_str().unwrap(),
+        format!("{:#x}", recipient),
+    );
+    assert_eq!(sender_deposits[0]["amount"], "0xf4240");
+
+    let recipient_status = ctx
+        .get_deposit_status_as_user(tempo_block_number, &recipient_signer)
+        .await?;
+    let recipient_deposits = recipient_status["result"]["deposits"]
+        .as_array()
+        .expect("recipient deposits should be an array");
+    assert_eq!(recipient_status["result"]["processed"], true);
+    assert_eq!(recipient_deposits.len(), 1);
+    assert_eq!(
+        recipient_deposits[0]["recipient"].as_str().unwrap(),
+        format!("{:#x}", recipient),
+    );
+
+    let unrelated_signer = PrivateKeySigner::random();
+    let unrelated_status = ctx
+        .get_deposit_status_as_user(tempo_block_number, &unrelated_signer)
+        .await?;
+    let unrelated_deposits = unrelated_status["result"]["deposits"]
+        .as_array()
+        .expect("unrelated deposits should be an array");
+    assert_eq!(unrelated_status["result"]["processed"], true);
+    assert!(unrelated_deposits.is_empty());
+
+    Ok(())
+}
+
+/// `zone_getDepositStatus` reveals encrypted deposits to the sender immediately,
+/// and to the recipient once the L2 processed event has revealed the recipient.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_get_deposit_status_encrypted() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc_l1_with_encryption().await?;
+    let l1 = ctx.l1();
+    let portal_address = ctx.portal_address();
+
+    let depositor_signer = l1.user_signer();
+    let recipient_signer = l1.signer_at(2);
+    let recipient = recipient_signer.address();
+
+    let mut depositor =
+        ZoneAccount::with_signer(depositor_signer.clone(), l1, &ctx.zone, portal_address);
+    let deposit_amount: u128 = 1_000_000;
+    let memo = B256::from([0x11; 32]);
+    l1.fund_user(depositor.address(), deposit_amount).await?;
+
+    let (tempo_block_number, _) = depositor
+        .deposit_encrypted_with_block(deposit_amount, recipient, memo, DEFAULT_TIMEOUT, &ctx.zone)
+        .await?;
+
+    let sender_status = ctx
+        .get_deposit_status_as_user(tempo_block_number, &depositor_signer)
+        .await?;
+    let sender_deposits = sender_status["result"]["deposits"]
+        .as_array()
+        .expect("sender deposits should be an array");
+    assert_eq!(sender_status["result"]["processed"], true);
+    assert_eq!(sender_deposits.len(), 1);
+    assert_eq!(sender_deposits[0]["kind"], "encrypted");
+    assert_eq!(sender_deposits[0]["status"], "processed");
+    assert_eq!(
+        sender_deposits[0]["recipient"].as_str().unwrap(),
+        format!("{:#x}", recipient),
+    );
+    assert_eq!(
+        sender_deposits[0]["memo"].as_str().unwrap(),
+        format!("{memo:#x}"),
+    );
+
+    let recipient_status = ctx
+        .get_deposit_status_as_user(tempo_block_number, &recipient_signer)
+        .await?;
+    let recipient_deposits = recipient_status["result"]["deposits"]
+        .as_array()
+        .expect("recipient deposits should be an array");
+    assert_eq!(recipient_status["result"]["processed"], true);
+    assert_eq!(recipient_deposits.len(), 1);
+    assert_eq!(
+        recipient_deposits[0]["recipient"].as_str().unwrap(),
+        format!("{:#x}", recipient),
+    );
+    assert_eq!(
+        recipient_deposits[0]["sender"].as_str().unwrap(),
+        format!("{:#x}", depositor.address()),
     );
 
     Ok(())

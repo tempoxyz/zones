@@ -351,6 +351,116 @@ In addition to the Ethereum JSON-RPC methods, the zone exposes zone-specific met
 | `zone_getZoneInfo` | Any authenticated | Returns zone metadata: `zoneId`, `zoneToken`, `sequencer` (address only, not private key), `chainId`. |
 | `zone_getDepositStatus(tempoBlockNumber)` | Scoped | Returns whether deposits from the given Tempo block have been processed on the zone. Only returns information about deposits where the sender or recipient is the authenticated account. |
 
+All integer fields in these responses use Ethereum JSON-RPC quantity encoding (hex strings such as `0x1`).
+
+### `zone_getAuthorizationTokenInfo`
+
+**Request**
+
+```json
+{
+  "method": "zone_getAuthorizationTokenInfo",
+  "params": []
+}
+```
+
+**Response**
+
+```json
+{
+  "account": "0x1234...",
+  "expiresAt": "0x67d2d7c0"
+}
+```
+
+- `account`: the authenticated account address recovered from the authorization token.
+- `expiresAt`: the token expiry timestamp (unix seconds).
+
+### `zone_getZoneInfo`
+
+**Request**
+
+```json
+{
+  "method": "zone_getZoneInfo",
+  "params": []
+}
+```
+
+**Response**
+
+```json
+{
+  "zoneId": "0x1",
+  "zoneToken": "0x20c0000000000000000000000000000000000000",
+  "sequencer": "0xabcd...",
+  "chainId": "0x2a"
+}
+```
+
+- `zoneId`: the configured zone identifier.
+- `zoneToken`: the zone's TIP-20 token address.
+- `sequencer`: the configured sequencer address.
+- `chainId`: the zone chain ID.
+
+### `zone_getDepositStatus(tempoBlockNumber)`
+
+**Request**
+
+```json
+{
+  "method": "zone_getDepositStatus",
+  "params": ["0x2a"]
+}
+```
+
+`tempoBlockNumber` MAY be supplied either as a JSON number or as a hex quantity string.
+
+**Response**
+
+```json
+{
+  "tempoBlockNumber": "0x2a",
+  "zoneProcessedThrough": "0x2a",
+  "processed": true,
+  "deposits": [
+    {
+      "depositHash": "0xfeed...",
+      "kind": "regular",
+      "token": "0x20c0000000000000000000000000000000000000",
+      "sender": "0xaaaa...",
+      "recipient": "0xbbbb...",
+      "amount": "0xf4240",
+      "memo": "0x1111...",
+      "status": "processed"
+    }
+  ]
+}
+```
+
+- `tempoBlockNumber`: the queried Tempo L1 block number.
+- `zoneProcessedThrough`: the latest Tempo block number the zone has processed on L2.
+- `processed`: `true` if the zone has advanced through `tempoBlockNumber` and every deposit visible to the authenticated caller from that block has reached a terminal status.
+- `deposits`: only deposits relevant to the authenticated caller.
+
+Each deposit entry has:
+
+- `depositHash`: the deposit queue hash (`newCurrentDepositQueueHash`) for that deposit.
+- `kind`: `"regular"` or `"encrypted"`.
+- `token`: the deposited token address.
+- `sender`: the L1 depositor address.
+- `recipient`: the plaintext recipient address when visible; otherwise `null`.
+- `amount`: the post-fee deposit amount.
+- `memo`: the deposit memo when visible; otherwise `null`.
+- `status`: `"pending"`, `"processed"`, or `"failed"`.
+
+Visibility rules:
+
+- Regular deposits are returned only when the authenticated account is the sender or the plaintext recipient.
+- Encrypted deposits are returned immediately to the sender.
+- Encrypted deposits are returned to a recipient-only caller only after the zone has emitted `EncryptedDepositProcessed` on L2, which reveals the recipient.
+- Pending encrypted deposits MUST keep `recipient` and `memo` as `null`; implementations MUST NOT decrypt or reveal hidden recipient data just to answer RPC.
+
 **Withdrawals**: To request a withdrawal, the caller MUST construct and sign a transaction calling `ZoneOutbox.requestWithdrawal(...)` and submit it via `eth_sendRawTransaction`. There is no server-side convenience method — authorization tokens are read-only credentials and MUST NOT be sufficient to authorize state-changing operations such as token transfers or withdrawals. Requiring a full transaction signature ensures that a stolen or replayed authorization token cannot be used to move funds.
 
 ## Error codes

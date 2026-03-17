@@ -192,7 +192,10 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "net_version"
         | "net_listening"
         | "web3_clientVersion"
-        | "web3_sha3" => Some(MethodTier::Public),
+        | "web3_sha3"
+        | "zone_getAuthorizationTokenInfo"
+        | "zone_getZoneInfo"
+        | "zone_getDepositStatus" => Some(MethodTier::Public),
 
         // Fetch-then-check: public but redacted based on caller identity
         "eth_getTransactionByHash"

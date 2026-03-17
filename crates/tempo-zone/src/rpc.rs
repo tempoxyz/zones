@@ -8,13 +8,14 @@ pub use zone_rpc::*;
 use std::{collections::HashMap, sync::Arc};
 
 use alloy_network::{ReceiptResponse, TransactionResponse};
-use alloy_primitives::{Address, B256, Bloom, Bytes, U256};
+use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256};
+use alloy_provider::{DynProvider, Provider};
 use alloy_rpc_types_eth::{
     Block, BlockId, BlockNumberOrTag, BlockTransactions, Filter, FilterChanges, FilterId,
     TransactionRequest,
     state::{EvmOverrides, StateOverride},
 };
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolEvent, SolEventInterface};
 use eyre::WrapErr;
 use reth_rpc::EthFilter;
 use reth_rpc_builder::EthHandlers;
@@ -33,12 +34,93 @@ use tempo_contracts::precompiles::{
 use tempo_primitives::TempoTxEnvelope;
 use tokio::sync::Mutex;
 
+use crate::abi::{
+    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
+};
 use zone_rpc::{
     auth::AuthContext,
     types::{BoxEyreFut, BoxFut, JsonRpcError, internal, raw_null, raw_zero, to_raw},
 };
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AuthorizationTokenInfoResponse {
+    account: Address,
+    expires_at: U64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ZoneInfoResponse {
+    zone_id: U64,
+    zone_token: Address,
+    sequencer: Address,
+    chain_id: U64,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DepositStatusResponse {
+    tempo_block_number: U64,
+    zone_processed_through: U64,
+    processed: bool,
+    deposits: Vec<DepositStatusEntry>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DepositStatusEntry {
+    deposit_hash: B256,
+    kind: DepositKind,
+    token: Address,
+    sender: Address,
+    recipient: Option<Address>,
+    amount: U256,
+    memo: Option<B256>,
+    status: DepositState,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DepositKind {
+    Regular,
+    Encrypted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+enum DepositState {
+    Pending,
+    Processed,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+enum PortalDepositRecord {
+    Regular {
+        deposit_hash: B256,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: u128,
+        memo: B256,
+    },
+    Encrypted {
+        deposit_hash: B256,
+        sender: Address,
+        token: Address,
+        amount: u128,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum TerminalDepositEvent {
+    RegularProcessed,
+    EncryptedProcessed { recipient: Address, memo: B256 },
+    EncryptedFailed,
+}
 
 /// [`ZoneRpcApi`] implementation backed by reth's [`EthHandlers`].
 ///
@@ -66,6 +148,11 @@ type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHe
 /// [`classify_method`]: zone_rpc::types::classify_method
 pub struct TempoZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
+    config: zone_rpc::PrivateRpcConfig,
+    l1_provider: DynProvider<TempoNetwork>,
+    zone_provider: DynProvider<TempoNetwork>,
+    tempo_state:
+        crate::abi::TempoState::TempoStateInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     /// Maps filter IDs to the authenticated account that created them.
     /// Ensures filters can only be accessed by their creator.
     ///
@@ -77,9 +164,19 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
 
 impl<Api: EthApiTypes> TempoZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
-    pub fn new(eth: EthHandlers<Api>) -> Self {
+    pub fn new(
+        eth: EthHandlers<Api>,
+        config: zone_rpc::PrivateRpcConfig,
+        l1_provider: DynProvider<TempoNetwork>,
+        zone_provider: DynProvider<TempoNetwork>,
+    ) -> Self {
+        let tempo_state = crate::abi::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider.clone());
         Self {
             eth,
+            config,
+            l1_provider,
+            zone_provider,
+            tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -108,6 +205,105 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
             Some(owner) if *owner == auth.caller => Ok(()),
             _ => Err(JsonRpcError::invalid_params("filter not found")),
         }
+    }
+
+    async fn portal_deposits_for_block(
+        &self,
+        tempo_block_number: u64,
+    ) -> Result<Vec<PortalDepositRecord>, JsonRpcError> {
+        if self.config.zone_portal.is_zero() {
+            return Err(JsonRpcError::internal("zone portal not configured"));
+        }
+
+        let filter = Filter::new()
+            .address(self.config.zone_portal)
+            .from_block(tempo_block_number)
+            .to_block(tempo_block_number)
+            .event_signature(vec![
+                ZonePortal::DepositMade::SIGNATURE_HASH,
+                ZonePortal::EncryptedDepositMade::SIGNATURE_HASH,
+            ]);
+
+        let logs = self.l1_provider.get_logs(&filter).await.map_err(internal)?;
+        let mut deposits = Vec::with_capacity(logs.len());
+
+        for log in logs {
+            match ZonePortal::ZonePortalEvents::decode_log(&log.inner)
+                .map_err(internal)?
+                .data
+            {
+                ZonePortal::ZonePortalEvents::DepositMade(event) => {
+                    deposits.push(PortalDepositRecord::Regular {
+                        deposit_hash: event.newCurrentDepositQueueHash,
+                        sender: event.sender,
+                        recipient: event.to,
+                        token: event.token,
+                        amount: event.netAmount,
+                        memo: event.memo,
+                    });
+                }
+                ZonePortal::ZonePortalEvents::EncryptedDepositMade(event) => {
+                    deposits.push(PortalDepositRecord::Encrypted {
+                        deposit_hash: event.newCurrentDepositQueueHash,
+                        sender: event.sender,
+                        token: event.token,
+                        amount: event.netAmount,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        Ok(deposits)
+    }
+
+    async fn terminal_event_for_deposit(
+        &self,
+        deposit_hash: B256,
+    ) -> Result<Option<TerminalDepositEvent>, JsonRpcError> {
+        let filter = Filter::new()
+            .address(ZONE_INBOX_ADDRESS)
+            .from_block(0)
+            .event_signature(vec![
+                ZoneInbox::DepositProcessed::SIGNATURE_HASH,
+                ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH,
+                ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH,
+            ])
+            .topic1(deposit_hash);
+
+        let logs = self
+            .zone_provider
+            .get_logs(&filter)
+            .await
+            .map_err(internal)?;
+        let Some(log) = logs.last() else {
+            return Ok(None);
+        };
+
+        let Some(signature) = log.topics().first().copied() else {
+            return Ok(None);
+        };
+
+        if signature == ZoneInbox::DepositProcessed::SIGNATURE_HASH {
+            ZoneInbox::DepositProcessed::decode_log(&log.inner).map_err(internal)?;
+            return Ok(Some(TerminalDepositEvent::RegularProcessed));
+        }
+
+        if signature == ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH {
+            let event =
+                ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner).map_err(internal)?;
+            return Ok(Some(TerminalDepositEvent::EncryptedProcessed {
+                recipient: event.to,
+                memo: event.memo,
+            }));
+        }
+
+        if signature == ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH {
+            ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner).map_err(internal)?;
+            return Ok(Some(TerminalDepositEvent::EncryptedFailed));
+        }
+
+        Ok(None)
     }
 }
 
@@ -521,6 +717,137 @@ where
             }
 
             to_raw(&result)
+        })
+    }
+
+    fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            to_raw(&AuthorizationTokenInfoResponse {
+                account: auth.caller,
+                expires_at: U64::from(auth.expires_at),
+            })
+        })
+    }
+
+    fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            to_raw(&ZoneInfoResponse {
+                zone_id: U64::from(self.config.zone_id),
+                zone_token: ZONE_TOKEN_ADDRESS,
+                sequencer: self.config.sequencer,
+                chain_id: U64::from(self.config.chain_id),
+            })
+        })
+    }
+
+    fn zone_get_deposit_status(&self, tempo_block_number: u64, auth: AuthContext) -> BoxFut<'_> {
+        Box::pin(async move {
+            let zone_processed_through = self
+                .tempo_state
+                .tempoBlockNumber()
+                .call()
+                .await
+                .map_err(internal)?;
+            let portal_deposits = self.portal_deposits_for_block(tempo_block_number).await?;
+
+            let mut deposits = Vec::new();
+            for deposit in portal_deposits {
+                match deposit {
+                    PortalDepositRecord::Regular {
+                        deposit_hash,
+                        sender,
+                        recipient,
+                        token,
+                        amount,
+                        memo,
+                    } => {
+                        if sender != auth.caller && recipient != auth.caller {
+                            continue;
+                        }
+
+                        let terminal = self.terminal_event_for_deposit(deposit_hash).await?;
+                        let status = if terminal.is_some() {
+                            DepositState::Processed
+                        } else {
+                            DepositState::Pending
+                        };
+
+                        deposits.push(DepositStatusEntry {
+                            deposit_hash,
+                            kind: DepositKind::Regular,
+                            token,
+                            sender,
+                            recipient: Some(recipient),
+                            amount: U256::from(amount),
+                            memo: Some(memo),
+                            status,
+                        });
+                    }
+                    PortalDepositRecord::Encrypted {
+                        deposit_hash,
+                        sender,
+                        token,
+                        amount,
+                    } => {
+                        let terminal = self.terminal_event_for_deposit(deposit_hash).await?;
+
+                        let include = match (&terminal, sender == auth.caller) {
+                            (_, true) => true,
+                            (
+                                Some(TerminalDepositEvent::EncryptedProcessed {
+                                    recipient, ..
+                                }),
+                                false,
+                            ) => *recipient == auth.caller,
+                            _ => false,
+                        };
+
+                        if !include {
+                            continue;
+                        }
+
+                        let (recipient, memo, status) = match terminal {
+                            Some(TerminalDepositEvent::EncryptedProcessed {
+                                recipient,
+                                memo,
+                                ..
+                            }) => (Some(recipient), Some(memo), DepositState::Processed),
+                            Some(TerminalDepositEvent::EncryptedFailed) => {
+                                (None, None, DepositState::Failed)
+                            }
+                            Some(TerminalDepositEvent::RegularProcessed) => {
+                                return Err(JsonRpcError::internal(
+                                    "regular deposit event matched encrypted deposit hash",
+                                ));
+                            }
+                            None => (None, None, DepositState::Pending),
+                        };
+
+                        deposits.push(DepositStatusEntry {
+                            deposit_hash,
+                            kind: DepositKind::Encrypted,
+                            token,
+                            sender,
+                            recipient,
+                            amount: U256::from(amount),
+                            memo,
+                            status,
+                        });
+                    }
+                }
+            }
+
+            let processed = zone_processed_through >= tempo_block_number
+                && deposits
+                    .iter()
+                    .all(|deposit| deposit.status != DepositState::Pending);
+
+            to_raw(&DepositStatusResponse {
+                tempo_block_number: U64::from(tempo_block_number),
+                zone_processed_through: U64::from(zone_processed_through),
+                processed,
+                deposits,
+            })
         })
     }
 }
