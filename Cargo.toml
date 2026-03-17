@@ -81,7 +81,7 @@ codegen-units = 1
 tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "ed25d8e4affee8c8ba71ed137c204e54b97ad69a" }
 tempo-chainspec = { git = "https://github.com/tempoxyz/tempo", rev = "ed25d8e4affee8c8ba71ed137c204e54b97ad69a", default-features = false }
 tempo-consensus = { git = "https://github.com/tempoxyz/tempo", rev = "ed25d8e4affee8c8ba71ed137c204e54b97ad69a", default-features = false }
-tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "ed25d8e4affee8c8ba71ed137c204e54b97ad69a", default-features = false }
+tempo-contracts = { git = "https://github.com/tempoxyz/tempo", rev = "ed25d8e4affee8c8ba71ed137c204e54b97ad69a", default-features = false, features = ["serde"] }
 tempo-evm = { git = "https://github.com/tempoxyz/tempo", rev = "ed25d8e4affee8c8ba71ed137c204e54b97ad69a", default-features = false }
 tempo-node = { git = "https://github.com/tempoxyz/tempo", rev = "ed25d8e4affee8c8ba71ed137c204e54b97ad69a" }
 tempo-payload-types = { git = "https://github.com/tempoxyz/tempo", rev = "ed25d8e4affee8c8ba71ed137c204e54b97ad69a", default-features = false }
