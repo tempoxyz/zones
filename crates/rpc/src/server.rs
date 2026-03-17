@@ -109,23 +109,6 @@ pub(crate) async fn process_rpc_text(
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
 ) -> RpcResult {
-    process_rpc_text_inner(text, auth, api, false).await
-}
-
-async fn process_rpc_text_metered(
-    text: &str,
-    auth: &AuthContext,
-    api: &dyn ZoneRpcApi,
-) -> RpcResult {
-    process_rpc_text_inner(text, auth, api, true).await
-}
-
-async fn process_rpc_text_inner(
-    text: &str,
-    auth: &AuthContext,
-    api: &dyn ZoneRpcApi,
-    metered: bool,
-) -> RpcResult {
     let trimmed = text.trim_start();
 
     if trimmed.starts_with('[') {
@@ -146,7 +129,7 @@ async fn process_rpc_text_inner(
             Ok(requests) => {
                 let mut responses = Vec::with_capacity(requests.len());
                 for req in &requests {
-                    responses.push(dispatch_request(req, auth, api, metered).await);
+                    responses.push(dispatch_request(req, auth, api).await);
                 }
                 RpcResult::Batch(responses)
             }
@@ -157,7 +140,7 @@ async fn process_rpc_text_inner(
         }
     } else {
         match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(request) => RpcResult::Single(dispatch_request(&request, auth, api, metered).await),
+            Ok(request) => RpcResult::Single(dispatch_request(&request, auth, api).await),
             Err(e) => RpcResult::Single(JsonRpcResponse::error(
                 serde_json::Value::Null,
                 JsonRpcError::parse_error(format!("parse error: {e}")),
@@ -167,19 +150,6 @@ async fn process_rpc_text_inner(
 }
 
 async fn dispatch_request(
-    req: &JsonRpcRequest,
-    auth: &AuthContext,
-    api: &dyn ZoneRpcApi,
-    metered: bool,
-) -> JsonRpcResponse {
-    if metered {
-        dispatch_metered(req, auth, api).await
-    } else {
-        handlers::dispatch(req, auth, api).await
-    }
-}
-
-async fn dispatch_metered(
     req: &JsonRpcRequest,
     auth: &AuthContext,
     api: &dyn ZoneRpcApi,
@@ -226,7 +196,7 @@ async fn handle_rpc(
         }
     };
 
-    process_rpc_text_metered(body_str, &auth, state.api.as_ref())
+    process_rpc_text(body_str, &auth, state.api.as_ref())
         .await
         .into_response()
 }
