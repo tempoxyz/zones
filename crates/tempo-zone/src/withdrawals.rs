@@ -25,7 +25,11 @@
 //! should match the portal slot index. The caller (batch submitter) is responsible for tracking
 //! which `batch_index` maps to which portal slot.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
@@ -36,6 +40,7 @@ use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
     abi::{self, ZonePortal},
+    metrics::WithdrawalProcessorMetrics,
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
@@ -80,13 +85,21 @@ pub struct WithdrawalProcessorConfig {
 /// (oldest first). The batch index corresponds to the portal's withdrawal queue slot index.
 pub struct WithdrawalStore {
     batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
+    metrics: WithdrawalProcessorMetrics,
 }
 
 impl WithdrawalStore {
     pub fn new() -> Self {
-        Self {
+        Self::with_metrics(WithdrawalProcessorMetrics::default())
+    }
+
+    fn with_metrics(metrics: WithdrawalProcessorMetrics) -> Self {
+        let store = Self {
             batches: BTreeMap::new(),
-        }
+            metrics,
+        };
+        store.record_batch_count();
+        store
     }
 
     /// Add a withdrawal to the given batch.
@@ -97,11 +110,13 @@ impl WithdrawalStore {
             .entry(batch_index)
             .or_default()
             .push(withdrawal);
+        self.record_batch_count();
     }
 
     /// Set all withdrawals for a batch at once, replacing any existing data.
     pub fn add_batch(&mut self, batch_index: u64, withdrawals: Vec<abi::Withdrawal>) {
         self.batches.insert(batch_index, withdrawals);
+        self.record_batch_count();
     }
 
     /// Get all withdrawals for a batch.
@@ -112,6 +127,7 @@ impl WithdrawalStore {
     /// Remove a batch after all its withdrawals are processed.
     pub fn remove_batch(&mut self, batch_index: u64) {
         self.batches.remove(&batch_index);
+        self.record_batch_count();
     }
 
     pub fn has_batch(&self, batch_index: u64) -> bool {
@@ -120,6 +136,12 @@ impl WithdrawalStore {
 
     pub fn batch_count(&self) -> usize {
         self.batches.len()
+    }
+
+    fn record_batch_count(&self) {
+        self.metrics
+            .store_batch_count
+            .set(self.batch_count() as f64);
     }
 }
 
@@ -146,6 +168,99 @@ pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count:
     abi::Withdrawal::queue_hash(remaining)
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TrackedHeadSlot {
+    slot: u64,
+    first_seen_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct HeadSlotTracker {
+    tracked: Option<TrackedHeadSlot>,
+}
+
+impl HeadSlotTracker {
+    fn observe(&mut self, head: u64, tail: u64, now: Instant) -> f64 {
+        if head == tail {
+            self.clear();
+            return 0.0;
+        }
+
+        match self.tracked {
+            Some(tracked) if tracked.slot == head => {
+                now.duration_since(tracked.first_seen_at).as_secs_f64()
+            }
+            _ => {
+                self.tracked = Some(TrackedHeadSlot {
+                    slot: head,
+                    first_seen_at: now,
+                });
+                0.0
+            }
+        }
+    }
+
+    fn clear(&mut self) {
+        self.tracked = None;
+    }
+}
+
+fn record_queue_metrics(
+    metrics: &WithdrawalProcessorMetrics,
+    tracker: &mut HeadSlotTracker,
+    head: u64,
+    tail: u64,
+    store_batch_count: usize,
+    now: Instant,
+) {
+    metrics.portal_queue_head.set(head as f64);
+    metrics.portal_queue_tail.set(tail as f64);
+    metrics
+        .portal_queue_pending_slots
+        .set((tail.saturating_sub(head)) as f64);
+    metrics.store_batch_count.set(store_batch_count as f64);
+    metrics
+        .head_slot_stuck_age_seconds
+        .set(tracker.observe(head, tail, now));
+}
+
+#[derive(Clone)]
+struct SlotProcessingRecorder {
+    metrics: WithdrawalProcessorMetrics,
+    started_at: Instant,
+}
+
+impl SlotProcessingRecorder {
+    fn new(metrics: WithdrawalProcessorMetrics, started_at: Instant) -> Self {
+        Self {
+            metrics,
+            started_at,
+        }
+    }
+
+    fn record_attempt(&self) {
+        self.metrics.withdrawals_processed_total.increment(1);
+    }
+
+    fn record_confirmed(&self) {
+        self.metrics.withdrawals_confirmed_total.increment(1);
+    }
+
+    fn record_failed(&self) {
+        self.metrics.withdrawals_failed_total.increment(1);
+    }
+
+    fn finish(&self, ended_at: Instant) {
+        self.record_duration(ended_at.duration_since(self.started_at));
+    }
+
+    fn record_duration(&self, duration: Duration) {
+        self.metrics
+            .slot_processing_duration_seconds
+            .record(duration.as_secs_f64());
+    }
+}
+
 // ---------------------------------------------------------------------------
 //  Withdrawal processor
 // ---------------------------------------------------------------------------
@@ -168,6 +283,8 @@ pub struct WithdrawalProcessor {
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
+    metrics: WithdrawalProcessorMetrics,
+    head_tracker: Mutex<HeadSlotTracker>,
 }
 
 impl WithdrawalProcessor {
@@ -187,6 +304,8 @@ impl WithdrawalProcessor {
             portal,
             store,
             notify,
+            metrics: WithdrawalProcessorMetrics::default(),
+            head_tracker: Mutex::new(HeadSlotTracker::default()),
         }
     }
 
@@ -222,6 +341,18 @@ impl WithdrawalProcessor {
 
         let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
         let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
+        let store_batch_count = self.store.lock().batch_count();
+        {
+            let mut tracker = self.head_tracker.lock();
+            record_queue_metrics(
+                &self.metrics,
+                &mut tracker,
+                head_val,
+                tail_val,
+                store_batch_count,
+                Instant::now(),
+            );
+        }
 
         if head_val == tail_val {
             debug!("Withdrawal queue empty, nothing to process");
@@ -258,8 +389,10 @@ impl WithdrawalProcessor {
             count = withdrawals.len(),
             "Processing withdrawal batch"
         );
+        let slot_metrics = SlotProcessingRecorder::new(self.metrics.clone(), Instant::now());
 
         for (i, withdrawal) in withdrawals.iter().enumerate() {
+            slot_metrics.record_attempt();
             let remaining_queue = compute_remaining_queue(&withdrawals, i + 1);
             let is_last = i + 1 == withdrawals.len();
 
@@ -320,6 +453,7 @@ impl WithdrawalProcessor {
                         .await
                     {
                         Ok(_) => {
+                            slot_metrics.record_confirmed();
                             info!(
                                 slot = head_val,
                                 index = i,
@@ -331,6 +465,8 @@ impl WithdrawalProcessor {
                             );
                         }
                         Err(e) => {
+                            slot_metrics.record_failed();
+                            slot_metrics.finish(Instant::now());
                             error!(
                                 slot = head_val,
                                 index = i,
@@ -345,6 +481,8 @@ impl WithdrawalProcessor {
                     }
                 }
                 Err(e) => {
+                    slot_metrics.record_failed();
+                    slot_metrics.finish(Instant::now());
                     error!(
                         slot = head_val,
                         index = i,
@@ -357,9 +495,12 @@ impl WithdrawalProcessor {
                 }
             }
         }
+        slot_metrics.finish(Instant::now());
 
         // All withdrawals in this slot confirmed — safe to remove.
         self.store.lock().remove_batch(head_val);
+        self.metrics.head_slot_stuck_age_seconds.set(0.0);
+        self.head_tracker.lock().clear();
 
         info!(
             slot = head_val,
@@ -399,6 +540,101 @@ mod tests {
     use crate::abi::EMPTY_SENTINEL;
     use alloy_primitives::{address, keccak256};
     use alloy_sol_types::SolValue;
+    use metrics_util::{
+        CompositeKey, MetricKind,
+        debugging::{DebugValue, DebuggingRecorder, Snapshotter},
+    };
+    use reth_metrics::metrics::{Label, SharedString, Unit};
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    type SnapshotEntry = (
+        CompositeKey,
+        (Option<Unit>, Option<SharedString>, DebugValue),
+    );
+    type SnapshotEntries = Vec<SnapshotEntry>;
+
+    fn snapshotter() -> &'static Snapshotter {
+        static SNAPSHOTTER: OnceLock<Snapshotter> = OnceLock::new();
+
+        SNAPSHOTTER.get_or_init(|| {
+            let recorder = DebuggingRecorder::new();
+            let snapshotter = recorder.snapshotter();
+            let _ = recorder.install();
+            snapshotter
+        })
+    }
+
+    fn metric_lock() -> &'static StdMutex<()> {
+        static LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| StdMutex::new(()))
+    }
+
+    fn with_metrics_snapshot<T>(action: impl FnOnce() -> T) -> (T, SnapshotEntries) {
+        let _guard = metric_lock().lock().unwrap();
+        let _ = snapshotter().snapshot();
+        let result = action();
+        let snapshot = snapshotter()
+            .snapshot()
+            .into_hashmap()
+            .into_iter()
+            .collect();
+        (result, snapshot)
+    }
+
+    fn metric_value<'a>(
+        snapshot: &'a SnapshotEntries,
+        kind: MetricKind,
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> &'a DebugValue {
+        snapshot
+            .iter()
+            .find(|(key, _)| {
+                key.kind() == kind
+                    && key.key().name() == name
+                    && labels_match(key.key().labels(), labels)
+            })
+            .map(|(_, (_, _, value))| value)
+            .unwrap_or_else(|| panic!("metric {name} with labels {labels:?} not found"))
+    }
+
+    fn labels_match<'a>(
+        labels: impl Iterator<Item = &'a Label>,
+        expected: &[(&str, &str)],
+    ) -> bool {
+        let mut actual: Vec<_> = labels.map(|label| (label.key(), label.value())).collect();
+        let mut expected = expected.to_vec();
+        actual.sort_unstable();
+        expected.sort_unstable();
+        actual == expected
+    }
+
+    fn counter(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> u64 {
+        match metric_value(snapshot, MetricKind::Counter, name, labels) {
+            DebugValue::Counter(value) => *value,
+            other => panic!("expected counter for {name}, got {other:?}"),
+        }
+    }
+
+    fn gauge(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> f64 {
+        match metric_value(snapshot, MetricKind::Gauge, name, labels) {
+            DebugValue::Gauge(value) => value.into_inner(),
+            other => panic!("expected gauge for {name}, got {other:?}"),
+        }
+    }
+
+    fn histogram(snapshot: &SnapshotEntries, name: &str, labels: &[(&str, &str)]) -> Vec<f64> {
+        match metric_value(snapshot, MetricKind::Histogram, name, labels) {
+            DebugValue::Histogram(values) => {
+                values.iter().map(|value| value.into_inner()).collect()
+            }
+            other => panic!("expected histogram for {name}, got {other:?}"),
+        }
+    }
+
+    fn test_metrics(label: &'static str) -> WithdrawalProcessorMetrics {
+        WithdrawalProcessorMetrics::new_with_labels(&[("test", label)])
+    }
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
@@ -558,5 +794,251 @@ mod tests {
 
         store.add_batch(1, vec![test_withdrawal(addr, 999)]);
         assert_eq!(store.batch_count(), 2);
+    }
+
+    #[test]
+    fn queue_metrics_reset_when_empty() {
+        let labels = [("test", "queue_metrics_reset_when_empty")];
+        let (_, snapshot) = with_metrics_snapshot(|| {
+            let metrics = test_metrics("queue_metrics_reset_when_empty");
+            let mut tracker = HeadSlotTracker::default();
+            record_queue_metrics(&metrics, &mut tracker, 7, 7, 0, Instant::now());
+        });
+
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.portal_queue_head",
+                &labels,
+            ),
+            7.0
+        );
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.portal_queue_tail",
+                &labels,
+            ),
+            7.0
+        );
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.portal_queue_pending_slots",
+                &labels,
+            ),
+            0.0
+        );
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.head_slot_stuck_age_seconds",
+                &labels,
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn queue_metrics_track_stuck_head_age() {
+        let labels = [("test", "queue_metrics_track_stuck_head_age")];
+        let now = Instant::now();
+        let (_, snapshot) = with_metrics_snapshot(|| {
+            let metrics = test_metrics("queue_metrics_track_stuck_head_age");
+            let mut tracker = HeadSlotTracker::default();
+            record_queue_metrics(&metrics, &mut tracker, 11, 14, 2, now);
+            record_queue_metrics(
+                &metrics,
+                &mut tracker,
+                11,
+                14,
+                2,
+                now + Duration::from_secs(8),
+            );
+        });
+
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.portal_queue_pending_slots",
+                &labels,
+            ),
+            3.0
+        );
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.store_batch_count",
+                &labels,
+            ),
+            2.0
+        );
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.head_slot_stuck_age_seconds",
+                &labels,
+            ),
+            8.0
+        );
+    }
+
+    #[test]
+    fn queue_metrics_reset_when_head_advances() {
+        let labels = [("test", "queue_metrics_reset_when_head_advances")];
+        let now = Instant::now();
+        let (_, snapshot) = with_metrics_snapshot(|| {
+            let metrics = test_metrics("queue_metrics_reset_when_head_advances");
+            let mut tracker = HeadSlotTracker::default();
+            record_queue_metrics(&metrics, &mut tracker, 3, 5, 1, now);
+            record_queue_metrics(
+                &metrics,
+                &mut tracker,
+                4,
+                5,
+                1,
+                now + Duration::from_secs(12),
+            );
+        });
+
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.head_slot_stuck_age_seconds",
+                &labels,
+            ),
+            0.0
+        );
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.portal_queue_head",
+                &labels,
+            ),
+            4.0
+        );
+    }
+
+    #[test]
+    fn slot_processing_metrics_record_success() {
+        let labels = [("test", "slot_processing_metrics_record_success")];
+        let start = Instant::now();
+        let (_, snapshot) = with_metrics_snapshot(|| {
+            let recorder = SlotProcessingRecorder::new(
+                test_metrics("slot_processing_metrics_record_success"),
+                start,
+            );
+            recorder.record_attempt();
+            recorder.record_confirmed();
+            recorder.record_attempt();
+            recorder.record_confirmed();
+            recorder.finish(start + Duration::from_secs(3));
+        });
+
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_withdrawal_processor.withdrawals_processed_total",
+                &labels,
+            ),
+            2
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_withdrawal_processor.withdrawals_confirmed_total",
+                &labels,
+            ),
+            2
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_withdrawal_processor.withdrawals_failed_total",
+                &labels,
+            ),
+            0
+        );
+        assert_eq!(
+            histogram(
+                &snapshot,
+                "zone_withdrawal_processor.slot_processing_duration_seconds",
+                &labels,
+            ),
+            vec![3.0]
+        );
+    }
+
+    #[test]
+    fn slot_processing_metrics_record_failure() {
+        let labels = [("test", "slot_processing_metrics_record_failure")];
+        let start = Instant::now();
+        let (_, snapshot) = with_metrics_snapshot(|| {
+            let recorder = SlotProcessingRecorder::new(
+                test_metrics("slot_processing_metrics_record_failure"),
+                start,
+            );
+            recorder.record_attempt();
+            recorder.record_confirmed();
+            recorder.record_attempt();
+            recorder.record_failed();
+            recorder.finish(start + Duration::from_secs(2));
+        });
+
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_withdrawal_processor.withdrawals_processed_total",
+                &labels,
+            ),
+            2
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_withdrawal_processor.withdrawals_confirmed_total",
+                &labels,
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &snapshot,
+                "zone_withdrawal_processor.withdrawals_failed_total",
+                &labels,
+            ),
+            1
+        );
+        assert_eq!(
+            histogram(
+                &snapshot,
+                "zone_withdrawal_processor.slot_processing_duration_seconds",
+                &labels,
+            ),
+            vec![2.0]
+        );
+    }
+
+    #[test]
+    fn store_batch_count_metric_tracks_mutations() {
+        let labels = [("test", "store_batch_count_metric_tracks_mutations")];
+        let (_, snapshot) = with_metrics_snapshot(|| {
+            let mut store = WithdrawalStore::with_metrics(test_metrics(
+                "store_batch_count_metric_tracks_mutations",
+            ));
+            let addr = address!("0x0000000000000000000000000000000000000042");
+            store.add_batch(0, vec![test_withdrawal(addr, 1)]);
+            store.add_batch(1, vec![test_withdrawal(addr, 2)]);
+            store.remove_batch(0);
+        });
+
+        assert_eq!(
+            gauge(
+                &snapshot,
+                "zone_withdrawal_processor.store_batch_count",
+                &labels,
+            ),
+            1.0
+        );
     }
 }
