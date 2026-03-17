@@ -6,11 +6,11 @@ use alloy_rpc_types_eth::Filter;
 use alloy_sol_types::{SolEvent, SolValue};
 use eyre::WrapErr;
 use p256::ecdsa::SigningKey as P256SigningKey;
-use reth_ethereum::tasks::TaskManager;
 use reth_node_api::FullNodeComponents;
 use reth_node_builder::{NodeBuilder, NodeConfig, NodeHandle, rpc::RethRpcAddOns};
 use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
+use reth_tasks::Runtime;
 use std::{
     sync::{
         Arc,
@@ -176,7 +176,7 @@ pub(crate) struct ZoneTestNode {
             + Sync,
     >,
     node_handle: Box<dyn TestNodeHandle>,
-    _tasks: TaskManager,
+    _tasks: Runtime,
 }
 
 impl ZoneTestNode {
@@ -450,7 +450,7 @@ impl ZoneTestNode {
         custom_genesis: Option<Genesis>,
         sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
-        let tasks = TaskManager::current();
+        let tasks = Runtime::test();
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))
@@ -491,7 +491,7 @@ impl ZoneTestNode {
         let policy_cache = zone_node.policy_cache();
 
         let node_handle = NodeBuilder::new(node_config)
-            .testing_node(tasks.executor())
+            .testing_node(tasks.clone())
             .node(zone_node)
             .launch_with_debug_capabilities()
             .await?;
@@ -551,7 +551,7 @@ pub(crate) struct L1TestNode {
     http_url: url::Url,
     ws_url: url::Url,
     _node_handle: Box<dyn TestNodeHandle>,
-    _tasks: TaskManager,
+    _tasks: Runtime,
 }
 
 impl L1TestNode {
@@ -1427,7 +1427,7 @@ impl L1TestNode {
     pub(crate) async fn start_with(
         f: impl FnOnce(&mut NodeConfig<TempoChainSpec>),
     ) -> eyre::Result<Self> {
-        let tasks = TaskManager::current();
+        let tasks = Runtime::test();
 
         let genesis: serde_json::Value =
             serde_json::from_str(include_str!("../assets/test-genesis.json"))?;
@@ -1452,7 +1452,7 @@ impl L1TestNode {
         f(&mut node_config);
 
         let node_handle = NodeBuilder::new(node_config)
-            .testing_node(tasks.executor())
+            .testing_node(tasks.clone())
             .node(tempo_node::node::TempoNode::default())
             .launch_with_debug_capabilities()
             .await?;

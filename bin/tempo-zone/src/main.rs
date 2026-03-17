@@ -224,7 +224,7 @@ fn main() {
             );
 
             // Spawn as critical tasks — node shuts down if either exits.
-            handle.node.task_executor.spawn_critical("zone-monitor", async move {
+            handle.node.task_executor.spawn_critical_task("zone-monitor", async move {
                 tokio::select! {
                     res = seq_handle.withdrawal_handle => {
                         tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
