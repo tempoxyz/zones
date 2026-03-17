@@ -88,31 +88,6 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
 }
 
-#[derive(Debug, Clone)]
-enum PortalDepositRecord {
-    Regular {
-        deposit_hash: B256,
-        sender: Address,
-        recipient: Address,
-        token: Address,
-        amount: u128,
-        memo: B256,
-    },
-    Encrypted {
-        deposit_hash: B256,
-        sender: Address,
-        token: Address,
-        amount: u128,
-    },
-}
-
-#[derive(Debug, Clone)]
-enum TerminalDepositEvent {
-    RegularProcessed,
-    EncryptedProcessed { recipient: Address, memo: B256 },
-    EncryptedFailed,
-}
-
 impl<Api: EthApiTypes> TempoZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
     pub async fn new(
@@ -811,6 +786,31 @@ where
             })
         })
     }
+}
+
+#[derive(Debug, Clone)]
+enum PortalDepositRecord {
+    Regular {
+        deposit_hash: B256,
+        sender: Address,
+        recipient: Address,
+        token: Address,
+        amount: u128,
+        memo: B256,
+    },
+    Encrypted {
+        deposit_hash: B256,
+        sender: Address,
+        token: Address,
+        amount: u128,
+    },
+}
+
+#[derive(Debug, Clone)]
+enum TerminalDepositEvent {
+    RegularProcessed,
+    EncryptedProcessed { recipient: Address, memo: B256 },
+    EncryptedFailed,
 }
 
 /// Strip privacy-sensitive fields from a block for non-sequencer callers.
