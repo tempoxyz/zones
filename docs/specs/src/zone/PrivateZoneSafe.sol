@@ -44,7 +44,9 @@ contract PrivateZoneSafe {
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
 
-    event SafeSetup(address indexed initiator, address[] owners, uint256 threshold, address fallbackHandler);
+    event SafeSetup(
+        address indexed initiator, address[] owners, uint256 threshold, address fallbackHandler
+    );
     event ExecutionSuccess(bytes32 indexed txHash);
     event ExecutionFailure(bytes32 indexed txHash);
     event AddedOwner(address indexed owner);
@@ -101,14 +103,22 @@ contract PrivateZoneSafe {
     /// @param _owners Initial owner addresses. Must be non-zero, non-sentinel, and unique.
     /// @param _threshold Number of required confirmations. Must be >= 1 and <= owners.length.
     /// @param _fallbackHandler Address of the fallback handler for view function delegation.
-    function setup(address[] calldata _owners, uint256 _threshold, address _fallbackHandler) external {
+    function setup(
+        address[] calldata _owners,
+        uint256 _threshold,
+        address _fallbackHandler
+    )
+        external
+    {
         if (initialized) revert AlreadyInitialized();
         if (_threshold == 0 || _threshold > _owners.length) revert InvalidThreshold();
 
         address current = SENTINEL;
         for (uint256 i = _owners.length; i > 0; i--) {
             address owner = _owners[i - 1];
-            if (owner == address(0) || owner == SENTINEL || owner == address(this)) revert InvalidOwner();
+            if (owner == address(0) || owner == SENTINEL || owner == address(this)) {
+                revert InvalidOwner();
+            }
             if (owners[owner] != address(0)) revert DuplicateOwner();
             owners[owner] = current;
             current = owner;
@@ -139,12 +149,15 @@ contract PrivateZoneSafe {
         uint256 value,
         bytes calldata data,
         bytes calldata signatures
-    ) external returns (bool success) {
+    )
+        external
+        returns (bool success)
+    {
         bytes32 txHash = getTransactionHash(to, value, data, nonce);
         _checkSignatures(txHash, signatures);
         nonce++;
 
-        (success,) = to.call{value: value}(data);
+        (success,) = to.call{ value: value }(data);
 
         if (success) {
             emit ExecutionSuccess(txHash);
@@ -192,7 +205,10 @@ contract PrivateZoneSafe {
         }
     }
 
-    function _splitSignature(bytes calldata signatures, uint256 index)
+    function _splitSignature(
+        bytes calldata signatures,
+        uint256 index
+    )
         internal
         pure
         returns (uint8 v, bytes32 r, bytes32 s)
@@ -211,7 +227,9 @@ contract PrivateZoneSafe {
     /// @dev Must be called via execTransaction (self-call).
     function addOwnerWithThreshold(address owner, uint256 _threshold) external {
         _requireSelfCall();
-        if (owner == address(0) || owner == SENTINEL || owner == address(this)) revert InvalidOwner();
+        if (owner == address(0) || owner == SENTINEL || owner == address(this)) {
+            revert InvalidOwner();
+        }
         if (owners[owner] != address(0)) revert DuplicateOwner();
 
         owners[owner] = owners[SENTINEL];
@@ -246,7 +264,9 @@ contract PrivateZoneSafe {
     /// @dev Must be called via execTransaction (self-call).
     function swapOwner(address prevOwner, address oldOwner, address newOwner) external {
         _requireSelfCall();
-        if (newOwner == address(0) || newOwner == SENTINEL || newOwner == address(this)) revert InvalidOwner();
+        if (newOwner == address(0) || newOwner == SENTINEL || newOwner == address(this)) {
+            revert InvalidOwner();
+        }
         if (owners[newOwner] != address(0)) revert DuplicateOwner();
         if (owners[prevOwner] != oldOwner) revert InvalidOwner();
         if (oldOwner == SENTINEL) revert InvalidOwner();
@@ -298,7 +318,12 @@ contract PrivateZoneSafe {
     }
 
     /// @notice Compute the EIP-712 transaction hash for signing.
-    function getTransactionHash(address to, uint256 value, bytes calldata data, uint256 _nonce)
+    function getTransactionHash(
+        address to,
+        uint256 value,
+        bytes calldata data,
+        uint256 _nonce
+    )
         public
         view
         returns (bytes32)
@@ -334,5 +359,6 @@ contract PrivateZoneSafe {
         }
     }
 
-    receive() external payable {}
+    receive() external payable { }
+
 }

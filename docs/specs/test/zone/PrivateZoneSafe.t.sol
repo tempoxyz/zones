@@ -66,7 +66,10 @@ contract PrivateZoneSafeTest is Test {
         return addrs;
     }
 
-    function _deploySafe(address[] memory owners, uint256 threshold)
+    function _deploySafe(
+        address[] memory owners,
+        uint256 threshold
+    )
         internal
         returns (PrivateZoneSafe)
     {
@@ -80,7 +83,11 @@ contract PrivateZoneSafeTest is Test {
         address to,
         uint256 value,
         bytes memory data
-    ) internal view returns (bytes memory) {
+    )
+        internal
+        view
+        returns (bytes memory)
+    {
         bytes32 txHash = safe.getTransactionHash(to, value, data, safe.nonce());
 
         // Sort keys by derived address (ascending) for Safe signature ordering
@@ -303,16 +310,16 @@ contract PrivateZoneSafeTest is Test {
         uint256[] memory keys = new uint256[](1);
         keys[0] = ownerKey1;
 
-        bytes32 txHash =
-            safe.getTransactionHash(address(reverter), 0, abi.encodeCall(reverter.fail, ()), safe.nonce());
+        bytes32 txHash = safe.getTransactionHash(
+            address(reverter), 0, abi.encodeCall(reverter.fail, ()), safe.nonce()
+        );
         bytes memory sig =
             _signTransaction(safe, keys, address(reverter), 0, abi.encodeCall(reverter.fail, ()));
 
         vm.expectEmit(true, false, false, false);
         emit PrivateZoneSafe.ExecutionFailure(txHash);
-        bool success = safe.execTransaction(
-            address(reverter), 0, abi.encodeCall(reverter.fail, ()), sig
-        );
+        bool success =
+            safe.execTransaction(address(reverter), 0, abi.encodeCall(reverter.fail, ()), sig);
 
         assertFalse(success);
     }
@@ -457,8 +464,7 @@ contract PrivateZoneSafeTest is Test {
         address[] memory owners = _sortedOwners2();
         PrivateZoneSafe safe = _deploySafe(owners, 1);
 
-        bytes memory addCall =
-            abi.encodeCall(safe.addOwnerWithThreshold, (owner3, 1));
+        bytes memory addCall = abi.encodeCall(safe.addOwnerWithThreshold, (owner3, 1));
 
         uint256[] memory keys = new uint256[](1);
         keys[0] = ownerKey1;
@@ -474,8 +480,7 @@ contract PrivateZoneSafeTest is Test {
         address[] memory owners = _sortedOwners2();
         PrivateZoneSafe safe = _deploySafe(owners, 1);
 
-        bytes memory addCall =
-            abi.encodeCall(safe.addOwnerWithThreshold, (owner3, 1));
+        bytes memory addCall = abi.encodeCall(safe.addOwnerWithThreshold, (owner3, 1));
 
         uint256[] memory keys = new uint256[](1);
         keys[0] = ownerKey1;
@@ -496,8 +501,7 @@ contract PrivateZoneSafeTest is Test {
         address[] memory currentOwners = safe.getOwners();
         address toRemove = currentOwners[0];
 
-        bytes memory removeCall =
-            abi.encodeCall(safe.removeOwner, (address(0x1), toRemove, 1));
+        bytes memory removeCall = abi.encodeCall(safe.removeOwner, (address(0x1), toRemove, 1));
 
         uint256[] memory keys = new uint256[](1);
         keys[0] = ownerKey1;
@@ -545,8 +549,7 @@ contract PrivateZoneSafeTest is Test {
         address[] memory owners = _sortedOwners3();
         PrivateZoneSafe safe = _deploySafe(owners, 1);
 
-        bytes memory call_ =
-            abi.encodeCall(safe.changeThreshold, (2));
+        bytes memory call_ = abi.encodeCall(safe.changeThreshold, (2));
 
         uint256[] memory keys = new uint256[](1);
         keys[0] = ownerKey1;
@@ -738,6 +741,7 @@ contract PrivateZoneSafeTest is Test {
         vm.expectRevert(PrivateZoneSafe.AlreadyInitialized.selector);
         singleton.setup(owners, 1, fallbackHandler);
     }
+
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -745,13 +749,17 @@ contract PrivateZoneSafeTest is Test {
 //////////////////////////////////////////////////////////////*/
 
 contract MockFallbackHandler {
+
     function isValidSignature(bytes32, bytes calldata) external pure returns (bytes4) {
         return 0x1626ba7e;
     }
+
 }
 
 contract MockReverter {
+
     function fail() external pure {
         revert("always fails");
     }
+
 }

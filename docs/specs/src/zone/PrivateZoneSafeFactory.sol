@@ -10,6 +10,7 @@ import { PrivateZoneSafe } from "./PrivateZoneSafe.sol";
  *      and encoded into the proxy bytecode at deployment time.
  */
 contract PrivateZoneSafeProxy {
+
     address internal immutable singleton;
 
     constructor(address _singleton) {
@@ -28,7 +29,8 @@ contract PrivateZoneSafeProxy {
         }
     }
 
-    receive() external payable {}
+    receive() external payable { }
+
 }
 
 /**
@@ -103,7 +105,11 @@ contract PrivateZoneSafeFactory {
     /// @param _threshold Number of required signatures.
     /// @param userSalt User-chosen salt for address derivation.
     /// @return proxy Address of the deployed Safe proxy.
-    function createProxy(address[] calldata owners, uint256 _threshold, bytes32 userSalt)
+    function createProxy(
+        address[] calldata owners,
+        uint256 _threshold,
+        bytes32 userSalt
+    )
         external
         returns (address proxy)
     {
@@ -111,7 +117,8 @@ contract PrivateZoneSafeFactory {
             abi.encodeCall(PrivateZoneSafe.setup, (owners, _threshold, fallbackHandler));
 
         bytes32 salt = keccak256(abi.encode(keccak256(initializer), userSalt));
-        bytes memory creationCode = abi.encodePacked(type(PrivateZoneSafeProxy).creationCode, abi.encode(singleton));
+        bytes memory creationCode =
+            abi.encodePacked(type(PrivateZoneSafeProxy).creationCode, abi.encode(singleton));
 
         assembly {
             proxy := create2(0, add(creationCode, 0x20), mload(creationCode), salt)
@@ -129,7 +136,11 @@ contract PrivateZoneSafeFactory {
     /// @param _threshold Number of required signatures.
     /// @param userSalt User-chosen salt.
     /// @return predicted The address the proxy would be deployed to.
-    function computeAddress(address[] calldata owners, uint256 _threshold, bytes32 userSalt)
+    function computeAddress(
+        address[] calldata owners,
+        uint256 _threshold,
+        bytes32 userSalt
+    )
         external
         view
         returns (address predicted)
@@ -138,11 +149,17 @@ contract PrivateZoneSafeFactory {
             abi.encodeCall(PrivateZoneSafe.setup, (owners, _threshold, fallbackHandler));
 
         bytes32 salt = keccak256(abi.encode(keccak256(initializer), userSalt));
-        bytes32 creationCodeHash =
-            keccak256(abi.encodePacked(type(PrivateZoneSafeProxy).creationCode, abi.encode(singleton)));
+        bytes32 creationCodeHash = keccak256(
+            abi.encodePacked(type(PrivateZoneSafeProxy).creationCode, abi.encode(singleton))
+        );
 
         predicted = address(
-            uint160(uint256(keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, creationCodeHash))))
+            uint160(
+                uint256(
+                    keccak256(abi.encodePacked(bytes1(0xff), address(this), salt, creationCodeHash))
+                )
+            )
         );
     }
+
 }
