@@ -15,7 +15,7 @@ use axum::{
 };
 use std::{
     sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 use tempo_contracts::precompiles::account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType;
 use tempo_primitives::transaction::{
@@ -29,6 +29,7 @@ use crate::{
     config::PrivateRpcConfig,
     error::{AuthError, AuthenticateError},
     handlers::{self, ZoneRpcApi},
+    metrics::{PrivateRpcAuthMetrics, PrivateRpcCallMetrics},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
     ws::handle_ws_upgrade,
 };
@@ -43,6 +44,8 @@ pub struct RpcState {
     pub config: PrivateRpcConfig,
     /// Type-erased EthApi for handling RPC methods.
     pub api: Arc<dyn ZoneRpcApi>,
+    /// Authentication failure metric for the private RPC.
+    auth_metrics: PrivateRpcAuthMetrics,
 }
 
 /// Start the private zone RPC server.
@@ -54,7 +57,11 @@ pub async fn start_private_rpc(
     api: Arc<dyn ZoneRpcApi>,
 ) -> eyre::Result<std::net::SocketAddr> {
     let listen_addr = config.listen_addr;
-    let state = Arc::new(RpcState { config, api });
+    let state = Arc::new(RpcState {
+        config,
+        api,
+        auth_metrics: PrivateRpcAuthMetrics::default(),
+    });
 
     let app = Router::new()
         .route("/", post(handle_rpc))
@@ -128,7 +135,7 @@ pub(crate) async fn process_rpc_text(
             Ok(requests) => {
                 let mut responses = Vec::with_capacity(requests.len());
                 for req in &requests {
-                    responses.push(handlers::dispatch(req, auth, api).await);
+                    responses.push(dispatch_request(req, auth, api).await);
                 }
                 RpcResult::Batch(responses)
             }
@@ -139,13 +146,36 @@ pub(crate) async fn process_rpc_text(
         }
     } else {
         match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(request) => RpcResult::Single(handlers::dispatch(&request, auth, api).await),
+            Ok(request) => RpcResult::Single(dispatch_request(&request, auth, api).await),
             Err(e) => RpcResult::Single(JsonRpcResponse::error(
                 serde_json::Value::Null,
                 JsonRpcError::parse_error(format!("parse error: {e}")),
             )),
         }
     }
+}
+
+async fn dispatch_request(
+    req: &JsonRpcRequest,
+    auth: &AuthContext,
+    api: &dyn ZoneRpcApi,
+) -> JsonRpcResponse {
+    let metrics = PrivateRpcCallMetrics::new_for(&req.method);
+    let started_at = Instant::now();
+
+    metrics.started_total.increment(1);
+    let response = handlers::dispatch(req, auth, api).await;
+    metrics
+        .time_seconds
+        .record(started_at.elapsed().as_secs_f64());
+
+    if response.error.is_some() {
+        metrics.failed_total.increment(1);
+    } else {
+        metrics.successful_total.increment(1);
+    }
+
+    response
 }
 
 /// Main HTTP RPC handler — authenticates, dispatches, returns response.
@@ -157,6 +187,9 @@ async fn handle_rpc(
     let auth = match authenticate(&headers, &state.config, state.api.as_ref()).await {
         Ok(auth) => auth,
         Err(e) => {
+            if e.is_invalid() {
+                state.auth_metrics.auth_failures_total.increment(1);
+            }
             e.log("http");
             return (e.status_code(), "").into_response();
         }

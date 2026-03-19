@@ -16,7 +16,10 @@ use alloy_signer_local::PrivateKeySigner;
 use parking_lot::Mutex;
 use tempo_alloy::TempoNetwork;
 
-use crate::auth::{X_AUTHORIZATION_TOKEN, build_token_fields};
+use crate::{
+    auth::{X_AUTHORIZATION_TOKEN, build_token_fields},
+    metrics::ZoneProviderMetrics,
+};
 
 /// How many seconds before expiry to refresh the token.
 const REFRESH_BUFFER_SECS: u64 = 30;
@@ -47,6 +50,7 @@ pub struct ZoneProviderConfig {
 pub struct ZoneProvider {
     config: ZoneProviderConfig,
     state: Arc<Mutex<CachedState>>,
+    metrics: ZoneProviderMetrics,
 }
 
 struct CachedState {
@@ -66,6 +70,7 @@ impl ZoneProvider {
                 provider,
                 expires_at,
             })),
+            metrics: ZoneProviderMetrics::default(),
         })
     }
 
@@ -78,7 +83,8 @@ impl ZoneProvider {
         if now + REFRESH_BUFFER_SECS < state.expires_at {
             return state.provider.clone();
         }
-        // Refresh
+        self.metrics.token_refresh_attempts_total.increment(1);
+
         match build_provider_with_token(&self.config) {
             Ok((provider, expires_at)) => {
                 state.provider = provider;
@@ -86,6 +92,7 @@ impl ZoneProvider {
                 state.provider.clone()
             }
             Err(e) => {
+                self.metrics.token_refresh_failures_total.increment(1);
                 tracing::warn!(target: "zone::rpc", err = %e, "failed to refresh zone auth token, reusing stale");
                 state.provider.clone()
             }

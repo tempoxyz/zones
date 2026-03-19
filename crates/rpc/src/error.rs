@@ -46,6 +46,11 @@ pub(crate) enum AuthenticateError {
 }
 
 impl AuthenticateError {
+    /// Returns true when the failure was caused by invalid caller credentials.
+    pub(crate) fn is_invalid(&self) -> bool {
+        matches!(self, Self::Invalid(_))
+    }
+
     /// Map the authentication failure to the corresponding HTTP status code.
     pub(crate) fn status_code(&self) -> StatusCode {
         match self {
