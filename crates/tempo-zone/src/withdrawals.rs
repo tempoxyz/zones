@@ -90,13 +90,9 @@ pub struct WithdrawalStore {
 
 impl WithdrawalStore {
     pub fn new() -> Self {
-        Self::with_metrics(WithdrawalProcessorMetrics::default())
-    }
-
-    fn with_metrics(metrics: WithdrawalProcessorMetrics) -> Self {
         let store = Self {
             batches: BTreeMap::new(),
-            metrics,
+            metrics: WithdrawalProcessorMetrics::default(),
         };
         store.record_batch_count();
         store
