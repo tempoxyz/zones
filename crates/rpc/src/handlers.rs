@@ -3,7 +3,9 @@
 //! Each handler calls the underlying EthApi via the [`ZoneRpcApi`] trait,
 //! which performs typed privacy redactions internally before serialization.
 
-use alloy_primitives::{Address, B256, Bytes};
+use std::str::FromStr;
+
+use alloy_primitives::{Address, B256, Bytes, U64};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, state::StateOverride};
 use serde_json::{Value, value::RawValue};
 use tempo_alloy::rpc::TempoTransactionRequest;
@@ -187,38 +189,6 @@ struct CallParams(
     Option<BlockId>,
     Option<StateOverride>,
 );
-
-/// `u64` JSON-RPC param that accepts either a JSON number or a hex quantity.
-#[derive(Debug)]
-enum QuantityU64 {
-    Number(u64),
-    Quantity(alloy_primitives::U64),
-}
-
-impl QuantityU64 {
-    fn into_u64(self) -> u64 {
-        match self {
-            Self::Number(value) => value,
-            Self::Quantity(value) => value.to(),
-        }
-    }
-}
-
-impl<'de> serde::Deserialize<'de> for QuantityU64 {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        #[derive(serde::Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Number(u64),
-            Quantity(alloy_primitives::U64),
-        }
-
-        match Repr::deserialize(deserializer)? {
-            Repr::Number(value) => Ok(Self::Number(value)),
-            Repr::Quantity(value) => Ok(Self::Quantity(value)),
-        }
-    }
-}
 
 impl<'de> serde::Deserialize<'de> for CallParams {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -741,10 +711,19 @@ async fn handle_zone_get_deposit_status(
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
     let (tempo_block_number,) =
-        match parse_params::<(QuantityU64,)>(raw, &id, "expected [tempoBlockNumber]") {
-            Ok((tempo_block_number,)) => (tempo_block_number.into_u64(),),
+        match parse_params::<(String,)>(raw, &id, "expected [tempoBlockNumber]") {
+            Ok((tempo_block_number,)) => (tempo_block_number,),
             Err(resp) => return resp,
         };
+    let tempo_block_number = match U64::from_str(&tempo_block_number) {
+        Ok(tempo_block_number) => tempo_block_number.to(),
+        Err(_) => {
+            return JsonRpcResponse::error(
+                id,
+                JsonRpcError::invalid_params("expected [tempoBlockNumber]"),
+            );
+        }
+    };
 
     api_result(
         id,
@@ -902,21 +881,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatches_zone_get_deposit_status_for_hex_and_numeric_quantities() {
+    async fn dispatches_zone_get_deposit_status_for_hex_quantity() {
         let api = MockZoneRpcApi::default();
 
-        let hex_resp = dispatch(
+        let resp = dispatch(
             &request("zone_getDepositStatus", json!(["0x2a"])),
             &auth(),
             &api,
         )
         .await;
-        assert!(hex_resp.error.is_none());
+        assert!(resp.error.is_none());
         assert_eq!(api.last_tempo_block_number.load(Ordering::Relaxed), 42);
+    }
 
-        let numeric_resp =
-            dispatch(&request("zone_getDepositStatus", json!([7])), &auth(), &api).await;
-        assert!(numeric_resp.error.is_none());
-        assert_eq!(api.last_tempo_block_number.load(Ordering::Relaxed), 7);
+    #[tokio::test]
+    async fn rejects_numeric_zone_get_deposit_status_param() {
+        let api = MockZoneRpcApi::default();
+
+        let resp = dispatch(&request("zone_getDepositStatus", json!([7])), &auth(), &api).await;
+        assert!(resp.result.is_none());
+        assert_eq!(resp.error.as_ref().unwrap().code, -32602);
     }
 }

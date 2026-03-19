@@ -414,7 +414,7 @@ All integer fields in these responses use Ethereum JSON-RPC quantity encoding (h
 }
 ```
 
-`tempoBlockNumber` MAY be supplied either as a JSON number or as a hex quantity string.
+`tempoBlockNumber` MUST be supplied as a JSON-RPC hex quantity string.
 
 **Response**
 

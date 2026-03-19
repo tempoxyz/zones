@@ -702,11 +702,7 @@ where
                         }
 
                         let terminal = self.terminal_event_for_deposit(deposit_hash).await?;
-                        let status = if terminal.is_some() {
-                            DepositState::Processed
-                        } else {
-                            DepositState::Pending
-                        };
+                        let status = regular_deposit_status(terminal)?;
 
                         deposits.push(DepositStatusEntry {
                             deposit_hash,
@@ -742,22 +738,7 @@ where
                             continue;
                         }
 
-                        let (recipient, memo, status) = match terminal {
-                            Some(TerminalDepositEvent::EncryptedProcessed {
-                                recipient,
-                                memo,
-                                ..
-                            }) => (Some(recipient), Some(memo), DepositState::Processed),
-                            Some(TerminalDepositEvent::EncryptedFailed) => {
-                                (None, None, DepositState::Failed)
-                            }
-                            Some(TerminalDepositEvent::RegularProcessed) => {
-                                return Err(JsonRpcError::internal(
-                                    "regular deposit event matched encrypted deposit hash",
-                                ));
-                            }
-                            None => (None, None, DepositState::Pending),
-                        };
+                        let (recipient, memo, status) = encrypted_deposit_details(terminal)?;
 
                         deposits.push(DepositStatusEntry {
                             deposit_hash,
@@ -813,9 +794,95 @@ enum TerminalDepositEvent {
     EncryptedFailed,
 }
 
+fn regular_deposit_status(
+    terminal: Option<TerminalDepositEvent>,
+) -> Result<DepositState, JsonRpcError> {
+    match terminal {
+        Some(TerminalDepositEvent::RegularProcessed) => Ok(DepositState::Processed),
+        Some(TerminalDepositEvent::EncryptedProcessed { .. }) => Err(JsonRpcError::internal(
+            "encrypted deposit event matched regular deposit hash",
+        )),
+        Some(TerminalDepositEvent::EncryptedFailed) => Err(JsonRpcError::internal(
+            "encrypted deposit failure matched regular deposit hash",
+        )),
+        None => Ok(DepositState::Pending),
+    }
+}
+
+fn encrypted_deposit_details(
+    terminal: Option<TerminalDepositEvent>,
+) -> Result<(Option<Address>, Option<B256>, DepositState), JsonRpcError> {
+    match terminal {
+        Some(TerminalDepositEvent::EncryptedProcessed { recipient, memo }) => {
+            Ok((Some(recipient), Some(memo), DepositState::Processed))
+        }
+        Some(TerminalDepositEvent::EncryptedFailed) => Ok((None, None, DepositState::Failed)),
+        Some(TerminalDepositEvent::RegularProcessed) => Err(JsonRpcError::internal(
+            "regular deposit event matched encrypted deposit hash",
+        )),
+        None => Ok((None, None, DepositState::Pending)),
+    }
+}
+
 /// Strip privacy-sensitive fields from a block for non-sequencer callers.
 fn redact_block(block: &mut RpcBlock) {
     // header.inner = alloy Header, .inner = Sealed wrapper, .inner = TempoHeader (contains logs_bloom)
     block.header.inner.inner.inner.logs_bloom = Bloom::ZERO;
     block.transactions = BlockTransactions::Hashes(Vec::new());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn regular_deposit_status_maps_terminal_events() {
+        assert_eq!(
+            regular_deposit_status(Some(TerminalDepositEvent::RegularProcessed)).unwrap(),
+            DepositState::Processed
+        );
+        assert_eq!(regular_deposit_status(None).unwrap(), DepositState::Pending);
+    }
+
+    #[test]
+    fn regular_deposit_status_rejects_encrypted_terminal_events() {
+        let err = regular_deposit_status(Some(TerminalDepositEvent::EncryptedFailed)).unwrap_err();
+        assert_eq!(
+            err.message,
+            "encrypted deposit failure matched regular deposit hash"
+        );
+    }
+
+    #[test]
+    fn encrypted_deposit_details_maps_terminal_events() {
+        let recipient = Address::repeat_byte(0x11);
+        let memo = B256::from([0x22; 32]);
+
+        assert_eq!(
+            encrypted_deposit_details(Some(TerminalDepositEvent::EncryptedProcessed {
+                recipient,
+                memo,
+            }))
+            .unwrap(),
+            (Some(recipient), Some(memo), DepositState::Processed)
+        );
+        assert_eq!(
+            encrypted_deposit_details(Some(TerminalDepositEvent::EncryptedFailed)).unwrap(),
+            (None, None, DepositState::Failed)
+        );
+        assert_eq!(
+            encrypted_deposit_details(None).unwrap(),
+            (None, None, DepositState::Pending)
+        );
+    }
+
+    #[test]
+    fn encrypted_deposit_details_rejects_regular_terminal_events() {
+        let err =
+            encrypted_deposit_details(Some(TerminalDepositEvent::RegularProcessed)).unwrap_err();
+        assert_eq!(
+            err.message,
+            "regular deposit event matched encrypted deposit hash"
+        );
+    }
 }
