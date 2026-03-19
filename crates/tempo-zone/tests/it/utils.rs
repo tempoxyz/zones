@@ -13,6 +13,7 @@ use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::Runtime;
 use std::{
     future::Future,
+    ops::Deref,
     pin::Pin,
     sync::{
         Arc,
@@ -2376,10 +2377,6 @@ async fn private_rpc_call_no_auth(
 pub(crate) struct PrivateRpcTestCtx {
     /// The underlying zone test node.
     pub zone: ZoneTestNode,
-    /// Optional real L1 test node for deposit-status integration tests.
-    pub l1: Option<L1TestNode>,
-    /// Optional real ZonePortal address on L1.
-    pub portal_address: Option<Address>,
     /// URL of the private RPC server (not the zone's direct HTTP endpoint).
     pub private_rpc_url: url::Url,
     /// The sequencer signer (gets full access on the private RPC).
@@ -2388,6 +2385,33 @@ pub(crate) struct PrivateRpcTestCtx {
     pub config: zone::rpc::PrivateRpcConfig,
     /// L1 fixture for injecting deposits.
     pub fixture: L1Fixture,
+}
+
+/// Private RPC e2e context backed by a real L1 node and deployed ZonePortal.
+pub(crate) struct PrivateRpcL1TestCtx {
+    ctx: PrivateRpcTestCtx,
+    l1: L1TestNode,
+    portal_address: Address,
+}
+
+impl Deref for PrivateRpcL1TestCtx {
+    type Target = PrivateRpcTestCtx;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
+impl PrivateRpcL1TestCtx {
+    /// Returns the real L1 node for tests that require one.
+    pub(crate) fn l1(&self) -> &L1TestNode {
+        &self.l1
+    }
+
+    /// Returns the real portal address for tests that require one.
+    pub(crate) fn portal_address(&self) -> Address {
+        self.portal_address
+    }
 }
 
 impl PrivateRpcTestCtx {
@@ -2646,15 +2670,40 @@ impl PrivateRpcTestCtx {
         )
         .await
     }
+}
 
-    /// Returns the real L1 node for tests that require one.
-    pub(crate) fn l1(&self) -> &L1TestNode {
-        self.l1.as_ref().expect("real L1 context required")
-    }
+async fn zone_chain_id(zone: &ZoneTestNode) -> eyre::Result<u64> {
+    use alloy_provider::Provider;
 
-    /// Returns the real portal address for tests that require one.
-    pub(crate) fn portal_address(&self) -> Address {
-        self.portal_address.expect("real portal address required")
+    let chain_id: alloy_primitives::U64 = zone
+        .provider()
+        .raw_request("eth_chainId".into(), ())
+        .await?;
+    Ok(chain_id.to())
+}
+
+async fn start_private_rpc_url(
+    zone: &ZoneTestNode,
+    config: zone::rpc::PrivateRpcConfig,
+) -> eyre::Result<url::Url> {
+    let local_addr =
+        zone::rpc::start_private_rpc(config.clone(), zone.rpc_api(config).await?).await?;
+    Ok(format!("http://{local_addr}").parse()?)
+}
+
+fn build_private_rpc_ctx(
+    zone: ZoneTestNode,
+    private_rpc_url: url::Url,
+    sequencer_signer: alloy_signer_local::PrivateKeySigner,
+    config: zone::rpc::PrivateRpcConfig,
+    fixture: L1Fixture,
+) -> PrivateRpcTestCtx {
+    PrivateRpcTestCtx {
+        zone,
+        private_rpc_url,
+        sequencer_signer,
+        config,
+        fixture,
     }
 }
 
@@ -2665,18 +2714,12 @@ impl PrivateRpcTestCtx {
 /// - A private RPC server on a random port
 /// - Sequencer credentials for testing access control
 pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTestCtx> {
-    use alloy_provider::Provider;
-
     let zone = ZoneTestNode::start_local().await?;
     let fixture = L1Fixture::new();
 
     fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, 20);
 
-    let chain_id: alloy_primitives::U64 = zone
-        .provider()
-        .raw_request("eth_chainId".into(), ())
-        .await?;
-    let chain_id = chain_id.to::<u64>();
+    let chain_id = zone_chain_id(&zone).await?;
 
     let sequencer_signer = alloy_signer_local::PrivateKeySigner::random();
     let sequencer_address = sequencer_signer.address();
@@ -2691,30 +2734,26 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
         sequencer: sequencer_address,
     };
 
-    let local_addr =
-        zone::rpc::start_private_rpc(config.clone(), zone.rpc_api(config.clone()).await?).await?;
-    let private_rpc_url: url::Url = format!("http://{local_addr}").parse()?;
+    let private_rpc_url = start_private_rpc_url(&zone, config.clone()).await?;
 
-    Ok(PrivateRpcTestCtx {
+    Ok(build_private_rpc_ctx(
         zone,
-        l1: None,
-        portal_address: None,
         private_rpc_url,
         sequencer_signer,
         config,
         fixture,
-    })
+    ))
 }
 
 /// Start a zone with a private RPC server backed by a real L1 + ZonePortal.
-pub(crate) async fn start_zone_with_private_rpc_l1() -> eyre::Result<PrivateRpcTestCtx> {
+pub(crate) async fn start_zone_with_private_rpc_l1() -> eyre::Result<PrivateRpcL1TestCtx> {
     start_zone_with_private_rpc_l1_inner(None).await
 }
 
 /// Start a zone with a private RPC server backed by a real L1 and a portal
 /// with a registered encryption key.
 pub(crate) async fn start_zone_with_private_rpc_l1_with_encryption()
--> eyre::Result<PrivateRpcTestCtx> {
+-> eyre::Result<PrivateRpcL1TestCtx> {
     use sha2::{Digest, Sha256};
 
     let key_bytes: [u8; 32] =
@@ -2725,9 +2764,7 @@ pub(crate) async fn start_zone_with_private_rpc_l1_with_encryption()
 
 async fn start_zone_with_private_rpc_l1_inner(
     encryption_key: Option<k256::SecretKey>,
-) -> eyre::Result<PrivateRpcTestCtx> {
-    use alloy_provider::Provider;
-
+) -> eyre::Result<PrivateRpcL1TestCtx> {
     let l1 = L1TestNode::start().await?;
     let portal_address = l1.deploy_zone().await?;
 
@@ -2749,11 +2786,7 @@ async fn start_zone_with_private_rpc_l1_inner(
         l1.set_sequencer_encryption_key(portal_address, key).await?;
     }
 
-    let chain_id: alloy_primitives::U64 = zone
-        .provider()
-        .raw_request("eth_chainId".into(), ())
-        .await?;
-    let chain_id = chain_id.to::<u64>();
+    let chain_id = zone_chain_id(&zone).await?;
 
     let config = zone::rpc::PrivateRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
@@ -2765,19 +2798,19 @@ async fn start_zone_with_private_rpc_l1_inner(
         sequencer: l1.dev_address(),
     };
 
-    let local_addr =
-        zone::rpc::start_private_rpc(config.clone(), zone.rpc_api(config.clone()).await?).await?;
-    let private_rpc_url: url::Url = format!("http://{local_addr}").parse()?;
+    let private_rpc_url = start_private_rpc_url(&zone, config.clone()).await?;
     let sequencer_signer = l1.dev_signer();
 
-    Ok(PrivateRpcTestCtx {
-        zone,
-        l1: Some(l1),
-        portal_address: Some(portal_address),
-        private_rpc_url,
-        sequencer_signer,
-        config,
-        fixture: L1Fixture::new(),
+    Ok(PrivateRpcL1TestCtx {
+        ctx: build_private_rpc_ctx(
+            zone,
+            private_rpc_url,
+            sequencer_signer,
+            config,
+            L1Fixture::new(),
+        ),
+        l1,
+        portal_address,
     })
 }
 

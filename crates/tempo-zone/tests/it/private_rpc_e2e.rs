@@ -497,7 +497,7 @@ async fn test_method_tiers() -> eyre::Result<()> {
 async fn test_zone_metadata_methods() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let ctx = start_zone_with_private_rpc_l1().await?;
+    let ctx = start_zone_with_private_rpc().await?;
     let user_signer = PrivateKeySigner::random();
 
     let auth_info = ctx
@@ -519,7 +519,10 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
     let zone_info = ctx
         .call_as_user("zone_getZoneInfo", serde_json::json!([]), &user_signer)
         .await?;
-    assert_eq!(zone_info["result"]["zoneId"], "0x1");
+    assert_eq!(
+        zone_info["result"]["zoneId"].as_str().unwrap(),
+        format!("0x{:x}", ctx.config.zone_id),
+    );
     assert_eq!(
         zone_info["result"]["zoneToken"].as_str().unwrap(),
         "0x20c0000000000000000000000000000000000000",
