@@ -193,6 +193,17 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
         Ok(deposits)
     }
 
+    async fn zone_tokens(&self) -> Result<Vec<Address>, JsonRpcError> {
+        if self.config.zone_portal.is_zero() {
+            return Ok(vec![ZONE_TOKEN_ADDRESS]);
+        }
+
+        ZonePortal::new(self.config.zone_portal, &self.l1_provider)
+            .enabled_tokens()
+            .await
+            .map_err(internal)
+    }
+
     async fn terminal_event_for_deposit(
         &self,
         deposit_hash: B256,
@@ -667,9 +678,10 @@ where
 
     fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
+            let zone_tokens = self.zone_tokens().await?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
-                zone_token: ZONE_TOKEN_ADDRESS,
+                zone_tokens,
                 sequencer: self.config.sequencer,
                 chain_id: U64::from(self.config.chain_id),
             })

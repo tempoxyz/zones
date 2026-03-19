@@ -175,8 +175,8 @@ pub struct AuthorizationTokenInfoResponse {
 pub struct ZoneInfoResponse {
     /// The zone's numeric identifier.
     pub zone_id: U64,
-    /// The fixed zone token contract address.
-    pub zone_token: Address,
+    /// The enabled zone token contract addresses.
+    pub zone_tokens: Vec<Address>,
     /// The configured sequencer account.
     pub sequencer: Address,
     /// The zone chain ID.
