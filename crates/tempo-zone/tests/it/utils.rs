@@ -12,6 +12,9 @@ use reth_node_core::args::RpcServerArgs;
 use reth_rpc_builder::RpcModuleSelection;
 use reth_tasks::Runtime;
 use std::{
+    future::Future,
+    ops::Deref,
+    pin::Pin,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -162,12 +165,15 @@ where
 /// - [`start_local_with_chain_id()`](Self::start_local_with_chain_id) — standalone with custom chain ID (multi-zone tests)
 /// - [`start_from_l1()`](Self::start_from_l1) — connected to a real [`L1TestNode`], genesis patched from L1 header
 /// - [`start()`](Self::start) — connected to an external L1 via WebSocket URL
+type RpcApiFuture = Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone::rpc::ZoneRpcApi>>>>>;
+type RpcApiFactory = dyn Fn(zone::rpc::PrivateRpcConfig) -> RpcApiFuture + Send + Sync;
+
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
     deposit_queue: DepositQueue,
     l1_state_cache: SharedL1StateCache,
     policy_cache: zone::SharedPolicyCache,
-    rpc_api: Arc<dyn zone::rpc::ZoneRpcApi>,
+    rpc_api_factory: Arc<RpcApiFactory>,
     node_handle: Box<dyn TestNodeHandle>,
     _tasks: Runtime,
 }
@@ -200,9 +206,12 @@ impl ZoneTestNode {
         &self.policy_cache
     }
 
-    /// Returns the real private RPC API backed by the node's EthHandlers.
-    pub(crate) fn rpc_api(&self) -> Arc<dyn zone::rpc::ZoneRpcApi> {
-        self.rpc_api.clone()
+    /// Builds the real private RPC API backed by the node's EthHandlers.
+    pub(crate) async fn rpc_api(
+        &self,
+        config: zone::rpc::PrivateRpcConfig,
+    ) -> eyre::Result<Arc<dyn zone::rpc::ZoneRpcApi>> {
+        (self.rpc_api_factory)(config).await
     }
 
     /// Subscribe to canonical state notifications.
@@ -485,7 +494,7 @@ impl ZoneTestNode {
             .launch_with_debug_capabilities()
             .await?;
 
-        let http_url = node_handle
+        let http_url: url::Url = node_handle
             .node
             .rpc_server_handle()
             .http_url()
@@ -496,15 +505,23 @@ impl ZoneTestNode {
         // Build the real private RPC API while the handle is still concrete,
         // before type-erasing it into Box<dyn TestNodeHandle>.
         let eth_handlers = node_handle.node.eth_handlers().clone();
-        let rpc_api: Arc<dyn zone::rpc::ZoneRpcApi> =
-            Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
+        let rpc_api_factory = Arc::new(move |config: zone::rpc::PrivateRpcConfig| {
+            let eth_handlers = eth_handlers.clone();
+            Box::pin(async move {
+                Ok(
+                    Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers, config).await?)
+                        as Arc<dyn zone::rpc::ZoneRpcApi>,
+                )
+            })
+                as Pin<Box<dyn Future<Output = eyre::Result<Arc<dyn zone::rpc::ZoneRpcApi>>>>>
+        });
 
         Ok(Self {
             deposit_queue,
             http_url,
             l1_state_cache,
             policy_cache,
-            rpc_api,
+            rpc_api_factory,
             node_handle: Box::new(node_handle),
             _tasks: tasks,
         })
@@ -1825,6 +1842,34 @@ impl ZoneAccount {
         timeout: Duration,
         zone: &ZoneTestNode,
     ) -> eyre::Result<U256> {
+        self.deposit_to(self.address, amount, timeout, zone).await
+    }
+
+    /// Approve the ZonePortal to spend pathUSD on L1, then deposit to a specific recipient.
+    ///
+    /// Waits for the expected post-deposit balance on L2 and returns it.
+    pub(crate) async fn deposit_to(
+        &mut self,
+        recipient: Address,
+        amount: u128,
+        timeout: Duration,
+        zone: &ZoneTestNode,
+    ) -> eyre::Result<U256> {
+        Ok(self
+            .deposit_to_with_block(recipient, amount, timeout, zone)
+            .await?
+            .1)
+    }
+
+    /// Same as [`deposit_to`](Self::deposit_to), but also returns the L1 block number
+    /// that included the deposit transaction.
+    pub(crate) async fn deposit_to_with_block(
+        &mut self,
+        recipient: Address,
+        amount: u128,
+        timeout: Duration,
+        zone: &ZoneTestNode,
+    ) -> eyre::Result<(u64, U256)> {
         use tempo_contracts::precompiles::ITIP20;
         use tempo_precompiles::PATH_USD_ADDRESS;
         use zone::abi::{ZONE_TOKEN_ADDRESS, ZonePortal};
@@ -1840,24 +1885,31 @@ impl ZoneAccount {
         }
 
         // Snapshot balance before deposit so we wait for the expected increase
-        let balance_before = zone.balance_of(ZONE_TOKEN_ADDRESS, self.address).await?;
+        let balance_before = zone.balance_of(ZONE_TOKEN_ADDRESS, recipient).await?;
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, self.address, amount, B256::ZERO)
+            .deposit(PATH_USD_ADDRESS, recipient, amount, B256::ZERO)
             .send()
             .await?
             .get_receipt()
             .await?;
         eyre::ensure!(receipt.status(), "L1 deposit tx failed");
 
-        zone.wait_for_balance(
-            ZONE_TOKEN_ADDRESS,
-            self.address,
-            balance_before + U256::from(amount),
-            timeout,
-        )
-        .await
+        let balance = zone
+            .wait_for_balance(
+                ZONE_TOKEN_ADDRESS,
+                recipient,
+                balance_before + U256::from(amount),
+                timeout,
+            )
+            .await?;
+
+        let block_number = receipt
+            .block_number
+            .ok_or_else(|| eyre::eyre!("deposit receipt missing block number"))?;
+
+        Ok((block_number, balance))
     }
 
     /// Approve the ZonePortal to spend `amount` of a specific `token` on L1, then deposit.
@@ -1924,6 +1976,22 @@ impl ZoneAccount {
         timeout: Duration,
         zone: &ZoneTestNode,
     ) -> eyre::Result<U256> {
+        Ok(self
+            .deposit_encrypted_with_block(amount, recipient, memo, timeout, zone)
+            .await?
+            .1)
+    }
+
+    /// Same as [`deposit_encrypted`](Self::deposit_encrypted), but also returns the
+    /// L1 block number that included the encrypted deposit transaction.
+    pub(crate) async fn deposit_encrypted_with_block(
+        &mut self,
+        amount: u128,
+        recipient: Address,
+        memo: B256,
+        timeout: Duration,
+        zone: &ZoneTestNode,
+    ) -> eyre::Result<(u64, U256)> {
         use tempo_contracts::precompiles::ITIP20;
         use tempo_precompiles::PATH_USD_ADDRESS;
         use zone::{
@@ -1989,13 +2057,20 @@ impl ZoneAccount {
         eyre::ensure!(receipt.status(), "L1 depositEncrypted tx failed");
 
         // Wait for the zone to process the encrypted deposit and mint to recipient
-        zone.wait_for_balance(
-            ZONE_TOKEN_ADDRESS,
-            recipient,
-            balance_before + U256::from(amount),
-            timeout,
-        )
-        .await
+        let balance = zone
+            .wait_for_balance(
+                ZONE_TOKEN_ADDRESS,
+                recipient,
+                balance_before + U256::from(amount),
+                timeout,
+            )
+            .await?;
+
+        let block_number = receipt
+            .block_number
+            .ok_or_else(|| eyre::eyre!("depositEncrypted receipt missing block number"))?;
+
+        Ok((block_number, balance))
     }
 
     /// Approve the ZoneOutbox, then request a withdrawal on L2.
@@ -2312,6 +2387,33 @@ pub(crate) struct PrivateRpcTestCtx {
     pub fixture: L1Fixture,
 }
 
+/// Private RPC e2e context backed by a real L1 node and deployed ZonePortal.
+pub(crate) struct PrivateRpcL1TestCtx {
+    ctx: PrivateRpcTestCtx,
+    l1: L1TestNode,
+    portal_address: Address,
+}
+
+impl Deref for PrivateRpcL1TestCtx {
+    type Target = PrivateRpcTestCtx;
+
+    fn deref(&self) -> &Self::Target {
+        &self.ctx
+    }
+}
+
+impl PrivateRpcL1TestCtx {
+    /// Returns the real L1 node for tests that require one.
+    pub(crate) fn l1(&self) -> &L1TestNode {
+        &self.l1
+    }
+
+    /// Returns the real portal address for tests that require one.
+    pub(crate) fn portal_address(&self) -> Address {
+        self.portal_address
+    }
+}
+
 impl PrivateRpcTestCtx {
     /// Build an auth token for the sequencer.
     pub(crate) fn sequencer_token(&self) -> String {
@@ -2554,6 +2656,55 @@ impl PrivateRpcTestCtx {
         eyre::ensure!(receipt.status(), "revokeKey failed");
         Ok(())
     }
+
+    /// Query `zone_getDepositStatus` via the private RPC as a specific user.
+    pub(crate) async fn get_deposit_status_as_user(
+        &self,
+        tempo_block_number: u64,
+        signer: &alloy_signer_local::PrivateKeySigner,
+    ) -> eyre::Result<serde_json::Value> {
+        self.call_as_user(
+            "zone_getDepositStatus",
+            serde_json::json!([format!("0x{tempo_block_number:x}")]),
+            signer,
+        )
+        .await
+    }
+}
+
+async fn zone_chain_id(zone: &ZoneTestNode) -> eyre::Result<u64> {
+    use alloy_provider::Provider;
+
+    let chain_id: alloy_primitives::U64 = zone
+        .provider()
+        .raw_request("eth_chainId".into(), ())
+        .await?;
+    Ok(chain_id.to())
+}
+
+async fn start_private_rpc_url(
+    zone: &ZoneTestNode,
+    config: zone::rpc::PrivateRpcConfig,
+) -> eyre::Result<url::Url> {
+    let local_addr =
+        zone::rpc::start_private_rpc(config.clone(), zone.rpc_api(config).await?).await?;
+    Ok(format!("http://{local_addr}").parse()?)
+}
+
+fn build_private_rpc_ctx(
+    zone: ZoneTestNode,
+    private_rpc_url: url::Url,
+    sequencer_signer: alloy_signer_local::PrivateKeySigner,
+    config: zone::rpc::PrivateRpcConfig,
+    fixture: L1Fixture,
+) -> PrivateRpcTestCtx {
+    PrivateRpcTestCtx {
+        zone,
+        private_rpc_url,
+        sequencer_signer,
+        config,
+        fixture,
+    }
 }
 
 /// Start a zone node with a private RPC server for testing.
@@ -2563,39 +2714,103 @@ impl PrivateRpcTestCtx {
 /// - A private RPC server on a random port
 /// - Sequencer credentials for testing access control
 pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTestCtx> {
-    use alloy_provider::Provider;
-
     let zone = ZoneTestNode::start_local().await?;
     let fixture = L1Fixture::new();
 
     fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, 20);
 
-    let chain_id: alloy_primitives::U64 = zone
-        .provider()
-        .raw_request("eth_chainId".into(), ())
-        .await?;
-    let chain_id = chain_id.to::<u64>();
+    let chain_id = zone_chain_id(&zone).await?;
 
     let sequencer_signer = alloy_signer_local::PrivateKeySigner::random();
     let sequencer_address = sequencer_signer.address();
 
     let config = zone::rpc::PrivateRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
+        l1_rpc_url: DUMMY_L1_URL.to_string(),
+        zone_rpc_url: zone.http_url().to_string(),
         zone_id: 0,
         chain_id,
         zone_portal: Address::ZERO,
         sequencer: sequencer_address,
     };
 
-    let local_addr = zone::rpc::start_private_rpc(config.clone(), zone.rpc_api()).await?;
-    let private_rpc_url: url::Url = format!("http://{local_addr}").parse()?;
+    let private_rpc_url = start_private_rpc_url(&zone, config.clone()).await?;
 
-    Ok(PrivateRpcTestCtx {
+    Ok(build_private_rpc_ctx(
         zone,
         private_rpc_url,
         sequencer_signer,
         config,
         fixture,
+    ))
+}
+
+/// Start a zone with a private RPC server backed by a real L1 + ZonePortal.
+pub(crate) async fn start_zone_with_private_rpc_l1() -> eyre::Result<PrivateRpcL1TestCtx> {
+    start_zone_with_private_rpc_l1_inner(None).await
+}
+
+/// Start a zone with a private RPC server backed by a real L1 and a portal
+/// with a registered encryption key.
+pub(crate) async fn start_zone_with_private_rpc_l1_with_encryption()
+-> eyre::Result<PrivateRpcL1TestCtx> {
+    use sha2::{Digest, Sha256};
+
+    let key_bytes: [u8; 32] =
+        Sha256::digest(b"private-rpc-zone-specific-methods-encryption-key").into();
+    let encryption_key = k256::SecretKey::from_slice(&key_bytes).expect("valid encryption key");
+    start_zone_with_private_rpc_l1_inner(Some(encryption_key)).await
+}
+
+async fn start_zone_with_private_rpc_l1_inner(
+    encryption_key: Option<k256::SecretKey>,
+) -> eyre::Result<PrivateRpcL1TestCtx> {
+    let l1 = L1TestNode::start().await?;
+    let portal_address = l1.deploy_zone().await?;
+
+    let zone = if let Some(key) = encryption_key.clone() {
+        ZoneTestNode::start_from_l1_with_sequencer_key(
+            l1.http_url(),
+            l1.ws_url(),
+            portal_address,
+            key,
+        )
+        .await?
+    } else {
+        ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?
+    };
+
+    zone.wait_for_l2_tempo_finalized(0, DEFAULT_TIMEOUT).await?;
+
+    if let Some(key) = encryption_key.as_ref() {
+        l1.set_sequencer_encryption_key(portal_address, key).await?;
+    }
+
+    let chain_id = zone_chain_id(&zone).await?;
+
+    let config = zone::rpc::PrivateRpcConfig {
+        listen_addr: ([127, 0, 0, 1], 0).into(),
+        l1_rpc_url: l1.http_url().to_string(),
+        zone_rpc_url: zone.http_url().to_string(),
+        zone_id: 1,
+        chain_id,
+        zone_portal: portal_address,
+        sequencer: l1.dev_address(),
+    };
+
+    let private_rpc_url = start_private_rpc_url(&zone, config.clone()).await?;
+    let sequencer_signer = l1.dev_signer();
+
+    Ok(PrivateRpcL1TestCtx {
+        ctx: build_private_rpc_ctx(
+            zone,
+            private_rpc_url,
+            sequencer_signer,
+            config,
+            L1Fixture::new(),
+        ),
+        l1,
+        portal_address,
     })
 }
 
