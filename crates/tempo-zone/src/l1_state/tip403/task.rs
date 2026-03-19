@@ -172,12 +172,12 @@ pub fn spawn_policy_resolution_task(
     l1_provider: DynProvider<TempoNetwork>,
     max_concurrent: usize,
     channel_capacity: usize,
-    task_executor: impl reth_ethereum::tasks::TaskSpawner,
+    task_executor: reth_tasks::Runtime,
 ) -> PolicyTaskHandle {
     let (tx, rx) = mpsc::channel(channel_capacity);
     let handle = PolicyTaskHandle::new(tx);
 
-    task_executor.spawn_critical(
+    task_executor.spawn_critical_task(
         "l1-policy-resolution",
         Box::pin(async move {
             let task = PolicyResolutionTask {

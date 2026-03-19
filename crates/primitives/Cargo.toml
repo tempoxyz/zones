@@ -17,6 +17,7 @@ alloy-sol-types = { workspace = true }
 alloy-contract = { workspace = true, optional = true }
 alloy-network = { workspace = true, optional = true }
 alloy-provider = { workspace = true, optional = true }
+futures = { workspace = true, optional = true }
 tokio = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 
@@ -32,4 +33,4 @@ std = [
     "serde?/std",
 ]
 serde = ["dep:serde", "alloy-primitives/serde"]
-rpc = ["dep:alloy-contract", "dep:alloy-network", "dep:alloy-provider", "dep:tokio"]
+rpc = ["dep:alloy-contract", "dep:alloy-network", "dep:alloy-provider", "dep:futures", "dep:tokio"]

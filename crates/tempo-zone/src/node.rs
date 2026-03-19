@@ -403,7 +403,7 @@ where
         );
         ctx.node
             .task_executor()
-            .spawn_critical("zone-engine", engine.run());
+            .spawn_critical_task("zone-engine", engine.run());
         info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
 
         self.inner.launch_add_ons(ctx).await
@@ -693,7 +693,7 @@ where
 
         // Spawn unified Tempo pool maintenance task
         // This consolidates: expired AA txs, 2D nonce updates, AMM cache, and keychain revocations
-        ctx.task_executor().spawn_critical(
+        ctx.task_executor().spawn_critical_task(
             "txpool maintenance - tempo pool",
             tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.clone()),
         );

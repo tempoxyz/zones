@@ -1,5 +1,5 @@
 use alloy::{
-    primitives::{Address, U256, address},
+    primitives::{Address, address},
     providers::ProviderBuilder,
 };
 use eyre::eyre;
@@ -99,10 +99,9 @@ impl ZoneInfoCmd {
         }
 
         // Enabled tokens
-        let token_count = portal.enabledTokenCount().call().await?;
-        println!("\nEnabled Tokens ({token_count})");
-        for i in 0..token_count.to::<u64>() {
-            let token = portal.enabledTokenAt(U256::from(i)).call().await?;
+        let tokens = portal.enabled_tokens().await?;
+        println!("\nEnabled Tokens ({})", tokens.len());
+        for (i, token) in tokens.iter().enumerate() {
             println!("  [{i}] {token}");
         }
 

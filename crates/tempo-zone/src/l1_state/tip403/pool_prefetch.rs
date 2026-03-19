@@ -39,11 +39,11 @@ use super::{AuthRole, task::PolicyTaskHandle};
 pub fn spawn_pool_prefetch_task<Pool>(
     pool: Pool,
     handle: PolicyTaskHandle,
-    task_executor: impl reth_ethereum::tasks::TaskSpawner,
+    task_executor: reth_tasks::Runtime,
 ) where
     Pool: TransactionPool<Transaction = TempoPooledTransaction> + 'static,
 {
-    task_executor.spawn(Box::pin(async move {
+    task_executor.spawn_task(Box::pin(async move {
         run_pool_prefetch(pool, handle).await;
     }));
 }

@@ -166,15 +166,25 @@ fn main() {
 
             // Launch the private zone RPC server.
             let eth_handlers = handle.node.eth_handlers().clone();
+            let zone_rpc_url = handle
+                .node
+                .rpc_server_handle()
+                .http_url()
+                .expect("HTTP RPC server must be enabled for sequencer mode");
             let private_rpc_config = zone::rpc::PrivateRpcConfig {
                 listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
+                l1_rpc_url: args.l1_rpc_url.clone(),
+                zone_rpc_url: zone_rpc_url.clone(),
                 zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
                 zone_portal: args.portal_address,
                 sequencer: sequencer_addr,
             };
-            let api: Arc<dyn zone::rpc::ZoneRpcApi> =
-                Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
+            let api: Arc<dyn zone::rpc::ZoneRpcApi> = Arc::new(zone::rpc::TempoZoneRpc::new(
+                eth_handlers,
+                private_rpc_config.clone(),
+            )
+            .await?);
             let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
             info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 
@@ -184,12 +194,6 @@ fn main() {
                 %sequencer_addr,
                 "Starting sequencer background tasks"
             );
-
-            let zone_rpc_url = handle
-                .node
-                .rpc_server_handle()
-                .http_url()
-                .expect("HTTP RPC server must be enabled for sequencer mode");
 
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
@@ -213,7 +217,7 @@ fn main() {
             );
 
             // Spawn as critical tasks — node shuts down if either exits.
-            handle.node.task_executor.spawn_critical("zone-monitor", async move {
+            handle.node.task_executor.spawn_critical_task("zone-monitor", async move {
                 tokio::select! {
                     res = seq_handle.withdrawal_handle => {
                         tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
