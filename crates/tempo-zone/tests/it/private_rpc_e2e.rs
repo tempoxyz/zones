@@ -574,8 +574,8 @@ async fn test_zone_get_zone_info_returns_all_enabled_tokens() -> eyre::Result<()
     assert_eq!(
         zone_tokens,
         vec![
-            format!("{:#x}", PATH_USD_ADDRESS),
-            format!("{:#x}", alpha_token)
+            format!("{PATH_USD_ADDRESS:#x}"),
+            format!("{alpha_token:#x}")
         ],
     );
 
