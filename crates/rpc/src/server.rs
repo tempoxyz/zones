@@ -29,7 +29,7 @@ use crate::{
     config::PrivateRpcConfig,
     error::{AuthError, AuthenticateError},
     handlers::{self, ZoneRpcApi},
-    metrics::{PrivateRpcCallMetrics, record_auth_failure},
+    metrics::{PrivateRpcAuthMetrics, PrivateRpcCallMetrics},
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse},
     ws::handle_ws_upgrade,
 };
@@ -44,6 +44,8 @@ pub struct RpcState {
     pub config: PrivateRpcConfig,
     /// Type-erased EthApi for handling RPC methods.
     pub api: Arc<dyn ZoneRpcApi>,
+    /// Authentication failure metric for the private RPC.
+    auth_metrics: PrivateRpcAuthMetrics,
 }
 
 /// Start the private zone RPC server.
@@ -55,7 +57,11 @@ pub async fn start_private_rpc(
     api: Arc<dyn ZoneRpcApi>,
 ) -> eyre::Result<std::net::SocketAddr> {
     let listen_addr = config.listen_addr;
-    let state = Arc::new(RpcState { config, api });
+    let state = Arc::new(RpcState {
+        config,
+        api,
+        auth_metrics: PrivateRpcAuthMetrics::default(),
+    });
 
     let app = Router::new()
         .route("/", post(handle_rpc))
@@ -181,8 +187,8 @@ async fn handle_rpc(
     let auth = match authenticate(&headers, &state.config, state.api.as_ref()).await {
         Ok(auth) => auth,
         Err(e) => {
-            if let AuthenticateError::Invalid(cause) = &e {
-                record_auth_failure(cause);
+            if matches!(&e, AuthenticateError::Invalid(_)) {
+                state.auth_metrics.auth_failures_total.increment(1);
             }
             e.log("http");
             return (e.status_code(), "").into_response();

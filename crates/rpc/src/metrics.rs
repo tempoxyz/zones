@@ -8,7 +8,7 @@ use reth_metrics::{
     metrics::{Counter, Histogram},
 };
 
-use crate::{auth::AuthError, types::classify_method};
+use crate::types::classify_method;
 
 #[derive(Metrics, Clone)]
 #[metrics(scope = "zone_private_rpc.calls")]
@@ -52,10 +52,4 @@ pub(crate) fn canonical_method_label(method: &str) -> &str {
         Some(_) => method,
         None => "unknown",
     }
-}
-
-pub(crate) fn record_auth_failure(_: &AuthError) {
-    PrivateRpcAuthMetrics::default()
-        .auth_failures_total
-        .increment(1);
 }
