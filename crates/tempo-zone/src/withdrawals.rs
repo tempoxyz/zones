@@ -85,17 +85,13 @@ pub struct WithdrawalProcessorConfig {
 /// (oldest first). The batch index corresponds to the portal's withdrawal queue slot index.
 pub struct WithdrawalStore {
     batches: BTreeMap<u64, Vec<abi::Withdrawal>>,
-    metrics: WithdrawalProcessorMetrics,
 }
 
 impl WithdrawalStore {
     pub fn new() -> Self {
-        let store = Self {
+        Self {
             batches: BTreeMap::new(),
-            metrics: WithdrawalProcessorMetrics::default(),
-        };
-        store.record_batch_count();
-        store
+        }
     }
 
     /// Add a withdrawal to the given batch.
@@ -106,13 +102,11 @@ impl WithdrawalStore {
             .entry(batch_index)
             .or_default()
             .push(withdrawal);
-        self.record_batch_count();
     }
 
     /// Set all withdrawals for a batch at once, replacing any existing data.
     pub fn add_batch(&mut self, batch_index: u64, withdrawals: Vec<abi::Withdrawal>) {
         self.batches.insert(batch_index, withdrawals);
-        self.record_batch_count();
     }
 
     /// Get all withdrawals for a batch.
@@ -123,7 +117,6 @@ impl WithdrawalStore {
     /// Remove a batch after all its withdrawals are processed.
     pub fn remove_batch(&mut self, batch_index: u64) {
         self.batches.remove(&batch_index);
-        self.record_batch_count();
     }
 
     pub fn has_batch(&self, batch_index: u64) -> bool {
@@ -132,12 +125,6 @@ impl WithdrawalStore {
 
     pub fn batch_count(&self) -> usize {
         self.batches.len()
-    }
-
-    fn record_batch_count(&self) {
-        self.metrics
-            .store_batch_count
-            .set(self.batch_count() as f64);
     }
 }
 
