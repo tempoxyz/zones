@@ -21,9 +21,6 @@ pub(crate) struct WithdrawalProcessorMetrics {
     /// Number of withdrawal batches currently stored in memory.
     pub(crate) store_batch_count: Gauge,
 
-    /// How long the current head slot has remained pending.
-    pub(crate) head_slot_stuck_age_seconds: Gauge,
-
     /// Number of `processWithdrawal` attempts started.
     pub(crate) withdrawals_processed_total: Counter,
 

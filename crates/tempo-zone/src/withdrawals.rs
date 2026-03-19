@@ -187,7 +187,6 @@ pub struct WithdrawalProcessor {
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
     metrics: WithdrawalProcessorMetrics,
-    stuck_head: Option<(u64, Instant)>,
 }
 
 impl WithdrawalProcessor {
@@ -208,7 +207,6 @@ impl WithdrawalProcessor {
             store,
             notify,
             metrics: WithdrawalProcessorMetrics::default(),
-            stuck_head: None,
         }
     }
 
@@ -392,7 +390,6 @@ impl WithdrawalProcessor {
 
         // All withdrawals in this slot confirmed — safe to remove.
         self.store.lock().remove_batch(head_val);
-        self.clear_stuck_head();
 
         info!(
             slot = head_val,
@@ -403,36 +400,12 @@ impl WithdrawalProcessor {
     }
 
     fn record_queue_metrics(&mut self, head: u64, tail: u64, store_batch_count: usize) {
-        let stuck_age = self.observe_stuck_head(head, tail, Instant::now());
         self.metrics.portal_queue_head.set(head as f64);
         self.metrics.portal_queue_tail.set(tail as f64);
         self.metrics
             .portal_queue_pending_slots
             .set((tail.saturating_sub(head)) as f64);
         self.metrics.store_batch_count.set(store_batch_count as f64);
-        self.metrics.head_slot_stuck_age_seconds.set(stuck_age);
-    }
-
-    fn observe_stuck_head(&mut self, head: u64, tail: u64, now: Instant) -> f64 {
-        if head == tail {
-            self.stuck_head = None;
-            return 0.0;
-        }
-
-        match self.stuck_head {
-            Some((tracked_head, first_seen_at)) if tracked_head == head => {
-                now.duration_since(first_seen_at).as_secs_f64()
-            }
-            _ => {
-                self.stuck_head = Some((head, now));
-                0.0
-            }
-        }
-    }
-
-    fn clear_stuck_head(&mut self) {
-        self.stuck_head = None;
-        self.metrics.head_slot_stuck_age_seconds.set(0.0);
     }
 
     fn record_slot_duration(&self, duration: Duration) {
