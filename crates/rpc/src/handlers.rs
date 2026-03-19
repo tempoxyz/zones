@@ -805,7 +805,7 @@ mod tests {
             Box::pin(async move {
                 to_raw(&json!({
                     "zoneId": "0x1",
-                    "zoneToken": format!("{:#x}", Address::repeat_byte(0x11)),
+                    "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
                     "sequencer": format!("{:#x}", auth.caller),
                     "chainId": "0x2a",
                 }))
@@ -877,6 +877,10 @@ mod tests {
         let body: serde_json::Value =
             serde_json::from_str(resp.result.as_ref().unwrap().get()).unwrap();
         assert_eq!(body["zoneId"], "0x1");
+        assert_eq!(
+            body["zoneTokens"][0],
+            format!("{:#x}", Address::repeat_byte(0x11))
+        );
         assert_eq!(body["chainId"], "0x2a");
     }
 

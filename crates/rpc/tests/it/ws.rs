@@ -136,7 +136,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
         Box::pin(async move {
             zone_rpc::types::to_raw(&serde_json::json!({
                 "zoneId": "0x1",
-                "zoneToken": format!("{:#x}", Address::repeat_byte(0x11)),
+                "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
                 "sequencer": format!("{:#x}", Address::repeat_byte(0x22)),
                 "chainId": "0x2a",
             }))

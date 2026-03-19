@@ -524,8 +524,13 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
         format!("0x{:x}", ctx.config.zone_id),
     );
     assert_eq!(
-        zone_info["result"]["zoneToken"].as_str().unwrap(),
-        "0x20c0000000000000000000000000000000000000",
+        zone_info["result"]["zoneTokens"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|token| token.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["0x20c0000000000000000000000000000000000000"],
     );
     assert_eq!(
         zone_info["result"]["sequencer"].as_str().unwrap(),
@@ -534,6 +539,44 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
     assert_eq!(
         zone_info["result"]["chainId"].as_str().unwrap(),
         format!("0x{:x}", ctx.config.chain_id),
+    );
+
+    Ok(())
+}
+
+/// `zone_getZoneInfo` returns every token currently enabled on the portal.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_get_zone_info_returns_all_enabled_tokens() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc_l1().await?;
+    let user_signer = PrivateKeySigner::random();
+    let alpha_salt = B256::with_last_byte(0x44);
+    let alpha_token = ctx
+        .l1()
+        .create_tip20("AlphaUSD", "aUSD", alpha_salt)
+        .await?;
+
+    ctx.l1()
+        .enable_token_on_portal(ctx.portal_address(), alpha_token)
+        .await?;
+
+    let zone_info = ctx
+        .call_as_user("zone_getZoneInfo", serde_json::json!([]), &user_signer)
+        .await?;
+    let zone_tokens = zone_info["result"]["zoneTokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|token| token.as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        zone_tokens,
+        vec![
+            format!("{PATH_USD_ADDRESS:#x}"),
+            format!("{alpha_token:#x}")
+        ],
     );
 
     Ok(())
