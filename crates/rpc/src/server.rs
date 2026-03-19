@@ -187,7 +187,7 @@ async fn handle_rpc(
     let auth = match authenticate(&headers, &state.config, state.api.as_ref()).await {
         Ok(auth) => auth,
         Err(e) => {
-            if matches!(&e, AuthenticateError::Invalid(_)) {
+            if e.is_invalid() {
                 state.auth_metrics.auth_failures_total.increment(1);
             }
             e.log("http");
