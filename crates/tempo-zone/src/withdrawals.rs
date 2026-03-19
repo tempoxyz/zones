@@ -168,99 +168,6 @@ pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count:
     abi::Withdrawal::queue_hash(remaining)
 }
 
-#[derive(Debug, Clone, Copy)]
-struct TrackedHeadSlot {
-    slot: u64,
-    first_seen_at: Instant,
-}
-
-#[derive(Debug, Default)]
-struct HeadSlotTracker {
-    tracked: Option<TrackedHeadSlot>,
-}
-
-impl HeadSlotTracker {
-    fn observe(&mut self, head: u64, tail: u64, now: Instant) -> f64 {
-        if head == tail {
-            self.clear();
-            return 0.0;
-        }
-
-        match self.tracked {
-            Some(tracked) if tracked.slot == head => {
-                now.duration_since(tracked.first_seen_at).as_secs_f64()
-            }
-            _ => {
-                self.tracked = Some(TrackedHeadSlot {
-                    slot: head,
-                    first_seen_at: now,
-                });
-                0.0
-            }
-        }
-    }
-
-    fn clear(&mut self) {
-        self.tracked = None;
-    }
-}
-
-fn record_queue_metrics(
-    metrics: &WithdrawalProcessorMetrics,
-    tracker: &mut HeadSlotTracker,
-    head: u64,
-    tail: u64,
-    store_batch_count: usize,
-    now: Instant,
-) {
-    metrics.portal_queue_head.set(head as f64);
-    metrics.portal_queue_tail.set(tail as f64);
-    metrics
-        .portal_queue_pending_slots
-        .set((tail.saturating_sub(head)) as f64);
-    metrics.store_batch_count.set(store_batch_count as f64);
-    metrics
-        .head_slot_stuck_age_seconds
-        .set(tracker.observe(head, tail, now));
-}
-
-#[derive(Clone)]
-struct SlotProcessingRecorder {
-    metrics: WithdrawalProcessorMetrics,
-    started_at: Instant,
-}
-
-impl SlotProcessingRecorder {
-    fn new(metrics: WithdrawalProcessorMetrics, started_at: Instant) -> Self {
-        Self {
-            metrics,
-            started_at,
-        }
-    }
-
-    fn record_attempt(&self) {
-        self.metrics.withdrawals_processed_total.increment(1);
-    }
-
-    fn record_confirmed(&self) {
-        self.metrics.withdrawals_confirmed_total.increment(1);
-    }
-
-    fn record_failed(&self) {
-        self.metrics.withdrawals_failed_total.increment(1);
-    }
-
-    fn finish(&self, ended_at: Instant) {
-        self.record_duration(ended_at.duration_since(self.started_at));
-    }
-
-    fn record_duration(&self, duration: Duration) {
-        self.metrics
-            .slot_processing_duration_seconds
-            .record(duration.as_secs_f64());
-    }
-}
-
 // ---------------------------------------------------------------------------
 //  Withdrawal processor
 // ---------------------------------------------------------------------------
@@ -284,7 +191,7 @@ pub struct WithdrawalProcessor {
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
     metrics: WithdrawalProcessorMetrics,
-    head_tracker: Mutex<HeadSlotTracker>,
+    stuck_head: Option<(u64, Instant)>,
 }
 
 impl WithdrawalProcessor {
@@ -305,7 +212,7 @@ impl WithdrawalProcessor {
             store,
             notify,
             metrics: WithdrawalProcessorMetrics::default(),
-            head_tracker: Mutex::new(HeadSlotTracker::default()),
+            stuck_head: None,
         }
     }
 
@@ -314,7 +221,7 @@ impl WithdrawalProcessor {
     /// Waits for a notification from the batch submitter (or a fallback timeout) before
     /// checking the L1 withdrawal queue.
     #[instrument(skip_all, fields(portal = %self.config.portal_address))]
-    pub async fn run(&self) -> eyre::Result<()> {
+    pub async fn run(&mut self) -> eyre::Result<()> {
         info!(l1_rpc = %self.config.l1_rpc_url, "Withdrawal processor started");
 
         loop {
@@ -335,24 +242,14 @@ impl WithdrawalProcessor {
 
     /// Process the current head slot of the portal's withdrawal queue on Tempo L1.
     #[instrument(skip_all)]
-    async fn process_queue(&self) -> eyre::Result<()> {
+    async fn process_queue(&mut self) -> eyre::Result<()> {
         let head: alloy_primitives::U256 = self.portal.withdrawalQueueHead().call().await?;
         let tail: alloy_primitives::U256 = self.portal.withdrawalQueueTail().call().await?;
 
         let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
         let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
         let store_batch_count = self.store.lock().batch_count();
-        {
-            let mut tracker = self.head_tracker.lock();
-            record_queue_metrics(
-                &self.metrics,
-                &mut tracker,
-                head_val,
-                tail_val,
-                store_batch_count,
-                Instant::now(),
-            );
-        }
+        self.record_queue_metrics(head_val, tail_val, store_batch_count);
 
         if head_val == tail_val {
             debug!("Withdrawal queue empty, nothing to process");
@@ -389,10 +286,10 @@ impl WithdrawalProcessor {
             count = withdrawals.len(),
             "Processing withdrawal batch"
         );
-        let slot_metrics = SlotProcessingRecorder::new(self.metrics.clone(), Instant::now());
+        let slot_started_at = Instant::now();
 
         for (i, withdrawal) in withdrawals.iter().enumerate() {
-            slot_metrics.record_attempt();
+            self.metrics.withdrawals_processed_total.increment(1);
             let remaining_queue = compute_remaining_queue(&withdrawals, i + 1);
             let is_last = i + 1 == withdrawals.len();
 
@@ -453,7 +350,7 @@ impl WithdrawalProcessor {
                         .await
                     {
                         Ok(_) => {
-                            slot_metrics.record_confirmed();
+                            self.metrics.withdrawals_confirmed_total.increment(1);
                             info!(
                                 slot = head_val,
                                 index = i,
@@ -465,8 +362,8 @@ impl WithdrawalProcessor {
                             );
                         }
                         Err(e) => {
-                            slot_metrics.record_failed();
-                            slot_metrics.finish(Instant::now());
+                            self.metrics.withdrawals_failed_total.increment(1);
+                            self.record_slot_duration(slot_started_at.elapsed());
                             error!(
                                 slot = head_val,
                                 index = i,
@@ -481,8 +378,8 @@ impl WithdrawalProcessor {
                     }
                 }
                 Err(e) => {
-                    slot_metrics.record_failed();
-                    slot_metrics.finish(Instant::now());
+                    self.metrics.withdrawals_failed_total.increment(1);
+                    self.record_slot_duration(slot_started_at.elapsed());
                     error!(
                         slot = head_val,
                         index = i,
@@ -495,12 +392,11 @@ impl WithdrawalProcessor {
                 }
             }
         }
-        slot_metrics.finish(Instant::now());
+        self.record_slot_duration(slot_started_at.elapsed());
 
         // All withdrawals in this slot confirmed — safe to remove.
         self.store.lock().remove_batch(head_val);
-        self.metrics.head_slot_stuck_age_seconds.set(0.0);
-        self.head_tracker.lock().clear();
+        self.clear_stuck_head();
 
         info!(
             slot = head_val,
@@ -508,6 +404,45 @@ impl WithdrawalProcessor {
             "Batch fully processed and removed from store"
         );
         Ok(())
+    }
+
+    fn record_queue_metrics(&mut self, head: u64, tail: u64, store_batch_count: usize) {
+        let stuck_age = self.observe_stuck_head(head, tail, Instant::now());
+        self.metrics.portal_queue_head.set(head as f64);
+        self.metrics.portal_queue_tail.set(tail as f64);
+        self.metrics
+            .portal_queue_pending_slots
+            .set((tail.saturating_sub(head)) as f64);
+        self.metrics.store_batch_count.set(store_batch_count as f64);
+        self.metrics.head_slot_stuck_age_seconds.set(stuck_age);
+    }
+
+    fn observe_stuck_head(&mut self, head: u64, tail: u64, now: Instant) -> f64 {
+        if head == tail {
+            self.stuck_head = None;
+            return 0.0;
+        }
+
+        match self.stuck_head {
+            Some((tracked_head, first_seen_at)) if tracked_head == head => {
+                now.duration_since(first_seen_at).as_secs_f64()
+            }
+            _ => {
+                self.stuck_head = Some((head, now));
+                0.0
+            }
+        }
+    }
+
+    fn clear_stuck_head(&mut self) {
+        self.stuck_head = None;
+        self.metrics.head_slot_stuck_age_seconds.set(0.0);
+    }
+
+    fn record_slot_duration(&self, duration: Duration) {
+        self.metrics
+            .slot_processing_duration_seconds
+            .record(duration.as_secs_f64());
     }
 }
 
@@ -524,7 +459,7 @@ pub fn spawn_withdrawal_processor(
     notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let processor = WithdrawalProcessor::new(config, provider, store, notify);
+        let mut processor = WithdrawalProcessor::new(config, provider, store, notify);
         loop {
             if let Err(e) = processor.run().await {
                 error!(error = %e, "Withdrawal processor failed, restarting in 5s");
