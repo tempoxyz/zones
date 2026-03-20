@@ -44,28 +44,29 @@ What is real:
 
 In a stronger version of Handoff, the main upgrades would be splitting Identity from Settlement, adding zk proofs at route minting time, and persisting recipient bindings with stronger recovery rules.
 
-## Alternative: Tempo Virtual Addresses
+## Alternative: Zone Virtual Addresses
 
-Another plausible design is to resolve the email identifier to a Tempo virtual address instead of returning an opaque encrypted deposit payload.
+Another plausible design is to resolve the email identifier to recipient-authorized zone routing material instead of returning an opaque encrypted deposit payload.
 
-In that model:
+In the current `Zones` model, that means:
 
-- the sender pays a normal Tempo address
-- the virtual address or manager contract forwards funds into the receiver's private zone destination
-- the routing service becomes closer to `identifier -> payable destination`
+- the sender resolves the identifier to a zone-side virtual recipient or derivation hint
+- the sender uses that resolved recipient as the `to` field inside `depositEncrypted(...)`
+- the zone credits that recipient directly after decryption
+- the routing service becomes closer to `identifier -> recipient-authorized routing material`
 
-This helps with the current trust gap because the sender no longer has to trust a server-generated encrypted payload blindly. The main tradeoff is how much linkability the virtual address introduces.
+This helps with the current trust gap because the sender no longer has to trust a server-generated encrypted payload blindly. Instead, the sender can construct the encrypted deposit locally. The main tradeoff is how much linkability the published routing material introduces.
 
 Two variants are worth distinguishing:
 
 - Stable virtual address:
-  `user@example.com -> one long-lived Tempo virtual address`
+  `user@example.com -> one long-lived zone-side virtual recipient`
 - Fresh virtual address:
-  `user@example.com -> one-time or per-payment Tempo virtual address`
+  `user@example.com -> one-time or per-payment zone-side virtual recipient`
 
-The stable version is much simpler, but it makes all payments to that recipient linkable onchain. The fresh version preserves better privacy, but it needs either a minting service or recipient-published routing material that lets the sender derive a valid one-time address.
+The stable version is much simpler, but it lets senders and recipients correlate repeated payments to the same destination. The fresh version preserves better privacy, but it needs either a minting service or recipient-published routing material that lets the sender derive a valid one-time zone recipient.
 
-Even in the virtual-address model, the sender should still be able to verify that the returned address is recipient-authorized, for example through a recipient signature, derivation from recipient-published routing material, or a proof that the virtual address is consistent with the signed recipient commitment.
+Even in the virtual-address model, the sender should still be able to verify that the returned routing material is recipient-authorized, for example through a recipient signature, derivation from recipient-published routing material, or a proof that the resolved virtual recipient is consistent with the signed recipient commitment.
 
 ## What Runs Where
 
