@@ -1,0 +1,26 @@
+flowchart LR
+    subgraph Mocked["Local Handoff control plane (mocked state, real HTTP)"]
+        A["Receiver signs route commitment"]
+        B["Handoff Identity<br/>register + resolve"]
+        C["Handoff Settlement<br/>link-recipient + mint-route"]
+        D["In-memory recipient mapping"]
+    end
+
+    subgraph Real["Real Tempo + Zones settlement path"]
+        E["Read ZonePortal encryption key"]
+        F["Build ECIES encrypted payload"]
+        G["TIP-20 approve()"]
+        H["ZonePortal.depositEncrypted(...)"]
+        I["Local zone processes deposit"]
+        J["Hidden zone balance increases"]
+    end
+
+    A --> B
+    B --> D
+    D --> C
+    C --> E
+    E --> F
+    F --> G
+    G --> H
+    H --> I
+    I --> J

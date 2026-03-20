@@ -1,0 +1,38 @@
+[package]
+name = "zone-examples"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy = { workspace = true, features = [
+  "contract",
+  "providers",
+  "reqwest",
+  "reqwest-rustls-tls",
+  "rpc-types",
+  "signers",
+  "signer-local",
+  "sol-types",
+] }
+anyhow = "1"
+axum.workspace = true
+clap.workspace = true
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+hex = "0.4"
+rand.workspace = true
+rand_core = { version = "0.6", features = ["getrandom"] }
+reqwest.workspace = true
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+thiserror.workspace = true
+uuid = { version = "1", features = ["v4"] }
+zone-precompiles = { workspace = true, features = ["std"] }
