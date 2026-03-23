@@ -306,14 +306,7 @@ contract ZoneBridgeTest is BaseTest {
             ObservedWithdrawal({
                 index: index,
                 withdrawal: _withdrawal(
-                    uint256(index) + 1,
-                    sender,
-                    to,
-                    amount,
-                    memo,
-                    gasLimit,
-                    fallbackRecipient,
-                    data
+                    uint256(index) + 1, sender, to, amount, memo, gasLimit, fallbackRecipient, data
                 )
             })
         );
@@ -436,8 +429,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Verify L1 queue updated
         assertEq(l1Portal.withdrawalBatchIndex(), 2);
-        Withdrawal memory w =
-            _withdrawal(1, alice, alice, withdrawAmount, bytes32(0), 0, alice, "");
+        Withdrawal memory w = _withdrawal(1, alice, alice, withdrawAmount, bytes32(0), 0, alice, "");
         bytes32 expectedQueueHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
         // Withdrawal should be in slot 0 (first batch with withdrawals)
         assertEq(l1Portal.withdrawalQueueSlot(0), expectedQueueHash);
@@ -558,7 +550,14 @@ contract ZoneBridgeTest is BaseTest {
 
         // Process withdrawal
         Withdrawal memory w = _withdrawal(
-            1, alice, address(withdrawalReceiver), 500e6, bytes32(0), 100_000, alice, "callback_data"
+            1,
+            alice,
+            address(withdrawalReceiver),
+            500e6,
+            bytes32(0),
+            100_000,
+            alice,
+            "callback_data"
         );
         l1Portal.processWithdrawal(w, bytes32(0));
 

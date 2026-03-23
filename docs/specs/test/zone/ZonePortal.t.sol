@@ -770,7 +770,14 @@ contract ZonePortalTest is BaseTest {
 
         // Create withdrawal with callback
         Withdrawal memory w = _withdrawal(
-            address(pathUSD), alice, address(withdrawalReceiver), 500e6, bytes32(0), 100_000, alice, ""
+            address(pathUSD),
+            alice,
+            address(withdrawalReceiver),
+            500e6,
+            bytes32(0),
+            100_000,
+            alice,
+            ""
         );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
@@ -816,7 +823,14 @@ contract ZonePortalTest is BaseTest {
         withdrawalReceiver.setShouldAccept(false);
 
         Withdrawal memory w = _withdrawal(
-            address(pathUSD), alice, address(withdrawalReceiver), 500e6, bytes32(0), 100_000, alice, ""
+            address(pathUSD),
+            alice,
+            address(withdrawalReceiver),
+            500e6,
+            bytes32(0),
+            100_000,
+            alice,
+            ""
         );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
@@ -1405,14 +1419,7 @@ contract ZonePortalTest is BaseTest {
 
         // Create withdrawal with gasLimit = 0
         Withdrawal memory w = _withdrawal(
-            address(pathUSD),
-            alice,
-            address(successfulReceiver),
-            500e6,
-            bytes32(0),
-            0,
-            alice,
-            ""
+            address(pathUSD), alice, address(successfulReceiver), 500e6, bytes32(0), 0, alice, ""
         );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
@@ -1668,7 +1675,14 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         Withdrawal memory w = _withdrawal(
-            address(pathUSD), alice, address(gasConsumingReceiver), 500e6, bytes32(0), 50_000, alice, ""
+            address(pathUSD),
+            alice,
+            address(gasConsumingReceiver),
+            500e6,
+            bytes32(0),
+            50_000,
+            alice,
+            ""
         );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 

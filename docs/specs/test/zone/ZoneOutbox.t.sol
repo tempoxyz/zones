@@ -7,8 +7,8 @@ import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { MockZoneToken } from "./mocks/MockZoneToken.sol";
+import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test } from "forge-std/Test.sol";
 
 /// @title ZoneOutboxTest
@@ -148,8 +148,7 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         // Expected hash
-        Withdrawal memory w =
-            _withdrawal(1, alice, alice, 500e6, bytes32("memo"), 0, alice, "");
+        Withdrawal memory w = _withdrawal(1, alice, alice, 500e6, bytes32("memo"), 0, alice, "");
         bytes32 expectedHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.prank(sequencer);
@@ -528,7 +527,14 @@ contract ZoneOutboxTest is Test {
 
         vm.expectRevert(ZoneOutbox.InvalidRevealTo.selector);
         outbox.requestWithdrawal(
-            address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "", hex"0211111111111111111111111111111111111111111111111111111111111111"
+            address(zoneToken),
+            bob,
+            500e6,
+            bytes32(0),
+            0,
+            alice,
+            "",
+            hex"0211111111111111111111111111111111111111111111111111111111111111"
         );
         vm.stopPrank();
     }
@@ -539,7 +545,14 @@ contract ZoneOutboxTest is Test {
 
         vm.expectRevert(ZoneOutbox.InvalidRevealTo.selector);
         outbox.requestWithdrawal(
-            address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "", hex"041111111111111111111111111111111111111111111111111111111111111111"
+            address(zoneToken),
+            bob,
+            500e6,
+            bytes32(0),
+            0,
+            alice,
+            "",
+            hex"041111111111111111111111111111111111111111111111111111111111111111"
         );
         vm.stopPrank();
     }
@@ -623,8 +636,7 @@ contract ZoneOutboxTest is Test {
         // Build expected hash (oldest = outermost)
         Withdrawal memory w1 = _withdrawal(1, alice, alice, 100e6, bytes32("w1"), 0, alice, "");
         Withdrawal memory w2 = _withdrawal(2, bob, bob, 200e6, bytes32("w2"), 0, alice, "");
-        Withdrawal memory w3 =
-            _withdrawal(3, charlie, charlie, 300e6, bytes32("w3"), 0, alice, "");
+        Withdrawal memory w3 = _withdrawal(3, charlie, charlie, 300e6, bytes32("w3"), 0, alice, "");
 
         // Hash chain: w1 outermost, w3 innermost wrapping EMPTY_SENTINEL
         bytes32 innermost = keccak256(abi.encode(w3, EMPTY_SENTINEL));

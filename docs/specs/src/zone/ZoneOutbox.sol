@@ -309,7 +309,10 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Emits BatchFinalized for observability (proof reads from state).
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber)
+    function finalizeWithdrawalBatch(
+        uint256 count,
+        uint64 blockNumber
+    )
         external
         returns (bytes32 withdrawalQueueHash)
     {
@@ -453,9 +456,8 @@ contract ZoneOutbox is IZoneOutbox {
         internal
         pure
     {
-        uint256 expectedLength = revealTo.length == 0
-            ? 0
-            : AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH;
+        uint256 expectedLength =
+            revealTo.length == 0 ? 0 : AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH;
         if (encryptedSender.length != expectedLength) {
             revert InvalidEncryptedSenderLength(encryptedSender.length, expectedLength);
         }

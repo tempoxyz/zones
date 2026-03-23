@@ -522,8 +522,7 @@ contract ZoneIntegrationTest is BaseTest {
         uint256 charlieBefore = l2ZoneToken.balanceOf(charlie);
         uint256 aliceBefore = l2ZoneToken.balanceOf(alice);
 
-        Withdrawal memory w1 =
-            _withdrawal(1, alice, bob, 1000e6, bytes32("to bob"), 0, alice, "");
+        Withdrawal memory w1 = _withdrawal(1, alice, bob, 1000e6, bytes32("to bob"), 0, alice, "");
         l1Portal.processWithdrawal(w1, bytes32(0));
         assertEq(l2ZoneToken.balanceOf(bob), bobBefore + 1000e6);
 
