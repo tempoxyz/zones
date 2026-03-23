@@ -28,7 +28,7 @@ pub use batch::{BatchData, BatchSubmitter};
 pub use engine::ZoneEngine;
 pub use l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockDeposits, L1Deposit,
-    L1PortalEvents, L1Subscriber, L1SubscriberConfig,
+    L1PortalEvents, L1SequencerEvent, L1Subscriber, L1SubscriberConfig,
 };
 pub use l1_state::{PolicyProvider, SharedL1StateCache, SharedPolicyCache};
 pub use node::{ZoneExecutorBuilder, ZoneNode};
