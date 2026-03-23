@@ -173,7 +173,7 @@ macro_rules! define_abi {
 
                 // -- View functions --
 
-                function zoneId() external view returns (uint64);
+                function zoneId() external view returns (uint32);
                 function sequencer() external view returns (address);
                 function verifier() external view returns (address);
                 function sequencerPubkey() external view returns (bytes32);
@@ -372,7 +372,7 @@ macro_rules! define_abi {
 
             #[derive(Debug)]
             struct ZoneInfo {
-                uint64 zoneId;
+                uint32 zoneId;
                 address portal;
                 address messenger;
                 address initialToken;
@@ -398,7 +398,7 @@ macro_rules! define_abi {
                 }
                 #[derive(Debug)]
                 event ZoneCreated(
-                    uint64 indexed zoneId,
+                    uint32 indexed zoneId,
                     address indexed portal,
                     address indexed messenger,
                     address token,
@@ -408,10 +408,10 @@ macro_rules! define_abi {
                     bytes32 genesisTempoBlockHash,
                     uint64 genesisTempoBlockNumber
                 );
-                function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
+                function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
                 function verifier() external view returns (address);
-                function zones(uint64 zoneId) external view returns (ZoneInfo memory);
-                function zoneCount() external view returns (uint64);
+                function zones(uint32 zoneId) external view returns (ZoneInfo memory);
+                function zoneCount() external view returns (uint32);
                 function isZonePortal(address portal) external view returns (bool);
                 function isZoneMessenger(address messenger) external view returns (bool);
             }

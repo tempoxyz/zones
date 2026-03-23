@@ -322,7 +322,7 @@ mod tests {
 
     use auth_tokens::{build_token_with_signature, now_secs, sign_keychain_signature};
 
-    const ZONE_ID: u64 = 7;
+    const ZONE_ID: u32 = 7;
     const CHAIN_ID: u64 = 99;
     const PORTAL: Address = Address::repeat_byte(0x22);
 

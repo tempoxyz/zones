@@ -53,7 +53,7 @@ contract ZonePortal is IZonePortal {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    uint64 public immutable zoneId;
+    uint32 public immutable zoneId;
     address public immutable messenger;
     address public immutable verifier;
     uint64 public immutable genesisTempoBlockNumber;
@@ -98,7 +98,7 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     constructor(
-        uint64 _zoneId,
+        uint32 _zoneId,
         address _initialToken,
         address _messenger,
         address _sequencer,

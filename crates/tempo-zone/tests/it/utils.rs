@@ -2219,7 +2219,7 @@ pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, se
 /// suitable for the `X-Authorization-Token` header.
 fn build_auth_token(
     signer: &alloy_signer_local::PrivateKeySigner,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
 ) -> String {
@@ -2243,7 +2243,7 @@ fn build_auth_token(
 
 fn build_auth_token_with_signature(
     signature: TempoSignature,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
 ) -> String {
@@ -2258,7 +2258,7 @@ fn build_auth_token_with_signature(
 
 fn build_p256_auth_token(
     signing_key: &P256SigningKey,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
 ) -> String {
@@ -2276,7 +2276,7 @@ fn build_p256_auth_token(
 
 fn build_webauthn_auth_token(
     signing_key: &P256SigningKey,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
     challenge_digest: Option<B256>,
@@ -2298,7 +2298,7 @@ fn build_keychain_auth_token(
     signing_key: &P256SigningKey,
     root_account: Address,
     version: u8,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
 ) -> (String, Address) {
@@ -2572,7 +2572,7 @@ impl PrivateRpcTestCtx {
     pub(crate) fn build_bad_token(
         &self,
         signer: &alloy_signer_local::PrivateKeySigner,
-        zone_id: u64,
+        zone_id: u32,
         chain_id: u64,
         portal: Address,
     ) -> String {

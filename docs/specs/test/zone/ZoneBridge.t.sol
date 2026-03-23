@@ -97,7 +97,7 @@ contract ZoneBridgeTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     MockWithdrawalReceiver public withdrawalReceiver;
-    uint64 public zoneId;
+    uint32 public zoneId;
 
     bytes32 constant GENESIS_BLOCK_HASH = keccak256("genesis");
     bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");

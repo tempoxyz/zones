@@ -15,11 +15,15 @@ contract ZoneFactory is IZoneFactory {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Minimum gas required for zone creation.
+    /// @dev Prevents low-cost zone spam. The caller must supply at least this much gas.
+    uint256 public constant ZONE_CREATION_GAS = 15_000_000;
+
     /// @notice Next zone ID to be assigned
     /// @dev Starts at 1, reserving zone ID 0 for potential future use (e.g., mainnet as zone 0)
-    uint64 internal _nextZoneId = 1;
+    uint32 internal _nextZoneId = 1;
 
-    mapping(uint64 => ZoneInfo) internal _zones;
+    mapping(uint32 => ZoneInfo) internal _zones;
     mapping(address => bool) internal _isZonePortal;
     mapping(address => bool) internal _isZoneMessenger;
     mapping(address => bool) internal _validVerifiers;
@@ -46,14 +50,17 @@ contract ZoneFactory is IZoneFactory {
 
     function createZone(CreateZoneParams calldata params)
         external
-        returns (uint64 zoneId, address portal)
+        returns (uint32 zoneId, address portal)
     {
         // Validate initial token is a TIP-20
         if (!TempoUtilities.isTIP20(params.initialToken)) revert InvalidToken();
         if (params.sequencer == address(0)) revert InvalidSequencer();
         if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
+        if (gasleft() < ZONE_CREATION_GAS) revert InsufficientGas();
 
-        zoneId = _nextZoneId++;
+        zoneId = _nextZoneId;
+        if (zoneId == type(uint32).max) revert ZoneIdOverflow();
+        _nextZoneId = zoneId + 1;
 
         // We deploy messenger first, then portal.
         // Messenger needs portal's address at construction (immutable).
@@ -153,11 +160,11 @@ contract ZoneFactory is IZoneFactory {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Returns the number of zones created (not including reserved zone 0)
-    function zoneCount() external view returns (uint64) {
+    function zoneCount() external view returns (uint32) {
         return _nextZoneId - 1;
     }
 
-    function zones(uint64 zoneId) external view returns (ZoneInfo memory) {
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
         return _zones[zoneId];
     }
 

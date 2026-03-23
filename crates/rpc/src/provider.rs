@@ -30,7 +30,7 @@ pub struct ZoneProviderConfig {
     /// Signer for generating authorization tokens.
     pub signer: PrivateKeySigner,
     /// Zone identifier.
-    pub zone_id: u64,
+    pub zone_id: u32,
     /// Chain identifier.
     pub chain_id: u64,
     /// ZonePortal contract address on L1.
@@ -120,7 +120,7 @@ fn build_provider_with_token(
         .sign_hash_sync(&digest)
         .map_err(|e| eyre::eyre!("failed to sign zone auth token: {e}"))?;
 
-    // Build blob: <65-byte sig><53-byte fields>
+    // Build blob: <65-byte sig><49-byte fields>
     let mut blob = Vec::with_capacity(65 + fields.len());
     blob.extend_from_slice(&sig.r().to_be_bytes::<32>());
     blob.extend_from_slice(&sig.s().to_be_bytes::<32>());

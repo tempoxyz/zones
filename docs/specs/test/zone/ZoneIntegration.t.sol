@@ -68,7 +68,7 @@ contract ZoneIntegrationTest is BaseTest {
 
     // Helpers
     TrackingReceiver public receiver;
-    uint64 public zoneId;
+    uint32 public zoneId;
 
     bytes32 constant GENESIS_BLOCK_HASH = keccak256("genesis");
     bytes32 constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
