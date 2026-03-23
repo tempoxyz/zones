@@ -3,7 +3,7 @@ use alloy_consensus::Header;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
-use alloy_sol_types::{SolCall, SolEvent, SolValue};
+use alloy_sol_types::{SolEvent, SolValue};
 use eyre::WrapErr;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use reth_node_api::FullNodeComponents;
@@ -242,12 +242,16 @@ impl ZoneTestNode {
         min_balance: U256,
         timeout: Duration,
     ) -> eyre::Result<U256> {
+        use tempo_contracts::precompiles::ITIP20;
+
+        let tip20 = ITIP20::new(token, self.provider());
         poll_until(timeout, DEFAULT_POLL, "token balance", || {
+            let tip20 = &tip20;
             async move {
                 // balanceOf may revert with Uninitialized() if the token hasn't
                 // been created yet (e.g. waiting for a TokenEnabled event to be
                 // processed). Treat reverts as "not ready" rather than fatal.
-                let balance = match self.read_zone_balance_of(token, account).await {
+                let balance = match tip20.balanceOf(account).from(account).call().await {
                     Ok(b) => b,
                     Err(_) => return Ok(None),
                 };
@@ -289,34 +293,12 @@ impl ZoneTestNode {
 
     /// Read a TIP-20 token balance on this zone (single-shot, no polling).
     pub(crate) async fn balance_of(&self, token: Address, account: Address) -> eyre::Result<U256> {
-        self.read_zone_balance_of(token, account).await
-    }
-
-    async fn read_zone_balance_of(&self, token: Address, account: Address) -> eyre::Result<U256> {
-        use alloy_provider::Provider;
         use tempo_contracts::precompiles::ITIP20;
-
-        let result: String = self
-            .provider()
-            .raw_request(
-                "eth_call".into(),
-                serde_json::json!([
-                    {
-                        "from": format!("{account:#x}"),
-                        "to": format!("{token:#x}"),
-                        "data": format!(
-                            "0x{}",
-                            alloy_primitives::hex::encode(
-                                ITIP20::balanceOfCall { account }.abi_encode()
-                            )
-                        ),
-                    },
-                    "latest"
-                ]),
-            )
-            .await?;
-        let bytes = alloy_primitives::hex::decode(result.trim_start_matches("0x"))?;
-        Ok(ITIP20::balanceOfCall::abi_decode_returns(&bytes)?)
+        Ok(ITIP20::new(token, self.provider())
+            .balanceOf(account)
+            .from(account)
+            .call()
+            .await?)
     }
 
     /// Wait for the zone L2 to finalize an L1 block beyond `after_block`.
