@@ -7,7 +7,7 @@ use crate::{
     ext::TempoStateExt,
     payload::{ZonePayloadAttributes, ZonePayloadTypes},
 };
-use alloy_primitives::{Address, U256};
+use alloy_primitives::U256;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
@@ -125,6 +125,7 @@ impl ZoneNode {
 
         let l1_state_provider_config = L1StateProviderConfig {
             l1_rpc_url,
+            portal_address,
             retry_connection_interval,
             ..Default::default()
         };
@@ -459,7 +460,6 @@ where
             self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
-            self.portal_address,
         );
         Self::components(executor_builder)
     }
@@ -531,23 +531,19 @@ pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: SharedL1StateCache,
     policy_cache: crate::SharedPolicyCache,
-    portal_address: Address,
 }
 
 impl ZoneExecutorBuilder {
-    /// Create a zone executor builder with the shared L1 state/policy caches
-    /// and the L1 portal address used by execution-layer privacy.
+    /// Create a zone executor builder with the shared L1 state/policy caches.
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: SharedL1StateCache,
         policy_cache: crate::SharedPolicyCache,
-        portal_address: Address,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_cache,
             policy_cache,
-            portal_address,
         }
     }
 }
@@ -567,7 +563,7 @@ where
         )
         .await?;
 
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider, self.portal_address);
+        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()

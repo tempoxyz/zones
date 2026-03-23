@@ -22,6 +22,7 @@ fn l1_rpc_url() -> String {
 async fn make_provider() -> L1StateProvider {
     let config = L1StateProviderConfig {
         l1_rpc_url: l1_rpc_url(),
+        portal_address: ZONE_PORTAL,
         ..Default::default()
     };
     let cache = SharedL1StateCache::new(HashSet::from([ZONE_PORTAL]));

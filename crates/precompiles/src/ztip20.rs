@@ -57,8 +57,8 @@ macro_rules! decode_or_revert {
 /// precompile can enforce sequencer-visible reads without knowing about the
 /// concrete provider type.
 pub trait SequencerExt: Send + Sync {
-    /// Return the latest known active sequencer for `portal_address`.
-    fn latest_sequencer(&self, portal_address: Address) -> Option<Address>;
+    /// Return the latest known active sequencer.
+    fn latest_sequencer(&self) -> Option<Address>;
 }
 
 /// Zone-specific TIP-20 token precompile.
@@ -72,8 +72,6 @@ pub struct ZoneTip20Token<P> {
     registry: Option<ZoneTip403ProxyRegistry<P>>,
     /// Sequencer-capable backend used to authorize private reads for the active sequencer.
     sequencer: Arc<dyn SequencerExt>,
-    /// Zone portal address whose L1 storage defines the current active sequencer.
-    portal_address: Address,
 }
 
 impl<P: PolicyCheck> ZoneTip20Token<P> {
@@ -81,12 +79,10 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     pub fn new(
         registry: Option<ZoneTip403ProxyRegistry<P>>,
         sequencer: Arc<dyn SequencerExt>,
-        portal_address: Address,
     ) -> Self {
         Self {
             registry,
             sequencer,
-            portal_address,
         }
     }
 
@@ -296,7 +292,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
 
     fn is_sequencer(&self, caller: Address) -> bool {
         self.sequencer
-            .latest_sequencer(self.portal_address)
+            .latest_sequencer()
             .is_some_and(|sequencer| caller == sequencer)
     }
 
@@ -336,11 +332,10 @@ where
         cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
         registry: Option<ZoneTip403ProxyRegistry<P>>,
         sequencer: Arc<dyn SequencerExt>,
-        portal_address: Address,
     ) -> DynPrecompile {
         let spec = cfg.spec;
         let gas_params = cfg.gas_params.clone();
-        let token = Self::new(registry, sequencer, portal_address);
+        let token = Self::new(registry, sequencer);
 
         DynPrecompile::new_stateful(
             PrecompileId::Custom("ZoneTip20Token".into()),
@@ -487,7 +482,7 @@ mod tests {
     }
 
     impl SequencerExt for MockSequencer {
-        fn latest_sequencer(&self, _portal_address: Address) -> Option<Address> {
+        fn latest_sequencer(&self) -> Option<Address> {
             self.address
         }
     }
@@ -514,7 +509,6 @@ mod tests {
 
         fn new_with_registry(policy: Option<MockPolicyProvider>) -> TestResult<Self> {
             let token = PATH_USD_ADDRESS;
-            let portal = address!("0x0000000000000000000000000000000000000099");
             let admin = address!("0x00000000000000000000000000000000000000a1");
             let alice = address!("0x00000000000000000000000000000000000000a2");
             let bob = address!("0x00000000000000000000000000000000000000a3");
@@ -571,7 +565,6 @@ mod tests {
                 Arc::new(MockSequencer {
                     address: Some(sequencer),
                 }),
-                portal,
             );
 
             Ok(Self {

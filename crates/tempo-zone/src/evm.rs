@@ -12,7 +12,6 @@ use alloy_evm::{
     precompiles::PrecompilesMap,
     revm::{Inspector, inspector::NoOpInspector},
 };
-use alloy_primitives::Address;
 use alloy_provider::{Provider, ProviderBuilder};
 use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
@@ -50,16 +49,14 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 pub struct ZoneEvmFactory {
     l1_provider: L1StateProvider,
     policy_provider: Option<PolicyProvider>,
-    portal_address: Address,
 }
 
 impl ZoneEvmFactory {
-    /// Create a new factory with the given L1 state provider and portal address.
-    pub fn new(l1_provider: L1StateProvider, portal_address: Address) -> Self {
+    /// Create a new factory with the given L1 state provider.
+    pub fn new(l1_provider: L1StateProvider) -> Self {
         Self {
             l1_provider,
             policy_provider: None,
-            portal_address,
         }
     }
 
@@ -91,7 +88,6 @@ impl ZoneEvmFactory {
             .map(ZoneTip403ProxyRegistry::new);
         let sequencer: Arc<dyn crate::precompiles::SequencerExt> =
             Arc::new(self.l1_provider.clone());
-        let portal_address = self.portal_address;
 
         if let Some(provider) = self.policy_provider.clone() {
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
@@ -126,7 +122,6 @@ impl ZoneEvmFactory {
                     &zone_cfg,
                     registry.clone(),
                     sequencer.clone(),
-                    portal_address,
                 ))
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
                 Some(TipFeeManager::create_precompile(&zone_cfg))
@@ -237,13 +232,9 @@ pub struct ZoneEvmConfig {
 
 impl ZoneEvmConfig {
     /// Create a new zone EVM config with the given chain spec, L1 state
-    /// provider, and L1 portal address.
-    pub fn new(
-        chain_spec: Arc<TempoChainSpec>,
-        l1_provider: L1StateProvider,
-        portal_address: Address,
-    ) -> Self {
-        let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
+    /// provider.
+    pub fn new(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
+        let zone_factory = ZoneEvmFactory::new(l1_provider);
         let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
@@ -266,8 +257,9 @@ impl ZoneEvmConfig {
             .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
-        let l1_provider = L1StateProvider::new_raw(cache, provider, runtime_handle);
-        Self::new(chain_spec, l1_provider, Address::ZERO)
+        let config = crate::l1_state::L1StateProviderConfig::default();
+        let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
+        Self::new(chain_spec, l1_provider)
     }
 
     /// Set the policy provider for the TIP-403 proxy precompile.
