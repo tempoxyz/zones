@@ -15,7 +15,7 @@ interface IZoneToken {
 
 /// @notice Common types for the Zone protocol
 struct ZoneInfo {
-    uint64 zoneId;
+    uint32 zoneId;
     address portal;
     address messenger;
     address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
@@ -398,7 +398,7 @@ interface IZoneFactory {
     }
 
     event ZoneCreated(
-        uint64 indexed zoneId,
+        uint32 indexed zoneId,
         address indexed portal,
         address indexed messenger,
         address initialToken,
@@ -412,13 +412,15 @@ interface IZoneFactory {
     error InvalidToken();
     error InvalidSequencer();
     error InvalidVerifier();
+    error InsufficientGas();
+    error ZoneIdOverflow();
 
     function isValidVerifier(address verifier) external view returns (bool);
     function createZone(CreateZoneParams calldata params)
         external
-        returns (uint64 zoneId, address portal);
-    function zoneCount() external view returns (uint64);
-    function zones(uint64 zoneId) external view returns (ZoneInfo memory);
+        returns (uint32 zoneId, address portal);
+    function zoneCount() external view returns (uint32);
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
     function isZoneMessenger(address messenger) external view returns (bool);
 
@@ -528,7 +530,7 @@ interface IZonePortal {
     /// @notice Maximum allowed gas fee rate (1e18)
     function MAX_GAS_FEE_RATE() external view returns (uint128);
 
-    function zoneId() external view returns (uint64);
+    function zoneId() external view returns (uint32);
     function messenger() external view returns (address);
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);

@@ -31,7 +31,7 @@ sol! {
     #[sol(rpc)]
     contract ZoneFactory {
         event ZoneCreated(
-            uint64 indexed zoneId,
+            uint32 indexed zoneId,
             address indexed portal,
             address indexed messenger,
             address initialToken,
@@ -43,7 +43,7 @@ sol! {
         );
 
         function verifier() external view returns (address);
-        function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
+        function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
     }
 }
 
