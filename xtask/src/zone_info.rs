@@ -19,7 +19,7 @@ pub(crate) struct ZoneInfoCmd {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    #[arg(long, default_value_t = address!("0x7F4528b1a555D704bC20f8328557240BED29488D"))]
+    #[arg(long, default_value_t = address!("0xAe40824A58f848fB8D17B3a4F2D94e472c80439f"))]
     zone_factory: Address,
 }
 
