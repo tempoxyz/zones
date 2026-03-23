@@ -1658,6 +1658,7 @@ pub(crate) struct WithdrawalArgs {
     pub gas_limit: u64,
     pub fallback_recipient: Option<Address>,
     pub data: alloy_primitives::Bytes,
+    pub reveal_to: alloy_primitives::Bytes,
 }
 
 impl WithdrawalArgs {
@@ -1670,6 +1671,7 @@ impl WithdrawalArgs {
             gas_limit: 0,
             fallback_recipient: None,
             data: alloy_primitives::Bytes::new(),
+            reveal_to: alloy_primitives::Bytes::new(),
         }
     }
 
@@ -1701,6 +1703,7 @@ impl WithdrawalArgs {
             gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
+            reveal_to: alloy_primitives::Bytes::new(),
         }
     }
 
@@ -1730,6 +1733,7 @@ impl WithdrawalArgs {
             gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
+            reveal_to: alloy_primitives::Bytes::new(),
         }
     }
 
@@ -2151,6 +2155,7 @@ impl ZoneAccount {
                 args.gas_limit,
                 fallback_recipient,
                 args.data,
+                args.reveal_to,
             )
             .gas(WITHDRAWAL_TX_GAS)
             .send()

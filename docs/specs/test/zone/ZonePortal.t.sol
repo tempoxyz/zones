@@ -41,7 +41,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     bool public shouldAccept = true;
     bool public shouldRevert = false;
 
-    address public lastSender;
+    bytes32 public lastSenderTag;
     address public lastToken;
     uint128 public lastAmount;
     bytes public lastCallbackData;
@@ -60,7 +60,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     }
 
     function onWithdrawalReceived(
-        address sender,
+        bytes32 senderTag,
         address token,
         uint128 amount,
         bytes calldata callbackData
@@ -68,7 +68,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         external
         returns (bytes4)
     {
-        lastSender = sender;
+        lastSenderTag = senderTag;
         lastToken = token;
         lastAmount = amount;
         lastCallbackData = callbackData;
@@ -90,7 +90,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
 contract GasConsumingReceiver is IWithdrawalReceiver {
 
     function onWithdrawalReceived(
-        address,
+        bytes32,
         address,
         uint128,
         bytes calldata
@@ -111,7 +111,7 @@ contract SuccessfulReceiver is IWithdrawalReceiver {
     uint256 public callCount;
 
     function onWithdrawalReceived(
-        address,
+        bytes32,
         address,
         uint128,
         bytes calldata
@@ -182,6 +182,38 @@ contract ZonePortalTest is BaseTest {
 
         // Set expected messenger for withdrawal receiver
         withdrawalReceiver.setExpectedMessenger(address(messenger));
+    }
+
+    function _senderTag(address sender) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(sender));
+    }
+
+    function _withdrawal(
+        address token,
+        address sender,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes memory callbackData
+    )
+        internal
+        pure
+        returns (Withdrawal memory)
+    {
+        return Withdrawal({
+            token: token,
+            senderTag: _senderTag(sender),
+            to: to,
+            amount: amount,
+            fee: 0,
+            memo: memo,
+            gasLimit: gasLimit,
+            fallbackRecipient: fallbackRecipient,
+            callbackData: callbackData,
+            encryptedSender: ""
+        });
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -476,17 +508,8 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         // Create a withdrawal and add to queue via batch
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0, // No callback
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
 
         // Build withdrawal hash (oldest = outermost, innermost = EMPTY_SENTINEL)
         bytes32 withdrawalHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
@@ -534,28 +557,10 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         // Create two withdrawals in the same batch
-        Withdrawal memory w1 = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 300e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
-        Withdrawal memory w2 = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: charlie,
-            amount: 400e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w1 =
+            _withdrawal(address(pathUSD), alice, bob, 300e6, bytes32(0), 0, alice, "");
+        Withdrawal memory w2 =
+            _withdrawal(address(pathUSD), alice, charlie, 400e6, bytes32(0), 0, alice, "");
 
         // Build queue: w1 is oldest (outermost), w2 is newest (innermost wraps EMPTY_SENTINEL)
         bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
@@ -610,17 +615,8 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         // Batch 1: withdrawal to bob
-        Withdrawal memory w1 = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w1 =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
         bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -640,17 +636,8 @@ contract ZonePortalTest is BaseTest {
         );
 
         // Batch 2: withdrawal to charlie
-        Withdrawal memory w2 = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: charlie,
-            amount: 600e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w2 =
+            _withdrawal(address(pathUSD), alice, charlie, 600e6, bytes32(0), 0, alice, "");
         bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -727,17 +714,16 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         // Create withdrawal with callback
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: address(withdrawalReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 100_000,
-            fallbackRecipient: alice,
-            callbackData: "callback_data"
-        });
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(withdrawalReceiver),
+            500e6,
+            bytes32(0),
+            100_000,
+            alice,
+            "callback_data"
+        );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         // Advance a block so the history precompile can return a hash
@@ -764,7 +750,7 @@ contract ZonePortalTest is BaseTest {
 
         // Receiver should have gotten funds and callback
         assertEq(pathUSD.balanceOf(address(withdrawalReceiver)), 500e6);
-        assertEq(withdrawalReceiver.lastSender(), alice);
+        assertEq(withdrawalReceiver.lastSenderTag(), _senderTag(alice));
         assertEq(withdrawalReceiver.lastAmount(), 500e6);
         assertEq(withdrawalReceiver.lastCallbackData(), "callback_data");
     }
@@ -783,17 +769,9 @@ contract ZonePortalTest is BaseTest {
         withdrawalReceiver.setShouldRevert(true);
 
         // Create withdrawal with callback
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: address(withdrawalReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 100_000,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD), alice, address(withdrawalReceiver), 500e6, bytes32(0), 100_000, alice, ""
+        );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         // Advance a block so the history precompile can return a hash
@@ -837,17 +815,9 @@ contract ZonePortalTest is BaseTest {
         // Set receiver to return wrong selector
         withdrawalReceiver.setShouldAccept(false);
 
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: address(withdrawalReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 100_000,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD), alice, address(withdrawalReceiver), 500e6, bytes32(0), 100_000, alice, ""
+        );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         // Advance a block so the history precompile can return a hash
@@ -893,17 +863,8 @@ contract ZonePortalTest is BaseTest {
         pathUSD.pause();
         vm.stopPrank();
 
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         // Advance a block so the history precompile can return a hash
@@ -937,17 +898,8 @@ contract ZonePortalTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     function test_processWithdrawal_revertsIfEmpty() public {
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 100e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 100e6, bytes32(0), 0, alice, "");
 
         vm.expectRevert(WithdrawalQueueLib.NoWithdrawalsInQueue.selector);
         portal.processWithdrawal(w, bytes32(0));
@@ -961,17 +913,8 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"));
         vm.stopPrank();
 
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         // Advance a block so the history precompile can return a hash
@@ -993,17 +936,8 @@ contract ZonePortalTest is BaseTest {
         );
 
         // Try to process with wrong withdrawal data
-        Withdrawal memory wrongW = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: charlie,
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory wrongW =
+            _withdrawal(address(pathUSD), alice, charlie, 500e6, bytes32(0), 0, alice, "");
 
         vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
         portal.processWithdrawal(wrongW, bytes32(0));
@@ -1016,17 +950,8 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"));
         vm.stopPrank();
 
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         // Advance a block so the history precompile can return a hash
@@ -1375,17 +1300,8 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHash = portal.currentDepositQueueHash();
 
         // Create two batches with different withdrawals
-        Withdrawal memory w1 = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 100e6,
-            fee: 0,
-            memo: bytes32("w1"),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w1 =
+            _withdrawal(address(pathUSD), alice, bob, 100e6, bytes32("w1"), 0, alice, "");
         bytes32 w1Hash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -1401,17 +1317,8 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        Withdrawal memory w2 = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: charlie,
-            amount: 200e6,
-            fee: 0,
-            memo: bytes32("w2"),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w2 =
+            _withdrawal(address(pathUSD), alice, charlie, 200e6, bytes32("w2"), 0, alice, "");
         bytes32 w2Hash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -1452,17 +1359,16 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHashBefore = portal.currentDepositQueueHash();
 
         // Create withdrawal with callback to gas-consuming receiver
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: address(gasConsumingReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 50_000, // Limited gas
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(gasConsumingReceiver),
+            500e6,
+            bytes32(0),
+            50_000,
+            alice,
+            ""
+        );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -1498,17 +1404,16 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHash = portal.currentDepositQueueHash();
 
         // Create withdrawal with gasLimit = 0
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: address(successfulReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0, // No callback
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(successfulReceiver),
+            500e6,
+            bytes32(0),
+            0,
+            alice,
+            ""
+        );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -1545,17 +1450,16 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHash = portal.currentDepositQueueHash();
 
         // Create withdrawal with callback
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: address(successfulReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 100_000,
-            fallbackRecipient: alice,
-            callbackData: "test"
-        });
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(successfulReceiver),
+            500e6,
+            bytes32(0),
+            100_000,
+            alice,
+            "test"
+        );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -1592,17 +1496,16 @@ contract ZonePortalTest is BaseTest {
         bytes32 depositHashBefore = portal.currentDepositQueueHash();
 
         // Create withdrawal with callback that will fail
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: address(gasConsumingReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32("payment"),
-            gasLimit: 50_000,
-            fallbackRecipient: bob, // Bob is the fallback
-            callbackData: ""
-        });
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(gasConsumingReceiver),
+            500e6,
+            bytes32("payment"),
+            50_000,
+            bob,
+            ""
+        );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -1734,17 +1637,8 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(address(pathUSD), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: bob,
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);
@@ -1773,17 +1667,9 @@ contract ZonePortalTest is BaseTest {
         portal.deposit(address(pathUSD), alice, 1000e6, bytes32(""));
         vm.stopPrank();
 
-        Withdrawal memory w = Withdrawal({
-            token: address(pathUSD),
-            sender: alice,
-            to: address(gasConsumingReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 50_000,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD), alice, address(gasConsumingReceiver), 500e6, bytes32(0), 50_000, alice, ""
+        );
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
         vm.roll(block.number + 1);

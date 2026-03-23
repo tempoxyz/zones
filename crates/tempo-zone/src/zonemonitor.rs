@@ -39,7 +39,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
-    batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot},
+    batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_slot_withdrawals},
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -387,23 +387,17 @@ impl ZoneMonitor {
         to: u64,
         end_state: ZoneBlockSnapshot,
     ) -> Result<()> {
-        // Fetch withdrawal events and finalized hashes concurrently.
-        let (all_withdrawals, finalized_hashes) = tokio::try_join!(
-            self.fetch_withdrawals(from, to),
-            self.fetch_finalized_hashes(from, to),
-        )?;
-
-        let withdrawal_queue_hash =
-            Self::compute_withdrawal_hash(&all_withdrawals, &finalized_hashes)?;
+        let all_withdrawals =
+            fetch_slot_withdrawals(&self.outbox, &self.provider, from, to).await?;
+        let withdrawal_queue_hash = abi::Withdrawal::queue_hash(&all_withdrawals);
 
         if !all_withdrawals.is_empty() {
             info!(
                 from,
                 to,
                 count = all_withdrawals.len(),
-                finalized_batches = finalized_hashes.len(),
                 withdrawal_queue_hash = %withdrawal_queue_hash,
-                "Collected withdrawal requests from zone"
+                "Collected finalized withdrawals from zone"
             );
         }
 
@@ -477,14 +471,9 @@ impl ZoneMonitor {
         for (step_idx, &step_end) in boundaries.iter().enumerate() {
             let step_state = self.fetch_block_snapshot(step_end).await?;
 
-            // Fetch withdrawal events for this sub-range.
-            let (step_withdrawals, step_finalized) = tokio::try_join!(
-                self.fetch_withdrawals(range_start, step_end),
-                self.fetch_finalized_hashes(range_start, step_end),
-            )?;
-
-            let withdrawal_queue_hash =
-                Self::compute_withdrawal_hash(&step_withdrawals, &step_finalized)?;
+            let step_withdrawals =
+                fetch_slot_withdrawals(&self.outbox, &self.provider, range_start, step_end).await?;
+            let withdrawal_queue_hash = abi::Withdrawal::queue_hash(&step_withdrawals);
 
             let batch_data = BatchData {
                 tempo_block_number: step_state.tempo_block_number,
@@ -511,88 +500,6 @@ impl ZoneMonitor {
         }
 
         Ok(())
-    }
-
-    /// Compute the withdrawal queue hash from withdrawal events and finalized hashes.
-    fn compute_withdrawal_hash(
-        all_withdrawals: &[abi::Withdrawal],
-        finalized_hashes: &[B256],
-    ) -> Result<B256> {
-        let withdrawal_queue_hash = if finalized_hashes.len() == 1 {
-            finalized_hashes[0]
-        } else if finalized_hashes.len() > 1 || !all_withdrawals.is_empty() {
-            abi::Withdrawal::queue_hash(all_withdrawals)
-        } else {
-            B256::ZERO
-        };
-
-        if !withdrawal_queue_hash.is_zero() && all_withdrawals.is_empty() {
-            return Err(eyre::eyre!(
-                "withdrawal_queue_hash is non-zero but no withdrawal events found — \
-                 RPC may have returned incomplete data"
-            ));
-        }
-
-        Ok(withdrawal_queue_hash)
-    }
-
-    /// Fetch all `WithdrawalRequested` events in the given block range and convert
-    /// them to [`abi::Withdrawal`] structs (order preserved from events).
-    async fn fetch_withdrawals(&self, from: u64, to: u64) -> Result<Vec<abi::Withdrawal>> {
-        let events = self
-            .outbox
-            .WithdrawalRequested_filter()
-            .from_block(from)
-            .to_block(to)
-            .query()
-            .await?;
-
-        let mut events_with_order: Vec<_> = events
-            .into_iter()
-            .map(|(event, log)| {
-                let sort_key = (
-                    log.block_number.unwrap_or(0),
-                    log.transaction_index.unwrap_or(0),
-                    log.log_index.unwrap_or(0),
-                );
-                (sort_key, event)
-            })
-            .collect();
-
-        events_with_order.sort_by_key(|(key, _)| *key);
-
-        Ok(events_with_order
-            .into_iter()
-            .map(|(_, event)| abi::Withdrawal {
-                token: event.token,
-                sender: event.sender,
-                to: event.to,
-                amount: event.amount,
-                fee: event.fee,
-                memo: event.memo,
-                gasLimit: event.gasLimit,
-                fallbackRecipient: event.fallbackRecipient,
-                callbackData: event.data,
-            })
-            .collect())
-    }
-
-    /// Fetch all non-zero `withdrawalQueueHash` values from `BatchFinalized` events
-    /// in the given block range.
-    async fn fetch_finalized_hashes(&self, from: u64, to: u64) -> Result<Vec<B256>> {
-        let events = self
-            .outbox
-            .BatchFinalized_filter()
-            .from_block(from)
-            .to_block(to)
-            .query()
-            .await?;
-
-        Ok(events
-            .iter()
-            .map(|(event, _)| event.withdrawalQueueHash)
-            .filter(|h| !h.is_zero())
-            .collect())
     }
 
     /// Read the zone state at block `to`: tempo block number, processed deposit

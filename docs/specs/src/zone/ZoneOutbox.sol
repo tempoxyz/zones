@@ -1,7 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneConfig, IZoneOutbox, IZoneToken, LastBatch, Withdrawal } from "./IZone.sol";
+import {
+    IZoneConfig,
+    IZoneOutbox,
+    IZoneToken,
+    IZoneTxContext,
+    LastBatch,
+    PendingWithdrawal,
+    Withdrawal,
+    ZONE_TX_CONTEXT
+} from "./IZone.sol";
 
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
@@ -28,6 +37,13 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev Covers processWithdrawal overhead: queue dequeue, transfer, event emission
     uint64 public constant WITHDRAWAL_BASE_GAS = 50_000;
 
+    /// @notice Length of a compressed secp256k1 public key
+    uint256 public constant REVEAL_TO_KEY_LENGTH = 33;
+
+    /// @notice Length of `encryptedSender` when selective reveal is enabled
+    /// @dev compressed ephemeral pubkey (33) || nonce (12) || ciphertext (52) || tag (16)
+    uint256 public constant AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH = 113;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -52,7 +68,7 @@ contract ZoneOutbox is IZoneOutbox {
     LastBatch internal _lastBatch;
 
     /// @notice Pending withdrawals waiting to be batched
-    Withdrawal[] internal _pendingWithdrawals;
+    PendingWithdrawal[] internal _pendingWithdrawals;
     uint256 internal _pendingWithdrawalsHead;
 
     /// @notice Maximum number of withdrawal requests allowed per zone block (0 = unlimited)
@@ -78,6 +94,10 @@ contract ZoneOutbox is IZoneOutbox {
     error OnlySequencer();
     error InvalidBlockNumber();
     error TooManyWithdrawalsThisBlock();
+    error InvalidRevealTo();
+    error InvalidCurrentTxHash();
+    error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
+    error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -148,6 +168,50 @@ contract ZoneOutbox is IZoneOutbox {
     )
         external
     {
+        _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, "");
+    }
+
+    /// @notice Request a withdrawal from the zone back to Tempo
+    /// @dev Caller must have approved the outbox to spend `amount + fee` of the specified token.
+    ///      The outbox burns the tokens and stores the withdrawal. The sequencer
+    ///      calls finalizeWithdrawalBatch() to construct the withdrawal queue hash.
+    ///      The token must be enabled on the portal. Withdrawals can never be disabled
+    ///      for an enabled token (non-custodial guarantee).
+    /// @param token The TIP-20 token to withdraw
+    /// @param to The Tempo recipient address
+    /// @param amount Amount to send to recipient (fee is additional)
+    /// @param memo User-provided context (e.g., payment reference)
+    /// @param gasLimit Gas limit for IWithdrawalReceiver callback (0 = no callback)
+    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param data Calldata for IWithdrawalReceiver callback
+    /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
+    function requestWithdrawal(
+        address token,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes calldata data,
+        bytes calldata revealTo
+    )
+        external
+    {
+        _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo);
+    }
+
+    function _requestWithdrawal(
+        address token,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes memory data,
+        bytes memory revealTo
+    )
+        internal
+    {
         // Always require a valid fallback recipient
         if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
@@ -157,6 +221,8 @@ contract ZoneOutbox is IZoneOutbox {
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
         }
+
+        _validateRevealTo(revealTo);
 
         // Enforce per-block withdrawal cap (0 = unlimited)
         if (maxWithdrawalsPerBlock > 0) {
@@ -174,6 +240,8 @@ contract ZoneOutbox is IZoneOutbox {
         // Fee is paid in the same token being withdrawn
         uint128 fee = calculateWithdrawalFee(gasLimit);
         uint128 totalBurn = amount + fee;
+        bytes32 txHash = IZoneTxContext(ZONE_TX_CONTEXT).currentTxHash();
+        if (txHash == bytes32(0)) revert InvalidCurrentTxHash();
 
         // Transfer tokens from sender to this contract, then burn
         // (Using transferFrom so user must approve first)
@@ -188,16 +256,18 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Store withdrawal in pending array
         _pendingWithdrawals.push(
-            Withdrawal({
+            PendingWithdrawal({
                 token: token,
                 sender: msg.sender,
+                txHash: txHash,
                 to: to,
                 amount: amount,
                 fee: fee,
                 memo: memo,
                 gasLimit: gasLimit,
                 fallbackRecipient: fallbackRecipient,
-                callbackData: data
+                callbackData: data,
+                revealTo: revealTo
             })
         );
 
@@ -205,7 +275,17 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 index = nextWithdrawalIndex++;
 
         emit WithdrawalRequested(
-            index, msg.sender, token, to, amount, fee, memo, gasLimit, fallbackRecipient, data
+            index,
+            msg.sender,
+            token,
+            to,
+            amount,
+            fee,
+            memo,
+            gasLimit,
+            fallbackRecipient,
+            data,
+            revealTo
         );
     }
 
@@ -221,11 +301,42 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Emits BatchFinalized for observability (proof reads from state).
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
+    function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber)
+        external
+        returns (bytes32 withdrawalQueueHash)
+    {
+        uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        if (count > pending) {
+            count = pending;
+        }
+        return _finalizeWithdrawalBatch(count, blockNumber, new bytes[](count));
+    }
+
+    /// @notice Finalize the batch at end of block - build withdrawal hash and emit proof inputs
+    /// @dev Only callable by sequencer at the end of a block.
+    ///      The proof enforces that this is the last call in the block and that a batch
+    ///      ends with exactly one finalizeWithdrawalBatch call (use count = 0 if no withdrawals).
+    ///      Protocol and proof enforce this runs at the end of the final block in the batch.
+    ///      Emits BatchFinalized for observability (proof reads from state).
+    /// @param count Max number of withdrawals to process (avoids unbounded loops)
+    /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(
         uint256 count,
-        uint64 blockNumber
+        uint64 blockNumber,
+        bytes[] calldata encryptedSenders
     )
         external
+        returns (bytes32 withdrawalQueueHash)
+    {
+        return _finalizeWithdrawalBatch(count, blockNumber, encryptedSenders);
+    }
+
+    function _finalizeWithdrawalBatch(
+        uint256 count,
+        uint64 blockNumber,
+        bytes[] memory encryptedSenders
+    )
+        internal
         returns (bytes32 withdrawalQueueHash)
     {
         if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
@@ -236,6 +347,9 @@ contract ZoneOutbox is IZoneOutbox {
         // Clamp to actual pending count
         if (count > pending) {
             count = pending;
+        }
+        if (encryptedSenders.length != count) {
+            revert InvalidEncryptedSenderCount(encryptedSenders.length, count);
         }
 
         // Build hash chain in reverse order (newest to oldest)
@@ -249,7 +363,24 @@ contract ZoneOutbox is IZoneOutbox {
 
             for (uint256 i = end; i > start;) {
                 uint256 index = i - 1;
-                Withdrawal memory w = _pendingWithdrawals[index];
+                PendingWithdrawal memory pendingWithdrawal = _pendingWithdrawals[index];
+                bytes memory encryptedSender = encryptedSenders[index - start];
+                _validateEncryptedSender(pendingWithdrawal.revealTo, encryptedSender);
+
+                Withdrawal memory w = Withdrawal({
+                    token: pendingWithdrawal.token,
+                    senderTag: keccak256(
+                        abi.encodePacked(pendingWithdrawal.sender, pendingWithdrawal.txHash)
+                    ),
+                    to: pendingWithdrawal.to,
+                    amount: pendingWithdrawal.amount,
+                    fee: pendingWithdrawal.fee,
+                    memo: pendingWithdrawal.memo,
+                    gasLimit: pendingWithdrawal.gasLimit,
+                    fallbackRecipient: pendingWithdrawal.fallbackRecipient,
+                    callbackData: pendingWithdrawal.callbackData,
+                    encryptedSender: encryptedSender
+                });
                 withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
                 delete _pendingWithdrawals[index];
                 unchecked {
@@ -290,6 +421,30 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory) {
         return _lastBatch;
+    }
+
+    function _validateRevealTo(bytes memory revealTo) internal pure {
+        if (revealTo.length == 0) {
+            return;
+        }
+        if (revealTo.length != REVEAL_TO_KEY_LENGTH) revert InvalidRevealTo();
+        bytes1 prefix = revealTo[0];
+        if (prefix != 0x02 && prefix != 0x03) revert InvalidRevealTo();
+    }
+
+    function _validateEncryptedSender(
+        bytes memory revealTo,
+        bytes memory encryptedSender
+    )
+        internal
+        pure
+    {
+        uint256 expectedLength = revealTo.length == 0
+            ? 0
+            : AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH;
+        if (encryptedSender.length != expectedLength) {
+            revert InvalidEncryptedSenderLength(encryptedSender.length, expectedLength);
+        }
     }
 
 }

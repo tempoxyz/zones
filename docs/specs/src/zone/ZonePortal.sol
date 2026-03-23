@@ -651,7 +651,7 @@ contract ZonePortal is IZonePortal {
         try IZoneMessenger(messenger)
             .relayMessage(
                 _token,
-                withdrawal.sender,
+                withdrawal.senderTag,
                 withdrawal.to,
                 withdrawal.amount,
                 withdrawal.gasLimit,

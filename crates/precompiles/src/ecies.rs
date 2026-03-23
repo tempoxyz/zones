@@ -21,6 +21,12 @@ use crate::{
 /// Plaintext size for encrypted deposits: 20 bytes (address) + 32 bytes (memo) + 12 bytes (padding).
 pub const ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE: usize = 64;
 
+/// Plaintext size for authenticated-withdrawal sender reveals: 20 bytes (sender) + 32 bytes (tx hash).
+pub const AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE: usize = 52;
+
+/// Total encoded size of `encryptedSender`.
+pub const AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE: usize = 33 + 12 + 52 + 16;
+
 /// Result of sequencer-side ECDH + Chaum-Pedersen proof derivation.
 ///
 /// This is always producible as long as the ephemeral public key is valid
@@ -145,6 +151,98 @@ pub struct EncryptedDepositArgs {
     pub nonce: [u8; 12],
     /// AES-256-GCM authentication tag.
     pub tag: [u8; 16],
+}
+
+/// Encrypt `(sender, tx_hash)` for authenticated withdrawals.
+///
+/// The output is:
+/// `compressed_ephemeral_pubkey(33) || nonce(12) || ciphertext(52) || tag(16)`.
+pub fn encrypt_authenticated_withdrawal(
+    reveal_to: &[u8],
+    sender: Address,
+    tx_hash: B256,
+) -> Option<Vec<u8>> {
+    if reveal_to.len() != 33 {
+        return None;
+    }
+    let parity = reveal_to[0];
+    if parity != 0x02 && parity != 0x03 {
+        return None;
+    }
+
+    let reveal_to_x = B256::from_slice(&reveal_to[1..]);
+    let reveal_pub = recover_point(&reveal_to_x.0, parity)?;
+
+    let eph_key = k256::SecretKey::random(&mut rand::thread_rng());
+    let eph_scalar: Scalar = *eph_key.to_nonzero_scalar();
+    let eph_pub = AffinePoint::from(ProjectivePoint::GENERATOR * eph_scalar);
+    let eph_encoded = eph_pub.to_encoded_point(true);
+    let eph_pubkey: [u8; 33] = eph_encoded.as_bytes().try_into().ok()?;
+
+    let shared_proj = ProjectivePoint::from(reveal_pub) * eph_scalar;
+    let shared_affine = AffinePoint::from(shared_proj);
+    let ss_encoded = shared_affine.to_encoded_point(true);
+    let shared_secret_x: [u8; 32] = ss_encoded.x()?.as_slice().try_into().ok()?;
+
+    let info = authenticated_withdrawal_hkdf_info(&eph_pubkey);
+    let aes_key = hkdf_sha256(&shared_secret_x, b"authenticated-withdrawal-aes-key", &info);
+
+    let plaintext = build_authenticated_withdrawal_plaintext(&sender, &tx_hash);
+    let cipher = Aes256Gcm::new((&aes_key).into());
+    let nonce_bytes: [u8; 12] = rand::random();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+    let encrypted = cipher.encrypt(nonce, plaintext.as_ref()).ok()?;
+    let ciphertext = &encrypted[..encrypted.len() - 16];
+    let tag = &encrypted[encrypted.len() - 16..];
+
+    let mut out = Vec::with_capacity(AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE);
+    out.extend_from_slice(&eph_pubkey);
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(ciphertext);
+    out.extend_from_slice(tag);
+    Some(out)
+}
+
+/// Decrypt an authenticated-withdrawal `encryptedSender` payload.
+pub fn decrypt_authenticated_withdrawal(
+    reveal_privkey: &k256::SecretKey,
+    encrypted_sender: &[u8],
+) -> Option<(Address, B256)> {
+    if encrypted_sender.len() != AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE {
+        return None;
+    }
+
+    let parity = encrypted_sender[0];
+    if parity != 0x02 && parity != 0x03 {
+        return None;
+    }
+
+    let eph_pub_x = B256::from_slice(&encrypted_sender[1..33]);
+    let nonce: [u8; 12] = encrypted_sender[33..45].try_into().ok()?;
+    let ciphertext = &encrypted_sender[45..97];
+    let tag: [u8; 16] = encrypted_sender[97..113].try_into().ok()?;
+
+    let eph_pub = recover_point(&eph_pub_x.0, parity)?;
+    let priv_scalar: Scalar = *reveal_privkey.to_nonzero_scalar();
+    let shared_proj = ProjectivePoint::from(eph_pub) * priv_scalar;
+    let shared_affine = AffinePoint::from(shared_proj);
+    let ss_encoded = shared_affine.to_encoded_point(true);
+    let shared_secret_x: [u8; 32] = ss_encoded.x()?.as_slice().try_into().ok()?;
+
+    let mut eph_pubkey = [0u8; 33];
+    eph_pubkey[0] = parity;
+    eph_pubkey[1..].copy_from_slice(eph_pub_x.as_slice());
+    let info = authenticated_withdrawal_hkdf_info(&eph_pubkey);
+    let aes_key = hkdf_sha256(&shared_secret_x, b"authenticated-withdrawal-aes-key", &info);
+
+    let (plaintext, valid) = decrypt_aes_gcm(&aes_key, &nonce, ciphertext, &[], &tag);
+    if !valid || plaintext.len() != AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE {
+        return None;
+    }
+
+    let sender = Address::from_slice(&plaintext[..20]);
+    let tx_hash = B256::from_slice(&plaintext[20..]);
+    Some((sender, tx_hash))
 }
 
 /// Encrypt deposit data for `ZonePortal.depositEncrypted`.
@@ -292,6 +390,17 @@ pub fn build_plaintext(to: &Address, memo: &B256) -> [u8; ENCRYPTED_PAYLOAD_PLAI
     buf
 }
 
+/// Build authenticated-withdrawal sender plaintext: `[sender(20)|tx_hash(32)]`.
+pub fn build_authenticated_withdrawal_plaintext(
+    sender: &Address,
+    tx_hash: &B256,
+) -> [u8; AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE] {
+    let mut buf = [0u8; AUTHENTICATED_WITHDRAWAL_PLAINTEXT_SIZE];
+    buf[..20].copy_from_slice(sender.as_slice());
+    buf[20..].copy_from_slice(tx_hash.as_slice());
+    buf
+}
+
 /// Build the 84-byte HKDF info parameter: `[portal(20) | key_index(32) | eph_pub_x(32)]`.
 pub fn hkdf_info(
     portal: &Address,
@@ -302,6 +411,13 @@ pub fn hkdf_info(
     info[..20].copy_from_slice(portal.as_slice());
     info[20..52].copy_from_slice(&key_index.to_be_bytes::<32>());
     info[52..84].copy_from_slice(&eph_pub_x.0);
+    info
+}
+
+fn authenticated_withdrawal_hkdf_info(eph_pubkey: &[u8; 33]) -> Vec<u8> {
+    let mut info = Vec::with_capacity(24 + eph_pubkey.len());
+    info.extend_from_slice(b"authenticated-withdrawal");
+    info.extend_from_slice(eph_pubkey);
     info
 }
 
@@ -320,9 +436,14 @@ pub fn encrypt_plaintext(aes_key: &[u8; 32], plaintext: &[u8]) -> (Vec<u8>, [u8;
 
 #[cfg(test)]
 mod tests {
-    use super::{compressed_x_and_parity, decrypt_deposit, hkdf_sha256, hmac_sha256};
+    use super::{
+        AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE, compressed_x_and_parity,
+        decrypt_authenticated_withdrawal, decrypt_deposit, encrypt_authenticated_withdrawal,
+        hkdf_sha256, hmac_sha256,
+    };
     use crate::test_utils::{EncryptedDepositFixture, assert_cp_proof_valid};
     use alloy_primitives::{Address, B256, U256};
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
 
     #[test]
     fn test_ecies_decrypt_roundtrip() {
@@ -332,6 +453,27 @@ mod tests {
         assert_eq!(dec.to, f.to);
         assert_eq!(dec.memo, f.memo);
         assert_cp_proof_valid(&dec, &f.eph_pub, &f.seq_pub);
+    }
+
+    #[test]
+    fn test_authenticated_withdrawal_roundtrip() {
+        use sha2::{Digest, Sha256};
+
+        let privkey_bytes: [u8; 32] = Sha256::digest(b"authenticated-withdrawal-key").into();
+        let privkey = k256::SecretKey::from_slice(&privkey_bytes).unwrap();
+        let pubkey = privkey.public_key();
+        let encoded = pubkey.to_encoded_point(true);
+
+        let sender = Address::repeat_byte(0x11);
+        let tx_hash = B256::repeat_byte(0x22);
+        let encrypted =
+            encrypt_authenticated_withdrawal(encoded.as_bytes(), sender, tx_hash).unwrap();
+        assert_eq!(encrypted.len(), AUTHENTICATED_WITHDRAWAL_ENCRYPTED_SIZE);
+
+        let (decrypted_sender, decrypted_tx_hash) =
+            decrypt_authenticated_withdrawal(&privkey, &encrypted).unwrap();
+        assert_eq!(decrypted_sender, sender);
+        assert_eq!(decrypted_tx_hash, tx_hash);
     }
 
     #[test]

@@ -289,7 +289,7 @@ interface ITempoStateReader {
 
 struct Withdrawal {
     address token; // TIP-20 token being withdrawn
-    address sender; // who initiated the withdrawal on the zone
+    bytes32 senderTag; // keccak256(abi.encodePacked(sender, txHash))
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     uint128 fee; // processing fee for sequencer (calculated at request time)
@@ -297,6 +297,21 @@ struct Withdrawal {
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient; // zone address for bounce-back if call fails
     bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
+    bytes encryptedSender; // optional encrypted (sender, txHash) reveal payload
+}
+
+struct PendingWithdrawal {
+    address token; // TIP-20 token being withdrawn
+    address sender; // who initiated the withdrawal on the zone
+    bytes32 txHash; // hash of the zone transaction that requested the withdrawal
+    address to; // Tempo recipient
+    uint128 amount; // amount to send to recipient (excludes fee)
+    uint128 fee; // processing fee for sequencer (calculated at request time)
+    bytes32 memo; // user-provided context
+    uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
+    address fallbackRecipient; // zone address for bounce-back if call fails
+    bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
+    bytes revealTo; // optional compressed secp256k1 pubkey for sender reveal encryption
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -317,6 +332,18 @@ address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
 
 // TempoStateReader precompile address (0x1c00...0004)
 address constant TEMPO_STATE_READER = 0x1c00000000000000000000000000000000000004;
+
+// ZoneTxContext precompile address (0x1c00...0005)
+address constant ZONE_TX_CONTEXT = 0x1C00000000000000000000000000000000000005;
+
+/// @title IZoneTxContext
+/// @notice Interface for the zone precompile that exposes the currently executing tx hash
+interface IZoneTxContext {
+
+    /// @notice Returns the hash of the currently executing zone transaction
+    function currentTxHash() external returns (bytes32);
+
+}
 
 /*//////////////////////////////////////////////////////////////
                 ZONE PORTAL STORAGE SLOT CONSTANTS
@@ -696,14 +723,14 @@ interface IZoneMessenger {
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
     /// @param token The TIP-20 token to transfer
-    /// @param sender The L2 origin address
+    /// @param senderTag The authenticated sender commitment from the zone
     /// @param target The Tempo recipient
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
     function relayMessage(
         address token,
-        address sender,
+        bytes32 senderTag,
         address target,
         uint128 amount,
         uint64 gasLimit,
@@ -718,7 +745,7 @@ interface IZoneMessenger {
 interface IWithdrawalReceiver {
 
     function onWithdrawalReceived(
-        address sender,
+        bytes32 senderTag,
         address token,
         uint128 amount,
         bytes calldata callbackData
@@ -894,7 +921,8 @@ interface IZoneOutbox {
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
-        bytes data
+        bytes data,
+        bytes revealTo
     );
 
     event TempoGasRateUpdated(uint128 tempoGasRate);
@@ -952,7 +980,8 @@ interface IZoneOutbox {
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
-        bytes calldata data
+        bytes calldata data,
+        bytes calldata revealTo
     )
         external;
 
@@ -963,7 +992,8 @@ interface IZoneOutbox {
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(
         uint256 count,
-        uint64 blockNumber
+        uint64 blockNumber,
+        bytes[] calldata encryptedSenders
     )
         external
         returns (bytes32 withdrawalQueueHash);

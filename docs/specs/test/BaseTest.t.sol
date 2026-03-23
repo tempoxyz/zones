@@ -13,7 +13,9 @@ import { INonce } from "../src/interfaces/INonce.sol";
 import { ITIP20 } from "../src/interfaces/ITIP20.sol";
 import { IValidatorConfig } from "../src/interfaces/IValidatorConfig.sol";
 import { BLOCKHASH_HISTORY } from "../src/zone/BlockHashHistory.sol";
+import { ZONE_TX_CONTEXT } from "../src/zone/IZone.sol";
 import { MockEIP2935 } from "./zone/mocks/MockEIP2935.sol";
+import { MockZoneTxContext } from "./zone/mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
 
 /// @notice Base test framework for all spec tests
@@ -30,6 +32,7 @@ contract BaseTest is Test {
     address internal constant _NONCE = 0x4e4F4E4345000000000000000000000000000000;
     address internal constant _VALIDATOR_CONFIG = 0xCccCcCCC00000000000000000000000000000000;
     address internal constant _BLOCKHASH_HISTORY = BLOCKHASH_HISTORY;
+    address internal constant _ZONE_TX_CONTEXT = ZONE_TX_CONTEXT;
 
     // Role constants
     bytes32 internal constant _ISSUER_ROLE = keccak256("ISSUER_ROLE");
@@ -56,6 +59,7 @@ contract BaseTest is Test {
     IValidatorConfig public validatorConfig = IValidatorConfig(_VALIDATOR_CONFIG);
     TIP20 public token1;
     TIP20 public token2;
+    MockZoneTxContext public zoneTxContext = MockZoneTxContext(_ZONE_TX_CONTEXT);
     bool isTempo;
 
     error MissingPrecompile(string name, address addr);
@@ -87,6 +91,8 @@ contract BaseTest is Test {
             // Deploy EIP-2935 mock that handles raw 32-byte calldata (no selector)
             MockEIP2935 mock2935 = new MockEIP2935();
             vm.etch(_BLOCKHASH_HISTORY, address(mock2935).code);
+            MockZoneTxContext mockTxContext = new MockZoneTxContext();
+            vm.etch(_ZONE_TX_CONTEXT, address(mockTxContext).code);
         }
 
         if (isTempo) {
@@ -123,6 +129,13 @@ contract BaseTest is Test {
             }
             if (_BLOCKHASH_HISTORY.code.length == 0) {
                 revert MissingPrecompile("BlockHashHistory", _BLOCKHASH_HISTORY);
+            }
+            if (_ZONE_TX_CONTEXT.code.length == 0) {
+                MockZoneTxContext tempoMockTxContext = new MockZoneTxContext();
+                vm.etch(_ZONE_TX_CONTEXT, address(tempoMockTxContext).code);
+            }
+            if (_ZONE_TX_CONTEXT.code.length == 0) {
+                revert MissingPrecompile("ZoneTxContext", _ZONE_TX_CONTEXT);
             }
 
             // Set ValidatorConfig owner to admin via direct storage write

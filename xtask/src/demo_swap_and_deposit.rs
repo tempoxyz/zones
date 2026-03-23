@@ -334,7 +334,8 @@ impl DemoSwapAndDeposit {
                 B256::ZERO,
                 ROUTER_CALLBACK_GAS_LIMIT,
                 operator,
-                callback_data,
+                Bytes::from(callback_data),
+                Bytes::new(),
             )
             .gas(WITHDRAWAL_TX_GAS)
             .send()
