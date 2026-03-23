@@ -44,6 +44,14 @@ contract ZoneOutbox is IZoneOutbox {
     /// @dev compressed ephemeral pubkey (33) || nonce (12) || ciphertext (52) || tag (16)
     uint256 public constant AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH = 113;
 
+    /// @notice secp256k1 field prime
+    uint256 internal constant SECP256K1_P =
+        0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
+
+    /// @notice (SECP256K1_P - 1) / 2 for Euler's criterion
+    uint256 internal constant SECP256K1_HALF_PM1 =
+        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7FFFFE17;
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -423,13 +431,19 @@ contract ZoneOutbox is IZoneOutbox {
         return _lastBatch;
     }
 
-    function _validateRevealTo(bytes memory revealTo) internal pure {
+    function _validateRevealTo(bytes memory revealTo) internal view {
         if (revealTo.length == 0) {
             return;
         }
         if (revealTo.length != REVEAL_TO_KEY_LENGTH) revert InvalidRevealTo();
         bytes1 prefix = revealTo[0];
         if (prefix != 0x02 && prefix != 0x03) revert InvalidRevealTo();
+
+        bytes32 x;
+        assembly {
+            x := mload(add(revealTo, 33))
+        }
+        if (!_isValidSecp256k1X(x)) revert InvalidRevealTo();
     }
 
     function _validateEncryptedSender(
@@ -445,6 +459,25 @@ contract ZoneOutbox is IZoneOutbox {
         if (encryptedSender.length != expectedLength) {
             revert InvalidEncryptedSenderLength(encryptedSender.length, expectedLength);
         }
+    }
+
+    /// @notice Validate that an X coordinate corresponds to a valid secp256k1 point
+    /// @dev Uses Euler's criterion via the MODEXP precompile (0x05):
+    ///      x^3 + 7 is a quadratic residue mod p iff (x^3 + 7)^((p-1)/2) == 1 (mod p)
+    function _isValidSecp256k1X(bytes32 x) internal view returns (bool) {
+        uint256 px = uint256(x);
+        if (px == 0 || px >= SECP256K1_P) return false;
+
+        uint256 rhs = addmod(mulmod(mulmod(px, px, SECP256K1_P), px, SECP256K1_P), 7, SECP256K1_P);
+
+        bytes memory input = abi.encodePacked(
+            uint256(32), uint256(32), uint256(32), rhs, SECP256K1_HALF_PM1, SECP256K1_P
+        );
+
+        (bool success, bytes memory result) = address(0x05).staticcall(input);
+        if (!success || result.length != 32) return false;
+
+        return uint256(bytes32(result)) == 1;
     }
 
 }

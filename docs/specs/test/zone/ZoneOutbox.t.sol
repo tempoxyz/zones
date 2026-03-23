@@ -89,7 +89,7 @@ contract ZoneOutboxTest is Test {
     }
 
     function _validRevealTo() internal pure returns (bytes memory) {
-        return hex"021111111111111111111111111111111111111111111111111111111111111111";
+        return hex"0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -540,6 +540,24 @@ contract ZoneOutboxTest is Test {
         vm.expectRevert(ZoneOutbox.InvalidRevealTo.selector);
         outbox.requestWithdrawal(
             address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "", hex"041111111111111111111111111111111111111111111111111111111111111111"
+        );
+        vm.stopPrank();
+    }
+
+    function test_requestWithdrawal_invalidRevealToPoint_reverts() public {
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
+
+        vm.expectRevert(ZoneOutbox.InvalidRevealTo.selector);
+        outbox.requestWithdrawal(
+            address(zoneToken),
+            bob,
+            500e6,
+            bytes32(0),
+            0,
+            alice,
+            "",
+            hex"020000000000000000000000000000000000000000000000000000000000000005"
         );
         vm.stopPrank();
     }
