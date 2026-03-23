@@ -13,7 +13,6 @@ use crate::utils::{
 };
 use alloy::{
     primitives::{Address, B256, address, hex},
-    rpc::types::FilterId,
     signers::local::PrivateKeySigner,
 };
 use p256::ecdsa::SigningKey as P256SigningKey;
@@ -332,16 +331,14 @@ async fn test_filter_ownership_and_uninstall_cleanup() -> eyre::Result<()> {
         create_resp.get("error").is_none(),
         "owner should be able to create a block filter: {create_resp}"
     );
-    let filter_id: FilterId = serde_json::from_value(create_resp["result"].clone())
-        .expect("filter id should deserialize");
-    let filter_id_json = serde_json::to_value(&filter_id).expect("filter id should serialize");
+    let filter_id = create_resp["result"].clone();
 
     ctx.inject_empty_block().await?;
 
     let owner_changes = ctx
         .call_as_user(
             "eth_getFilterChanges",
-            serde_json::json!([filter_id_json.clone()]),
+            serde_json::json!([filter_id.clone()]),
             &owner_signer,
         )
         .await?;
@@ -359,7 +356,7 @@ async fn test_filter_ownership_and_uninstall_cleanup() -> eyre::Result<()> {
     let other_changes = ctx
         .call_as_user(
             "eth_getFilterChanges",
-            serde_json::json!([filter_id_json.clone()]),
+            serde_json::json!([filter_id.clone()]),
             &other_signer,
         )
         .await?;
@@ -368,7 +365,7 @@ async fn test_filter_ownership_and_uninstall_cleanup() -> eyre::Result<()> {
     let uninstall_resp = ctx
         .call_as_user(
             "eth_uninstallFilter",
-            serde_json::json!([filter_id_json.clone()]),
+            serde_json::json!([filter_id.clone()]),
             &owner_signer,
         )
         .await?;
@@ -381,7 +378,7 @@ async fn test_filter_ownership_and_uninstall_cleanup() -> eyre::Result<()> {
     let after_uninstall = ctx
         .call_as_user(
             "eth_getFilterChanges",
-            serde_json::json!([filter_id_json]),
+            serde_json::json!([filter_id]),
             &owner_signer,
         )
         .await?;

@@ -77,6 +77,35 @@ fn stale_filter_owner_ids(
         .collect()
 }
 
+async fn prune_filter_owners<Api: EthApiTypes + 'static>(
+    filter: &EthFilter<Api>,
+    owners: &Mutex<HashMap<FilterId, Address>>,
+) {
+    let owner_ids = {
+        let owners = owners.lock().await;
+        owners.keys().cloned().collect::<Vec<_>>()
+    };
+    if owner_ids.is_empty() {
+        return;
+    }
+
+    let active_ids = filter
+        .active_filters()
+        .ids()
+        .await
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let stale_ids = stale_filter_owner_ids(owner_ids, &active_ids);
+    if stale_ids.is_empty() {
+        return;
+    }
+
+    let mut owners = owners.lock().await;
+    for id in stale_ids {
+        owners.remove(&id);
+    }
+}
+
 /// [`ZoneRpcApi`] implementation backed by reth's [`EthHandlers`].
 ///
 /// This is the privacy enforcement layer for the zone's JSON-RPC surface.
@@ -153,34 +182,6 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
         self.filter().active_filters().contains(id).await
     }
 
-    #[allow(dead_code)]
-    async fn prune_filter_owners_once(&self) {
-        let owner_ids = {
-            let owners = self.filter_owners.lock().await;
-            owners.keys().cloned().collect::<Vec<_>>()
-        };
-        if owner_ids.is_empty() {
-            return;
-        }
-
-        let active_ids = self
-            .filter()
-            .active_filters()
-            .ids()
-            .await
-            .into_iter()
-            .collect::<HashSet<_>>();
-        let stale_ids = stale_filter_owner_ids(owner_ids, &active_ids);
-        if stale_ids.is_empty() {
-            return;
-        }
-
-        let mut owners = self.filter_owners.lock().await;
-        for id in stale_ids {
-            owners.remove(&id);
-        }
-    }
-
     fn spawn_filter_owner_pruner(&self)
     where
         Api: Send + Sync + 'static,
@@ -198,29 +199,7 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
                     break;
                 };
 
-                let owner_ids = {
-                    let owners = owners.lock().await;
-                    owners.keys().cloned().collect::<Vec<_>>()
-                };
-                if owner_ids.is_empty() {
-                    continue;
-                }
-
-                let active_ids = filter
-                    .active_filters()
-                    .ids()
-                    .await
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                let stale_ids = stale_filter_owner_ids(owner_ids, &active_ids);
-                if stale_ids.is_empty() {
-                    continue;
-                }
-
-                let mut owners = owners.lock().await;
-                for id in stale_ids {
-                    owners.remove(&id);
-                }
+                prune_filter_owners(&filter, &owners).await;
             }
         });
     }
