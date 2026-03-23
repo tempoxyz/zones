@@ -483,7 +483,7 @@ interface IZoneFactory {
     );
 
     function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
-    function zoneCount() external view returns (uint64);
+    function zoneCount() external view returns (uint32);
     function zones(uint32 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
 }
