@@ -477,16 +477,16 @@ contract ZonePortal is IZonePortal {
         if (!cfg.enabled) revert TokenNotEnabled();
         if (!cfg.depositsActive) revert DepositsNotActive();
 
-        // TODO: enabled after T2:
-        //        // Enforce TIP-403 policy: the recipient must be authorized under the
-        //        // token's transfer policy before accepting the deposit.
-        //        uint64 policyId = ITIP20(_token).transferPolicyId();
-        //        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
-        //            revert DepositPolicyForbids();
-        //        }
-        //         if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
-        //             revert DepositPolicyForbids();
-        //         }
+        // Enforce TIP-403 policy: the recipient must be authorized under the
+        // token's transfer policy before accepting the deposit.
+        uint64 policyId = ITIP20(_token).transferPolicyId();
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
+            revert DepositPolicyForbids();
+        }
+        // TODO(T2): also check isAuthorizedMintRecipient for compound policies
+        // if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
+        //     revert DepositPolicyForbids();
+        // }
 
         // Calculate deposit fee
         uint128 fee = calculateDepositFee();
