@@ -33,11 +33,11 @@ use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoT
 use crate::executor::ZoneBlockExecutor;
 
 use crate::{
-    abi::TEMPO_STATE_READER_ADDRESS,
+    abi::{PORTAL_SEQUENCER_SLOT, TEMPO_STATE_READER_ADDRESS},
     l1_state::{L1StateProvider, PolicyProvider, SharedL1StateCache, TempoStateReader},
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
+        SequencerResolver, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
         ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
 };
@@ -50,16 +50,16 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 pub struct ZoneEvmFactory {
     l1_provider: L1StateProvider,
     policy_provider: Option<PolicyProvider>,
-    sequencer: Address,
+    portal_address: Address,
 }
 
 impl ZoneEvmFactory {
-    /// Create a new factory with the given L1 state provider and sequencer.
-    pub fn new(l1_provider: L1StateProvider, sequencer: Address) -> Self {
+    /// Create a new factory with the given L1 state provider and portal address.
+    pub fn new(l1_provider: L1StateProvider, portal_address: Address) -> Self {
         Self {
             l1_provider,
             policy_provider: None,
-            sequencer,
+            portal_address,
         }
     }
 
@@ -85,61 +85,77 @@ impl ZoneEvmFactory {
         precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
             Some(ZoneTokenFactory::create(&cfg))
         });
-        if let Some(provider) = self.policy_provider.clone() {
-            let registry = ZoneTip403ProxyRegistry::new(provider.clone());
-            let sequencer = self.sequencer;
+        let registry = self
+            .policy_provider
+            .clone()
+            .map(ZoneTip403ProxyRegistry::new);
+        let sequencer_resolver =
+            l1_sequencer_resolver(self.l1_provider.clone(), self.portal_address);
 
+        if let Some(provider) = self.policy_provider.clone() {
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
                 Some(ZoneTip403ProxyRegistry::create(provider.clone()))
             });
-
-            // Override the TIP-20 precompile lookup so that all TIP-20 token
-            // calls go through ZoneTip20Token (which checks the registry)
-            // instead of the vanilla TIP20Precompile (which reads empty local
-            // TIP403Registry storage).
-            //
-            // This replaces the upstream `extend_tempo_precompiles` lookup, so
-            // we must also handle the non-TIP-20 Tempo precompiles that are
-            // only registered via that lookup (FeeManager, StablecoinDEX, etc.).
-            // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
-            // static map via `apply_precompile` and take priority over this.
-            let zone_cfg = cfg.clone();
-            precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
-                use tempo_precompiles::{
-                    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
-                    TIP_FEE_MANAGER_ADDRESS, VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
-                    account_keychain::AccountKeychain, nonce::NonceManager,
-                    stablecoin_dex::StablecoinDEX, tip_fee_manager::TipFeeManager,
-                    tip20::is_tip20_prefix, validator_config::ValidatorConfig,
-                    validator_config_v2::ValidatorConfigV2,
-                };
-
-                if is_tip20_prefix(*address) {
-                    Some(ZoneTip20Token::create(
-                        *address,
-                        &zone_cfg,
-                        registry.clone(),
-                        sequencer,
-                    ))
-                } else if *address == TIP_FEE_MANAGER_ADDRESS {
-                    Some(TipFeeManager::create_precompile(&zone_cfg))
-                } else if *address == STABLECOIN_DEX_ADDRESS {
-                    Some(StablecoinDEX::create_precompile(&zone_cfg))
-                } else if *address == NONCE_PRECOMPILE_ADDRESS {
-                    Some(NonceManager::create_precompile(&zone_cfg))
-                } else if *address == VALIDATOR_CONFIG_ADDRESS {
-                    Some(ValidatorConfig::create_precompile(&zone_cfg))
-                } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-                    Some(AccountKeychain::create_precompile(&zone_cfg))
-                } else if *address == VALIDATOR_CONFIG_V2_ADDRESS {
-                    Some(ValidatorConfigV2::create_precompile(&zone_cfg))
-                } else {
-                    None
-                }
-            });
         }
+
+        // Override the TIP-20 precompile lookup so that all TIP-20 token
+        // calls go through ZoneTip20Token. When a live policy provider is
+        // available, the wrapper also enforces TIP-403 policy checks; without
+        // one, it still applies privacy, fixed-gas, and bridge-auth rules.
+        //
+        // This replaces the upstream `extend_tempo_precompiles` lookup, so we
+        // must also handle the non-TIP-20 Tempo precompiles that are only
+        // registered via that lookup (FeeManager, StablecoinDEX, etc.).
+        // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
+        // static map via `apply_precompile` and take priority over this.
+        let zone_cfg = cfg.clone();
+        precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
+            use tempo_precompiles::{
+                ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
+                TIP_FEE_MANAGER_ADDRESS, VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
+                account_keychain::AccountKeychain, nonce::NonceManager,
+                stablecoin_dex::StablecoinDEX, tip_fee_manager::TipFeeManager,
+                tip20::is_tip20_prefix, validator_config::ValidatorConfig,
+                validator_config_v2::ValidatorConfigV2,
+            };
+
+            if is_tip20_prefix(*address) {
+                Some(ZoneTip20Token::create(
+                    *address,
+                    &zone_cfg,
+                    registry.clone(),
+                    sequencer_resolver.clone(),
+                ))
+            } else if *address == TIP_FEE_MANAGER_ADDRESS {
+                Some(TipFeeManager::create_precompile(&zone_cfg))
+            } else if *address == STABLECOIN_DEX_ADDRESS {
+                Some(StablecoinDEX::create_precompile(&zone_cfg))
+            } else if *address == NONCE_PRECOMPILE_ADDRESS {
+                Some(NonceManager::create_precompile(&zone_cfg))
+            } else if *address == VALIDATOR_CONFIG_ADDRESS {
+                Some(ValidatorConfig::create_precompile(&zone_cfg))
+            } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
+                Some(AccountKeychain::create_precompile(&zone_cfg))
+            } else if *address == VALIDATOR_CONFIG_V2_ADDRESS {
+                Some(ValidatorConfigV2::create_precompile(&zone_cfg))
+            } else {
+                None
+            }
+        });
         evm
     }
+}
+
+fn l1_sequencer_resolver(
+    l1_provider: L1StateProvider,
+    portal_address: Address,
+) -> SequencerResolver {
+    Arc::new(move || {
+        let value = l1_provider
+            .get_latest_storage(portal_address, PORTAL_SEQUENCER_SLOT)
+            .ok()?;
+        Some(Address::from_slice(&value.as_slice()[12..]))
+    })
 }
 
 impl EvmFactory for ZoneEvmFactory {
@@ -231,13 +247,13 @@ pub struct ZoneEvmConfig {
 
 impl ZoneEvmConfig {
     /// Create a new zone EVM config with the given chain spec, L1 state
-    /// provider, and configured sequencer address.
+    /// provider, and L1 portal address.
     pub fn new(
         chain_spec: Arc<TempoChainSpec>,
         l1_provider: L1StateProvider,
-        sequencer: Address,
+        portal_address: Address,
     ) -> Self {
-        let zone_factory = ZoneEvmFactory::new(l1_provider, sequencer);
+        let zone_factory = ZoneEvmFactory::new(l1_provider, portal_address);
         let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
@@ -252,16 +268,16 @@ impl ZoneEvmConfig {
     /// Intended for CLI subcommands (import, stage, re-execute) that need a type-compatible
     /// EVM config but don't have access to an L1 RPC connection. Transactions calling the
     /// TempoStateReader precompile will get a reverted / empty response. The
-    /// sequencer defaults to the zero address in this mode.
+    /// portal address defaults to the zero address in this mode, so sequencer
+    /// reads are treated as unavailable.
     pub fn new_without_l1(chain_spec: Arc<TempoChainSpec>) -> Self {
         let cache = SharedL1StateCache::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
-        let l1_provider = L1StateProvider::new_raw(cache, provider.clone(), runtime_handle.clone());
-        let policy_provider = PolicyProvider::new(Default::default(), provider, runtime_handle);
-        Self::new(chain_spec, l1_provider, Address::ZERO).with_policy_provider(policy_provider)
+        let l1_provider = L1StateProvider::new_raw(cache, provider, runtime_handle);
+        Self::new(chain_spec, l1_provider, Address::ZERO)
     }
 
     /// Set the policy provider for the TIP-403 proxy precompile.

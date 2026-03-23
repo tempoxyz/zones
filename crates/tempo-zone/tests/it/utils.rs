@@ -1,5 +1,6 @@
 use alloy::genesis::Genesis;
 use alloy_consensus::Header;
+use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
@@ -2200,7 +2201,12 @@ pub(crate) async fn start_local_zone_with_fixture(
 ) -> eyre::Result<(ZoneTestNode, L1Fixture)> {
     let zone = ZoneTestNode::start_local().await?;
     let fixture = L1Fixture::new();
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, seed_blocks);
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        Address::ZERO,
+        Address::ZERO,
+        seed_blocks,
+    );
     Ok((zone, fixture))
 }
 
@@ -2208,7 +2214,12 @@ pub(crate) async fn start_local_zone_with_fixture(
 ///
 /// Use when multiple zones share the same fixture timeline — call once per zone.
 pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, seed_blocks: u64) {
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, seed_blocks);
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        Address::ZERO,
+        Address::ZERO,
+        seed_blocks,
+    );
 }
 
 // ============ Private RPC Test Utilities ============
@@ -2757,7 +2768,7 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
     .await?;
     let fixture = L1Fixture::new();
 
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, 20);
+    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, sequencer_address, 20);
 
     let chain_id = zone_chain_id(&zone).await?;
 
@@ -2898,19 +2909,30 @@ impl L1Fixture {
         &self,
         cache: &SharedL1StateCache,
         portal_address: Address,
+        sequencer: Address,
         num_blocks: u64,
     ) {
         let mut cache = cache.write();
         let deposit_queue_hash_slot = B256::with_last_byte(4);
 
         for block in 0..=num_blocks {
-            // Sequencer slot (0) — not actually read if msg.sender == address(0),
-            // but seed it to be safe.
-            cache.set(portal_address, B256::ZERO, block, B256::ZERO);
+            let mut sequencer_bytes = [0u8; 32];
+            sequencer_bytes[12..].copy_from_slice(sequencer.as_slice());
+            cache.set(
+                portal_address,
+                B256::ZERO,
+                block,
+                B256::new(sequencer_bytes),
+            );
             // Deposit queue hash slot (4) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
         }
+
+        cache.update_anchor(NumHash {
+            number: num_blocks,
+            hash: B256::ZERO,
+        });
     }
 
     /// Build a [`TempoHeader`] for the next L1 block.

@@ -37,7 +37,7 @@ pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
 pub use tip403_proxy::{ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry};
-pub use ztip20::ZoneTip20Token;
+pub use ztip20::{SequencerResolver, ZoneTip20Token};
 
 use revm::precompile::PrecompileError;
 

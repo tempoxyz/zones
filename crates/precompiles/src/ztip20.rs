@@ -10,6 +10,8 @@
 //! [`PolicyCheck`] — cache-first, L1 RPC fallback), and only then delegates
 //! to the vanilla `TIP20Token` implementation.
 
+use alloc::sync::Arc;
+
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolInterface};
@@ -52,20 +54,25 @@ macro_rules! decode_or_revert {
 /// Zone-specific TIP-20 token precompile.
 ///
 /// Wraps the vanilla [`TIP20Token`] and the [`ZoneTip403ProxyRegistry`] to add
-/// PolicyCheck-backed authorization for transfers and mints, privacy-gated
+/// optional PolicyCheck-backed authorization for transfers and mints, privacy-gated
 /// `balanceOf`/`allowance`, fixed gas for transfer-family calls and `approve`,
 /// and operation-specific bridge auth for mint/burn selectors.
+pub type SequencerResolver = Arc<dyn Fn() -> Option<Address> + Send + Sync>;
+
 pub struct ZoneTip20Token<P> {
-    registry: ZoneTip403ProxyRegistry<P>,
-    sequencer: Address,
+    registry: Option<ZoneTip403ProxyRegistry<P>>,
+    sequencer_resolver: SequencerResolver,
 }
 
 impl<P: PolicyCheck> ZoneTip20Token<P> {
     /// Create a new wrapper with the given registry.
-    pub fn new(registry: ZoneTip403ProxyRegistry<P>, sequencer: Address) -> Self {
+    pub fn new(
+        registry: Option<ZoneTip403ProxyRegistry<P>>,
+        sequencer_resolver: SequencerResolver,
+    ) -> Self {
         Self {
             registry,
-            sequencer,
+            sequencer_resolver,
         }
     }
 
@@ -155,7 +162,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     }
 
     fn enforce_balance_of(&self, account: Address, caller: Address) -> Option<PrecompileResult> {
-        if caller == account || caller == self.sequencer {
+        if caller == account || self.is_sequencer(caller) {
             None
         } else {
             Some(Ok(Self::unauthorized_output()))
@@ -168,7 +175,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         spender: Address,
         caller: Address,
     ) -> Option<PrecompileResult> {
-        if caller == owner || caller == spender || caller == self.sequencer {
+        if caller == owner || caller == spender || self.is_sequencer(caller) {
             None
         } else {
             Some(Ok(Self::unauthorized_output()))
@@ -184,6 +191,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         from: Address,
         to: Address,
     ) -> Option<PrecompileResult> {
+        let registry = self.registry.as_ref()?;
         let policy_id = match self.resolve_transfer_policy_id(token) {
             Ok(id) => id,
             Err(e) => {
@@ -202,7 +210,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
             "ZoneTip20Token: checking transfer authorization"
         );
 
-        match self.registry.is_transfer_authorized(policy_id, from, to) {
+        match registry.is_transfer_authorized(policy_id, from, to) {
             Ok(true) => None,
             Ok(false) => {
                 trace!(
@@ -219,6 +227,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     ///
     /// Returns `Some(revert)` if forbidden, `None` if allowed.
     fn enforce_mint(&self, token: Address, to: Address) -> Option<PrecompileResult> {
+        let registry = self.registry.as_ref()?;
         let policy_id = match self.resolve_transfer_policy_id(token) {
             Ok(id) => id,
             Err(e) => {
@@ -237,10 +246,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
             "ZoneTip20Token: checking mint recipient authorization"
         );
 
-        match self
-            .registry
-            .is_authorized(policy_id, to, AuthRole::MintRecipient)
-        {
+        match registry.is_authorized(policy_id, to, AuthRole::MintRecipient) {
             Ok(true) => None,
             Ok(false) => {
                 trace!(target: "zone::precompile", %to, policy_id, "mint recipient not authorized");
@@ -268,7 +274,14 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
 
     /// Resolve the `transfer_policy_id` for a token.
     fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64, PrecompileError> {
-        self.registry.resolve_transfer_policy_id(token)
+        self.registry
+            .as_ref()
+            .expect("transfer policy resolution only happens when a registry is configured")
+            .resolve_transfer_policy_id(token)
+    }
+
+    fn is_sequencer(&self, caller: Address) -> bool {
+        (self.sequencer_resolver)().is_some_and(|sequencer| caller == sequencer)
     }
 
     fn unauthorized_output() -> PrecompileOutput {
@@ -295,18 +308,19 @@ impl<P: PolicyCheck + Clone + Send + Sync + 'static> ZoneTip20Token<P> {
     ///
     /// The returned precompile:
     /// 1. Checks the 4-byte selector for transfer/mint calls.
-    /// 2. For those calls, reads `transfer_policy_id` from EVM storage and
-    ///    checks authorization via the [`ZoneTip403ProxyRegistry`].
+    /// 2. When a TIP-403 registry is configured, reads `transfer_policy_id`
+    ///    from EVM storage and checks authorization via the
+    ///    [`ZoneTip403ProxyRegistry`].
     /// 3. Delegates to the vanilla `TIP20Token::call()` for execution.
     pub fn create(
         address: Address,
         cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
-        registry: ZoneTip403ProxyRegistry<P>,
-        sequencer: Address,
+        registry: Option<ZoneTip403ProxyRegistry<P>>,
+        sequencer_resolver: SequencerResolver,
     ) -> DynPrecompile {
         let spec = cfg.spec;
         let gas_params = cfg.gas_params.clone();
-        let token = Self::new(registry, sequencer);
+        let token = Self::new(registry, sequencer_resolver);
 
         DynPrecompile::new_stateful(
             PrecompileId::Custom("ZoneTip20Token".into()),
@@ -460,6 +474,14 @@ mod tests {
 
     impl PrecompileHarness {
         fn new(policy: MockPolicyProvider) -> TestResult<Self> {
+            Self::new_with_registry(Some(policy))
+        }
+
+        fn new_without_registry() -> TestResult<Self> {
+            Self::new_with_registry(None)
+        }
+
+        fn new_with_registry(policy: Option<MockPolicyProvider>) -> TestResult<Self> {
             let token = PATH_USD_ADDRESS;
             let admin = address!("0x00000000000000000000000000000000000000a1");
             let alice = address!("0x00000000000000000000000000000000000000a2");
@@ -510,11 +532,12 @@ mod tests {
                 })
             })?;
 
+            let sequencer_resolver: SequencerResolver = Arc::new(move || Some(sequencer));
             let precompile = ZoneTip20Token::create(
                 token,
                 &ctx.cfg,
-                ZoneTip403ProxyRegistry::new(policy),
-                sequencer,
+                policy.map(ZoneTip403ProxyRegistry::new),
+                sequencer_resolver,
             );
 
             Ok(Self {
@@ -642,6 +665,44 @@ mod tests {
         let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
         assert!(outsider.reverted);
         assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn wrapper_without_policy_registry_still_enforces_privacy_and_fixed_gas() -> TestResult {
+        let mut harness = PrecompileHarness::new_without_registry()?;
+
+        let private_balance = harness.call(
+            harness.bob,
+            ITIP20::balanceOfCall {
+                account: harness.alice,
+            }
+            .abi_encode()
+            .into(),
+            FIXED_TRANSFER_GAS,
+            true,
+        )?;
+        assert!(private_balance.reverted);
+        assert_eq!(
+            private_balance.bytes,
+            Bytes::from(Unauthorized {}.abi_encode())
+        );
+
+        let transfer = harness.call(
+            harness.alice,
+            ITIP20::transferCall {
+                to: harness.bob,
+                amount: U256::from(12_345u64),
+            }
+            .abi_encode()
+            .into(),
+            FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(!transfer.reverted);
+        assert_eq!(transfer.gas_used, FIXED_TRANSFER_GAS);
+        assert_eq!(harness.balance_of(harness.bob)?, U256::from(12_345u64));
 
         Ok(())
     }

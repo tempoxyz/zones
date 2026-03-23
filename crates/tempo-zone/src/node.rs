@@ -459,7 +459,7 @@ where
             self.l1_state_provider_config.clone(),
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
-            self.sequencer,
+            self.portal_address,
         );
         Self::components(executor_builder)
     }
@@ -531,23 +531,23 @@ pub struct ZoneExecutorBuilder {
     l1_state_provider_config: L1StateProviderConfig,
     l1_state_cache: SharedL1StateCache,
     policy_cache: crate::SharedPolicyCache,
-    sequencer: Address,
+    portal_address: Address,
 }
 
 impl ZoneExecutorBuilder {
     /// Create a zone executor builder with the shared L1 state/policy caches
-    /// and the configured sequencer address used by execution-layer privacy.
+    /// and the L1 portal address used by execution-layer privacy.
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: SharedL1StateCache,
         policy_cache: crate::SharedPolicyCache,
-        sequencer: Address,
+        portal_address: Address,
     ) -> Self {
         Self {
             l1_state_provider_config,
             l1_state_cache,
             policy_cache,
-            sequencer,
+            portal_address,
         }
     }
 }
@@ -567,7 +567,7 @@ where
         )
         .await?;
 
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider, self.sequencer);
+        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider, self.portal_address);
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()

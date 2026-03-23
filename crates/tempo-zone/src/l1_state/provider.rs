@@ -183,6 +183,27 @@ impl L1StateProvider {
         }
     }
 
+    /// Read a storage slot at the latest known L1 height.
+    ///
+    /// Uses the cache anchor when available; otherwise falls back to the
+    /// current RPC head before resolving the slot value.
+    pub fn get_latest_storage(&self, address: Address, slot: B256) -> Result<B256> {
+        let anchor_number = self.cache.read().anchor().number;
+        let block_number = if anchor_number != 0 {
+            anchor_number
+        } else {
+            tokio::task::block_in_place(|| {
+                self.runtime_handle.block_on(async {
+                    self.provider.get_block_number().await.map_err(|e| {
+                        eyre::eyre!("eth_blockNumber failed while reading latest storage: {e}")
+                    })
+                })
+            })?
+        };
+
+        self.get_storage(address, slot, block_number)
+    }
+
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// Same semantics as [`get_storage`](Self::get_storage) but natively async. The
