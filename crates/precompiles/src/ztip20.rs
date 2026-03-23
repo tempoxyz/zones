@@ -10,8 +10,6 @@
 //! [`PolicyCheck`] — cache-first, L1 RPC fallback), and only then delegates
 //! to the vanilla `TIP20Token` implementation.
 
-use alloc::sync::Arc;
-
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolInterface};
@@ -51,28 +49,39 @@ macro_rules! decode_or_revert {
     };
 }
 
+/// Capability trait for resolving the active zone sequencer.
+///
+/// The zone runtime implements this for its L1-backed state provider so the
+/// precompile can enforce sequencer-visible reads without knowing about the
+/// concrete provider type.
+pub trait SequencerExt {
+    /// Return the latest known active sequencer for `portal_address`.
+    fn latest_sequencer(&self, portal_address: Address) -> Option<Address>;
+}
+
 /// Zone-specific TIP-20 token precompile.
 ///
 /// Wraps the vanilla [`TIP20Token`] and the [`ZoneTip403ProxyRegistry`] to add
 /// optional PolicyCheck-backed authorization for transfers and mints, privacy-gated
 /// `balanceOf`/`allowance`, fixed gas for transfer-family calls and `approve`,
 /// and operation-specific bridge auth for mint/burn selectors.
-pub type SequencerResolver = Arc<dyn Fn() -> Option<Address> + Send + Sync>;
-
-pub struct ZoneTip20Token<P> {
+pub struct ZoneTip20Token<P, S> {
     registry: Option<ZoneTip403ProxyRegistry<P>>,
-    sequencer_resolver: SequencerResolver,
+    sequencer: S,
+    portal_address: Address,
 }
 
-impl<P: PolicyCheck> ZoneTip20Token<P> {
+impl<P: PolicyCheck, S: SequencerExt> ZoneTip20Token<P, S> {
     /// Create a new wrapper with the given registry.
     pub fn new(
         registry: Option<ZoneTip403ProxyRegistry<P>>,
-        sequencer_resolver: SequencerResolver,
+        sequencer: S,
+        portal_address: Address,
     ) -> Self {
         Self {
             registry,
-            sequencer_resolver,
+            sequencer,
+            portal_address,
         }
     }
 
@@ -281,7 +290,9 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     }
 
     fn is_sequencer(&self, caller: Address) -> bool {
-        (self.sequencer_resolver)().is_some_and(|sequencer| caller == sequencer)
+        self.sequencer
+            .latest_sequencer(self.portal_address)
+            .is_some_and(|sequencer| caller == sequencer)
     }
 
     fn unauthorized_output() -> PrecompileOutput {
@@ -303,7 +314,11 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     }
 }
 
-impl<P: PolicyCheck + Clone + Send + Sync + 'static> ZoneTip20Token<P> {
+impl<P, S> ZoneTip20Token<P, S>
+where
+    P: PolicyCheck + Clone + Send + Sync + 'static,
+    S: SequencerExt + Send + Sync + 'static,
+{
     /// Create a [`DynPrecompile`] for a zone-side TIP-20 token at `address`.
     ///
     /// The returned precompile:
@@ -316,11 +331,12 @@ impl<P: PolicyCheck + Clone + Send + Sync + 'static> ZoneTip20Token<P> {
         address: Address,
         cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
         registry: Option<ZoneTip403ProxyRegistry<P>>,
-        sequencer_resolver: SequencerResolver,
+        sequencer: S,
+        portal_address: Address,
     ) -> DynPrecompile {
         let spec = cfg.spec;
         let gas_params = cfg.gas_params.clone();
-        let token = Self::new(registry, sequencer_resolver);
+        let token = Self::new(registry, sequencer, portal_address);
 
         DynPrecompile::new_stateful(
             PrecompileId::Custom("ZoneTip20Token".into()),
@@ -461,6 +477,17 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    struct MockSequencer {
+        address: Option<Address>,
+    }
+
+    impl SequencerExt for MockSequencer {
+        fn latest_sequencer(&self, _portal_address: Address) -> Option<Address> {
+            self.address
+        }
+    }
+
     struct PrecompileHarness {
         ctx: TestContext,
         token: Address,
@@ -483,6 +510,7 @@ mod tests {
 
         fn new_with_registry(policy: Option<MockPolicyProvider>) -> TestResult<Self> {
             let token = PATH_USD_ADDRESS;
+            let portal = address!("0x0000000000000000000000000000000000000099");
             let admin = address!("0x00000000000000000000000000000000000000a1");
             let alice = address!("0x00000000000000000000000000000000000000a2");
             let bob = address!("0x00000000000000000000000000000000000000a3");
@@ -532,12 +560,14 @@ mod tests {
                 })
             })?;
 
-            let sequencer_resolver: SequencerResolver = Arc::new(move || Some(sequencer));
             let precompile = ZoneTip20Token::create(
                 token,
                 &ctx.cfg,
                 policy.map(ZoneTip403ProxyRegistry::new),
-                sequencer_resolver,
+                MockSequencer {
+                    address: Some(sequencer),
+                },
+                portal,
             );
 
             Ok(Self {

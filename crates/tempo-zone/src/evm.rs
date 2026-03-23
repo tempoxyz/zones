@@ -33,11 +33,11 @@ use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoT
 use crate::executor::ZoneBlockExecutor;
 
 use crate::{
-    abi::{PORTAL_SEQUENCER_SLOT, TEMPO_STATE_READER_ADDRESS},
+    abi::TEMPO_STATE_READER_ADDRESS,
     l1_state::{L1StateProvider, PolicyProvider, SharedL1StateCache, TempoStateReader},
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        SequencerResolver, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
+        ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
         ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
 };
@@ -89,8 +89,8 @@ impl ZoneEvmFactory {
             .policy_provider
             .clone()
             .map(ZoneTip403ProxyRegistry::new);
-        let sequencer_resolver =
-            l1_sequencer_resolver(self.l1_provider.clone(), self.portal_address);
+        let l1_provider = self.l1_provider.clone();
+        let portal_address = self.portal_address;
 
         if let Some(provider) = self.policy_provider.clone() {
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
@@ -124,7 +124,8 @@ impl ZoneEvmFactory {
                     *address,
                     &zone_cfg,
                     registry.clone(),
-                    sequencer_resolver.clone(),
+                    l1_provider.clone(),
+                    portal_address,
                 ))
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
                 Some(TipFeeManager::create_precompile(&zone_cfg))
@@ -144,18 +145,6 @@ impl ZoneEvmFactory {
         });
         evm
     }
-}
-
-fn l1_sequencer_resolver(
-    l1_provider: L1StateProvider,
-    portal_address: Address,
-) -> SequencerResolver {
-    Arc::new(move || {
-        let value = l1_provider
-            .get_latest_storage(portal_address, PORTAL_SEQUENCER_SLOT)
-            .ok()?;
-        Some(Address::from_slice(&value.as_slice()[12..]))
-    })
 }
 
 impl EvmFactory for ZoneEvmFactory {

@@ -18,8 +18,10 @@ use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
+use zone_precompiles::SequencerExt;
 
 use super::cache::SharedL1StateCache;
+use crate::abi::PORTAL_SEQUENCER_SLOT;
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
@@ -204,6 +206,12 @@ impl L1StateProvider {
         self.get_storage(address, slot, block_number)
     }
 
+    /// Read the active sequencer address from the portal at the latest known L1 height.
+    pub fn get_latest_sequencer(&self, portal_address: Address) -> Result<Address> {
+        let value = self.get_latest_storage(portal_address, PORTAL_SEQUENCER_SLOT)?;
+        Ok(Address::from_slice(&value.as_slice()[12..]))
+    }
+
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// Same semantics as [`get_storage`](Self::get_storage) but natively async. The
@@ -246,5 +254,11 @@ impl L1StateProvider {
         let result = B256::from(value.to_be_bytes());
         debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
         Ok(result)
+    }
+}
+
+impl SequencerExt for L1StateProvider {
+    fn latest_sequencer(&self, portal_address: Address) -> Option<Address> {
+        self.get_latest_sequencer(portal_address).ok()
     }
 }
