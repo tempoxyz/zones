@@ -66,8 +66,11 @@ pub trait SequencerExt {
 /// `balanceOf`/`allowance`, fixed gas for transfer-family calls and `approve`,
 /// and operation-specific bridge auth for mint/burn selectors.
 pub struct ZoneTip20Token<P, S> {
+    /// Optional TIP-403 registry wrapper used for transfer and mint-recipient policy checks.
     registry: Option<ZoneTip403ProxyRegistry<P>>,
+    /// Sequencer-capable backend used to authorize private reads for the active sequencer.
     sequencer: S,
+    /// Zone portal address whose L1 storage defines the current active sequencer.
     portal_address: Address,
 }
 
