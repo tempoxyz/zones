@@ -756,9 +756,7 @@ where
                 .await
                 .map_err(internal)?;
 
-            if result {
-                self.filter_owners.lock().await.remove(&id);
-            } else if !self.filter_is_active(&id).await {
+            if result || !self.filter_is_active(&id).await {
                 self.filter_owners.lock().await.remove(&id);
             }
 

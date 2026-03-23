@@ -369,9 +369,8 @@ async fn test_filter_ownership_and_uninstall_cleanup() -> eyre::Result<()> {
             &owner_signer,
         )
         .await?;
-    assert_eq!(
+    assert!(
         uninstall_resp["result"].as_bool().unwrap(),
-        true,
         "owner uninstall should succeed",
     );
 
