@@ -5,7 +5,11 @@
 
 pub use zone_rpc::*;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 use alloy_network::{ReceiptResponse, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256};
@@ -17,7 +21,7 @@ use alloy_rpc_types_eth::{
 };
 use alloy_sol_types::{SolCall, SolEvent, SolEventInterface};
 use eyre::WrapErr;
-use reth_rpc::EthFilter;
+use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
     EthApiTypes, EthFilterApiServer,
@@ -32,7 +36,10 @@ use tempo_contracts::precompiles::{
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
 };
 use tempo_primitives::TempoTxEnvelope;
-use tokio::sync::Mutex;
+use tokio::{
+    sync::Mutex,
+    time::{MissedTickBehavior, interval},
+};
 
 use crate::abi::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
@@ -47,6 +54,28 @@ use zone_rpc::{
 };
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
+const FILTER_OWNER_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+fn filter_not_found_error() -> JsonRpcError {
+    JsonRpcError::invalid_params("filter not found")
+}
+
+fn map_eth_filter_error(err: EthFilterError) -> JsonRpcError {
+    match err {
+        EthFilterError::FilterNotFound(_) => filter_not_found_error(),
+        other => internal(other),
+    }
+}
+
+fn stale_filter_owner_ids(
+    owner_ids: impl IntoIterator<Item = FilterId>,
+    active_ids: &HashSet<FilterId>,
+) -> Vec<FilterId> {
+    owner_ids
+        .into_iter()
+        .filter(|id| !active_ids.contains(id))
+        .collect()
+}
 
 /// [`ZoneRpcApi`] implementation backed by reth's [`EthHandlers`].
 ///
@@ -80,15 +109,11 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
     tempo_state:
         crate::abi::TempoState::TempoStateInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     /// Maps filter IDs to the authenticated account that created them.
-    /// Ensures filters can only be accessed by their creator.
-    ///
-    /// TODO: entries are never cleaned up when reth reaps stale filters internally.
-    /// After bumping reth, use its `ActiveFilters` API to periodically sync this
-    /// map and remove entries for filters that no longer exist on the reth side.
+    /// The reth filter registry remains the source of truth for filter liveness.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
 }
 
-impl<Api: EthApiTypes> TempoZoneRpc<Api> {
+impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
     pub async fn new(
         eth: EthHandlers<Api>,
@@ -107,20 +132,97 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
             .wrap_err("failed to connect private RPC zone provider")?
             .erased();
         let tempo_state = crate::abi::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider.clone());
-        Ok(Self {
+        let rpc = Self {
             eth,
             config,
             l1_provider,
             zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
-        })
+        };
+        rpc.spawn_filter_owner_pruner();
+        Ok(rpc)
     }
 
     /// Returns a reference to the inner [`EthFilter`] handler.
-    #[allow(dead_code)]
     pub fn filter(&self) -> &EthFilter<Api> {
         &self.eth.filter
+    }
+
+    async fn filter_is_active(&self, id: &FilterId) -> bool {
+        self.filter().active_filters().contains(id).await
+    }
+
+    #[allow(dead_code)]
+    async fn prune_filter_owners_once(&self) {
+        let owner_ids = {
+            let owners = self.filter_owners.lock().await;
+            owners.keys().cloned().collect::<Vec<_>>()
+        };
+        if owner_ids.is_empty() {
+            return;
+        }
+
+        let active_ids = self
+            .filter()
+            .active_filters()
+            .ids()
+            .await
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let stale_ids = stale_filter_owner_ids(owner_ids, &active_ids);
+        if stale_ids.is_empty() {
+            return;
+        }
+
+        let mut owners = self.filter_owners.lock().await;
+        for id in stale_ids {
+            owners.remove(&id);
+        }
+    }
+
+    fn spawn_filter_owner_pruner(&self)
+    where
+        Api: Send + Sync + 'static,
+    {
+        let filter = self.filter().clone();
+        let owners: Weak<Mutex<HashMap<FilterId, Address>>> = Arc::downgrade(&self.filter_owners);
+        tokio::spawn(async move {
+            let mut prune_interval = interval(FILTER_OWNER_PRUNE_INTERVAL);
+            prune_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            loop {
+                prune_interval.tick().await;
+
+                let Some(owners) = owners.upgrade() else {
+                    break;
+                };
+
+                let owner_ids = {
+                    let owners = owners.lock().await;
+                    owners.keys().cloned().collect::<Vec<_>>()
+                };
+                if owner_ids.is_empty() {
+                    continue;
+                }
+
+                let active_ids = filter
+                    .active_filters()
+                    .ids()
+                    .await
+                    .into_iter()
+                    .collect::<HashSet<_>>();
+                let stale_ids = stale_filter_owner_ids(owner_ids, &active_ids);
+                if stale_ids.is_empty() {
+                    continue;
+                }
+
+                let mut owners = owners.lock().await;
+                for id in stale_ids {
+                    owners.remove(&id);
+                }
+            }
+        });
     }
 
     /// Verify that the filter belongs to the authenticated caller.
@@ -136,10 +238,18 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
         if auth.is_sequencer {
             return Ok(());
         }
-        let owners = self.filter_owners.lock().await;
-        match owners.get(id) {
-            Some(owner) if *owner == auth.caller => Ok(()),
-            _ => Err(JsonRpcError::invalid_params("filter not found")),
+        let owner_matches = {
+            let owners = self.filter_owners.lock().await;
+            matches!(owners.get(id), Some(owner) if *owner == auth.caller)
+        };
+        if !owner_matches {
+            return Err(filter_not_found_error());
+        }
+        if self.filter_is_active(id).await {
+            Ok(())
+        } else {
+            self.filter_owners.lock().await.remove(id);
+            Err(filter_not_found_error())
         }
     }
 
@@ -596,7 +706,11 @@ where
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
 
-            let logs = self.eth.filter.filter_logs(id).await.map_err(internal)?;
+            let logs = self
+                .filter()
+                .filter_logs(id)
+                .await
+                .map_err(map_eth_filter_error)?;
 
             if auth.is_sequencer {
                 return to_raw(&logs);
@@ -611,7 +725,11 @@ where
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
 
-            let changes = self.eth.filter.filter_changes(id).await.map_err(internal)?;
+            let changes = self
+                .filter()
+                .filter_changes(id)
+                .await
+                .map_err(map_eth_filter_error)?;
 
             if auth.is_sequencer {
                 return to_raw(&changes);
@@ -660,6 +778,8 @@ where
                 .map_err(internal)?;
 
             if result {
+                self.filter_owners.lock().await.remove(&id);
+            } else if !self.filter_is_active(&id).await {
                 self.filter_owners.lock().await.remove(&id);
             }
 
@@ -896,5 +1016,29 @@ mod tests {
             err.message,
             "regular deposit event matched encrypted deposit hash"
         );
+    }
+
+    #[test]
+    fn stale_filter_owner_ids_removes_only_inactive_entries() {
+        let active_ids = HashSet::from([
+            FilterId::Str("0xactive".to_string()),
+            FilterId::Str("0xkeep".to_string()),
+        ]);
+        let owner_ids = vec![
+            FilterId::Str("0xactive".to_string()),
+            FilterId::Str("0xstale".to_string()),
+            FilterId::Str("0xkeep".to_string()),
+        ];
+
+        let stale_ids = stale_filter_owner_ids(owner_ids, &active_ids);
+
+        assert_eq!(stale_ids, vec![FilterId::Str("0xstale".to_string())]);
+    }
+
+    #[test]
+    fn stale_filter_owner_ids_is_noop_for_empty_owner_set() {
+        let stale_ids = stale_filter_owner_ids(Vec::new(), &HashSet::new());
+
+        assert!(stale_ids.is_empty());
     }
 }
