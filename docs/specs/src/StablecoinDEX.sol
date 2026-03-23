@@ -635,13 +635,7 @@ contract StablecoinDEX is IStablecoinDEX {
     /// @param user The user to transfer from
     /// @param token The token to transfer
     /// @param amount The amount to transfer
-    function _decrementBalanceOrTransferFrom(
-        address user,
-        address token,
-        uint128 amount
-    )
-        internal
-    {
+    function _decrementBalanceOrTransferFrom(address user, address token, uint128 amount) internal {
         // Check if user is authorized by the token's transfer policy before using internal balance
         uint64 policyId = ITIP20(token).transferPolicyId();
         if (

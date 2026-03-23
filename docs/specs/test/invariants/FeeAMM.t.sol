@@ -597,8 +597,9 @@ contract FeeAMMInvariantTest is BaseTest {
         vm.startPrank(actor);
         try amm.mint(userToken, validatorToken, amount, actor) returns (uint256 liquidity) {
             if (liquidity > 0) {
-                try amm.burn(userToken, validatorToken, liquidity, actor) returns (uint256, uint256)
-                {
+                try amm.burn(userToken, validatorToken, liquidity, actor) returns (
+                    uint256, uint256
+                ) {
                     _totalMintBurnCycles++;
 
                     uint256 actorBalAfter = TIP20(validatorToken).balanceOf(actor);
@@ -1947,7 +1948,8 @@ contract FeeAMMInvariantTest is BaseTest {
             || selector == IFeeAMM.InvalidToken.selector
             || selector == IFeeAMM.InsufficientLiquidity.selector
             || selector == IFeeAMM.InsufficientReserves.selector
-            || selector == IFeeAMM.InvalidAmount.selector || selector == IFeeAMM.DivisionByZero.selector
+            || selector == IFeeAMM.InvalidAmount.selector
+            || selector == IFeeAMM.DivisionByZero.selector
             || selector == IFeeAMM.InvalidSwapCalculation.selector
             || selector == IFeeAMM.InvalidCurrency.selector
             || selector == ITIP20.InsufficientBalance.selector
@@ -1965,9 +1967,9 @@ contract FeeAMMInvariantTest is BaseTest {
             || selector == IFeeAMM.InvalidCurrency.selector
             || selector == ITIP20.InsufficientBalance.selector
             || selector == ITIP20.PolicyForbids.selector
-        // FeeManager specific (string reverts)
-        || keccak256(reason)
-            == keccak256(abi.encodeWithSignature("Error(string)", "ONLY_DIRECT_CALL"))
+            // FeeManager specific (string reverts)
+            || keccak256(reason)
+                == keccak256(abi.encodeWithSignature("Error(string)", "ONLY_DIRECT_CALL"))
             || keccak256(reason)
                 == keccak256(abi.encodeWithSignature("Error(string)", "CANNOT_CHANGE_WITHIN_BLOCK"));
         assertTrue(isKnownError, "Failed with unknown FeeManager error");

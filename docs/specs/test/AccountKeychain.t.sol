@@ -36,7 +36,7 @@ contract AccountKeychainTest is BaseTest {
         limits[0] = IAccountKeychain.TokenLimit({
             token: USDC,
             amount: 1000e6 // 1000 USDC
-         });
+        });
 
         keychain.authorizeKey(
             aliceAccessKey,
@@ -66,11 +66,11 @@ contract AccountKeychainTest is BaseTest {
         limits[0] = IAccountKeychain.TokenLimit({
             token: USDC,
             amount: 1000e6 // 1000 USDC
-         });
+        });
         limits[1] = IAccountKeychain.TokenLimit({
             token: USDT,
             amount: 500e6 // 500 USDT
-         });
+        });
 
         keychain.authorizeKey(
             aliceAccessKey,

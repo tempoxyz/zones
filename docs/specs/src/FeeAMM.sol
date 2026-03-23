@@ -40,10 +40,7 @@ contract FeeAMM is IFeeAMM {
         return keccak256(abi.encode(userToken, validatorToken));
     }
 
-    function getPool(
-        address userToken,
-        address validatorToken
-    )
+    function getPool(address userToken, address validatorToken)
         external
         view
         returns (Pool memory)

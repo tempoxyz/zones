@@ -483,8 +483,9 @@ contract TIP20Test is BaseTest {
         // Create a policy that blocks alice
         address[] memory accounts = new address[](1);
         accounts[0] = alice;
-        uint64 blockingPolicy =
-            registry.createPolicyWithAccounts(admin, ITIP403Registry.PolicyType.BLACKLIST, accounts);
+        uint64 blockingPolicy = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, accounts
+        );
 
         vm.prank(admin);
         token.changeTransferPolicyId(blockingPolicy);
@@ -853,8 +854,9 @@ contract TIP20Test is BaseTest {
         // Create a policy that blocks alice
         address[] memory accounts = new address[](1);
         accounts[0] = alice;
-        uint64 blockingPolicy =
-            registry.createPolicyWithAccounts(admin, ITIP403Registry.PolicyType.BLACKLIST, accounts);
+        uint64 blockingPolicy = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, accounts
+        );
 
         // Change to a policy where alice is blocked
         vm.startPrank(admin);
@@ -878,8 +880,9 @@ contract TIP20Test is BaseTest {
         // Create a policy that blocks alice
         address[] memory accounts = new address[](1);
         accounts[0] = alice;
-        uint64 blockingPolicy =
-            registry.createPolicyWithAccounts(admin, ITIP403Registry.PolicyType.BLACKLIST, accounts);
+        uint64 blockingPolicy = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, accounts
+        );
 
         vm.prank(admin);
         token.changeTransferPolicyId(blockingPolicy);
@@ -1051,8 +1054,9 @@ contract TIP20Test is BaseTest {
     }
 
     function testCompleteQuoteTokenUpdateCannotCreateIndirectLoop() public {
-        TIP20 newToken =
-            TIP20(factory.createToken("New Token", "NEW", "USD", token, admin, bytes32("newtoken")));
+        TIP20 newToken = TIP20(
+            factory.createToken("New Token", "NEW", "USD", token, admin, bytes32("newtoken"))
+        );
 
         // Try to set token's quote token to newToken (which would create a loop)
         vm.startPrank(admin);
@@ -2266,8 +2270,9 @@ contract TIP20Test is BaseTest {
     function test_ClaimRewards_RevertsIf_UserUnauthorized() public {
         address[] memory accounts = new address[](1);
         accounts[0] = alice;
-        uint64 blacklistPolicy =
-            registry.createPolicyWithAccounts(admin, ITIP403Registry.PolicyType.BLACKLIST, accounts);
+        uint64 blacklistPolicy = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, accounts
+        );
 
         vm.prank(admin);
         token.changeTransferPolicyId(blacklistPolicy);

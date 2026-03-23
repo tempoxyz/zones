@@ -64,7 +64,8 @@ contract BaseTest is Test {
     function setUp() public virtual {
         // Is this tempo chain?
         isTempo = _TIP403REGISTRY.code.length + _TIP20FACTORY.code.length + _PATH_USD.code.length
-            + _STABLECOIN_DEX.code.length + _NONCE.code.length + _ACCOUNT_KEYCHAIN.code.length > 0;
+                + _STABLECOIN_DEX.code.length + _NONCE.code.length + _ACCOUNT_KEYCHAIN.code.length
+            > 0;
 
         console.log("Tests running with isTempo =", isTempo);
 
