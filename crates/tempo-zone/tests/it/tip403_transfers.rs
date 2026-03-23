@@ -15,6 +15,7 @@ use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
+use zone::abi::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
 
 use crate::utils::{DEFAULT_TIMEOUT, TEST_MNEMONIC, start_local_zone_with_fixture};
 
@@ -59,7 +60,7 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     let pending = tip20
         .transfer(bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(100_000)
+        .gas(150_000)
         .send()
         .await?;
 
@@ -91,6 +92,94 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     assert!(
         dev_balance >= U256::from(expected_remaining.saturating_sub(gas_buffer)),
         "dev balance {dev_balance} too low — unexpected gas usage"
+    );
+
+    Ok(())
+}
+
+/// Deposit pathUSD to the dev account, then request a withdrawal through the
+/// ZoneOutbox. Verifies the approval + outbox flow still succeeds and the
+/// token does not remain stranded on the outbox after burn.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(20).await?;
+
+    let dev_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let dev_address = dev_signer.address();
+
+    let deposit_amount: u128 = 1_000_000;
+    let withdrawal_amount: u128 = 250_000;
+
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
+    fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
+
+    zone.wait_for_balance(
+        PATH_USD_ADDRESS,
+        dev_address,
+        U256::from(deposit_amount),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    let provider = ProviderBuilder::new()
+        .wallet(dev_signer)
+        .connect_http(zone.http_url().clone());
+    let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+
+    let approve_pending = tip20
+        .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    let approve_receipt = approve_pending.get_receipt().await?;
+    assert!(approve_receipt.status(), "approve should succeed");
+
+    let balance_before = zone.balance_of(PATH_USD_ADDRESS, dev_address).await?;
+    assert_eq!(
+        zone.balance_of(PATH_USD_ADDRESS, ZONE_OUTBOX_ADDRESS)
+            .await?,
+        U256::ZERO,
+        "outbox should start with zero token balance"
+    );
+
+    let withdrawal_pending = outbox
+        .requestWithdrawal(
+            PATH_USD_ADDRESS,
+            dev_address,
+            withdrawal_amount,
+            B256::ZERO,
+            0,
+            dev_address,
+            alloy_primitives::Bytes::new(),
+        )
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(300_000)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    let withdrawal_receipt = withdrawal_pending.get_receipt().await?;
+    assert!(
+        withdrawal_receipt.status(),
+        "withdrawal request should succeed"
+    );
+
+    let balance_after = zone.balance_of(PATH_USD_ADDRESS, dev_address).await?;
+    assert!(
+        balance_after < balance_before,
+        "withdrawal should reduce the user balance"
+    );
+    assert_eq!(
+        zone.balance_of(PATH_USD_ADDRESS, ZONE_OUTBOX_ADDRESS)
+            .await?,
+        U256::ZERO,
+        "outbox should not retain funds after transferFrom + burn"
     );
 
     Ok(())
@@ -149,7 +238,7 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
     let pending = tip20_alice
         .transfer(bob, U256::from(alice_to_bob))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(100_000)
+        .gas(150_000)
         .send()
         .await?;
 
@@ -177,7 +266,7 @@ async fn test_sequential_transfers() -> eyre::Result<()> {
     let pending = tip20_bob
         .transfer(charlie, U256::from(bob_to_charlie))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(100_000)
+        .gas(150_000)
         .send()
         .await?;
 
@@ -266,7 +355,7 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
     let pending = tip20
         .transfer(bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(100_000)
+        .gas(150_000)
         .send()
         .await?;
 
@@ -338,7 +427,7 @@ async fn test_transfer_with_memo() -> eyre::Result<()> {
     let pending = tip20
         .transferWithMemo(bob, U256::from(transfer_amount), memo)
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(100_000)
+        .gas(150_000)
         .send()
         .await?;
 

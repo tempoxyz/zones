@@ -125,6 +125,7 @@ impl ZoneNode {
 
         let l1_state_provider_config = L1StateProviderConfig {
             l1_rpc_url,
+            portal_address,
             retry_connection_interval,
             ..Default::default()
         };
@@ -533,6 +534,7 @@ pub struct ZoneExecutorBuilder {
 }
 
 impl ZoneExecutorBuilder {
+    /// Create a zone executor builder with the shared L1 state/policy caches.
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: SharedL1StateCache,

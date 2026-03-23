@@ -99,6 +99,9 @@ macro_rules! define_abi {
                 string currency;
             }
 
+            /// Generic unauthorized access error used by zone wrapper logic.
+            error Unauthorized();
+
             // ---------------------------------------------------------------
             //  ZonePortal — deployed on Tempo L1
             // ---------------------------------------------------------------

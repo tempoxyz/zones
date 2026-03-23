@@ -8,17 +8,24 @@
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, ZoneAccount, now_secs, start_zone_with_private_rpc,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, ZoneAccount, now_secs, start_zone_with_private_rpc,
     start_zone_with_private_rpc_l1, start_zone_with_private_rpc_l1_with_encryption,
 };
 use alloy::{
-    primitives::{Address, B256, address, hex},
+    primitives::{Address, B256, U256, address, hex},
     signers::local::PrivateKeySigner,
 };
+use alloy_provider::ProviderBuilder;
+use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use alloy_sol_types::SolCall;
 use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
-use tempo_contracts::precompiles::account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType;
-use tempo_precompiles::PATH_USD_ADDRESS;
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_contracts::precompiles::{
+    ITIP20 as ContractTip20,
+    account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
+};
+use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
 use tokio::time::sleep;
 
 fn corrupt_token_hex(token: &str) -> String {
@@ -346,6 +353,134 @@ async fn test_balance_privacy() -> eyre::Result<()> {
     assert!(
         resp.get("result").is_some() && resp.get("error").is_none(),
         "sequencer should be able to query any address's balance"
+    );
+
+    Ok(())
+}
+
+/// `eth_call` against the zone TIP-20 enforces read privacy for `balanceOf`
+/// and `allowance`, while the configured sequencer retains access.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+
+    let owner_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let owner = owner_signer.address();
+    let spender_signer = PrivateKeySigner::random();
+    let spender = spender_signer.address();
+    let outsider_signer = PrivateKeySigner::random();
+
+    let deposit_amount: u128 = 1_000_000;
+    let allowance_amount: u128 = 333_333;
+
+    ctx.inject_deposit(PATH_USD_ADDRESS, owner, owner, deposit_amount)
+        .await?;
+
+    let owner_provider = ProviderBuilder::new()
+        .wallet(owner_signer.clone())
+        .connect_http(ctx.zone.http_url().clone());
+    let approve_pending = ContractTip20::new(PATH_USD_ADDRESS, &owner_provider)
+        .approve(spender, U256::from(allowance_amount))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+    ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
+    let approve_receipt = approve_pending.get_receipt().await?;
+    assert!(approve_receipt.status(), "approve should succeed");
+    let expected_owner_balance = ctx.zone.balance_of(PATH_USD_ADDRESS, owner).await?;
+
+    let balance_call = PrecompileTip20::balanceOfCall { account: owner };
+    let balance_data = format!("0x{}", hex::encode(balance_call.abi_encode()));
+    let allowance_call = PrecompileTip20::allowanceCall { owner, spender };
+    let allowance_data = format!("0x{}", hex::encode(allowance_call.abi_encode()));
+
+    let outsider_balance = ctx
+        .call_as_user(
+            "eth_call",
+            serde_json::json!([
+                {
+                    "to": format!("{PATH_USD_ADDRESS:#x}"),
+                    "data": balance_data,
+                },
+                "latest"
+            ]),
+            &outsider_signer,
+        )
+        .await?;
+    assert!(
+        outsider_balance.get("error").is_some(),
+        "non-owner balanceOf(other) should revert"
+    );
+
+    let outsider_allowance = ctx
+        .call_as_user(
+            "eth_call",
+            serde_json::json!([
+                {
+                    "to": format!("{PATH_USD_ADDRESS:#x}"),
+                    "data": allowance_data,
+                },
+                "latest"
+            ]),
+            &outsider_signer,
+        )
+        .await?;
+    assert!(
+        outsider_allowance.get("error").is_some(),
+        "unrelated caller allowance(owner, spender) should revert"
+    );
+
+    let sequencer_balance = ctx
+        .call_as_sequencer(
+            "eth_call",
+            serde_json::json!([
+                {
+                    "from": format!("{:#x}", ctx.config.sequencer),
+                    "to": format!("{PATH_USD_ADDRESS:#x}"),
+                    "data": format!("0x{}", hex::encode(balance_call.abi_encode())),
+                },
+                "latest"
+            ]),
+        )
+        .await?;
+    let sequencer_balance_bytes = hex::decode(
+        sequencer_balance["result"]
+            .as_str()
+            .expect("sequencer balanceOf should return hex")
+            .trim_start_matches("0x"),
+    )?;
+    assert_eq!(
+        PrecompileTip20::balanceOfCall::abi_decode_returns(&sequencer_balance_bytes)?,
+        expected_owner_balance
+    );
+
+    let sequencer_allowance = ctx
+        .call_as_sequencer(
+            "eth_call",
+            serde_json::json!([
+                {
+                    "from": format!("{:#x}", ctx.config.sequencer),
+                    "to": format!("{PATH_USD_ADDRESS:#x}"),
+                    "data": format!("0x{}", hex::encode(allowance_call.abi_encode())),
+                },
+                "latest"
+            ]),
+        )
+        .await?;
+    let sequencer_allowance_bytes = hex::decode(
+        sequencer_allowance["result"]
+            .as_str()
+            .expect("sequencer allowance should return hex")
+            .trim_start_matches("0x"),
+    )?;
+    assert_eq!(
+        PrecompileTip20::allowanceCall::abi_decode_returns(&sequencer_allowance_bytes)?,
+        U256::from(allowance_amount)
     );
 
     Ok(())

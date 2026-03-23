@@ -18,14 +18,18 @@ use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
+use zone_precompiles::SequencerExt;
 
 use super::cache::SharedL1StateCache;
+use crate::abi::PORTAL_SEQUENCER_SLOT;
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
 pub struct L1StateProviderConfig {
     /// HTTP RPC endpoint for Tempo L1.
     pub l1_rpc_url: String,
+    /// Zone portal address on Tempo L1, used for sequencer lookups.
+    pub portal_address: Address,
     /// Maximum number of transport-level retries for failed/rate-limited RPC requests.
     /// Defaults to 10.
     pub max_retries: u32,
@@ -41,6 +45,7 @@ impl Default for L1StateProviderConfig {
     fn default() -> Self {
         Self {
             l1_rpc_url: String::new(),
+            portal_address: Address::ZERO,
             max_retries: 10,
             initial_backoff_ms: 20,
             retry_connection_interval: std::time::Duration::from_millis(100),
@@ -68,6 +73,8 @@ impl Default for L1StateProviderConfig {
 pub struct L1StateProvider {
     /// In-memory cache of L1 contract storage slots, checked before any RPC call.
     cache: SharedL1StateCache,
+    /// Zone portal address on Tempo L1 used for sequencer lookups.
+    portal_address: Address,
     /// HTTP provider pointed at **Tempo L1**, used as a fallback when the cache misses.
     /// Wraps a [`RetryBackoffLayer`] that handles retries with exponential backoff.
     provider: DynProvider<TempoNetwork>,
@@ -112,6 +119,7 @@ impl L1StateProvider {
 
         Ok(Self {
             cache,
+            portal_address: config.portal_address,
             provider,
             runtime_handle,
         })
@@ -122,12 +130,14 @@ impl L1StateProvider {
     /// Used by [`ZoneEvmConfig::new_without_l1`](crate::evm::ZoneEvmConfig::new_without_l1)
     /// to build a fallback provider that won't panic on an empty RPC URL.
     pub fn new_raw(
+        config: L1StateProviderConfig,
         cache: SharedL1StateCache,
         provider: DynProvider<TempoNetwork>,
         runtime_handle: tokio::runtime::Handle,
     ) -> Self {
         Self {
             cache,
+            portal_address: config.portal_address,
             provider,
             runtime_handle,
         }
@@ -183,6 +193,33 @@ impl L1StateProvider {
         }
     }
 
+    /// Read a storage slot at the latest known L1 height.
+    ///
+    /// Uses the cache anchor when available; otherwise falls back to the
+    /// current RPC head before resolving the slot value.
+    pub fn get_latest_storage(&self, address: Address, slot: B256) -> Result<B256> {
+        let anchor_number = self.cache.read().anchor().number;
+        let block_number = if anchor_number != 0 {
+            anchor_number
+        } else {
+            tokio::task::block_in_place(|| {
+                self.runtime_handle.block_on(async {
+                    self.provider.get_block_number().await.map_err(|e| {
+                        eyre::eyre!("eth_blockNumber failed while reading latest storage: {e}")
+                    })
+                })
+            })?
+        };
+
+        self.get_storage(address, slot, block_number)
+    }
+
+    /// Read the active sequencer address from the configured portal at the latest known L1 height.
+    pub fn get_latest_sequencer(&self) -> Result<Address> {
+        let value = self.get_latest_storage(self.portal_address, PORTAL_SEQUENCER_SLOT)?;
+        Ok(Address::from_slice(&value.as_slice()[12..]))
+    }
+
     /// Read a storage slot asynchronously at a specific L1 block — cache first, RPC fallback.
     ///
     /// Same semantics as [`get_storage`](Self::get_storage) but natively async. The
@@ -225,5 +262,11 @@ impl L1StateProvider {
         let result = B256::from(value.to_be_bytes());
         debug!(%address, %slot, block_number, %result, "fetched L1 storage slot from RPC");
         Ok(result)
+    }
+}
+
+impl SequencerExt for L1StateProvider {
+    fn latest_sequencer(&self) -> Option<Address> {
+        self.get_latest_sequencer().ok()
     }
 }
