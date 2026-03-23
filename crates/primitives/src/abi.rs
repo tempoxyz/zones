@@ -15,9 +15,9 @@ use alloy_primitives::{B256, keccak256};
 use alloy_sol_types::SolValue;
 
 pub use crate::constants::{
-    EMPTY_SENTINEL, TEMPO_BLOCK_HASH_SLOT, TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS,
-    TEMPO_STATE_READER_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
-    ZONE_TOKEN_ADDRESS,
+    EMPTY_SENTINEL, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, TEMPO_BLOCK_HASH_SLOT,
+    TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS, TEMPO_STATE_READER_ADDRESS, ZONE_CONFIG_ADDRESS,
+    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
 };
 
 /// Internal macro that emits the full `sol!` block, placing `$($rpc_attr)*`
@@ -155,6 +155,18 @@ macro_rules! define_abi {
                     address indexed fallbackRecipient,
                     address token,
                     uint128 amount
+                );
+
+                #[derive(Debug)]
+                event SequencerTransferStarted(
+                    address indexed currentSequencer,
+                    address indexed pendingSequencer
+                );
+
+                #[derive(Debug)]
+                event SequencerTransferred(
+                    address indexed previousSequencer,
+                    address indexed newSequencer
                 );
 
                 // -- Errors --
