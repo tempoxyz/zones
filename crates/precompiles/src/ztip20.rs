@@ -151,21 +151,21 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
                 self.enforce_transfer(address, call.from, call.to)
             }
             ITIP20::mintCall::SELECTOR => {
-                if let Some(revert) = self.enforce_mint_auth(caller) {
+                if let Some(revert) = self.reject_crossed_mint_caller(caller) {
                     return Some(revert);
                 }
                 let call = decode_or_revert!(ITIP20::mintCall, args);
                 self.enforce_mint(address, call.to)
             }
             ITIP20::mintWithMemoCall::SELECTOR => {
-                if let Some(revert) = self.enforce_mint_auth(caller) {
+                if let Some(revert) = self.reject_crossed_mint_caller(caller) {
                     return Some(revert);
                 }
                 let call = decode_or_revert!(ITIP20::mintWithMemoCall, args);
                 self.enforce_mint(address, call.to)
             }
             ITIP20::burnCall::SELECTOR | ITIP20::burnWithMemoCall::SELECTOR => {
-                self.enforce_burn_auth(caller)
+                self.reject_crossed_burn_caller(caller)
             }
             _ => None,
         }
@@ -202,7 +202,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         to: Address,
     ) -> Option<PrecompileResult> {
         let registry = self.registry.as_ref()?;
-        let policy_id = match self.resolve_transfer_policy_id(token) {
+        let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
             Ok(id) => id,
             Err(e) => {
                 debug!(
@@ -238,7 +238,7 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     /// Returns `Some(revert)` if forbidden, `None` if allowed.
     fn enforce_mint(&self, token: Address, to: Address) -> Option<PrecompileResult> {
         let registry = self.registry.as_ref()?;
-        let policy_id = match self.resolve_transfer_policy_id(token) {
+        let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
             Ok(id) => id,
             Err(e) => {
                 debug!(
@@ -266,7 +266,8 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         }
     }
 
-    fn enforce_mint_auth(&self, caller: Address) -> Option<PrecompileResult> {
+    /// Reject the system caller that is only allowed on the opposite bridge path.
+    fn reject_crossed_mint_caller(&self, caller: Address) -> Option<PrecompileResult> {
         if caller == ZONE_OUTBOX_ADDRESS {
             Some(Ok(Self::roles_unauthorized_output()))
         } else {
@@ -274,7 +275,8 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         }
     }
 
-    fn enforce_burn_auth(&self, caller: Address) -> Option<PrecompileResult> {
+    /// Reject the system caller that is only allowed on the opposite bridge path.
+    fn reject_crossed_burn_caller(&self, caller: Address) -> Option<PrecompileResult> {
         if caller == ZONE_INBOX_ADDRESS {
             Some(Ok(Self::roles_unauthorized_output()))
         } else {
@@ -283,11 +285,11 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     }
 
     /// Resolve the `transfer_policy_id` for a token.
-    fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64, PrecompileError> {
-        self.registry
-            .as_ref()
-            .expect("transfer policy resolution only happens when a registry is configured")
-            .resolve_transfer_policy_id(token)
+    fn resolve_transfer_policy_id(
+        registry: &ZoneTip403ProxyRegistry<P>,
+        token: Address,
+    ) -> Result<u64, PrecompileError> {
+        registry.resolve_transfer_policy_id(token)
     }
 
     fn is_sequencer(&self, caller: Address) -> bool {
