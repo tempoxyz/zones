@@ -62,7 +62,7 @@ pub(crate) struct CreateZone {
 
     /// ZoneFactory contract address on Tempo L1.
     /// Default is the ZoneFactory deployed on moderato.
-    #[arg(long, default_value_t = address!("0x7F4528b1a555D704bC20f8328557240BED29488D"))]
+    #[arg(long, default_value_t = address!("0xD8d977D60F61F8a5e5003a3A9dCF6ACae554BC8c"))]
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).

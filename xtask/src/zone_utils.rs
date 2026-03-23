@@ -17,7 +17,7 @@ use zone::abi::{ZoneInbox, ZonePortal};
 
 pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 pub(crate) const MODERATO_ZONE_FACTORY: Address =
-    address!("0x7F4528b1a555D704bC20f8328557240BED29488D");
+    address!("0xD8d977D60F61F8a5e5003a3A9dCF6ACae554BC8c");
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;

@@ -239,9 +239,16 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc=zone_r
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     OUTBOX="0x1c00000000000000000000000000000000000002"
     echo "Approving ZoneOutbox for max zone tokens..."
-    cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 100000
-    echo "Approved!"
+    TX_OUTPUT=$(cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 150000 --json)
+    STATUS=$(echo "$TX_OUTPUT" | jq -r '.status')
+    if [[ "$STATUS" == "0x1" ]]; then
+        echo "Approved!"
+    else
+        echo "Transaction failed!"
+        echo "$TX_OUTPUT" | jq .
+        exit 1
+    fi
 
 [group('zone')]
 [doc('Sends a withdrawal request on the zone (L2) back to Tempo L1. Requires PRIVATE_KEY env var. Run max-approve-outbox first.')]
