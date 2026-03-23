@@ -10,6 +10,8 @@
 //! [`PolicyCheck`] — cache-first, L1 RPC fallback), and only then delegates
 //! to the vanilla `TIP20Token` implementation.
 
+use alloc::sync::Arc;
+
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolInterface};
@@ -54,7 +56,7 @@ macro_rules! decode_or_revert {
 /// The zone runtime implements this for its L1-backed state provider so the
 /// precompile can enforce sequencer-visible reads without knowing about the
 /// concrete provider type.
-pub trait SequencerExt {
+pub trait SequencerExt: Send + Sync {
     /// Return the latest known active sequencer for `portal_address`.
     fn latest_sequencer(&self, portal_address: Address) -> Option<Address>;
 }
@@ -65,20 +67,20 @@ pub trait SequencerExt {
 /// optional PolicyCheck-backed authorization for transfers and mints, privacy-gated
 /// `balanceOf`/`allowance`, fixed gas for transfer-family calls and `approve`,
 /// and operation-specific bridge auth for mint/burn selectors.
-pub struct ZoneTip20Token<P, S> {
+pub struct ZoneTip20Token<P> {
     /// Optional TIP-403 registry wrapper used for transfer and mint-recipient policy checks.
     registry: Option<ZoneTip403ProxyRegistry<P>>,
     /// Sequencer-capable backend used to authorize private reads for the active sequencer.
-    sequencer: S,
+    sequencer: Arc<dyn SequencerExt>,
     /// Zone portal address whose L1 storage defines the current active sequencer.
     portal_address: Address,
 }
 
-impl<P: PolicyCheck, S: SequencerExt> ZoneTip20Token<P, S> {
+impl<P: PolicyCheck> ZoneTip20Token<P> {
     /// Create a new wrapper with the given registry.
     pub fn new(
         registry: Option<ZoneTip403ProxyRegistry<P>>,
-        sequencer: S,
+        sequencer: Arc<dyn SequencerExt>,
         portal_address: Address,
     ) -> Self {
         Self {
@@ -317,10 +319,9 @@ impl<P: PolicyCheck, S: SequencerExt> ZoneTip20Token<P, S> {
     }
 }
 
-impl<P, S> ZoneTip20Token<P, S>
+impl<P> ZoneTip20Token<P>
 where
     P: PolicyCheck + Clone + Send + Sync + 'static,
-    S: SequencerExt + Send + Sync + 'static,
 {
     /// Create a [`DynPrecompile`] for a zone-side TIP-20 token at `address`.
     ///
@@ -334,7 +335,7 @@ where
         address: Address,
         cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
         registry: Option<ZoneTip403ProxyRegistry<P>>,
-        sequencer: S,
+        sequencer: Arc<dyn SequencerExt>,
         portal_address: Address,
     ) -> DynPrecompile {
         let spec = cfg.spec;
@@ -567,9 +568,9 @@ mod tests {
                 token,
                 &ctx.cfg,
                 policy.map(ZoneTip403ProxyRegistry::new),
-                MockSequencer {
+                Arc::new(MockSequencer {
                     address: Some(sequencer),
-                },
+                }),
                 portal,
             );
 

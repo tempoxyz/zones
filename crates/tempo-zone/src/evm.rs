@@ -89,7 +89,8 @@ impl ZoneEvmFactory {
             .policy_provider
             .clone()
             .map(ZoneTip403ProxyRegistry::new);
-        let l1_provider = self.l1_provider.clone();
+        let sequencer: Arc<dyn crate::precompiles::SequencerExt> =
+            Arc::new(self.l1_provider.clone());
         let portal_address = self.portal_address;
 
         if let Some(provider) = self.policy_provider.clone() {
@@ -124,7 +125,7 @@ impl ZoneEvmFactory {
                     *address,
                     &zone_cfg,
                     registry.clone(),
-                    l1_provider.clone(),
+                    sequencer.clone(),
                     portal_address,
                 ))
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
