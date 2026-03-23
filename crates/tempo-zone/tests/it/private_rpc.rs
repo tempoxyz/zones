@@ -66,8 +66,8 @@ fn parse_token_fields() {
 
 #[test]
 fn parse_token_too_short() {
-    // 53 bytes = exactly the message length, no room for a signature
-    let blob = vec![0u8; 53];
+    // 49 bytes = exactly the message length, no room for a signature
+    let blob = vec![0u8; 49];
     assert!(AuthorizationToken::parse(&blob).is_err());
 
     // Even shorter
