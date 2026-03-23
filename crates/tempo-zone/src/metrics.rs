@@ -68,6 +68,12 @@ pub(crate) struct L1SubscriberMetrics {
     /// Number of `TokenEnabled` events observed on L1.
     pub token_enabled_events_total: Counter,
 
+    /// Number of `SequencerTransferStarted` events observed on L1.
+    pub sequencer_transfer_started_events_total: Counter,
+
+    /// Number of `SequencerTransferred` events observed on L1.
+    pub sequencer_transferred_events_total: Counter,
+
     /// Number of reorgs detected by the subscriber.
     pub reorgs_detected_total: Counter,
 

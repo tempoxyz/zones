@@ -2998,6 +2998,7 @@ impl L1Fixture {
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,
+            ..Default::default()
         };
         queue.enqueue(header, events, vec![]);
     }

@@ -361,7 +361,7 @@ struct Deposit {
 
 struct Withdrawal {
     address token;              // TIP-20 token being withdrawn
-    address sender;             // who initiated the withdrawal on the zone
+    bytes32 senderTag;          // keccak256(abi.encodePacked(sender, txHash)) — see Authenticated withdrawals
     address to;                 // Tempo recipient
     uint128 amount;             // amount to send to recipient (excludes fee)
     uint128 fee;                // processing fee for sequencer (calculated at request time)
@@ -369,6 +369,7 @@ struct Withdrawal {
     uint64 gasLimit;            // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
     bytes callbackData;         // calldata for IWithdrawalReceiver (if gasLimit > 0, max 1KB)
+    bytes encryptedSender;      // ECDH-encrypted (sender, txHash) for revealTo key, or empty
 }
 ```
 
@@ -671,7 +672,7 @@ interface IZoneMessenger {
     /// @param data Calldata for the target
     function relayMessage(
         address token,
-        address sender,
+        bytes32 senderTag,
         address target,
         uint128 amount,
         uint64 gasLimit,
@@ -680,7 +681,7 @@ interface IZoneMessenger {
 }
 ```
 
-The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` to authenticate the call, and receive the L2 origin as the `sender` parameter in `onWithdrawalReceived`. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
+The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` to authenticate the call, and receive the `senderTag` in `onWithdrawalReceived` (see [Authenticated withdrawals](#authenticated-withdrawals)). This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
 
 #### Withdrawal receiver
 
@@ -695,7 +696,7 @@ interface IWithdrawalReceiver {
     /// @param callbackData The callback data from the withdrawal request
     /// @return The function selector to confirm successful handling
     function onWithdrawalReceived(
-        address sender,
+        bytes32 senderTag,
         address token,
         uint128 amount,
         bytes calldata callbackData
@@ -920,7 +921,8 @@ interface IZoneOutbox {
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
-        bytes data
+        bytes data,
+        bytes revealTo
     );
 
     event TempoGasRateUpdated(uint128 tempoGasRate);
@@ -984,6 +986,7 @@ interface IZoneOutbox {
     /// @param gasLimit Gas limit for messenger callback (0 = no callback).
     /// @param fallbackRecipient Zone address for bounce-back if callback fails.
     /// @param data Calldata for the target (max 1KB).
+    /// @param revealTo Compressed secp256k1 public key (33 bytes) to encrypt sender reveal to, or empty.
     function requestWithdrawal(
         address token,
         address to,
@@ -991,7 +994,8 @@ interface IZoneOutbox {
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
-        bytes calldata data
+        bytes calldata data,
+        bytes calldata revealTo
     ) external;
 
     /// @notice Finalize batch at end of final block - build withdrawal hash and write to state.
@@ -1528,7 +1532,7 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
     }
 
     // Try callback via messenger for atomicity
-    try IZoneMessenger(messenger).relayMessage(w.token, w.sender, w.to, w.amount, w.gasLimit, w.callbackData) {
+    try IZoneMessenger(messenger).relayMessage(w.token, w.senderTag, w.to, w.amount, w.gasLimit, w.callbackData) {
         // Success: tokens transferred and callback executed
     } catch {
         // Callback failed: bounce back to zone
@@ -1537,7 +1541,7 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
 }
 ```
 
-The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` to authenticate the call, and receive the L2 origin as the `sender` parameter in `onWithdrawalReceived`. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
+The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` to authenticate the call, and receive the `senderTag` in `onWithdrawalReceived` (see [Authenticated withdrawals](#authenticated-withdrawals)). This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
 
 ## Withdrawal failure and bounce-back
 
@@ -1699,6 +1703,131 @@ Tempo Node
     ├── In-memory State Store
     └── SP1 Prover (mock for dev)
 ```
+
+## Authenticated withdrawals
+
+Zone transactions are private — the zone is a validium and transaction data is not published on L1. However, when a withdrawal is processed on L1 via `processWithdrawal`, the full `Withdrawal` struct (including `sender`) is passed in calldata and is publicly visible. This leaks the sender's identity.
+
+Authenticated withdrawals replace the plaintext sender with a commitment that only the sender can open, enabling selective disclosure: the recipient (or any other party the sender chooses) can verify the sender's identity, while the public cannot.
+
+### Sender tag
+
+The `sender` field in the `Withdrawal` struct is replaced with a `senderTag` and a new `encryptedSender` field:
+
+```solidity
+struct Withdrawal {
+    address token;
+    bytes32 senderTag;          // keccak256(abi.encodePacked(sender, txHash))
+    address to;
+    uint128 amount;
+    uint128 fee;
+    bytes32 memo;
+    uint64 gasLimit;
+    address fallbackRecipient;
+    bytes callbackData;
+    bytes encryptedSender;      // ECDH-encrypted (sender, txHash) for a target key, or empty
+}
+```
+
+The sequencer computes both fields when building the withdrawal in `finalizeWithdrawalBatch`:
+
+```
+senderTag       = keccak256(abi.encodePacked(sender, txHash))
+encryptedSender = ECDH_Encrypt((sender, txHash), revealTo)   // empty if no revealTo
+```
+
+where `sender` is the address that called `requestWithdrawal` on the zone and `txHash` is the hash of that transaction. The `txHash` acts as a 32-byte blinding factor — it is private to the zone (transaction data is not published on L1) and known only to the sender and the sequencer.
+
+The sender cannot encrypt `txHash` into the withdrawal transaction themselves (the hash depends on the transaction contents, creating a circular dependency). Instead, the sequencer performs the encryption post-hoc: it knows `sender`, `txHash`, and the target key after processing the transaction.
+
+### Reveal key
+
+The sender specifies an optional `revealTo` public key when requesting the withdrawal:
+
+```solidity
+function requestWithdrawal(
+    address token,
+    address to,
+    uint128 amount,
+    bytes32 memo,
+    uint64 gasLimit,
+    address fallbackRecipient,
+    bytes calldata data,
+    bytes calldata revealTo     // compressed secp256k1 public key (33 bytes), or empty
+) external;
+```
+
+If `revealTo` is provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH (same scheme as encrypted deposits) and populates `encryptedSender` in the L1-facing `Withdrawal` struct. If empty, `encryptedSender` is empty and the sender can reveal `txHash` manually.
+
+The `revealTo` key is stored in the zone's pending withdrawal state so the sequencer can use it during `finalizeWithdrawalBatch`. It does not appear in the L1-facing struct — only the encrypted output does.
+
+### Encrypted sender format
+
+When `revealTo` is specified, `encryptedSender` contains:
+
+```
+ephemeralPubKey (33 bytes) || ciphertext (52 bytes) || mac (16 bytes)
+```
+
+The sequencer generates an ephemeral key pair `(r, R = r*G)`, derives a shared secret `S = r * revealTo`, and encrypts `abi.encodePacked(sender, txHash)` (52 bytes) using a symmetric cipher keyed by `S`. The holder of the private key corresponding to `revealTo` derives the same shared secret via `S = privKey * R` and decrypts.
+
+### Selective disclosure
+
+Two disclosure modes:
+
+**Manual reveal** (`revealTo` empty): The sender reveals `txHash` to any party off-chain. The verifier checks `keccak256(abi.encodePacked(sender_address, txHash)) == senderTag`.
+
+**Encrypted reveal** (`revealTo` specified): The holder of the `revealTo` private key decrypts `encryptedSender` to obtain `(sender, txHash)` and verifies against `senderTag`. No off-chain communication with the sender is needed.
+
+The sender can use both modes: specify `revealTo` for a primary recipient (e.g., target zone sequencer) and later reveal `txHash` manually to additional parties.
+
+### Zone-to-zone transfers
+
+For cross-zone withdrawals (Zone A to Zone B), the sender sets `revealTo` to Zone B's sequencer public key. The flow:
+
+1. Sender on Zone A calls `requestWithdrawal` with `revealTo = pubKeySeqB`.
+2. Zone A's sequencer processes the transaction, computes `senderTag` and `encryptedSender`.
+3. The withdrawal is proven and submitted to L1. `processWithdrawal` transfers tokens to Zone B's portal.
+4. Zone B's sequencer observes the incoming deposit, reads `encryptedSender` from the withdrawal data.
+5. Zone B's sequencer decrypts with its private key to learn `(sender, txHash)`.
+6. Zone B's sequencer verifies `keccak256(sender || txHash) == senderTag`.
+7. Zone B can now attribute the deposit to the sender, enabling sender-aware processing on Zone B.
+
+Each zone sequencer's public key is already published (used for encrypted deposits), so the sender can look it up without additional infrastructure.
+
+### Trust model
+
+The sequencer computes `senderTag` and `encryptedSender`, and includes them in the `Withdrawal` struct. The struct is hashed into the withdrawal queue chain, which is committed in the batch proof. The sequencer is trusted to compute both correctly — a malicious sequencer could insert incorrect values, and the batch proof would still be valid since the prover does not verify the tag's preimage or the encryption.
+
+This is a modest extension of the existing trust model: the sequencer is already trusted for liveness, transaction ordering, and withdrawal processing. Adding honest sender tag computation and encryption to that set is a small incremental assumption.
+
+To upgrade to trustless sender authentication, the `senderTag` computation can be moved into the ZK circuit. The prover would verify `senderTag == keccak256(abi.encodePacked(sender, txHash))` for the actual sender of each withdrawal transaction. The encryption would remain sequencer-mediated (ZK-proving ECDH encryption is expensive), but the commitment would be trustless. The on-chain interface and reveal flow remain unchanged.
+
+### Impact on callback withdrawals
+
+For simple withdrawals (`gasLimit == 0`), the sender field is not used in execution — only `to` and `amount` matter. The `senderTag` replacement has no functional impact.
+
+For callback withdrawals (`gasLimit > 0`), `IWithdrawalReceiver.onWithdrawalReceived` receives `bytes32 senderTag` instead of `address sender`:
+
+```solidity
+function onWithdrawalReceived(
+    bytes32 senderTag,
+    address token,
+    uint128 amount,
+    bytes calldata callbackData
+) external returns (bytes4);
+```
+
+Receiving contracts that need the sender's identity can decrypt `encryptedSender` off-chain (if they hold the `revealTo` key) or receive `txHash` via `callbackData` or a separate channel.
+
+### Zone-side changes
+
+`ZoneOutbox.requestWithdrawal` records the pending withdrawal with the plaintext `sender` and the `revealTo` key. The sequencer computes `senderTag` and `encryptedSender` when building the L1-facing `Withdrawal` struct in `finalizeWithdrawalBatch`. The zone-side `WithdrawalRequested` event continues to include the plaintext `sender` since zone events are private.
+
+### Open questions
+
+- **Sequencer-signed tag**: A per-withdrawal sequencer signature over `senderTag` would let recipients verify authenticity without trusting the batch proof context. This adds ~65 bytes per withdrawal. Whether this overhead is justified depends on the verification use case.
+- **revealTo for non-zone recipients**: Individual L1 recipients could also publish a public key (e.g., via ENS or an on-chain registry) to receive encrypted sender reveals without manual coordination.
 
 ## Open questions
 

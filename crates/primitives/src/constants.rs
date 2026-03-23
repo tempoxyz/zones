@@ -46,6 +46,16 @@ pub const ZONE_TIP20_FACTORY_ADDRESS: Address =
 /// Default zone token address (pathUSD TIP-20).
 pub const ZONE_TOKEN_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
 
+/// ZonePortal storage slot 0: `sequencer` (address).
+pub const PORTAL_SEQUENCER_SLOT: B256 = B256::ZERO;
+
+/// ZonePortal storage slot 1: `pendingSequencer` (address).
+pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 1;
+    B256::new(bytes)
+};
+
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
 // ---------------------------------------------------------------------------
