@@ -540,7 +540,7 @@ impl DemoBlacklist {
         let outbox_token = TIP20Token::new(token_addr, &l2_target);
         let receipt = outbox_token
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-            .gas(100_000)
+            .gas(150_000)
             .send_sync()
             .await
             .wrap_err("approve outbox on L2")?;
