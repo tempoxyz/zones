@@ -21,12 +21,12 @@ use tempo_precompiles::{
 };
 use tracing::{debug, trace};
 use zone_primitives::{
+    abi::Unauthorized,
     constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
     policy::AuthRole,
 };
 
 use crate::{
-    abi::Unauthorized,
     policy::PolicyCheck,
     tip403_proxy::{AUTH_CHECK_GAS, ZoneTip403ProxyRegistry},
 };

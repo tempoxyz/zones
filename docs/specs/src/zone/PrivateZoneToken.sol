@@ -32,9 +32,7 @@ abstract contract PrivateZoneToken {
     ///      Matches the zone's FIXED_DEPOSIT_GAS for consistency.
     uint256 public constant FIXED_TRANSFER_GAS = 100_000;
 
-    /// @notice Reference source for the configured sequencer address.
-    /// @dev The runtime threads the node's configured sequencer address into the
-    ///      precompile. This spec models that check via config.sequencer().
+    /// @notice Zone configuration (provides sequencer address from L1).
     IZoneConfig public immutable config;
 
     /*//////////////////////////////////////////////////////////////
@@ -173,20 +171,19 @@ abstract contract PrivateZoneToken {
     }
 
     /**
-     * @notice Burn tokens from the caller.
+     * @notice Burn tokens from `from`.
      * @dev On Tempo, burn() requires the caller to have ISSUER_ROLE. On a privacy zone,
      *      burn is additionally callable by the ZoneOutbox system contract (for withdrawal
      *      processing). The ZoneOutbox flow is:
      *        1. User approves ZoneOutbox to spend (amount + fee)
-     *        2. ZoneOutbox calls transferFrom(user, address(this), amount + fee)
-     *        3. ZoneOutbox calls burn(amount + fee)
+     *        2. ZoneOutbox calls transferFrom(user, self, amount + fee)
+     *        3. ZoneOutbox calls burn(self, amount + fee)
      *      The burned tokens are released on Tempo when the withdrawal is processed.
      *
-     *      Access: ISSUER_ROLE holders OR ZoneOutbox (0x1c...0002). Crossed
-     *      system calls (ZoneInbox -> burn, ZoneOutbox -> mint) must revert.
+     *      Access: ISSUER_ROLE holders OR ZoneOutbox (0x1c...0002).
      *      Gas: standard (not fixed) — only the sequencer/outbox calls this.
      */
-    function burn(uint256 amount) external {
+    function burn(address from, uint256 amount) external {
         _requireBurnAuth();
         revert(); // precompile stub
     }
