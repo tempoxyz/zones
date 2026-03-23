@@ -35,6 +35,22 @@ fn corrupt_token_hex(token: &str) -> String {
     hex::encode(bytes)
 }
 
+fn assert_filter_not_found_error(response: &serde_json::Value) {
+    let error = response
+        .get("error")
+        .unwrap_or_else(|| panic!("expected filter-not-found error, got {response}"));
+    assert_eq!(
+        error["code"].as_i64().unwrap(),
+        -32602,
+        "filter-not-found should surface as invalid params",
+    );
+    assert_eq!(
+        error["message"].as_str().unwrap(),
+        "filter not found",
+        "filter-not-found message should be stable",
+    );
+}
+
 /// Auth enforcement: missing header → 401, garbage token → 401/403, wrong chain ID → 403.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_auth_rejection() -> eyre::Result<()> {
@@ -302,6 +318,77 @@ async fn test_public_methods() -> eyre::Result<()> {
             "user should succeed for {method}"
         );
     }
+
+    Ok(())
+}
+
+/// Filter ownership is scoped to the creating account, and uninstall removes follow-up access.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_filter_ownership_and_uninstall_cleanup() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+    let owner_signer = PrivateKeySigner::random();
+    let other_signer = PrivateKeySigner::random();
+
+    let create_resp = ctx
+        .call_as_user("eth_newBlockFilter", serde_json::json!([]), &owner_signer)
+        .await?;
+    assert!(
+        create_resp.get("error").is_none(),
+        "owner should be able to create a block filter: {create_resp}"
+    );
+    let filter_id = create_resp["result"].clone();
+
+    ctx.inject_empty_block().await?;
+
+    let owner_changes = ctx
+        .call_as_user(
+            "eth_getFilterChanges",
+            serde_json::json!([filter_id.clone()]),
+            &owner_signer,
+        )
+        .await?;
+    assert!(
+        owner_changes.get("error").is_none(),
+        "owner should be able to read filter changes: {owner_changes}"
+    );
+    assert!(
+        owner_changes["result"]
+            .as_array()
+            .is_some_and(|changes| !changes.is_empty()),
+        "owner should observe at least one new block hash"
+    );
+
+    let other_changes = ctx
+        .call_as_user(
+            "eth_getFilterChanges",
+            serde_json::json!([filter_id.clone()]),
+            &other_signer,
+        )
+        .await?;
+    assert_filter_not_found_error(&other_changes);
+
+    let uninstall_resp = ctx
+        .call_as_user(
+            "eth_uninstallFilter",
+            serde_json::json!([filter_id.clone()]),
+            &owner_signer,
+        )
+        .await?;
+    assert!(
+        uninstall_resp["result"].as_bool().unwrap(),
+        "owner uninstall should succeed",
+    );
+
+    let after_uninstall = ctx
+        .call_as_user(
+            "eth_getFilterChanges",
+            serde_json::json!([filter_id]),
+            &owner_signer,
+        )
+        .await?;
+    assert_filter_not_found_error(&after_uninstall);
 
     Ok(())
 }
