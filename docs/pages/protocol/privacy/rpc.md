@@ -348,7 +348,7 @@ In addition to the Ethereum JSON-RPC methods, the zone exposes zone-specific met
 | Method | Access | Description |
 |--------|--------|-------------|
 | `zone_getAuthorizationTokenInfo` | Any authenticated | Returns the authenticated account address and token expiry. Useful for verifying the authorization token is valid. |
-| `zone_getZoneInfo` | Any authenticated | Returns zone metadata: `zoneId`, `zoneToken`, `sequencer` (address only, not private key), `chainId`. |
+| `zone_getZoneInfo` | Any authenticated | Returns zone metadata: `zoneId`, `zoneTokens`, `sequencer` (address only, not private key), `chainId`. |
 | `zone_getDepositStatus(tempoBlockNumber)` | Scoped | Returns whether deposits from the given Tempo block have been processed on the zone. Only returns information about deposits where the sender or recipient is the authenticated account. |
 
 All integer fields in these responses use Ethereum JSON-RPC quantity encoding (hex strings such as `0x1`).
@@ -392,14 +392,17 @@ All integer fields in these responses use Ethereum JSON-RPC quantity encoding (h
 ```json
 {
   "zoneId": "0x1",
-  "zoneToken": "0x20c0000000000000000000000000000000000000",
+  "zoneTokens": [
+    "0x20c0000000000000000000000000000000000000",
+    "0x20c0000000000000000000000000000000aa0001"
+  ],
   "sequencer": "0xabcd...",
   "chainId": "0x2a"
 }
 ```
 
 - `zoneId`: the configured zone identifier.
-- `zoneToken`: the zone's TIP-20 token address.
+- `zoneTokens`: the zone's currently enabled TIP-20 token addresses.
 - `sequencer`: the configured sequencer address.
 - `chainId`: the zone chain ID.
 

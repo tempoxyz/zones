@@ -18,8 +18,17 @@ use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone::{ZoneNode, evm::ZoneEvmConfig};
 
+type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
+
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
+
+const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
+    "tungstenite=warn,",
+    "alloy_pubsub=warn,",
+    "alloy_transport_ws=warn,",
+    "rustls::client=warn"
+);
 
 /// Tempo Zone CLI arguments.
 #[derive(Debug, Clone, clap::Args)]
@@ -106,6 +115,19 @@ struct ZoneArgs {
     pub private_rpc_port: u16,
 }
 
+fn prepend_log_filter(filter: &mut String, directives: &str) {
+    if filter.is_empty() {
+        *filter = directives.to_owned();
+    } else {
+        *filter = format!("{directives},{filter}");
+    }
+}
+
+fn apply_zone_log_filters(cli: &mut ZoneCli) {
+    prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
+    prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
+}
+
 fn main() {
     reth_cli_util::sigsegv_handler::install();
 
@@ -126,8 +148,10 @@ fn main() {
         )
     };
 
-    if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
-        .run_with_components::<ZoneNode>(components, async move |mut builder, args| {
+    let mut cli = ZoneCli::parse();
+    apply_zone_log_filters(&mut cli);
+
+    let run_result = cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
             // Disable peer discovery — the zone node has no peering.
@@ -243,8 +267,9 @@ fn main() {
 
             handle.node_exit_future.await?;
             Ok(())
-        })
-    {
+        });
+
+    if let Err(err) = run_result {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
     }
