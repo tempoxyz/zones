@@ -333,7 +333,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if state_override.is_some() {
+            if !auth.is_sequencer && state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
@@ -359,7 +359,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if state_override.is_some() {
+            if !auth.is_sequencer && state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 

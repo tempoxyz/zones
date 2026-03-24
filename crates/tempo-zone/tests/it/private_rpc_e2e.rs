@@ -678,6 +678,7 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
 
     let ctx = start_zone_with_private_rpc().await?;
     let user_signer = PrivateKeySigner::random();
+    let simulation_target = format!("{:#x}", Address::repeat_byte(0x11));
 
     for method in ["eth_call", "eth_estimateGas"] {
         let create_resp = ctx
@@ -707,7 +708,7 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
                 method,
                 json!([
                     {
-                        "to": format!("{PATH_USD_ADDRESS:#x}"),
+                        "to": simulation_target.clone(),
                         "data": "0x"
                     },
                     "latest",
@@ -731,7 +732,8 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
                 method,
                 json!([
                     {
-                        "to": format!("{PATH_USD_ADDRESS:#x}"),
+                        "from": format!("{:#x}", ctx.config.sequencer),
+                        "to": simulation_target.clone(),
                         "data": "0x"
                     },
                     "latest",
@@ -740,15 +742,13 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
             )
             .await?;
         assert_eq!(
-            sequencer_override_resp["error"]["code"].as_i64().unwrap(),
-            -32602,
-            "{method} should reject sequencer state overrides",
+            sequencer_override_resp.get("error"),
+            None,
+            "{method} should preserve sequencer state override access: {sequencer_override_resp}",
         );
-        assert_eq!(
-            sequencer_override_resp["error"]["message"]
-                .as_str()
-                .unwrap(),
-            "state overrides not allowed",
+        assert!(
+            sequencer_override_resp.get("result").is_some(),
+            "{method} should return a result for sequencer state overrides: {sequencer_override_resp}",
         );
     }
 
