@@ -715,9 +715,18 @@ Zones have four system contract predeploys at fixed addresses:
 - **ZoneOutbox** (0x1c00000000000000000000000000000000000002) - Handles withdrawal requests back to Tempo
 - **ZoneConfig** (0x1c00000000000000000000000000000000000003) - Central configuration that reads sequencer from L1
 
-#### Zone tokens
+#### Zone token model
 
-Each enabled TIP-20 token is bridged from Tempo to the zone. Each is deployed at the **same address** on the zone as on Tempo. Users interact with them via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints the correct token when processing deposits and burns the correct token when withdrawals are requested. The zone node must deploy/configure zone-side representations for each enabled token.
+Zones have **no TIP-20 factory**. All TIP-20 tokens on a zone are bridged representations of Tempo tokens — there is no mechanism to create or issue new tokens on the zone itself. Contract creation is disabled (`CREATE` and `CREATE2` revert), so users cannot deploy token contracts either.
+
+Each enabled TIP-20 token is deployed on the zone at the **same address** as on Tempo. When the sequencer calls `enableToken(token)` on the L1 portal, the zone node provisions a zone-side TIP-20 precompile at that address in the next genesis or state update. Users interact with zone tokens via the standard TIP-20 interface for transfers and approvals.
+
+The total supply of each zone token is controlled exclusively by the bridge:
+
+- **Mint on deposit**: `ZoneInbox` mints tokens when processing deposits from Tempo.
+- **Burn on withdrawal**: `ZoneOutbox` burns tokens when users request withdrawals back to Tempo.
+
+The zone-side supply of each token always equals the net deposits minus net withdrawals for that token. The corresponding Tempo-side tokens are held in escrow by the `ZonePortal`. No other actor can mint or burn zone tokens — system contracts (`ZoneInbox`, `ZoneOutbox`) are the sole mint/burn authorities.
 
 #### ZoneConfig predeploy
 
@@ -1134,7 +1143,7 @@ Notes:
 - The portal only stores `currentDepositQueueHash`, not individual deposits. The sequencer must track deposits off-chain.
 - Tempo state advancement is combined with deposit processing in `ZoneInbox.advanceTempo()`, which calls `TempoState.finalizeTempo()` internally.
 - The proof validates an exact match to `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits.
-- Each enabled TIP-20 is deployed at the **same address** on the zone as on Tempo. The zone node must deploy/configure zone-side representations for each enabled token.
+- Each enabled TIP-20 is deployed at the **same address** on the zone as on Tempo. Zone tokens are precompiles provisioned by the zone node — there is no TIP-20 factory on zones.
 
 ### Encrypted deposits
 
@@ -1207,7 +1216,7 @@ This ensures deposits are processed in the exact order they were made, regardles
 - **Sequencer trust**: Users trust the sequencer to decrypt correctly and credit the right recipient. A malicious sequencer could steal encrypted deposits.
 - **On-chain verification**: The sequencer provides the ECDH shared secret, which enables on-chain decryption verification via GCM tag validation without revealing the private key. See "On-chain decryption verification" below.
 - **Key rotation**: The portal maintains a history of encryption keys. Each encrypted deposit includes the `keyIndex` the user encrypted to, allowing the prover to look up the correct key for decryption. See "Encryption key history" below.
-- **Malformed ciphertext**: If decryption fails, the sequencer may refund to `sender` or hold funds pending resolution.
+- **Malformed ciphertext**: If decryption fails (invalid ciphertext, wrong key, corrupted data), the zone mints tokens to `sender`'s address on the zone — the same address as their L1 account. The L1 funds remain escrowed in the portal. This ensures chain progress is never blocked by invalid encrypted deposits.
 
 **On-chain decryption verification:**
 
@@ -1262,7 +1271,7 @@ bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", "");
 // Step 4: Try to decrypt using AES-GCM precompile
 (bytes memory plaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(...);
 
-// Step 5: If decryption fails, return funds to sender (don't block chain)
+// Step 5: If decryption fails, credit depositor's address on zone (L1 funds stay escrowed)
 if (!valid) {
     IZoneToken(ed.token).mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(...);
@@ -1371,7 +1380,7 @@ if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
 
 // Step 6: Handle success or failure
 if (!valid) {
-    // Decryption failed - return funds to sender
+    // Decryption failed - credit depositor's address on zone (L1 funds stay escrowed)
     IZoneToken(ed.token).mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
 } else {
