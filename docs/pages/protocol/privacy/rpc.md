@@ -144,8 +144,6 @@ The authorization token fields are always exactly 49 bytes (1 + 4 + 8 + 20 + 8 +
 
 Requests without an authorization token receive a `401 Unauthorized` HTTP response. Requests with an expired, malformed, or unauthorized token receive `403 Forbidden`. If Keychain token verification fails because the server cannot read `AccountKeychain.getKey(...)`, the server returns `500 Internal Server Error`.
 
-The same endpoint also accepts WebSocket upgrades. For WebSocket clients, the authorization token is supplied during the upgrade handshake via the `X-Authorization-Token` header or a `?token=0x...` query parameter. `eth_subscribe` and `eth_unsubscribe` are **WebSocket-only**; calling them over HTTP returns `-32006` (method disabled).
-
 ## RPC method access control
 
 The zone RPC starts from the standard Ethereum JSON-RPC method set and applies per-method restrictions. Each method falls into one of four categories: **allowed** (unrestricted), **scoped** (filtered to the authenticated account), **restricted** (sequencer-only), or **disabled** (not available).
@@ -165,7 +163,7 @@ These methods return public zone information and are available to any authentica
 | `eth_feeHistory` | Fee history is public |
 | `eth_getBlockByNumber` | Returns block headers **without transaction details** (see [Block responses](#block-responses)) |
 | `eth_getBlockByHash` | Returns block headers **without transaction details** |
-| `eth_subscribe("newHeads")` | **WebSocket-only.** Pushes block headers on new blocks. The `logsBloom` field is zeroed for non-sequencers (see [Block responses](#block-responses)). |
+| `eth_subscribe("newHeads")` | Pushes block headers on new blocks. The `logsBloom` field is zeroed (see [Block responses](#block-responses)). |
 | `eth_syncing` | Returns sync status. Low risk — reveals node state, not account data. |
 | `eth_coinbase` | Returns the sequencer address (already public via `zone_getZoneInfo`). |
 | `net_version` | Network ID |
@@ -193,7 +191,6 @@ These methods are available to any authenticated caller but filter results to on
 | `eth_getTransactionByHash` | Returns the transaction only if the authenticated account is the `from` (sender) of the transaction. Returns `null` for transactions sent by other accounts. |
 | `eth_getTransactionReceipt` | Returns the receipt only if the authenticated account is the sender. Returns `null` otherwise. Logs within the receipt are filtered (see [Event filtering](#event-filtering)). |
 | `eth_sendRawTransaction` | Accepts and broadcasts the transaction. The zone validates that the transaction sender matches the authenticated account. Transactions from mismatched accounts are rejected with error code `-32003` (transaction rejected). |
-| `eth_subscribe("newPendingTransactions")` | **WebSocket-only.** Default mode returns transaction hashes. Passing `true` returns full pending transaction objects. Non-sequencers only receive pending transactions where `from == authenticated account`; the sequencer receives the full pending stream. |
 
 #### Transaction simulation
 
@@ -233,7 +230,7 @@ Methods that do **not** need the speed bump include those where authorization ca
 | `eth_getFilterLogs` | Same filtering as `eth_getLogs`. |
 | `eth_getFilterChanges` | Same filtering. Only returns new events matching the filter since last poll. |
 | `eth_newFilter` | Creates a filter. The filter is implicitly scoped to the authenticated account. |
-| `eth_subscribe("logs")` | **WebSocket-only.** Uses the native log pubsub stream, then applies the same scoping and post-filtering rules as `eth_getLogs` / `eth_getFilterChanges`. |
+| `eth_subscribe("logs")` | WebSocket equivalent of `eth_newFilter` + `eth_getFilterChanges`. The subscription is implicitly scoped to the authenticated account using the same [event filtering rules](#event-filtering-rules). |
 | `eth_newBlockFilter` | Allowed. Returns new block hashes. |
 | `eth_uninstallFilter` | Allowed. Removes a previously created filter. |
 
@@ -274,7 +271,8 @@ These methods are not supported on privacy zones.
 | `eth_submitHashrate` | Zones have no mining |
 | `eth_getProof` | Merkle proofs include sibling hashes that reveal state trie structure (number of accounts, address prefix distribution, slot occupancy), leaking information beyond the queried account |
 | `eth_getFilterLogs` (unscoped) | All log access goes through the scoped path |
-| `eth_newPendingTransactionFilter` | Polling equivalent of `eth_subscribe("newPendingTransactions")` is not exposed; pending-tx observation is WebSocket-only |
+| `eth_newPendingTransactionFilter` | Polling equivalent of `eth_subscribe("newPendingTransactions")` — mempool observation |
+| `eth_subscribe("newPendingTransactions")` | Mempool observation reveals all pending activity. Other subscription types (`newHeads`, `logs`) are classified above. |
 
 Disabled methods return error code `-32601` (method not found).
 
@@ -501,4 +499,4 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 - Filter state (from `eth_newFilter`) is stored per-authenticated-account. Filters created by one authorization token are accessible by subsequent authorization tokens for the same account.
 - The zone node SHOULD cache authorization token verification results for the duration of token validity to avoid repeated signature recovery. For Keychain Access Keys, cache entries MUST have a TTL bounded by the earlier of authorization-token expiry and the active key's `expiry`, and MUST be invalidated within 1 second of importing a block that revokes the key (see [Keychain key revocation and expiry](#security-considerations)). The recommended approach is to hook into block import and evict cache entries when `KeyRevoked` events are observed.
 - P256 and WebAuthn signature verification is more expensive than secp256k1. The RPC server SHOULD aggressively cache verified authorization tokens to amortize the verification cost. A verified authorization token can be cached by its hash for the remaining duration of its validity.
-- WebSocket connections (`eth_subscribe`) follow the same authorization-token model. The authorization token is provided during the WebSocket handshake and scopes all subscriptions for that connection. The current implementation authenticates only at handshake time: it does **not** proactively terminate an already-open WebSocket when the authorization token later expires or when a Keychain key is later revoked. Fresh auth state is picked up on the next connection or reconnect.
+- WebSocket connections (`eth_subscribe`) follow the same authorization-token model. The authorization token is provided during the WebSocket handshake and scopes all subscriptions for that connection. The connection is terminated when the authorization token expires; clients must reconnect with a fresh token. For Keychain-authenticated WebSocket connections, the server MUST also terminate the connection within 1 second of importing a block that revokes the Keychain key, following the same deadline as [Keychain key revocation](#security-considerations).
