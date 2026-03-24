@@ -7,7 +7,7 @@ use reth_metrics::{
 
 /// Metrics emitted by the withdrawal processor.
 #[derive(Metrics, Clone)]
-#[metrics(scope = "zone_withdrawal_processor")]
+#[metrics(scope = "tempo_zone_withdrawal_processor")]
 pub(crate) struct WithdrawalProcessorMetrics {
     /// Current portal withdrawal queue head slot.
     pub(crate) portal_queue_head: Gauge,
@@ -36,7 +36,7 @@ pub(crate) struct WithdrawalProcessorMetrics {
 
 /// Metrics emitted by the L1 subscriber / deposit ingestion pipeline.
 #[derive(Metrics, Clone)]
-#[metrics(scope = "zone_l1_subscriber")]
+#[metrics(scope = "tempo_zone_l1_subscriber")]
 pub(crate) struct L1SubscriberMetrics {
     /// Whether a backfill is currently running (1) or idle (0).
     pub backfill_in_progress: Gauge,
@@ -89,7 +89,7 @@ pub(crate) struct L1SubscriberMetrics {
 
 /// Metrics emitted by the zone monitor and batch submitter.
 #[derive(Metrics, Clone)]
-#[metrics(scope = "zone_monitor")]
+#[metrics(scope = "tempo_zone_monitor")]
 pub(crate) struct ZoneMonitorMetrics {
     /// Most recent zone block observed on L2.
     pub latest_zone_block_observed: Gauge,

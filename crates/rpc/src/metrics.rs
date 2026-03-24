@@ -11,7 +11,7 @@ use reth_metrics::{
 use crate::types::classify_method;
 
 #[derive(Metrics, Clone)]
-#[metrics(scope = "zone_private_rpc.calls")]
+#[metrics(scope = "tempo_zone_private_rpc_calls")]
 pub(crate) struct PrivateRpcCallMetrics {
     /// Number of private RPC calls that started.
     pub(crate) started_total: Counter,
@@ -30,14 +30,14 @@ impl PrivateRpcCallMetrics {
 }
 
 #[derive(Metrics, Clone)]
-#[metrics(scope = "zone_private_rpc")]
+#[metrics(scope = "tempo_zone_private_rpc")]
 pub(crate) struct PrivateRpcAuthMetrics {
     /// Number of authentication failures.
     pub(crate) auth_failures_total: Counter,
 }
 
 #[derive(Metrics, Clone)]
-#[metrics(scope = "zone_private_rpc.provider")]
+#[metrics(scope = "tempo_zone_private_rpc_provider")]
 pub(crate) struct ZoneProviderMetrics {
     /// Number of private RPC provider token refresh attempts.
     pub(crate) token_refresh_attempts_total: Counter,
