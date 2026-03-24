@@ -512,12 +512,7 @@ async fn handle_ws_session(
 
     loop {
         let msg = tokio::select! {
-            changed = close_session_rx.changed() => {
-                if changed.is_ok() && *close_session_rx.borrow() {
-                    break;
-                }
-                break;
-            }
+            _ = close_session_rx.changed() => break,
             msg = ws_receiver.next() => match msg {
                 Some(msg) => msg,
                 None => break,
