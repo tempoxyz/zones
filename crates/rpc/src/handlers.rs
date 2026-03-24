@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::{
     auth::AuthContext,
+    subscription::BoxWsSubscriptionFut,
     types::{
         BoxEyreFut, BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, MethodTier,
         classify_method,
@@ -157,6 +158,26 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `eth_uninstallFilter(id)` — removes a filter.
     fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `eth_subscribe("newHeads")` — opens a stream of new block headers.
+    fn ws_subscribe_new_heads(&self, _auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
+
+    /// `eth_subscribe("logs", filter)` — opens a stream of matching logs.
+    fn ws_subscribe_logs(&self, _filter: Filter, _auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
+
+    /// `eth_subscribe("newPendingTransactions", full?)` — opens a stream of
+    /// pending transactions, returning either hashes or full transaction objects.
+    fn ws_subscribe_pending_transactions(
+        &self,
+        _full: bool,
+        _auth: AuthContext,
+    ) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
 
     /// `zone_getAuthorizationTokenInfo()` — returns the authenticated account
     /// and token expiry.

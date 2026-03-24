@@ -18,8 +18,14 @@ use alloy::{
 use alloy_provider::ProviderBuilder;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use alloy_sol_types::SolCall;
+use futures::{SinkExt, StreamExt};
 use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
+use serde_json::{Value, json};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{
     ITIP20 as ContractTip20,
@@ -27,6 +33,10 @@ use tempo_contracts::precompiles::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
 use tokio::time::sleep;
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{Message, client::IntoClientRequest},
+};
 
 fn corrupt_token_hex(token: &str) -> String {
     let mut bytes = hex::decode(token).expect("token hex should decode");
@@ -49,6 +59,94 @@ fn assert_filter_not_found_error(response: &serde_json::Value) {
         "filter not found",
         "filter-not-found message should be stable",
     );
+}
+
+type PrivateRpcWs =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+fn private_rpc_ws_url(http_url: &url::Url) -> eyre::Result<url::Url> {
+    let mut ws_url = http_url.clone();
+    let target_scheme = if ws_url.scheme() == "https" {
+        "wss"
+    } else {
+        "ws"
+    };
+    ws_url
+        .set_scheme(target_scheme)
+        .map_err(|_| eyre::eyre!("failed to derive websocket URL"))?;
+    Ok(ws_url)
+}
+
+fn jsonrpc_with_params(method: &str, params: Value, id: u64) -> String {
+    json!({"jsonrpc":"2.0","method":method,"params":params,"id":id}).to_string()
+}
+
+async fn connect_private_rpc_ws(url: &url::Url, auth_token: &str) -> eyre::Result<PrivateRpcWs> {
+    let ws_url = private_rpc_ws_url(url)?;
+    let mut req = ws_url.as_str().into_client_request()?;
+    req.headers_mut().insert(
+        "x-authorization-token",
+        auth_token
+            .parse()
+            .expect("auth token header should be valid"),
+    );
+    let (ws, _) = connect_async(req).await?;
+    Ok(ws)
+}
+
+async fn ws_next_json(ws: &mut PrivateRpcWs) -> eyre::Result<Value> {
+    let Some(msg) = tokio::time::timeout(DEFAULT_TIMEOUT, ws.next())
+        .await
+        .map_err(|_| eyre::eyre!("timed out waiting for websocket message"))?
+    else {
+        eyre::bail!("websocket closed unexpectedly");
+    };
+
+    match msg? {
+        Message::Text(text) => Ok(serde_json::from_str(&text)?),
+        other => eyre::bail!("expected text websocket message, got {other:?}"),
+    }
+}
+
+async fn ws_subscribe(ws: &mut PrivateRpcWs, params: Value) -> eyre::Result<String> {
+    ws.send(Message::Text(
+        jsonrpc_with_params("eth_subscribe", params, 1).into(),
+    ))
+    .await?;
+    let response = ws_next_json(ws).await?;
+    Ok(response["result"]
+        .as_str()
+        .expect("subscription response should include an id")
+        .to_owned())
+}
+
+async fn ws_expect_no_message(ws: &mut PrivateRpcWs, duration: Duration) -> eyre::Result<()> {
+    match tokio::time::timeout(duration, ws.next()).await {
+        Err(_) => Ok(()),
+        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => Ok(()),
+        Ok(Some(Ok(Message::Text(text)))) => {
+            eyre::bail!("unexpected websocket message: {text}")
+        }
+        Ok(Some(Ok(other))) => eyre::bail!("unexpected websocket frame: {other:?}"),
+        Ok(Some(Err(err))) => Err(err.into()),
+    }
+}
+
+async fn ws_collect_messages_until_quiet(
+    ws: &mut PrivateRpcWs,
+    duration: Duration,
+) -> eyre::Result<Vec<Value>> {
+    let mut messages = Vec::new();
+
+    loop {
+        match tokio::time::timeout(duration, ws.next()).await {
+            Err(_) => return Ok(messages),
+            Ok(Some(Ok(Message::Close(_)))) | Ok(None) => return Ok(messages),
+            Ok(Some(Ok(Message::Text(text)))) => messages.push(serde_json::from_str(&text)?),
+            Ok(Some(Ok(other))) => eyre::bail!("unexpected websocket frame: {other:?}"),
+            Ok(Some(Err(err))) => return Err(err.into()),
+        }
+    }
 }
 
 /// Auth enforcement: missing header → 401, garbage token → 401/403, wrong chain ID → 403.
@@ -709,6 +807,232 @@ async fn test_method_tiers() -> eyre::Result<()> {
         -32601,
         "unknown method should return -32601"
     );
+
+    Ok(())
+}
+
+/// WebSocket log subscriptions apply the same caller-scoped filtering as
+/// polling log APIs, while the sequencer sees the full stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ws_logs_subscription_scopes_non_sequencer_and_allows_sequencer() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+    let owner_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let outsider_signer = PrivateKeySigner::random();
+    let spender = PrivateKeySigner::random().address();
+
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        owner_signer.address(),
+        owner_signer.address(),
+        1_000_000,
+    )
+    .await?;
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        outsider_signer.address(),
+        outsider_signer.address(),
+        1_000_000,
+    )
+    .await?;
+
+    let owner_token = ctx.user_token(&owner_signer);
+    let sequencer_token = ctx.sequencer_token();
+    let mut owner_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &owner_token).await?;
+    let mut sequencer_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &sequencer_token).await?;
+
+    let owner_subscription = ws_subscribe(
+        &mut owner_ws,
+        json!(["logs", {"address": format!("{PATH_USD_ADDRESS:#x}")}]),
+    )
+    .await?;
+    let sequencer_subscription = ws_subscribe(
+        &mut sequencer_ws,
+        json!(["logs", {"address": format!("{PATH_USD_ADDRESS:#x}")}]),
+    )
+    .await?;
+
+    let owner_provider = ProviderBuilder::new()
+        .wallet(owner_signer.clone())
+        .connect_http(ctx.zone.http_url().clone());
+    let outsider_provider = ProviderBuilder::new()
+        .wallet(outsider_signer.clone())
+        .connect_http(ctx.zone.http_url().clone());
+
+    let owner_pending = ContractTip20::new(PATH_USD_ADDRESS, &owner_provider)
+        .approve(spender, U256::from(111u64))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+    let outsider_pending = ContractTip20::new(PATH_USD_ADDRESS, &outsider_provider)
+        .approve(spender, U256::from(222u64))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+
+    let owner_hash = *owner_pending.tx_hash();
+    let outsider_hash = *outsider_pending.tx_hash();
+
+    ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
+
+    let owner_receipt = owner_pending.get_receipt().await?;
+    let outsider_receipt = outsider_pending.get_receipt().await?;
+    assert!(owner_receipt.status(), "owner approve should succeed");
+    assert!(outsider_receipt.status(), "outsider approve should succeed");
+
+    let mut owner_notifications = vec![ws_next_json(&mut owner_ws).await?];
+    owner_notifications
+        .extend(ws_collect_messages_until_quiet(&mut owner_ws, Duration::from_millis(500)).await?);
+    let owner_hashes = owner_notifications
+        .into_iter()
+        .map(|notification| {
+            assert_eq!(
+                notification["params"]["subscription"].as_str().unwrap(),
+                owner_subscription
+            );
+            notification["params"]["result"]["transactionHash"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<HashSet<_>>();
+    assert_eq!(owner_hashes, HashSet::from([format!("{owner_hash:#x}")]));
+
+    let mut sequencer_notifications = vec![ws_next_json(&mut sequencer_ws).await?];
+    sequencer_notifications.extend(
+        ws_collect_messages_until_quiet(&mut sequencer_ws, Duration::from_millis(500)).await?,
+    );
+    let sequencer_hashes = sequencer_notifications
+        .into_iter()
+        .map(|notification| {
+            assert_eq!(
+                notification["params"]["subscription"].as_str().unwrap(),
+                sequencer_subscription
+            );
+            notification["params"]["result"]["transactionHash"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect::<HashSet<_>>();
+    assert!(sequencer_hashes.contains(&format!("{owner_hash:#x}")));
+    assert!(sequencer_hashes.contains(&format!("{outsider_hash:#x}")));
+
+    Ok(())
+}
+
+/// Pending transaction subscriptions are sender-scoped for non-sequencers,
+/// while the sequencer sees the unfiltered full transaction stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_ws_pending_transactions_are_sender_scoped_for_users() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let mut ctx = start_zone_with_private_rpc().await?;
+    let owner_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let outsider_signer = PrivateKeySigner::random();
+    let spender = PrivateKeySigner::random().address();
+
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        owner_signer.address(),
+        owner_signer.address(),
+        1_000_000,
+    )
+    .await?;
+    ctx.inject_deposit(
+        PATH_USD_ADDRESS,
+        outsider_signer.address(),
+        outsider_signer.address(),
+        1_000_000,
+    )
+    .await?;
+
+    let owner_token = ctx.user_token(&owner_signer);
+    let sequencer_token = ctx.sequencer_token();
+    let mut owner_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &owner_token).await?;
+    let mut sequencer_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &sequencer_token).await?;
+
+    let owner_subscription = ws_subscribe(&mut owner_ws, json!(["newPendingTransactions"])).await?;
+    let sequencer_subscription =
+        ws_subscribe(&mut sequencer_ws, json!(["newPendingTransactions", true])).await?;
+
+    let owner_provider = ProviderBuilder::new()
+        .wallet(owner_signer.clone())
+        .connect_http(ctx.zone.http_url().clone());
+    let outsider_provider = ProviderBuilder::new()
+        .wallet(outsider_signer.clone())
+        .connect_http(ctx.zone.http_url().clone());
+
+    let owner_pending = ContractTip20::new(PATH_USD_ADDRESS, &owner_provider)
+        .approve(spender, U256::from(333u64))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+    let outsider_pending = ContractTip20::new(PATH_USD_ADDRESS, &outsider_provider)
+        .approve(spender, U256::from(444u64))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+
+    let owner_hash = *owner_pending.tx_hash();
+    let outsider_hash = *outsider_pending.tx_hash();
+
+    let owner_notification = ws_next_json(&mut owner_ws).await?;
+    assert_eq!(
+        owner_notification["params"]["subscription"]
+            .as_str()
+            .unwrap(),
+        owner_subscription
+    );
+    assert_eq!(
+        owner_notification["params"]["result"].as_str().unwrap(),
+        format!("{owner_hash:#x}")
+    );
+    ws_expect_no_message(&mut owner_ws, Duration::from_millis(500)).await?;
+
+    let mut sequencer_pending = HashMap::new();
+    for _ in 0..2 {
+        let notification = ws_next_json(&mut sequencer_ws).await?;
+        assert_eq!(
+            notification["params"]["subscription"].as_str().unwrap(),
+            sequencer_subscription
+        );
+        let tx = notification["params"]["result"]
+            .as_object()
+            .expect("sequencer should receive full pending tx objects");
+        sequencer_pending.insert(
+            tx["hash"].as_str().unwrap().to_owned(),
+            tx["from"].as_str().unwrap().to_owned(),
+        );
+    }
+    assert_eq!(
+        sequencer_pending,
+        HashMap::from([
+            (
+                format!("{owner_hash:#x}"),
+                format!("{:#x}", owner_signer.address()),
+            ),
+            (
+                format!("{outsider_hash:#x}"),
+                format!("{:#x}", outsider_signer.address()),
+            ),
+        ])
+    );
+
+    ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
+    let owner_receipt = owner_pending.get_receipt().await?;
+    let outsider_receipt = outsider_pending.get_receipt().await?;
+    assert!(owner_receipt.status(), "owner approve should succeed");
+    assert!(outsider_receipt.status(), "outsider approve should succeed");
 
     Ok(())
 }

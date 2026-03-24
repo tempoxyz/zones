@@ -74,6 +74,7 @@ derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 either.workspace = true
 eyre.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
@@ -113,6 +114,7 @@ tempo-payload-types.workspace = true
 sha2.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+tokio-tungstenite.workspace = true
 
 [features]
 default = []

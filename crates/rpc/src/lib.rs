@@ -16,6 +16,7 @@ pub mod policy;
 pub mod provider;
 pub mod proxy;
 pub mod server;
+pub mod subscription;
 pub mod types;
 mod ws;
 
@@ -24,3 +25,4 @@ pub use handlers::ZoneRpcApi;
 pub use provider::{ZoneProvider, ZoneProviderConfig};
 pub use proxy::ProxyZoneRpc;
 pub use server::start_private_rpc;
+pub use subscription::{BoxWsSubscriptionFut, WsSubscription, WsSubscriptionStream};
