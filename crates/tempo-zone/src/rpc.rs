@@ -861,6 +861,8 @@ where
             if auth.is_sequencer {
                 if !full {
                     let pool = self.eth.api.pool().clone();
+                    // Sequencers can use the direct hash listener because no sender scoping is
+                    // required; non-sequencers must source full tx events to filter by sender.
                     let stream = futures::stream::unfold(
                         pool.pending_transactions_listener(),
                         |mut rx| async move { rx.recv().await.map(|hash| (hash, rx)) },

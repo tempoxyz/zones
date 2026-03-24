@@ -23,7 +23,10 @@ use futures::{SinkExt, stream::StreamExt};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, value::RawValue};
 use std::{collections::HashMap, sync::Arc};
-use tokio::{sync::mpsc, task::JoinHandle};
+use tokio::{
+    sync::{mpsc, watch},
+    task::JoinHandle,
+};
 use tracing::warn;
 
 use crate::{
@@ -35,8 +38,13 @@ use crate::{
 
 /// Maximum WebSocket message size (1 MiB).
 const MAX_WS_MESSAGE_SIZE: usize = 1 << 20;
+/// Maximum number of queued outbound messages before the session is dropped.
+const MAX_WS_OUTBOUND_QUEUE: usize = 1024;
+/// Maximum number of active or pending subscriptions per WebSocket session.
+const MAX_WS_SUBSCRIPTIONS: usize = 32;
 
-type NotificationTx = mpsc::UnboundedSender<String>;
+type NotificationTx = mpsc::Sender<String>;
+type CloseSessionTx = watch::Sender<bool>;
 
 /// Query parameters for the WebSocket upgrade endpoint.
 #[derive(serde::Deserialize, Default)]
@@ -56,6 +64,7 @@ struct PendingSubscription {
 
 struct WsSession {
     next_subscription_id: u64,
+    pending_subscription_count: usize,
     subscriptions: HashMap<FilterId, ActiveSubscription>,
 }
 
@@ -63,16 +72,38 @@ impl Default for WsSession {
     fn default() -> Self {
         Self {
             next_subscription_id: 1,
+            pending_subscription_count: 0,
             subscriptions: HashMap::new(),
         }
     }
 }
 
 impl WsSession {
+    fn total_subscription_count(&self) -> usize {
+        self.pending_subscription_count + self.subscriptions.len()
+    }
+
     fn next_subscription_id(&mut self) -> FilterId {
         let id = FilterId::from(format!("0x{:x}", self.next_subscription_id));
         self.next_subscription_id += 1;
         id
+    }
+
+    fn reserve_subscription_id(&mut self) -> Result<FilterId, JsonRpcError> {
+        if self.total_subscription_count() >= MAX_WS_SUBSCRIPTIONS {
+            return Err(JsonRpcError::invalid_params(format!(
+                "too many active subscriptions ({MAX_WS_SUBSCRIPTIONS} max)"
+            )));
+        }
+
+        self.pending_subscription_count += 1;
+        Ok(self.next_subscription_id())
+    }
+
+    fn activate_subscription(&mut self, subscription_id: FilterId, task: JoinHandle<()>) {
+        self.pending_subscription_count = self.pending_subscription_count.saturating_sub(1);
+        self.subscriptions
+            .insert(subscription_id, ActiveSubscription { task });
     }
 
     fn cleanup(self) {
@@ -137,6 +168,7 @@ fn spawn_subscription(
     subscription_id: FilterId,
     mut subscription: WsSubscriptionStream,
     notifications: NotificationTx,
+    close_session: CloseSessionTx,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(item) = subscription.next().await {
@@ -153,17 +185,39 @@ fn spawn_subscription(
                 }
             };
 
-            if notifications
-                .send(subscription_notification_raw(
-                    &subscription_id,
-                    result.as_ref(),
-                ))
-                .is_err()
-            {
+            if !try_queue_notification(
+                &notifications,
+                &close_session,
+                subscription_notification_raw(&subscription_id, result.as_ref()),
+            ) {
                 return;
             }
         }
     })
+}
+
+fn request_session_close(close_session: &CloseSessionTx) {
+    let _ = close_session.send(true);
+}
+
+fn try_queue_notification(
+    notifications: &NotificationTx,
+    close_session: &CloseSessionTx,
+    message: String,
+) -> bool {
+    match notifications.try_send(message) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            warn!(
+                target: "zone::rpc",
+                max_queue = MAX_WS_OUTBOUND_QUEUE,
+                "ws outbound queue full, closing session"
+            );
+            request_session_close(close_session);
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
 }
 
 struct WsDispatchResult {
@@ -269,7 +323,12 @@ async fn handle_subscribe(
         }
     };
 
-    let subscription_id = session.next_subscription_id();
+    let subscription_id = match session.reserve_subscription_id() {
+        Ok(subscription_id) => subscription_id,
+        Err(err) => {
+            return WsDispatchResult::response_only(JsonRpcResponse::error(req.id.clone(), err));
+        }
+    };
     WsDispatchResult {
         response: success_response(req.id.clone(), &subscription_id),
         pending_subscriptions: vec![PendingSubscription {
@@ -386,13 +445,17 @@ async fn process_ws_text(
 fn activate_pending_subscriptions(
     pending_subscriptions: Vec<PendingSubscription>,
     notifications: &NotificationTx,
+    close_session: &CloseSessionTx,
     session: &mut WsSession,
 ) {
     for pending in pending_subscriptions {
-        let task = spawn_subscription(pending.id.clone(), pending.stream, notifications.clone());
-        session
-            .subscriptions
-            .insert(pending.id, ActiveSubscription { task });
+        let task = spawn_subscription(
+            pending.id.clone(),
+            pending.stream,
+            notifications.clone(),
+            close_session.clone(),
+        );
+        session.activate_subscription(pending.id, task);
     }
 }
 
@@ -435,7 +498,8 @@ async fn handle_ws_session(
     state: Arc<RpcState>,
 ) {
     let (mut ws_sender, mut ws_receiver) = socket.split();
-    let (notifications, mut outbound) = mpsc::unbounded_channel::<String>();
+    let (notifications, mut outbound) = mpsc::channel::<String>(MAX_WS_OUTBOUND_QUEUE);
+    let (close_session, mut close_session_rx) = watch::channel(false);
     let writer = tokio::spawn(async move {
         while let Some(message) = outbound.recv().await {
             if ws_sender.send(Message::Text(message.into())).await.is_err() {
@@ -446,19 +510,36 @@ async fn handle_ws_session(
 
     let mut session = WsSession::default();
 
-    while let Some(msg) = ws_receiver.next().await {
+    loop {
+        let msg = tokio::select! {
+            changed = close_session_rx.changed() => {
+                if changed.is_ok() && *close_session_rx.borrow() {
+                    break;
+                }
+                break;
+            }
+            msg = ws_receiver.next() => match msg {
+                Some(msg) => msg,
+                None => break,
+            },
+        };
+
         let text = match msg {
             Ok(Message::Text(t)) => t,
             Ok(Message::Binary(b)) => match std::str::from_utf8(&b) {
                 Ok(s) => s.into(),
                 Err(_) => {
-                    let _ = notifications.send(
+                    if !try_queue_notification(
+                        &notifications,
+                        &close_session,
                         serde_json::to_string(&JsonRpcResponse::error(
                             Value::Null,
                             JsonRpcError::parse_error("invalid UTF-8"),
                         ))
                         .expect("JsonRpcResponse serialization is infallible"),
-                    );
+                    ) {
+                        break;
+                    }
                     continue;
                 }
             },
@@ -473,11 +554,16 @@ async fn handle_ws_session(
         let (response_json, pending_subscriptions) =
             process_ws_text(&text, &auth, &state, &mut session).await;
 
-        if notifications.send(response_json).is_err() {
+        if !try_queue_notification(&notifications, &close_session, response_json) {
             break;
         }
 
-        activate_pending_subscriptions(pending_subscriptions, &notifications, &mut session);
+        activate_pending_subscriptions(
+            pending_subscriptions,
+            &notifications,
+            &close_session,
+            &mut session,
+        );
     }
 
     session.cleanup();

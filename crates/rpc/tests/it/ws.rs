@@ -731,6 +731,50 @@ async fn ws_subscribe_rejects_invalid_param_shapes() {
 }
 
 #[tokio::test]
+async fn ws_subscribe_rejects_too_many_active_subscriptions() {
+    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    for id in 1..=32 {
+        ws.send(tungstenite::Message::Text(
+            jsonrpc_with_params("eth_subscribe", json!(["newHeads"]), id).into(),
+        ))
+        .await
+        .unwrap();
+
+        let resp = loop {
+            let message = parse_response(ws.next().await.unwrap().unwrap());
+            if message["id"] == id {
+                break message;
+            }
+        };
+
+        assert!(resp["result"].as_str().is_some());
+    }
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["newHeads"]), 33).into(),
+    ))
+    .await
+    .unwrap();
+
+    let resp = loop {
+        let message = parse_response(ws.next().await.unwrap().unwrap());
+        if message["id"] == 33 {
+            break message;
+        }
+    };
+
+    assert_eq!(resp["error"]["code"], -32602);
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too many active subscriptions")
+    );
+}
+
+#[tokio::test]
 async fn ws_empty_batch() {
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
