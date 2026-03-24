@@ -30,7 +30,10 @@ use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
-use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
+use reth_transaction_pool::{
+    TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
+    error::InvalidPoolTransactionError,
+};
 use std::sync::Arc;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoChainSpec;
@@ -42,6 +45,7 @@ use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxTyp
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
     amm::AmmLiquidityCache,
+    transaction::TempoPooledTransaction,
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tracing::{debug, info};
@@ -105,6 +109,7 @@ impl ZoneNode {
         sequencer: alloy_primitives::Address,
         sequencer_key: k256::SecretKey,
         l1_fetch_concurrency: usize,
+        retry_connection_interval: std::time::Duration,
     ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
@@ -119,10 +124,13 @@ impl ZoneNode {
             policy_cache: policy_cache.clone(),
             l1_state_cache: l1_state_cache.clone(),
             l1_fetch_concurrency,
+            retry_connection_interval,
         };
 
         let l1_state_provider_config = L1StateProviderConfig {
             l1_rpc_url,
+            portal_address,
+            retry_connection_interval,
             ..Default::default()
         };
 
@@ -400,7 +408,7 @@ where
         );
         ctx.node
             .task_executor()
-            .spawn_critical("zone-engine", engine.run());
+            .spawn_critical_task("zone-engine", engine.run());
         info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
 
         self.inner.launch_add_ons(ctx).await
@@ -530,6 +538,7 @@ pub struct ZoneExecutorBuilder {
 }
 
 impl ZoneExecutorBuilder {
+    /// Create a zone executor builder with the shared L1 state/policy caches.
     pub fn new(
         l1_state_provider_config: L1StateProviderConfig,
         l1_state_cache: SharedL1StateCache,
@@ -641,7 +650,7 @@ where
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
         let tempo_evm_config = TempoEvmConfig::new(ctx.chain_spec());
-        let validator = TransactionValidationTaskExecutor::eth_builder(
+        let mut validator = TransactionValidationTaskExecutor::eth_builder(
             ctx.provider().clone(),
             tempo_evm_config,
         )
@@ -655,7 +664,22 @@ where
         .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
         .with_custom_tx_type(TempoTxType::AA as u8)
         .no_eip4844()
-        .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        .build_with_tasks::<TempoPooledTransaction, _>(
+            ctx.task_executor().clone(),
+            blob_store.clone(),
+        );
+
+        Arc::get_mut(&mut validator.validator)
+            .expect("still unique")
+            .set_additional_stateless_validation(|_origin, tx| {
+                use alloy_consensus::Transaction;
+                if tx.is_create() {
+                    return Err(InvalidPoolTransactionError::Consensus(
+                        reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                    ));
+                }
+                Ok(())
+            });
 
         let aa_2d_config = AA2dPoolConfig {
             price_bump_config: pool_config.price_bumps,
@@ -684,7 +708,7 @@ where
 
         // Spawn unified Tempo pool maintenance task
         // This consolidates: expired AA txs, 2D nonce updates, AMM cache, and keychain revocations
-        ctx.task_executor().spawn_critical(
+        ctx.task_executor().spawn_critical_task(
             "txpool maintenance - tempo pool",
             tempo_transaction_pool::maintain::maintain_tempo_pool(transaction_pool.clone()),
         );

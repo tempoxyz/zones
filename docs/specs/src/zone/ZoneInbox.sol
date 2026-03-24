@@ -296,8 +296,8 @@ contract ZoneInbox is IZoneInbox {
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
                 if (!valid) {
-                    // Decryption failed (user encrypted garbage or corrupted data)
-                    // Return funds to sender instead of blocking chain progress
+                    // Decryption failed: credit the depositor's address on the zone.
+                    // L1 funds remain escrowed in the portal.
                     IZoneToken(ed.token).mint(ed.sender, ed.amount);
                     emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                 } else {

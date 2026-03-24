@@ -2,7 +2,7 @@
 
 use std::{future::Future, pin::Pin};
 
-use alloy_primitives::U256;
+use alloy_primitives::{Address, B256, U64, U256};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 
@@ -13,6 +13,9 @@ use serde_json::{Value, value::RawValue};
 /// the JSON-RPC response.
 pub type BoxFut<'a> =
     Pin<Box<dyn Future<Output = Result<Box<RawValue>, JsonRpcError>> + Send + 'a>>;
+
+/// Shorthand for typed boxed futures returned by internal async helpers.
+pub type BoxEyreFut<'a, T> = Pin<Box<dyn Future<Output = eyre::Result<T>> + Send + 'a>>;
 
 /// A JSON-RPC 2.0 request.
 #[derive(Debug, Clone, Deserialize)]
@@ -137,6 +140,15 @@ impl JsonRpcError {
         }
     }
 
+    /// Parse error — invalid JSON (-32700).
+    pub fn parse_error(msg: impl Into<String>) -> Self {
+        Self {
+            code: -32700,
+            message: msg.into(),
+            data: None,
+        }
+    }
+
     /// Internal error (-32603).
     pub fn internal(msg: impl Into<String>) -> Self {
         Self {
@@ -145,6 +157,88 @@ impl JsonRpcError {
             data: None,
         }
     }
+}
+
+/// Response payload for `zone_getAuthorizationTokenInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationTokenInfoResponse {
+    /// Authenticated account derived from the authorization token.
+    pub account: Address,
+    /// Expiration timestamp encoded as a JSON-RPC quantity.
+    pub expires_at: U64,
+}
+
+/// Response payload for `zone_getZoneInfo`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ZoneInfoResponse {
+    /// The zone's numeric identifier.
+    pub zone_id: U64,
+    /// The enabled zone token contract addresses.
+    pub zone_tokens: Vec<Address>,
+    /// The configured sequencer account.
+    pub sequencer: Address,
+    /// The zone chain ID.
+    pub chain_id: U64,
+}
+
+/// Response payload for `zone_getDepositStatus`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DepositStatusResponse {
+    /// The Tempo block number queried by the caller.
+    pub tempo_block_number: U64,
+    /// The latest Tempo block number processed on the zone.
+    pub zone_processed_through: U64,
+    /// Whether every relevant deposit for `tempo_block_number` has reached a terminal state.
+    pub processed: bool,
+    /// Deposits relevant to the authenticated caller.
+    pub deposits: Vec<DepositStatusEntry>,
+}
+
+/// Per-deposit status entry returned by `zone_getDepositStatus`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DepositStatusEntry {
+    /// The deposit queue hash used to correlate portal and inbox events.
+    pub deposit_hash: B256,
+    /// Whether the deposit is regular or encrypted.
+    pub kind: DepositKind,
+    /// The deposited token address.
+    pub token: Address,
+    /// The L1 sender who initiated the deposit.
+    pub sender: Address,
+    /// The revealed recipient, if visible to the caller.
+    pub recipient: Option<Address>,
+    /// The deposited amount.
+    pub amount: U256,
+    /// The revealed memo, if visible to the caller.
+    pub memo: Option<B256>,
+    /// The current terminal or pending state of the deposit.
+    pub status: DepositState,
+}
+
+/// Deposit kind returned by `zone_getDepositStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DepositKind {
+    /// A plaintext deposit emitted by the portal.
+    Regular,
+    /// A deposit whose recipient and memo remain hidden until revealed on L2.
+    Encrypted,
+}
+
+/// Processing state returned by `zone_getDepositStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DepositState {
+    /// The deposit has not yet reached a terminal L2 inbox event.
+    Pending,
+    /// The deposit was processed successfully on L2.
+    Processed,
+    /// The encrypted deposit reached an explicit failure event on L2.
+    Failed,
 }
 
 /// Method access tier.
@@ -180,7 +274,10 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "net_version"
         | "net_listening"
         | "web3_clientVersion"
-        | "web3_sha3" => Some(MethodTier::Public),
+        | "web3_sha3"
+        | "zone_getAuthorizationTokenInfo"
+        | "zone_getZoneInfo"
+        | "zone_getDepositStatus" => Some(MethodTier::Public),
 
         // Fetch-then-check: public but redacted based on caller identity
         "eth_getTransactionByHash"

@@ -134,7 +134,7 @@ contract ZonePortalTest is BaseTest {
     GasConsumingReceiver public gasConsumingReceiver;
     SuccessfulReceiver public successfulReceiver;
 
-    uint64 public testZoneId;
+    uint32 public testZoneId;
     bytes32 public constant GENESIS_BLOCK_HASH = keccak256("genesis");
     bytes32 public constant GENESIS_TEMPO_BLOCK_HASH = keccak256("tempoGenesis");
     uint64 public genesisTempoBlockNumber;

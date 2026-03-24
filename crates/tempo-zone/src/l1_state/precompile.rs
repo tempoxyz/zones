@@ -134,7 +134,7 @@ impl TempoStateReader {
         let value = provider
             .get_storage(call.account, call.slot, call.blockNumber)
             .map_err(|e| {
-                PrecompileError::other(format!(
+                zone_precompiles::zone_rpc_error(format!(
                     "L1 storage unavailable for account={} slot={} block={}: {e}",
                     call.account, call.slot, call.blockNumber
                 ))
@@ -162,7 +162,7 @@ impl TempoStateReader {
             let value = provider
                 .get_storage(call.account, *slot, call.blockNumber)
                 .map_err(|e| {
-                    PrecompileError::other(format!(
+                    zone_precompiles::zone_rpc_error(format!(
                         "L1 storage unavailable for account={} slot={} block={}: {e}",
                         call.account, slot, call.blockNumber
                     ))

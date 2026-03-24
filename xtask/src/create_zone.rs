@@ -31,7 +31,7 @@ sol! {
     #[sol(rpc)]
     contract ZoneFactory {
         event ZoneCreated(
-            uint64 indexed zoneId,
+            uint32 indexed zoneId,
             address indexed portal,
             address indexed messenger,
             address initialToken,
@@ -43,7 +43,7 @@ sol! {
         );
 
         function verifier() external view returns (address);
-        function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
+        function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
     }
 }
 
@@ -62,7 +62,7 @@ pub(crate) struct CreateZone {
 
     /// ZoneFactory contract address on Tempo L1.
     /// Default is the ZoneFactory deployed on moderato.
-    #[arg(long, default_value_t = address!("0x7F4528b1a555D704bC20f8328557240BED29488D"))]
+    #[arg(long, default_value_t = address!("0xD8d977D60F61F8a5e5003a3A9dCF6ACae554BC8c"))]
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
@@ -205,6 +205,7 @@ impl CreateZone {
             "initialToken": format!("{}", self.initial_token),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": confirm_header.inner.number,
+            "zoneFactory": format!("{}", self.zone_factory),
         });
         let zone_json_path = self.output.join("zone.json");
         std::fs::write(
@@ -218,6 +219,7 @@ impl CreateZone {
         println!("  Portal: {portal}");
         println!("  Initial Token: {}", self.initial_token);
         println!("  Sequencer: {}", self.sequencer);
+        println!("  ZoneFactory: {}", self.zone_factory);
         println!("  Tempo anchor block: {}", confirm_header.inner.number);
         println!(
             "  Genesis written to: {}",

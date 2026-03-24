@@ -50,7 +50,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 use tracing::info;
 
-use zone_primitives::policy::{FIRST_USER_POLICY, POLICY_ALLOW_ALL};
+use super::builtin_authorization;
 
 use crate::l1_state::versioned::HeightVersioned;
 
@@ -185,9 +185,8 @@ impl PolicyCache {
         block_number: u64,
         role: AuthRole,
     ) -> Option<bool> {
-        if policy_id < FIRST_USER_POLICY {
-            // Policy 0 = reject all (empty whitelist), policy 1 = allow all (empty blacklist).
-            return Some(policy_id == POLICY_ALLOW_ALL);
+        if let Some(authorized) = builtin_authorization(policy_id) {
+            return Some(authorized);
         }
 
         let policy = self.policies.get(&policy_id)?;
@@ -238,8 +237,8 @@ impl PolicyCache {
     /// Handles builtins and whitelist/blacklist. Returns `None` for compound sub-policies
     /// (compound-of-compound is invalid on L1).
     pub fn check_simple(&self, policy_id: u64, user: Address, block_number: u64) -> Option<bool> {
-        if policy_id < FIRST_USER_POLICY {
-            return Some(policy_id == POLICY_ALLOW_ALL);
+        if let Some(authorized) = builtin_authorization(policy_id) {
+            return Some(authorized);
         }
 
         let policy = self.policies.get(&policy_id)?;
@@ -450,7 +449,6 @@ pub enum PolicyEvent {
     /// A new simple policy was created on L1 (`PolicyCreated`).
     PolicyCreated {
         policy_id: u64,
-        #[serde(with = "policy_type_serde")]
         policy_type: PolicyType,
     },
     /// A new compound policy was created on L1 (`CompoundPolicyCreated`).
@@ -765,22 +763,6 @@ pub(super) struct MembershipUpdate {
     pub account: Address,
     /// Whether the address was added to or removed from the set.
     pub change: MembershipChange,
-}
-
-/// Serde helper for [`PolicyType`] — the sol!-generated enum lacks serde support,
-/// so we serialize it as its `u8` repr.
-mod policy_type_serde {
-    use super::PolicyType;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub(super) fn serialize<S: Serializer>(val: &PolicyType, s: S) -> Result<S::Ok, S::Error> {
-        (*val as u8).serialize(s)
-    }
-
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PolicyType, D::Error> {
-        let v = u8::deserialize(d)?;
-        PolicyType::try_from(v).map_err(serde::de::Error::custom)
-    }
 }
 
 #[cfg(test)]

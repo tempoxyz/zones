@@ -8,16 +8,21 @@
 
 pub mod auth;
 pub mod config;
+pub mod error;
 pub mod filter;
 pub mod handlers;
+mod metrics;
 pub mod policy;
 pub mod provider;
 pub mod proxy;
 pub mod server;
+pub mod subscription;
 pub mod types;
+mod ws;
 
 pub use config::PrivateRpcConfig;
 pub use handlers::ZoneRpcApi;
 pub use provider::{ZoneProvider, ZoneProviderConfig};
 pub use proxy::ProxyZoneRpc;
 pub use server::start_private_rpc;
+pub use subscription::{BoxWsSubscriptionFut, WsSubscriptionStream};

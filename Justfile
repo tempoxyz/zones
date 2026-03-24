@@ -112,12 +112,25 @@ zone-info identifier:
     cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
-create-zone name:
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
+create-zone name token="":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    ZONE_TOKEN_L1="{{token}}"
+    if [[ -z "$ZONE_TOKEN_L1" ]]; then
+        ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    fi
+    # Resolve well-known aliases (lowercased for case-insensitive matching)
+    ZONE_TOKEN_LOWER=$(echo "$ZONE_TOKEN_L1" | tr '[:upper:]' '[:lower:]')
+    case "$ZONE_TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            ZONE_TOKEN_L1="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000002" ;;
+    esac
     SEQ_KEY="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}"
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
@@ -129,6 +142,7 @@ create-zone name:
     echo "Building xtask..."
     cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
+    echo "Initial portal token: $ZONE_TOKEN_L1"
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
@@ -136,6 +150,50 @@ create-zone name:
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$PK"
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
+
+[group('zone')]
+[doc('Deploys SwapAndDepositRouter on L1 for an existing zone and saves it to generated/<name>/zone.json. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+deploy-router name dex="0xDEc0000000000000000000000000000000000000":
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    ZONE_DIR="generated/{{name}}"
+    ZONE_JSON="$ZONE_DIR/zone.json"
+    if [[ ! -f "$ZONE_JSON" ]]; then
+        echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    echo "Building Solidity specs..."
+    (cd docs/specs && forge build --skip test) || true
+    cargo run -p tempo-xtask -- deploy-router \
+        --zone-dir "$ZONE_DIR" \
+        --l1-rpc-url "$HTTP_RPC" \
+        --private-key "$PK" \
+        --stablecoin-dex "{{dex}}"
+
+[group('zone')]
+[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    ZONE_DIR="generated/{{name}}"
+    ZONE_JSON="$ZONE_DIR/zone.json"
+    if [[ ! -f "$ZONE_JSON" ]]; then
+        echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    cargo run -p tempo-xtask -- demo-swap-and-deposit \
+        --zone-dir "$ZONE_DIR" \
+        --l1-rpc-url "$HTTP_RPC" \
+        --zone-rpc-url "{{rpc}}" \
+        --private-key "$PK" \
+        --amount "{{amount}}" \
+        --tick "{{tick}}"
 
 [group('zone')]
 [doc('Starts a Tempo Zone L2 node, subscribing to L1 deposits. Pass the zone name used in create-zone. Use profile=release for production.')]
@@ -195,9 +253,16 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc=zone_r
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     OUTBOX="0x1c00000000000000000000000000000000000002"
     echo "Approving ZoneOutbox for max zone tokens..."
-    cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 100000
-    echo "Approved!"
+    TX_OUTPUT=$(cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 150000 --json)
+    STATUS=$(echo "$TX_OUTPUT" | jq -r '.status')
+    if [[ "$STATUS" == "0x1" ]]; then
+        echo "Approved!"
+    else
+        echo "Transaction failed!"
+        echo "$TX_OUTPUT" | jq .
+        exit 1
+    fi
 
 [group('zone')]
 [doc('Sends a withdrawal request on the zone (L2) back to Tempo L1. Requires PRIVATE_KEY env var. Run max-approve-outbox first.')]
@@ -516,7 +581,7 @@ zone-auth-token name:
     EXPIRES=$((NOW + 600))
     MAGIC="54656d706f5a6f6e655250430000000000000000000000000000000000000000"
     VERSION="00"
-    ZONE_ID_HEX=$(printf '%016x' "$ZONE_ID")
+    ZONE_ID_HEX=$(printf '%08x' "$ZONE_ID")
     CHAIN_ID_HEX=$(printf '%016x' "$CHAIN_ID")
     PORTAL_HEX=$(echo "$PORTAL" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
     ISSUED_HEX=$(printf '%016x' "$NOW")
@@ -555,17 +620,33 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
-[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Requires L1_RPC_URL env var.')]
-deploy-zone name:
+[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL env var.')]
+deploy-zone name token="":
     #!/bin/bash
     set -euo pipefail
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     OUTPUT="generated/{{name}}"
+    ZONE_TOKEN_L1="{{token}}"
+    if [[ -z "$ZONE_TOKEN_L1" ]]; then
+        ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    fi
+    # Resolve well-known aliases (lowercased for case-insensitive matching)
+    ZONE_TOKEN_LOWER=$(echo "$ZONE_TOKEN_L1" | tr '[:upper:]' '[:lower:]')
+    case "$ZONE_TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            ZONE_TOKEN_L1="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000002" ;;
+    esac
 
     echo "============================================"
     echo "  Deploying Zone: {{name}}"
     echo "============================================"
+    echo ""
+    echo "  Initial portal token: $ZONE_TOKEN_L1"
     echo ""
 
     # Step 1: Generate a new sequencer keypair
@@ -593,6 +674,7 @@ deploy-zone name:
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
+        --initial-token "$ZONE_TOKEN_L1" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$SEQUENCER_KEY"
     echo ""
@@ -622,6 +704,7 @@ deploy-zone name:
     echo "  Zone ID:         $ZONE_ID"
     echo "  Zone Name:       {{name}}"
     echo "  Portal:          $PORTAL"
+    echo "  Initial Token:   $ZONE_TOKEN_L1"
     echo "  Sequencer:       $SEQUENCER_ADDR"
     echo "  Anchor Block:    $ANCHOR_BLOCK"
     echo ""

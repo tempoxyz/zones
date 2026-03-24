@@ -15,9 +15,9 @@ use alloy_primitives::{B256, keccak256};
 use alloy_sol_types::SolValue;
 
 pub use crate::constants::{
-    EMPTY_SENTINEL, TEMPO_BLOCK_HASH_SLOT, TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS,
-    TEMPO_STATE_READER_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
-    ZONE_TOKEN_ADDRESS,
+    EMPTY_SENTINEL, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, TEMPO_BLOCK_HASH_SLOT,
+    TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS, TEMPO_STATE_READER_ADDRESS, ZONE_CONFIG_ADDRESS,
+    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
 };
 
 /// Internal macro that emits the full `sol!` block, placing `$($rpc_attr)*`
@@ -99,6 +99,9 @@ macro_rules! define_abi {
                 string currency;
             }
 
+            /// Generic unauthorized access error used by zone wrapper logic.
+            error Unauthorized();
+
             // ---------------------------------------------------------------
             //  ZonePortal — deployed on Tempo L1
             // ---------------------------------------------------------------
@@ -157,6 +160,18 @@ macro_rules! define_abi {
                     uint128 amount
                 );
 
+                #[derive(Debug)]
+                event SequencerTransferStarted(
+                    address indexed currentSequencer,
+                    address indexed pendingSequencer
+                );
+
+                #[derive(Debug)]
+                event SequencerTransferred(
+                    address indexed previousSequencer,
+                    address indexed newSequencer
+                );
+
                 // -- Errors --
 
                 #[derive(Debug)]
@@ -170,7 +185,7 @@ macro_rules! define_abi {
 
                 // -- View functions --
 
-                function zoneId() external view returns (uint64);
+                function zoneId() external view returns (uint32);
                 function sequencer() external view returns (address);
                 function verifier() external view returns (address);
                 function sequencerPubkey() external view returns (bytes32);
@@ -369,7 +384,7 @@ macro_rules! define_abi {
 
             #[derive(Debug)]
             struct ZoneInfo {
-                uint64 zoneId;
+                uint32 zoneId;
                 address portal;
                 address messenger;
                 address initialToken;
@@ -395,7 +410,7 @@ macro_rules! define_abi {
                 }
                 #[derive(Debug)]
                 event ZoneCreated(
-                    uint64 indexed zoneId,
+                    uint32 indexed zoneId,
                     address indexed portal,
                     address indexed messenger,
                     address token,
@@ -405,10 +420,10 @@ macro_rules! define_abi {
                     bytes32 genesisTempoBlockHash,
                     uint64 genesisTempoBlockNumber
                 );
-                function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
+                function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
                 function verifier() external view returns (address);
-                function zones(uint64 zoneId) external view returns (ZoneInfo memory);
-                function zoneCount() external view returns (uint64);
+                function zones(uint32 zoneId) external view returns (ZoneInfo memory);
+                function zoneCount() external view returns (uint32);
                 function isZonePortal(address portal) external view returns (bool);
                 function isZoneMessenger(address messenger) external view returns (bool);
             }
@@ -527,20 +542,19 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     /// Returns all token addresses currently enabled for bridging on this [`ZonePortal`].
     ///
     /// Calls [`enabledTokenCount`](ZonePortal::enabledTokenCountCall) followed by
-    /// [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) for each index.
+    /// [`enabledTokenAt`](ZonePortal::enabledTokenAtCall) for each index concurrently.
     pub async fn enabled_tokens(
         &self,
     ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
         let count = self.enabledTokenCount().call().await?;
-        let mut tokens = alloc::vec::Vec::with_capacity(count.to::<usize>());
-        for i in 0..count.to::<u64>() {
-            let token = self
-                .enabledTokenAt(alloy_primitives::U256::from(i))
-                .call()
-                .await?;
-            tokens.push(token);
-        }
-        Ok(tokens)
+        let futs: alloc::vec::Vec<_> = (0..count.to::<u64>())
+            .map(|i| async move {
+                self.enabledTokenAt(alloy_primitives::U256::from(i))
+                    .call()
+                    .await
+            })
+            .collect();
+        futures::future::try_join_all(futs).await
     }
 
     /// Fetches the active sequencer encryption key and its index.
@@ -594,7 +608,7 @@ impl Withdrawal {
 
         let mut hash = EMPTY_SENTINEL;
         for w in withdrawals.iter().rev() {
-            hash = keccak256((w.clone(), hash).abi_encode());
+            hash = keccak256((w.clone(), hash).abi_encode_params());
         }
         hash
     }

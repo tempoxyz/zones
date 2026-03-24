@@ -37,7 +37,24 @@ pub use aes_gcm::{AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt};
 pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
 pub use tip403_proxy::{ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry};
-pub use ztip20::ZoneTip20Token;
+pub use ztip20::{SequencerExt, ZoneTip20Token};
+
+use revm::precompile::PrecompileError;
+
+const ZONE_RPC_ERROR_PREFIX: &str = "[zone rpc]";
+
+/// Create a [`PrecompileError::Fatal`] for transient L1 RPC errors.
+///
+/// Fatal errors propagate out of the EVM as `Err` (instead of a revert),
+/// allowing the builder to skip the pool transaction rather than charging gas.
+pub fn zone_rpc_error(msg: impl core::fmt::Display) -> PrecompileError {
+    PrecompileError::Fatal(alloc::format!("{ZONE_RPC_ERROR_PREFIX} {msg}"))
+}
+
+/// Returns `true` if the error string was produced by [`zone_rpc_error`].
+pub fn is_zone_rpc_error(err: &str) -> bool {
+    err.starts_with(ZONE_RPC_ERROR_PREFIX)
+}
 
 #[cfg(test)]
 mod test_utils;

@@ -22,7 +22,7 @@ use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
     ConfigureEvm, Database, NextBlockEnvAttributes,
-    execute::{BlockBuilder, BlockBuilderOutcome, ExecutionOutcome},
+    execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
 };
 use reth_node_api::FullNodeTypes;
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
@@ -312,6 +312,12 @@ where
                     }
                     continue;
                 }
+                Err(reth_evm::block::BlockExecutionError::Internal(
+                    reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
+                )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
+                    warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
+                    continue;
+                }
                 Err(err) => return Err(PayloadBuilderError::evm(err)),
             }
         }
@@ -381,16 +387,14 @@ where
         let eth_payload =
             EthBuiltPayload::new(attributes.payload_id(), sealed_block, total_fees, requests);
 
-        let execution_outcome = ExecutionOutcome::new(
-            db.take_bundle(),
-            vec![execution_result.receipts],
-            block.number(),
-            vec![execution_result.requests],
-        );
+        let execution_output = BlockExecutionOutput {
+            result: execution_result,
+            state: db.take_bundle(),
+        };
 
         let executed_block = BuiltPayloadExecutedBlock {
             recovered_block: Arc::new(block),
-            execution_output: Arc::new(execution_outcome),
+            execution_output: Arc::new(execution_output),
             hashed_state: Either::Left(Arc::new(hashed_state)),
             trie_updates: Either::Left(Arc::new(trie_updates)),
         };

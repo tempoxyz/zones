@@ -18,8 +18,17 @@ use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone::{ZoneNode, evm::ZoneEvmConfig};
 
+type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
+
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
+
+const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
+    "tungstenite=warn,",
+    "alloy_pubsub=warn,",
+    "alloy_transport_ws=warn,",
+    "rustls::client=warn"
+);
 
 /// Tempo Zone CLI arguments.
 #[derive(Debug, Clone, clap::Args)]
@@ -84,10 +93,18 @@ struct ZoneArgs {
     )]
     pub l1_fetch_concurrency: usize,
 
+    /// Interval in milliseconds between WebSocket reconnection attempts to L1.
+    #[arg(
+        long = "l1.retry-connection-interval",
+        env = "L1_RETRY_CONNECTION_INTERVAL_MS",
+        default_value_t = 100
+    )]
+    pub l1_retry_connection_interval_ms: u64,
+
     /// Zone ID for the private RPC auth token validation.
     /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
-    pub zone_id: u64,
+    pub zone_id: u32,
 
     /// Port for the private zone RPC server (0 for OS-assigned).
     #[arg(
@@ -96,6 +113,19 @@ struct ZoneArgs {
         default_value_t = 8544
     )]
     pub private_rpc_port: u16,
+}
+
+fn prepend_log_filter(filter: &mut String, directives: &str) {
+    if filter.is_empty() {
+        *filter = directives.to_owned();
+    } else {
+        *filter = format!("{directives},{filter}");
+    }
+}
+
+fn apply_zone_log_filters(cli: &mut ZoneCli) {
+    prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
+    prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
 }
 
 fn main() {
@@ -118,8 +148,10 @@ fn main() {
         )
     };
 
-    if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
-        .run_with_components::<ZoneNode>(components, async move |mut builder, args| {
+    let mut cli = ZoneCli::parse();
+    apply_zone_log_filters(&mut cli);
+
+    let run_result = cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
             // Disable peer discovery — the zone node has no peering.
@@ -150,6 +182,7 @@ fn main() {
                 sequencer_addr,
                 sequencer_secret_key,
                 args.l1_fetch_concurrency,
+                Duration::from_millis(args.l1_retry_connection_interval_ms),
             );
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
@@ -157,15 +190,25 @@ fn main() {
 
             // Launch the private zone RPC server.
             let eth_handlers = handle.node.eth_handlers().clone();
+            let zone_rpc_url = handle
+                .node
+                .rpc_server_handle()
+                .http_url()
+                .expect("HTTP RPC server must be enabled for sequencer mode");
             let private_rpc_config = zone::rpc::PrivateRpcConfig {
                 listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
+                l1_rpc_url: args.l1_rpc_url.clone(),
+                zone_rpc_url: zone_rpc_url.clone(),
                 zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
                 zone_portal: args.portal_address,
                 sequencer: sequencer_addr,
             };
-            let api: Arc<dyn zone::rpc::ZoneRpcApi> =
-                Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
+            let api: Arc<dyn zone::rpc::ZoneRpcApi> = Arc::new(zone::rpc::TempoZoneRpc::new(
+                eth_handlers,
+                private_rpc_config.clone(),
+            )
+            .await?);
             let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
             info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 
@@ -175,12 +218,6 @@ fn main() {
                 %sequencer_addr,
                 "Starting sequencer background tasks"
             );
-
-            let zone_rpc_url = handle
-                .node
-                .rpc_server_handle()
-                .http_url()
-                .expect("HTTP RPC server must be enabled for sequencer mode");
 
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
@@ -204,7 +241,7 @@ fn main() {
             );
 
             // Spawn as critical tasks — node shuts down if either exits.
-            handle.node.task_executor.spawn_critical("zone-monitor", async move {
+            handle.node.task_executor.spawn_critical_task("zone-monitor", async move {
                 tokio::select! {
                     res = seq_handle.withdrawal_handle => {
                         tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
@@ -230,8 +267,9 @@ fn main() {
 
             handle.node_exit_future.await?;
             Ok(())
-        })
-    {
+        });
+
+    if let Err(err) = run_result {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
     }
