@@ -196,8 +196,8 @@ These methods are available to any authenticated caller but filter results to on
 
 | Method | Scoping rule |
 |--------|-------------|
-| `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected with error code `-32004` (account mismatch). Requests that include a state override set or block override object (client-specific simulation extensions) MUST be rejected with `-32602` (invalid params). |
-| `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. Returns `-32004` on mismatch. Requests that include a state override set or block override object MUST be rejected with `-32602` (invalid params). |
+| `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected with error code `-32004` (account mismatch). Requests from non-sequencer callers that include a state override set or block override object (client-specific simulation extensions) MUST be rejected with `-32602` (invalid params). |
+| `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. Returns `-32004` on mismatch. Requests from non-sequencer callers that include a state override set or block override object MUST be rejected with `-32602` (invalid params). |
 
 **Rationale**: Transaction simulation could reveal state about other accounts (e.g., simulating a transfer to probe whether a recipient exists). Restricting simulation to the caller's own transactions prevents this.
 

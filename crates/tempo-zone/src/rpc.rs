@@ -128,7 +128,7 @@ async fn prune_filter_owners<Api: EthApiTypes + 'static>(
 /// - **`from`-enforcement** — `eth_call` / `eth_estimateGas` may only
 ///   simulate from the authenticated account (`-32004` on mismatch,
 ///   auto-set when omitted); state overrides are rejected for
-///   non-sequencers (`-32602`).
+///   non-sequencer callers (`-32602`).
 /// - **Sender verification** — `eth_sendRawTransaction` checks that the
 ///   recovered transaction sender matches the authenticated account
 ///   (`-32003` on mismatch).
@@ -553,7 +553,8 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            // Defense-in-depth: handlers.rs also rejects this, but enforce here too.
+            // Defense-in-depth: handlers.rs also rejects this for non-sequencers,
+            // but enforce here too.
             if !auth.is_sequencer && state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
@@ -561,6 +562,8 @@ where
             if !auth.is_sequencer {
                 zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
+
+            zone_rpc::policy::enforce_no_contract_creation(&request)?;
 
             let result = EthCall::call(
                 &self.eth.api,
@@ -582,7 +585,8 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            // Defense-in-depth: handlers.rs also rejects this, but enforce here too.
+            // Defense-in-depth: handlers.rs also rejects this for non-sequencers,
+            // but enforce here too.
             if !auth.is_sequencer && state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
@@ -590,6 +594,8 @@ where
             if !auth.is_sequencer {
                 zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
+
+            zone_rpc::policy::enforce_no_contract_creation(&request)?;
 
             let result = EthCall::estimate_gas_at(
                 &self.eth.api,
@@ -643,6 +649,8 @@ where
             if !auth.is_sequencer {
                 zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
+
+            zone_rpc::policy::enforce_no_contract_creation(&request)?;
 
             let result = EthTransactions::fill_transaction(&self.eth.api, request)
                 .await
