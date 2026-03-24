@@ -74,6 +74,12 @@ impl WsSession {
         self.next_subscription_id += 1;
         id
     }
+
+    fn cleanup(self) {
+        for (_, active) in self.subscriptions {
+            active.task.abort();
+        }
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -377,12 +383,6 @@ async fn process_ws_text(
     }
 }
 
-fn cleanup_ws_session(session: WsSession) {
-    for (_, active) in session.subscriptions {
-        active.task.abort();
-    }
-}
-
 fn activate_pending_subscriptions(
     pending_subscriptions: Vec<PendingSubscription>,
     notifications: &NotificationTx,
@@ -480,7 +480,7 @@ async fn handle_ws_session(
         activate_pending_subscriptions(pending_subscriptions, &notifications, &mut session);
     }
 
-    cleanup_ws_session(session);
+    session.cleanup();
     drop(notifications);
     let _ = writer.await;
 }
