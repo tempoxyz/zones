@@ -243,7 +243,10 @@ async fn handle_subscribe(
         match parse_ws_params(req, "expected [subscription, params?]") {
             Ok(params) => params,
             Err(err) => {
-                return WsDispatchResult::response_only(JsonRpcResponse::error(req.id.clone(), err));
+                return WsDispatchResult::response_only(JsonRpcResponse::error(
+                    req.id.clone(),
+                    err,
+                ));
             }
         };
 
