@@ -22,12 +22,15 @@ use alloy_rpc_types_eth::{
 use alloy_sol_types::{SolCall, SolEvent, SolEventInterface};
 use eyre::WrapErr;
 use futures::StreamExt;
+use reth_provider::CanonStateSubscriptions;
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
     EthApiTypes, EthFilterApiServer, RpcConvert,
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
+use reth_rpc_eth_types::logs_utils;
+use reth_transaction_pool::TransactionPool;
 use serde_json::value::RawValue;
 use tempo_alloy::{
     TempoNetwork,
@@ -39,7 +42,7 @@ use tempo_contracts::precompiles::{
 };
 use tempo_primitives::TempoTxEnvelope;
 use tokio::{
-    sync::{Mutex, mpsc},
+    sync::Mutex,
     time::{MissedTickBehavior, interval},
 };
 
@@ -769,65 +772,76 @@ where
     fn ws_subscribe_new_heads(&self, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
             let redact_logs_bloom = !auth.is_sequencer;
-            let pubsub = self.eth.pubsub.clone();
-            let (tx, rx) = mpsc::unbounded_channel();
-            let task = tokio::spawn(async move {
-                let mut stream = Box::pin(pubsub.new_headers_stream());
-                while let Some(header) = stream.next().await {
-                    if tx
-                        .send(serialize_ws_header(&header, redact_logs_bloom))
-                        .is_err()
-                    {
-                        break;
-                    }
-                }
-            });
-            Ok(WsSubscription::with_cleanup(
-                ws_stream_from_receiver(rx),
-                task,
-            ))
+            let api = self.eth.api.clone();
+            let provider = self.eth.api.provider().clone();
+            let stream = provider
+                .canonical_state_stream()
+                .flat_map(move |new_chain| {
+                    let api = api.clone();
+                    let headers = new_chain
+                        .committed()
+                        .blocks_iter()
+                        .filter_map(move |block| {
+                            match api
+                                .converter()
+                                .convert_header(block.clone_sealed_header(), block.rlp_length())
+                            {
+                                Ok(header) => Some(header),
+                                Err(err) => {
+                                    tracing::error!(
+                                        target: "rpc",
+                                        %err,
+                                        "Failed to convert header"
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    futures::stream::iter(headers)
+                })
+                .map(move |header| serialize_ws_header(&header, redact_logs_bloom));
+            Ok(WsSubscription::new(Box::pin(stream)))
         })
     }
 
     fn ws_subscribe_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
-            let pubsub = self.eth.pubsub.clone();
+            let provider = self.eth.api.provider().clone();
+            let caller = auth.caller;
 
-            if auth.is_sequencer {
-                let (tx, rx) = mpsc::unbounded_channel();
-                let task = tokio::spawn(async move {
-                    let mut stream = Box::pin(pubsub.log_stream(filter));
-                    while let Some(log) = stream.next().await {
-                        if tx.send(to_raw(&log)).is_err() {
-                            break;
-                        }
-                    }
-                });
-                return Ok(WsSubscription::with_cleanup(
-                    ws_stream_from_receiver(rx),
-                    task,
-                ));
+            if !auth.is_sequencer {
+                zone_rpc::filter::scope_filter(&mut filter);
             }
 
-            zone_rpc::filter::scope_filter(&mut filter);
-            let caller = auth.caller;
-            let (tx, rx) = mpsc::unbounded_channel();
-            let task = tokio::spawn(async move {
-                let mut stream = Box::pin(pubsub.log_stream(filter));
-                while let Some(log) = stream.next().await {
-                    if !zone_rpc::filter::is_log_visible(&log, &caller) {
-                        continue;
-                    }
+            let stream = provider
+                .canonical_state_stream()
+                .flat_map(|canon_state| futures::stream::iter(canon_state.block_receipts()))
+                .flat_map(move |(block_receipts, removed)| {
+                    let all_logs = logs_utils::matching_block_logs_with_tx_hashes(
+                        &filter,
+                        block_receipts.block,
+                        block_receipts.timestamp,
+                        block_receipts
+                            .tx_receipts
+                            .iter()
+                            .map(|(tx, receipt)| (*tx, receipt)),
+                        removed,
+                    );
+                    futures::stream::iter(all_logs)
+                });
 
-                    if tx.send(to_raw(&log)).is_err() {
-                        break;
-                    }
-                }
+            if auth.is_sequencer {
+                let stream = stream.map(|log| to_raw(&log));
+                return Ok(WsSubscription::new(Box::pin(stream)));
+            }
+
+            let stream = stream.filter_map(move |log| {
+                std::future::ready(
+                    zone_rpc::filter::is_log_visible(&log, &caller).then(|| to_raw(&log)),
+                )
             });
-            Ok(WsSubscription::with_cleanup(
-                ws_stream_from_receiver(rx),
-                task,
-            ))
+            Ok(WsSubscription::new(Box::pin(stream)))
         })
     }
 
@@ -837,91 +851,57 @@ where
         auth: AuthContext,
     ) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
-            let pubsub = self.eth.pubsub.clone();
-
             if auth.is_sequencer {
                 if !full {
-                    let (tx, rx) = mpsc::unbounded_channel();
-                    let task = tokio::spawn(async move {
-                        let mut stream = Box::pin(pubsub.pending_transaction_hashes_stream());
-                        while let Some(hash) = stream.next().await {
-                            if tx.send(to_raw(&hash)).is_err() {
-                                break;
-                            }
-                        }
-                    });
-                    return Ok(WsSubscription::with_cleanup(
-                        ws_stream_from_receiver(rx),
-                        task,
-                    ));
+                    let pool = self.eth.api.pool().clone();
+                    let stream = futures::stream::unfold(
+                        pool.pending_transactions_listener(),
+                        |mut rx| async move { rx.recv().await.map(|hash| (hash, rx)) },
+                    )
+                    .map(|hash| to_raw(&hash));
+                    return Ok(WsSubscription::new(Box::pin(stream)));
                 }
 
                 let api = self.eth.api.clone();
-                let (tx, rx) = mpsc::unbounded_channel();
-                let task = tokio::spawn(async move {
-                    let mut stream = Box::pin(pubsub.full_pending_transaction_stream());
-                    while let Some(pending_tx) = stream.next().await {
-                        let item = api
-                            .converter()
+                let pool = self.eth.api.pool().clone();
+                let stream = pool
+                    .new_pending_pool_transactions_listener()
+                    .map(move |pending_tx| {
+                        api.converter()
                             .fill_pending(pending_tx.transaction.to_consensus())
                             .map_err(internal)
-                            .and_then(|tx| to_raw(&tx));
-                        if tx.send(item).is_err() {
-                            break;
-                        }
-                    }
-                });
-                return Ok(WsSubscription::with_cleanup(
-                    ws_stream_from_receiver(rx),
-                    task,
-                ));
+                            .and_then(|tx| to_raw(&tx))
+                    });
+                return Ok(WsSubscription::new(Box::pin(stream)));
             }
 
             let caller = auth.caller;
+            let pool = self.eth.api.pool().clone();
 
             if !full {
-                let (tx, rx) = mpsc::unbounded_channel();
-                let task = tokio::spawn(async move {
-                    let mut stream = Box::pin(pubsub.full_pending_transaction_stream());
-                    while let Some(pending_tx) = stream.next().await {
-                        if pending_tx.transaction.sender() != caller {
-                            continue;
-                        }
-
-                        if tx.send(to_raw(&*pending_tx.transaction.hash())).is_err() {
-                            break;
-                        }
-                    }
-                });
-                return Ok(WsSubscription::with_cleanup(
-                    ws_stream_from_receiver(rx),
-                    task,
-                ));
+                let stream =
+                    pool.new_pending_pool_transactions_listener()
+                        .filter_map(move |pending_tx| {
+                            std::future::ready(
+                                (pending_tx.transaction.sender() == caller)
+                                    .then(|| to_raw(&*pending_tx.transaction.hash())),
+                            )
+                        });
+                return Ok(WsSubscription::new(Box::pin(stream)));
             }
 
             let api = self.eth.api.clone();
-            let (tx, rx) = mpsc::unbounded_channel();
-            let task = tokio::spawn(async move {
-                let mut stream = Box::pin(pubsub.full_pending_transaction_stream());
-                while let Some(pending_tx) = stream.next().await {
-                    if pending_tx.transaction.sender() != caller {
-                        continue;
-                    }
-
-                    let item = api
-                        .converter()
-                        .fill_pending(pending_tx.transaction.to_consensus())
-                        .map_err(internal)
-                        .and_then(|tx| to_raw(&tx));
-                    if tx.send(item).is_err() {
-                        break;
-                    }
-                }
-            });
-            Ok(WsSubscription::with_cleanup(
-                ws_stream_from_receiver(rx),
-                task,
-            ))
+            let stream =
+                pool.new_pending_pool_transactions_listener()
+                    .filter_map(move |pending_tx| {
+                        std::future::ready((pending_tx.transaction.sender() == caller).then(|| {
+                            api.converter()
+                                .fill_pending(pending_tx.transaction.to_consensus())
+                                .map_err(internal)
+                                .and_then(|tx| to_raw(&tx))
+                        }))
+                    });
+            Ok(WsSubscription::new(Box::pin(stream)))
         })
     }
 
@@ -1118,14 +1098,6 @@ fn serialize_ws_header<T: serde::Serialize>(
         );
     }
     to_raw(&value)
-}
-
-fn ws_stream_from_receiver(
-    rx: mpsc::UnboundedReceiver<Result<Box<RawValue>, JsonRpcError>>,
-) -> WsSubscriptionStream {
-    Box::pin(futures::stream::unfold(rx, |mut rx| async move {
-        rx.recv().await.map(|item| (item, rx))
-    }))
 }
 
 #[cfg(test)]

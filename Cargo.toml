@@ -127,6 +127,7 @@ reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "72d0e04", feat
 reth-rpc = { git = "https://github.com/paradigmxyz/reth", rev = "72d0e04" }
 reth-rpc-builder = { git = "https://github.com/paradigmxyz/reth", rev = "72d0e04" }
 reth-rpc-eth-api = { git = "https://github.com/paradigmxyz/reth", rev = "72d0e04" }
+reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "72d0e04" }
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "72d0e04" }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "72d0e04" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "72d0e04" }

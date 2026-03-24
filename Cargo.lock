@@ -12874,6 +12874,7 @@ dependencies = [
  "reth-rpc",
  "reth-rpc-builder",
  "reth-rpc-eth-api",
+ "reth-rpc-eth-types",
  "reth-storage-api",
  "reth-tasks",
  "reth-tracing",
