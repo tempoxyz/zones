@@ -895,7 +895,7 @@ where
                         .filter_map(move |pending_tx| {
                             std::future::ready(
                                 (pending_tx.transaction.sender() == caller)
-                                    .then(|| to_raw(&*pending_tx.transaction.hash())),
+                                    .then(|| to_raw(pending_tx.transaction.hash())),
                             )
                         });
                 let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);

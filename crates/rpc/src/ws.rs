@@ -129,14 +129,13 @@ fn success_response<T: serde::Serialize>(id: Value, result: &T) -> JsonRpcRespon
 fn parse_ws_params<T: DeserializeOwned>(
     req: &JsonRpcRequest,
     message: &'static str,
-) -> Result<T, JsonRpcResponse> {
+) -> Result<T, JsonRpcError> {
     let raw = req
         .params
         .as_deref()
         .map(|params| params.get())
         .unwrap_or("[]");
-    serde_json::from_str(raw)
-        .map_err(|_| JsonRpcResponse::error(req.id.clone(), JsonRpcError::invalid_params(message)))
+    serde_json::from_str(raw).map_err(|_| JsonRpcError::invalid_params(message))
 }
 
 #[derive(serde::Serialize)]
@@ -243,7 +242,9 @@ async fn handle_subscribe(
     let SubscribeParams(kind, params) =
         match parse_ws_params(req, "expected [subscription, params?]") {
             Ok(params) => params,
-            Err(resp) => return WsDispatchResult::response_only(resp),
+            Err(err) => {
+                return WsDispatchResult::response_only(JsonRpcResponse::error(req.id.clone(), err));
+            }
         };
 
     let subscription = match kind {
@@ -342,7 +343,7 @@ async fn handle_unsubscribe(req: &JsonRpcRequest, session: &mut WsSession) -> Js
     let (subscription_id,) = match parse_ws_params::<(FilterId,)>(req, "expected [subscriptionId]")
     {
         Ok(params) => params,
-        Err(resp) => return resp,
+        Err(err) => return JsonRpcResponse::error(req.id.clone(), err),
     };
 
     let Some(active) = session.subscriptions.remove(&subscription_id) else {
@@ -405,11 +406,11 @@ async fn process_ws_text(
                     responses.push(result.response);
                     pending_subscriptions.extend(result.pending_subscriptions);
                 }
-                return (
+                (
                     serde_json::to_string(&responses)
                         .expect("JsonRpcResponse serialization is infallible"),
                     pending_subscriptions,
-                );
+                )
             }
             Err(err) => (
                 serde_json::to_string(&JsonRpcResponse::error(
