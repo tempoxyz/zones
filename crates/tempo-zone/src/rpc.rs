@@ -31,7 +31,6 @@ use reth_rpc_eth_api::{
 };
 use reth_rpc_eth_types::logs_utils;
 use reth_transaction_pool::TransactionPool;
-use serde_json::value::RawValue;
 use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoHeaderResponse, TempoTransactionRequest},
@@ -40,7 +39,7 @@ use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
 };
-use tempo_primitives::TempoTxEnvelope;
+use tempo_primitives::{TempoHeader, TempoTxEnvelope};
 use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
@@ -800,8 +799,14 @@ where
                         .collect::<Vec<_>>();
                     futures::stream::iter(headers)
                 })
-                .map(move |header| serialize_ws_header(&header, redact_logs_bloom));
-            Ok(WsSubscription::new(Box::pin(stream)))
+                .map(move |mut header| {
+                    if redact_logs_bloom {
+                        redact_ws_header(&mut header);
+                    }
+                    to_raw(&header)
+                });
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
         })
     }
 
@@ -833,7 +838,8 @@ where
 
             if auth.is_sequencer {
                 let stream = stream.map(|log| to_raw(&log));
-                return Ok(WsSubscription::new(Box::pin(stream)));
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
             }
 
             let stream = stream.filter_map(move |log| {
@@ -841,7 +847,8 @@ where
                     zone_rpc::filter::is_log_visible(&log, &caller).then(|| to_raw(&log)),
                 )
             });
-            Ok(WsSubscription::new(Box::pin(stream)))
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
         })
     }
 
@@ -859,7 +866,8 @@ where
                         |mut rx| async move { rx.recv().await.map(|hash| (hash, rx)) },
                     )
                     .map(|hash| to_raw(&hash));
-                    return Ok(WsSubscription::new(Box::pin(stream)));
+                    let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                    return Ok(stream);
                 }
 
                 let api = self.eth.api.clone();
@@ -872,7 +880,8 @@ where
                             .map_err(internal)
                             .and_then(|tx| to_raw(&tx))
                     });
-                return Ok(WsSubscription::new(Box::pin(stream)));
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
             }
 
             let caller = auth.caller;
@@ -887,7 +896,8 @@ where
                                     .then(|| to_raw(&*pending_tx.transaction.hash())),
                             )
                         });
-                return Ok(WsSubscription::new(Box::pin(stream)));
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
             }
 
             let api = self.eth.api.clone();
@@ -901,7 +911,8 @@ where
                                 .and_then(|tx| to_raw(&tx))
                         }))
                     });
-            Ok(WsSubscription::new(Box::pin(stream)))
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
         })
     }
 
@@ -1074,30 +1085,18 @@ fn encrypted_deposit_details(
     }
 }
 
-/// Strip privacy-sensitive fields from a block for non-sequencer callers.
-fn redact_block(block: &mut RpcBlock) {
-    // header.inner = alloy Header, .inner = Sealed wrapper, .inner = TempoHeader (contains logs_bloom)
-    block.header.inner.inner.inner.logs_bloom = Bloom::ZERO;
-    block.transactions = BlockTransactions::Hashes(Vec::new());
+fn redact_tempo_header(header: &mut TempoHeader) {
+    header.inner.logs_bloom = Bloom::ZERO;
 }
 
-/// Serialize a `newHeads` item, optionally redacting `logsBloom`.
-fn serialize_ws_header<T: serde::Serialize>(
-    header: &T,
-    redact_logs_bloom: bool,
-) -> Result<Box<RawValue>, JsonRpcError> {
-    if !redact_logs_bloom {
-        return to_raw(header);
-    }
+fn redact_ws_header(header: &mut TempoHeaderResponse) {
+    redact_tempo_header(&mut header.inner.inner);
+}
 
-    let mut value = serde_json::to_value(header).map_err(internal)?;
-    if let Some(obj) = value.as_object_mut() {
-        obj.insert(
-            "logsBloom".to_string(),
-            serde_json::Value::String(format!("0x{}", "0".repeat(512))),
-        );
-    }
-    to_raw(&value)
+/// Strip privacy-sensitive fields from a block for non-sequencer callers.
+fn redact_block(block: &mut RpcBlock) {
+    redact_tempo_header(&mut block.header.inner);
+    block.transactions = BlockTransactions::Hashes(Vec::new());
 }
 
 #[cfg(test)]

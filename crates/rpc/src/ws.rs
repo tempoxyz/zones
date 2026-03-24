@@ -29,7 +29,7 @@ use tracing::warn;
 use crate::{
     auth::{self, AuthContext, AuthError},
     server::{MAX_BATCH_SIZE, RpcState, authenticate_token, dispatch_request},
-    subscription::WsSubscription,
+    subscription::WsSubscriptionStream,
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, to_raw},
 };
 
@@ -47,6 +47,11 @@ pub(crate) struct WsQuery {
 
 struct ActiveSubscription {
     task: JoinHandle<()>,
+}
+
+struct PendingSubscription {
+    id: FilterId,
+    stream: WsSubscriptionStream,
 }
 
 struct WsSession {
@@ -124,14 +129,11 @@ fn subscription_notification_raw(subscription_id: &FilterId, result: &RawValue) 
 
 fn spawn_subscription(
     subscription_id: FilterId,
-    mut subscription: WsSubscription,
+    mut subscription: WsSubscriptionStream,
     notifications: NotificationTx,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        // Let the subscribe response get enqueued before the first notification.
-        tokio::task::yield_now().await;
-
-        while let Some(item) = subscription.stream.next().await {
+        while let Some(item) = subscription.next().await {
             let result = match item {
                 Ok(result) => result,
                 Err(err) => {
@@ -158,31 +160,49 @@ fn spawn_subscription(
     })
 }
 
+struct WsDispatchResult {
+    response: JsonRpcResponse,
+    pending_subscriptions: Vec<PendingSubscription>,
+}
+
+impl WsDispatchResult {
+    fn response_only(response: JsonRpcResponse) -> Self {
+        Self {
+            response,
+            pending_subscriptions: Vec::new(),
+        }
+    }
+}
+
 async fn handle_subscribe(
     req: &JsonRpcRequest,
     auth: &AuthContext,
     state: &Arc<RpcState>,
-    notifications: &NotificationTx,
     session: &mut WsSession,
-) -> JsonRpcResponse {
+) -> WsDispatchResult {
     let SubscribeParams(kind, params) =
         match parse_ws_params(req, "expected [subscription, params?]") {
             Ok(params) => params,
-            Err(resp) => return resp,
+            Err(resp) => return WsDispatchResult::response_only(resp),
         };
 
     let subscription = match kind {
         SubscriptionKind::NewHeads => {
             if !matches!(params, None | Some(SubscriptionParams::None)) {
-                return JsonRpcResponse::error(
+                return WsDispatchResult::response_only(JsonRpcResponse::error(
                     req.id.clone(),
                     JsonRpcError::invalid_params("eth_subscribe(newHeads) does not accept params"),
-                );
+                ));
             }
 
             match state.api.ws_subscribe_new_heads(auth.clone()).await {
                 Ok(subscription) => subscription,
-                Err(err) => return JsonRpcResponse::error(req.id.clone(), err),
+                Err(err) => {
+                    return WsDispatchResult::response_only(JsonRpcResponse::error(
+                        req.id.clone(),
+                        err,
+                    ));
+                }
             }
         }
         SubscriptionKind::Logs => {
@@ -190,16 +210,21 @@ async fn handle_subscribe(
                 SubscriptionParams::None => Filter::default(),
                 SubscriptionParams::Logs(filter) => *filter,
                 SubscriptionParams::Bool(_) => {
-                    return JsonRpcResponse::error(
+                    return WsDispatchResult::response_only(JsonRpcResponse::error(
                         req.id.clone(),
                         JsonRpcError::invalid_params("eth_subscribe(logs) expects a filter object"),
-                    );
+                    ));
                 }
             };
 
             match state.api.ws_subscribe_logs(filter, auth.clone()).await {
                 Ok(subscription) => subscription,
-                Err(err) => return JsonRpcResponse::error(req.id.clone(), err),
+                Err(err) => {
+                    return WsDispatchResult::response_only(JsonRpcResponse::error(
+                        req.id.clone(),
+                        err,
+                    ));
+                }
             }
         }
         SubscriptionKind::NewPendingTransactions => {
@@ -207,12 +232,12 @@ async fn handle_subscribe(
                 SubscriptionParams::None | SubscriptionParams::Bool(false) => false,
                 SubscriptionParams::Bool(true) => true,
                 SubscriptionParams::Logs(_) => {
-                    return JsonRpcResponse::error(
+                    return WsDispatchResult::response_only(JsonRpcResponse::error(
                         req.id.clone(),
                         JsonRpcError::invalid_params(
                             "eth_subscribe(newPendingTransactions) expects an optional boolean",
                         ),
-                    );
+                    ));
                 }
             };
 
@@ -222,20 +247,30 @@ async fn handle_subscribe(
                 .await
             {
                 Ok(subscription) => subscription,
-                Err(err) => return JsonRpcResponse::error(req.id.clone(), err),
+                Err(err) => {
+                    return WsDispatchResult::response_only(JsonRpcResponse::error(
+                        req.id.clone(),
+                        err,
+                    ));
+                }
             }
         }
         SubscriptionKind::Syncing => {
-            return JsonRpcResponse::error(req.id.clone(), JsonRpcError::method_disabled());
+            return WsDispatchResult::response_only(JsonRpcResponse::error(
+                req.id.clone(),
+                JsonRpcError::method_disabled(),
+            ));
         }
     };
 
     let subscription_id = session.next_subscription_id();
-    let task = spawn_subscription(subscription_id.clone(), subscription, notifications.clone());
-    session
-        .subscriptions
-        .insert(subscription_id.clone(), ActiveSubscription { task });
-    success_response(req.id.clone(), &subscription_id)
+    WsDispatchResult {
+        response: success_response(req.id.clone(), &subscription_id),
+        pending_subscriptions: vec![PendingSubscription {
+            id: subscription_id,
+            stream: subscription,
+        }],
+    }
 }
 
 async fn handle_unsubscribe(req: &JsonRpcRequest, session: &mut WsSession) -> JsonRpcResponse {
@@ -257,13 +292,14 @@ async fn dispatch_ws_request(
     req: &JsonRpcRequest,
     auth: &AuthContext,
     state: &Arc<RpcState>,
-    notifications: &NotificationTx,
     session: &mut WsSession,
-) -> JsonRpcResponse {
+) -> WsDispatchResult {
     match req.method.as_str() {
-        "eth_subscribe" => handle_subscribe(req, auth, state, notifications, session).await,
-        "eth_unsubscribe" => handle_unsubscribe(req, session).await,
-        _ => dispatch_request(req, auth, state.api.as_ref()).await,
+        "eth_subscribe" => handle_subscribe(req, auth, state, session).await,
+        "eth_unsubscribe" => {
+            WsDispatchResult::response_only(handle_unsubscribe(req, session).await)
+        }
+        _ => WsDispatchResult::response_only(dispatch_request(req, auth, state.api.as_ref()).await),
     }
 }
 
@@ -271,53 +307,92 @@ async fn process_ws_text(
     text: &str,
     auth: &AuthContext,
     state: &Arc<RpcState>,
-    notifications: &NotificationTx,
     session: &mut WsSession,
-) -> String {
+) -> (String, Vec<PendingSubscription>) {
     let trimmed = text.trim_start();
 
-    let response = if trimmed.starts_with('[') {
+    if trimmed.starts_with('[') {
         match serde_json::from_str::<Vec<JsonRpcRequest>>(trimmed) {
-            Ok(requests) if requests.is_empty() => {
-                JsonRpcResponse::error(Value::Null, JsonRpcError::parse_error("empty batch"))
-            }
-            Ok(requests) if requests.len() > MAX_BATCH_SIZE => JsonRpcResponse::error(
-                Value::Null,
-                JsonRpcError::invalid_params(format!(
-                    "batch too large ({} > {MAX_BATCH_SIZE})",
-                    requests.len()
-                )),
+            Ok(requests) if requests.is_empty() => (
+                serde_json::to_string(&JsonRpcResponse::error(
+                    Value::Null,
+                    JsonRpcError::parse_error("empty batch"),
+                ))
+                .expect("JsonRpcResponse serialization is infallible"),
+                Vec::new(),
+            ),
+            Ok(requests) if requests.len() > MAX_BATCH_SIZE => (
+                serde_json::to_string(&JsonRpcResponse::error(
+                    Value::Null,
+                    JsonRpcError::invalid_params(format!(
+                        "batch too large ({} > {MAX_BATCH_SIZE})",
+                        requests.len()
+                    )),
+                ))
+                .expect("JsonRpcResponse serialization is infallible"),
+                Vec::new(),
             ),
             Ok(requests) => {
                 let mut responses = Vec::with_capacity(requests.len());
+                let mut pending_subscriptions = Vec::new();
                 for req in &requests {
-                    responses
-                        .push(dispatch_ws_request(req, auth, state, notifications, session).await);
+                    let result = dispatch_ws_request(req, auth, state, session).await;
+                    responses.push(result.response);
+                    pending_subscriptions.extend(result.pending_subscriptions);
                 }
-                return serde_json::to_string(&responses)
-                    .expect("JsonRpcResponse serialization is infallible");
+                return (
+                    serde_json::to_string(&responses)
+                        .expect("JsonRpcResponse serialization is infallible"),
+                    pending_subscriptions,
+                );
             }
-            Err(err) => JsonRpcResponse::error(
-                Value::Null,
-                JsonRpcError::parse_error(format!("parse error: {err}")),
+            Err(err) => (
+                serde_json::to_string(&JsonRpcResponse::error(
+                    Value::Null,
+                    JsonRpcError::parse_error(format!("parse error: {err}")),
+                ))
+                .expect("JsonRpcResponse serialization is infallible"),
+                Vec::new(),
             ),
         }
     } else {
         match serde_json::from_str::<JsonRpcRequest>(trimmed) {
-            Ok(request) => dispatch_ws_request(&request, auth, state, notifications, session).await,
-            Err(err) => JsonRpcResponse::error(
-                Value::Null,
-                JsonRpcError::parse_error(format!("parse error: {err}")),
+            Ok(request) => {
+                let result = dispatch_ws_request(&request, auth, state, session).await;
+                (
+                    serde_json::to_string(&result.response)
+                        .expect("JsonRpcResponse serialization is infallible"),
+                    result.pending_subscriptions,
+                )
+            }
+            Err(err) => (
+                serde_json::to_string(&JsonRpcResponse::error(
+                    Value::Null,
+                    JsonRpcError::parse_error(format!("parse error: {err}")),
+                ))
+                .expect("JsonRpcResponse serialization is infallible"),
+                Vec::new(),
             ),
         }
-    };
-
-    serde_json::to_string(&response).expect("JsonRpcResponse serialization is infallible")
+    }
 }
 
 fn cleanup_ws_session(session: WsSession) {
     for (_, active) in session.subscriptions {
         active.task.abort();
+    }
+}
+
+fn activate_pending_subscriptions(
+    pending_subscriptions: Vec<PendingSubscription>,
+    notifications: &NotificationTx,
+    session: &mut WsSession,
+) {
+    for pending in pending_subscriptions {
+        let task = spawn_subscription(pending.id.clone(), pending.stream, notifications.clone());
+        session
+            .subscriptions
+            .insert(pending.id, ActiveSubscription { task });
     }
 }
 
@@ -395,12 +470,14 @@ async fn handle_ws_session(
             }
         };
 
-        let response_json =
-            process_ws_text(&text, &auth, &state, &notifications, &mut session).await;
+        let (response_json, pending_subscriptions) =
+            process_ws_text(&text, &auth, &state, &mut session).await;
 
         if notifications.send(response_json).is_err() {
             break;
         }
+
+        activate_pending_subscriptions(pending_subscriptions, &notifications, &mut session);
     }
 
     cleanup_ws_session(session);

@@ -17,7 +17,7 @@ use zone_rpc::{
     auth::build_token_fields,
     handlers::ZoneRpcApi,
     start_private_rpc,
-    subscription::{BoxWsSubscriptionFut, WsSubscription},
+    subscription::{BoxWsSubscriptionFut, WsSubscriptionStream},
     types::{BoxEyreFut, BoxFut, JsonRpcError},
 };
 
@@ -154,7 +154,8 @@ impl ZoneRpcApi for MockZoneRpcApi {
                 "parentHash": format!("{:#x}", alloy_primitives::B256::ZERO),
                 "logsBloom": format!("0x{}", "0".repeat(512)),
             }))]);
-            Ok(WsSubscription::new(Box::pin(stream)))
+            let stream: WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
         })
     }
 
@@ -189,7 +190,8 @@ impl ZoneRpcApi for MockZoneRpcApi {
                 "logIndex": "0x0",
                 "removed": false
             }))]);
-            Ok(WsSubscription::new(Box::pin(stream)))
+            let stream: WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
         })
     }
 
@@ -220,7 +222,8 @@ impl ZoneRpcApi for MockZoneRpcApi {
                     b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
                 ))])
             };
-            Ok(WsSubscription::new(Box::pin(stream)))
+            let stream: WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
         })
     }
 

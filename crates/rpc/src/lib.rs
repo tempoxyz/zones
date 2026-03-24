@@ -25,4 +25,4 @@ pub use handlers::ZoneRpcApi;
 pub use provider::{ZoneProvider, ZoneProviderConfig};
 pub use proxy::ProxyZoneRpc;
 pub use server::start_private_rpc;
-pub use subscription::{BoxWsSubscriptionFut, WsSubscription, WsSubscriptionStream};
+pub use subscription::{BoxWsSubscriptionFut, WsSubscriptionStream};
