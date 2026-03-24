@@ -112,12 +112,25 @@ zone-info identifier:
     cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
-create-zone name:
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
+create-zone name token="":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    ZONE_TOKEN_L1="{{token}}"
+    if [[ -z "$ZONE_TOKEN_L1" ]]; then
+        ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    fi
+    # Resolve well-known aliases (lowercased for case-insensitive matching)
+    ZONE_TOKEN_LOWER=$(echo "$ZONE_TOKEN_L1" | tr '[:upper:]' '[:lower:]')
+    case "$ZONE_TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            ZONE_TOKEN_L1="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000002" ;;
+    esac
     SEQ_KEY="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}"
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
@@ -129,6 +142,7 @@ create-zone name:
     echo "Building xtask..."
     cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
+    echo "Initial portal token: $ZONE_TOKEN_L1"
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
@@ -606,17 +620,33 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
-[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Requires L1_RPC_URL env var.')]
-deploy-zone name:
+[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL env var.')]
+deploy-zone name token="":
     #!/bin/bash
     set -euo pipefail
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     OUTPUT="generated/{{name}}"
+    ZONE_TOKEN_L1="{{token}}"
+    if [[ -z "$ZONE_TOKEN_L1" ]]; then
+        ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    fi
+    # Resolve well-known aliases (lowercased for case-insensitive matching)
+    ZONE_TOKEN_LOWER=$(echo "$ZONE_TOKEN_L1" | tr '[:upper:]' '[:lower:]')
+    case "$ZONE_TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            ZONE_TOKEN_L1="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000002" ;;
+    esac
 
     echo "============================================"
     echo "  Deploying Zone: {{name}}"
     echo "============================================"
+    echo ""
+    echo "  Initial portal token: $ZONE_TOKEN_L1"
     echo ""
 
     # Step 1: Generate a new sequencer keypair
@@ -644,6 +674,7 @@ deploy-zone name:
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
+        --initial-token "$ZONE_TOKEN_L1" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$SEQUENCER_KEY"
     echo ""
@@ -673,6 +704,7 @@ deploy-zone name:
     echo "  Zone ID:         $ZONE_ID"
     echo "  Zone Name:       {{name}}"
     echo "  Portal:          $PORTAL"
+    echo "  Initial Token:   $ZONE_TOKEN_L1"
     echo "  Sequencer:       $SEQUENCER_ADDR"
     echo "  Anchor Block:    $ANCHOR_BLOCK"
     echo ""
