@@ -333,13 +333,15 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer && state_override.is_some() {
+            if state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
             if !auth.is_sequencer {
                 policy::enforce_from(&mut request, &auth)?;
             }
+
+            policy::enforce_no_contract_creation(&request)?;
 
             self.forward(
                 "eth_call",
@@ -357,13 +359,15 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer && state_override.is_some() {
+            if state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
             if !auth.is_sequencer {
                 policy::enforce_from(&mut request, &auth)?;
             }
+
+            policy::enforce_no_contract_creation(&request)?;
 
             self.forward(
                 "eth_estimateGas",
@@ -413,6 +417,8 @@ impl ZoneRpcApi for ProxyZoneRpc {
             if !auth.is_sequencer {
                 policy::enforce_from(&mut request, &auth)?;
             }
+
+            policy::enforce_no_contract_creation(&request)?;
 
             self.forward("eth_fillTransaction", serde_json::json!([request]))
                 .await

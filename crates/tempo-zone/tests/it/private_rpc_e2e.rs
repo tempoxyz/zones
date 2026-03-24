@@ -671,6 +671,107 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     Ok(())
 }
 
+/// Simulation methods reject contract creation and override extensions.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc().await?;
+    let user_signer = PrivateKeySigner::random();
+
+    for method in ["eth_call", "eth_estimateGas"] {
+        let create_resp = ctx
+            .call_as_user(
+                method,
+                json!([
+                    {
+                        "data": "0x60006000f3",
+                    },
+                    "latest"
+                ]),
+                &user_signer,
+            )
+            .await?;
+        assert_eq!(
+            create_resp["error"]["code"].as_i64().unwrap(),
+            -32602,
+            "{method} should reject create-style requests",
+        );
+        assert_eq!(
+            create_resp["error"]["message"].as_str().unwrap(),
+            "contract creation not supported on zones",
+        );
+
+        let user_override_resp = ctx
+            .call_as_user(
+                method,
+                json!([
+                    {
+                        "to": format!("{PATH_USD_ADDRESS:#x}"),
+                        "data": "0x"
+                    },
+                    "latest",
+                    {}
+                ]),
+                &user_signer,
+            )
+            .await?;
+        assert_eq!(
+            user_override_resp["error"]["code"].as_i64().unwrap(),
+            -32602,
+            "{method} should reject user state overrides",
+        );
+        assert_eq!(
+            user_override_resp["error"]["message"].as_str().unwrap(),
+            "state overrides not allowed",
+        );
+
+        let sequencer_override_resp = ctx
+            .call_as_sequencer(
+                method,
+                json!([
+                    {
+                        "to": format!("{PATH_USD_ADDRESS:#x}"),
+                        "data": "0x"
+                    },
+                    "latest",
+                    {}
+                ]),
+            )
+            .await?;
+        assert_eq!(
+            sequencer_override_resp["error"]["code"].as_i64().unwrap(),
+            -32602,
+            "{method} should reject sequencer state overrides",
+        );
+        assert_eq!(
+            sequencer_override_resp["error"]["message"]
+                .as_str()
+                .unwrap(),
+            "state overrides not allowed",
+        );
+    }
+
+    let fill_resp = ctx
+        .call_as_user(
+            "eth_fillTransaction",
+            json!([
+                {
+                    "gas": "0x5208",
+                }
+            ]),
+            &user_signer,
+        )
+        .await?;
+    assert_eq!(fill_resp["error"]["code"].as_i64().unwrap(), -32602);
+    assert_eq!(
+        fill_resp["error"]["message"].as_str().unwrap(),
+        "contract creation not supported on zones",
+    );
+
+    Ok(())
+}
+
 /// Block access control: user gets redacted blocks (full=false), rejected for full=true;
 /// sequencer gets full blocks.
 #[tokio::test(flavor = "multi_thread")]
