@@ -199,6 +199,9 @@ fn main() {
                 listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
                 l1_rpc_url: args.l1_rpc_url.clone(),
                 zone_rpc_url: zone_rpc_url.clone(),
+                retry_connection_interval: Duration::from_millis(
+                    args.l1_retry_connection_interval_ms,
+                ),
                 zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
                 zone_portal: args.portal_address,
@@ -222,6 +225,9 @@ fn main() {
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
                 l1_rpc_url: args.l1_rpc_url,
+                retry_connection_interval: Duration::from_millis(
+                    args.l1_retry_connection_interval_ms,
+                ),
                 withdrawal_poll_interval: Duration::from_secs(
                     args.poll_interval_secs,
                 ),

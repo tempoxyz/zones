@@ -155,12 +155,18 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
         let l1_rpc_url = config.l1_rpc_url.clone();
         let zone_rpc_url = config.zone_rpc_url.clone();
         let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&l1_rpc_url)
+            .connect_with_config(
+                &l1_rpc_url,
+                crate::rpc_connection_config(config.retry_connection_interval),
+            )
             .await
             .wrap_err("failed to connect private RPC L1 provider")?
             .erased();
         let zone_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&zone_rpc_url)
+            .connect_with_config(
+                &zone_rpc_url,
+                crate::rpc_connection_config(config.retry_connection_interval),
+            )
             .await
             .wrap_err("failed to connect private RPC zone provider")?
             .erased();

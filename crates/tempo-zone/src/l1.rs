@@ -9,7 +9,7 @@ use alloy_consensus::BlockHeader as _;
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_client::{ConnectionConfig, RpcClient};
+use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::{BlockId, Log};
 use alloy_sol_types::{SolEvent, SolEventInterface, SolValue};
 use alloy_transport::Authorization;
@@ -127,9 +127,7 @@ impl L1Subscriber {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
         let url: url::Url = self.config.l1_rpc_url.parse()?;
-        let mut conn_config = ConnectionConfig::new()
-            .with_max_retries(u32::MAX)
-            .with_retry_interval(self.config.retry_connection_interval);
+        let mut conn_config = crate::rpc_connection_config(self.config.retry_connection_interval);
 
         if !url.username().is_empty() {
             let auth = Authorization::basic(url.username(), url.password().unwrap_or_default());

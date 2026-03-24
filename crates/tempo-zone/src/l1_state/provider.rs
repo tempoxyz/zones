@@ -12,7 +12,7 @@
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_client::{ConnectionConfig, RpcClient};
+use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
@@ -98,9 +98,7 @@ impl L1StateProvider {
         let retry_layer =
             RetryBackoffLayer::new(config.max_retries, config.initial_backoff_ms, u64::MAX);
 
-        let conn_config = ConnectionConfig::new()
-            .with_max_retries(u32::MAX)
-            .with_retry_interval(config.retry_connection_interval);
+        let conn_config = crate::rpc_connection_config(config.retry_connection_interval);
 
         let client = RpcClient::builder()
             .layer(retry_layer)

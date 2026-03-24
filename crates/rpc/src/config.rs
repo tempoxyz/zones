@@ -1,7 +1,7 @@
 //! Configuration for the private zone RPC server.
 
 use alloy_primitives::Address;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, time::Duration};
 
 /// Configuration for the private zone RPC server.
 #[derive(Debug, Clone)]
@@ -12,6 +12,8 @@ pub struct PrivateRpcConfig {
     pub l1_rpc_url: String,
     /// Zone L2 RPC URL used by zone-specific RPC methods that inspect L2 events.
     pub zone_rpc_url: String,
+    /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
+    pub retry_connection_interval: Duration,
     /// The zone's numeric identifier.
     pub zone_id: u32,
     /// The zone's chain ID.
