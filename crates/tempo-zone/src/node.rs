@@ -30,7 +30,10 @@ use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::RpcConverter;
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
-use reth_transaction_pool::{TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore};
+use reth_transaction_pool::{
+    TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
+    error::InvalidPoolTransactionError,
+};
 use std::sync::Arc;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoChainSpec;
@@ -42,6 +45,7 @@ use tempo_primitives::{TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxTyp
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
     amm::AmmLiquidityCache,
+    transaction::TempoPooledTransaction,
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tracing::{debug, info};
@@ -646,7 +650,7 @@ where
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
         let tempo_evm_config = TempoEvmConfig::new(ctx.chain_spec());
-        let validator = TransactionValidationTaskExecutor::eth_builder(
+        let mut validator = TransactionValidationTaskExecutor::eth_builder(
             ctx.provider().clone(),
             tempo_evm_config,
         )
@@ -660,7 +664,22 @@ where
         .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
         .with_custom_tx_type(TempoTxType::AA as u8)
         .no_eip4844()
-        .build_with_tasks(ctx.task_executor().clone(), blob_store.clone());
+        .build_with_tasks::<TempoPooledTransaction, _>(
+            ctx.task_executor().clone(),
+            blob_store.clone(),
+        );
+
+        Arc::get_mut(&mut validator.validator)
+            .expect("still unique")
+            .set_additional_stateless_validation(|_origin, tx| {
+                use alloy_consensus::Transaction;
+                if tx.is_create() {
+                    return Err(InvalidPoolTransactionError::Consensus(
+                        reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                    ));
+                }
+                Ok(())
+            });
 
         let aa_2d_config = AA2dPoolConfig {
             price_bump_config: pool_config.price_bumps,
