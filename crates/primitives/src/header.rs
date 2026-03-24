@@ -17,6 +17,7 @@ pub struct ZoneHeader {
     pub receipts_root: B256,
     pub number: u64,
     pub timestamp: u64,
+    pub protocol_version: u64,
 }
 
 impl alloy_rlp::Encodable for ZoneHeader {
@@ -33,6 +34,7 @@ impl alloy_rlp::Encodable for ZoneHeader {
         self.receipts_root.encode(out);
         self.number.encode(out);
         self.timestamp.encode(out);
+        self.protocol_version.encode(out);
     }
 
     fn length(&self) -> usize {
@@ -54,6 +56,7 @@ impl ZoneHeader {
             + self.receipts_root.length()
             + self.number.length()
             + self.timestamp.length()
+            + self.protocol_version.length()
     }
 
     /// Compute the block hash: `keccak256(rlp_encode(self))`.
