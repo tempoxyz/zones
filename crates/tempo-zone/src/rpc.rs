@@ -21,12 +21,16 @@ use alloy_rpc_types_eth::{
 };
 use alloy_sol_types::{SolCall, SolEvent, SolEventInterface};
 use eyre::WrapErr;
+use futures::StreamExt;
+use reth_provider::CanonStateSubscriptions;
 use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
-    EthApiTypes, EthFilterApiServer,
+    EthApiTypes, EthFilterApiServer, RpcConvert,
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
+use reth_rpc_eth_types::logs_utils;
+use reth_transaction_pool::TransactionPool;
 use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoHeaderResponse, TempoTransactionRequest},
@@ -35,7 +39,7 @@ use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
 };
-use tempo_primitives::TempoTxEnvelope;
+use tempo_primitives::{TempoHeader, TempoTxEnvelope};
 use tokio::{
     sync::Mutex,
     time::{MissedTickBehavior, interval},
@@ -764,6 +768,156 @@ where
         })
     }
 
+    fn ws_subscribe_new_heads(&self, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            let redact_logs_bloom = !auth.is_sequencer;
+            let api = self.eth.api.clone();
+            let provider = self.eth.api.provider().clone();
+            let stream = provider
+                .canonical_state_stream()
+                .flat_map(move |new_chain| {
+                    let api = api.clone();
+                    let headers = new_chain
+                        .committed()
+                        .blocks_iter()
+                        .filter_map(move |block| {
+                            match api
+                                .converter()
+                                .convert_header(block.clone_sealed_header(), block.rlp_length())
+                            {
+                                Ok(header) => Some(header),
+                                Err(err) => {
+                                    tracing::error!(
+                                        target: "rpc",
+                                        %err,
+                                        "Failed to convert header"
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    futures::stream::iter(headers)
+                })
+                .map(move |mut header| {
+                    if redact_logs_bloom {
+                        redact_ws_header(&mut header);
+                    }
+                    to_raw(&header)
+                });
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
+    fn ws_subscribe_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            let provider = self.eth.api.provider().clone();
+            let caller = auth.caller;
+
+            if !auth.is_sequencer {
+                zone_rpc::filter::scope_filter(&mut filter);
+            }
+
+            let stream = provider
+                .canonical_state_stream()
+                .flat_map(|canon_state| futures::stream::iter(canon_state.block_receipts()))
+                .flat_map(move |(block_receipts, removed)| {
+                    let all_logs = logs_utils::matching_block_logs_with_tx_hashes(
+                        &filter,
+                        block_receipts.block,
+                        block_receipts.timestamp,
+                        block_receipts
+                            .tx_receipts
+                            .iter()
+                            .map(|(tx, receipt)| (*tx, receipt)),
+                        removed,
+                    );
+                    futures::stream::iter(all_logs)
+                });
+
+            if auth.is_sequencer {
+                let stream = stream.map(|log| to_raw(&log));
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
+            }
+
+            let stream = stream.filter_map(move |log| {
+                std::future::ready(
+                    zone_rpc::filter::is_log_visible(&log, &caller).then(|| to_raw(&log)),
+                )
+            });
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
+    fn ws_subscribe_pending_transactions(
+        &self,
+        full: bool,
+        auth: AuthContext,
+    ) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            if auth.is_sequencer {
+                if !full {
+                    let pool = self.eth.api.pool().clone();
+                    // Sequencers can use the direct hash listener because no sender scoping is
+                    // required; non-sequencers must source full tx events to filter by sender.
+                    let stream = futures::stream::unfold(
+                        pool.pending_transactions_listener(),
+                        |mut rx| async move { rx.recv().await.map(|hash| (hash, rx)) },
+                    )
+                    .map(|hash| to_raw(&hash));
+                    let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                    return Ok(stream);
+                }
+
+                let api = self.eth.api.clone();
+                let pool = self.eth.api.pool().clone();
+                let stream = pool
+                    .new_pending_pool_transactions_listener()
+                    .map(move |pending_tx| {
+                        api.converter()
+                            .fill_pending(pending_tx.transaction.to_consensus())
+                            .map_err(internal)
+                            .and_then(|tx| to_raw(&tx))
+                    });
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
+            }
+
+            let caller = auth.caller;
+            let pool = self.eth.api.pool().clone();
+
+            if !full {
+                let stream =
+                    pool.new_pending_pool_transactions_listener()
+                        .filter_map(move |pending_tx| {
+                            std::future::ready(
+                                (pending_tx.transaction.sender() == caller)
+                                    .then(|| to_raw(pending_tx.transaction.hash())),
+                            )
+                        });
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
+            }
+
+            let api = self.eth.api.clone();
+            let stream =
+                pool.new_pending_pool_transactions_listener()
+                    .filter_map(move |pending_tx| {
+                        std::future::ready((pending_tx.transaction.sender() == caller).then(|| {
+                            api.converter()
+                                .fill_pending(pending_tx.transaction.to_consensus())
+                                .map_err(internal)
+                                .and_then(|tx| to_raw(&tx))
+                        }))
+                    });
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
     fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             to_raw(&AuthorizationTokenInfoResponse {
@@ -933,10 +1087,17 @@ fn encrypted_deposit_details(
     }
 }
 
+fn redact_tempo_header(header: &mut TempoHeader) {
+    header.inner.logs_bloom = Bloom::ZERO;
+}
+
+fn redact_ws_header(header: &mut TempoHeaderResponse) {
+    redact_tempo_header(&mut header.inner.inner);
+}
+
 /// Strip privacy-sensitive fields from a block for non-sequencer callers.
 fn redact_block(block: &mut RpcBlock) {
-    // header.inner = alloy Header, .inner = Sealed wrapper, .inner = TempoHeader (contains logs_bloom)
-    block.header.inner.inner.inner.logs_bloom = Bloom::ZERO;
+    redact_tempo_header(&mut block.header.inner);
     block.transactions = BlockTransactions::Hashes(Vec::new());
 }
 
