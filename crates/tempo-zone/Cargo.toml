@@ -115,7 +115,6 @@ sha2.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true
-metrics-util = "0.20.1"
 
 [features]
 default = []
