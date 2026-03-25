@@ -18,10 +18,12 @@ use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
 use std::{pin::Pin, sync::Arc};
 use tempo_alloy::TempoNetwork;
+use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::TempoHeader;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
+    SharedL1StateCache, SharedPolicyCache,
     abi::{
         self, EncryptedDeposit as AbiEncryptedDeposit,
         EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_PENDING_SEQUENCER_SLOT,
@@ -67,10 +69,10 @@ pub struct L1SubscriberConfig {
     /// Shared TIP-403 policy cache. The subscriber applies policy events
     /// extracted from L1 receipts directly into this cache before enqueuing
     /// blocks.
-    pub policy_cache: crate::l1_state::tip403::SharedPolicyCache,
+    pub policy_cache: SharedPolicyCache,
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
     /// confirmed block and clears it on reorgs.
-    pub l1_state_cache: crate::l1_state::cache::SharedL1StateCache,
+    pub l1_state_cache: SharedL1StateCache,
     /// Maximum number of concurrent L1 RPC receipt fetches. Used directly for
     /// the live stream and halved for backfill (which sends 2 requests per block).
     pub l1_fetch_concurrency: usize,
@@ -548,9 +550,6 @@ impl L1Subscriber {
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
     ) -> (L1PortalEvents, Vec<PolicyEvent>) {
-        use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
-
-        let portal_address = self.config.portal_address;
         let mut portal_events = L1PortalEvents::default();
         let mut policy_events = Vec::new();
 
@@ -558,11 +557,14 @@ impl L1Subscriber {
             for log in receipt.logs() {
                 let addr = log.address();
 
-                if addr == portal_address {
+                if addr == self.config.portal_address {
                     let prev_len = portal_events.enabled_tokens.len();
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
+
+                    // NOTE: this is a bit odd, need to better understand how tracked tokens vs non
+                    // tracked tokens behave
                     if let Some(enabled) = portal_events.enabled_tokens.get(prev_len) {
                         let token = enabled.token;
                         if !self.tracked_tokens.contains(&token) {
@@ -939,6 +941,7 @@ pub struct EnabledToken {
     pub currency: String,
 }
 
+// NOTE: why are we doing this rather than using sol macro
 impl EnabledToken {
     /// Convert to the ABI type used in `advanceTempo` calldata.
     pub fn to_abi(&self) -> abi::EnabledToken {
