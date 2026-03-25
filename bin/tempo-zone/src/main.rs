@@ -17,6 +17,7 @@ use reth_ethereum::chainspec::EthChainSpec;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone::{ZoneNode, evm::ZoneEvmConfig};
+use zone_primitives::constants::zone_chain_id;
 
 type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
 
@@ -187,6 +188,21 @@ fn main() {
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
             info!(target: "reth::cli", "Tempo Zone node started");
+
+            // Verify the chain ID matches the deterministic derivation from the zone ID.
+            // Skip when zone_id is 0 (local testing default).
+            if args.zone_id != 0 {
+                let expected_chain_id = zone_chain_id(args.zone_id);
+                let actual_chain_id = handle.node.chain_spec().chain().id();
+                if actual_chain_id != expected_chain_id {
+                    eyre::bail!(
+                        "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
+                        args.zone_id,
+                        expected_chain_id,
+                        actual_chain_id,
+                    );
+                }
+            }
 
             // Launch the private zone RPC server.
             let eth_handlers = handle.node.eth_handlers().clone();

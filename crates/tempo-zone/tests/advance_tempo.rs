@@ -11,6 +11,7 @@ use revm::{
     state::AccountInfo,
 };
 use tempo_chainspec::hardfork::TempoHardfork;
+use zone_primitives::constants::zone_chain_id;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::TempoBlockEnv;
 
@@ -127,7 +128,7 @@ fn deploy_contract(
 
 /// Build an EVM with the zone contracts deployed in-memory (same as xtask generate_zone_genesis).
 fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
-    let chain_id = 13371u64;
+    let chain_id = zone_chain_id(1);
     let gas_limit = 30_000_000u64;
 
     let db = CacheDB::default();

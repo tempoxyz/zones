@@ -10852,6 +10852,7 @@ dependencies = [
  "tempo-revm",
  "tokio",
  "zone",
+ "zone-primitives",
 ]
 
 [[package]]
@@ -10862,6 +10863,7 @@ dependencies = [
  "alloy-signer-local",
  "clap",
  "const-hex",
+ "eyre",
  "k256",
  "reth-cli-util",
  "reth-consensus",
@@ -10872,6 +10874,7 @@ dependencies = [
  "tokio",
  "tracing",
  "zone",
+ "zone-primitives",
 ]
 
 [[package]]
