@@ -71,9 +71,6 @@ pub(crate) struct L1SubscriberMetrics {
     /// Number of failed L1 block preparation fetches.
     pub fetch_failures: Counter,
 
-    /// Time spent waiting for the next live L1 block from the stream.
-    pub stream_try_next_duration_seconds: Histogram,
-
     /// Number of reconnect attempts after the subscriber exits or errors.
     pub reconnects: Counter,
 }

@@ -466,6 +466,7 @@ impl L1Subscriber {
         Ok(())
     }
 
+    // TODO:
     async fn handle_l1_block_stream<'a>(
         mut self,
         provider: &DynProvider<TempoNetwork>,
@@ -479,24 +480,13 @@ impl L1Subscriber {
             Vec<PolicyEvent>,
         )> = None;
 
-        loop {
-            let stream_wait_start = std::time::Instant::now();
-            let next = stream.try_next().await?;
-
-            // TODO: do we really need this?
-            self.subscriber_metrics
-                .stream_try_next_duration_seconds
-                .record(stream_wait_start.elapsed().as_secs_f64());
-            let Some((header, receipts)) = next else {
-                // NOTE: do we want to warn here?
-                break;
-            };
+        while let Some((header, receipts)) = stream.try_next().await? {
             let block_number = header.number();
+            // NOTE: should this be 0?
+            self.record_seen_block(block_number, 0);
+
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
             let (events, policy_events) = self.extract_events(block_number, &receipts);
-
-            // NOTE: should this be 0
-            self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.
             if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
