@@ -16,7 +16,7 @@ use alloy_transport::Authorization;
 use futures::{Stream, StreamExt, TryStreamExt as _};
 use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
-use std::{collections::HashSet, pin::Pin, sync::Arc};
+use std::{collections::{HashMap, HashSet}, pin::Pin, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::TempoHeader;
@@ -85,9 +85,9 @@ pub struct L1SubscriberConfig {
 pub struct L1Subscriber {
     config: L1SubscriberConfig,
     deposit_queue: DepositQueue,
-    /// Mutable set of token addresses tracked for TIP-403 policy events.
+    /// Set of enabled token addresses for TIP-403 policy event filtering.
     /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
-    tracked_tokens: HashSet<Address>,
+    enabled_tokens: HashSet<Address>,
     /// TIP-403 metrics (cache sizes, events applied).
     tip403_metrics: crate::l1_state::tip403::Tip403Metrics,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
@@ -105,11 +105,11 @@ impl L1Subscriber {
         deposit_queue: DepositQueue,
         task_executor: reth_tasks::Runtime,
     ) {
-        let tracked_tokens = config.policy_cache.read().tracked_tokens();
+        let enabled_tokens = config.policy_cache.read().enabled_tokens();
         let subscriber = Self {
             config,
             deposit_queue,
-            tracked_tokens,
+            enabled_tokens,
             tip403_metrics: Default::default(),
             subscriber_metrics: Default::default(),
         };
@@ -306,7 +306,7 @@ impl L1Subscriber {
         &mut self,
         l1_provider: &impl Provider<TempoNetwork>,
     ) -> eyre::Result<()> {
-        self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
+        self.enabled_tokens = self.config.policy_cache.read().enabled_tokens();
 
         let Some(mut from) = self.resolve_start_block(l1_provider).await? else {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
@@ -544,7 +544,7 @@ impl L1Subscriber {
         Ok(())
     }
 
-    /// Extract portal and policy events from pre-fetched receipts (no RPC).
+    /// Extract portal and policy events from pre-fetched receipts
     fn extract_events(
         &mut self,
         block_number: u64,
@@ -557,23 +557,26 @@ impl L1Subscriber {
             for log in receipt.logs() {
                 let addr = log.address();
 
+                // If the log is from the portal, handle enabled token events
                 if addr == self.config.portal_address {
                     let prev_len = portal_events.enabled_tokens.len();
                     if let Err(e) = portal_events.push_log(log, block_number) {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
 
-                    if let Some(enabled) = portal_events.enabled_tokens.get(prev_len) {
-                        let token = enabled.token;
-                        if self.tracked_tokens.insert(token) {
-                            info!(%token, "New token enabled, adding to tracked tokens");
+                    // If a new token was enabled, start tracking it for TIP-403 policy events.
+                    if portal_events.enabled_tokens.len() > prev_len {
+                        for token in portal_events.enabled_tokens.keys() {
+                            if self.enabled_tokens.insert(*token) {
+                                info!(%token, "New token enabled, adding to tracked tokens");
+                            }
                         }
                     }
                 } else if addr == TIP403_REGISTRY_ADDRESS {
                     if let Some(event) = PolicyEvent::decode_registry(log) {
                         policy_events.push(event);
                     }
-                } else if self.tracked_tokens.contains(&addr)
+                } else if self.enabled_tokens.contains(&addr)
                     && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
                     && let Some(event) = PolicyEvent::decode_tip20(log)
                 {
@@ -919,8 +922,8 @@ pub(crate) enum EnqueueOutcome {
 pub struct L1PortalEvents {
     /// Deposit events (regular + encrypted).
     pub deposits: Vec<L1Deposit>,
-    /// Tokens newly enabled for bridging in this block, with metadata.
-    pub enabled_tokens: Vec<EnabledToken>,
+    /// Tokens newly enabled for bridging in this block, keyed by L1 token address.
+    pub enabled_tokens: HashMap<Address, EnabledToken>,
     /// Sequencer transfer events in the order they appeared in the block.
     pub sequencer_events: Vec<L1SequencerEvent>,
 }
@@ -1030,7 +1033,7 @@ impl L1PortalEvents {
                     currency = %event.currency,
                     "🪙 Token enabled on L1"
                 );
-                self.enabled_tokens.push(EnabledToken {
+                self.enabled_tokens.insert(event.token, EnabledToken {
                     token: event.token,
                     name: event.name,
                     symbol: event.symbol,
@@ -1269,7 +1272,7 @@ impl L1BlockDeposits {
         let enabled_tokens: Vec<_> = self
             .events
             .enabled_tokens
-            .iter()
+            .values()
             .map(|t| t.to_abi())
             .collect();
 

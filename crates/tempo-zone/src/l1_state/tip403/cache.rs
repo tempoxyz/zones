@@ -122,8 +122,8 @@ impl PolicyCache {
         &self.policies
     }
 
-    /// Returns all token addresses currently tracked by the cache.
-    pub fn tracked_tokens(&self) -> HashSet<Address> {
+    /// Returns all enabled token addresses known to the cache.
+    pub fn enabled_tokens(&self) -> HashSet<Address> {
         self.tokens.keys().copied().collect()
     }
 
@@ -392,14 +392,14 @@ impl SharedPolicyCache {
     pub async fn seed_token_policies(
         &self,
         portal_address: Address,
-        tracked_tokens: &[Address],
+        enabled_tokens: &[Address],
         provider: &DynProvider<TempoNetwork>,
     ) -> eyre::Result<()> {
         use tempo_contracts::precompiles::ITIP20;
 
         let block_number = self.last_l1_block();
 
-        let seeded = futures::future::join_all(tracked_tokens.iter().map(|token| {
+        let seeded = futures::future::join_all(enabled_tokens.iter().map(|token| {
             let tip20 = ITIP20::new(*token, provider);
             async move {
                 let policy_id = tip20

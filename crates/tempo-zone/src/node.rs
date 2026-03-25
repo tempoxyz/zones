@@ -345,8 +345,7 @@ where
 
         // Resolve enabled tokens — use pre-configured list if available, otherwise
         // query L1 via RPC as a fallback.
-        // TODO: what are these tracked tokens doing again?
-        let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
+        let enabled_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
@@ -360,7 +359,7 @@ where
         // Seed the policy cache with current transferPolicyId for each tracked token
         // before spawning the subscriber, so errors propagate to the caller.
         self.policy_cache
-            .seed_token_policies(portal_address, &tracked_tokens, &l1_provider)
+            .seed_token_policies(portal_address, &enabled_tokens, &l1_provider)
             .await?;
         info!(target: "reth::cli", "Seeded token policies from L1");
 

@@ -584,7 +584,7 @@ mod tests {
                     c: B256::ZERO,
                 },
             }],
-            enabled_tokens: vec![],
+            enabled_tokens: Default::default(),
         };
 
         let recovered_tx = super::build_advance_tempo_tx(&prepared);

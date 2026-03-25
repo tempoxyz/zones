@@ -3022,7 +3022,7 @@ impl L1Fixture {
         let header = self.next_header();
         let events = L1PortalEvents {
             deposits: vec![],
-            enabled_tokens: tokens,
+            enabled_tokens: tokens.into_iter().map(|t| (t.token, t)).collect(),
             ..Default::default()
         };
         queue.enqueue(header, events, vec![]);
