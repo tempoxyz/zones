@@ -85,10 +85,9 @@ The zone's `TempoState` genesis must be anchored to the L1's current state.
 
 ### Portal Address Requirement
 
-`ZoneNode::new()` now rejects `Address::ZERO` for `portal_address`. Local test
-helpers use a non-zero dummy portal address instead, and patch the default test
-genesis so `ZoneInbox` and `ZoneConfig` read from that dummy portal rather than
-the zero address.
+Local test helpers use a non-zero dummy portal address, and patch the default
+test genesis so `ZoneInbox` and `ZoneConfig` read from that dummy portal rather
+than the zero address.
 
 ## Test Inventory
 
