@@ -114,7 +114,10 @@ pub async fn spawn_zone_sequencer(
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .with_nonce_key_filler()
             .wallet(wallet)
-            .connect(&config.l1_rpc_url)
+            .connect_with_config(
+                &config.l1_rpc_url,
+                rpc_connection_config(config.retry_connection_interval),
+            )
             .await
             .expect("valid L1 RPC URL")
             .erased();
