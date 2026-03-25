@@ -184,7 +184,7 @@ fn main() {
                 sequencer_secret_key,
                 args.l1_fetch_concurrency,
                 Duration::from_millis(args.l1_retry_connection_interval_ms),
-            );
+            )?;
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
             info!(target: "reth::cli", "Tempo Zone node started");

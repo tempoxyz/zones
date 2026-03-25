@@ -83,26 +83,12 @@ The zone's `TempoState` genesis must be anchored to the L1's current state.
    - Layout: `(tempoBlockNumber:u64, tempoGasLimit:u64, tempoGasUsed:u64, tempoTimestamp:u64)`
    - Only `tempoBlockNumber` is currently patched; other fields retain genesis defaults
 
-### L1Subscriber Fix for `Address::ZERO` Portal
+### Portal Address Requirement
 
-When no portal is deployed (e.g., local testing with `portal_address = Address::ZERO`),
-the `L1Subscriber` would crash trying to call `lastSyncedTempoBlockNumber()` on
-a non-existent contract.
-
-The fix in `sync_to_l1_tip()` adds an early guard:
-
-```rust
-if let Some(genesis) = self.config.genesis_tempo_block_number {
-    if self.config.portal_address == Address::ZERO {
-        // Skip portal queries entirely — no portal is deployed
-        return genesis + 1;
-    }
-}
-```
-
-This allows `start_from_l1()` to pass `portal_address = Address::ZERO` with a
-`genesis_tempo_block_number` override, and the subscriber starts from that block
-without any portal interaction.
+`ZoneNode::new()` now rejects `Address::ZERO` for `portal_address`. Local test
+helpers use a non-zero dummy portal address instead, and patch the default test
+genesis so `ZoneInbox` and `ZoneConfig` read from that dummy portal rather than
+the zero address.
 
 ## Test Inventory
 

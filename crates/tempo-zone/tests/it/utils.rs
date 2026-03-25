@@ -119,6 +119,8 @@ fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
 /// connection until the first request, so `L1StateProvider::new` succeeds
 /// without a running L1. The L1Subscriber will fail and retry in the background.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
+pub(crate) const LOCAL_TEST_PORTAL_ADDRESS: Address =
+    address!("0x00000000000000000000000000000000000000aa");
 
 /// Compute the TIP-20 token address for a given sender and salt.
 ///
@@ -178,6 +180,7 @@ type RpcApiFactory = dyn Fn(zone::rpc::PrivateRpcConfig) -> RpcApiFuture + Send 
 
 pub(crate) struct ZoneTestNode {
     http_url: url::Url,
+    portal_address: Address,
     deposit_queue: DepositQueue,
     l1_state_cache: SharedL1StateCache,
     policy_cache: zone::SharedPolicyCache,
@@ -190,6 +193,11 @@ impl ZoneTestNode {
     /// Returns the HTTP RPC URL for connecting providers to this node.
     pub(crate) fn http_url(&self) -> &url::Url {
         &self.http_url
+    }
+
+    /// Returns the configured portal address for this zone node.
+    pub(crate) fn portal_address(&self) -> Address {
+        self.portal_address
     }
 
     /// Returns an HTTP provider connected to this zone node.
@@ -424,7 +432,7 @@ impl ZoneTestNode {
     pub(crate) async fn start_local() -> eyre::Result<Self> {
         Self::launch(
             DUMMY_L1_URL.to_string(),
-            Address::ZERO,
+            LOCAL_TEST_PORTAL_ADDRESS,
             None,
             next_unique_chain_id(),
             Address::ZERO,
@@ -439,7 +447,7 @@ impl ZoneTestNode {
     pub(crate) async fn start_local_with_chain_id(chain_id: u64) -> eyre::Result<Self> {
         Self::launch(
             DUMMY_L1_URL.to_string(),
-            Address::ZERO,
+            LOCAL_TEST_PORTAL_ADDRESS,
             None,
             chain_id,
             Address::ZERO,
@@ -478,11 +486,15 @@ impl ZoneTestNode {
         sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
+        let custom_genesis_provided = custom_genesis.is_some();
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))
                 .expect("valid zone test genesis")
         });
+        if !custom_genesis_provided {
+            patch_zone_portal_immutables(&mut genesis, portal_address)?;
+        }
         genesis.config.chain_id = chain_id;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
@@ -494,7 +506,7 @@ impl ZoneTestNode {
             sequencer_key,
             4,
             std::time::Duration::from_millis(100),
-        )
+        )?
         .with_initial_tokens(vec![]);
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
@@ -546,8 +558,9 @@ impl ZoneTestNode {
         });
 
         Ok(Self {
-            deposit_queue,
             http_url,
+            portal_address,
+            deposit_queue,
             l1_state_cache,
             policy_cache,
             rpc_api_factory,
@@ -567,7 +580,11 @@ impl ZoneTestNode {
 /// ```ignore
 /// let l1 = L1TestNode::start().await?;
 /// let provider = ProviderBuilder::new().connect_http(l1.http_url().clone());
-/// let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), Address::ZERO).await?;
+/// let zone = ZoneTestNode::start_from_l1(
+///     l1.http_url(),
+///     l1.ws_url(),
+///     LOCAL_TEST_PORTAL_ADDRESS,
+/// ).await?;
 /// ```
 pub(crate) struct L1TestNode {
     http_url: url::Url,
@@ -1568,40 +1585,51 @@ async fn build_l1_anchored_genesis(
         B256::from(new_slot7.to_be_bytes()),
     );
 
-    // --- Patch 2: Portal address immutables in ZoneInbox and ZoneConfig ---
-    // Solidity immutables are baked into deployed bytecode as `PUSH32 <value>`.
-    // The default genesis has tempoPortal = Address::ZERO. We replace the 32-byte
-    // zero-padded needle at the byte level. Both ZoneInbox (0x...0001) and
-    // ZoneConfig (0x...0003) have `tempoPortal` as an immutable.
-    if !portal_address.is_zero() {
-        let needle = [0u8; 32]; // Address::ZERO left-padded to 32 bytes
-        let mut replacement = [0u8; 32];
-        replacement[12..].copy_from_slice(portal_address.as_slice());
-
-        let contracts_to_patch: &[(Address, usize)] = &[
-            (address!("0x1c00000000000000000000000000000000000001"), 4), // ZoneInbox
-            (address!("0x1c00000000000000000000000000000000000003"), 5), // ZoneConfig
-        ];
-
-        for &(addr, expected_count) in contracts_to_patch {
-            let account = genesis
-                .alloc
-                .get_mut(&addr)
-                .unwrap_or_else(|| panic!("contract {addr} missing in genesis alloc"));
-            if let Some(code) = &account.code {
-                let mut buf = code.to_vec();
-                let count = patch_bytes(&mut buf, &needle, &replacement);
-                assert_eq!(
-                    count, expected_count,
-                    "expected {expected_count} tempoPortal immutable(s) in {addr}, found {count} \
-                     — contract bytecode may have changed, update expected_count"
-                );
-                account.code = Some(buf.into());
-            }
-        }
-    }
+    patch_zone_portal_immutables(&mut genesis, portal_address)?;
 
     Ok((genesis, genesis_block_number))
+}
+
+fn patch_zone_portal_immutables(
+    genesis: &mut Genesis,
+    portal_address: Address,
+) -> eyre::Result<()> {
+    use alloy_primitives::address;
+
+    if portal_address.is_zero() {
+        return Ok(());
+    }
+
+    let needle = [0u8; 32];
+    let mut replacement = [0u8; 32];
+    replacement[12..].copy_from_slice(portal_address.as_slice());
+
+    let contracts_to_patch: &[(Address, usize)] = &[
+        (address!("0x1c00000000000000000000000000000000000001"), 4),
+        (address!("0x1c00000000000000000000000000000000000003"), 5),
+    ];
+
+    for &(addr, expected_count) in contracts_to_patch {
+        let account = genesis
+            .alloc
+            .get_mut(&addr)
+            .ok_or_else(|| eyre::eyre!("contract {addr} missing in genesis alloc"))?;
+        let code = account
+            .code
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("contract {addr} has no code in genesis alloc"))?;
+
+        let mut buf = code.to_vec();
+        let count = patch_bytes(&mut buf, &needle, &replacement);
+        eyre::ensure!(
+            count == expected_count,
+            "expected {expected_count} tempoPortal immutable(s) in {addr}, found {count} \
+             — contract bytecode may have changed, update expected_count"
+        );
+        account.code = Some(buf.into());
+    }
+
+    Ok(())
 }
 
 /// Replace all non-overlapping occurrences of `needle` with `replacement` in `buf`.
@@ -2204,7 +2232,7 @@ pub(crate) async fn start_local_zone_with_fixture(
     let fixture = L1Fixture::new();
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
-        Address::ZERO,
+        zone.portal_address(),
         Address::ZERO,
         seed_blocks,
     );
@@ -2217,7 +2245,7 @@ pub(crate) async fn start_local_zone_with_fixture(
 pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, seed_blocks: u64) {
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
-        Address::ZERO,
+        zone.portal_address(),
         Address::ZERO,
         seed_blocks,
     );
@@ -2761,7 +2789,7 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
 
     let zone = ZoneTestNode::launch(
         DUMMY_L1_URL.to_string(),
-        Address::ZERO,
+        LOCAL_TEST_PORTAL_ADDRESS,
         None,
         next_unique_chain_id(),
         sequencer_address,
@@ -2769,7 +2797,12 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
     .await?;
     let fixture = L1Fixture::new();
 
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, sequencer_address, 20);
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        zone.portal_address(),
+        sequencer_address,
+        20,
+    );
 
     let chain_id = zone_chain_id(&zone).await?;
 
@@ -2780,7 +2813,7 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
         retry_connection_interval: Duration::from_millis(100),
         zone_id: 0,
         chain_id,
-        zone_portal: Address::ZERO,
+        zone_portal: zone.portal_address(),
         sequencer: sequencer_address,
     };
 
