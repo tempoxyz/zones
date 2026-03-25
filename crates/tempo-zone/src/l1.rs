@@ -258,11 +258,6 @@ impl L1Subscriber {
         &self,
         l1_provider: &impl Provider<TempoNetwork>,
     ) -> eyre::Result<Option<u64>> {
-        debug_assert!(
-            !self.config.portal_address.is_zero(),
-            "portal address should be validated during startup"
-        );
-
         // The zone's local state is the authoritative source for where to
         // resume. This avoids the bug where the portal's
         // lastSyncedTempoBlockNumber runs ahead of local zone state.

@@ -83,12 +83,6 @@ The zone's `TempoState` genesis must be anchored to the L1's current state.
    - Layout: `(tempoBlockNumber:u64, tempoGasLimit:u64, tempoGasUsed:u64, tempoTimestamp:u64)`
    - Only `tempoBlockNumber` is currently patched; other fields retain genesis defaults
 
-### Portal Address Requirement
-
-Local test helpers use a non-zero dummy portal address, and patch the default
-test genesis so `ZoneInbox` and `ZoneConfig` read from that dummy portal rather
-than the zero address.
-
 ## Test Inventory
 
 ### `e2e.rs` — Injection-Based Tests
