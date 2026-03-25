@@ -2183,6 +2183,7 @@ pub(crate) async fn spawn_sequencer(
     let config = zone::ZoneSequencerConfig {
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
+        retry_connection_interval: Duration::from_millis(100),
         withdrawal_poll_interval: Duration::from_millis(500),
         outbox_address: ZONE_OUTBOX_ADDRESS,
         inbox_address: ZONE_INBOX_ADDRESS,
@@ -2776,6 +2777,7 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
         listen_addr: ([127, 0, 0, 1], 0).into(),
         l1_rpc_url: DUMMY_L1_URL.to_string(),
         zone_rpc_url: zone.http_url().to_string(),
+        retry_connection_interval: Duration::from_millis(100),
         zone_id: 0,
         chain_id,
         zone_portal: Address::ZERO,
@@ -2840,6 +2842,7 @@ async fn start_zone_with_private_rpc_l1_inner(
         listen_addr: ([127, 0, 0, 1], 0).into(),
         l1_rpc_url: l1.http_url().to_string(),
         zone_rpc_url: zone.http_url().to_string(),
+        retry_connection_interval: Duration::from_millis(100),
         zone_id: 1,
         chain_id,
         zone_portal: portal_address,

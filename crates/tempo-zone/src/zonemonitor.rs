@@ -56,8 +56,10 @@ pub struct ZoneMonitorConfig {
     pub inbox_address: Address,
     /// TempoState predeploy address on Zone L2 (usually [`abi::TEMPO_STATE_ADDRESS`]).
     pub tempo_state_address: Address,
-    /// Zone L2 RPC URL (HTTP).
+    /// Zone L2 RPC URL.
     pub zone_rpc_url: String,
+    /// Interval between WebSocket reconnection attempts for the zone RPC client.
+    pub retry_connection_interval: Duration,
     /// How often to poll the zone L2 for new blocks (cheap RPC call).
     pub poll_interval: Duration,
     /// Maximum time to accumulate zone blocks before submitting a batch to L1.
@@ -130,7 +132,10 @@ impl ZoneMonitor {
     ) -> Self {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&config.zone_rpc_url)
+            .connect_with_config(
+                &config.zone_rpc_url,
+                crate::rpc_connection_config(config.retry_connection_interval),
+            )
             .await
             .expect("failed to connect to Zone RPC")
             .erased();
@@ -933,6 +938,7 @@ mod tests {
             inbox_address: Address::repeat_byte(0x33),
             tempo_state_address: Address::repeat_byte(0x44),
             zone_rpc_url: "http://unused.test".to_string(),
+            retry_connection_interval: Duration::from_millis(100),
             poll_interval: Duration::from_secs(1),
             batch_interval: Duration::from_secs(1),
             portal_address,

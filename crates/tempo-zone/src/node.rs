@@ -336,7 +336,10 @@ where
 
         // Connect L1 provider upfront so startup failures are immediately visible.
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&l1_url)
+            .connect_with_config(
+                &l1_url,
+                crate::rpc_connection_config(self.l1_config.retry_connection_interval),
+            )
             .await?
             .erased();
 
@@ -571,7 +574,12 @@ where
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&self.l1_state_provider_config.l1_rpc_url)
+            .connect_with_config(
+                &self.l1_state_provider_config.l1_rpc_url,
+                crate::rpc_connection_config(
+                    self.l1_state_provider_config.retry_connection_interval,
+                ),
+            )
             .await?
             .erased();
 

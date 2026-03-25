@@ -40,6 +40,7 @@ use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_client::ConnectionConfig;
 use alloy_signer_local::PrivateKeySigner;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tokio::sync::Notify;
@@ -49,8 +50,10 @@ use tokio::sync::Notify;
 pub struct ZoneSequencerConfig {
     /// ZonePortal contract address on Tempo L1.
     pub portal_address: Address,
-    /// Tempo L1 RPC URL (HTTP).
+    /// Tempo L1 RPC URL.
     pub l1_rpc_url: String,
+    /// Interval between WebSocket reconnection attempts for long-lived RPC clients.
+    pub retry_connection_interval: Duration,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
     /// ZoneOutbox contract address on Zone L2.
@@ -59,7 +62,7 @@ pub struct ZoneSequencerConfig {
     pub inbox_address: Address,
     /// TempoState predeploy address on Zone L2.
     pub tempo_state_address: Address,
-    /// Zone L2 RPC URL (HTTP).
+    /// Zone L2 RPC URL.
     pub zone_rpc_url: String,
     /// How often the zone monitor polls for new L2 blocks.
     pub zone_poll_interval: Duration,
@@ -73,6 +76,12 @@ pub struct ZoneSequencerHandle {
     pub withdrawal_handle: tokio::task::JoinHandle<()>,
     /// Join handle for the zone monitor task (which also handles batch submission).
     pub monitor_handle: tokio::task::JoinHandle<()>,
+}
+
+pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> ConnectionConfig {
+    ConnectionConfig::new()
+        .with_max_retries(u32::MAX)
+        .with_retry_interval(retry_connection_interval)
 }
 
 /// Spawn all zone sequencer background tasks.
@@ -124,6 +133,7 @@ pub async fn spawn_zone_sequencer(
         inbox_address: config.inbox_address,
         tempo_state_address: config.tempo_state_address,
         zone_rpc_url: config.zone_rpc_url,
+        retry_connection_interval: config.retry_connection_interval,
         poll_interval: config.zone_poll_interval,
         batch_interval: config.batch_interval,
         portal_address: config.portal_address,
