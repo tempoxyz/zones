@@ -48,10 +48,6 @@ const MAX_RETRIES: u32 = 3;
 
 /// Initial delay between retries (doubles on each attempt).
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
-/// Default transport retry budget for the long-lived zone monitor client.
-const TRANSPORT_MAX_RETRIES: u32 = 10;
-/// Initial transport retry backoff for the zone monitor client.
-const TRANSPORT_INITIAL_BACKOFF_MS: u64 = 20;
 
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
@@ -138,8 +134,8 @@ impl ZoneMonitor {
     ) -> Self {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let retry_layer = RetryBackoffLayer::new(
-            TRANSPORT_MAX_RETRIES,
-            TRANSPORT_INITIAL_BACKOFF_MS,
+            u32::MAX,
+            config.retry_connection_interval.as_millis() as u64,
             u64::MAX,
         );
         let client = RpcClient::builder()
