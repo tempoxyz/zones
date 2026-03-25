@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 # tempo
 zone = { path = "../../crates/tempo-zone" }
+zone-primitives.workspace = true
 tempo-chainspec = { workspace = true, features = ["cli"] }
 
 # reth
@@ -32,6 +33,7 @@ rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
 # misc
 clap.workspace = true
+eyre.workspace = true
 const-hex.workspace = true
 k256.workspace = true
 tokio.workspace = true
