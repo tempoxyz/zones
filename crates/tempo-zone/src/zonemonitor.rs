@@ -28,6 +28,8 @@ use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_client::RpcClient;
+use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
@@ -131,13 +133,21 @@ impl ZoneMonitor {
         withdrawal_notify: Arc<Notify>,
     ) -> Self {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
-        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        let retry_layer = RetryBackoffLayer::new(
+            u32::MAX,
+            config.retry_connection_interval.as_millis() as u64,
+            u64::MAX,
+        );
+        let client = RpcClient::builder()
+            .layer(retry_layer)
             .connect_with_config(
                 &config.zone_rpc_url,
                 crate::rpc_connection_config(config.retry_connection_interval),
             )
             .await
-            .expect("failed to connect to Zone RPC")
+            .expect("failed to connect to Zone RPC");
+        let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_client(client)
             .erased();
 
         let outbox = ZoneOutbox::new(config.outbox_address, provider.clone());
