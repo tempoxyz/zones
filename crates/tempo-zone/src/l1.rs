@@ -274,14 +274,6 @@ impl L1Subscriber {
             return Ok(Some(genesis + 1));
         }
 
-        if self.config.portal_address.is_zero() {
-            warn!(
-                "No portal address and no genesis block number override — skipping backfill. \
-                 Set --l1.genesis-block-number or provide a portal address."
-            );
-            return Ok(None);
-        }
-
         let portal = ZonePortal::new(self.config.portal_address, l1_provider);
         let on_chain = portal.genesisTempoBlockNumber().call().await?;
         if on_chain == 0 {
