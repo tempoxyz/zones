@@ -123,7 +123,7 @@ impl PolicyCache {
     }
 
     /// Returns all token addresses currently tracked by the cache.
-    pub fn tracked_tokens(&self) -> Vec<Address> {
+    pub fn tracked_tokens(&self) -> HashSet<Address> {
         self.tokens.keys().copied().collect()
     }
 

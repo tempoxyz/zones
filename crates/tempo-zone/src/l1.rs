@@ -16,7 +16,7 @@ use alloy_transport::Authorization;
 use futures::{Stream, StreamExt, TryStreamExt as _};
 use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
-use std::{pin::Pin, sync::Arc};
+use std::{collections::HashSet, pin::Pin, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::TempoHeader;
@@ -87,7 +87,7 @@ pub struct L1Subscriber {
     deposit_queue: DepositQueue,
     /// Mutable set of token addresses tracked for TIP-403 policy events.
     /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
-    tracked_tokens: Vec<Address>,
+    tracked_tokens: HashSet<Address>,
     /// TIP-403 metrics (cache sizes, events applied).
     tip403_metrics: crate::l1_state::tip403::Tip403Metrics,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
@@ -563,13 +563,10 @@ impl L1Subscriber {
                         warn!(block_number, %e, "Failed to decode portal event from receipt");
                     }
 
-                    // NOTE: this is a bit odd, need to better understand how tracked tokens vs non
-                    // tracked tokens behave
                     if let Some(enabled) = portal_events.enabled_tokens.get(prev_len) {
                         let token = enabled.token;
-                        if !self.tracked_tokens.contains(&token) {
+                        if self.tracked_tokens.insert(token) {
                             info!(%token, "New token enabled, adding to tracked tokens");
-                            self.tracked_tokens.push(token);
                         }
                     }
                 } else if addr == TIP403_REGISTRY_ADDRESS {
