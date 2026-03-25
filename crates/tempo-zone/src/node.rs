@@ -335,11 +335,12 @@ where
         let portal_address = self.l1_config.portal_address;
 
         // Connect L1 provider upfront so startup failures are immediately visible.
-        let l1_client =
-            crate::default_retrying_rpc_client(&l1_url, self.l1_config.retry_connection_interval)
-                .await?;
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_client(l1_client)
+            .connect_with_config(
+                &l1_url,
+                crate::rpc_connection_config(self.l1_config.retry_connection_interval),
+            )
+            .await?
             .erased();
 
         // Resolve enabled tokens — use pre-configured list if available, otherwise
@@ -572,13 +573,14 @@ where
         let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
-        let policy_client = crate::default_retrying_rpc_client(
-            &self.l1_state_provider_config.l1_rpc_url,
-            self.l1_state_provider_config.retry_connection_interval,
-        )
-        .await?;
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_client(policy_client)
+            .connect_with_config(
+                &self.l1_state_provider_config.l1_rpc_url,
+                crate::rpc_connection_config(
+                    self.l1_state_provider_config.retry_connection_interval,
+                ),
+            )
+            .await?
             .erased();
 
         let policy_provider =

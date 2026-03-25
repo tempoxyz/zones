@@ -12,7 +12,9 @@
 
 use alloy_primitives::{Address, B256, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::BlockId;
+use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tracing::{debug, info, warn};
@@ -93,20 +95,21 @@ impl L1StateProvider {
         cache: SharedL1StateCache,
         runtime_handle: tokio::runtime::Handle,
     ) -> Result<Self> {
+        let retry_layer =
+            RetryBackoffLayer::new(config.max_retries, config.initial_backoff_ms, u64::MAX);
+
         let conn_config = crate::rpc_connection_config(config.retry_connection_interval);
-        let client = crate::retrying_rpc_client(
-            &config.l1_rpc_url,
-            conn_config,
-            config.max_retries,
-            config.initial_backoff_ms,
-        )
-        .await
-        .map_err(|e| {
-            eyre::eyre!(
-                "Failed to connect L1 state provider at {}: {e}",
-                config.l1_rpc_url
-            )
-        })?;
+
+        let client = RpcClient::builder()
+            .layer(retry_layer)
+            .connect_with_config(&config.l1_rpc_url, conn_config)
+            .await
+            .map_err(|e| {
+                eyre::eyre!(
+                    "Failed to connect L1 state provider at {}: {e}",
+                    config.l1_rpc_url
+                )
+            })?;
 
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_client(client)

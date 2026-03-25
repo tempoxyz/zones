@@ -11,10 +11,8 @@ use std::{
 
 use alloy_primitives::{Address, hex};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_client::RpcClient;
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_transport::layers::RetryBackoffLayer;
 use parking_lot::Mutex;
 use tempo_alloy::TempoNetwork;
 
@@ -25,10 +23,6 @@ use crate::{
 
 /// How many seconds before expiry to refresh the token.
 const REFRESH_BUFFER_SECS: u64 = 30;
-/// Default transport retry budget for authenticated zone RPC clients.
-const TRANSPORT_MAX_RETRIES: u32 = 10;
-/// Initial transport retry backoff for authenticated zone RPC clients.
-const TRANSPORT_INITIAL_BACKOFF_MS: u64 = 20;
 
 /// Configuration for building a [`ZoneProvider`].
 #[derive(Clone, Debug)]
@@ -143,16 +137,8 @@ fn build_provider_with_token(
         .default_headers(headers)
         .build()?;
 
-    let retry_layer = RetryBackoffLayer::new(
-        TRANSPORT_MAX_RETRIES,
-        TRANSPORT_INITIAL_BACKOFF_MS,
-        u64::MAX,
-    );
-    let rpc_client = RpcClient::builder()
-        .layer(retry_layer)
-        .http_with_client(client, config.rpc_url.clone());
     let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-        .connect_client(rpc_client)
+        .connect_reqwest(client, config.rpc_url.clone())
         .erased();
 
     Ok((provider, expires_at))

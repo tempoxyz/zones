@@ -28,6 +28,8 @@ use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::{Address, B256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_client::RpcClient;
+use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
@@ -46,6 +48,10 @@ const MAX_RETRIES: u32 = 3;
 
 /// Initial delay between retries (doubles on each attempt).
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
+/// Default transport retry budget for the long-lived zone monitor client.
+const TRANSPORT_MAX_RETRIES: u32 = 10;
+/// Initial transport retry backoff for the zone monitor client.
+const TRANSPORT_INITIAL_BACKOFF_MS: u64 = 20;
 
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
@@ -131,12 +137,19 @@ impl ZoneMonitor {
         withdrawal_notify: Arc<Notify>,
     ) -> Self {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
-        let client = crate::default_retrying_rpc_client(
-            &config.zone_rpc_url,
-            config.retry_connection_interval,
-        )
-        .await
-        .expect("failed to connect to Zone RPC");
+        let retry_layer = RetryBackoffLayer::new(
+            TRANSPORT_MAX_RETRIES,
+            TRANSPORT_INITIAL_BACKOFF_MS,
+            u64::MAX,
+        );
+        let client = RpcClient::builder()
+            .layer(retry_layer)
+            .connect_with_config(
+                &config.zone_rpc_url,
+                crate::rpc_connection_config(config.retry_connection_interval),
+            )
+            .await
+            .expect("failed to connect to Zone RPC");
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_client(client)
             .erased();

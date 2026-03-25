@@ -9,6 +9,7 @@ use alloy_consensus::BlockHeader as _;
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
+use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::{BlockId, Log};
 use alloy_sol_types::{SolEvent, SolEventInterface, SolValue};
 use alloy_transport::Authorization;
@@ -133,13 +134,9 @@ impl L1Subscriber {
             conn_config = conn_config.with_auth(auth);
         }
 
-        let client = crate::retrying_rpc_client(
-            &self.config.l1_rpc_url,
-            conn_config,
-            crate::DEFAULT_RPC_LAYER_MAX_RETRIES,
-            crate::DEFAULT_RPC_LAYER_INITIAL_BACKOFF_MS,
-        )
-        .await?;
+        let client = RpcClient::builder()
+            .connect_with_config(&self.config.l1_rpc_url, conn_config)
+            .await?;
 
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_client(client)

@@ -154,19 +154,21 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
     ) -> eyre::Result<Self> {
         let l1_rpc_url = config.l1_rpc_url.clone();
         let zone_rpc_url = config.zone_rpc_url.clone();
-        let l1_client =
-            crate::default_retrying_rpc_client(&l1_rpc_url, config.retry_connection_interval)
-                .await
-                .wrap_err("failed to connect private RPC L1 provider")?;
         let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_client(l1_client)
+            .connect_with_config(
+                &l1_rpc_url,
+                crate::rpc_connection_config(config.retry_connection_interval),
+            )
+            .await
+            .wrap_err("failed to connect private RPC L1 provider")?
             .erased();
-        let zone_client =
-            crate::default_retrying_rpc_client(&zone_rpc_url, config.retry_connection_interval)
-                .await
-                .wrap_err("failed to connect private RPC zone provider")?;
         let zone_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_client(zone_client)
+            .connect_with_config(
+                &zone_rpc_url,
+                crate::rpc_connection_config(config.retry_connection_interval),
+            )
+            .await
+            .wrap_err("failed to connect private RPC zone provider")?
             .erased();
         let tempo_state = crate::abi::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider.clone());
         let rpc = Self {
