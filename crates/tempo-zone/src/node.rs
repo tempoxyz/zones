@@ -110,11 +110,7 @@ impl ZoneNode {
         sequencer_key: k256::SecretKey,
         l1_fetch_concurrency: usize,
         retry_connection_interval: std::time::Duration,
-    ) -> eyre::Result<Self> {
-        if portal_address.is_zero() {
-            eyre::bail!("portal address must not be zero");
-        }
-
+    ) -> Self {
         let deposit_queue = crate::DepositQueue::default();
 
         let policy_cache = crate::SharedPolicyCache::default();
@@ -138,7 +134,7 @@ impl ZoneNode {
             ..Default::default()
         };
 
-        Ok(Self {
+        Self {
             deposit_queue,
             l1_config,
             l1_state_provider_config,
@@ -148,7 +144,7 @@ impl ZoneNode {
             sequencer_key,
             portal_address,
             initial_tokens: None,
-        })
+        }
     }
 
     /// Set the initial list of enabled token addresses.
@@ -751,29 +747,5 @@ where
             .build();
 
         Ok(eth_api)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ZoneNode;
-
-    #[test]
-    fn new_rejects_zero_portal_address() {
-        let err = ZoneNode::new(
-            "http://127.0.0.1:8545".to_owned(),
-            alloy_primitives::Address::ZERO,
-            None,
-            alloy_primitives::address!("0x00000000000000000000000000000000000000b0"),
-            k256::SecretKey::from_slice(&[0x11; 32]).expect("valid test key"),
-            1,
-            std::time::Duration::from_millis(100),
-        )
-        .expect_err("zero portal address should be rejected");
-
-        assert!(
-            err.to_string().contains("portal address must not be zero"),
-            "unexpected error: {err:#}"
-        );
     }
 }

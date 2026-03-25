@@ -5,8 +5,7 @@
 //! subscriber naturally receives blocks and deposits — no synthetic injection.
 
 use crate::utils::{
-    L1TestNode, LOCAL_TEST_PORTAL_ADDRESS, STABLECOIN_DEX_ADDRESS, WithdrawalArgs, ZoneAccount,
-    ZoneTestNode, spawn_sequencer,
+    L1TestNode, STABLECOIN_DEX_ADDRESS, WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer,
 };
 use alloy::{
     primitives::{Address, B256, U256},
@@ -118,8 +117,7 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
 
     // Start zone node connected to real L1 — genesis is patched from the L1's
     // current header so TempoState chain continuity works.
-    let zone =
-        ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), LOCAL_TEST_PORTAL_ADDRESS).await?;
+    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), Address::ZERO).await?;
 
     // Wait for the zone to advance past block 0 (genesis anchor)
     let zone_tempo_number = zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
