@@ -11,9 +11,9 @@ use revm::{
     state::AccountInfo,
 };
 use tempo_chainspec::hardfork::TempoHardfork;
-use zone_primitives::constants::zone_chain_id;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::TempoBlockEnv;
+use zone_primitives::constants::zone_chain_id;
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
