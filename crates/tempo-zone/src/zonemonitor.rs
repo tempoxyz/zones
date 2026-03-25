@@ -131,13 +131,14 @@ impl ZoneMonitor {
         withdrawal_notify: Arc<Notify>,
     ) -> Self {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
+        let client = crate::default_retrying_rpc_client(
+            &config.zone_rpc_url,
+            config.retry_connection_interval,
+        )
+        .await
+        .expect("failed to connect to Zone RPC");
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect_with_config(
-                &config.zone_rpc_url,
-                crate::rpc_connection_config(config.retry_connection_interval),
-            )
-            .await
-            .expect("failed to connect to Zone RPC")
+            .connect_client(client)
             .erased();
 
         let outbox = ZoneOutbox::new(config.outbox_address, provider.clone());

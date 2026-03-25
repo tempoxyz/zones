@@ -40,8 +40,9 @@ use std::{sync::Arc, time::Duration};
 
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_client::ConnectionConfig;
+use alloy_rpc_client::{BuiltInConnectionString, ConnectionConfig, RpcClient};
 use alloy_signer_local::PrivateKeySigner;
+use alloy_transport::{BoxTransport, TransportConnect, TransportError, layers::RetryBackoffLayer};
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tokio::sync::Notify;
 
@@ -78,10 +79,72 @@ pub struct ZoneSequencerHandle {
     pub monitor_handle: tokio::task::JoinHandle<()>,
 }
 
+/// Default transport retry budget for long-lived RPC clients.
+pub(crate) const DEFAULT_RPC_LAYER_MAX_RETRIES: u32 = 10;
+/// Initial transport retry backoff for long-lived RPC clients.
+pub(crate) const DEFAULT_RPC_LAYER_INITIAL_BACKOFF_MS: u64 = 20;
+
+/// Wrapper around Alloy's built-in connection string that preserves `is_local()`
+/// while still applying [`ConnectionConfig`] during transport construction.
+#[derive(Clone, Debug)]
+struct ConfiguredConnection {
+    inner: BuiltInConnectionString,
+    config: ConnectionConfig,
+}
+
+impl ConfiguredConnection {
+    fn new(rpc_url: &str, config: ConnectionConfig) -> Result<Self, TransportError> {
+        Ok(Self {
+            inner: rpc_url.parse()?,
+            config,
+        })
+    }
+}
+
+impl TransportConnect for ConfiguredConnection {
+    fn is_local(&self) -> bool {
+        self.inner.is_local()
+    }
+
+    async fn get_transport(&self) -> Result<BoxTransport, TransportError> {
+        self.inner.connect_boxed_with(self.config.clone()).await
+    }
+}
+
 pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> ConnectionConfig {
     ConnectionConfig::new()
         .with_max_retries(u32::MAX)
         .with_retry_interval(retry_connection_interval)
+}
+
+/// Build an RPC client with transport-level retry backoff while preserving local URL detection.
+pub(crate) async fn retrying_rpc_client(
+    rpc_url: &str,
+    connection_config: ConnectionConfig,
+    max_retries: u32,
+    initial_backoff_ms: u64,
+) -> Result<RpcClient, TransportError> {
+    let retry_layer = RetryBackoffLayer::new(max_retries, initial_backoff_ms, u64::MAX);
+    let connection = ConfiguredConnection::new(rpc_url, connection_config)?;
+
+    RpcClient::builder()
+        .layer(retry_layer)
+        .connect_with(connection)
+        .await
+}
+
+/// Build an RPC client with the default transport-level retry backoff settings.
+pub(crate) async fn default_retrying_rpc_client(
+    rpc_url: &str,
+    retry_connection_interval: Duration,
+) -> Result<RpcClient, TransportError> {
+    retrying_rpc_client(
+        rpc_url,
+        rpc_connection_config(retry_connection_interval),
+        DEFAULT_RPC_LAYER_MAX_RETRIES,
+        DEFAULT_RPC_LAYER_INITIAL_BACKOFF_MS,
+    )
+    .await
 }
 
 /// Spawn all zone sequencer background tasks.
@@ -110,13 +173,14 @@ pub async fn spawn_zone_sequencer(
     // precompile on first use per (address, nonce_key) pair and caches them
     // locally for subsequent sends.
     let wallet = alloy_network::EthereumWallet::from(signer);
+    let client = default_retrying_rpc_client(&config.l1_rpc_url, config.retry_connection_interval)
+        .await
+        .expect("valid L1 RPC URL");
     let l1_provider: DynProvider<TempoNetwork> =
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .with_nonce_key_filler()
             .wallet(wallet)
-            .connect(&config.l1_rpc_url)
-            .await
-            .expect("valid L1 RPC URL")
+            .connect_client(client)
             .erased();
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
@@ -155,5 +219,21 @@ pub async fn spawn_zone_sequencer(
     ZoneSequencerHandle {
         withdrawal_handle,
         monitor_handle,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_connection_preserves_local_detection() {
+        let conn = ConfiguredConnection::new(
+            "http://127.0.0.1:8545",
+            rpc_connection_config(Duration::from_millis(100)),
+        )
+        .expect("valid local URL");
+
+        assert!(conn.is_local());
     }
 }
