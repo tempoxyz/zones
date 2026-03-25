@@ -16,6 +16,7 @@ use alloy_transport::Authorization;
 use futures::{Stream, StreamExt, TryStreamExt as _};
 use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
+use reth_storage_api::StateProviderFactory;
 use std::{pin::Pin, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
@@ -31,6 +32,7 @@ use crate::{
             SequencerTransferred, TokenEnabled, ZonePortalEvents,
         },
     },
+    ext::TempoStateExt,
     l1_state::{cache::L1StateCache, tip403::PolicyEvent},
 };
 
@@ -48,10 +50,6 @@ pub struct L1SubscriberConfig {
     /// the portal's on-chain `genesisTempoBlockNumber` (which may be 0 for
     /// portals not created via ZoneFactory).
     pub genesis_tempo_block_number: Option<u64>,
-    /// The zone's current `tempoBlockNumber` read from local state at startup.
-    /// Backfill starts from `local_tempo_block_number + 1` to avoid re-fetching
-    /// blocks the zone has already processed.
-    pub local_tempo_block_number: u64,
     /// Shared TIP-403 policy cache. The subscriber applies policy events
     /// extracted from L1 receipts directly into this cache before enqueuing
     /// blocks.
@@ -66,10 +64,29 @@ pub struct L1SubscriberConfig {
     pub retry_connection_interval: std::time::Duration,
 }
 
+trait LocalTempoStateReader: Send + Sync {
+    fn latest_tempo_block_number(&self) -> eyre::Result<u64>;
+}
+
+struct ProviderLocalTempoStateReader<P> {
+    provider: P,
+}
+
+impl<P> LocalTempoStateReader for ProviderLocalTempoStateReader<P>
+where
+    P: StateProviderFactory + Clone + Send + Sync + 'static,
+{
+    fn latest_tempo_block_number(&self) -> eyre::Result<u64> {
+        let state = self.provider.latest()?;
+        Ok(state.tempo_block_number()?)
+    }
+}
+
 /// L1 chain subscriber that listens for new blocks and extracts deposit events.
 #[derive(Clone)]
 pub struct L1Subscriber {
     config: L1SubscriberConfig,
+    local_state: Arc<dyn LocalTempoStateReader>,
     deposit_queue: DepositQueue,
     /// Mutable set of token addresses tracked for TIP-403 policy events.
     /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
@@ -86,14 +103,20 @@ impl L1Subscriber {
     /// The subscriber runs in a retry loop — if the connection drops or
     /// [`Self::run`] returns an error, it reconnects after the configured retry
     /// interval.
-    pub fn spawn(
+    pub fn spawn<P>(
         config: L1SubscriberConfig,
+        local_state_provider: P,
         deposit_queue: DepositQueue,
         task_executor: reth_tasks::Runtime,
-    ) {
+    ) where
+        P: StateProviderFactory + Clone + Send + Sync + 'static,
+    {
         let tracked_tokens = config.policy_cache.read().tracked_tokens();
         let subscriber = Self {
             config,
+            local_state: Arc::new(ProviderLocalTempoStateReader {
+                provider: local_state_provider,
+            }),
             deposit_queue,
             tracked_tokens,
             tip403_metrics: Default::default(),
@@ -261,12 +284,10 @@ impl L1Subscriber {
         // The zone's local state is the authoritative source for where to
         // resume. This avoids the bug where the portal's
         // lastSyncedTempoBlockNumber runs ahead of local zone state.
-        if self.config.local_tempo_block_number > 0 {
-            info!(
-                local_tempo_block_number = self.config.local_tempo_block_number,
-                "Resuming from local zone state"
-            );
-            return Ok(Some(self.config.local_tempo_block_number + 1));
+        let local_tempo_block_number = self.local_state.latest_tempo_block_number()?;
+        if local_tempo_block_number > 0 {
+            info!(local_tempo_block_number, "Resuming from local zone state");
+            return Ok(Some(local_tempo_block_number + 1));
         }
 
         if let Some(genesis) = self.config.genesis_tempo_block_number {
@@ -1768,7 +1789,58 @@ mod tests {
     use alloy_consensus::Header;
     use alloy_primitives::{FixedBytes, address};
     use alloy_sol_types::SolEvent;
-    use std::collections::HashSet;
+    use alloy_transport::mock::Asserter;
+    use std::{
+        collections::{HashSet, VecDeque},
+        time::Duration,
+    };
+
+    struct SequenceLocalTempoStateReader {
+        values: Mutex<VecDeque<u64>>,
+        last_value: u64,
+    }
+
+    impl SequenceLocalTempoStateReader {
+        fn new(values: impl Into<VecDeque<u64>>) -> Self {
+            let values = values.into();
+            let last_value = values.back().copied().unwrap_or_default();
+            Self {
+                values: Mutex::new(values),
+                last_value,
+            }
+        }
+    }
+
+    impl LocalTempoStateReader for SequenceLocalTempoStateReader {
+        fn latest_tempo_block_number(&self) -> eyre::Result<u64> {
+            let mut values = self.values.lock();
+            Ok(values.pop_front().unwrap_or(self.last_value))
+        }
+    }
+
+    fn test_subscriber(
+        local_state: Arc<dyn LocalTempoStateReader>,
+        genesis_tempo_block_number: Option<u64>,
+    ) -> L1Subscriber {
+        let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+
+        L1Subscriber {
+            config: L1SubscriberConfig {
+                l1_rpc_url: "http://127.0.0.1:8545".to_owned(),
+                portal_address,
+                genesis_tempo_block_number,
+                policy_cache: crate::SharedPolicyCache::default(),
+                l1_state_cache: crate::SharedL1StateCache::new(HashSet::from([portal_address])),
+                l1_fetch_concurrency: 1,
+                retry_connection_interval: Duration::from_secs(1),
+            },
+            local_state,
+            deposit_queue: DepositQueue::default(),
+            tracked_tokens: vec![],
+            tip403_metrics: Default::default(),
+            subscriber_metrics: Default::default(),
+        }
+    }
 
     fn make_test_header(number: u64) -> TempoHeader {
         TempoHeader {
@@ -1826,6 +1898,40 @@ mod tests {
             log_index: None,
             removed: false,
         }
+    }
+
+    #[tokio::test]
+    async fn test_resolve_start_block_reads_live_local_state_each_time() {
+        let subscriber = test_subscriber(
+            Arc::new(SequenceLocalTempoStateReader::new(VecDeque::from([10, 11]))),
+            None,
+        );
+        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(Asserter::new());
+
+        assert_eq!(
+            subscriber.resolve_start_block(&l1_provider).await.unwrap(),
+            Some(11)
+        );
+        assert_eq!(
+            subscriber.resolve_start_block(&l1_provider).await.unwrap(),
+            Some(12)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_start_block_falls_back_to_genesis_override_when_local_state_is_zero() {
+        let subscriber = test_subscriber(
+            Arc::new(SequenceLocalTempoStateReader::new(VecDeque::from([0]))),
+            Some(42),
+        );
+        let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(Asserter::new());
+
+        assert_eq!(
+            subscriber.resolve_start_block(&l1_provider).await.unwrap(),
+            Some(43)
+        );
     }
 
     #[test]
