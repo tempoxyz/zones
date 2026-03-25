@@ -340,13 +340,6 @@ impl L1Subscriber {
             "Backfilling deposit events"
         );
 
-        // FIXME: do we really need a backfill in progress metric? This doesnt make sense as a
-        // gauge, this can just be a log
-        self.subscriber_metrics.backfill_in_progress.set(1.0);
-        self.subscriber_metrics
-            .backfill_start_block
-            .set(from as f64);
-        self.subscriber_metrics.backfill_end_block.set(tip as f64);
         let start = std::time::Instant::now();
         let result = self.backfill(l1_provider, from, tip).await;
         self.subscriber_metrics
