@@ -38,15 +38,6 @@ pub(crate) struct WithdrawalProcessorMetrics {
 #[derive(Metrics, Clone)]
 #[metrics(scope = "tempo_zone_l1_subscriber")]
 pub(crate) struct L1SubscriberMetrics {
-    /// Whether a backfill is currently running (1) or idle (0).
-    pub backfill_in_progress: Gauge,
-
-    /// The first L1 block number of the most recent backfill run.
-    pub backfill_start_block: Gauge,
-
-    /// The last L1 block number of the most recent backfill run.
-    pub backfill_end_block: Gauge,
-
     /// Duration of a backfill run in seconds.
     pub backfill_duration_seconds: Histogram,
 
@@ -57,34 +48,34 @@ pub(crate) struct L1SubscriberMetrics {
     pub current_l1_lag_blocks: Gauge,
 
     /// Number of L1 blocks accepted into the deposit queue.
-    pub blocks_enqueued_total: Counter,
+    pub blocks_enqueued: Counter,
 
     /// Number of regular deposit events observed on L1.
-    pub regular_deposit_events_total: Counter,
+    pub regular_deposit_events: Counter,
 
     /// Number of encrypted deposit events observed on L1.
-    pub encrypted_deposit_events_total: Counter,
+    pub encrypted_deposit_events: Counter,
 
     /// Number of `TokenEnabled` events observed on L1.
-    pub token_enabled_events_total: Counter,
+    pub token_enabled_events: Counter,
 
     /// Number of `SequencerTransferStarted` events observed on L1.
-    pub sequencer_transfer_started_events_total: Counter,
+    pub sequencer_transfer_started_events: Counter,
 
     /// Number of `SequencerTransferred` events observed on L1.
-    pub sequencer_transferred_events_total: Counter,
+    pub sequencer_transferred_events: Counter,
 
     /// Number of reorgs detected by the subscriber.
-    pub reorgs_detected_total: Counter,
+    pub reorgs_detected: Counter,
 
     /// Number of failed L1 block preparation fetches.
-    pub fetch_failures_total: Counter,
+    pub fetch_failures: Counter,
 
     /// Time spent waiting for the next live L1 block from the stream.
     pub stream_try_next_duration_seconds: Histogram,
 
     /// Number of reconnect attempts after the subscriber exits or errors.
-    pub reconnects_total: Counter,
+    pub reconnects: Counter,
 }
 
 /// Metrics emitted by the zone monitor and batch submitter.
@@ -120,4 +111,49 @@ pub(crate) struct ZoneMonitorMetrics {
 
     /// Number of times local monitor state was resynced from the portal.
     pub resync_from_portal_total: Counter,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::L1SubscriberMetrics;
+    use metrics::with_local_recorder;
+    use metrics_util::debugging::DebuggingRecorder;
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn l1_subscriber_metrics_register_the_cleaned_up_metric_set() {
+        let recorder = DebuggingRecorder::default();
+        let snapshotter = recorder.snapshotter();
+
+        with_local_recorder(&recorder, || {
+            L1SubscriberMetrics::describe();
+            let _metrics = L1SubscriberMetrics::default();
+        });
+
+        let names = snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(key, _, _, _)| key.key().name().to_string())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            names,
+            BTreeSet::from([
+                "tempo_zone_l1_subscriber.backfill_duration_seconds".to_string(),
+                "tempo_zone_l1_subscriber.blocks_enqueued".to_string(),
+                "tempo_zone_l1_subscriber.current_l1_lag_blocks".to_string(),
+                "tempo_zone_l1_subscriber.encrypted_deposit_events".to_string(),
+                "tempo_zone_l1_subscriber.fetch_failures".to_string(),
+                "tempo_zone_l1_subscriber.latest_l1_block_seen".to_string(),
+                "tempo_zone_l1_subscriber.reconnects".to_string(),
+                "tempo_zone_l1_subscriber.regular_deposit_events".to_string(),
+                "tempo_zone_l1_subscriber.reorgs_detected".to_string(),
+                "tempo_zone_l1_subscriber.sequencer_transfer_started_events".to_string(),
+                "tempo_zone_l1_subscriber.sequencer_transferred_events".to_string(),
+                "tempo_zone_l1_subscriber.stream_try_next_duration_seconds".to_string(),
+                "tempo_zone_l1_subscriber.token_enabled_events".to_string(),
+            ])
+        );
+    }
 }
