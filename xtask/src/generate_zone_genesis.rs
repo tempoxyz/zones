@@ -58,7 +58,7 @@ pub(crate) struct GenerateZoneGenesis {
     #[arg(short, long)]
     pub(crate) output: PathBuf,
 
-    #[arg(long, default_value_t = 13371)]
+    #[arg(long)]
     pub(crate) chain_id: u64,
 
     #[arg(long, default_value_t = TEMPO_T0_BASE_FEE.into())]

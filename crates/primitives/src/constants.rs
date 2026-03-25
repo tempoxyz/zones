@@ -79,3 +79,15 @@ pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
     le[0] = 2;
     U256::from_le_bytes(le)
 };
+
+/// Base offset for deriving zone chain IDs: `4217000000 + zone_id`.
+///
+/// Each zone gets a unique EIP-155 chain ID derived from its on-chain zone ID
+/// assigned by the `ZoneFactory` contract. The prefix `4217` comes from the
+/// Tempo L1 chain ID.
+pub const ZONE_CHAIN_ID_BASE: u64 = 4_217_000_000;
+
+/// Derives the EIP-155 chain ID for a zone from its on-chain zone ID.
+pub const fn zone_chain_id(zone_id: u32) -> u64 {
+    ZONE_CHAIN_ID_BASE + zone_id as u64
+}

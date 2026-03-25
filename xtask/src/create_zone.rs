@@ -13,6 +13,7 @@ use eyre::{WrapErr as _, eyre};
 use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use zone_primitives::constants::zone_chain_id;
 
 sol! {
     struct ZoneParams {
@@ -77,10 +78,6 @@ pub(crate) struct CreateZone {
     /// Private key (hex) for signing the createZone transaction on L1.
     #[arg(long)]
     private_key: String,
-
-    /// Zone L2 chain ID.
-    #[arg(long, default_value_t = 13371)]
-    chain_id: u64,
 
     /// Base fee per gas for the zone L2.
     #[arg(long, default_value_t = TEMPO_T0_BASE_FEE.into())]
@@ -159,6 +156,7 @@ impl CreateZone {
 
         let zone_id = event.zoneId;
         let portal = event.portal;
+        let chain_id = zone_chain_id(zone_id);
 
         // Re-fetch the header from the block that included the `createZone` tx.
         // The portal (and its sequencer storage slot) only exists from this block onward,
@@ -185,7 +183,7 @@ impl CreateZone {
 
         let genesis_cmd = crate::generate_zone_genesis::GenerateZoneGenesis {
             output: self.output.clone(),
-            chain_id: self.chain_id,
+            chain_id,
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
             tempo_portal: portal,
@@ -201,6 +199,7 @@ impl CreateZone {
         // Write zone.json with deployment metadata for downstream tooling (e.g. `just zone-up`).
         let zone_json = serde_json::json!({
             "zoneId": zone_id,
+            "chainId": chain_id,
             "portal": format!("{portal}"),
             "initialToken": format!("{}", self.initial_token),
             "sequencer": format!("{}", self.sequencer),
@@ -216,6 +215,7 @@ impl CreateZone {
 
         println!("Zone created successfully!");
         println!("  Zone ID: {zone_id}");
+        println!("  Chain ID: {chain_id}");
         println!("  Portal: {portal}");
         println!("  Initial Token: {}", self.initial_token);
         println!("  Sequencer: {}", self.sequencer);
