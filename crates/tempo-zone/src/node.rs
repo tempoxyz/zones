@@ -337,6 +337,7 @@ where
 
         // Resolve enabled tokens — use pre-configured list if available, otherwise
         // query L1 via RPC as a fallback.
+        // TODO: what are these tracked tokens doing again?
         let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens

@@ -35,6 +35,18 @@ use crate::{
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
 const HTTP_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
+pub type TempoL1BlockStream<'a> = Pin<
+    Box<
+        dyn Stream<
+                Item = eyre::Result<(
+                    <TempoNetwork as alloy_network::Network>::HeaderResponse,
+                    Vec<<TempoNetwork as alloy_network::Network>::ReceiptResponse>,
+                )>,
+            > + Send
+            + 'a,
+    >,
+>;
+
 /// Configuration for the L1 subscriber.
 #[derive(Debug, Clone)]
 pub struct L1SubscriberConfig {
@@ -199,19 +211,7 @@ impl L1Subscriber {
     async fn l1_block_stream<'a>(
         &self,
         provider: &'a DynProvider<TempoNetwork>,
-    ) -> eyre::Result<
-        Pin<
-            Box<
-                dyn Stream<
-                        Item = eyre::Result<(
-                            <TempoNetwork as alloy_network::Network>::HeaderResponse,
-                            Vec<<TempoNetwork as alloy_network::Network>::ReceiptResponse>,
-                        )>,
-                    > + Send
-                    + 'a,
-            >,
-        >,
-    > {
+    ) -> eyre::Result<TempoL1BlockStream<'a>> {
         let header_stream = self.header_stream(provider).await?;
         let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
@@ -261,6 +261,7 @@ impl L1Subscriber {
         // The zone's local state is the authoritative source for where to
         // resume. This avoids the bug where the portal's
         // lastSyncedTempoBlockNumber runs ahead of local zone state.
+        // FIXME: is this value ever updated?
         if self.config.local_tempo_block_number > 0 {
             info!(
                 local_tempo_block_number = self.config.local_tempo_block_number,
@@ -274,6 +275,7 @@ impl L1Subscriber {
             return Ok(Some(genesis + 1));
         }
 
+        // FIXME: should this ever happen
         if self.config.portal_address.is_zero() {
             warn!(
                 "No portal address and no genesis block number override — skipping backfill. \
@@ -302,6 +304,8 @@ impl L1Subscriber {
         &mut self,
         l1_provider: &impl Provider<TempoNetwork>,
     ) -> eyre::Result<()> {
+        self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
+
         let Some(mut from) = self.resolve_start_block(l1_provider).await? else {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
@@ -335,6 +339,9 @@ impl L1Subscriber {
             blocks = tip - from + 1,
             "Backfilling deposit events"
         );
+
+        // FIXME: do we really need a backfill in progress metric? This doesnt make sense as a
+        // gauge, this can just be a log
         self.subscriber_metrics.backfill_in_progress.set(1.0);
         self.subscriber_metrics
             .backfill_start_block
@@ -468,23 +475,22 @@ impl L1Subscriber {
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
     pub async fn run(mut self) -> eyre::Result<()> {
-        // Re-read tracked tokens from the policy cache so we pick up any
-        // tokens discovered during a previous run (before a reconnect).
-        self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
-
         let provider = self.connect().await?;
-
-        // Backfill to the current tip before subscribing.
-        // Backfilled blocks are historical and considered confirmed.
         self.sync_to_l1_tip(&provider).await?;
 
-        info!(portal = %self.config.portal_address, "Listening for L1 blocks");
-        let mut stream = self.l1_block_stream(&provider).await?;
+        let stream = self.l1_block_stream(&provider).await?;
+        self.handle_l1_block_stream(&provider, stream).await?;
 
-        // Confirmation buffer: holds the latest unconfirmed L1 block.
-        // A block is only flushed to the deposit queue once the NEXT block
-        // arrives with a matching parent hash, proving the buffered block
-        // is on the canonical chain.
+        Ok(())
+    }
+
+    async fn handle_l1_block_stream<'a>(
+        mut self,
+        provider: &DynProvider<TempoNetwork>,
+        mut stream: TempoL1BlockStream<'a>,
+    ) -> eyre::Result<()> {
+        info!(portal = %self.config.portal_address, "Listening for L1 blocks");
+
         let mut unconfirmed_tip: Option<(
             SealedHeader<TempoHeader>,
             L1PortalEvents,
@@ -494,15 +500,20 @@ impl L1Subscriber {
         loop {
             let stream_wait_start = std::time::Instant::now();
             let next = stream.try_next().await?;
+
+            // TODO: do we really need this?
             self.subscriber_metrics
                 .stream_try_next_duration_seconds
                 .record(stream_wait_start.elapsed().as_secs_f64());
             let Some((header, receipts)) = next else {
+                // NOTE: do we want to warn here?
                 break;
             };
             let block_number = header.number();
             let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
             let (events, policy_events) = self.extract_events(block_number, &receipts);
+
+            // NOTE: should this be 0
             self.record_seen_block(block_number, 0);
 
             // If we have a buffered tip, check if the new block confirms it.

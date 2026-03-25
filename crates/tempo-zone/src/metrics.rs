@@ -39,6 +39,7 @@ pub(crate) struct WithdrawalProcessorMetrics {
 #[metrics(scope = "zone_l1_subscriber")]
 pub(crate) struct L1SubscriberMetrics {
     /// Whether a backfill is currently running (1) or idle (0).
+    // FIXME: do we really need a backfill in progress guage, this can just be a log1
     pub backfill_in_progress: Gauge,
 
     /// The first L1 block number of the most recent backfill run.
