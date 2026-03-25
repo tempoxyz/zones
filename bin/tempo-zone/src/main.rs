@@ -24,7 +24,6 @@ type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
-
 // TODO: why do we hardcode this
 const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
     "tungstenite=warn,",
@@ -74,8 +73,6 @@ struct ZoneArgs {
     )]
     pub zone_batch_interval_secs: u64,
 
-
-
     // TODO: update this name to be more descriptive
     /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(
@@ -99,9 +96,6 @@ struct ZoneArgs {
     )]
     pub l1_fetch_concurrency: usize,
 
-
-
-
     // TODO: nit l1_ws_reconnect_interval_ms
     /// Interval in milliseconds between WebSocket reconnection attempts to L1.
     #[arg(
@@ -110,7 +104,6 @@ struct ZoneArgs {
         default_value_t = 100
     )]
     pub l1_retry_connection_interval_ms: u64,
-
 
     // TODO: shouldnt this read this from the portal address or the l1 contract?
     /// Zone ID for the private RPC auth token validation.
@@ -126,8 +119,6 @@ struct ZoneArgs {
     )]
     pub private_rpc_port: u16,
 }
-
-
 
 // TODO::  can we cleaner
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -145,9 +136,6 @@ fn apply_zone_log_filters(cli: &mut ZoneCli) {
 
 fn main() {
     reth_cli_util::sigsegv_handler::install();
-
-
-
 
     // Install the default rustls CryptoProvider for WSS connections to L1.
     rustls::crypto::aws_lc_rs::default_provider()
