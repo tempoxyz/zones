@@ -30,7 +30,7 @@ use alloy_primitives::{Address, B256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_transport::layers::RetryBackoffLayer;
-use eyre::Result;
+use eyre::{Result, WrapErr};
 use tempo_alloy::TempoNetwork;
 use tokio::sync::Notify;
 use tracing::{error, info, instrument, warn};
@@ -131,8 +131,8 @@ impl ZoneMonitor {
         l1_provider: DynProvider<TempoNetwork>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
-    ) -> Self {
-        let metrics = crate::metrics::ZoneMonitorMetrics::default();
+    ) -> Result<Self> {
+        let zone_rpc_url = config.zone_rpc_url.clone();
         let retry_layer = RetryBackoffLayer::new(
             u32::MAX,
             config.retry_connection_interval.as_millis() as u64,
@@ -145,11 +145,29 @@ impl ZoneMonitor {
                 crate::rpc_connection_config(config.retry_connection_interval),
             )
             .await
-            .expect("failed to connect to Zone RPC");
+            .wrap_err_with(|| format!("failed to connect to Zone RPC at {zone_rpc_url}"))?;
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_client(client)
             .erased();
 
+        Self::new_with_provider(
+            config,
+            provider,
+            l1_provider,
+            withdrawal_store,
+            withdrawal_notify,
+        )
+        .await
+    }
+
+    async fn new_with_provider(
+        config: ZoneMonitorConfig,
+        provider: DynProvider<TempoNetwork>,
+        l1_provider: DynProvider<TempoNetwork>,
+        withdrawal_store: SharedWithdrawalStore,
+        withdrawal_notify: Arc<Notify>,
+    ) -> Result<Self> {
+        let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let outbox = ZoneOutbox::new(config.outbox_address, provider.clone());
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
@@ -159,7 +177,7 @@ impl ZoneMonitor {
                 .genesisTempoBlockNumber()
                 .call()
                 .await
-                .expect("failed to read genesisTempoBlockNumber");
+                .wrap_err("failed to read genesisTempoBlockNumber during zone monitor startup")?;
 
         let batch_submitter = BatchSubmitter::new(
             config.portal_address,
@@ -171,7 +189,7 @@ impl ZoneMonitor {
             batch_submitter.read_portal_block_hash(),
             batch_submitter.read_portal_withdrawal_queue_tail(),
         )
-        .expect("failed to read portal state at startup");
+        .wrap_err("failed to read portal state during zone monitor startup")?;
 
         let last_submitted_zone_block =
             Self::resolve_zone_block_number(&provider, prev_zone_block_hash).await;
@@ -195,7 +213,7 @@ impl ZoneMonitor {
         let pending = batch_submitter
             .fetch_pending_withdrawals(&provider, config.outbox_address)
             .await
-            .expect("failed to fetch pending withdrawals");
+            .wrap_err("failed to restore pending withdrawals during zone monitor startup")?;
 
         if !pending.is_empty() {
             let mut store = withdrawal_store.lock();
@@ -224,7 +242,7 @@ impl ZoneMonitor {
             .set(last_submitted_zone_block as f64);
         metrics.zone_to_l1_submission_lag_blocks.set(0.0);
 
-        Self {
+        Ok(Self {
             config,
             metrics,
             provider,
@@ -239,7 +257,7 @@ impl ZoneMonitor {
             prev_zone_block_hash,
             portal_withdrawal_queue_tail,
             latest_observed_zone_block: last_submitted_zone_block,
-        }
+        })
     }
 
     /// Run the monitor loop. This method never returns under normal operation.
@@ -873,8 +891,23 @@ pub fn spawn_zone_monitor(
     withdrawal_notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut monitor =
-            ZoneMonitor::new(config, l1_provider, withdrawal_store, withdrawal_notify).await;
+        let mut monitor = loop {
+            match ZoneMonitor::new(
+                config.clone(),
+                l1_provider.clone(),
+                withdrawal_store.clone(),
+                withdrawal_notify.clone(),
+            )
+            .await
+            {
+                Ok(monitor) => break monitor,
+                Err(e) => {
+                    error!(error = %e, "Zone monitor failed to start, retrying in 5s");
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                }
+            }
+        };
+
         loop {
             if let Err(e) = monitor.run().await {
                 error!(error = %e, "Zone monitor failed, restarting in 5s");
@@ -940,8 +973,6 @@ mod tests {
     }
 
     fn test_monitor(l1: Asserter, zone: Asserter) -> ZoneMonitor {
-        let zone_provider = mock_provider(zone);
-        let l1_provider = mock_provider(l1);
         let portal_address = Address::repeat_byte(0x11);
         let config = ZoneMonitorConfig {
             outbox_address: Address::repeat_byte(0x22),
@@ -953,6 +984,8 @@ mod tests {
             batch_interval: Duration::from_secs(1),
             portal_address,
         };
+        let zone_provider = mock_provider(zone);
+        let l1_provider = mock_provider(l1);
 
         ZoneMonitor {
             config,
@@ -970,6 +1003,45 @@ mod tests {
             portal_withdrawal_queue_tail: 3,
             latest_observed_zone_block: 50,
         }
+    }
+
+    #[tokio::test]
+    async fn new_returns_error_when_startup_l1_read_fails() {
+        let l1 = Asserter::new();
+        let zone = Asserter::new();
+        let portal_address = Address::repeat_byte(0x11);
+        let config = ZoneMonitorConfig {
+            outbox_address: Address::repeat_byte(0x22),
+            inbox_address: Address::repeat_byte(0x33),
+            tempo_state_address: Address::repeat_byte(0x44),
+            zone_rpc_url: "http://unused.test".to_string(),
+            retry_connection_interval: Duration::from_millis(100),
+            poll_interval: Duration::from_secs(1),
+            batch_interval: Duration::from_secs(1),
+            portal_address,
+        };
+
+        l1.push_failure_msg("boom");
+
+        let err = match ZoneMonitor::new_with_provider(
+            config,
+            mock_provider(zone.clone()),
+            mock_provider(l1.clone()),
+            SharedWithdrawalStore::new(),
+            Arc::new(Notify::new()),
+        )
+        .await
+        {
+            Ok(_) => panic!("zone monitor startup should fail"),
+            Err(err) => err,
+        };
+
+        assert!(
+            err.to_string()
+                .contains("failed to read genesisTempoBlockNumber during zone monitor startup")
+        );
+        assert!(l1.read_q().is_empty());
+        assert!(zone.read_q().is_empty());
     }
 
     #[tokio::test]
