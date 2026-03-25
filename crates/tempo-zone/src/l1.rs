@@ -454,19 +454,8 @@ impl L1Subscriber {
         Ok(())
     }
 
-    /// Run the L1 subscriber until the stream ends or an error occurs.
-    ///
-    /// Connects to the L1 node (HTTP or WebSocket), backfills deposit events
-    /// to the current L1 tip, then listens for new block headers. Each block —
-    /// with or without deposits — is enqueued so the zone engine sees a strict
-    /// sequential chain.
-    ///
-    /// Live-streamed blocks are buffered one block behind: a block is only
-    /// flushed to the deposit queue once the next block arrives with a
-    /// matching parent hash, proving the buffered block is canonical. This
-    /// prevents the zone from committing to an L1 tip that gets reorged away.
-    ///
-    /// Callers should retry on error (see [`Self::spawn`]).
+    /// Syncs to L1 tip and subscribes to L1 blocks.
+    /// Handles deposit events, TIP 403 policy changes and Zone portal contract updates
     pub async fn run(mut self) -> eyre::Result<()> {
         let provider = self.connect().await?;
         self.sync_to_l1_tip(&provider).await?;
