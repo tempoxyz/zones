@@ -16,7 +16,11 @@ use alloy_transport::Authorization;
 use futures::{Stream, StreamExt, TryStreamExt as _};
 use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
-use std::{collections::{HashMap, HashSet}, pin::Pin, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    pin::Pin,
+    sync::Arc,
+};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{ITIP20::TransferPolicyUpdate, TIP403_REGISTRY_ADDRESS};
 use tempo_primitives::TempoHeader;
@@ -28,10 +32,7 @@ use crate::{
         self, EncryptedDeposit as AbiEncryptedDeposit,
         EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_PENDING_SEQUENCER_SLOT,
         PORTAL_SEQUENCER_SLOT,
-        ZonePortal::{
-            self, BounceBack, DepositMade, EncryptedDepositMade, SequencerTransferStarted,
-            SequencerTransferred, TokenEnabled, ZonePortalEvents,
-        },
+        ZonePortal::{self, BounceBack, DepositMade, EncryptedDepositMade, ZonePortalEvents},
     },
     l1_state::{cache::L1StateCache, tip403::PolicyEvent},
 };
@@ -559,18 +560,16 @@ impl L1Subscriber {
 
                 // If the log is from the portal, handle enabled token events
                 if addr == self.config.portal_address {
-                    let prev_len = portal_events.enabled_tokens.len();
-                    if let Err(e) = portal_events.push_log(log, block_number) {
-                        warn!(block_number, %e, "Failed to decode portal event from receipt");
-                    }
-
-                    // If a new token was enabled, start tracking it for TIP-403 policy events.
-                    if portal_events.enabled_tokens.len() > prev_len {
-                        for token in portal_events.enabled_tokens.keys() {
-                            if self.enabled_tokens.insert(*token) {
-                                info!(%token, "New token enabled, adding to tracked tokens");
+                    match portal_events.push_log(log, block_number) {
+                        Ok(Some(token)) => {
+                            if self.enabled_tokens.insert(token) {
+                                info!(%token, "New token enabled, adding to enabled tokens");
                             }
                         }
+                        Err(e) => {
+                            warn!(block_number, %e, "Failed to decode portal event from receipt");
+                        }
+                        _ => {}
                     }
                 } else if addr == TIP403_REGISTRY_ADDRESS {
                     if let Some(event) = PolicyEvent::decode_registry(log) {
@@ -955,16 +954,6 @@ impl EnabledToken {
 }
 
 impl L1PortalEvents {
-    /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 6] = [
-        DepositMade::SIGNATURE_HASH,
-        EncryptedDepositMade::SIGNATURE_HASH,
-        BounceBack::SIGNATURE_HASH,
-        TokenEnabled::SIGNATURE_HASH,
-        SequencerTransferStarted::SIGNATURE_HASH,
-        SequencerTransferred::SIGNATURE_HASH,
-    ];
-
     /// Create portal events from deposits only.
     pub fn from_deposits(deposits: Vec<L1Deposit>) -> Self {
         Self {
@@ -975,18 +964,13 @@ impl L1PortalEvents {
 
     /// Decode a portal log and add the event to this container.
     ///
-    /// Logs whose topic0 does not match a known portal event are skipped.
-    /// Known events that fail to decode return an error.
-    pub fn push_log(&mut self, log: &Log, block_number: u64) -> eyre::Result<()> {
-        if !Self::is_known_event(log) {
-            debug!(
-                l1_block = block_number,
-                topic0 = ?log.topic0(),
-                "Skipping unknown portal event"
-            );
-            return Ok(());
-        }
-        match ZonePortalEvents::decode_log(&log.inner)?.data {
+    /// Returns the newly enabled token address if this log was a `TokenEnabled` event.
+    /// Logs that don't match a known portal event are silently ignored.
+    pub fn push_log(&mut self, log: &Log, block_number: u64) -> eyre::Result<Option<Address>> {
+        let Ok(decoded) = ZonePortalEvents::decode_log(&log.inner) else {
+            return Ok(None);
+        };
+        match decoded.data {
             ZonePortalEvents::DepositMade(event) => {
                 info!(
                     l1_block = block_number,
@@ -1033,12 +1017,17 @@ impl L1PortalEvents {
                     currency = %event.currency,
                     "🪙 Token enabled on L1"
                 );
-                self.enabled_tokens.insert(event.token, EnabledToken {
-                    token: event.token,
-                    name: event.name,
-                    symbol: event.symbol,
-                    currency: event.currency,
-                });
+                let token = event.token;
+                self.enabled_tokens.insert(
+                    token,
+                    EnabledToken {
+                        token,
+                        name: event.name,
+                        symbol: event.symbol,
+                        currency: event.currency,
+                    },
+                );
+                return Ok(Some(token));
             }
             ZonePortalEvents::SequencerTransferStarted(event) => {
                 info!(
@@ -1067,12 +1056,7 @@ impl L1PortalEvents {
             }
             _ => {}
         }
-        Ok(())
-    }
-
-    fn is_known_event(log: &Log) -> bool {
-        log.topic0()
-            .is_some_and(|t| Self::SIGNATURE_HASHES.contains(t))
+        Ok(None)
     }
 }
 
