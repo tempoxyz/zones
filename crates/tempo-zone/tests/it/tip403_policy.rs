@@ -54,7 +54,7 @@ async fn test_tip20_transfer_on_zone() -> eyre::Result<()> {
     let pending = tip20
         .transfer(bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(100_000)
+        .gas(150_000)
         .send()
         .await?;
 

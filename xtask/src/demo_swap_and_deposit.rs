@@ -277,7 +277,7 @@ impl DemoSwapAndDeposit {
         );
         TIP20Token::new(alpha, &l2_operator)
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-            .gas(100_000)
+            .gas(150_000)
             .send_sync()
             .await
             .wrap_err("failed to approve AlphaUSD for the outbox")?;

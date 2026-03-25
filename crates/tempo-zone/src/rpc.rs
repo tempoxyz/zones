@@ -5,7 +5,11 @@
 
 pub use zone_rpc::*;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, Weak},
+    time::Duration,
+};
 
 use alloy_network::{ReceiptResponse, TransactionResponse};
 use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256};
@@ -17,12 +21,16 @@ use alloy_rpc_types_eth::{
 };
 use alloy_sol_types::{SolCall, SolEvent, SolEventInterface};
 use eyre::WrapErr;
-use reth_rpc::EthFilter;
+use futures::StreamExt;
+use reth_provider::CanonStateSubscriptions;
+use reth_rpc::{EthFilter, eth::filter::EthFilterError};
 use reth_rpc_builder::EthHandlers;
 use reth_rpc_eth_api::{
-    EthApiTypes, EthFilterApiServer,
+    EthApiTypes, EthFilterApiServer, RpcConvert,
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
+use reth_rpc_eth_types::logs_utils;
+use reth_transaction_pool::TransactionPool;
 use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoHeaderResponse, TempoTransactionRequest},
@@ -31,8 +39,11 @@ use tempo_contracts::precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS,
     account_keychain::IAccountKeychain::{self, KeyInfo, getKeyCall},
 };
-use tempo_primitives::TempoTxEnvelope;
-use tokio::sync::Mutex;
+use tempo_primitives::{TempoHeader, TempoTxEnvelope};
+use tokio::{
+    sync::Mutex,
+    time::{MissedTickBehavior, interval},
+};
 
 use crate::abi::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
@@ -47,6 +58,57 @@ use zone_rpc::{
 };
 
 type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHeaderResponse>;
+const FILTER_OWNER_PRUNE_INTERVAL: Duration = Duration::from_secs(60);
+
+fn filter_not_found_error() -> JsonRpcError {
+    JsonRpcError::invalid_params("filter not found")
+}
+
+fn map_eth_filter_error(err: EthFilterError) -> JsonRpcError {
+    match err {
+        EthFilterError::FilterNotFound(_) => filter_not_found_error(),
+        other => internal(other),
+    }
+}
+
+fn stale_filter_owner_ids(
+    owner_ids: impl IntoIterator<Item = FilterId>,
+    active_ids: &HashSet<FilterId>,
+) -> Vec<FilterId> {
+    owner_ids
+        .into_iter()
+        .filter(|id| !active_ids.contains(id))
+        .collect()
+}
+
+async fn prune_filter_owners<Api: EthApiTypes + 'static>(
+    filter: &EthFilter<Api>,
+    owners: &Mutex<HashMap<FilterId, Address>>,
+) {
+    let owner_ids = {
+        let owners = owners.lock().await;
+        owners.keys().cloned().collect::<Vec<_>>()
+    };
+    if owner_ids.is_empty() {
+        return;
+    }
+
+    let active_ids = filter
+        .active_filters()
+        .ids()
+        .await
+        .into_iter()
+        .collect::<HashSet<_>>();
+    let stale_ids = stale_filter_owner_ids(owner_ids, &active_ids);
+    if stale_ids.is_empty() {
+        return;
+    }
+
+    let mut owners = owners.lock().await;
+    for id in stale_ids {
+        owners.remove(&id);
+    }
+}
 
 /// [`ZoneRpcApi`] implementation backed by reth's [`EthHandlers`].
 ///
@@ -66,7 +128,7 @@ type RpcBlock = Block<alloy_rpc_types_eth::Transaction<TempoTxEnvelope>, TempoHe
 /// - **`from`-enforcement** — `eth_call` / `eth_estimateGas` may only
 ///   simulate from the authenticated account (`-32004` on mismatch,
 ///   auto-set when omitted); state overrides are rejected for
-///   non-sequencers (`-32602`).
+///   non-sequencer callers (`-32602`).
 /// - **Sender verification** — `eth_sendRawTransaction` checks that the
 ///   recovered transaction sender matches the authenticated account
 ///   (`-32003` on mismatch).
@@ -80,15 +142,11 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
     tempo_state:
         crate::abi::TempoState::TempoStateInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     /// Maps filter IDs to the authenticated account that created them.
-    /// Ensures filters can only be accessed by their creator.
-    ///
-    /// TODO: entries are never cleaned up when reth reaps stale filters internally.
-    /// After bumping reth, use its `ActiveFilters` API to periodically sync this
-    /// map and remove entries for filters that no longer exist on the reth side.
+    /// The reth filter registry remains the source of truth for filter liveness.
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
 }
 
-impl<Api: EthApiTypes> TempoZoneRpc<Api> {
+impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
     pub async fn new(
         eth: EthHandlers<Api>,
@@ -97,30 +155,63 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
         let l1_rpc_url = config.l1_rpc_url.clone();
         let zone_rpc_url = config.zone_rpc_url.clone();
         let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&l1_rpc_url)
+            .connect_with_config(
+                &l1_rpc_url,
+                crate::rpc_connection_config(config.retry_connection_interval),
+            )
             .await
             .wrap_err("failed to connect private RPC L1 provider")?
             .erased();
         let zone_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .connect(&zone_rpc_url)
+            .connect_with_config(
+                &zone_rpc_url,
+                crate::rpc_connection_config(config.retry_connection_interval),
+            )
             .await
             .wrap_err("failed to connect private RPC zone provider")?
             .erased();
         let tempo_state = crate::abi::TempoState::new(TEMPO_STATE_ADDRESS, zone_provider.clone());
-        Ok(Self {
+        let rpc = Self {
             eth,
             config,
             l1_provider,
             zone_provider,
             tempo_state,
             filter_owners: Arc::new(Mutex::new(HashMap::new())),
-        })
+        };
+        rpc.spawn_filter_owner_pruner();
+        Ok(rpc)
     }
 
     /// Returns a reference to the inner [`EthFilter`] handler.
-    #[allow(dead_code)]
     pub fn filter(&self) -> &EthFilter<Api> {
         &self.eth.filter
+    }
+
+    async fn filter_is_active(&self, id: &FilterId) -> bool {
+        self.filter().active_filters().contains(id).await
+    }
+
+    fn spawn_filter_owner_pruner(&self)
+    where
+        Api: Send + Sync + 'static,
+    {
+        let filter = self.filter().clone();
+        let owners: Weak<Mutex<HashMap<FilterId, Address>>> = Arc::downgrade(&self.filter_owners);
+        tokio::spawn(async move {
+            let mut prune_interval = interval(FILTER_OWNER_PRUNE_INTERVAL);
+            prune_interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
+            loop {
+                prune_interval.tick().await;
+
+                let Some(owners) = owners.upgrade() else {
+                    break;
+                };
+
+                prune_filter_owners(&filter, &owners).await;
+            }
+        });
     }
 
     /// Verify that the filter belongs to the authenticated caller.
@@ -136,10 +227,18 @@ impl<Api: EthApiTypes> TempoZoneRpc<Api> {
         if auth.is_sequencer {
             return Ok(());
         }
-        let owners = self.filter_owners.lock().await;
-        match owners.get(id) {
-            Some(owner) if *owner == auth.caller => Ok(()),
-            _ => Err(JsonRpcError::invalid_params("filter not found")),
+        let owner_matches = {
+            let owners = self.filter_owners.lock().await;
+            matches!(owners.get(id), Some(owner) if *owner == auth.caller)
+        };
+        if !owner_matches {
+            return Err(filter_not_found_error());
+        }
+        if self.filter_is_active(id).await {
+            Ok(())
+        } else {
+            self.filter_owners.lock().await.remove(id);
+            Err(filter_not_found_error())
         }
     }
 
@@ -460,7 +559,8 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            // Defense-in-depth: handlers.rs also rejects this, but enforce here too.
+            // Defense-in-depth: handlers.rs also rejects this for non-sequencers,
+            // but enforce here too.
             if !auth.is_sequencer && state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
@@ -468,6 +568,8 @@ where
             if !auth.is_sequencer {
                 zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
+
+            zone_rpc::policy::enforce_no_contract_creation(&request)?;
 
             let result = EthCall::call(
                 &self.eth.api,
@@ -489,7 +591,8 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            // Defense-in-depth: handlers.rs also rejects this, but enforce here too.
+            // Defense-in-depth: handlers.rs also rejects this for non-sequencers,
+            // but enforce here too.
             if !auth.is_sequencer && state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
@@ -497,6 +600,8 @@ where
             if !auth.is_sequencer {
                 zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
+
+            zone_rpc::policy::enforce_no_contract_creation(&request)?;
 
             let result = EthCall::estimate_gas_at(
                 &self.eth.api,
@@ -551,6 +656,8 @@ where
                 zone_rpc::policy::enforce_from(&mut request, &auth)?;
             }
 
+            zone_rpc::policy::enforce_no_contract_creation(&request)?;
+
             let result = EthTransactions::fill_transaction(&self.eth.api, request)
                 .await
                 .map_err(internal)?;
@@ -596,7 +703,11 @@ where
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
 
-            let logs = self.eth.filter.filter_logs(id).await.map_err(internal)?;
+            let logs = self
+                .filter()
+                .filter_logs(id)
+                .await
+                .map_err(map_eth_filter_error)?;
 
             if auth.is_sequencer {
                 return to_raw(&logs);
@@ -611,7 +722,11 @@ where
         Box::pin(async move {
             self.ensure_filter_owner(&id, &auth).await?;
 
-            let changes = self.eth.filter.filter_changes(id).await.map_err(internal)?;
+            let changes = self
+                .filter()
+                .filter_changes(id)
+                .await
+                .map_err(map_eth_filter_error)?;
 
             if auth.is_sequencer {
                 return to_raw(&changes);
@@ -659,11 +774,161 @@ where
                 .await
                 .map_err(internal)?;
 
-            if result {
+            if result || !self.filter_is_active(&id).await {
                 self.filter_owners.lock().await.remove(&id);
             }
 
             to_raw(&result)
+        })
+    }
+
+    fn ws_subscribe_new_heads(&self, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            let redact_logs_bloom = !auth.is_sequencer;
+            let api = self.eth.api.clone();
+            let provider = self.eth.api.provider().clone();
+            let stream = provider
+                .canonical_state_stream()
+                .flat_map(move |new_chain| {
+                    let api = api.clone();
+                    let headers = new_chain
+                        .committed()
+                        .blocks_iter()
+                        .filter_map(move |block| {
+                            match api
+                                .converter()
+                                .convert_header(block.clone_sealed_header(), block.rlp_length())
+                            {
+                                Ok(header) => Some(header),
+                                Err(err) => {
+                                    tracing::error!(
+                                        target: "rpc",
+                                        %err,
+                                        "Failed to convert header"
+                                    );
+                                    None
+                                }
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    futures::stream::iter(headers)
+                })
+                .map(move |mut header| {
+                    if redact_logs_bloom {
+                        redact_ws_header(&mut header);
+                    }
+                    to_raw(&header)
+                });
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
+    fn ws_subscribe_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            let provider = self.eth.api.provider().clone();
+            let caller = auth.caller;
+
+            if !auth.is_sequencer {
+                zone_rpc::filter::scope_filter(&mut filter);
+            }
+
+            let stream = provider
+                .canonical_state_stream()
+                .flat_map(|canon_state| futures::stream::iter(canon_state.block_receipts()))
+                .flat_map(move |(block_receipts, removed)| {
+                    let all_logs = logs_utils::matching_block_logs_with_tx_hashes(
+                        &filter,
+                        block_receipts.block,
+                        block_receipts.timestamp,
+                        block_receipts
+                            .tx_receipts
+                            .iter()
+                            .map(|(tx, receipt)| (*tx, receipt)),
+                        removed,
+                    );
+                    futures::stream::iter(all_logs)
+                });
+
+            if auth.is_sequencer {
+                let stream = stream.map(|log| to_raw(&log));
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
+            }
+
+            let stream = stream.filter_map(move |log| {
+                std::future::ready(
+                    zone_rpc::filter::is_log_visible(&log, &caller).then(|| to_raw(&log)),
+                )
+            });
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
+    fn ws_subscribe_pending_transactions(
+        &self,
+        full: bool,
+        auth: AuthContext,
+    ) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async move {
+            if auth.is_sequencer {
+                if !full {
+                    let pool = self.eth.api.pool().clone();
+                    // Sequencers can use the direct hash listener because no sender scoping is
+                    // required; non-sequencers must source full tx events to filter by sender.
+                    let stream = futures::stream::unfold(
+                        pool.pending_transactions_listener(),
+                        |mut rx| async move { rx.recv().await.map(|hash| (hash, rx)) },
+                    )
+                    .map(|hash| to_raw(&hash));
+                    let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                    return Ok(stream);
+                }
+
+                let api = self.eth.api.clone();
+                let pool = self.eth.api.pool().clone();
+                let stream = pool
+                    .new_pending_pool_transactions_listener()
+                    .map(move |pending_tx| {
+                        api.converter()
+                            .fill_pending(pending_tx.transaction.to_consensus())
+                            .map_err(internal)
+                            .and_then(|tx| to_raw(&tx))
+                    });
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
+            }
+
+            let caller = auth.caller;
+            let pool = self.eth.api.pool().clone();
+
+            if !full {
+                let stream =
+                    pool.new_pending_pool_transactions_listener()
+                        .filter_map(move |pending_tx| {
+                            std::future::ready(
+                                (pending_tx.transaction.sender() == caller)
+                                    .then(|| to_raw(pending_tx.transaction.hash())),
+                            )
+                        });
+                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+                return Ok(stream);
+            }
+
+            let api = self.eth.api.clone();
+            let stream =
+                pool.new_pending_pool_transactions_listener()
+                    .filter_map(move |pending_tx| {
+                        std::future::ready((pending_tx.transaction.sender() == caller).then(|| {
+                            api.converter()
+                                .fill_pending(pending_tx.transaction.to_consensus())
+                                .map_err(internal)
+                                .and_then(|tx| to_raw(&tx))
+                        }))
+                    });
+            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
         })
     }
 
@@ -836,10 +1101,17 @@ fn encrypted_deposit_details(
     }
 }
 
+fn redact_tempo_header(header: &mut TempoHeader) {
+    header.inner.logs_bloom = Bloom::ZERO;
+}
+
+fn redact_ws_header(header: &mut TempoHeaderResponse) {
+    redact_tempo_header(&mut header.inner.inner);
+}
+
 /// Strip privacy-sensitive fields from a block for non-sequencer callers.
 fn redact_block(block: &mut RpcBlock) {
-    // header.inner = alloy Header, .inner = Sealed wrapper, .inner = TempoHeader (contains logs_bloom)
-    block.header.inner.inner.inner.logs_bloom = Bloom::ZERO;
+    redact_tempo_header(&mut block.header.inner);
     block.transactions = BlockTransactions::Hashes(Vec::new());
 }
 
@@ -896,5 +1168,29 @@ mod tests {
             err.message,
             "regular deposit event matched encrypted deposit hash"
         );
+    }
+
+    #[test]
+    fn stale_filter_owner_ids_removes_only_inactive_entries() {
+        let active_ids = HashSet::from([
+            FilterId::Str("0xactive".to_string()),
+            FilterId::Str("0xkeep".to_string()),
+        ]);
+        let owner_ids = vec![
+            FilterId::Str("0xactive".to_string()),
+            FilterId::Str("0xstale".to_string()),
+            FilterId::Str("0xkeep".to_string()),
+        ];
+
+        let stale_ids = stale_filter_owner_ids(owner_ids, &active_ids);
+
+        assert_eq!(stale_ids, vec![FilterId::Str("0xstale".to_string())]);
+    }
+
+    #[test]
+    fn stale_filter_owner_ids_is_noop_for_empty_owner_set() {
+        let stale_ids = stale_filter_owner_ids(Vec::new(), &HashSet::new());
+
+        assert!(stale_ids.is_empty());
     }
 }

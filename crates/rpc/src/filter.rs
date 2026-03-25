@@ -76,12 +76,14 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
 ///
 /// TODO: once the enabled-token registry is plumbed through, also filter
 /// by emitting contract address (only logs from enabled TIP-20 tokens).
+pub fn is_log_visible(log: &Log, caller: &Address) -> bool {
+    log.topic0().is_some_and(|t| WHITELISTED_TOPICS.contains(t)) && is_caller_eligible(log, caller)
+}
+
+/// Filters logs to only those the caller is allowed to see.
 pub fn filter_logs(logs: Vec<Log>, caller: &Address) -> Vec<Log> {
     logs.into_iter()
-        .filter(|log| {
-            log.topic0().is_some_and(|t| WHITELISTED_TOPICS.contains(t))
-                && is_caller_eligible(log, caller)
-        })
+        .filter(|log| is_log_visible(log, caller))
         .collect()
 }
 

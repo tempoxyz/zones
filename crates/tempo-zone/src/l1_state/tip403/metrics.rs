@@ -7,7 +7,7 @@ use reth_metrics::{
 
 /// Metrics for the TIP-403 policy cache, provider, and resolution task.
 #[derive(Metrics, Clone)]
-#[metrics(scope = "tip403")]
+#[metrics(scope = "tempo_zone_tip403")]
 pub struct Tip403Metrics {
     /// Total authorization checks performed (cache + RPC).
     pub authorization_checks_total: Counter,

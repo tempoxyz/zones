@@ -9,7 +9,7 @@ use alloy_consensus::BlockHeader as _;
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
-use alloy_rpc_client::{ConnectionConfig, RpcClient};
+use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::{BlockId, Log};
 use alloy_sol_types::{SolEvent, SolEventInterface, SolValue};
 use alloy_transport::Authorization;
@@ -24,12 +24,14 @@ use tracing::{debug, error, info, instrument, warn};
 use crate::{
     abi::{
         self, EncryptedDeposit as AbiEncryptedDeposit,
-        EncryptedDepositPayload as AbiEncryptedDepositPayload,
+        EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_PENDING_SEQUENCER_SLOT,
+        PORTAL_SEQUENCER_SLOT,
         ZonePortal::{
-            self, BounceBack, DepositMade, EncryptedDepositMade, TokenEnabled, ZonePortalEvents,
+            self, BounceBack, DepositMade, EncryptedDepositMade, SequencerTransferStarted,
+            SequencerTransferred, TokenEnabled, ZonePortalEvents,
         },
     },
-    l1_state::tip403::PolicyEvent,
+    l1_state::{cache::L1StateCache, tip403::PolicyEvent},
 };
 
 /// Poll interval for the HTTP block filter fallback (500ms, matching L1 block time).
@@ -116,7 +118,7 @@ impl L1Subscriber {
                 loop {
                     if let Err(e) = subscriber.clone().run().await {
                         let retry_interval = subscriber.config.retry_connection_interval;
-                        subscriber.subscriber_metrics.reconnects_total.increment(1);
+                        subscriber.subscriber_metrics.reconnects.increment(1);
                         error!(
                             error = %e,
                             retry_secs = retry_interval.as_secs_f32(),
@@ -137,9 +139,7 @@ impl L1Subscriber {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
         let url: url::Url = self.config.l1_rpc_url.parse()?;
-        let mut conn_config = ConnectionConfig::new()
-            .with_max_retries(u32::MAX)
-            .with_retry_interval(self.config.retry_connection_interval);
+        let mut conn_config = crate::rpc_connection_config(self.config.retry_connection_interval);
 
         if !url.username().is_empty() {
             let auth = Authorization::basic(url.username(), url.password().unwrap_or_default());
@@ -222,7 +222,7 @@ impl L1Subscriber {
                 async move {
                     let block_number = header.number();
                     let start = std::time::Instant::now();
-                    let fetch_failures_total = &subscriber_metrics.fetch_failures_total;
+                    let fetch_failures = &subscriber_metrics.fetch_failures;
                     let receipts = provider
                         .get_block_receipts(BlockId::number(block_number))
                         .await
@@ -232,7 +232,7 @@ impl L1Subscriber {
                                 .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
                         })
                         .inspect_err(|_| {
-                            fetch_failures_total.increment(1);
+                            fetch_failures.increment(1);
                         })?;
                     let elapsed = start.elapsed();
                     debug!(
@@ -349,7 +349,6 @@ impl L1Subscriber {
         self.subscriber_metrics.backfill_end_block.set(tip as f64);
         let start = std::time::Instant::now();
         let result = self.backfill(l1_provider, from, tip).await;
-        self.subscriber_metrics.backfill_in_progress.set(0.0);
         self.subscriber_metrics
             .backfill_duration_seconds
             .record(start.elapsed().as_secs_f64());
@@ -385,7 +384,7 @@ impl L1Subscriber {
                 let subscriber_metrics = subscriber_metrics.clone();
                 async move {
                     let start = std::time::Instant::now();
-                    let fetch_failures_total = &subscriber_metrics.fetch_failures_total;
+                    let fetch_failures = &subscriber_metrics.fetch_failures;
                     let (receipts, header_resp) = tokio::try_join!(
                         async {
                             provider
@@ -404,7 +403,7 @@ impl L1Subscriber {
                         },
                     )
                     .inspect_err(|_| {
-                        fetch_failures_total.increment(1);
+                        fetch_failures.increment(1);
                     })?;
                     let elapsed = start.elapsed();
                     debug!(
@@ -431,10 +430,11 @@ impl L1Subscriber {
 
             let sealed = SealedHeader::seal_slow(header);
             self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
+            self.apply_portal_state_events(block_number, &events);
             self.deposit_queue
                 .enqueue_sealed(sealed, events, policy_events);
             enqueued += 1;
-            self.subscriber_metrics.blocks_enqueued_total.increment(1);
+            self.subscriber_metrics.blocks_enqueued.increment(1);
 
             if enqueued.is_multiple_of(100) {
                 let elapsed = backfill_start.elapsed();
@@ -526,12 +526,13 @@ impl L1Subscriber {
                     let tip_parent = tip_header.parent_hash();
                     self.apply_policy_events(tip_number, &tip_policy_events);
                     self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
+                    self.apply_portal_state_events(tip_number, &tip_events);
                     match self
                         .deposit_queue
                         .try_enqueue(tip_header, tip_events, tip_policy_events)
                     {
                         EnqueueOutcome::Accepted => {
-                            self.subscriber_metrics.blocks_enqueued_total.increment(1);
+                            self.subscriber_metrics.blocks_enqueued.increment(1);
                         }
                         EnqueueOutcome::Duplicate => {}
                         EnqueueOutcome::NeedBackfill { from, to } => {
@@ -549,7 +550,7 @@ impl L1Subscriber {
                     }
                 } else {
                     // Reorg — discard the buffered tip and clear L1 state cache.
-                    self.subscriber_metrics.reorgs_detected_total.increment(1);
+                    self.subscriber_metrics.reorgs_detected.increment(1);
                     warn!(
                         discarded_block = tip_header.number(),
                         discarded_hash = %tip_header.hash(),
@@ -626,26 +627,44 @@ impl L1Subscriber {
     fn record_portal_event_metrics(&self, portal_events: &L1PortalEvents) {
         let mut regular = 0u64;
         let mut encrypted = 0u64;
+        let mut transfer_started = 0u64;
+        let mut transferred = 0u64;
         for deposit in &portal_events.deposits {
             match deposit {
                 L1Deposit::Regular(_) => regular += 1,
                 L1Deposit::Encrypted(_) => encrypted += 1,
             }
         }
+        for event in &portal_events.sequencer_events {
+            match event {
+                L1SequencerEvent::TransferStarted { .. } => transfer_started += 1,
+                L1SequencerEvent::Transferred { .. } => transferred += 1,
+            }
+        }
         if regular > 0 {
             self.subscriber_metrics
-                .regular_deposit_events_total
+                .regular_deposit_events
                 .increment(regular);
         }
         if encrypted > 0 {
             self.subscriber_metrics
-                .encrypted_deposit_events_total
+                .encrypted_deposit_events
                 .increment(encrypted);
         }
         if !portal_events.enabled_tokens.is_empty() {
             self.subscriber_metrics
-                .token_enabled_events_total
+                .token_enabled_events
                 .increment(portal_events.enabled_tokens.len() as u64);
+        }
+        if transfer_started > 0 {
+            self.subscriber_metrics
+                .sequencer_transfer_started_events
+                .increment(transfer_started);
+        }
+        if transferred > 0 {
+            self.subscriber_metrics
+                .sequencer_transferred_events
+                .increment(transferred);
         }
     }
 
@@ -668,6 +687,22 @@ impl L1Subscriber {
             .set(cache.num_token_policies() as f64);
     }
 
+    /// Write decoded portal state changes into the shared L1 cache at the
+    /// confirmed block height.
+    fn apply_portal_state_events(&self, block_number: u64, portal_events: &L1PortalEvents) {
+        if portal_events.sequencer_events.is_empty() {
+            return;
+        }
+
+        let mut cache = self.config.l1_state_cache.write();
+        apply_sequencer_events_to_cache(
+            &mut cache,
+            self.config.portal_address,
+            block_number,
+            &portal_events.sequencer_events,
+        );
+    }
+
     /// Update the L1 state cache anchor. Detects reorgs by comparing
     /// `parent_hash` against the current anchor and clears the cache when they
     /// diverge.
@@ -675,7 +710,7 @@ impl L1Subscriber {
         let mut guard = self.config.l1_state_cache.write();
         let anchor = guard.anchor();
         if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
-            self.subscriber_metrics.reorgs_detected_total.increment(1);
+            self.subscriber_metrics.reorgs_detected.increment(1);
             warn!(
                 old_anchor = %anchor.hash,
                 new_parent = %parent_hash,
@@ -686,6 +721,58 @@ impl L1Subscriber {
         }
         guard.update_anchor(NumHash { number, hash });
     }
+}
+
+fn apply_sequencer_events_to_cache(
+    cache: &mut L1StateCache,
+    portal_address: Address,
+    block_number: u64,
+    sequencer_events: &[L1SequencerEvent],
+) {
+    for event in sequencer_events {
+        match *event {
+            L1SequencerEvent::TransferStarted {
+                current_sequencer,
+                pending_sequencer,
+            } => {
+                cache.set(
+                    portal_address,
+                    PORTAL_SEQUENCER_SLOT,
+                    block_number,
+                    address_to_storage_value(current_sequencer),
+                );
+                cache.set(
+                    portal_address,
+                    PORTAL_PENDING_SEQUENCER_SLOT,
+                    block_number,
+                    address_to_storage_value(pending_sequencer),
+                );
+            }
+            L1SequencerEvent::Transferred {
+                previous_sequencer: _,
+                new_sequencer,
+            } => {
+                cache.set(
+                    portal_address,
+                    PORTAL_SEQUENCER_SLOT,
+                    block_number,
+                    address_to_storage_value(new_sequencer),
+                );
+                cache.set(
+                    portal_address,
+                    PORTAL_PENDING_SEQUENCER_SLOT,
+                    block_number,
+                    B256::ZERO,
+                );
+            }
+        }
+    }
+}
+
+fn address_to_storage_value(address: Address) -> B256 {
+    let mut bytes = [0u8; 32];
+    bytes[12..].copy_from_slice(address.as_slice());
+    B256::new(bytes)
 }
 
 /// A deposit extracted from L1.
@@ -825,6 +912,21 @@ impl L1Deposit {
     }
 }
 
+/// A sequencer-management event emitted by the L1 portal.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum L1SequencerEvent {
+    /// The current sequencer nominated a pending successor.
+    TransferStarted {
+        current_sequencer: Address,
+        pending_sequencer: Address,
+    },
+    /// The pending sequencer accepted and became the active sequencer.
+    Transferred {
+        previous_sequencer: Address,
+        new_sequencer: Address,
+    },
+}
+
 /// Result of attempting to enqueue an L1 block into the deposit queue.
 #[derive(Debug)]
 pub(crate) enum EnqueueOutcome {
@@ -848,6 +950,8 @@ pub struct L1PortalEvents {
     pub deposits: Vec<L1Deposit>,
     /// Tokens newly enabled for bridging in this block, with metadata.
     pub enabled_tokens: Vec<EnabledToken>,
+    /// Sequencer transfer events in the order they appeared in the block.
+    pub sequencer_events: Vec<L1SequencerEvent>,
 }
 
 /// A token newly enabled for bridging, with metadata for L2 creation.
@@ -877,11 +981,13 @@ impl EnabledToken {
 
 impl L1PortalEvents {
     /// Event signature hashes that this container knows how to decode.
-    const SIGNATURE_HASHES: [B256; 4] = [
+    const SIGNATURE_HASHES: [B256; 6] = [
         DepositMade::SIGNATURE_HASH,
         EncryptedDepositMade::SIGNATURE_HASH,
         BounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
+        SequencerTransferStarted::SIGNATURE_HASH,
+        SequencerTransferred::SIGNATURE_HASH,
     ];
 
     /// Create portal events from deposits only.
@@ -957,6 +1063,31 @@ impl L1PortalEvents {
                     name: event.name,
                     symbol: event.symbol,
                     currency: event.currency,
+                });
+            }
+            ZonePortalEvents::SequencerTransferStarted(event) => {
+                info!(
+                    l1_block = block_number,
+                    current_sequencer = %event.currentSequencer,
+                    pending_sequencer = %event.pendingSequencer,
+                    "👤 Sequencer transfer started on L1"
+                );
+                self.sequencer_events
+                    .push(L1SequencerEvent::TransferStarted {
+                        current_sequencer: event.currentSequencer,
+                        pending_sequencer: event.pendingSequencer,
+                    });
+            }
+            ZonePortalEvents::SequencerTransferred(event) => {
+                info!(
+                    l1_block = block_number,
+                    previous_sequencer = %event.previousSequencer,
+                    new_sequencer = %event.newSequencer,
+                    "👤 Sequencer transferred on L1"
+                );
+                self.sequencer_events.push(L1SequencerEvent::Transferred {
+                    previous_sequencer: event.previousSequencer,
+                    new_sequencer: event.newSequencer,
                 });
             }
             _ => {}
@@ -1657,9 +1788,11 @@ impl Default for DepositQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::DepositType;
+    use crate::abi::{DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT};
     use alloy_consensus::Header;
     use alloy_primitives::{FixedBytes, address};
+    use alloy_sol_types::SolEvent;
+    use std::collections::HashSet;
 
     fn make_test_header(number: u64) -> TempoHeader {
         TempoHeader {
@@ -1701,6 +1834,22 @@ mod tests {
     fn confirm_shared(queue: &DepositQueue) -> L1BlockDeposits {
         let num_hash = queue.peek().expect("queue is empty").header.num_hash();
         queue.confirm(num_hash).expect("confirm mismatch")
+    }
+
+    fn make_portal_log<E: SolEvent>(portal_address: Address, event: E) -> Log {
+        Log {
+            inner: alloy_primitives::Log {
+                address: portal_address,
+                data: event.encode_log_data(),
+            },
+            block_hash: None,
+            block_number: None,
+            block_timestamp: None,
+            transaction_hash: None,
+            transaction_index: None,
+            log_index: None,
+            removed: false,
+        }
     }
 
     #[test]
@@ -1746,6 +1895,152 @@ mod tests {
             deposit.memo,
             B256::ZERO,
             "bounce-back deposits should clear memo"
+        );
+    }
+
+    #[test]
+    fn test_push_log_decodes_sequencer_transfer_started() {
+        let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+        let current_sequencer = address!("0x00000000000000000000000000000000000000A1");
+        let pending_sequencer = address!("0x00000000000000000000000000000000000000B2");
+        let event = SequencerTransferStarted {
+            currentSequencer: current_sequencer,
+            pendingSequencer: pending_sequencer,
+        };
+        let log = make_portal_log(portal_address, event);
+
+        let mut events = L1PortalEvents::default();
+        events
+            .push_log(&log, 123)
+            .expect("sequencer transfer start should decode");
+
+        assert_eq!(
+            events.sequencer_events,
+            vec![L1SequencerEvent::TransferStarted {
+                current_sequencer,
+                pending_sequencer,
+            }]
+        );
+        assert!(events.deposits.is_empty());
+        assert!(events.enabled_tokens.is_empty());
+    }
+
+    #[test]
+    fn test_push_log_decodes_sequencer_transferred() {
+        let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+        let previous_sequencer = address!("0x00000000000000000000000000000000000000A1");
+        let new_sequencer = address!("0x00000000000000000000000000000000000000B2");
+        let event = SequencerTransferred {
+            previousSequencer: previous_sequencer,
+            newSequencer: new_sequencer,
+        };
+        let log = make_portal_log(portal_address, event);
+
+        let mut events = L1PortalEvents::default();
+        events
+            .push_log(&log, 123)
+            .expect("sequencer transferred should decode");
+
+        assert_eq!(
+            events.sequencer_events,
+            vec![L1SequencerEvent::Transferred {
+                previous_sequencer,
+                new_sequencer,
+            }]
+        );
+        assert!(events.deposits.is_empty());
+        assert!(events.enabled_tokens.is_empty());
+    }
+
+    #[test]
+    fn test_apply_sequencer_events_to_cache_sets_pending_sequencer() {
+        let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+        let current_sequencer = address!("0x00000000000000000000000000000000000000A1");
+        let pending_sequencer = address!("0x00000000000000000000000000000000000000B2");
+        let mut cache = L1StateCache::new(HashSet::from([portal_address]));
+
+        apply_sequencer_events_to_cache(
+            &mut cache,
+            portal_address,
+            42,
+            &[L1SequencerEvent::TransferStarted {
+                current_sequencer,
+                pending_sequencer,
+            }],
+        );
+
+        assert_eq!(
+            cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 42),
+            Some(address_to_storage_value(current_sequencer))
+        );
+        assert_eq!(
+            cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 42),
+            Some(address_to_storage_value(pending_sequencer))
+        );
+    }
+
+    #[test]
+    fn test_apply_sequencer_events_to_cache_accept_clears_pending_sequencer() {
+        let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+        let previous_sequencer = address!("0x00000000000000000000000000000000000000A1");
+        let new_sequencer = address!("0x00000000000000000000000000000000000000B2");
+        let mut cache = L1StateCache::new(HashSet::from([portal_address]));
+
+        apply_sequencer_events_to_cache(
+            &mut cache,
+            portal_address,
+            43,
+            &[L1SequencerEvent::Transferred {
+                previous_sequencer,
+                new_sequencer,
+            }],
+        );
+
+        assert_eq!(
+            cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 43),
+            Some(address_to_storage_value(new_sequencer))
+        );
+        assert_eq!(
+            cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 43),
+            Some(B256::ZERO)
+        );
+    }
+
+    #[test]
+    fn test_apply_sequencer_events_to_cache_preserves_in_block_event_order() {
+        let portal_address = address!("0x0000000000000000000000000000000000000ABC");
+        let sequencer_a = address!("0x00000000000000000000000000000000000000A1");
+        let sequencer_b = address!("0x00000000000000000000000000000000000000B2");
+        let sequencer_c = address!("0x00000000000000000000000000000000000000C3");
+        let mut cache = L1StateCache::new(HashSet::from([portal_address]));
+
+        apply_sequencer_events_to_cache(
+            &mut cache,
+            portal_address,
+            44,
+            &[
+                L1SequencerEvent::TransferStarted {
+                    current_sequencer: sequencer_a,
+                    pending_sequencer: sequencer_b,
+                },
+                L1SequencerEvent::Transferred {
+                    previous_sequencer: sequencer_a,
+                    new_sequencer: sequencer_b,
+                },
+                L1SequencerEvent::TransferStarted {
+                    current_sequencer: sequencer_b,
+                    pending_sequencer: sequencer_c,
+                },
+            ],
+        );
+
+        assert_eq!(
+            cache.get(portal_address, PORTAL_SEQUENCER_SLOT, 44),
+            Some(address_to_storage_value(sequencer_b))
+        );
+        assert_eq!(
+            cache.get(portal_address, PORTAL_PENDING_SEQUENCER_SLOT, 44),
+            Some(address_to_storage_value(sequencer_c))
         );
     }
 

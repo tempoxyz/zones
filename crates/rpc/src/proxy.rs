@@ -341,6 +341,8 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 policy::enforce_from(&mut request, &auth)?;
             }
 
+            policy::enforce_no_contract_creation(&request)?;
+
             self.forward(
                 "eth_call",
                 serde_json::json!([request, block, state_override]),
@@ -364,6 +366,8 @@ impl ZoneRpcApi for ProxyZoneRpc {
             if !auth.is_sequencer {
                 policy::enforce_from(&mut request, &auth)?;
             }
+
+            policy::enforce_no_contract_creation(&request)?;
 
             self.forward(
                 "eth_estimateGas",
@@ -413,6 +417,8 @@ impl ZoneRpcApi for ProxyZoneRpc {
             if !auth.is_sequencer {
                 policy::enforce_from(&mut request, &auth)?;
             }
+
+            policy::enforce_no_contract_creation(&request)?;
 
             self.forward("eth_fillTransaction", serde_json::json!([request]))
                 .await

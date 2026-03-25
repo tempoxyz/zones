@@ -87,6 +87,7 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
     let events = L1PortalEvents {
         deposits: vec![L1Deposit::Regular(deposit)],
         enabled_tokens: vec![enabled],
+        ..Default::default()
     };
     fixture.enqueue_events(&block, zone.deposit_queue(), events);
 

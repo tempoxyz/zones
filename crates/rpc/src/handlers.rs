@@ -14,6 +14,7 @@ use tracing::warn;
 
 use crate::{
     auth::AuthContext,
+    subscription::BoxWsSubscriptionFut,
     types::{
         BoxEyreFut, BoxFut, JsonRpcError, JsonRpcRequest, JsonRpcResponse, MethodTier,
         classify_method,
@@ -100,7 +101,7 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     ///
     /// Enforces that `from` equals the authenticated account (sets it if omitted,
     /// rejects with `-32004` on mismatch). State/block overrides are rejected
-    /// for non-sequencer callers (`-32602`).
+    /// with `-32602` for non-sequencer callers.
     fn call(
         &self,
         request: TempoTransactionRequest,
@@ -112,7 +113,7 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
     /// `eth_estimateGas(request, block, state_override)` — estimates gas for a transaction.
     ///
     /// Same `from`-enforcement as [`call`](Self::call). State overrides are
-    /// rejected for non-sequencer callers (`-32602`).
+    /// rejected with `-32602` for non-sequencer callers.
     fn estimate_gas(
         &self,
         request: TempoTransactionRequest,
@@ -157,6 +158,26 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `eth_uninstallFilter(id)` — removes a filter.
     fn uninstall_filter(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_>;
+
+    /// `eth_subscribe("newHeads")` — opens a stream of new block headers.
+    fn ws_subscribe_new_heads(&self, _auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
+
+    /// `eth_subscribe("logs", filter)` — opens a stream of matching logs.
+    fn ws_subscribe_logs(&self, _filter: Filter, _auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
+
+    /// `eth_subscribe("newPendingTransactions", full?)` — opens a stream of
+    /// pending transactions, returning either hashes or full transaction objects.
+    fn ws_subscribe_pending_transactions(
+        &self,
+        _full: bool,
+        _auth: AuthContext,
+    ) -> BoxWsSubscriptionFut<'_> {
+        Box::pin(async { Err(JsonRpcError::method_disabled()) })
+    }
 
     /// `zone_getAuthorizationTokenInfo()` — returns the authenticated account
     /// and token expiry.
@@ -838,6 +859,14 @@ mod tests {
         }
     }
 
+    fn sequencer_auth() -> AuthContext {
+        AuthContext {
+            caller: Address::repeat_byte(0xbb),
+            is_sequencer: true,
+            expires_at: 1_700_000_000,
+        }
+    }
+
     fn request(method: &str, params: serde_json::Value) -> JsonRpcRequest {
         serde_json::from_value(json!({
             "jsonrpc": "2.0",
@@ -905,5 +934,121 @@ mod tests {
         let resp = dispatch(&request("zone_getDepositStatus", json!([7])), &auth(), &api).await;
         assert!(resp.result.is_none());
         assert_eq!(resp.error.as_ref().unwrap().code, -32602);
+    }
+
+    #[tokio::test]
+    async fn rejects_state_override_for_non_sequencer_eth_call() {
+        let api = MockZoneRpcApi::default();
+        let resp = dispatch(
+            &request(
+                "eth_call",
+                json!([
+                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
+                    "latest",
+                    {}
+                ]),
+            ),
+            &auth(),
+            &api,
+        )
+        .await;
+
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("should reject state overrides");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "state overrides not allowed");
+    }
+
+    #[tokio::test]
+    async fn allows_state_override_for_sequencer_eth_call() {
+        let api = MockZoneRpcApi::default();
+        let resp = dispatch(
+            &request(
+                "eth_call",
+                json!([
+                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
+                    "latest",
+                    {}
+                ]),
+            ),
+            &sequencer_auth(),
+            &api,
+        )
+        .await;
+
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("sequencer request should reach the API");
+        assert_eq!(err.code, -32603);
+        assert_eq!(err.message, "not implemented");
+    }
+
+    #[tokio::test]
+    async fn rejects_state_override_for_non_sequencer_estimate_gas() {
+        let api = MockZoneRpcApi::default();
+        let resp = dispatch(
+            &request(
+                "eth_estimateGas",
+                json!([
+                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
+                    "latest",
+                    {}
+                ]),
+            ),
+            &auth(),
+            &api,
+        )
+        .await;
+
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("should reject state overrides");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "state overrides not allowed");
+    }
+
+    #[tokio::test]
+    async fn allows_state_override_for_sequencer_estimate_gas() {
+        let api = MockZoneRpcApi::default();
+        let resp = dispatch(
+            &request(
+                "eth_estimateGas",
+                json!([
+                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
+                    "latest",
+                    {}
+                ]),
+            ),
+            &sequencer_auth(),
+            &api,
+        )
+        .await;
+
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("sequencer request should reach the API");
+        assert_eq!(err.code, -32603);
+        assert_eq!(err.message, "not implemented");
+    }
+
+    #[tokio::test]
+    async fn rejects_extra_block_override_param_for_eth_call() {
+        let api = MockZoneRpcApi::default();
+        let resp = dispatch(
+            &request(
+                "eth_call",
+                json!([
+                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
+                    "latest",
+                    {},
+                    {}
+                ]),
+            ),
+            &auth(),
+            &api,
+        )
+        .await;
+
+        assert!(resp.result.is_none());
+        let err = resp.error.expect("should reject extra simulation params");
+        assert_eq!(err.code, -32602);
+        assert_eq!(err.message, "expected [request, block?, stateOverride?]");
     }
 }

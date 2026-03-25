@@ -7,7 +7,6 @@
 
 use alloy::primitives::{Address, B256, U256, address};
 use alloy_eips::NumHash;
-use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use zone::{
     ChainTempoStateExt,
@@ -356,9 +355,8 @@ async fn test_large_deposit_batch() -> eyre::Result<()> {
     .await?;
 
     // Verify all recipients received the correct amount
-    let zone_token = ITIP20::new(PATH_USD_ADDRESS, zone.provider());
     for recipient in &recipients {
-        let balance = zone_token.balanceOf(*recipient).call().await?;
+        let balance = zone.balance_of(PATH_USD_ADDRESS, *recipient).await?;
         assert_eq!(
             balance,
             U256::from(amount_each),

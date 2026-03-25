@@ -94,6 +94,7 @@ pub struct ZoneHeader {
     pub receipts_root: B256,
     pub number: u64,
     pub timestamp: u64,
+    pub protocol_version: u64,
 }
 
 #[derive(Debug)]
@@ -182,7 +183,7 @@ If `advanceTempo` is omitted for a block, the Tempo binding carries over from th
 The executor must enforce at most one `advanceTempo` at the start of each block
 (or zero, for blocks that do not advance Tempo), and enforce `finalizeWithdrawalBatch` only in the
 final block of the batch. The block hash is computed from the simplified zone header:
-`parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`.
+`parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`, `protocolVersion`.
 The transactions and receipts roots are computed over the full ordered list of zone transactions.
 
 ### Zone State Witness
@@ -379,6 +380,7 @@ pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error> {
             receipts_root: receipts_root,
             number: block.number,
             timestamp: block.timestamp,
+            protocol_version: block.protocol_version,
         };
         prev_block_hash = keccak256(rlp_encode(header));
         prev_header = header;

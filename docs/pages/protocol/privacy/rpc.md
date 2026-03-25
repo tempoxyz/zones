@@ -28,7 +28,7 @@ The signed message is the `keccak256` hash of the following packed encoding:
 bytes32 authorizationTokenHash = keccak256(abi.encodePacked(
     bytes32(0x54656d706f5a6f6e65525043),  // "TempoZoneRPC" magic prefix
     uint8(version),                         // spec version (currently 0)
-    uint64(zoneId),                         // zone this key is valid for
+    uint32(zoneId),                         // zone this key is valid for
     uint64(chainId),                        // zone chain ID (replay protection)
     address(zonePortal),                    // ZonePortal address on Tempo
     uint64(issuedAt),                       // unix timestamp (seconds) of issuance
@@ -137,10 +137,10 @@ Content-Type: application/json
 The `X-Authorization-Token` value is a single hex-encoded blob containing the concatenation of the signature and the authorization token fields:
 
 ```
-<signature bytes><version: 1 byte><zoneId: 8 bytes><chainId: 8 bytes><zonePortal: 20 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
+<signature bytes><version: 1 byte><zoneId: 4 bytes><chainId: 8 bytes><zonePortal: 20 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
 ```
 
-The authorization token fields are always exactly 53 bytes (1 + 8 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 53 bytes** as the authorization token fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` for legacy V1 or `0x04` for V2 and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
+The authorization token fields are always exactly 49 bytes (1 + 4 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 49 bytes** as the authorization token fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` for legacy V1 or `0x04` for V2 and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
 
 Requests without an authorization token receive a `401 Unauthorized` HTTP response. Requests with an expired, malformed, or unauthorized token receive `403 Forbidden`. If Keychain token verification fails because the server cannot read `AccountKeychain.getKey(...)`, the server returns `500 Internal Server Error`.
 
@@ -196,8 +196,8 @@ These methods are available to any authenticated caller but filter results to on
 
 | Method | Scoping rule |
 |--------|-------------|
-| `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected with error code `-32004` (account mismatch). Requests that include a state override set or block override object (client-specific simulation extensions) MUST be rejected with `-32602` (invalid params). |
-| `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. Returns `-32004` on mismatch. Requests that include a state override set or block override object MUST be rejected with `-32602` (invalid params). |
+| `eth_call` | The `from` field MUST equal the authenticated account. If `from` is omitted, the RPC server sets it to the authenticated account. If `from` is present and does not match, the call is rejected with error code `-32004` (account mismatch). Requests from non-sequencer callers that include a state override set or block override object (client-specific simulation extensions) MUST be rejected with `-32602` (invalid params). |
+| `eth_estimateGas` | Same restriction as `eth_call`: only the authenticated account can simulate transactions. Returns `-32004` on mismatch. Requests from non-sequencer callers that include a state override set or block override object MUST be rejected with `-32602` (invalid params). |
 
 **Rationale**: Transaction simulation could reveal state about other accounts (e.g., simulating a transfer to probe whether a recipient exists). Restricting simulation to the caller's own transactions prevents this.
 

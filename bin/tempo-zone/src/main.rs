@@ -17,6 +17,7 @@ use reth_ethereum::chainspec::EthChainSpec;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone::{ZoneNode, evm::ZoneEvmConfig};
+use zone_primitives::constants::zone_chain_id;
 
 type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
 
@@ -115,7 +116,7 @@ struct ZoneArgs {
     /// Zone ID for the private RPC auth token validation.
     /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
-    pub zone_id: u64,
+    pub zone_id: u32,
 
     /// Port for the private zone RPC server (0 for OS-assigned).
     #[arg(
@@ -209,8 +210,21 @@ fn main() {
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
             info!(target: "reth::cli", "Tempo Zone node started");
 
+            // Verify the chain ID matches the deterministic derivation from the zone ID.
+            // Skip when zone_id is 0 (local testing default).
+            if args.zone_id != 0 {
+                let expected_chain_id = zone_chain_id(args.zone_id);
+                let actual_chain_id = handle.node.chain_spec().chain().id();
+                if actual_chain_id != expected_chain_id {
+                    eyre::bail!(
+                        "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
+                        args.zone_id,
+                        expected_chain_id,
+                        actual_chain_id,
+                    );
+                }
+            }
 
-            // TODO: can we encapsulate this into its own struct?
             // Launch the private zone RPC server.
             let eth_handlers = handle.node.eth_handlers().clone();
             let zone_rpc_url = handle
@@ -222,6 +236,9 @@ fn main() {
                 listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
                 l1_rpc_url: args.l1_rpc_url.clone(),
                 zone_rpc_url: zone_rpc_url.clone(),
+                retry_connection_interval: Duration::from_millis(
+                    args.l1_retry_connection_interval_ms,
+                ),
                 zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
                 zone_portal: args.portal_address,
@@ -245,6 +262,9 @@ fn main() {
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
                 l1_rpc_url: args.l1_rpc_url,
+                retry_connection_interval: Duration::from_millis(
+                    args.l1_retry_connection_interval_ms,
+                ),
                 withdrawal_poll_interval: Duration::from_secs(
                     args.poll_interval_secs,
                 ),
@@ -265,8 +285,6 @@ fn main() {
                 "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
             );
 
-            // TODO: can probably encapsulate this into its own fn as well, can we add this in a
-        // separate task or fn or something so its clear
             // Spawn as critical tasks — node shuts down if either exits.
             handle.node.task_executor.spawn_critical_task("zone-monitor", async move {
                 tokio::select! {

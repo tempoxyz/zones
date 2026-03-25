@@ -1,5 +1,6 @@
 use alloy::genesis::Genesis;
 use alloy_consensus::Header;
+use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::Filter;
@@ -59,6 +60,13 @@ pub(crate) const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 /// Default poll interval for e2e tests.
 pub(crate) const DEFAULT_POLL: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Gas limit for `ZoneOutbox.requestWithdrawal` test transactions.
+///
+/// The call now needs enough headroom for a fixed-gas `transferFrom`, the
+/// subsequent `burn`, and storage writes for callback payloads in router-based
+/// withdrawals.
+const WITHDRAWAL_TX_GAS: u64 = 1_000_000;
 
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
@@ -244,7 +252,7 @@ impl ZoneTestNode {
                 // balanceOf may revert with Uninitialized() if the token hasn't
                 // been created yet (e.g. waiting for a TokenEnabled event to be
                 // processed). Treat reverts as "not ready" rather than fatal.
-                let balance = match tip20.balanceOf(account).call().await {
+                let balance = match tip20.balanceOf(account).from(account).call().await {
                     Ok(b) => b,
                     Err(_) => return Ok(None),
                 };
@@ -289,6 +297,7 @@ impl ZoneTestNode {
         use tempo_contracts::precompiles::ITIP20;
         Ok(ITIP20::new(token, self.provider())
             .balanceOf(account)
+            .from(account)
             .call()
             .await?)
     }
@@ -346,7 +355,14 @@ impl ZoneTestNode {
 
     /// Start a zone node pointing at a real L1 WebSocket URL.
     pub(crate) async fn start(l1_ws_url: String, portal_address: Address) -> eyre::Result<Self> {
-        Self::launch(l1_ws_url, portal_address, None, next_unique_chain_id()).await
+        Self::launch(
+            l1_ws_url,
+            portal_address,
+            None,
+            next_unique_chain_id(),
+            Address::ZERO,
+        )
+        .await
     }
 
     /// Start a zone node connected to a real L1, generating genesis from the L1's
@@ -368,6 +384,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
+            Address::ZERO,
             throwaway_key,
         )
         .await
@@ -392,6 +409,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
+            Address::ZERO,
             sequencer_key,
         )
         .await
@@ -409,6 +427,7 @@ impl ZoneTestNode {
             Address::ZERO,
             None,
             next_unique_chain_id(),
+            Address::ZERO,
         )
         .await
     }
@@ -418,7 +437,14 @@ impl ZoneTestNode {
     /// Useful for running multiple zone nodes in a single test — each needs
     /// a unique chain ID to avoid datadir collisions.
     pub(crate) async fn start_local_with_chain_id(chain_id: u64) -> eyre::Result<Self> {
-        Self::launch(DUMMY_L1_URL.to_string(), Address::ZERO, None, chain_id).await
+        Self::launch(
+            DUMMY_L1_URL.to_string(),
+            Address::ZERO,
+            None,
+            chain_id,
+            Address::ZERO,
+        )
+        .await
     }
 
     async fn launch(
@@ -426,6 +452,7 @@ impl ZoneTestNode {
         portal_address: Address,
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
+        sequencer: Address,
     ) -> eyre::Result<Self> {
         // Generate a throwaway key for tests that don't use encrypted deposits.
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
@@ -435,6 +462,7 @@ impl ZoneTestNode {
             genesis_tempo_block_number,
             chain_id,
             None,
+            sequencer,
             throwaway_key,
         )
         .await
@@ -446,6 +474,7 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
         custom_genesis: Option<Genesis>,
+        sequencer: Address,
         sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
@@ -461,7 +490,7 @@ impl ZoneTestNode {
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
-            Address::ZERO, // sequencer address (overridden by sequencer_key)
+            sequencer,
             sequencer_key,
             4,
             std::time::Duration::from_millis(100),
@@ -2111,6 +2140,7 @@ impl ZoneAccount {
         // Approve outbox for this token
         ITIP20::new(token, &self.l2_provider)
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+            .gas(150_000)
             .send()
             .await?
             .get_receipt()
@@ -2130,6 +2160,7 @@ impl ZoneAccount {
                 fallback_recipient,
                 args.data,
             )
+            .gas(WITHDRAWAL_TX_GAS)
             .send()
             .await?
             .get_receipt()
@@ -2152,6 +2183,7 @@ pub(crate) async fn spawn_sequencer(
     let config = zone::ZoneSequencerConfig {
         portal_address,
         l1_rpc_url: l1.http_url().to_string(),
+        retry_connection_interval: Duration::from_millis(100),
         withdrawal_poll_interval: Duration::from_millis(500),
         outbox_address: ZONE_OUTBOX_ADDRESS,
         inbox_address: ZONE_INBOX_ADDRESS,
@@ -2170,7 +2202,12 @@ pub(crate) async fn start_local_zone_with_fixture(
 ) -> eyre::Result<(ZoneTestNode, L1Fixture)> {
     let zone = ZoneTestNode::start_local().await?;
     let fixture = L1Fixture::new();
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, seed_blocks);
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        Address::ZERO,
+        Address::ZERO,
+        seed_blocks,
+    );
     Ok((zone, fixture))
 }
 
@@ -2178,7 +2215,12 @@ pub(crate) async fn start_local_zone_with_fixture(
 ///
 /// Use when multiple zones share the same fixture timeline — call once per zone.
 pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, seed_blocks: u64) {
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, seed_blocks);
+    fixture.seed_l1_cache(
+        zone.l1_state_cache(),
+        Address::ZERO,
+        Address::ZERO,
+        seed_blocks,
+    );
 }
 
 // ============ Private RPC Test Utilities ============
@@ -2189,7 +2231,7 @@ pub(crate) fn seed_fixture_for_zone(fixture: &L1Fixture, zone: &ZoneTestNode, se
 /// suitable for the `X-Authorization-Token` header.
 fn build_auth_token(
     signer: &alloy_signer_local::PrivateKeySigner,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
 ) -> String {
@@ -2213,7 +2255,7 @@ fn build_auth_token(
 
 fn build_auth_token_with_signature(
     signature: TempoSignature,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
 ) -> String {
@@ -2228,7 +2270,7 @@ fn build_auth_token_with_signature(
 
 fn build_p256_auth_token(
     signing_key: &P256SigningKey,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
 ) -> String {
@@ -2246,7 +2288,7 @@ fn build_p256_auth_token(
 
 fn build_webauthn_auth_token(
     signing_key: &P256SigningKey,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
     challenge_digest: Option<B256>,
@@ -2268,7 +2310,7 @@ fn build_keychain_auth_token(
     signing_key: &P256SigningKey,
     root_account: Address,
     version: u8,
-    zone_id: u64,
+    zone_id: u32,
     chain_id: u64,
     portal: Address,
 ) -> (String, Address) {
@@ -2542,7 +2584,7 @@ impl PrivateRpcTestCtx {
     pub(crate) fn build_bad_token(
         &self,
         signer: &alloy_signer_local::PrivateKeySigner,
-        zone_id: u64,
+        zone_id: u32,
         chain_id: u64,
         portal: Address,
     ) -> String {
@@ -2714,20 +2756,28 @@ fn build_private_rpc_ctx(
 /// - A private RPC server on a random port
 /// - Sequencer credentials for testing access control
 pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTestCtx> {
-    let zone = ZoneTestNode::start_local().await?;
-    let fixture = L1Fixture::new();
-
-    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, 20);
-
-    let chain_id = zone_chain_id(&zone).await?;
-
     let sequencer_signer = alloy_signer_local::PrivateKeySigner::random();
     let sequencer_address = sequencer_signer.address();
+
+    let zone = ZoneTestNode::launch(
+        DUMMY_L1_URL.to_string(),
+        Address::ZERO,
+        None,
+        next_unique_chain_id(),
+        sequencer_address,
+    )
+    .await?;
+    let fixture = L1Fixture::new();
+
+    fixture.seed_l1_cache(zone.l1_state_cache(), Address::ZERO, sequencer_address, 20);
+
+    let chain_id = zone_chain_id(&zone).await?;
 
     let config = zone::rpc::PrivateRpcConfig {
         listen_addr: ([127, 0, 0, 1], 0).into(),
         l1_rpc_url: DUMMY_L1_URL.to_string(),
         zone_rpc_url: zone.http_url().to_string(),
+        retry_connection_interval: Duration::from_millis(100),
         zone_id: 0,
         chain_id,
         zone_portal: Address::ZERO,
@@ -2792,6 +2842,7 @@ async fn start_zone_with_private_rpc_l1_inner(
         listen_addr: ([127, 0, 0, 1], 0).into(),
         l1_rpc_url: l1.http_url().to_string(),
         zone_rpc_url: zone.http_url().to_string(),
+        retry_connection_interval: Duration::from_millis(100),
         zone_id: 1,
         chain_id,
         zone_portal: portal_address,
@@ -2861,19 +2912,30 @@ impl L1Fixture {
         &self,
         cache: &SharedL1StateCache,
         portal_address: Address,
+        sequencer: Address,
         num_blocks: u64,
     ) {
         let mut cache = cache.write();
         let deposit_queue_hash_slot = B256::with_last_byte(4);
 
         for block in 0..=num_blocks {
-            // Sequencer slot (0) — not actually read if msg.sender == address(0),
-            // but seed it to be safe.
-            cache.set(portal_address, B256::ZERO, block, B256::ZERO);
+            let mut sequencer_bytes = [0u8; 32];
+            sequencer_bytes[12..].copy_from_slice(sequencer.as_slice());
+            cache.set(
+                portal_address,
+                B256::ZERO,
+                block,
+                B256::new(sequencer_bytes),
+            );
             // Deposit queue hash slot (4) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
         }
+
+        cache.update_anchor(NumHash {
+            number: num_blocks,
+            hash: B256::ZERO,
+        });
     }
 
     /// Build a [`TempoHeader`] for the next L1 block.
@@ -2961,6 +3023,7 @@ impl L1Fixture {
         let events = L1PortalEvents {
             deposits: vec![],
             enabled_tokens: tokens,
+            ..Default::default()
         };
         queue.enqueue(header, events, vec![]);
     }

@@ -13,6 +13,12 @@ export L1_RPC_URL="wss://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
 just deploy-zone my-zone
 ```
 
+To choose a different initial TIP-20 on the portal at deploy time, pass it as the second positional argument:
+
+```bash
+just deploy-zone my-zone alphausd
+```
+
 This single command will:
 1. Generate a fresh sequencer keypair
 2. Fund the sequencer on L1 via `tempo_fundAddress`
@@ -118,15 +124,24 @@ export PRIVATE_KEY="$SEQUENCER_KEY"
 just create-zone my-zone
 ```
 
+To choose the initial TIP-20 enabled on the portal, pass it as the second positional argument:
+
+```bash
+just create-zone my-zone alphausd
+```
+
 This creates `generated/my-zone/` containing:
 - **`genesis.json`** — Zone L2 genesis state (system contracts, fee token, etc.)
 - **`zone.json`** — Deployment metadata (portal address, zone ID, anchor block, `zoneFactory`, and optional router/sequencer metadata)
+
+This initial token controls the first L1 TIP-20 the portal accepts and mirrors onto the zone. The zone's fee token in genesis remains `pathUSD`.
 
 You can also run the xtask directly for more control:
 
 ```bash
 cargo run -p tempo-xtask -- create-zone \
   --output generated/my-zone \
+  --initial-token 0x20c0000000000000000000000000000000000001 \
   --sequencer "$SEQUENCER_ADDR" \
   --private-key "$SEQUENCER_KEY"
 ```
@@ -306,7 +321,7 @@ just set-supply-cap <token-address> 1000000000000
 
 ### Enable a Token on the Zone
 
-To deposit a custom token into the zone, it must be enabled on the ZonePortal. Currently the portal enables pathUSD by default. For custom tokens, the token must exist on L1 and the portal must recognise it. Only the sequencer can enable tokens.
+To deposit a custom token into the zone, it must be enabled on the ZonePortal. By default the portal starts with `pathUSD`, or whichever TIP-20 you selected with `just create-zone <name> <token>` or `just deploy-zone <name> <token>`. Additional tokens must exist on L1 and be enabled by the sequencer.
 
 ```bash
 # Enable a token by address (requires SEQUENCER_KEY, L1_RPC_URL, L1_PORTAL_ADDRESS)
@@ -441,7 +456,7 @@ graph TB
 | `--l1.rpc-url` | (required) | L1 WebSocket RPC URL |
 | `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
 | `--l1.genesis-block-number` | (from zone.json) | L1 block when the zone was created |
-| `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth) |
+| `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth). The zone's chain ID is derived as `4217000000 + zone_id`. |
 | `--sequencer-key` | (optional) | Sequencer private key for block production |
 | `--block.interval-ms` | 250 | Block building interval |
 | `--zone.batch-interval-secs` | 60 | Max seconds to accumulate zone blocks before submitting a batch to L1 |
@@ -458,13 +473,14 @@ graph TB
 | `SEQUENCER_KEY` | For sequencing | Sequencer private key |
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
+| `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
 
 ## Justfile Commands Reference
 
 | Command | Description |
 |---------|-------------|
-| `just deploy-zone <name>` | One-shot: keygen → fund → create → genesis → start node |
-| `just create-zone <name>` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`) |
+| `just deploy-zone <name> [<tip20>]` | One-shot: keygen → fund → create → genesis → start node |
+| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`) |
 | `just deploy-router <name>` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal` | Approve portal to spend tokens on L1 |

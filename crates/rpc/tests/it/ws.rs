@@ -1,13 +1,13 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, b256};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt, stream};
 use p256::ecdsa::SigningKey as P256SigningKey;
 use parking_lot::Mutex;
 use rand::thread_rng;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
     KeyInfo, SignatureType as KeyInfoSignatureType,
 };
@@ -17,6 +17,7 @@ use zone_rpc::{
     auth::build_token_fields,
     handlers::ZoneRpcApi,
     start_private_rpc,
+    subscription::{BoxWsSubscriptionFut, WsSubscriptionStream},
     types::{BoxEyreFut, BoxFut, JsonRpcError},
 };
 
@@ -36,6 +37,7 @@ use auth_tokens::{
 struct MockZoneRpcApi {
     key_infos: Mutex<HashMap<(Address, Address), KeyInfo>>,
     key_lookup_error: Option<&'static str>,
+    ws_subscriptions_enabled: bool,
 }
 
 impl MockZoneRpcApi {
@@ -54,6 +56,7 @@ impl MockZoneRpcApi {
         Self {
             key_infos: Mutex::new(key_infos),
             key_lookup_error: None,
+            ws_subscriptions_enabled: false,
         }
     }
 
@@ -61,6 +64,15 @@ impl MockZoneRpcApi {
         Self {
             key_infos: Mutex::new(HashMap::new()),
             key_lookup_error: Some(message),
+            ws_subscriptions_enabled: false,
+        }
+    }
+
+    fn with_ws_subscriptions() -> Self {
+        Self {
+            key_infos: Mutex::new(HashMap::new()),
+            key_lookup_error: None,
+            ws_subscriptions_enabled: true,
         }
     }
 }
@@ -123,6 +135,98 @@ impl ZoneRpcApi for MockZoneRpcApi {
     stub!(new_block_filter, _c: zone_rpc::auth::AuthContext);
     stub!(uninstall_filter, _a: alloy_rpc_types_eth::FilterId, _c: zone_rpc::auth::AuthContext);
 
+    fn ws_subscribe_new_heads(
+        &self,
+        _auth: zone_rpc::auth::AuthContext,
+    ) -> BoxWsSubscriptionFut<'_> {
+        let enabled = self.ws_subscriptions_enabled;
+        Box::pin(async move {
+            if !enabled {
+                return Err(JsonRpcError::method_disabled());
+            }
+
+            let stream = stream::iter(vec![zone_rpc::types::to_raw(&json!({
+                "hash": format!(
+                    "{:#x}",
+                    b256!("0x4444444444444444444444444444444444444444444444444444444444444444")
+                ),
+                "number": "0x42",
+                "parentHash": format!("{:#x}", alloy_primitives::B256::ZERO),
+                "logsBloom": format!("0x{}", "0".repeat(512)),
+            }))]);
+            let stream: WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
+    fn ws_subscribe_logs(
+        &self,
+        _filter: alloy_rpc_types_eth::Filter,
+        _auth: zone_rpc::auth::AuthContext,
+    ) -> BoxWsSubscriptionFut<'_> {
+        let enabled = self.ws_subscriptions_enabled;
+        Box::pin(async move {
+            if !enabled {
+                return Err(JsonRpcError::method_disabled());
+            }
+
+            let stream = stream::iter(vec![zone_rpc::types::to_raw(&json!({
+                "address": format!("{:#x}", Address::ZERO),
+                "topics": [format!(
+                    "{:#x}",
+                    b256!("0x1111111111111111111111111111111111111111111111111111111111111111")
+                )],
+                "data": "0x",
+                "blockHash": format!(
+                    "{:#x}",
+                    b256!("0x2222222222222222222222222222222222222222222222222222222222222222")
+                ),
+                "blockNumber": "0x42",
+                "transactionHash": format!(
+                    "{:#x}",
+                    b256!("0x3333333333333333333333333333333333333333333333333333333333333333")
+                ),
+                "transactionIndex": "0x0",
+                "logIndex": "0x0",
+                "removed": false
+            }))]);
+            let stream: WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
+    fn ws_subscribe_pending_transactions(
+        &self,
+        full: bool,
+        _auth: zone_rpc::auth::AuthContext,
+    ) -> BoxWsSubscriptionFut<'_> {
+        let enabled = self.ws_subscriptions_enabled;
+        Box::pin(async move {
+            if !enabled {
+                return Err(JsonRpcError::method_disabled());
+            }
+
+            let stream = if full {
+                stream::iter(vec![zone_rpc::types::to_raw(&json!({
+                    "hash": format!(
+                        "{:#x}",
+                        b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
+                    ),
+                    "from": format!("{:#x}", Address::repeat_byte(0x11)),
+                    "to": format!("{:#x}", Address::repeat_byte(0x22)),
+                    "nonce": "0x7"
+                }))])
+            } else {
+                stream::iter(vec![zone_rpc::types::to_raw(&format!(
+                    "{:#x}",
+                    b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
+                ))])
+            };
+            let stream: WsSubscriptionStream = Box::pin(stream);
+            Ok(stream)
+        })
+    }
+
     fn zone_get_authorization_token_info(&self, auth: zone_rpc::auth::AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             zone_rpc::types::to_raw(&serde_json::json!({
@@ -163,7 +267,7 @@ impl ZoneRpcApi for MockZoneRpcApi {
 // Test context
 // ---------------------------------------------------------------------------
 
-const ZONE_ID: u64 = 1;
+const ZONE_ID: u32 = 1;
 const CHAIN_ID: u64 = 42;
 const PORTAL: Address = Address::ZERO;
 
@@ -179,6 +283,7 @@ impl TestContext {
             listen_addr: ([127, 0, 0, 1], 0).into(),
             l1_rpc_url: "http://127.0.0.1:1".to_string(),
             zone_rpc_url: "http://127.0.0.1:1".to_string(),
+            retry_connection_interval: std::time::Duration::from_millis(100),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
             zone_portal: PORTAL,
@@ -210,6 +315,10 @@ impl TestContext {
 /// Build a JSON-RPC request string.
 fn jsonrpc(method: &str, id: u64) -> String {
     serde_json::json!({"jsonrpc":"2.0","method":method,"params":[],"id":id}).to_string()
+}
+
+fn jsonrpc_with_params(method: &str, params: Value, id: u64) -> String {
+    serde_json::json!({"jsonrpc":"2.0","method":method,"params":params,"id":id}).to_string()
 }
 
 /// Connect to the WS endpoint using the X-Authorization-Token header.
@@ -424,12 +533,12 @@ async fn ws_unknown_method() {
 }
 
 #[tokio::test]
-async fn ws_disabled_method() {
+async fn ws_disabled_subscription_method() {
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let mut ws = connect_with_header(&ctx).await;
 
     ws.send(tungstenite::Message::Text(
-        jsonrpc("eth_subscribe", 1).into(),
+        jsonrpc_with_params("eth_subscribe", json!(["newHeads"]), 1).into(),
     ))
     .await
     .unwrap();
@@ -437,6 +546,233 @@ async fn ws_disabled_method() {
 
     assert_eq!(resp["id"], 1);
     assert_eq!(resp["error"]["code"], -32006);
+}
+
+#[tokio::test]
+async fn ws_subscribe_new_heads_emits_redacted_headers() {
+    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["newHeads"]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+
+    assert_eq!(resp["id"], 1);
+    let subscription_id = resp["result"].as_str().expect("subscription id");
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("timed out waiting for newHeads notification")
+        .unwrap()
+        .unwrap();
+    let notification = parse_response(notification);
+
+    assert_eq!(notification["method"], "eth_subscription");
+    assert_eq!(notification["params"]["subscription"], subscription_id);
+    assert_eq!(
+        notification["params"]["result"]["hash"],
+        format!(
+            "{:#x}",
+            b256!("0x4444444444444444444444444444444444444444444444444444444444444444")
+        )
+    );
+    assert_eq!(
+        notification["params"]["result"]["logsBloom"],
+        format!("0x{}", "0".repeat(512))
+    );
+    assert!(
+        notification["params"]["result"]
+            .get("transactions")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn ws_subscribe_logs_emits_notifications() {
+    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["logs", {}]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+
+    assert_eq!(resp["id"], 1);
+    let subscription_id = resp["result"].as_str().expect("subscription id");
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("timed out waiting for log notification")
+        .unwrap()
+        .unwrap();
+    let notification = parse_response(notification);
+
+    assert_eq!(notification["method"], "eth_subscription");
+    assert_eq!(notification["params"]["subscription"], subscription_id);
+    assert_eq!(notification["params"]["result"]["blockNumber"], "0x42");
+}
+
+#[tokio::test]
+async fn ws_subscribe_pending_transactions_hashes_emits_notifications() {
+    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["newPendingTransactions"]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+
+    assert_eq!(resp["id"], 1);
+    let subscription_id = resp["result"].as_str().expect("subscription id");
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("timed out waiting for pending tx hash notification")
+        .unwrap()
+        .unwrap();
+    let notification = parse_response(notification);
+
+    assert_eq!(notification["method"], "eth_subscription");
+    assert_eq!(notification["params"]["subscription"], subscription_id);
+    assert_eq!(
+        notification["params"]["result"],
+        format!(
+            "{:#x}",
+            b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
+        )
+    );
+}
+
+#[tokio::test]
+async fn ws_subscribe_pending_transactions_full_emits_notifications() {
+    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["newPendingTransactions", true]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+
+    assert_eq!(resp["id"], 1);
+    let subscription_id = resp["result"].as_str().expect("subscription id");
+
+    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
+        .await
+        .expect("timed out waiting for full pending tx notification")
+        .unwrap()
+        .unwrap();
+    let notification = parse_response(notification);
+
+    assert_eq!(notification["method"], "eth_subscription");
+    assert_eq!(notification["params"]["subscription"], subscription_id);
+    assert_eq!(notification["params"]["result"]["nonce"], "0x7");
+    assert_eq!(
+        notification["params"]["result"]["from"],
+        format!("{:#x}", Address::repeat_byte(0x11))
+    );
+}
+
+#[tokio::test]
+async fn ws_unsubscribe_removes_subscription() {
+    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["logs", {}]), 1).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = parse_response(ws.next().await.unwrap().unwrap());
+    let subscription_id = resp["result"].clone();
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_unsubscribe", json!([subscription_id]), 2).into(),
+    ))
+    .await
+    .unwrap();
+    let resp = loop {
+        let message = parse_response(ws.next().await.unwrap().unwrap());
+        if message["id"] == 2 {
+            break message;
+        }
+    };
+
+    assert_eq!(resp["id"], 2);
+    assert_eq!(resp["result"], true);
+}
+
+#[tokio::test]
+async fn ws_subscribe_rejects_invalid_param_shapes() {
+    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    for (id, params) in [
+        (1, json!(["newHeads", false])),
+        (2, json!(["logs", false])),
+        (3, json!(["newPendingTransactions", {}])),
+    ] {
+        ws.send(tungstenite::Message::Text(
+            jsonrpc_with_params("eth_subscribe", params, id).into(),
+        ))
+        .await
+        .unwrap();
+        let resp = parse_response(ws.next().await.unwrap().unwrap());
+        assert_eq!(resp["id"], id);
+        assert_eq!(resp["error"]["code"], -32602);
+    }
+}
+
+#[tokio::test]
+async fn ws_subscribe_rejects_too_many_active_subscriptions() {
+    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
+    let mut ws = connect_with_header(&ctx).await;
+
+    for id in 1..=32 {
+        ws.send(tungstenite::Message::Text(
+            jsonrpc_with_params("eth_subscribe", json!(["newHeads"]), id).into(),
+        ))
+        .await
+        .unwrap();
+
+        let resp = loop {
+            let message = parse_response(ws.next().await.unwrap().unwrap());
+            if message["id"] == id {
+                break message;
+            }
+        };
+
+        assert!(resp["result"].as_str().is_some());
+    }
+
+    ws.send(tungstenite::Message::Text(
+        jsonrpc_with_params("eth_subscribe", json!(["newHeads"]), 33).into(),
+    ))
+    .await
+    .unwrap();
+
+    let resp = loop {
+        let message = parse_response(ws.next().await.unwrap().unwrap());
+        if message["id"] == 33 {
+            break message;
+        }
+    };
+
+    assert_eq!(resp["error"]["code"], -32602);
+    assert!(
+        resp["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("too many active subscriptions")
+    );
 }
 
 #[tokio::test]
