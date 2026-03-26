@@ -162,8 +162,12 @@ impl BatchSubmitter {
 
         let anchor_mode = self.resolve_anchor_mode(batch.tempo_block_number).await?;
         let recent_tempo_block_number = anchor_mode.recent_block_number();
-        let current_l1_block = self.l1_provider.get_block_number().await?;
-        let portal_block_hash = self.read_portal_block_hash().await?;
+        let (current_l1_block, portal_block_hash) = tokio::join!(
+            self.l1_provider.get_block_number(),
+            self.read_portal_block_hash(),
+        );
+        let current_l1_block = current_l1_block?;
+        let portal_block_hash = portal_block_hash?;
 
         info!(
             ?anchor_mode,
