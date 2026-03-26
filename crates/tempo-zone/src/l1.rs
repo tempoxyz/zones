@@ -1714,11 +1714,13 @@ impl Default for DepositQueue {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::abi::{DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT};
+    use crate::abi::{
+        DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT,
+        ZonePortal::{SequencerTransferStarted, SequencerTransferred},
+    };
     use alloy_consensus::Header;
     use alloy_primitives::{FixedBytes, address};
     use alloy_sol_types::SolEvent;
-    use std::collections::HashSet;
 
     fn make_test_header(number: u64) -> TempoHeader {
         TempoHeader {
