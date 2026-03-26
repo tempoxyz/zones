@@ -471,9 +471,6 @@ macro_rules! define_abi {
                     uint128 amount
                 );
 
-                #[derive(Debug)]
-                event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
-
                 /// Emitted when a TIP-20 token is enabled on the zone via advanceTempo.
                 #[derive(Debug)]
                 event TokenEnabled(address indexed token, string name, string symbol, string currency);
@@ -483,15 +480,10 @@ macro_rules! define_abi {
                 error MissingDecryptionData();
                 error ExtraDecryptionData();
                 error InvalidSharedSecretProof();
-                error TooManyDeposits();
-
                 function processedDepositQueueHash() external view returns (bytes32);
-                function maxDepositsPerTempoBlock() external view returns (uint256);
                 function tempoPortal() external view returns (address);
                 function tempoState() external view returns (address);
                 function config() external view returns (address);
-
-                function setMaxDepositsPerTempoBlock(uint256 _maxDepositsPerTempoBlock) external;
 
                 function advanceTempo(
                     bytes calldata header,
