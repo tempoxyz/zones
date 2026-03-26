@@ -72,6 +72,7 @@ struct ZoneArgs {
     )]
     pub zone_batch_interval_secs: u64,
 
+    /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(
         long = "withdrawal-poll-interval-secs",
         env = "WITHDRAWAL_POLL_INTERVAL_SECS",
@@ -93,6 +94,8 @@ struct ZoneArgs {
     )]
     pub l1_fetch_concurrency: usize,
 
+
+    /// Interval in milliseconds between WebSocket reconnection attempts to L1.
     #[arg(
         long = "l1.retry-connection-interval",
         env = "L1_RETRY_CONNECTION_INTERVAL_MS",
@@ -100,6 +103,8 @@ struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
+    /// Zone ID for the private RPC auth token validation.
+    /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
     pub zone_id: u32,
 
@@ -151,7 +156,7 @@ fn main() {
     let run_result = cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
-
+            // Disable peer discovery — the zone node has no peering.
             builder.config_mut().network.discovery.disable_discovery = true;
             // Disable the auth (Engine API) server — the zone node derives blocks
             // from L1, so no external consensus client or Engine API is needed.
@@ -252,7 +257,6 @@ fn main() {
             };
 
 
-            // NOTE: is this batcher, or what exactly is this doing
             let seq_handle = zone::spawn_zone_sequencer(sequencer_config, sequencer_signer).await;
 
             info!(
