@@ -29,6 +29,7 @@
 use std::collections::BTreeMap;
 
 use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
@@ -212,69 +213,30 @@ impl BatchSubmitter {
             "submitBatch tx accepted by RPC; waiting for confirmation"
         );
 
-        let confirmed_tx_hash = pending
+        let receipt_result = pending
             .with_required_confirmations(1)
             .with_timeout(Some(std::time::Duration::from_secs(30)))
-            .watch()
+            .get_receipt()
             .await;
 
-        let tx_hash = match confirmed_tx_hash {
-            Ok(hash) => hash,
+        let receipt = match receipt_result {
+            Ok(receipt) => receipt,
             Err(err) => {
                 warn!(
                     %tx_hash,
                     timeout_secs = 30,
                     error = %err,
-                    "submitBatch tx was broadcast but not confirmed before timeout"
+                    "submitBatch tx was broadcast but receipt not obtained"
                 );
-
-                match self.l1_provider.get_transaction_by_hash(tx_hash).await {
-                    Ok(Some(_)) => {
-                        warn!(
-                            %tx_hash,
-                            "submitBatch tx is still known by RPC after confirmation timeout"
-                        );
-                    }
-                    Ok(None) => {
-                        warn!(
-                            %tx_hash,
-                            "submitBatch tx is not known by RPC after confirmation timeout"
-                        );
-                    }
-                    Err(fetch_err) => {
-                        warn!(
-                            %tx_hash,
-                            error = %fetch_err,
-                            "Failed to query submitBatch tx by hash after confirmation timeout"
-                        );
-                    }
-                }
-
-                match self.l1_provider.get_transaction_receipt(tx_hash).await {
-                    Ok(Some(_)) => {
-                        warn!(
-                            %tx_hash,
-                            "submitBatch receipt is available despite confirmation timeout"
-                        );
-                    }
-                    Ok(None) => {
-                        warn!(
-                            %tx_hash,
-                            "submitBatch receipt is still unavailable after confirmation timeout"
-                        );
-                    }
-                    Err(fetch_err) => {
-                        warn!(
-                            %tx_hash,
-                            error = %fetch_err,
-                            "Failed to query submitBatch receipt after confirmation timeout"
-                        );
-                    }
-                }
-
                 return Err(err.into());
             }
         };
+
+        if !receipt.status() {
+            return Err(eyre::eyre!(
+                "submitBatch tx {tx_hash} was included but reverted on L1"
+            ));
+        }
 
         info!(%tx_hash, "Batch submitted to L1");
 
