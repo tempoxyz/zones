@@ -290,11 +290,10 @@ impl PolicyProvider {
     ///
     /// Panics if called from within an async context on the same tokio runtime.
     pub fn resolve_transfer_policy_id(&self, token: Address) -> Result<u64> {
-        if let Some(id) = self.cache.read().get_token_policy(token, u64::MAX) {
+        let block_number = self.cache.read().last_l1_block();
+        if let Some(id) = self.cache.read().get_token_policy(token, block_number) {
             return Ok(id);
         }
-
-        let block_number = self.cache.read().last_l1_block();
         tokio::task::block_in_place(|| {
             self.runtime_handle
                 .block_on(self.resolve_policy_id(token, block_number))
@@ -394,9 +393,9 @@ impl PolicyProvider {
     /// Cache-first, RPC-fallback authorization check by policy ID (no token resolution).
     ///
     /// Intended for the zone TIP-403 proxy precompile which receives `policyId`
-    /// directly. Uses `u64::MAX` as block number to query the latest cached state.
-    /// On cache miss, falls back to L1 RPC (using `block_in_place`) and populates
-    /// the cache so subsequent lookups are instant.
+    /// directly. Queries cache at `last_l1_block` to ensure deterministic results
+    /// across nodes. On cache miss, falls back to L1 RPC (using `block_in_place`)
+    /// and populates the cache so subsequent lookups are instant.
     ///
     /// # Panics
     ///
@@ -415,11 +414,12 @@ impl PolicyProvider {
             return Ok(authorized);
         }
 
-        // Try cache first
+        // Try cache first — use last_l1_block to avoid leaking subscriber-ahead state
+        let block_number = self.cache.read().last_l1_block();
         if let Some(result) = self
             .cache
             .read()
-            .check_policy(policy_id, user, u64::MAX, role)
+            .check_policy(policy_id, user, block_number, role)
         {
             self.metrics.cache_hits.increment(1);
             return Ok(result);
@@ -427,7 +427,6 @@ impl PolicyProvider {
 
         // Cache miss — fall back to L1 RPC
         self.metrics.cache_misses.increment(1);
-        let block_number = self.cache.read().last_l1_block();
         debug!(
             policy_id, %user, ?role, block_number,
             "Policy proxy cache miss, fetching from L1 RPC"
