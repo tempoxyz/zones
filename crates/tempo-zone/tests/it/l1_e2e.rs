@@ -1070,7 +1070,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
         let l1_block = l1.provider().get_block_number().await?;
         let mut cache = policy_cache.write();
         cache.set_token_policy(PATH_USD_ADDRESS, 0, policy_id);
-        cache.set_policy_type(policy_id, PolicyType::BLACKLIST);
+        cache.set_policy_type(policy_id, 1, PolicyType::BLACKLIST);
         cache.set_member(policy_id, blacklisted_recipient, 0, true);
         // Also seed for current and future blocks
         cache.set_token_policy(PATH_USD_ADDRESS, l1_block, policy_id);
@@ -1217,16 +1217,17 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
         let mut cache = zone.policy_cache().write();
         cache.set_token_policy(PATH_USD_ADDRESS, 0, compound_policy_id);
         cache.set_token_policy(PATH_USD_ADDRESS, l1_block, compound_policy_id);
-        cache.set_policy_type(compound_policy_id, PolicyType::COMPOUND);
+        cache.set_policy_type(compound_policy_id, 1, PolicyType::COMPOUND);
         cache.set_compound(
             compound_policy_id,
+            1,
             zone::l1_state::tip403::CompoundData {
                 sender_policy_id,
                 recipient_policy_id: 1,
                 mint_recipient_policy_id: 1,
             },
         );
-        cache.set_policy_type(sender_policy_id, PolicyType::BLACKLIST);
+        cache.set_policy_type(sender_policy_id, 1, PolicyType::BLACKLIST);
         cache.set_member(sender_policy_id, alice, 0, true);
         cache.set_member(sender_policy_id, alice, l1_block, true);
     }
