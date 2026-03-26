@@ -161,14 +161,39 @@ impl BatchSubmitter {
         };
 
         let anchor_mode = self.resolve_anchor_mode(batch.tempo_block_number).await?;
+        let recent_tempo_block_number = anchor_mode.recent_block_number();
+        let (current_l1_block, portal_block_hash) = tokio::join!(
+            self.l1_provider.get_block_number(),
+            self.read_portal_block_hash(),
+        );
+        let current_l1_block = current_l1_block?;
+        let portal_block_hash = portal_block_hash?;
+
+        info!(
+            ?anchor_mode,
+            recent_tempo_block_number,
+            current_l1_block,
+            portal_block_hash = %portal_block_hash,
+            batch_prev_block_hash = %batch.prev_block_hash,
+            nonce_key = ?SUBMIT_BATCH_NONCE_KEY,
+            "Preparing submitBatch to ZonePortal on L1"
+        );
+
+        if portal_block_hash != batch.prev_block_hash {
+            warn!(
+                portal_block_hash = %portal_block_hash,
+                batch_prev_block_hash = %batch.prev_block_hash,
+                "Portal block hash does not match batch prev hash before submitBatch"
+            );
+        }
 
         info!(?anchor_mode, "Submitting batch to ZonePortal on L1");
 
-        let tx_hash = self
+        let pending = self
             .portal
             .submitBatch(
                 batch.tempo_block_number,
-                anchor_mode.recent_block_number(),
+                recent_tempo_block_number,
                 block_transition,
                 deposit_transition,
                 batch.withdrawal_queue_hash,
@@ -177,11 +202,79 @@ impl BatchSubmitter {
             )
             .nonce_key(SUBMIT_BATCH_NONCE_KEY)
             .send()
-            .await?
+            .await?;
+
+        let tx_hash = *pending.tx_hash();
+        info!(
+            %tx_hash,
+            timeout_secs = 30,
+            required_confirmations = 1,
+            "submitBatch tx accepted by RPC; waiting for confirmation"
+        );
+
+        let confirmed_tx_hash = pending
             .with_required_confirmations(1)
             .with_timeout(Some(std::time::Duration::from_secs(30)))
             .watch()
-            .await?;
+            .await;
+
+        let tx_hash = match confirmed_tx_hash {
+            Ok(hash) => hash,
+            Err(err) => {
+                warn!(
+                    %tx_hash,
+                    timeout_secs = 30,
+                    error = %err,
+                    "submitBatch tx was broadcast but not confirmed before timeout"
+                );
+
+                match self.l1_provider.get_transaction_by_hash(tx_hash).await {
+                    Ok(Some(_)) => {
+                        warn!(
+                            %tx_hash,
+                            "submitBatch tx is still known by RPC after confirmation timeout"
+                        );
+                    }
+                    Ok(None) => {
+                        warn!(
+                            %tx_hash,
+                            "submitBatch tx is not known by RPC after confirmation timeout"
+                        );
+                    }
+                    Err(fetch_err) => {
+                        warn!(
+                            %tx_hash,
+                            error = %fetch_err,
+                            "Failed to query submitBatch tx by hash after confirmation timeout"
+                        );
+                    }
+                }
+
+                match self.l1_provider.get_transaction_receipt(tx_hash).await {
+                    Ok(Some(_)) => {
+                        warn!(
+                            %tx_hash,
+                            "submitBatch receipt is available despite confirmation timeout"
+                        );
+                    }
+                    Ok(None) => {
+                        warn!(
+                            %tx_hash,
+                            "submitBatch receipt is still unavailable after confirmation timeout"
+                        );
+                    }
+                    Err(fetch_err) => {
+                        warn!(
+                            %tx_hash,
+                            error = %fetch_err,
+                            "Failed to query submitBatch receipt after confirmation timeout"
+                        );
+                    }
+                }
+
+                return Err(err.into());
+            }
+        };
 
         info!(%tx_hash, "Batch submitted to L1");
 
