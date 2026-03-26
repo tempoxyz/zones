@@ -755,6 +755,7 @@ async fn handle_zone_get_deposit_status(
     )
 }
 
+/// Zones do not have a real pending block, so treat `pending` as `latest`.
 fn normalize_block_number(number: BlockNumberOrTag) -> BlockNumberOrTag {
     if number.is_pending() {
         BlockNumberOrTag::Latest
