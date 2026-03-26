@@ -255,7 +255,6 @@ fn main() {
                 batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
             };
 
-
             let seq_handle = zone::spawn_zone_sequencer(sequencer_config, sequencer_signer).await;
 
             info!(
