@@ -248,6 +248,8 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     /// Check mint recipient authorization.
     ///
     /// Returns `Some(revert)` if forbidden, `None` if allowed.
+    /// Resolution errors are treated as allow because mints are triggered by
+    /// deposit system transactions whose policy is already enforced on L1.
     fn enforce_mint(&self, token: Address, to: Address) -> Option<PrecompileResult> {
         let registry = self.registry.as_ref()?;
         let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
@@ -256,9 +258,9 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
                 warn!(
                     target: "zone::precompile",
                     %token, error = %e,
-                    "failed to resolve transfer_policy_id, rejecting mint"
+                    "failed to resolve transfer_policy_id for mint, deferring to L1 enforcement"
                 );
-                return Some(Err(e));
+                return None;
             }
         };
 
@@ -1110,13 +1112,16 @@ mod tests {
         .into();
 
         let result = harness.call(harness.alice, calldata, 100_000, false);
-        assert!(result.is_err(), "transfer must fail when policy resolution errors");
+        assert!(
+            result.is_err(),
+            "transfer must fail when policy resolution errors"
+        );
 
         Ok(())
     }
 
     #[test]
-    fn mint_fails_closed_on_policy_resolution_error() -> TestResult {
+    fn mint_defers_to_l1_on_policy_resolution_error() -> TestResult {
         let mut harness = PrecompileHarness::new(MockPolicyProvider::failing())?;
 
         let calldata: Bytes = ITIP20::mintCall {
@@ -1127,7 +1132,10 @@ mod tests {
         .into();
 
         let result = harness.call(harness.issuer, calldata, 100_000, false);
-        assert!(result.is_err(), "mint must fail when policy resolution errors");
+        assert!(
+            result.is_ok(),
+            "mint must proceed when policy resolution errors (L1 enforces policy at deposit time)"
+        );
 
         Ok(())
     }
