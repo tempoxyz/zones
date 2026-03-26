@@ -19,7 +19,7 @@ use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, Precompi
 use tempo_precompiles::{
     DelegateCallNotAllowed, Precompile as TempoPrecompile,
     storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-    tip20::{ITIP20, RolesAuthError, TIP20Token},
+    tip20::{IRolesAuth, ITIP20, RolesAuthError, TIP20Token},
 };
 use tracing::{debug, trace};
 use zone_primitives::{
@@ -166,6 +166,18 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
             }
             ITIP20::burnCall::SELECTOR | ITIP20::burnWithMemoCall::SELECTOR => {
                 self.reject_crossed_burn_caller(caller)
+            }
+            ITIP20::userRewardInfoCall::SELECTOR => {
+                let call = decode_or_revert!(ITIP20::userRewardInfoCall, args);
+                self.enforce_balance_of(call.account, caller)
+            }
+            ITIP20::getPendingRewardsCall::SELECTOR => {
+                let call = decode_or_revert!(ITIP20::getPendingRewardsCall, args);
+                self.enforce_balance_of(call.account, caller)
+            }
+            IRolesAuth::hasRoleCall::SELECTOR => {
+                let call = decode_or_revert!(IRolesAuth::hasRoleCall, args);
+                self.enforce_balance_of(call.account, caller)
             }
             _ => None,
         }
