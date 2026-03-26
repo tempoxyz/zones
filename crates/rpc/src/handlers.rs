@@ -368,6 +368,7 @@ async fn handle_get_block_by_number(
         Ok(v) => v,
         Err(resp) => return resp,
     };
+    let number = normalize_block_number(number);
 
     if full && !auth.is_sequencer {
         return JsonRpcResponse::error(id, JsonRpcError::sequencer_only());
@@ -752,6 +753,15 @@ async fn handle_zone_get_deposit_status(
         api.zone_get_deposit_status(tempo_block_number, auth.clone())
             .await,
     )
+}
+
+/// Zones do not have a real pending block, so treat `pending` as `latest`.
+fn normalize_block_number(number: BlockNumberOrTag) -> BlockNumberOrTag {
+    if number.is_pending() {
+        BlockNumberOrTag::Latest
+    } else {
+        number
+    }
 }
 
 #[cfg(test)]
