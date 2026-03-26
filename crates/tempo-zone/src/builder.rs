@@ -8,9 +8,10 @@ use crate::{
     evm::ZoneEvmConfig,
     ext::TempoStateExt,
     l1::PreparedL1Block,
-    payload::ZonePayloadBuilderAttributes,
+    payload::ZonePayloadAttributes,
 };
 use alloy_consensus::{Signed, Transaction, TxLegacy};
+use alloy_eips::eip4895::Withdrawals;
 use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::SolCall;
@@ -27,7 +28,7 @@ use reth_evm::{
 use reth_node_api::FullNodeTypes;
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
-use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadBuilderAttributes};
+use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{StateProvider, StateProviderFactory};
@@ -91,7 +92,7 @@ where
     Provider:
         StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone + 'static,
 {
-    type Attributes = ZonePayloadBuilderAttributes;
+    type Attributes = ZonePayloadAttributes;
     type BuiltPayload = TempoBuiltPayload;
 
     fn try_build(
@@ -107,6 +108,7 @@ where
         let PayloadConfig {
             parent_header,
             attributes,
+            payload_id: _,
         } = config;
 
         let start = Instant::now();
@@ -205,7 +207,7 @@ where
                         prev_randao: attributes.prev_randao(),
                         gas_limit: block_gas_limit,
                         parent_beacon_block_root: attributes.parent_beacon_block_root(),
-                        withdrawals: Some(attributes.withdrawals().clone()),
+                        withdrawals: attributes.withdrawals().cloned().map(Withdrawals::new),
                         extra_data: attributes.extra_data(),
                     },
                     general_gas_limit,
@@ -384,8 +386,7 @@ where
             "Built zone payload"
         );
 
-        let eth_payload =
-            EthBuiltPayload::new(attributes.payload_id(), sealed_block, total_fees, requests);
+        let eth_payload = EthBuiltPayload::new(sealed_block, total_fees, requests);
 
         let execution_output = BlockExecutionOutput {
             result: execution_result,

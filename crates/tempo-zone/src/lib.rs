@@ -32,7 +32,7 @@ pub use l1::{
 };
 pub use l1_state::{PolicyProvider, SharedL1StateCache, SharedPolicyCache};
 pub use node::{ZoneExecutorBuilder, ZoneNode};
-pub use payload::{ZonePayloadAttributes, ZonePayloadBuilderAttributes, ZonePayloadTypes};
+pub use payload::{ZonePayloadAttributes, ZonePayloadTypes};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 
