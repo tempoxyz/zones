@@ -1,0 +1,13 @@
+[profile.default]
+src = "src"
+test = "test"
+out = "out"
+libs = ["lib"]
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "solady/=lib/solady/src/",
+]
+solc_version = "0.8.24"
+optimizer = true
+optimizer_runs = 200
+via_ir = true
