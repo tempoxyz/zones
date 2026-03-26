@@ -436,8 +436,7 @@ impl L1Subscriber {
             self.apply_policy_events(block_number, &policy_events);
 
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
-            self.apply_portal_state_events(block_number, &events);
+            self.update_l1_state_cache(&sealed, &events);
             self.deposit_queue
                 .enqueue_sealed(sealed, events, policy_events);
             enqueued += 1;
@@ -513,8 +512,7 @@ impl L1Subscriber {
             parent_hash = sealed.hash();
 
             self.apply_policy_events(block_number, &policy_events);
-            self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
-            self.apply_portal_state_events(block_number, &portal_events);
+            self.update_l1_state_cache(&sealed, &portal_events);
 
             match self
                 .deposit_queue
@@ -631,17 +629,11 @@ impl L1Subscriber {
         }
     }
 
-    /// Write decoded policy events into the shared cache and advance its L1 block
-    /// cursor. The cursor is always updated — even for blocks with no policy events —
-    /// so that cache-miss fallback queries target the correct L1 height.
+    /// Write decoded policy events into the shared cache and
+    /// advance the L1 block cursor.
     fn apply_policy_events(&self, block_number: u64, policy_events: &[PolicyEvent]) {
         let mut cache = self.config.policy_cache.write();
         cache.apply_events(block_number, policy_events);
-        if !policy_events.is_empty() {
-            self.tip403_metrics
-                .listener_events_applied
-                .increment(policy_events.len() as u64);
-        }
         self.tip403_metrics
             .cached_policies
             .set(cache.policies().len() as f64);
@@ -650,39 +642,24 @@ impl L1Subscriber {
             .set(cache.num_token_policies() as f64);
     }
 
-    /// Write decoded portal state changes into the shared L1 cache at the
-    /// confirmed block height.
-    fn apply_portal_state_events(&self, block_number: u64, portal_events: &L1PortalEvents) {
-        if portal_events.sequencer_events.is_empty() {
-            return;
-        }
-
+    /// Update the L1 state cache: move the anchor forward and apply any
+    /// sequencer events from the portal, all under a single write lock.
+    fn update_l1_state_cache(
+        &self,
+        header: &SealedHeader<TempoHeader>,
+        portal_events: &L1PortalEvents,
+    ) {
         let mut cache = self.config.l1_state_cache.write();
+        cache.update_anchor(NumHash {
+            number: header.number(),
+            hash: header.hash(),
+        });
         apply_sequencer_events_to_cache(
             &mut cache,
             self.config.portal_address,
-            block_number,
+            header.number(),
             &portal_events.sequencer_events,
         );
-    }
-
-    /// Update the L1 state cache anchor. Detects reorgs by comparing
-    /// `parent_hash` against the current anchor and clears the cache when they
-    /// diverge.
-    fn update_l1_state_anchor(&self, number: u64, hash: B256, parent_hash: B256) {
-        let mut guard = self.config.l1_state_cache.write();
-        let anchor = guard.anchor();
-        if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
-            self.subscriber_metrics.reorgs_detected.increment(1);
-            warn!(
-                old_anchor = %anchor.hash,
-                new_parent = %parent_hash,
-                block_number = number,
-                "Reorg detected, clearing L1 state cache"
-            );
-            guard.clear();
-        }
-        guard.update_anchor(NumHash { number, hash });
     }
 }
 

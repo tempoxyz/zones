@@ -41,7 +41,4 @@ pub struct Tip403Metrics {
 
     /// Number of cached token-to-policy mappings.
     pub cached_token_policies: Gauge,
-
-    /// Policy events applied from L1 subscriber.
-    pub listener_events_applied: Counter,
 }
