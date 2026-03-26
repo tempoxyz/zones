@@ -21,7 +21,7 @@ use tempo_precompiles::{
     storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
     tip20::{IRolesAuth, ITIP20, RolesAuthError, TIP20Token},
 };
-use tracing::{debug, trace};
+use tracing::{trace, warn};
 use zone_primitives::{
     abi::Unauthorized,
     constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
@@ -217,12 +217,12 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
             Ok(id) => id,
             Err(e) => {
-                debug!(
+                warn!(
                     target: "zone::precompile",
                     %token, error = %e,
-                    "failed to resolve transfer_policy_id, deferring to vanilla TIP20"
+                    "failed to resolve transfer_policy_id, rejecting transfer"
                 );
-                return None;
+                return Some(Err(e));
             }
         };
 
@@ -253,12 +253,12 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
             Ok(id) => id,
             Err(e) => {
-                debug!(
+                warn!(
                     target: "zone::precompile",
                     %token, error = %e,
-                    "failed to resolve transfer_policy_id, deferring to vanilla TIP20"
+                    "failed to resolve transfer_policy_id, rejecting mint"
                 );
-                return None;
+                return Some(Err(e));
             }
         };
 
@@ -436,6 +436,7 @@ mod tests {
         transfer_authorized: bool,
         mint_authorized: bool,
         policy_id: u64,
+        fail_policy_id_resolution: bool,
     }
 
     impl MockPolicyProvider {
@@ -444,6 +445,14 @@ mod tests {
                 transfer_authorized: true,
                 mint_authorized: true,
                 policy_id: 1,
+                fail_policy_id_resolution: false,
+            }
+        }
+
+        fn failing() -> Self {
+            Self {
+                fail_policy_id_resolution: true,
+                ..Default::default()
             }
         }
     }
@@ -463,6 +472,9 @@ mod tests {
         }
 
         fn resolve_transfer_policy_id(&self, _token: Address) -> Result<u64, PrecompileError> {
+            if self.fail_policy_id_resolution {
+                return Err(PrecompileError::other("RPC unavailable"));
+            }
             Ok(self.policy_id)
         }
 
@@ -1082,6 +1094,40 @@ mod tests {
         let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
         assert!(outsider.reverted);
         assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn transfer_fails_closed_on_policy_resolution_error() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::failing())?;
+
+        let calldata: Bytes = ITIP20::transferCall {
+            to: harness.bob,
+            amount: U256::from(100u64),
+        }
+        .abi_encode()
+        .into();
+
+        let result = harness.call(harness.alice, calldata, 100_000, false);
+        assert!(result.is_err(), "transfer must fail when policy resolution errors");
+
+        Ok(())
+    }
+
+    #[test]
+    fn mint_fails_closed_on_policy_resolution_error() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::failing())?;
+
+        let calldata: Bytes = ITIP20::mintCall {
+            to: harness.alice,
+            amount: U256::from(100u64),
+        }
+        .abi_encode()
+        .into();
+
+        let result = harness.call(harness.issuer, calldata, 100_000, false);
+        assert!(result.is_err(), "mint must fail when policy resolution errors");
 
         Ok(())
     }
