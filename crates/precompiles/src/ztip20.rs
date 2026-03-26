@@ -19,7 +19,7 @@ use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, Precompi
 use tempo_precompiles::{
     DelegateCallNotAllowed, Precompile as TempoPrecompile,
     storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
-    tip20::{ITIP20, RolesAuthError, TIP20Token},
+    tip20::{IRolesAuth, ITIP20, RolesAuthError, TIP20Token},
 };
 use tracing::{debug, trace};
 use zone_primitives::{
@@ -166,6 +166,18 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
             }
             ITIP20::burnCall::SELECTOR | ITIP20::burnWithMemoCall::SELECTOR => {
                 self.reject_crossed_burn_caller(caller)
+            }
+            ITIP20::userRewardInfoCall::SELECTOR => {
+                let call = decode_or_revert!(ITIP20::userRewardInfoCall, args);
+                self.enforce_balance_of(call.account, caller)
+            }
+            ITIP20::getPendingRewardsCall::SELECTOR => {
+                let call = decode_or_revert!(ITIP20::getPendingRewardsCall, args);
+                self.enforce_balance_of(call.account, caller)
+            }
+            IRolesAuth::hasRoleCall::SELECTOR => {
+                let call = decode_or_revert!(IRolesAuth::hasRoleCall, args);
+                self.enforce_balance_of(call.account, caller)
             }
             _ => None,
         }
@@ -1020,6 +1032,82 @@ mod tests {
         )?;
         assert!(!transfer.reverted);
         assert_eq!(harness.balance_of(harness.bob)?, U256::from(7_654u64));
+
+        Ok(())
+    }
+
+    #[test]
+    fn user_reward_info_enforces_account_or_sequencer_access() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+        let calldata: Bytes = ITIP20::userRewardInfoCall {
+            account: harness.alice,
+        }
+        .abi_encode()
+        .into();
+
+        // Owner can query their own reward info
+        let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
+        assert!(!owner.reverted);
+
+        // Sequencer can query anyone's reward info
+        let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
+        assert!(!sequencer.reverted);
+
+        // Outsider is rejected
+        let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
+        assert!(outsider.reverted);
+        assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn get_pending_rewards_enforces_account_or_sequencer_access() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+        let calldata: Bytes = ITIP20::getPendingRewardsCall {
+            account: harness.alice,
+        }
+        .abi_encode()
+        .into();
+
+        // Owner can query their own pending rewards
+        let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
+        assert!(!owner.reverted);
+
+        // Sequencer can query anyone's pending rewards
+        let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
+        assert!(!sequencer.reverted);
+
+        // Outsider is rejected
+        let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
+        assert!(outsider.reverted);
+        assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn has_role_enforces_account_or_sequencer_access() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+        let calldata: Bytes = IRolesAuth::hasRoleCall {
+            account: harness.alice,
+            role: *ISSUER_ROLE,
+        }
+        .abi_encode()
+        .into();
+
+        // Owner can query their own roles
+        let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
+        assert!(!owner.reverted);
+
+        // Sequencer can query anyone's roles
+        let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
+        assert!(!sequencer.reverted);
+
+        // Outsider is rejected
+        let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
+        assert!(outsider.reverted);
+        assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
 
         Ok(())
     }
