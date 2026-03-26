@@ -264,7 +264,6 @@ impl L1Subscriber {
         // The zone's local state is the authoritative source for where to
         // resume. This avoids the bug where the portal's
         // lastSyncedTempoBlockNumber runs ahead of local zone state.
-        // FIXME: is this value ever updated?
         if self.config.local_tempo_block_number > 0 {
             info!(
                 local_tempo_block_number = self.config.local_tempo_block_number,
@@ -276,15 +275,6 @@ impl L1Subscriber {
         if let Some(genesis) = self.config.genesis_tempo_block_number {
             info!(genesis, "Using CLI genesis block number override");
             return Ok(Some(genesis + 1));
-        }
-
-        // FIXME: should this ever happen
-        if self.config.portal_address.is_zero() {
-            warn!(
-                "No portal address and no genesis block number override — skipping backfill. \
-                 Set --l1.genesis-block-number or provide a portal address."
-            );
-            return Ok(None);
         }
 
         let portal = ZonePortal::new(self.config.portal_address, l1_provider);
