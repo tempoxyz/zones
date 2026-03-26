@@ -120,7 +120,6 @@ impl ZoneNode {
             l1_rpc_url: l1_rpc_url.clone(),
             portal_address,
             genesis_tempo_block_number,
-            local_tempo_block_number: 0, // resolved at launch from local state
             policy_cache: policy_cache.clone(),
             l1_state_cache: l1_state_cache.clone(),
             l1_fetch_concurrency,
@@ -323,11 +322,10 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        // Read the zone's current tempoBlockNumber from local state so the L1
-        // subscriber knows exactly where to resume backfill.
+        // Read the zone's current tempoBlockNumber from local state so policy
+        // cache fallback queries start from the correct L1 height.
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
-        self.l1_config.local_tempo_block_number = tempo_block_number;
         self.policy_cache.set_last_l1_block(tempo_block_number);
         info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
 
@@ -366,6 +364,7 @@ where
         // Spawn unified L1 subscriber (deposits + policy events + L1 state anchor).
         L1Subscriber::spawn(
             self.l1_config,
+            ctx.node.provider().clone(),
             self.deposit_queue.clone(),
             ctx.node.task_executor().clone(),
         );
