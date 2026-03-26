@@ -343,7 +343,7 @@ impl PolicyProvider {
 
         self.cache
             .write()
-            .set_policy_type(policy_id, result.policyType);
+            .set_policy_type(policy_id, block_number, result.policyType);
         info!(policy_id, policy_type = ?result.policyType, "Cached policy type from L1 RPC");
 
         Ok(result.policyType)
@@ -379,7 +379,7 @@ impl PolicyProvider {
             mint_recipient_policy_id: result.mintRecipientPolicyId,
         };
 
-        self.cache.write().set_compound(policy_id, compound);
+        self.cache.write().set_compound(policy_id, block_number, compound);
         info!(
             policy_id,
             sender = compound.sender_policy_id,
@@ -500,13 +500,15 @@ impl PolicyProvider {
     ///
     /// Panics if called from within an async context on the same tokio runtime.
     pub fn resolve_policy_type_sync(&self, policy_id: u64) -> Result<PolicyType> {
-        if let Some(policy) = self.cache.read().policies().get(&policy_id)
+        let cache = self.cache.read();
+        let block_number = cache.last_l1_block();
+        if let Some(policy) = cache.policies().get(&policy_id)
             && let Some(policy_type) = policy.policy_type
+            && policy.created_at.is_some_and(|b| b <= block_number)
         {
             return Ok(policy_type);
         }
-
-        let block_number = self.cache.read().last_l1_block();
+        drop(cache);
         debug!(
             policy_id,
             block_number, "Policy type cache miss, fetching from L1 RPC"
@@ -525,13 +527,15 @@ impl PolicyProvider {
     ///
     /// Panics if called from within an async context on the same tokio runtime.
     pub fn resolve_compound_data_sync(&self, policy_id: u64) -> Result<CompoundData> {
-        if let Some(policy) = self.cache.read().policies().get(&policy_id)
+        let cache = self.cache.read();
+        let block_number = cache.last_l1_block();
+        if let Some(policy) = cache.policies().get(&policy_id)
             && let Some(ref compound) = policy.compound
+            && policy.created_at.is_some_and(|b| b <= block_number)
         {
             return Ok(*compound);
         }
-
-        let block_number = self.cache.read().last_l1_block();
+        drop(cache);
         debug!(
             policy_id,
             block_number, "Compound data cache miss, fetching from L1 RPC"
@@ -555,14 +559,16 @@ impl PolicyProvider {
             return Ok(true);
         }
 
-        // Cache hit: if we have a policy record with a known type, it exists.
-        if let Some(policy) = self.cache.read().policies().get(&policy_id)
+        let cache = self.cache.read();
+        let block_number = cache.last_l1_block();
+        // Cache hit: if we have a policy record created at or before the engine's height, it exists.
+        if let Some(policy) = cache.policies().get(&policy_id)
             && policy.policy_type.is_some()
+            && policy.created_at.is_some_and(|b| b <= block_number)
         {
             return Ok(true);
         }
-
-        let block_number = self.cache.read().last_l1_block();
+        drop(cache);
         debug!(
             policy_id,
             block_number, "Policy exists cache miss, fetching from L1 RPC"

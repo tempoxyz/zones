@@ -104,7 +104,7 @@ async fn test_policy_proxy_whitelist_authorization() -> eyre::Result<()> {
     {
         let cache = zone.policy_cache();
         let mut w = cache.write();
-        w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
+        w.set_policy_type(5, 1, ITIP403Registry::PolicyType::WHITELIST);
         w.set_member(5, alice, 1, true);
         w.set_member(5, bob, 1, false);
     }
@@ -154,7 +154,7 @@ async fn test_policy_proxy_blacklist_authorization() -> eyre::Result<()> {
     {
         let cache = zone.policy_cache();
         let mut w = cache.write();
-        w.set_policy_type(5, ITIP403Registry::PolicyType::BLACKLIST);
+        w.set_policy_type(5, 1, ITIP403Registry::PolicyType::BLACKLIST);
         w.set_member(5, alice, 1, true);
         w.set_member(5, bob, 1, false);
     }
@@ -193,12 +193,13 @@ async fn test_policy_proxy_compound_policy() -> eyre::Result<()> {
     {
         let cache = zone.policy_cache();
         let mut w = cache.write();
-        w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
+        w.set_policy_type(5, 1, ITIP403Registry::PolicyType::WHITELIST);
         w.set_member(5, alice, 1, true); // Alice whitelisted as sender
-        w.set_policy_type(6, ITIP403Registry::PolicyType::BLACKLIST);
+        w.set_policy_type(6, 1, ITIP403Registry::PolicyType::BLACKLIST);
         w.set_member(6, bob, 1, true); // Bob blacklisted as recipient
         w.set_compound(
             10,
+            1,
             CompoundData {
                 sender_policy_id: 5,
                 recipient_policy_id: 6,
@@ -313,14 +314,15 @@ async fn test_compound_policy_transfer_role_authorization() -> eyre::Result<()> 
     {
         let cache = zone.policy_cache();
         let mut w = cache.write();
-        w.set_policy_type(5, ITIP403Registry::PolicyType::WHITELIST);
+        w.set_policy_type(5, 1, ITIP403Registry::PolicyType::WHITELIST);
         w.set_member(5, alice, 1, true); // Alice whitelisted as sender
         w.set_member(5, bob, 1, false); // Bob not whitelisted as sender
-        w.set_policy_type(6, ITIP403Registry::PolicyType::BLACKLIST);
+        w.set_policy_type(6, 1, ITIP403Registry::PolicyType::BLACKLIST);
         w.set_member(6, alice, 1, false); // Alice not blacklisted as recipient
         w.set_member(6, bob, 1, true); // Bob blacklisted as recipient
         w.set_compound(
             10,
+            1,
             CompoundData {
                 sender_policy_id: 5,
                 recipient_policy_id: 6,

@@ -98,9 +98,11 @@ impl PolicyCache {
             .set(block_number, policy_id);
     }
 
-    /// Sets the policy type for a policy ID.
-    pub fn set_policy_type(&mut self, policy_id: u64, policy_type: PolicyType) {
-        self.get_policy_entry(policy_id).policy_type = Some(policy_type);
+    /// Sets the policy type for a policy ID at the given L1 block height.
+    pub fn set_policy_type(&mut self, policy_id: u64, block_number: u64, policy_type: PolicyType) {
+        let entry = self.get_policy_entry(policy_id);
+        entry.policy_type = Some(policy_type);
+        entry.created_at.get_or_insert(block_number);
     }
 
     /// Sets whether `user` is a member of the policy set at the given block.
@@ -111,9 +113,10 @@ impl PolicyCache {
     }
 
     /// Sets compound policy sub-policy IDs and marks the policy as compound.
-    pub fn set_compound(&mut self, policy_id: u64, compound: CompoundData) {
+    pub fn set_compound(&mut self, policy_id: u64, block_number: u64, compound: CompoundData) {
         let entry = self.get_policy_entry(policy_id);
         entry.policy_type = Some(PolicyType::COMPOUND);
+        entry.created_at.get_or_insert(block_number);
         entry.compound = Some(compound);
     }
 
@@ -289,7 +292,7 @@ impl PolicyCache {
                     policy_id,
                     policy_type,
                 } => {
-                    self.set_policy_type(*policy_id, *policy_type);
+                    self.set_policy_type(*policy_id, block_number, *policy_type);
                 }
                 PolicyEvent::CompoundPolicyCreated {
                     policy_id,
@@ -299,6 +302,7 @@ impl PolicyCache {
                 } => {
                     self.set_compound(
                         *policy_id,
+                        block_number,
                         CompoundData {
                             sender_policy_id: *sender_policy_id,
                             recipient_policy_id: *recipient_policy_id,
@@ -601,6 +605,9 @@ pub(super) use zone_primitives::policy::AuthRole;
 pub struct CachedPolicy {
     /// Policy type. `None` if the `PolicyCreated` event hasn't been observed yet.
     pub policy_type: Option<PolicyType>,
+    /// L1 block number at which this policy was first observed (created).
+    /// Used to avoid serving subscriber-ahead state during block building.
+    pub created_at: Option<u64>,
     /// Set membership for simple (non-compound) policies.
     pub members: MembershipSet,
     /// Compound sub-policy IDs. `None` for simple policies.
@@ -859,7 +866,7 @@ mod tests {
     fn whitelist_authorized_when_in_set() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
         cache.set_member(2, USER_A, 10, true);
         cache.set_member(2, USER_B, 10, false);
 
@@ -877,7 +884,7 @@ mod tests {
     fn blacklist_authorized_when_not_in_set() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 3);
-        cache.set_policy_type(3, PolicyType::BLACKLIST);
+        cache.set_policy_type(3, 1, PolicyType::BLACKLIST);
         cache.set_member(3, USER_A, 10, true);
         cache.set_member(3, USER_B, 10, false);
 
@@ -895,7 +902,7 @@ mod tests {
     fn blacklist_unknown_user_returns_none() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 3);
-        cache.set_policy_type(3, PolicyType::BLACKLIST);
+        cache.set_policy_type(3, 1, PolicyType::BLACKLIST);
 
         // USER_A has no membership data — unknown, caller should fall back to RPC
         assert_eq!(
@@ -908,7 +915,7 @@ mod tests {
     fn whitelist_unknown_user_returns_none() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
 
         // USER_A has no membership data — unknown, caller should fall back to RPC
         assert_eq!(
@@ -941,7 +948,7 @@ mod tests {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 1);
         cache.set_token_policy(TOKEN, 20, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
         cache.set_member(2, USER_A, 20, true);
 
         // At block 15: policy_id=1 (always allow)
@@ -970,7 +977,7 @@ mod tests {
     fn block_versioned_membership_change() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
         cache.set_member(2, USER_A, 10, false);
         cache.set_member(2, USER_A, 20, true);
 
@@ -988,7 +995,7 @@ mod tests {
     fn clear_removes_all_data() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
         cache.set_member(2, USER_A, 10, true);
 
         cache.clear();
@@ -1023,7 +1030,7 @@ mod tests {
         // Two tokens share policy 2
         cache.set_token_policy(TOKEN, 10, 2);
         cache.set_token_policy(token2, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
         cache.set_member(2, USER_A, 10, true);
 
         // Both tokens see the same membership (per-policy, no fan-out needed)
@@ -1044,7 +1051,7 @@ mod tests {
 
         cache.set_token_policy(TOKEN, 10, 2);
         cache.set_token_policy(token2, 10, 2);
-        cache.set_policy_type(2, PolicyType::BLACKLIST);
+        cache.set_policy_type(2, 1, PolicyType::BLACKLIST);
         cache.set_member(2, USER_A, 10, true);
 
         // BLACKLIST: authorized when NOT in set
@@ -1074,8 +1081,8 @@ mod tests {
 
         cache.set_token_policy(TOKEN, 10, 2);
         cache.set_token_policy(token2, 10, 3);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
-        cache.set_policy_type(3, PolicyType::BLACKLIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
+        cache.set_policy_type(3, 1, PolicyType::BLACKLIST);
         cache.set_member(2, USER_A, 10, true);
         cache.set_member(3, USER_A, 10, true);
 
@@ -1095,7 +1102,7 @@ mod tests {
     fn advance_then_lookup() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::BLACKLIST);
+        cache.set_policy_type(2, 1, PolicyType::BLACKLIST);
         cache.set_member(2, USER_A, 10, true);
         cache.set_member(2, USER_A, 20, false);
 
@@ -1134,8 +1141,8 @@ mod tests {
         // Start with whitelist at block 10, switch to blacklist policy at block 20
         cache.set_token_policy(TOKEN, 10, 2);
         cache.set_token_policy(TOKEN, 20, 3);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
-        cache.set_policy_type(3, PolicyType::BLACKLIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
+        cache.set_policy_type(3, 1, PolicyType::BLACKLIST);
         cache.set_member(2, USER_A, 10, true);
         cache.set_member(3, USER_A, 10, true);
 
@@ -1157,14 +1164,15 @@ mod tests {
     fn compound_policy_sender_check() {
         let mut cache = PolicyCache::default();
         // Simple sub-policies
-        cache.set_policy_type(2, PolicyType::BLACKLIST); // sender policy
-        cache.set_policy_type(3, PolicyType::WHITELIST); // recipient policy
+        cache.set_policy_type(2, 1, PolicyType::BLACKLIST); // sender policy
+        cache.set_policy_type(3, 1, PolicyType::WHITELIST); // recipient policy
         cache.set_member(2, USER_A, 10, true); // USER_A blacklisted as sender
         cache.set_member(3, USER_A, 10, true); // USER_A whitelisted as recipient
 
         // Compound policy referencing sub-policies
         cache.set_compound(
             5,
+            1,
             CompoundData {
                 sender_policy_id: 2,
                 recipient_policy_id: 3,
@@ -1190,11 +1198,12 @@ mod tests {
     #[test]
     fn compound_policy_transfer_checks_both() {
         let mut cache = PolicyCache::default();
-        cache.set_policy_type(2, PolicyType::WHITELIST); // sender
-        cache.set_policy_type(3, PolicyType::WHITELIST); // recipient
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST); // sender
+        cache.set_policy_type(3, 1, PolicyType::WHITELIST); // recipient
 
         cache.set_compound(
             5,
+            1,
             CompoundData {
                 sender_policy_id: 2,
                 recipient_policy_id: 3,
@@ -1230,6 +1239,7 @@ mod tests {
         // Compound: sender=allow(1), recipient=reject(0), mint=allow(1)
         cache.set_compound(
             5,
+            1,
             CompoundData {
                 sender_policy_id: 1,
                 recipient_policy_id: 0,
@@ -1263,6 +1273,7 @@ mod tests {
         // Compound references sub-policy 99 which doesn't exist
         cache.set_compound(
             5,
+            1,
             CompoundData {
                 sender_policy_id: 99,
                 recipient_policy_id: 3,
@@ -1281,7 +1292,7 @@ mod tests {
     fn compound_returns_none_when_compound_data_missing() {
         let mut cache = PolicyCache::default();
         // Policy 5 has COMPOUND type but no compound data set
-        cache.set_policy_type(5, PolicyType::COMPOUND);
+        cache.set_policy_type(5, 1, PolicyType::COMPOUND);
         cache.set_token_policy(TOKEN, 10, 5);
 
         assert_eq!(
@@ -1328,7 +1339,7 @@ mod tests {
     fn observed_survives_advance() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
         cache.set_member(2, USER_A, 10, true);
 
         // Before advance: known and authorized
@@ -1357,7 +1368,7 @@ mod tests {
     fn observed_survives_advance_for_removed_member() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
 
         // Add then remove USER_A
         cache.set_member(2, USER_A, 10, true);
@@ -1377,7 +1388,7 @@ mod tests {
     fn observed_survives_advance_blacklist() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::BLACKLIST);
+        cache.set_policy_type(2, 1, PolicyType::BLACKLIST);
         cache.set_member(2, USER_A, 10, true); // blacklisted
 
         cache.advance(20);
@@ -1399,7 +1410,7 @@ mod tests {
     fn clear_resets_observed() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 10, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
         cache.set_member(2, USER_A, 10, true);
 
         assert_eq!(
@@ -1446,7 +1457,7 @@ mod tests {
     fn multiple_advances_preserve_observed() {
         let mut cache = PolicyCache::default();
         cache.set_token_policy(TOKEN, 5, 2);
-        cache.set_policy_type(2, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::WHITELIST);
 
         // Events at different blocks
         cache.set_member(2, USER_A, 10, true);
@@ -1479,8 +1490,8 @@ mod tests {
     fn apply_events_with_compound_policy() {
         let mut cache = PolicyCache::default();
         // Pre-populate simple sub-policies
-        cache.set_policy_type(2, PolicyType::BLACKLIST);
-        cache.set_policy_type(3, PolicyType::WHITELIST);
+        cache.set_policy_type(2, 1, PolicyType::BLACKLIST);
+        cache.set_policy_type(3, 1, PolicyType::WHITELIST);
         cache.set_member(2, USER_A, 10, false); // explicitly not blacklisted
         cache.set_member(3, USER_A, 10, true);
 
