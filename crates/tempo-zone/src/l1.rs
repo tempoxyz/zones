@@ -630,7 +630,7 @@ impl L1Subscriber {
     }
 
     /// Write decoded policy events into the shared cache and
-    /// advance the L1 block cursor.
+    /// advance its L1 block cursor.
     fn apply_policy_events(&self, block_number: u64, policy_events: &[PolicyEvent]) {
         let mut cache = self.config.policy_cache.write();
         cache.apply_events(block_number, policy_events);
