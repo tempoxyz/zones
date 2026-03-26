@@ -24,7 +24,6 @@ type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
 
-// TODO: why do we hardcode this
 const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
     "tungstenite=warn,",
     "alloy_pubsub=warn,",
@@ -73,8 +72,6 @@ struct ZoneArgs {
     )]
     pub zone_batch_interval_secs: u64,
 
-    // TODO: update this name to be more descriptive
-    /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(
         long = "withdrawal-poll-interval-secs",
         env = "WITHDRAWAL_POLL_INTERVAL_SECS",
@@ -96,8 +93,6 @@ struct ZoneArgs {
     )]
     pub l1_fetch_concurrency: usize,
 
-    // TODO: nit l1_ws_reconnect_interval_ms
-    /// Interval in milliseconds between WebSocket reconnection attempts to L1.
     #[arg(
         long = "l1.retry-connection-interval",
         env = "L1_RETRY_CONNECTION_INTERVAL_MS",
@@ -105,9 +100,6 @@ struct ZoneArgs {
     )]
     pub l1_retry_connection_interval_ms: u64,
 
-    // TODO: shouldnt this read this from the portal address or the l1 contract?
-    /// Zone ID for the private RPC auth token validation.
-    /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
     pub zone_id: u32,
 
@@ -120,7 +112,6 @@ struct ZoneArgs {
     pub private_rpc_port: u16,
 }
 
-// TODO::  can we cleaner
 fn prepend_log_filter(filter: &mut String, directives: &str) {
     if filter.is_empty() {
         *filter = directives.to_owned();
@@ -161,8 +152,6 @@ fn main() {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
 
-            // TODO: should we just do this in the node builder?
-            // Disable peer discovery — the zone node has no peering.
             builder.config_mut().network.discovery.disable_discovery = true;
             // Disable the auth (Engine API) server — the zone node derives blocks
             // from L1, so no external consensus client or Engine API is needed.
@@ -172,12 +161,10 @@ fn main() {
 
             // Parse the sequencer key to derive the address for block building
             // and the k256 secret key for ECIES decryption of encrypted deposits.
-            // TODO: can we parse this in the args?
             let sequencer_signer: alloy_signer_local::PrivateKeySigner =
                 args.sequencer_key.parse().expect("invalid sequencer private key");
             let sequencer_addr = sequencer_signer.address();
 
-            // TODO: same here can we add to args directly
             let key_hex = &args.sequencer_key;
             let sequencer_secret_key: k256::SecretKey = {
                 let bytes = const_hex::decode(key_hex.strip_prefix("0x").unwrap_or(key_hex))
