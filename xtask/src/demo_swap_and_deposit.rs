@@ -1,19 +1,26 @@
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, B256, Bytes, U256},
+    primitives::{Address, B256, Bytes, U256, keccak256},
     providers::{Provider, ProviderBuilder},
-    signers::local::PrivateKeySigner,
+    signers::{Signer, local::PrivateKeySigner},
     sol,
     sol_types::SolValue,
 };
 use eyre::{WrapErr as _, eyre};
+use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
 use std::{path::PathBuf, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
     IRolesAuth, ITIP20 as TIP20Token, ITIP20Factory as TIP20Factory,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
-use zone::abi::{ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal};
+use zone::{
+    abi::{
+        EncryptedDepositPayload, SwapAndDepositRouterEncryptedCallback, ZONE_OUTBOX_ADDRESS,
+        ZoneOutbox, ZonePortal,
+    },
+    precompiles::ecies::encrypt_deposit,
+};
 
 use crate::zone_utils::{
     ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
@@ -25,6 +32,7 @@ const DEMO_PATHUSD_GAS_NET: u128 = 5_000_000;
 const DEX_LIQUIDITY_MULTIPLIER: u128 = 3;
 const NONCE_CONFLICT_RETRIES: u32 = 5;
 const PATHUSD_HEADROOM: u128 = 10_000_000;
+const WITHDRAWAL_TX_GAS: u64 = 1_000_000;
 
 sol! {
     #[sol(rpc)]
@@ -57,7 +65,8 @@ pub(crate) struct DemoSwapAndDeposit {
     #[arg(long, env = "PRIVATE_KEY")]
     private_key: String,
 
-    /// Sequencer private key (hex). Needed to enable tokens on the portal.
+    /// Sequencer private key (hex). Needed to enable tokens on the portal and
+    /// to encrypt the routed deposit payload.
     #[arg(long, env = "SEQUENCER_KEY")]
     sequencer_key: Option<String>,
 
@@ -137,13 +146,19 @@ impl DemoSwapAndDeposit {
             .call()
             .await
             .wrap_err("failed to fetch portal deposit fee")?;
+        let withdrawal_fee = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2)
+            .calculateWithdrawalFee(ROUTER_CALLBACK_GAS_LIMIT)
+            .call()
+            .await
+            .wrap_err("failed to fetch outbox withdrawal fee")?;
         let dex_liquidity = self
             .amount
             .checked_mul(DEX_LIQUIDITY_MULTIPLIER)
             .ok_or_else(|| eyre!("dex liquidity amount overflow"))?;
         let alpha_gross_deposit = self
             .amount
-            .checked_add(deposit_fee)
+            .checked_add(withdrawal_fee)
+            .and_then(|value| value.checked_add(deposit_fee))
             .ok_or_else(|| eyre!("alpha deposit amount overflow"))?;
         let pathusd_gross_deposit = DEMO_PATHUSD_GAS_NET
             .checked_add(deposit_fee)
@@ -162,6 +177,7 @@ impl DemoSwapAndDeposit {
         println!("  Swap amount:      {}", self.amount);
         println!("  DEX tick:         {}", self.tick);
         println!("  Deposit fee:      {deposit_fee}");
+        println!("  Withdrawal fee:   {withdrawal_fee}");
         println!();
 
         println!("Step 1: Fund the operator with pathUSD on L1");
@@ -217,6 +233,11 @@ impl DemoSwapAndDeposit {
             .call()
             .await
             .wrap_err("failed to quote DEX swap")?;
+        let expected_beta_net = expected_beta.checked_sub(deposit_fee).ok_or_else(|| {
+            eyre!(
+                "quoted swap output {expected_beta} does not cover the portal deposit fee {deposit_fee}"
+            )
+        })?;
         println!(
             "  Seeded liquidity: {dex_liquidity} units at tick {}",
             self.tick
@@ -225,6 +246,7 @@ impl DemoSwapAndDeposit {
             "  Quoted swap output for {} AlphaUSD: {expected_beta} BetaUSD",
             self.amount
         );
+        println!("  Expected L2 BetaUSD after portal fee: {expected_beta_net}");
         println!();
 
         println!("Step 6: Deposit pathUSD for L2 gas and AlphaUSD for the swap");
@@ -264,25 +286,45 @@ impl DemoSwapAndDeposit {
         check(&receipt, "deposit AlphaUSD")?;
         wait_for_deposit_processed(&l2, l2_from_block, operator, operator, alpha).await?;
 
-        let alpha_before = token_balance(&l2, alpha, operator)
+        let alpha_before = token_balance(&l2_operator, alpha, operator)
             .await
             .unwrap_or_default();
-        let beta_before = token_balance(&l2, beta, operator).await.unwrap_or_default();
+        let beta_before = token_balance(&l2_operator, beta, operator)
+            .await
+            .unwrap_or_default();
         println!("  L2 AlphaUSD balance: {alpha_before}");
         println!("  L2 BetaUSD balance:  {beta_before}");
         println!();
 
         println!(
-            "Step 7: Withdraw AlphaUSD to the router and let it swap+deposit back into the zone"
+            "Step 7: Withdraw AlphaUSD to the router, swap on L1, and deposit BetaUSD back into the zone using an encrypted deposit"
         );
-        TIP20Token::new(alpha, &l2_operator)
+        let receipt = TIP20Token::new(alpha, &l2_operator)
             .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
             .gas(150_000)
-            .send_sync()
+            .send()
+            .await
+            .wrap_err("failed to submit AlphaUSD approval for the outbox")?
+            .get_receipt()
             .await
             .wrap_err("failed to approve AlphaUSD for the outbox")?;
+        check(&receipt, "approve AlphaUSD for outbox")?;
+        println!(
+            "  Outbox approved for AlphaUSD on L2  [tx: {}]",
+            receipt.transaction_hash
+        );
 
-        let callback_data = (false, beta, portal, operator, B256::ZERO, expected_beta).abi_encode();
+        let portal_contract_seq = ZonePortal::new(portal, &l1_seq);
+        let callback_data = build_encrypted_router_callback(
+            &portal_contract_seq,
+            portal,
+            beta,
+            operator,
+            B256::ZERO,
+            expected_beta,
+            &sequencer_key,
+        )
+        .await?;
         let l1_from_block = l1.get_block_number().await.unwrap_or(0);
         let receipt = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2_operator)
             .requestWithdrawal(
@@ -292,10 +334,13 @@ impl DemoSwapAndDeposit {
                 B256::ZERO,
                 ROUTER_CALLBACK_GAS_LIMIT,
                 operator,
-                Bytes::from(callback_data),
+                callback_data,
             )
-            .gas(500_000)
-            .send_sync()
+            .gas(WITHDRAWAL_TX_GAS)
+            .send()
+            .await
+            .wrap_err("failed to submit routed withdrawal request on the zone")?
+            .get_receipt()
             .await
             .wrap_err("failed to request routed withdrawal on the zone")?;
         check(&receipt, "request routed withdrawal")?;
@@ -304,7 +349,7 @@ impl DemoSwapAndDeposit {
             receipt.transaction_hash
         );
 
-        let l2_alpha_after_request = token_balance(&l2, alpha, operator)
+        let l2_alpha_after_request = token_balance(&l2_operator, alpha, operator)
             .await
             .unwrap_or_default();
         println!("  AlphaUSD balance immediately after request: {l2_alpha_after_request}");
@@ -321,10 +366,16 @@ impl DemoSwapAndDeposit {
         .await?;
         println!("  Router callback processed on L1 (block {l1_block})");
 
-        let expected_beta_balance = beta_before + U256::from(expected_beta);
-        let final_beta =
-            wait_for_balance(&l2, beta, operator, expected_beta_balance, "BetaUSD").await?;
-        let final_alpha = token_balance(&l2, alpha, operator)
+        let expected_beta_balance = beta_before + U256::from(expected_beta_net);
+        let final_beta = wait_for_balance(
+            &l2_operator,
+            beta,
+            operator,
+            expected_beta_balance,
+            "BetaUSD",
+        )
+        .await?;
+        let final_alpha = token_balance(&l2_operator, alpha, operator)
             .await
             .unwrap_or_default();
         println!("  Final L2 AlphaUSD balance: {final_alpha}");
@@ -502,4 +553,134 @@ fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
         .unwrap_or(private_key)
         .parse()
         .wrap_err("invalid private key")
+}
+
+async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(
+    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
+    portal_address: Address,
+    token_out: Address,
+    recipient: Address,
+    memo: B256,
+    min_amount_out: u128,
+    sequencer_private_key: &str,
+) -> eyre::Result<Bytes> {
+    let (key, key_index) =
+        ensure_sequencer_encryption_key(portal, portal_address, sequencer_private_key).await?;
+    let y_parity = key.normalized_y_parity().ok_or_else(|| {
+        eyre!(
+            "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
+            key.yParity
+        )
+    })?;
+
+    let encrypted =
+        encrypt_deposit(&key.x, y_parity, recipient, memo, portal_address, key_index)
+            .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
+
+    let callback = SwapAndDepositRouterEncryptedCallback {
+        token_out,
+        target_portal: portal_address,
+        key_index,
+        encrypted: EncryptedDepositPayload {
+            ephemeralPubkeyX: encrypted.eph_pub_x,
+            ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
+            ciphertext: Bytes::from(encrypted.ciphertext),
+            nonce: encrypted.nonce.into(),
+            tag: encrypted.tag.into(),
+        },
+        min_amount_out,
+    };
+
+    Ok(Bytes::from(callback.abi_encode()))
+}
+
+async fn ensure_sequencer_encryption_key<P: Provider<TempoNetwork>>(
+    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
+    portal_address: Address,
+    sequencer_private_key: &str,
+) -> eyre::Result<(ZonePortal::sequencerEncryptionKeyReturn, U256)> {
+    let (expected_x, expected_y_parity) = derive_encryption_public_key(sequencer_private_key)
+        .wrap_err("failed to derive the sequencer encryption public key from SEQUENCER_KEY")?;
+    let key_count = portal
+        .encryptionKeyCount()
+        .call()
+        .await
+        .wrap_err("failed to read portal encryption key count")?;
+
+    let needs_registration = if key_count == U256::ZERO {
+        println!("  Registering the sequencer encryption key on the portal");
+        true
+    } else {
+        let current_key = portal
+            .sequencerEncryptionKey()
+            .call()
+            .await
+            .wrap_err("failed to read the active sequencer encryption key")?;
+        let current_y_parity = current_key.normalized_y_parity().ok_or_else(|| {
+            eyre!(
+                "unexpected portal yParity {:#x}, expected 0/1 or 0x02/0x03",
+                current_key.yParity
+            )
+        })?;
+        if current_key.x == expected_x && current_y_parity == expected_y_parity {
+            false
+        } else {
+            println!(
+                "  Portal encryption key does not match SEQUENCER_KEY; registering the current sequencer key"
+            );
+            true
+        }
+    };
+
+    if needs_registration {
+        register_sequencer_encryption_key(portal, portal_address, sequencer_private_key).await?;
+    }
+
+    portal
+        .encryption_key()
+        .await
+        .wrap_err("failed to fetch the active sequencer encryption key")
+}
+
+async fn register_sequencer_encryption_key<P: Provider<TempoNetwork>>(
+    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
+    portal_address: Address,
+    sequencer_private_key: &str,
+) -> eyre::Result<()> {
+    let (x, y_parity) = derive_encryption_public_key(sequencer_private_key)
+        .wrap_err("failed to derive the sequencer encryption public key")?;
+    let signer = parse_private_key(sequencer_private_key)?;
+    let message = keccak256((portal_address, x, U256::from(y_parity)).abi_encode());
+    let sig = signer
+        .sign_hash(&message)
+        .await
+        .wrap_err("failed to sign the encryption key proof-of-possession")?;
+    let pop_v = sig.v() as u8 + 27;
+    let pop_r = B256::from(sig.r().to_be_bytes::<32>());
+    let pop_s = B256::from(sig.s().to_be_bytes::<32>());
+
+    let receipt = portal
+        .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
+        .send_sync()
+        .await
+        .wrap_err("failed to send setSequencerEncryptionKey")?;
+    check(&receipt, "setSequencerEncryptionKey")?;
+    println!(
+        "  Sequencer encryption key registered on L1  [tx: {}]",
+        receipt.transaction_hash
+    );
+    Ok(())
+}
+
+fn derive_encryption_public_key(sequencer_private_key: &str) -> eyre::Result<(B256, u8)> {
+    let key_str = sequencer_private_key
+        .strip_prefix("0x")
+        .unwrap_or(sequencer_private_key);
+    let enc_key = k256::SecretKey::from_slice(&const_hex::decode(key_str)?)?;
+    let scalar: Scalar = *enc_key.to_nonzero_scalar();
+    let pub_point = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
+    let encoded = pub_point.to_encoded_point(true);
+    let x = B256::from_slice(encoded.x().unwrap().as_slice());
+    let y_parity = encoded.as_bytes()[0];
+    Ok((x, y_parity))
 }

@@ -11,7 +11,8 @@
 // The `sol!` macro generates functions whose arity we don't control.
 #![allow(clippy::too_many_arguments)]
 
-use alloy_primitives::{B256, keccak256};
+use alloc::vec::Vec;
+use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::SolValue;
 
 pub use crate::constants::{
@@ -508,6 +509,7 @@ macro_rules! define_abi {
             contract SwapAndDepositRouter {
                 function onWithdrawalReceived(
                     address sender,
+                    address tokenIn,
                     uint128 amount,
                     bytes calldata data
                 ) external returns (bytes4);
@@ -532,6 +534,77 @@ impl ZonePortal::sequencerEncryptionKeyReturn {
             0 | 1 => Some(0x02 + self.yParity),
             _ => None,
         }
+    }
+}
+
+/// Plaintext callback payload for `SwapAndDepositRouter.onWithdrawalReceived`.
+///
+/// This payload tells the router to optionally swap the withdrawn token on L1
+/// and then perform a regular `ZonePortal.deposit(...)`.
+#[derive(Debug, Clone)]
+pub struct SwapAndDepositRouterPlaintextCallback {
+    /// Token that should be deposited after the optional L1 swap.
+    pub token_out: Address,
+    /// Target zone portal that receives the downstream deposit.
+    pub target_portal: Address,
+    /// Zone recipient for the downstream plaintext deposit.
+    pub recipient: Address,
+    /// Memo recorded on the downstream plaintext deposit.
+    pub memo: B256,
+    /// Minimum acceptable output from the optional swap.
+    ///
+    /// Ignored when `tokenIn == token_out` and the router can deposit directly.
+    pub min_amount_out: u128,
+}
+
+impl SwapAndDepositRouterPlaintextCallback {
+    /// ABI-encode the router callback data expected by the Solidity router.
+    pub fn abi_encode(&self) -> Vec<u8> {
+        (
+            false,
+            self.token_out,
+            self.target_portal,
+            self.recipient,
+            self.memo,
+            self.min_amount_out,
+        )
+            .abi_encode_params()
+    }
+}
+
+/// Encrypted callback payload for `SwapAndDepositRouter.onWithdrawalReceived`.
+///
+/// This payload tells the router to optionally swap the withdrawn token on L1
+/// and then call `ZonePortal.depositEncrypted(...)` with an ECIES-encrypted
+/// `(recipient, memo)` payload.
+#[derive(Debug, Clone)]
+pub struct SwapAndDepositRouterEncryptedCallback {
+    /// Token that should be deposited after the optional L1 swap.
+    pub token_out: Address,
+    /// Target zone portal that receives the downstream encrypted deposit.
+    pub target_portal: Address,
+    /// Portal encryption key index used to build [`Self::encrypted`].
+    pub key_index: U256,
+    /// ECIES-encrypted `(recipient, memo)` payload for `depositEncrypted`.
+    pub encrypted: EncryptedDepositPayload,
+    /// Minimum acceptable output from the optional swap.
+    ///
+    /// Ignored when `tokenIn == token_out` and the router can deposit directly.
+    pub min_amount_out: u128,
+}
+
+impl SwapAndDepositRouterEncryptedCallback {
+    /// ABI-encode the router callback data expected by the Solidity router.
+    pub fn abi_encode(&self) -> Vec<u8> {
+        (
+            true,
+            self.token_out,
+            self.target_portal,
+            self.key_index,
+            self.encrypted.clone(),
+            self.min_amount_out,
+        )
+            .abi_encode_params()
     }
 }
 
@@ -721,5 +794,58 @@ mod tests {
 
         assert_eq!(solidity_encoding, rust_encoding, "ABI encodings must match");
         assert_eq!(solidity_hash, rust_hash, "Deposit hash chains must match");
+    }
+
+    #[test]
+    fn test_router_plaintext_callback_encoding_matches_tuple() {
+        let callback = SwapAndDepositRouterPlaintextCallback {
+            token_out: address!("0x0000000000000000000000000000000000001001"),
+            target_portal: address!("0x0000000000000000000000000000000000002001"),
+            recipient: address!("0x0000000000000000000000000000000000003001"),
+            memo: B256::from([0x11; 32]),
+            min_amount_out: 1234,
+        };
+
+        let tuple_encoding = (
+            false,
+            callback.token_out,
+            callback.target_portal,
+            callback.recipient,
+            callback.memo,
+            callback.min_amount_out,
+        )
+            .abi_encode_params();
+
+        assert_eq!(callback.abi_encode(), tuple_encoding);
+    }
+
+    #[test]
+    fn test_router_encrypted_callback_encoding_matches_tuple() {
+        let encrypted = EncryptedDepositPayload {
+            ephemeralPubkeyX: B256::from([0x22; 32]),
+            ephemeralPubkeyYParity: 0x02,
+            ciphertext: Bytes::from(vec![0xaa, 0xbb, 0xcc, 0xdd]),
+            nonce: [0x33; 12].into(),
+            tag: [0x44; 16].into(),
+        };
+        let callback = SwapAndDepositRouterEncryptedCallback {
+            token_out: address!("0x0000000000000000000000000000000000001002"),
+            target_portal: address!("0x0000000000000000000000000000000000002002"),
+            key_index: U256::from(7),
+            encrypted: encrypted.clone(),
+            min_amount_out: 5678,
+        };
+
+        let tuple_encoding = (
+            true,
+            callback.token_out,
+            callback.target_portal,
+            callback.key_index,
+            encrypted,
+            callback.min_amount_out,
+        )
+            .abi_encode_params();
+
+        assert_eq!(callback.abi_encode(), tuple_encoding);
     }
 }

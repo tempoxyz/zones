@@ -174,7 +174,7 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
         --stablecoin-dex "{{dex}}"
 
 [group('zone')]
-[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone via an encrypted deposit. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
 demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail

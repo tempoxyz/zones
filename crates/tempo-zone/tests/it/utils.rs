@@ -1683,19 +1683,16 @@ impl WithdrawalArgs {
         memo: B256,
         min_amount_out: u128,
     ) -> Self {
-        use alloy_sol_types::SolValue;
+        use zone::abi::SwapAndDepositRouterPlaintextCallback;
 
-        // SwapAndDepositRouter plaintext callback format:
-        // (bool isEncrypted, address tokenOut, address targetPortal, address recipient, bytes32 memo, uint128 minAmountOut)
-        let callback_data = (
-            false,
+        let callback_data = SwapAndDepositRouterPlaintextCallback {
             token_out,
             target_portal,
             recipient,
             memo,
             min_amount_out,
-        )
-            .abi_encode();
+        }
+        .abi_encode();
 
         Self {
             amount,
@@ -1717,19 +1714,14 @@ impl WithdrawalArgs {
         encrypted: zone::abi::EncryptedDepositPayload,
         min_amount_out: u128,
     ) -> Self {
-        use alloy_sol_types::SolValue;
-
-        // SwapAndDepositRouter encrypted callback format:
-        // (bool isEncrypted, address tokenOut, address targetPortal, uint256 keyIndex, EncryptedDepositPayload encrypted, uint128 minAmountOut)
-        let callback_data = (
-            true,
+        let callback_data = zone::abi::SwapAndDepositRouterEncryptedCallback {
             token_out,
             target_portal,
             key_index,
             encrypted,
             min_amount_out,
-        )
-            .abi_encode();
+        }
+        .abi_encode();
 
         Self {
             amount,
