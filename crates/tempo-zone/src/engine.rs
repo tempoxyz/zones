@@ -44,7 +44,7 @@ use eyre::OptionExt;
 use reth_chainspec::EthereumHardforks;
 use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
-use reth_payload_primitives::{BuiltPayload, EngineApiMessageVersion, PayloadKind, PayloadTypes};
+use reth_payload_primitives::{BuiltPayload, PayloadKind, PayloadTypes};
 use reth_primitives_traits::SealedHeader;
 use std::{sync::Arc, time::Duration};
 use tempo_chainspec::spec::TempoChainSpec;
@@ -158,10 +158,7 @@ impl ZoneEngine {
     /// Send an FCU without payload attributes (heartbeat).
     async fn update_forkchoice_state(&self) -> eyre::Result<()> {
         let state = self.forkchoice_state();
-        let res = self
-            .to_engine
-            .fork_choice_updated(state, None, EngineApiMessageVersion::default())
-            .await?;
+        let res = self.to_engine.fork_choice_updated(state, None).await?;
 
         if !res.is_valid() {
             eyre::bail!("Invalid fork choice update {state:?}: {res:?}")
@@ -243,11 +240,7 @@ impl ZoneEngine {
         // the attributes carry the L1 block data for the new zone block.
         let res = self
             .to_engine
-            .fork_choice_updated(
-                self.forkchoice_state(),
-                Some(attributes),
-                EngineApiMessageVersion::default(),
-            )
+            .fork_choice_updated(self.forkchoice_state(), Some(attributes))
             .await?;
 
         if res.is_invalid() {

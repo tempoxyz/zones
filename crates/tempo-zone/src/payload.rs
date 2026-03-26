@@ -1,17 +1,16 @@
 //! Zone-specific payload types.
 //!
-//! Owns the full payload attribute types for the zone, wrapping
-//! [`EthPayloadBuilderAttributes`] directly and adding L1 block data plus the
-//! millisecond timestamp portion. This avoids pulling in Tempo-specific
-//! concepts the zone doesn't use (interrupts, subblocks, DKG extra-data).
+//! Owns the full payload attribute types for the zone, wrapping Ethereum
+//! payload attributes and adding L1 block data plus the millisecond timestamp
+//! portion. This avoids pulling in Tempo-specific concepts the zone doesn't
+//! use (interrupts, subblocks, DKG extra-data).
 
 use std::sync::Arc;
 
 use alloy_primitives::{Address, B256, Bytes};
-use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
+use alloy_rpc_types_engine::{PayloadAttributes as EthPayloadAttributes, PayloadId};
 use alloy_rpc_types_eth::Withdrawal;
-use reth_node_api::{PayloadBuilderAttributes, PayloadTypes};
-use reth_payload_builder::EthPayloadBuilderAttributes;
+use reth_node_api::PayloadTypes;
 use reth_primitives_traits::SealedBlock;
 use serde::{Deserialize, Serialize};
 use tempo_payload_types::{TempoBuiltPayload, TempoExecutionData};
@@ -41,33 +40,24 @@ pub struct ZonePayloadAttributes {
 }
 
 impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
+    fn payload_id(&self, parent_hash: &B256) -> PayloadId {
+        reth_payload_primitives::payload_id(parent_hash, &self.inner)
+    }
+
     fn timestamp(&self) -> u64 {
-        self.inner.timestamp()
+        self.inner.timestamp
     }
 
     fn withdrawals(&self) -> Option<&Vec<Withdrawal>> {
-        self.inner.withdrawals()
+        self.inner.withdrawals.as_ref()
     }
 
     fn parent_beacon_block_root(&self) -> Option<B256> {
-        self.inner.parent_beacon_block_root()
+        self.inner.parent_beacon_block_root
     }
 }
 
-/// Zone builder attributes — wraps [`EthPayloadBuilderAttributes`] with L1
-/// data and the millisecond timestamp portion.
-///
-/// The `l1_block` is mandatory: every zone block processes exactly one L1
-/// block via `advanceTempo`. Decryption and TIP-403 policy checks have
-/// already been performed by the engine.
-#[derive(Debug, Clone)]
-pub struct ZonePayloadBuilderAttributes {
-    inner: EthPayloadBuilderAttributes,
-    timestamp_millis_part: u64,
-    l1_block: PreparedL1Block,
-}
-
-impl ZonePayloadBuilderAttributes {
+impl ZonePayloadAttributes {
     /// Returns a reference to the prepared L1 block data.
     pub fn l1_block(&self) -> &PreparedL1Block {
         &self.l1_block
@@ -82,54 +72,13 @@ impl ZonePayloadBuilderAttributes {
     pub fn timestamp_millis_part(&self) -> u64 {
         self.timestamp_millis_part
     }
-}
 
-impl PayloadBuilderAttributes for ZonePayloadBuilderAttributes {
-    type RpcPayloadAttributes = ZonePayloadAttributes;
-    type Error = std::convert::Infallible;
-
-    fn try_new(
-        parent: B256,
-        rpc_payload_attributes: Self::RpcPayloadAttributes,
-        version: u8,
-    ) -> Result<Self, Self::Error> {
-        Ok(Self {
-            inner: EthPayloadBuilderAttributes::try_new(
-                parent,
-                rpc_payload_attributes.inner,
-                version,
-            )?,
-            timestamp_millis_part: rpc_payload_attributes.timestamp_millis_part,
-            l1_block: rpc_payload_attributes.l1_block,
-        })
+    pub fn suggested_fee_recipient(&self) -> Address {
+        self.inner.suggested_fee_recipient
     }
 
-    fn payload_id(&self) -> alloy_rpc_types_engine::PayloadId {
-        self.inner.payload_id()
-    }
-
-    fn parent(&self) -> B256 {
-        self.inner.parent()
-    }
-
-    fn timestamp(&self) -> u64 {
-        self.inner.timestamp()
-    }
-
-    fn parent_beacon_block_root(&self) -> Option<B256> {
-        self.inner.parent_beacon_block_root()
-    }
-
-    fn suggested_fee_recipient(&self) -> Address {
-        self.inner.suggested_fee_recipient()
-    }
-
-    fn prev_randao(&self) -> B256 {
-        self.inner.prev_randao()
-    }
-
-    fn withdrawals(&self) -> &alloy_rpc_types_eth::Withdrawals {
-        self.inner.withdrawals()
+    pub fn prev_randao(&self) -> B256 {
+        self.inner.prev_randao
     }
 }
 
@@ -142,7 +91,6 @@ impl PayloadTypes for ZonePayloadTypes {
     type ExecutionData = TempoExecutionData;
     type BuiltPayload = TempoBuiltPayload;
     type PayloadAttributes = ZonePayloadAttributes;
-    type PayloadBuilderAttributes = ZonePayloadBuilderAttributes;
 
     fn block_to_payload(block: SealedBlock<Block>) -> Self::ExecutionData {
         TempoExecutionData {
