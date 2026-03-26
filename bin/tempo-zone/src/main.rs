@@ -94,7 +94,6 @@ struct ZoneArgs {
     )]
     pub l1_fetch_concurrency: usize,
 
-
     /// Interval in milliseconds between WebSocket reconnection attempts to L1.
     #[arg(
         long = "l1.retry-connection-interval",
