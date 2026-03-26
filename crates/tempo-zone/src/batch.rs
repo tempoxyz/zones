@@ -194,17 +194,16 @@ impl BatchSubmitter {
     /// Only performs a single `get_block_number` RPC call — no header fetching
     /// or contract reads.
     ///
-    /// Returns an error if `tempo_block_number` is not yet confirmed on L1
-    /// (i.e. it equals or exceeds the current L1 tip).
+    /// Returns an error if `tempo_block_number` is ahead of the current L1 tip.
     pub(crate) async fn classify_anchor_gap(
         &self,
         tempo_block_number: u64,
     ) -> Result<AnchorGapKind> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
-        if tempo_block_number >= current_l1_block {
+        if tempo_block_number > current_l1_block {
             return Err(eyre::eyre!(
-                "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 (tip={current_l1_block}), \
+                "tempo_block_number ({tempo_block_number}) is ahead of L1 tip (tip={current_l1_block}), \
                  will retry after L1 advances"
             ));
         }
@@ -233,9 +232,9 @@ impl BatchSubmitter {
     async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
-        if tempo_block_number >= current_l1_block {
+        if tempo_block_number > current_l1_block {
             return Err(eyre::eyre!(
-                "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 \
+                "tempo_block_number ({tempo_block_number}) is ahead of L1 tip \
                  (tip={current_l1_block}), will retry after L1 advances"
             ));
         }
