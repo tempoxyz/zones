@@ -2,8 +2,8 @@
 pragma solidity ^0.8.13;
 
 import { TIP20 } from "../../src/TIP20.sol";
-import { ITIP403Registry } from "../../src/interfaces/ITIP403Registry.sol";
 import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
+import { ITIP403Registry } from "../../src/interfaces/ITIP403Registry.sol";
 
 import { BLOCKHASH_HISTORY_WINDOW } from "../../src/zone/BlockHashHistory.sol";
 import {

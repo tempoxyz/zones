@@ -1,7 +1,4 @@
-use alloy::{
-    primitives::Address,
-    providers::ProviderBuilder,
-};
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
 use zone::abi::{ZoneFactory, ZonePortal};
