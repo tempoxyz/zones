@@ -367,6 +367,7 @@ struct Deposit {
     address to;
     uint128 amount;
     bytes32 memo;
+    address bouncebackRecipient; // L1 address for refund if zone-side processing fails (address(0) for bounce-back deposits)
 }
 
 struct Withdrawal {
@@ -511,7 +512,8 @@ interface IZonePortal {
         address to,
         uint128 netAmount,
         uint128 fee,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient
     );
 
     event BatchSubmitted(
@@ -527,9 +529,15 @@ interface IZonePortal {
         bool callbackSuccess
     );
 
-    event BounceBack(
+    event WithdrawalBounceBack(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed fallbackRecipient,
+        uint128 amount
+    );
+
+    event DepositBounceBack(
+        address indexed token,
+        address indexed bouncebackRecipient,
         uint128 amount
     );
 
@@ -611,14 +619,17 @@ interface IZonePortal {
     function calculateDepositFee() external view returns (uint128 fee);
 
     /// @notice Deposit a TIP-20 token into the zone. Fee is deducted from amount.
-    function deposit(address token, address to, uint128 amount, bytes32 memo) external returns (bytes32 newCurrentDepositQueueHash);
+    /// @param bouncebackRecipient L1 address to receive refund if zone-side processing fails. Validated against TIP-403 at deposit time.
+    function deposit(address token, address to, uint128 amount, bytes32 memo, address bouncebackRecipient) external returns (bytes32 newCurrentDepositQueueHash);
 
     /// @notice Deposit with encrypted recipient and memo. Fee is deducted from amount.
+    /// @param bouncebackRecipient L1 address to receive refund if zone-side processing fails. Validated against TIP-403 at deposit time.
     function depositEncrypted(
         address token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted
+        EncryptedDepositPayload calldata encrypted,
+        address bouncebackRecipient
     ) external returns (bytes32 newCurrentDepositQueueHash);
 
     /// @notice Get the current sequencer encryption key.
@@ -1139,15 +1150,17 @@ The key insight: structure the hash chain so the **on-chain operation touches th
 
 ## Bridging in (Tempo to zone)
 
-1. User calls `ZonePortal.deposit(token, to, amount, memo)` on Tempo, specifying which enabled TIP-20 to deposit.
-2. `ZonePortal` validates the token is enabled and deposits are active, transfers `amount` of the specified token into escrow, and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, deposit, currentDepositQueueHash))`. The `Deposit` struct includes the `token` field.
-3. The sequencer observes `DepositMade` events and processes deposits in order via `ZoneInbox.advanceTempo()`, minting the correct zone-side TIP-20 to the recipient: `IZoneToken(d.token).mint(d.to, d.amount)`. Deposits always succeed—there is no callback or bounce mechanism.
-4. A batch proof/attestation must prove the zone correctly processed deposits by validating the Tempo state read inside the proof.
-5. After the batch is accepted, `lastSyncedTempoBlockNumber` is updated to record how far Tempo state was synced.
+1. User calls `ZonePortal.deposit(token, to, amount, memo, bouncebackRecipient)` on Tempo, specifying which enabled TIP-20 to deposit. The `bouncebackRecipient` is a Tempo L1 address that will receive refunded tokens if zone-side processing fails.
+2. `ZonePortal` validates the token is enabled and deposits are active, validates that `bouncebackRecipient` is authorized under TIP-403 (see [Deposit bounce-back](#deposit-bounce-back-zone--tempo)), transfers `amount` of the specified token into escrow, and appends a deposit to the queue: `currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, deposit, currentDepositQueueHash))`. The `Deposit` struct includes the `token` and `bouncebackRecipient` fields.
+3. The sequencer observes `DepositMade` events and processes deposits in order via `ZoneInbox.advanceTempo()`, minting the correct zone-side TIP-20 to the recipient: `IZoneToken(d.token).mint(d.to, d.amount)`.
+4. If zone-side minting fails (e.g., zone-side TIP-403 policy blocks the recipient), the zone creates a **bounce-back withdrawal** that returns the funds to `bouncebackRecipient` on L1 (see [Deposit bounce-back](#deposit-bounce-back-zone--tempo)).
+5. A batch proof/attestation must prove the zone correctly processed deposits (including any bouncebacks) by validating the Tempo state read inside the proof.
+6. After the batch is accepted, `lastSyncedTempoBlockNumber` is updated to record how far Tempo state was synced.
 
 Notes:
 
-- Deposits are simple token credits. There are no callbacks or failure modes on the zone side.
+- Deposits that succeed are simple token credits with no callbacks.
+- Deposits that fail on the zone side bounce back to `bouncebackRecipient` on L1. The sequencer processes the bounceback when submitting the next batch.
 - Deposits are finalized for Tempo once the batch is verified.
 - There is no forced inclusion. If the sequencer withholds deposits, funds are stuck in escrow.
 - The portal only stores `currentDepositQueueHash`, not individual deposits. The sequencer must track deposits off-chain.
@@ -1562,25 +1575,117 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
 
 The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` to authenticate the call, and receive the `senderTag` in `onWithdrawalReceived` (see [Authenticated withdrawals](#authenticated-withdrawals)). This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
 
-## Withdrawal failure and bounce-back
+## Bounce-back
+
+Bouncebacks provide a symmetric recovery mechanism for failed transfers in both directions. A withdrawal that fails on Tempo bounces back to the zone. A deposit that fails on the zone bounces back to Tempo. In both cases, the user's funds are never lost.
+
+### Withdrawal bounce-back (Tempo → zone)
 
 Withdrawals can fail if the token transfer or messenger callback reverts (out of gas, logic error, TIP-403 policy, token pause, etc.). When this happens, the portal "bounces back" the funds by re-depositing into the same zone to the withdrawal's `fallbackRecipient`.
 
 ```solidity
-function _enqueueBounceBack(address token, uint128 amount, address fallbackRecipient) internal {
+function _enqueueWithdrawalBounceBack(address token, uint128 amount, address fallbackRecipient) internal {
     Deposit memory d = Deposit({
-        token: token,           // same token from the failed withdrawal
+        token: token,
         sender: address(this),
         to: fallbackRecipient,
         amount: amount,
-        memo: bytes32(0)
+        memo: bytes32(0),
+        bouncebackRecipient: address(0) // bounce-back deposits do not themselves bounce
     });
     currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, d, currentDepositQueueHash));
-    emit BounceBack(...);
+    emit WithdrawalBounceBack(...);
 }
 ```
 
 The zone processes bounce-back deposits and credits the `fallbackRecipient`. This allows withdrawals to fail gracefully without blocking the queue.
+
+`fallbackRecipient` is a **zone address**. The user specifies it when requesting the withdrawal on the zone. It MUST NOT be `address(0)`.
+
+### Deposit bounce-back (zone → Tempo)
+
+Deposits can fail on the zone side if the mint is rejected (e.g., zone-side TIP-403 policy blocks the recipient, or decryption fails for encrypted deposits). When this happens, the zone enqueues a **bounce-back withdrawal** that returns the escrowed funds to the deposit's `bouncebackRecipient` on Tempo.
+
+```solidity
+function _enqueueDepositBounceBack(address token, uint128 amount, address bouncebackRecipient) internal {
+    PendingWithdrawal memory w = PendingWithdrawal({
+        token: token,
+        sender: address(0),       // system-generated, no zone sender
+        txHash: bytes32(0),       // no originating zone transaction
+        to: bouncebackRecipient,  // L1 recipient (validated at deposit time)
+        amount: amount,
+        fee: 0,                   // no fee for bouncebacks
+        memo: bytes32(0),
+        gasLimit: 0,              // simple transfer, no callback
+        fallbackRecipient: address(0), // N/A for deposit bouncebacks
+        callbackData: "",
+        revealTo: ""
+    });
+    // Enqueue as a pending withdrawal for inclusion in the next batch
+    _enqueueBounceBackWithdrawal(w);
+    emit DepositBounceBack(token, bouncebackRecipient, amount);
+}
+```
+
+**Zone-side processing**: During `advanceTempo()`, when a deposit fails:
+
+```solidity
+// In ZoneInbox.advanceTempo():
+try IZoneToken(d.token).mint(d.to, d.amount) {
+    emit DepositProcessed(...);
+} catch {
+    // Mint failed — bounce back to L1
+    ZoneOutbox(_outbox)._enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
+    emit DepositFailed(currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient);
+}
+```
+
+The bounceback withdrawal is included in the zone's next withdrawal batch, and the portal processes it like any other withdrawal. The portal bypasses TIP-403 for bounceback transfers (see [Portal TIP-403 bypass](#portal-tip-403-bypass)).
+
+`bouncebackRecipient` is a **Tempo L1 address**. The user specifies it when making the deposit on L1. It MUST NOT be `address(0)`.
+
+### Deposit bounce-back for encrypted deposits
+
+Encrypted deposits already have a failure path when decryption fails: funds are minted to `ed.sender` on the zone. With deposit bouncebacks, a second failure path is added for when the decrypted recipient is rejected:
+
+1. **Decryption fails**: Funds are minted to `ed.sender` on the zone (existing behavior, unchanged).
+2. **Decryption succeeds but mint fails**: Funds bounce back to `bouncebackRecipient` on L1 via a bounceback withdrawal.
+
+The `bouncebackRecipient` for encrypted deposits is set at deposit time, same as regular deposits. This ensures that even if the encrypted recipient turns out to be blacklisted, the depositor has a guaranteed recovery path.
+
+### Bounce-back properties
+
+| Property | Withdrawal bounce-back | Deposit bounce-back |
+|----------|----------------------|-------------------|
+| Direction | Tempo → zone | Zone → Tempo |
+| Trigger | Transfer/callback fails on Tempo | Mint fails on zone |
+| Recipient field | `fallbackRecipient` (zone address) | `bouncebackRecipient` (L1 address) |
+| Validated at | Withdrawal request time (zone) | Deposit time (L1) |
+| Fee | None (sequencer keeps original fee) | None (sequencer keeps original deposit fee) |
+| Mechanism | Portal enqueues a deposit to zone | Zone enqueues a withdrawal to L1 |
+| Recursive bouncing | No — bounce-back deposits have `bouncebackRecipient = address(0)` | No — bounce-back withdrawals have `fallbackRecipient = address(0)` |
+
+**No recursive bouncing**: Bounce-back deposits (from withdrawal failures) set `bouncebackRecipient = address(0)` and are guaranteed to succeed on the zone because they bypass all policy checks. Bounce-back withdrawals (from deposit failures) set `fallbackRecipient = address(0)` because TIP-403 is validated at deposit time and the portal bypasses TIP-403 for bounceback transfers.
+
+### Portal TIP-403 bypass
+
+The portal MUST be able to transfer tokens for bounceback withdrawals regardless of TIP-403 policy changes between deposit time and bounceback time. To achieve this:
+
+1. The portal contract address MUST be whitelisted as an authorized sender in the TIP-403 policy for every enabled token.
+2. The `bouncebackRecipient` is validated against TIP-403 at deposit time. Even if the recipient is later blacklisted, the portal's whitelisted sender status ensures the transfer succeeds.
+3. Alternatively, the TIP-20 contract can grant the portal a bypass role that exempts portal-initiated transfers from TIP-403 checks entirely.
+
+The choice between (2) and (3) depends on the TIP-403 implementation. Option (3) is more robust because it eliminates the race between deposit validation and bounceback execution.
+
+### Distinguishing bounce-back withdrawals
+
+The portal needs to distinguish bounce-back withdrawals from regular withdrawals to apply the correct TIP-403 treatment. Bounce-back withdrawals are identifiable by:
+
+- `fee == 0` (regular withdrawals always have a non-zero fee)
+- `sender == address(0)` in the `PendingWithdrawal` struct
+- `senderTag == bytes32(0)` in the finalized `Withdrawal` struct
+
+The portal SHOULD use these markers to skip TIP-403 recipient checks and apply the portal's bypass authorization when processing bounceback withdrawals.
 
 ## Data availability and liveness
 
@@ -1588,25 +1693,34 @@ The zone processes bounce-back deposits and credits the `fallbackRecipient`. Thi
 - If the sequencer withholds data or halts, users cannot reconstruct zone state or force exits; batch posting and withdrawal processing are sequencer-only.
 - The design assumes users accept this risk in exchange for low-cost and fast settlement.
 
-## Withdrawal failure details
+## Failure details
 
-Withdrawals can fail for various reasons. The system handles failures gracefully via bounce-back:
-
-### Failure reasons
+### Withdrawal failures
 
 Withdrawals can fail due to:
-- **Transfer failure**: `transfer` or `transferFrom` reverts (includes gasLimit = 0 cases)
+- **Transfer failure**: `transfer` or `transferFrom` reverts
 - **TIP-403 policy**: Recipient not authorized under the token's transfer policy
 - **Token paused**: The token is globally paused
 - **Callback revert**: The receiver contract reverts (out of gas, logic error, etc.)
 - **Callback rejection**: Receiver returns wrong selector
 
-### Withdrawal failures (Tempo-side)
-
 When a withdrawal fails on Tempo:
 1. The TIP-20 transfer or callback reverts
 2. The portal enqueues a bounce-back deposit to `fallbackRecipient` on the zone
 3. Funds return to zone via the normal deposit flow
+
+### Deposit failures
+
+Deposits can fail on the zone due to:
+- **Zone-side TIP-403 policy**: Recipient blocked by the zone's policy registry
+- **Token misconfiguration**: Zone-side token predeploy rejects the mint
+- **Encrypted deposit — decryption failure**: Chaum-Pedersen proof invalid or AES-GCM decryption fails (handled separately — mints to `sender` on zone)
+
+When a deposit fails on the zone:
+1. The zone-side mint reverts
+2. The zone enqueues a bounce-back withdrawal to `bouncebackRecipient` on L1
+3. The batch proof includes the bounceback withdrawal
+4. The portal processes it and transfers escrowed funds to `bouncebackRecipient`
 
 ### TIP-403 specific considerations
 
@@ -1616,8 +1730,9 @@ Tempo TIP-20 tokens use TIP-403 for transfer authorization:
 - Policy ID 1 is "always-allow" (default for most tokens)
 
 Zone creators SHOULD choose tokens with `transferPolicyId == 1` to avoid complexity. If using restricted policies:
-- The portal address MUST be whitelisted
-- Users should set `fallbackRecipient` to an address they control
+- The portal address MUST be whitelisted as an authorized sender
+- Users should set `fallbackRecipient` / `bouncebackRecipient` to an address they control
+- The portal MUST bypass TIP-403 for bounceback transfers (see [Portal TIP-403 bypass](#portal-tip-403-bypass))
 
 ## Security considerations
 
@@ -1625,9 +1740,9 @@ Zone creators SHOULD choose tokens with `transferPolicyId == 1` to avoid complex
 - The verifier is a trust anchor. A faulty verifier can steal or lock funds.
 - Withdrawals with callbacks go through the zone messenger with a user-specified gas limit. The messenger does `transferFrom` + callback atomically; any transfer or callback failure triggers a bounce-back to `fallbackRecipient`.
 - Deposits are locked on Tempo until a verified batch consumes them.
-- **Bounce-back guarantees**: Failed withdrawals bounce back to zone `fallbackRecipient`. Users always retain their funds.
-- **TIP-403 policy changes**: If a token's policy restricts the portal, withdrawals for that token will fail and bounce back.
-- **Token pause**: If a token is paused, withdrawals for that token bounce back to zone.
+- **Bounce-back guarantees**: Failed withdrawals bounce back to zone `fallbackRecipient`. Failed deposits bounce back to L1 `bouncebackRecipient`. Users always retain their funds in both directions.
+- **TIP-403 policy changes**: If a token's policy restricts the portal or a recipient, transfers fail and bounce back. The portal bypasses TIP-403 for bounceback transfers to ensure funds are always recoverable.
+- **Token pause**: If a token is paused, withdrawals for that token bounce back to zone. Deposits that fail zone-side bounce back to L1.
 
 ## Implementation architecture
 
