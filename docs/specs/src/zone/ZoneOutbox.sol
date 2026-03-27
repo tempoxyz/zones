@@ -308,28 +308,7 @@ contract ZoneOutbox is IZoneOutbox {
     ///      Protocol and proof enforce this runs at the end of the final block in the batch.
     ///      Emits BatchFinalized for observability (proof reads from state).
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
-    /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(
-        uint256 count,
-        uint64 blockNumber
-    )
-        external
-        returns (bytes32 withdrawalQueueHash)
-    {
-        uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
-        if (count > pending) {
-            count = pending;
-        }
-        return _finalizeWithdrawalBatch(count, blockNumber, new bytes[](count));
-    }
-
-    /// @notice Finalize the batch at end of block - build withdrawal hash and emit proof inputs
-    /// @dev Only callable by sequencer at the end of a block.
-    ///      The proof enforces that this is the last call in the block and that a batch
-    ///      ends with exactly one finalizeWithdrawalBatch call (use count = 0 if no withdrawals).
-    ///      Protocol and proof enforce this runs at the end of the final block in the batch.
-    ///      Emits BatchFinalized for observability (proof reads from state).
-    /// @param count Max number of withdrawals to process (avoids unbounded loops)
+    /// @param encryptedSenders One ciphertext per finalized withdrawal (empty for plaintext withdrawals)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(
         uint256 count,

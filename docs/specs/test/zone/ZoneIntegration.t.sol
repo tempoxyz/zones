@@ -171,6 +171,27 @@ contract ZoneIntegrationTest is BaseTest {
         });
     }
 
+    function _emptyEncryptedSenders(uint256 count)
+        internal
+        view
+        returns (bytes[] memory encryptedSenders)
+    {
+        uint256 pending = l2Outbox.pendingWithdrawalsCount();
+        if (count > pending) {
+            count = pending;
+        }
+        encryptedSenders = new bytes[](count);
+    }
+
+    function _finalizeWithdrawalBatch(uint256 count) internal returns (bytes32) {
+        vm.startPrank(admin);
+        bytes32 hash = l2Outbox.finalizeWithdrawalBatch(
+            count, uint64(block.number), _emptyEncryptedSenders(count)
+        );
+        vm.stopPrank();
+        return hash;
+    }
+
     /*//////////////////////////////////////////////////////////////
                    MULTI-USER DEPOSIT FLOW TESTS
     //////////////////////////////////////////////////////////////*/
@@ -374,9 +395,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.stopPrank();
 
         // Finalize L2 batch
-        vm.prank(admin);
-        bytes32 withdrawalHash =
-            l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 withdrawalHash = _finalizeWithdrawalBatch(type(uint256).max);
 
         // Submit L1 batch
         vm.roll(block.number + 1);
@@ -445,8 +464,7 @@ contract ZoneIntegrationTest is BaseTest {
         // batch needs a distinct block.number, so we advance before each finalize+submit pair.
         vm.roll(block.number + 1);
 
-        vm.prank(admin);
-        bytes32 wHash1 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 wHash1 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
             uint64(block.number - 1),
@@ -471,8 +489,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         vm.roll(block.number + 1);
 
-        vm.prank(admin);
-        bytes32 wHash2 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 wHash2 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
             uint64(block.number - 1),
@@ -497,8 +514,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         vm.roll(block.number + 1);
 
-        vm.prank(admin);
-        bytes32 wHash3 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 wHash3 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
             uint64(block.number - 1),
@@ -587,8 +603,7 @@ contract ZoneIntegrationTest is BaseTest {
         l2Outbox.requestWithdrawal(address(l2ZoneToken), charlie, 1500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        vm.prank(admin);
-        bytes32 wHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 wHash = _finalizeWithdrawalBatch(type(uint256).max);
 
         // Phase 3: More deposits arrive while withdrawals are pending
         vm.startPrank(charlie);

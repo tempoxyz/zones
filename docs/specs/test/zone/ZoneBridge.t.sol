@@ -215,6 +215,27 @@ contract ZoneBridgeTest is BaseTest {
         });
     }
 
+    function _emptyEncryptedSenders(uint256 count)
+        internal
+        view
+        returns (bytes[] memory encryptedSenders)
+    {
+        uint256 pending = l2Outbox.pendingWithdrawalsCount();
+        if (count > pending) {
+            count = pending;
+        }
+        encryptedSenders = new bytes[](count);
+    }
+
+    function _finalizeWithdrawalBatch(uint256 count) internal returns (bytes32) {
+        vm.startPrank(admin);
+        bytes32 hash = l2Outbox.finalizeWithdrawalBatch(
+            count, uint64(block.number), _emptyEncryptedSenders(count)
+        );
+        vm.stopPrank();
+        return hash;
+    }
+
     /*//////////////////////////////////////////////////////////////
                        SEQUENCER SIMULATION HELPERS
     //////////////////////////////////////////////////////////////*/
@@ -331,9 +352,7 @@ contract ZoneBridgeTest is BaseTest {
     /// @notice Simulate sequencer building and submitting a batch to Tempo
     function _sequencerSubmitBatch(bytes32 newProcessedDepositQueueHash) internal {
         // Sequencer calls finalizeWithdrawalBatch() on zone outbox to get withdrawal hash on-chain
-        vm.prank(admin);
-        bytes32 withdrawalQueueHash =
-            l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 withdrawalQueueHash = _finalizeWithdrawalBatch(type(uint256).max);
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
