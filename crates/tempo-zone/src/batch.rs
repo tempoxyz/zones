@@ -33,13 +33,19 @@ use alloy_consensus::Transaction;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, sol};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
 use tracing::{info, instrument, warn};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
+
+sol! {
+    contract LegacyZoneOutboxDecoder {
+        function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber) external returns (bytes32 withdrawalQueueHash);
+    }
+}
 
 /// EIP-2935 stores the last 8192 block hashes (~68 min at 500ms block time).
 const EIP2935_HISTORY_WINDOW: u64 = 8192;
@@ -867,8 +873,8 @@ pub(crate) async fn fetch_slot_withdrawals(
                     finalized_batch.block_number
                 )
             })?;
-        let finalize_call =
-            abi::ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
+        let encrypted_senders =
+            decode_finalize_encrypted_senders(finalize_tx.input().as_ref(), requests.len())
                 .map_err(|err| {
                     eyre::eyre!(
                         "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
@@ -876,27 +882,24 @@ pub(crate) async fn fetch_slot_withdrawals(
                     )
                 })?;
 
-        if finalize_call.encryptedSenders.len() != requests.len() {
+        if encrypted_senders.len() != requests.len() {
             return Err(eyre::eyre!(
                 "encrypted sender count mismatch at zone block {}: {} encrypted senders for {} requests",
                 finalized_batch.block_number,
-                finalize_call.encryptedSenders.len(),
+                encrypted_senders.len(),
                 requests.len()
             ));
         }
 
-        withdrawals.extend(
-            requests
-                .into_iter()
-                .zip(finalize_call.encryptedSenders)
-                .map(|(request, encrypted_sender)| {
-                    abi::Withdrawal::from_requested_event(
-                        &request.event,
-                        request.tx_hash,
-                        encrypted_sender,
-                    )
-                }),
-        );
+        withdrawals.extend(requests.into_iter().zip(encrypted_senders).map(
+            |(request, encrypted_sender)| {
+                abi::Withdrawal::from_requested_event(
+                    &request.event,
+                    request.tx_hash,
+                    encrypted_sender,
+                )
+            },
+        ));
     }
 
     if !requests_by_block.is_empty() {
@@ -906,6 +909,30 @@ pub(crate) async fn fetch_slot_withdrawals(
     }
 
     Ok(withdrawals)
+}
+
+fn decode_finalize_encrypted_senders(input: &[u8], request_count: usize) -> Result<Vec<Bytes>> {
+    if input.starts_with(&abi::ZoneOutbox::finalizeWithdrawalBatchCall::SELECTOR) {
+        return Ok(
+            abi::ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(input)
+                .map_err(|err| eyre::eyre!("{err}"))?
+                .encryptedSenders,
+        );
+    }
+
+    if input.starts_with(&LegacyZoneOutboxDecoder::finalizeWithdrawalBatchCall::SELECTOR) {
+        LegacyZoneOutboxDecoder::finalizeWithdrawalBatchCall::abi_decode(input)
+            .map_err(|err| eyre::eyre!("{err}"))?;
+        return Ok(vec![Bytes::new(); request_count]);
+    }
+
+    let selector = input
+        .get(..4)
+        .map(alloy_primitives::hex::encode)
+        .unwrap_or_else(|| "<missing>".to_string());
+    Err(eyre::eyre!(
+        "unknown finalizeWithdrawalBatch selector {selector}"
+    ))
 }
 
 /// Classification of the EIP-2935 gap, returned by
@@ -986,7 +1013,7 @@ pub(crate) struct ZoneBlockSnapshot {
 mod tests {
     use super::*;
     use crate::abi;
-    use alloy_primitives::{B256, address};
+    use alloy_primitives::{B256, Bytes, U256, address};
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
@@ -1069,6 +1096,29 @@ mod tests {
         let result =
             resolve_pending_slots(5, 5, &BTreeMap::new(), &BTreeMap::new(), B256::ZERO).unwrap();
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn decode_finalize_withdrawal_batch_supports_both_overloads() {
+        let legacy_call = LegacyZoneOutboxDecoder::finalizeWithdrawalBatchCall {
+            count: U256::from(2),
+            blockNumber: 7,
+        };
+        assert_eq!(
+            decode_finalize_encrypted_senders(&legacy_call.abi_encode(), 2).unwrap(),
+            vec![Bytes::new(), Bytes::new()]
+        );
+
+        let encrypted = vec![Bytes::from(vec![0xAA]), Bytes::from(vec![0xBB, 0xCC])];
+        let authenticated_call = abi::ZoneOutbox::finalizeWithdrawalBatchCall {
+            count: U256::from(2),
+            blockNumber: 7,
+            encryptedSenders: encrypted.clone(),
+        };
+        assert_eq!(
+            decode_finalize_encrypted_senders(&authenticated_call.abi_encode(), 2).unwrap(),
+            encrypted
+        );
     }
 
     #[test]
