@@ -1,10 +1,12 @@
 use alloy::{
-    primitives::{Address, address},
+    primitives::Address,
     providers::ProviderBuilder,
 };
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
 use zone::abi::{ZoneFactory, ZonePortal};
+
+use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct ZoneInfoCmd {
@@ -19,7 +21,7 @@ pub(crate) struct ZoneInfoCmd {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    #[arg(long, default_value_t = address!("0xD8d977D60F61F8a5e5003a3A9dCF6ACae554BC8c"))]
+    #[arg(long, default_value_t = MODERATO_ZONE_FACTORY)]
     zone_factory: Address,
 }
 

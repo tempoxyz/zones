@@ -447,7 +447,7 @@ graph TB
 | Contract | Address |
 |----------|---------|
 | pathUSD (TIP-20) | `0x20C0000000000000000000000000000000000000` |
-| ZoneFactory (moderato) | `0x8F3F0d21D01648d9373B3688CAc91b5253D3874C` |
+| ZoneFactory (moderato) | `0x4C64016B46A675F60B4E3f9606C3E2568746a2Fe` |
 
 ### Zone Node CLI Options
 
