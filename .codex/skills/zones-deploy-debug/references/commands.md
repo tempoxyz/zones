@@ -37,6 +37,40 @@ Read deployment metadata:
 jq '{zoneId, portal, tempoAnchorBlock, zoneFactory, swapAndDepositRouter, sequencerAddress}' generated/my-zone/zone.json
 ```
 
+## Direct deposit + withdrawal validation
+
+Set the active portal first:
+
+```bash
+export L1_PORTAL_ADDRESS="$(jq -r '.portal' generated/my-zone/zone.json)"
+```
+
+Approve the L1 portal before depositing:
+
+```bash
+just max-approve-portal
+```
+
+Send a deposit to the zone:
+
+```bash
+just send-deposit 1000000
+```
+
+Approve the L2 outbox before withdrawing:
+
+```bash
+just max-approve-outbox
+```
+
+Request a withdrawal back to L1:
+
+```bash
+just send-withdrawal 400000
+```
+
+`just send-withdrawal` only waits for L1 finalization if both `L1_RPC_URL` and `L1_PORTAL_ADDRESS` are set.
+
 ## Router validation flow
 
 Deploy the router:
@@ -74,13 +108,13 @@ target/debug/tempo-xtask demo-swap-and-deposit \
 Tail the zone log:
 
 ```bash
-tail -f /tmp/tempo-zone-my-zone*/logs/immutable/reth.log
+tail -f /tmp/tempo-zone-my-zone*/logs/*/reth.log
 ```
 
 Useful patterns:
 
 ```bash
-rg -n "Prepared L1 block deposits|Including advanceTempo|TokenEnabled|DepositProcessed|WithdrawalProcessed" /tmp/tempo-zone-my-zone*/logs/immutable/reth.log
+rg -n "Prepared L1 block deposits|Including advanceTempo|TokenEnabled|DepositProcessed|WithdrawalProcessed" /tmp/tempo-zone-my-zone*/logs/*/reth.log
 ```
 
 When `demo-swap-and-deposit` stalls at token enablement:
@@ -94,7 +128,7 @@ cast receipt <tx-hash> --rpc-url "$HTTP_RPC"
 2. Compare it with the latest processed L1 block in the log:
 
 ```bash
-tail -n 200 /tmp/tempo-zone-my-zone*/logs/immutable/reth.log | rg "Prepared L1 block deposits|Including advanceTempo"
+tail -n 200 /tmp/tempo-zone-my-zone*/logs/*/reth.log | rg "Prepared L1 block deposits|Including advanceTempo"
 ```
 
 If the zone is still behind the tx block, wait longer or rerun the test with a `release` node.
