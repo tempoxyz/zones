@@ -36,7 +36,7 @@ contract TrackingReceiver is IWithdrawalReceiver {
     uint256 public callCount;
 
     function onWithdrawalReceived(
-        address,
+        bytes32,
         address,
         uint128 amount,
         bytes calldata
@@ -137,6 +137,59 @@ contract ZoneIntegrationTest is BaseTest {
         l2Inbox.advanceTempo(
             "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
         );
+    }
+
+    function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked(sender, zoneTxContext.txHashFor(txSequence)));
+    }
+
+    function _withdrawal(
+        uint256 txSequence,
+        address sender,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes memory callbackData
+    )
+        internal
+        view
+        returns (Withdrawal memory)
+    {
+        return Withdrawal({
+            token: address(l2ZoneToken),
+            senderTag: _senderTag(sender, txSequence),
+            to: to,
+            amount: amount,
+            fee: 0,
+            memo: memo,
+            gasLimit: gasLimit,
+            fallbackRecipient: fallbackRecipient,
+            callbackData: callbackData,
+            encryptedSender: ""
+        });
+    }
+
+    function _emptyEncryptedSenders(uint256 count)
+        internal
+        view
+        returns (bytes[] memory encryptedSenders)
+    {
+        uint256 pending = l2Outbox.pendingWithdrawalsCount();
+        if (count > pending) {
+            count = pending;
+        }
+        encryptedSenders = new bytes[](count);
+    }
+
+    function _finalizeWithdrawalBatch(uint256 count) internal returns (bytes32) {
+        vm.startPrank(admin);
+        bytes32 hash = l2Outbox.finalizeWithdrawalBatch(
+            count, uint64(block.number), _emptyEncryptedSenders(count)
+        );
+        vm.stopPrank();
+        return hash;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -342,9 +395,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.stopPrank();
 
         // Finalize L2 batch
-        vm.prank(admin);
-        bytes32 withdrawalHash =
-            l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 withdrawalHash = _finalizeWithdrawalBatch(type(uint256).max);
 
         // Submit L1 batch
         vm.roll(block.number + 1);
@@ -363,17 +414,9 @@ contract ZoneIntegrationTest is BaseTest {
         );
 
         // Process withdrawal
-        Withdrawal memory w = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: address(receiver),
-            amount: 2000e6,
-            fee: 0,
-            memo: bytes32("payment"),
-            gasLimit: 100_000,
-            fallbackRecipient: alice,
-            callbackData: "callback"
-        });
+        Withdrawal memory w = _withdrawal(
+            1, alice, address(receiver), 2000e6, bytes32("payment"), 100_000, alice, "callback"
+        );
         l1Portal.processWithdrawal(w, bytes32(0));
 
         // Verify callback was executed
@@ -421,8 +464,7 @@ contract ZoneIntegrationTest is BaseTest {
         // batch needs a distinct block.number, so we advance before each finalize+submit pair.
         vm.roll(block.number + 1);
 
-        vm.prank(admin);
-        bytes32 wHash1 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 wHash1 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
             uint64(block.number - 1),
@@ -447,8 +489,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         vm.roll(block.number + 1);
 
-        vm.prank(admin);
-        bytes32 wHash2 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 wHash2 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
             uint64(block.number - 1),
@@ -473,8 +514,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         vm.roll(block.number + 1);
 
-        vm.prank(admin);
-        bytes32 wHash3 = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 wHash3 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
             uint64(block.number - 1),
@@ -498,45 +538,17 @@ contract ZoneIntegrationTest is BaseTest {
         uint256 charlieBefore = l2ZoneToken.balanceOf(charlie);
         uint256 aliceBefore = l2ZoneToken.balanceOf(alice);
 
-        Withdrawal memory w1 = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: bob,
-            amount: 1000e6,
-            fee: 0,
-            memo: bytes32("to bob"),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w1 = _withdrawal(1, alice, bob, 1000e6, bytes32("to bob"), 0, alice, "");
         l1Portal.processWithdrawal(w1, bytes32(0));
         assertEq(l2ZoneToken.balanceOf(bob), bobBefore + 1000e6);
 
-        Withdrawal memory w2 = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: charlie,
-            amount: 2000e6,
-            fee: 0,
-            memo: bytes32("to charlie"),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w2 =
+            _withdrawal(2, alice, charlie, 2000e6, bytes32("to charlie"), 0, alice, "");
         l1Portal.processWithdrawal(w2, bytes32(0));
         assertEq(l2ZoneToken.balanceOf(charlie), charlieBefore + 2000e6);
 
-        Withdrawal memory w3 = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: alice,
-            amount: 3000e6,
-            fee: 0,
-            memo: bytes32("to self"),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w3 =
+            _withdrawal(3, alice, alice, 3000e6, bytes32("to self"), 0, alice, "");
         l1Portal.processWithdrawal(w3, bytes32(0));
         assertEq(l2ZoneToken.balanceOf(alice), aliceBefore + 3000e6);
 
@@ -591,8 +603,7 @@ contract ZoneIntegrationTest is BaseTest {
         l2Outbox.requestWithdrawal(address(l2ZoneToken), charlie, 1500e6, bytes32(0), 0, alice, "");
         vm.stopPrank();
 
-        vm.prank(admin);
-        bytes32 wHash = l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 wHash = _finalizeWithdrawalBatch(type(uint256).max);
 
         // Phase 3: More deposits arrive while withdrawals are pending
         vm.startPrank(charlie);
@@ -638,28 +649,8 @@ contract ZoneIntegrationTest is BaseTest {
         assertEq(l2ZoneToken.balanceOf(charlie), 1_000_000e6);
 
         // Process withdrawals
-        Withdrawal memory w1 = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: charlie,
-            amount: 2000e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
-        Withdrawal memory w2 = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: bob,
-            to: charlie,
-            amount: 1500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w1 = _withdrawal(1, alice, charlie, 2000e6, bytes32(0), 0, alice, "");
+        Withdrawal memory w2 = _withdrawal(2, bob, charlie, 1500e6, bytes32(0), 0, alice, "");
 
         bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
         uint256 charlieBefore = l2ZoneToken.balanceOf(charlie);

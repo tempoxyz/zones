@@ -12,13 +12,13 @@
 #![allow(clippy::too_many_arguments)]
 
 use alloc::vec::Vec;
-use alloy_primitives::{Address, B256, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_sol_types::SolValue;
 
 pub use crate::constants::{
     EMPTY_SENTINEL, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, TEMPO_BLOCK_HASH_SLOT,
     TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS, TEMPO_STATE_READER_ADDRESS, ZONE_CONFIG_ADDRESS,
-    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
+    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
 };
 
 /// Internal macro that emits the full `sol!` block, placing `$($rpc_attr)*`
@@ -34,7 +34,7 @@ macro_rules! define_abi {
             #[derive(Debug)]
             struct Withdrawal {
                 address token;
-                address sender;
+                bytes32 senderTag;
                 address to;
                 uint128 amount;
                 uint128 fee;
@@ -42,6 +42,7 @@ macro_rules! define_abi {
                 uint64 gasLimit;
                 address fallbackRecipient;
                 bytes callbackData;
+                bytes encryptedSender;
             }
 
             #[derive(Debug)]
@@ -267,7 +268,8 @@ macro_rules! define_abi {
                     bytes32 memo,
                     uint64 gasLimit,
                     address fallbackRecipient,
-                    bytes data
+                    bytes data,
+                    bytes revealTo
                 );
 
                 #[derive(Debug)]
@@ -294,9 +296,10 @@ macro_rules! define_abi {
                     bytes32 memo,
                     uint64 gasLimit,
                     address fallbackRecipient,
-                    bytes calldata data
+                    bytes calldata data,
+                    bytes calldata revealTo
                 ) external;
-                function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber) external returns (bytes32 withdrawalQueueHash);
+                function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders) external returns (bytes32 withdrawalQueueHash);
             }
 
             // ---------------------------------------------------------------
@@ -342,6 +345,11 @@ macro_rules! define_abi {
 
                 function readStorageAt(address account, bytes32 slot, uint64 blockNumber) external view returns (bytes32);
                 function readStorageBatchAt(address account, bytes32[] calldata slots, uint64 blockNumber) external view returns (bytes32[] memory);
+            }
+
+            $($rpc_attr)*
+            contract ZoneTxContext {
+                function currentTxHash() external returns (bytes32);
             }
 
             // ---------------------------------------------------------------
@@ -500,7 +508,7 @@ macro_rules! define_abi {
             $($rpc_attr)*
             contract SwapAndDepositRouter {
                 function onWithdrawalReceived(
-                    address sender,
+                    bytes32 senderTag,
                     address tokenIn,
                     uint128 amount,
                     bytes calldata data
@@ -656,6 +664,39 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
 }
 
 impl Withdrawal {
+    /// Build the authenticated-withdrawal sender plaintext `[sender(20) | tx_hash(32)]`.
+    pub fn authenticated_sender_plaintext(sender: Address, tx_hash: B256) -> [u8; 52] {
+        let mut plaintext = [0u8; 52];
+        plaintext[..20].copy_from_slice(sender.as_slice());
+        plaintext[20..].copy_from_slice(tx_hash.as_slice());
+        plaintext
+    }
+
+    /// Compute the authenticated sender tag `keccak256(sender || tx_hash)`.
+    pub fn sender_tag(sender: Address, tx_hash: B256) -> B256 {
+        keccak256(Self::authenticated_sender_plaintext(sender, tx_hash))
+    }
+
+    /// Reconstruct the public L1-facing withdrawal from a zone-side withdrawal request event.
+    pub fn from_requested_event(
+        event: &ZoneOutbox::WithdrawalRequested,
+        tx_hash: B256,
+        encrypted_sender: Bytes,
+    ) -> Self {
+        Self {
+            token: event.token,
+            senderTag: Self::sender_tag(event.sender, tx_hash),
+            to: event.to,
+            amount: event.amount,
+            fee: event.fee,
+            memo: event.memo,
+            gasLimit: event.gasLimit,
+            fallbackRecipient: event.fallbackRecipient,
+            callbackData: event.data.clone(),
+            encryptedSender: encrypted_sender,
+        }
+    }
+
     /// Compute the withdrawal queue hash for a slice of withdrawals.
     ///
     /// The hash chain has the oldest withdrawal at the outermost layer for efficient FIFO removal:
@@ -809,6 +850,20 @@ mod tests {
             .abi_encode_params();
 
         assert_eq!(callback.abi_encode(), tuple_encoding);
+    }
+
+    #[test]
+    fn test_sender_tag_matches_plaintext_hash() {
+        let sender = address!("0x0000000000000000000000000000000000000001");
+        let tx_hash = B256::repeat_byte(0x22);
+        let plaintext = Withdrawal::authenticated_sender_plaintext(sender, tx_hash);
+
+        assert_eq!(&plaintext[..20], sender.as_slice());
+        assert_eq!(&plaintext[20..], tx_hash.as_slice());
+        assert_eq!(
+            Withdrawal::sender_tag(sender, tx_hash),
+            keccak256(plaintext)
+        );
     }
 
     #[test]

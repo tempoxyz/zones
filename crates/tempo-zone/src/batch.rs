@@ -29,10 +29,12 @@
 use std::collections::BTreeMap;
 
 use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
+use alloy_consensus::Transaction;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
+use alloy_sol_types::SolCall;
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
@@ -576,7 +578,8 @@ impl BatchSubmitter {
                 );
                 continue;
             };
-            let withdrawals = fetch_slot_withdrawals(&outbox, zone_start, zone_end).await?;
+            let withdrawals =
+                fetch_slot_withdrawals(&outbox, zone_provider, zone_start, zone_end).await?;
             slot_withdrawals.insert(portal_slot, withdrawals);
         }
 
@@ -772,43 +775,136 @@ fn find_processed_offset(
 
 /// Fetch `WithdrawalRequested` events from zone L2 in the given block range,
 /// sorted by log order, and convert to [`abi::Withdrawal`] structs.
-async fn fetch_slot_withdrawals(
+pub(crate) async fn fetch_slot_withdrawals(
     outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    zone_provider: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
 ) -> Result<Vec<abi::Withdrawal>> {
-    let mut events: Vec<_> = outbox
+    struct RequestedWithdrawalLog {
+        block_number: u64,
+        tx_index: u64,
+        log_index: u64,
+        tx_hash: B256,
+        event: abi::ZoneOutbox::WithdrawalRequested,
+    }
+
+    struct FinalizedBatchLog {
+        block_number: u64,
+        tx_index: u64,
+        log_index: u64,
+        tx_hash: B256,
+    }
+
+    let mut requests: Vec<_> = outbox
         .WithdrawalRequested_filter()
         .from_block(from)
         .to_block(to)
         .query()
         .await?
         .into_iter()
-        .map(|(e, log)| {
-            let key = (
-                log.block_number.unwrap_or(0),
-                log.transaction_index.unwrap_or(0),
-                log.log_index.unwrap_or(0),
-            );
-            (key, e)
+        .map(|(event, log)| -> Result<_> {
+            Ok(RequestedWithdrawalLog {
+                block_number: log.block_number.unwrap_or(0),
+                tx_index: log.transaction_index.unwrap_or(0),
+                log_index: log.log_index.unwrap_or(0),
+                tx_hash: log.transaction_hash.ok_or_else(|| {
+                    eyre::eyre!("WithdrawalRequested log missing transaction hash")
+                })?,
+                event,
+            })
         })
-        .collect();
-    events.sort_by_key(|(k, _)| *k);
+        .collect::<Result<Vec<_>>>()?;
+    requests.sort_by_key(|request| (request.block_number, request.tx_index, request.log_index));
 
-    Ok(events
+    let mut finalized_batches: Vec<_> = outbox
+        .BatchFinalized_filter()
+        .from_block(from)
+        .to_block(to)
+        .query()
+        .await?
         .into_iter()
-        .map(|(_, e)| abi::Withdrawal {
-            token: e.token,
-            sender: e.sender,
-            to: e.to,
-            amount: e.amount,
-            fee: e.fee,
-            memo: e.memo,
-            gasLimit: e.gasLimit,
-            fallbackRecipient: e.fallbackRecipient,
-            callbackData: e.data,
+        .filter(|(event, _)| !event.withdrawalQueueHash.is_zero())
+        .map(|(_, log)| -> Result<_> {
+            Ok(FinalizedBatchLog {
+                block_number: log.block_number.unwrap_or(0),
+                tx_index: log.transaction_index.unwrap_or(0),
+                log_index: log.log_index.unwrap_or(0),
+                tx_hash: log
+                    .transaction_hash
+                    .ok_or_else(|| eyre::eyre!("BatchFinalized log missing transaction hash"))?,
+            })
         })
-        .collect())
+        .collect::<Result<Vec<_>>>()?;
+    finalized_batches.sort_by_key(|batch| (batch.block_number, batch.tx_index, batch.log_index));
+
+    let mut requests_by_block: BTreeMap<u64, Vec<RequestedWithdrawalLog>> = BTreeMap::new();
+    for request in requests {
+        requests_by_block
+            .entry(request.block_number)
+            .or_default()
+            .push(request);
+    }
+
+    let mut withdrawals = Vec::new();
+    for finalized_batch in finalized_batches {
+        let requests = requests_by_block
+            .remove(&finalized_batch.block_number)
+            .unwrap_or_default();
+        if requests.is_empty() {
+            return Err(eyre::eyre!(
+                "BatchFinalized at zone block {} has no matching WithdrawalRequested events",
+                finalized_batch.block_number
+            ));
+        }
+
+        let finalize_tx = zone_provider
+            .get_transaction_by_hash(finalized_batch.tx_hash)
+            .await?
+            .ok_or_else(|| {
+                eyre::eyre!(
+                    "missing finalizeWithdrawalBatch tx {} for zone block {}",
+                    finalized_batch.tx_hash,
+                    finalized_batch.block_number
+                )
+            })?;
+        let encrypted_senders =
+            abi::ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
+                .map_err(|err| {
+                    eyre::eyre!(
+                        "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
+                        finalized_batch.tx_hash
+                    )
+                })?
+                .encryptedSenders;
+
+        if encrypted_senders.len() != requests.len() {
+            return Err(eyre::eyre!(
+                "encrypted sender count mismatch at zone block {}: {} encrypted senders for {} requests",
+                finalized_batch.block_number,
+                encrypted_senders.len(),
+                requests.len()
+            ));
+        }
+
+        withdrawals.extend(requests.into_iter().zip(encrypted_senders).map(
+            |(request, encrypted_sender)| {
+                abi::Withdrawal::from_requested_event(
+                    &request.event,
+                    request.tx_hash,
+                    encrypted_sender,
+                )
+            },
+        ));
+    }
+
+    if !requests_by_block.is_empty() {
+        return Err(eyre::eyre!(
+            "found WithdrawalRequested events without matching non-zero BatchFinalized events in range {from}..={to}"
+        ));
+    }
+
+    Ok(withdrawals)
 }
 
 /// Classification of the EIP-2935 gap, returned by
@@ -894,7 +990,7 @@ mod tests {
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
             token: address!("0x0000000000000000000000000000000000001000"),
-            sender: address!("0x0000000000000000000000000000000000000001"),
+            senderTag: B256::repeat_byte(0x11),
             to,
             amount,
             fee: 0,
@@ -902,6 +998,7 @@ mod tests {
             gasLimit: 0,
             fallbackRecipient: to,
             callbackData: Default::default(),
+            encryptedSender: Default::default(),
         }
     }
 

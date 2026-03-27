@@ -354,14 +354,15 @@ contract WithdrawalQueueLibTest is Test {
     {
         return Withdrawal({
             token: address(0x100),
-            sender: sender,
+            senderTag: keccak256(abi.encodePacked(sender)),
             to: to,
             amount: amount,
             fee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: sender,
-            callbackData: ""
+            callbackData: "",
+            encryptedSender: ""
         });
     }
 

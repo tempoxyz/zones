@@ -39,6 +39,7 @@ use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::BlockNumberOrTag;
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_alloy::TempoNetwork;
+use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -66,7 +67,7 @@ pub(crate) const DEFAULT_POLL: std::time::Duration = std::time::Duration::from_m
 /// The call now needs enough headroom for a fixed-gas `transferFrom`, the
 /// subsequent `burn`, and storage writes for callback payloads in router-based
 /// withdrawals.
-const WITHDRAWAL_TX_GAS: u64 = 1_000_000;
+pub(crate) const WITHDRAWAL_TX_GAS: u64 = 1_000_000;
 
 pub(crate) const TEST_MNEMONIC: &str =
     "test test test test test test test test test test test junk";
@@ -119,6 +120,18 @@ fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
 /// connection until the first request, so `L1StateProvider::new` succeeds
 /// without a running L1. The L1Subscriber will fail and retry in the background.
 const DUMMY_L1_URL: &str = "http://127.0.0.1:1";
+
+/// Seed the local test policy cache with the default pathUSD transfer policy.
+///
+/// Self-contained zone tests boot without a real L1, so startup can't resolve the
+/// token's `transferPolicyId` via RPC. pathUSD defaults to builtin policy `1`
+/// (allow all), and local tests rely on that behavior for outbox `transferFrom`
+/// flows.
+fn seed_local_policy_cache(policy_cache: &zone::SharedPolicyCache) {
+    policy_cache
+        .write()
+        .set_token_policy(PATH_USD_ADDRESS, 0, ALLOW_ALL_POLICY_ID);
+}
 
 /// Compute the TIP-20 token address for a given sender and salt.
 ///
@@ -478,6 +491,7 @@ impl ZoneTestNode {
         sequencer_key: k256::SecretKey,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
+        let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
 
         let mut genesis = custom_genesis.unwrap_or_else(|| {
             serde_json::from_str(include_str!("../assets/zone-test-genesis.json"))
@@ -516,6 +530,9 @@ impl ZoneTestNode {
         let deposit_queue = zone_node.deposit_queue();
         let l1_state_cache = zone_node.l1_state_cache();
         let policy_cache = zone_node.policy_cache();
+        if is_local_dummy_l1 {
+            seed_local_policy_cache(&policy_cache);
+        }
 
         let node_handle = NodeBuilder::new(node_config)
             .testing_node(tasks.clone())
@@ -1658,6 +1675,7 @@ pub(crate) struct WithdrawalArgs {
     pub gas_limit: u64,
     pub fallback_recipient: Option<Address>,
     pub data: alloy_primitives::Bytes,
+    pub reveal_to: alloy_primitives::Bytes,
 }
 
 impl WithdrawalArgs {
@@ -1670,6 +1688,7 @@ impl WithdrawalArgs {
             gas_limit: 0,
             fallback_recipient: None,
             data: alloy_primitives::Bytes::new(),
+            reveal_to: alloy_primitives::Bytes::new(),
         }
     }
 
@@ -1701,6 +1720,7 @@ impl WithdrawalArgs {
             gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
+            reveal_to: alloy_primitives::Bytes::new(),
         }
     }
 
@@ -1730,6 +1750,7 @@ impl WithdrawalArgs {
             gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
+            reveal_to: alloy_primitives::Bytes::new(),
         }
     }
 
@@ -2151,6 +2172,7 @@ impl ZoneAccount {
                 args.gas_limit,
                 fallback_recipient,
                 args.data,
+                args.reveal_to,
             )
             .gas(WITHDRAWAL_TX_GAS)
             .send()

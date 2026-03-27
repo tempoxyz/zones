@@ -567,6 +567,7 @@ impl DemoBlacklist {
                     0,
                     target,
                     Bytes::new(),
+                    Bytes::new(),
                 )
                 .gas(500_000)
                 .send_sync()

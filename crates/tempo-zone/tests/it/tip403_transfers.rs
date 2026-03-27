@@ -17,7 +17,9 @@ use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use zone::abi::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
 
-use crate::utils::{DEFAULT_TIMEOUT, TEST_MNEMONIC, start_local_zone_with_fixture};
+use crate::utils::{
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, WITHDRAWAL_TX_GAS, start_local_zone_with_fixture,
+};
 
 /// Deposit pathUSD to the dev account, then transfer a portion to Bob.
 ///
@@ -111,8 +113,19 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
         .build()?;
     let dev_address = dev_signer.address();
 
-    let deposit_amount: u128 = 1_000_000;
     let withdrawal_amount: u128 = 250_000;
+
+    let provider = ProviderBuilder::new()
+        .wallet(dev_signer)
+        .connect_http(zone.http_url().clone());
+    let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+
+    let withdrawal_fee = outbox.calculateWithdrawalFee(0).call().await?;
+    let deposit_amount = withdrawal_amount
+        .checked_add(withdrawal_fee)
+        .and_then(|value| value.checked_add(100_000))
+        .expect("test deposit amount should not overflow");
 
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
@@ -124,12 +137,6 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
         DEFAULT_TIMEOUT,
     )
     .await?;
-
-    let provider = ProviderBuilder::new()
-        .wallet(dev_signer)
-        .connect_http(zone.http_url().clone());
-    let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
 
     let approve_pending = tip20
         .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
@@ -158,9 +165,10 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
             0,
             dev_address,
             alloy_primitives::Bytes::new(),
+            alloy_primitives::Bytes::new(),
         )
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(300_000)
+        .gas(WITHDRAWAL_TX_GAS)
         .send()
         .await?;
     fixture.inject_empty_block(zone.deposit_queue());

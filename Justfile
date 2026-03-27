@@ -266,7 +266,7 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc=zone_r
 
 [group('zone')]
 [doc('Sends a withdrawal request on the zone (L2) back to Tempo L1. Requires PRIVATE_KEY env var. Run max-approve-outbox first.')]
-send-withdrawal amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" rpc=zone_rpc:
+send-withdrawal amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" reveal-to="0x" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -281,8 +281,8 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     fi
     echo "Requesting withdrawal of {{amount}} to $TO (fallback: $FALLBACK)..."
     L2_OUTPUT=$(cast send "$OUTBOX" \
-        "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes)" \
-        "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" \
+        "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)" \
+        "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" "{{reveal-to}}" \
         --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
     L2_TX=$(echo "$L2_OUTPUT" | jq -r '.transactionHash')
     L2_BLOCK=$(echo "$L2_OUTPUT" | jq -r '.blockNumber')

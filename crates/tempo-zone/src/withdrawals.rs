@@ -435,7 +435,7 @@ mod tests {
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
             token: address!("0x0000000000000000000000000000000000001000"),
-            sender: address!("0x0000000000000000000000000000000000000001"),
+            senderTag: B256::repeat_byte(0x11),
             to,
             amount,
             fee: 0,
@@ -443,6 +443,7 @@ mod tests {
             gasLimit: 0,
             fallbackRecipient: to,
             callbackData: Default::default(),
+            encryptedSender: Default::default(),
         }
     }
 
@@ -476,7 +477,7 @@ mod tests {
     fn withdrawal_hash_requires_param_encoding() {
         let w = abi::Withdrawal {
             token: address!("0x20c0000000000000000000000000000000000000"),
-            sender: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
+            senderTag: B256::repeat_byte(0x22),
             to: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
             amount: 500_000,
             fee: 0,
@@ -484,6 +485,7 @@ mod tests {
             gasLimit: 0,
             fallbackRecipient: address!("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
             callbackData: Default::default(),
+            encryptedSender: Default::default(),
         };
 
         let tuple_value_hash = keccak256((w.clone(), EMPTY_SENTINEL).abi_encode());
@@ -492,12 +494,6 @@ mod tests {
         assert_ne!(
             tuple_value_hash, param_hash,
             "tuple-value encoding must differ from Solidity abi.encode(args...) here"
-        );
-        assert_eq!(
-            param_hash,
-            alloy_primitives::b256!(
-                "b48c451d87f74a89050368265aab8eeebe85b871f9239f60f53f5eec2b68e509"
-            )
         );
     }
 

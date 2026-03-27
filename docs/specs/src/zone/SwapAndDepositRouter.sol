@@ -61,7 +61,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
     ///
     /// Note: minAmountOut is ignored for same-token transfers (no swap)
     function onWithdrawalReceived(
-        address, /* sender */
+        bytes32, /* senderTag */
         address tokenIn,
         uint128 amount,
         bytes calldata data

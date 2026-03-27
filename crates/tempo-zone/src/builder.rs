@@ -10,11 +10,11 @@ use crate::{
     l1::PreparedL1Block,
     payload::ZonePayloadAttributes,
 };
-use alloy_consensus::{Signed, Transaction, TxLegacy};
+use alloy_consensus::{Signed, Transaction, TxLegacy, TxReceipt};
 use alloy_eips::eip4895::Withdrawals;
-use alloy_primitives::{Bytes, U256};
+use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Encodable;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolEvent};
 use either::Either;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -49,6 +49,14 @@ use tempo_transaction_pool::TempoTransactionPool;
 use tracing::{error, info, warn};
 
 use super::node::ZoneNode;
+
+use alloy_evm::block::BlockExecutor;
+
+#[derive(Clone)]
+struct RequestedWithdrawalContext {
+    event: abi::ZoneOutbox::WithdrawalRequested,
+    tx_hash: B256,
+}
 
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone, Default)]
@@ -194,6 +202,7 @@ where
 
         let mut cumulative_gas_used = 0u64;
         let total_fees = U256::ZERO;
+        let mut requested_withdrawals = Vec::new();
 
         let mut builder = self
             .evm_config
@@ -297,9 +306,17 @@ where
             }
 
             let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
+            let tx_hash = *pool_tx.hash();
             match builder.execute_transaction(tx_with_env) {
                 Ok(gas_used) => {
                     cumulative_gas_used += gas_used;
+                    if let Some(receipt) = builder.executor().receipts().last() {
+                        collect_requested_withdrawals(
+                            receipt,
+                            tx_hash,
+                            &mut requested_withdrawals,
+                        )?;
+                    }
                 }
                 Err(reth_evm::block::BlockExecutionError::Validation(
                     reth_evm::block::BlockValidationError::InvalidTx { error, .. },
@@ -333,7 +350,32 @@ where
             .number
             .try_into()
             .expect("block number fits u64");
-        let finalize_tx = build_finalize_withdrawal_batch_tx(U256::MAX, block_number);
+        let encrypted_senders = requested_withdrawals
+            .iter()
+            .map(|request| {
+                if request.event.revealTo.is_empty() {
+                    Ok(Bytes::new())
+                } else {
+                    zone_precompiles::ecies::encrypt_authenticated_withdrawal(
+                        request.event.revealTo.as_ref(),
+                        request.event.sender,
+                        request.tx_hash,
+                    )
+                    .map(Bytes::from)
+                    .ok_or_else(|| {
+                        PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                            "failed to encrypt authenticated sender reveal for tx {}",
+                            request.tx_hash
+                        )))
+                    })
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let finalize_tx = build_finalize_withdrawal_batch_tx(
+            U256::from(requested_withdrawals.len()),
+            block_number,
+            encrypted_senders,
+        );
         let mut finalize_reverted = false;
         match builder.execute_transaction_with_result_closure(finalize_tx, |result| {
             if !result.is_success() {
@@ -446,10 +488,12 @@ where
 pub(crate) fn build_finalize_withdrawal_batch_tx(
     count: U256,
     block_number: u64,
+    encrypted_senders: Vec<Bytes>,
 ) -> Recovered<TempoTxEnvelope> {
     let calldata = abi::ZoneOutbox::finalizeWithdrawalBatchCall {
         count,
         blockNumber: block_number,
+        encryptedSenders: encrypted_senders,
     }
     .abi_encode();
 
@@ -467,6 +511,44 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
         TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
         TEMPO_SYSTEM_TX_SENDER,
     )
+}
+
+fn collect_requested_withdrawals(
+    receipt: &tempo_primitives::TempoReceipt,
+    tx_hash: B256,
+    requested_withdrawals: &mut Vec<RequestedWithdrawalContext>,
+) -> Result<(), PayloadBuilderError> {
+    // Zone execution preserves reverted logs in receipts for observability, but
+    // reverted `requestWithdrawal` calls roll back the outbox's pending storage.
+    // Only successful receipts should contribute to end-of-block finalization.
+    if !receipt.status() {
+        return Ok(());
+    }
+
+    for log in receipt.logs() {
+        if log.address != ZONE_OUTBOX_ADDRESS {
+            continue;
+        }
+
+        if log
+            .topics()
+            .first()
+            .copied()
+            .is_some_and(|topic| topic == abi::ZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
+        {
+            let event = abi::ZoneOutbox::WithdrawalRequested::decode_log(log).map_err(|err| {
+                PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                    "failed to decode WithdrawalRequested log: {err}"
+                )))
+            })?;
+            requested_withdrawals.push(RequestedWithdrawalContext {
+                event: event.data,
+                tx_hash,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Build the `advanceTempo(header, deposits, decryptions, enabledTokens)` system transaction.
@@ -512,15 +594,45 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, U256, address};
-    use alloy_sol_types::SolCall;
+    use alloy_primitives::{B256, Bytes, Log, U256, address};
+    use alloy_sol_types::{SolCall, SolEvent};
     use reth_primitives_traits::SealedHeader;
-    use tempo_primitives::TempoHeader;
+    use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxType};
 
     use crate::{
         abi::{self, DepositType, ZoneInbox},
         l1::PreparedL1Block,
     };
+
+    fn make_withdrawal_requested_log(sender: alloy_primitives::Address) -> Log {
+        let event = abi::ZoneOutbox::WithdrawalRequested {
+            withdrawalIndex: 1,
+            sender,
+            token: address!("0x0000000000000000000000000000000000001000"),
+            to: address!("0x0000000000000000000000000000000000002000"),
+            amount: 500_000,
+            fee: 0,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackRecipient: sender,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        };
+
+        Log {
+            address: super::ZONE_OUTBOX_ADDRESS,
+            data: event.encode_log_data(),
+        }
+    }
+
+    fn make_receipt(success: bool, logs: Vec<Log>) -> TempoReceipt {
+        TempoReceipt {
+            tx_type: TempoTxType::Legacy,
+            success,
+            cumulative_gas_used: 21_000,
+            logs,
+        }
+    }
 
     /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
     /// deposit types. The calldata should include `QueuedDeposit` entries with the
@@ -622,5 +734,33 @@ mod tests {
             1,
             "should have 1 DecryptionData for the encrypted deposit"
         );
+    }
+
+    #[test]
+    fn collect_requested_withdrawals_ignores_reverted_receipts() {
+        let sender = address!("0x0000000000000000000000000000000000001234");
+        let tx_hash = B256::with_last_byte(0x42);
+        let mut requested = Vec::new();
+
+        super::collect_requested_withdrawals(
+            &make_receipt(false, vec![make_withdrawal_requested_log(sender)]),
+            tx_hash,
+            &mut requested,
+        )
+        .expect("reverted receipt should be ignored");
+        assert!(
+            requested.is_empty(),
+            "reverted receipts must not add phantom withdrawals"
+        );
+
+        super::collect_requested_withdrawals(
+            &make_receipt(true, vec![make_withdrawal_requested_log(sender)]),
+            tx_hash,
+            &mut requested,
+        )
+        .expect("successful receipt should decode");
+        assert_eq!(requested.len(), 1, "successful receipt should be collected");
+        assert_eq!(requested[0].tx_hash, tx_hash);
+        assert_eq!(requested[0].event.sender, sender);
     }
 }

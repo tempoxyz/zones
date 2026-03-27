@@ -136,7 +136,7 @@ contract SwapAndDepositRouterTest is BaseTest {
     MockZonePortalForRouter public mockPortal;
     MockZonePortalForRouter public mockPortal2;
 
-    address public sender = address(0x500);
+    bytes32 public senderTag = keccak256(abi.encodePacked(address(0x500)));
     uint128 public constant AMOUNT = 1000e6;
 
     function setUp() public override {
@@ -215,7 +215,7 @@ contract SwapAndDepositRouterTest is BaseTest {
 
         vm.prank(alice);
         vm.expectRevert(SwapAndDepositRouter.UnauthorizedMessenger.selector);
-        router.onWithdrawalReceived(sender, address(pathUSD), AMOUNT, data);
+        router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
     }
 
     function test_revertInvalidTargetPortal() public {
@@ -225,7 +225,7 @@ contract SwapAndDepositRouterTest is BaseTest {
 
         vm.prank(address(mockMessenger));
         vm.expectRevert(SwapAndDepositRouter.InvalidTargetPortal.selector);
-        router.onWithdrawalReceived(sender, address(pathUSD), AMOUNT, data);
+        router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
     }
 
     function test_revertInvalidToken() public {
@@ -234,7 +234,7 @@ contract SwapAndDepositRouterTest is BaseTest {
 
         vm.prank(address(mockMessenger));
         vm.expectRevert(SwapAndDepositRouter.InvalidToken.selector);
-        router.onWithdrawalReceived(sender, address(pathUSD), AMOUNT, data);
+        router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
     }
 
     function test_plaintextDeposit_sameToken() public {
@@ -242,7 +242,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             _buildPlaintextData(address(pathUSD), address(mockPortal), alice, bytes32("hello"), 0);
 
         vm.prank(address(mockMessenger));
-        bytes4 ret = router.onWithdrawalReceived(sender, address(pathUSD), AMOUNT, data);
+        bytes4 ret = router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
 
         assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
         assertTrue(mockPortal.depositCalled());
@@ -260,7 +260,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         );
 
         vm.prank(address(mockMessenger));
-        bytes4 ret = router.onWithdrawalReceived(sender, address(pathUSD), AMOUNT, data);
+        bytes4 ret = router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
 
         assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
         assertTrue(mockPortal2.depositCalled());
@@ -275,7 +275,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             _buildEncryptedData(address(pathUSD), address(mockPortal), 0, payload, 0);
 
         vm.prank(address(mockMessenger));
-        bytes4 ret = router.onWithdrawalReceived(sender, address(pathUSD), AMOUNT, data);
+        bytes4 ret = router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
 
         assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
         assertTrue(mockPortal.encryptedDepositCalled());
@@ -292,7 +292,7 @@ contract SwapAndDepositRouterTest is BaseTest {
             _buildEncryptedData(address(token1), address(mockPortal2), 1, payload, 900e6);
 
         vm.prank(address(mockMessenger));
-        bytes4 ret = router.onWithdrawalReceived(sender, address(pathUSD), AMOUNT, data);
+        bytes4 ret = router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
 
         assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
         assertTrue(mockPortal2.encryptedDepositCalled());
@@ -309,7 +309,7 @@ contract SwapAndDepositRouterTest is BaseTest {
 
         vm.prank(address(mockMessenger));
         vm.expectRevert(IStablecoinDEX.InsufficientOutput.selector);
-        router.onWithdrawalReceived(sender, address(pathUSD), AMOUNT, data);
+        router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
     }
 
 }

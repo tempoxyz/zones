@@ -43,7 +43,7 @@ import { Vm } from "forge-std/Vm.sol";
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
 
     bool public shouldAccept = true;
-    address public lastSender;
+    bytes32 public lastSenderTag;
     address public lastToken;
     uint128 public lastAmount;
     bytes public lastCallbackData;
@@ -53,7 +53,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     }
 
     function onWithdrawalReceived(
-        address sender,
+        bytes32 senderTag,
         address token,
         uint128 amount,
         bytes calldata callbackData
@@ -61,7 +61,7 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         external
         returns (bytes4)
     {
-        lastSender = sender;
+        lastSenderTag = senderTag;
         lastToken = token;
         lastAmount = amount;
         lastCallbackData = callbackData;
@@ -183,6 +183,59 @@ contract ZoneBridgeTest is BaseTest {
         l2BlockHash = GENESIS_BLOCK_HASH;
     }
 
+    function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
+        return keccak256(abi.encodePacked(sender, zoneTxContext.txHashFor(txSequence)));
+    }
+
+    function _withdrawal(
+        uint256 txSequence,
+        address sender,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes memory callbackData
+    )
+        internal
+        view
+        returns (Withdrawal memory)
+    {
+        return Withdrawal({
+            token: address(l2ZoneToken),
+            senderTag: _senderTag(sender, txSequence),
+            to: to,
+            amount: amount,
+            fee: 0,
+            memo: memo,
+            gasLimit: gasLimit,
+            fallbackRecipient: fallbackRecipient,
+            callbackData: callbackData,
+            encryptedSender: ""
+        });
+    }
+
+    function _emptyEncryptedSenders(uint256 count)
+        internal
+        view
+        returns (bytes[] memory encryptedSenders)
+    {
+        uint256 pending = l2Outbox.pendingWithdrawalsCount();
+        if (count > pending) {
+            count = pending;
+        }
+        encryptedSenders = new bytes[](count);
+    }
+
+    function _finalizeWithdrawalBatch(uint256 count) internal returns (bytes32) {
+        vm.startPrank(admin);
+        bytes32 hash = l2Outbox.finalizeWithdrawalBatch(
+            count, uint64(block.number), _emptyEncryptedSenders(count)
+        );
+        vm.stopPrank();
+        return hash;
+    }
+
     /*//////////////////////////////////////////////////////////////
                        SEQUENCER SIMULATION HELPERS
     //////////////////////////////////////////////////////////////*/
@@ -273,17 +326,9 @@ contract ZoneBridgeTest is BaseTest {
         pendingWithdrawals.push(
             ObservedWithdrawal({
                 index: index,
-                withdrawal: Withdrawal({
-                    token: address(l2ZoneToken),
-                    sender: sender,
-                    to: to,
-                    amount: amount,
-                    fee: 0,
-                    memo: memo,
-                    gasLimit: gasLimit,
-                    fallbackRecipient: fallbackRecipient,
-                    callbackData: data
-                })
+                withdrawal: _withdrawal(
+                    uint256(index) + 1, sender, to, amount, memo, gasLimit, fallbackRecipient, data
+                )
             })
         );
     }
@@ -307,9 +352,7 @@ contract ZoneBridgeTest is BaseTest {
     /// @notice Simulate sequencer building and submitting a batch to Tempo
     function _sequencerSubmitBatch(bytes32 newProcessedDepositQueueHash) internal {
         // Sequencer calls finalizeWithdrawalBatch() on zone outbox to get withdrawal hash on-chain
-        vm.prank(admin);
-        bytes32 withdrawalQueueHash =
-            l2Outbox.finalizeWithdrawalBatch(type(uint256).max, uint64(block.number));
+        bytes32 withdrawalQueueHash = _finalizeWithdrawalBatch(type(uint256).max);
 
         // Advance a block so the history precompile can return a hash
         vm.roll(block.number + 1);
@@ -405,17 +448,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Verify L1 queue updated
         assertEq(l1Portal.withdrawalBatchIndex(), 2);
-        Withdrawal memory w = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: alice,
-            amount: withdrawAmount,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w = _withdrawal(1, alice, alice, withdrawAmount, bytes32(0), 0, alice, "");
         bytes32 expectedQueueHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
         // Withdrawal should be in slot 0 (first batch with withdrawals)
         assertEq(l1Portal.withdrawalQueueSlot(0), expectedQueueHash);
@@ -477,28 +510,8 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerSubmitBatch(processedHash);
 
         // Build expected queue hash (oldest = outermost, innermost wraps EMPTY_SENTINEL)
-        Withdrawal memory w0 = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: alice,
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
-        Withdrawal memory w1 = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: bob,
-            to: bob,
-            amount: 1000e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 0,
-            fallbackRecipient: bob,
-            callbackData: ""
-        });
+        Withdrawal memory w0 = _withdrawal(1, alice, alice, 500e6, bytes32(0), 0, alice, "");
+        Withdrawal memory w1 = _withdrawal(2, bob, bob, 1000e6, bytes32(0), 0, bob, "");
         bytes32 innerHash = keccak256(abi.encode(w1, EMPTY_SENTINEL));
         bytes32 queueHash = keccak256(abi.encode(w0, innerHash));
         // Both withdrawals are in slot 0 (same batch)
@@ -555,22 +568,21 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerSubmitBatch(processedHash);
 
         // Process withdrawal
-        Withdrawal memory w = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: address(withdrawalReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 100_000,
-            fallbackRecipient: alice,
-            callbackData: "callback_data"
-        });
+        Withdrawal memory w = _withdrawal(
+            1,
+            alice,
+            address(withdrawalReceiver),
+            500e6,
+            bytes32(0),
+            100_000,
+            alice,
+            "callback_data"
+        );
         l1Portal.processWithdrawal(w, bytes32(0));
 
         // Verify callback was executed
         assertEq(l2ZoneToken.balanceOf(address(withdrawalReceiver)), 500e6);
-        assertEq(withdrawalReceiver.lastSender(), alice);
+        assertEq(withdrawalReceiver.lastSenderTag(), _senderTag(alice, 1));
         assertEq(withdrawalReceiver.lastAmount(), 500e6);
         assertEq(withdrawalReceiver.lastCallbackData(), "callback_data");
     }
@@ -611,17 +623,9 @@ contract ZoneBridgeTest is BaseTest {
         bytes32 depositHashBefore = l1Portal.currentDepositQueueHash();
 
         // Process withdrawal - callback will fail, triggering bounce-back
-        Withdrawal memory w = Withdrawal({
-            token: address(l2ZoneToken),
-            sender: alice,
-            to: address(withdrawalReceiver),
-            amount: 500e6,
-            fee: 0,
-            memo: bytes32(0),
-            gasLimit: 100_000,
-            fallbackRecipient: alice,
-            callbackData: ""
-        });
+        Withdrawal memory w = _withdrawal(
+            1, alice, address(withdrawalReceiver), 500e6, bytes32(0), 100_000, alice, ""
+        );
         l1Portal.processWithdrawal(w, bytes32(0));
 
         // Verify receiver did NOT get funds (transfer reverted)
