@@ -750,7 +750,9 @@ impl ZoneMonitor {
         // All retries exhausted — resync from portal.
         self.resync_from_portal().await;
 
-        Ok(())
+        Err(eyre::eyre!(
+            "batch submission failed after {MAX_RETRIES} retries for zone block {last_zone_block}"
+        ))
     }
 
     /// Resync the local submission anchor from portal-confirmed on-chain state.
