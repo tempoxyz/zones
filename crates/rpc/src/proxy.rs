@@ -517,10 +517,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 .forward("eth_uninstallFilter", serde_json::json!([id]))
                 .await?;
 
-            let removed: bool = serde_json::from_str(result.get()).unwrap_or(false);
-            if removed {
-                self.filter_owners.lock().await.remove(&id);
-            }
+            self.filter_owners.lock().await.remove(&id);
 
             Ok(result)
         })
