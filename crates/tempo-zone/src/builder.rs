@@ -10,7 +10,7 @@ use crate::{
     l1::PreparedL1Block,
     payload::ZonePayloadAttributes,
 };
-use alloy_consensus::{Signed, Transaction, TxLegacy};
+use alloy_consensus::{Signed, Transaction, TxLegacy, TxReceipt};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Encodable;
