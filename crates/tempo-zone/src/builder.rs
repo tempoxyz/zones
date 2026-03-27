@@ -518,6 +518,13 @@ fn collect_requested_withdrawals(
     tx_hash: B256,
     requested_withdrawals: &mut Vec<RequestedWithdrawalContext>,
 ) -> Result<(), PayloadBuilderError> {
+    // Zone execution preserves reverted logs in receipts for observability, but
+    // reverted `requestWithdrawal` calls roll back the outbox's pending storage.
+    // Only successful receipts should contribute to end-of-block finalization.
+    if !receipt.status() {
+        return Ok(());
+    }
+
     for log in receipt.logs() {
         if log.address != ZONE_OUTBOX_ADDRESS {
             continue;
@@ -587,15 +594,45 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, U256, address};
-    use alloy_sol_types::SolCall;
+    use alloy_primitives::{B256, Bytes, Log, U256, address};
+    use alloy_sol_types::{SolCall, SolEvent};
     use reth_primitives_traits::SealedHeader;
-    use tempo_primitives::TempoHeader;
+    use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxType};
 
     use crate::{
         abi::{self, DepositType, ZoneInbox},
         l1::PreparedL1Block,
     };
+
+    fn make_withdrawal_requested_log(sender: alloy_primitives::Address) -> Log {
+        let event = abi::ZoneOutbox::WithdrawalRequested {
+            withdrawalIndex: 1,
+            sender,
+            token: address!("0x0000000000000000000000000000000000001000"),
+            to: address!("0x0000000000000000000000000000000000002000"),
+            amount: 500_000,
+            fee: 0,
+            memo: B256::ZERO,
+            gasLimit: 0,
+            fallbackRecipient: sender,
+            data: Bytes::new(),
+            revealTo: Bytes::new(),
+        };
+
+        Log {
+            address: super::ZONE_OUTBOX_ADDRESS,
+            data: event.encode_log_data(),
+        }
+    }
+
+    fn make_receipt(success: bool, logs: Vec<Log>) -> TempoReceipt {
+        TempoReceipt {
+            tx_type: TempoTxType::Legacy,
+            success,
+            cumulative_gas_used: 21_000,
+            logs,
+        }
+    }
 
     /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
     /// deposit types. The calldata should include `QueuedDeposit` entries with the
@@ -697,5 +734,33 @@ mod tests {
             1,
             "should have 1 DecryptionData for the encrypted deposit"
         );
+    }
+
+    #[test]
+    fn collect_requested_withdrawals_ignores_reverted_receipts() {
+        let sender = address!("0x0000000000000000000000000000000000001234");
+        let tx_hash = B256::with_last_byte(0x42);
+        let mut requested = Vec::new();
+
+        super::collect_requested_withdrawals(
+            &make_receipt(false, vec![make_withdrawal_requested_log(sender)]),
+            tx_hash,
+            &mut requested,
+        )
+        .expect("reverted receipt should be ignored");
+        assert!(
+            requested.is_empty(),
+            "reverted receipts must not add phantom withdrawals"
+        );
+
+        super::collect_requested_withdrawals(
+            &make_receipt(true, vec![make_withdrawal_requested_log(sender)]),
+            tx_hash,
+            &mut requested,
+        )
+        .expect("successful receipt should decode");
+        assert_eq!(requested.len(), 1, "successful receipt should be collected");
+        assert_eq!(requested[0].tx_hash, tx_hash);
+        assert_eq!(requested[0].event.sender, sender);
     }
 }
