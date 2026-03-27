@@ -467,7 +467,8 @@ contract ZonePortal is IZonePortal {
         address _token,
         address to,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
@@ -487,6 +488,15 @@ contract ZonePortal is IZonePortal {
             revert DepositPolicyForbids();
         }
 
+        // Validate bouncebackRecipient against TIP-403 at deposit time so that
+        // bounceback transfers on L1 are guaranteed to succeed even if the
+        // recipient is later blacklisted (portal has a TIP-403 bypass).
+        if (bouncebackRecipient != address(0)) {
+            if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+                revert DepositPolicyForbids();
+            }
+        }
+
         // Calculate deposit fee
         uint128 fee = calculateDepositFee();
         if (amount <= fee) revert DepositTooSmall();
@@ -502,14 +512,20 @@ contract ZonePortal is IZonePortal {
         }
 
         // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
-        Deposit memory depositData =
-            Deposit({ token: _token, sender: msg.sender, to: to, amount: netAmount, memo: memo });
+        Deposit memory depositData = Deposit({
+            token: _token,
+            sender: msg.sender,
+            to: to,
+            amount: netAmount,
+            memo: memo,
+            bouncebackRecipient: bouncebackRecipient
+        });
 
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
-        emit DepositMade(newCurrentDepositQueueHash, msg.sender, _token, to, netAmount, fee, memo);
+        emit DepositMade(newCurrentDepositQueueHash, msg.sender, _token, to, netAmount, fee, memo, bouncebackRecipient);
     }
 
     /// @notice Deposit with encrypted recipient and memo
@@ -526,7 +542,8 @@ contract ZonePortal is IZonePortal {
         address _token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted
+        EncryptedDepositPayload calldata encrypted,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
@@ -579,7 +596,8 @@ contract ZonePortal is IZonePortal {
             sender: msg.sender,
             amount: netAmount,
             keyIndex: keyIndex,
-            encrypted: encrypted
+            encrypted: encrypted,
+            bouncebackRecipient: bouncebackRecipient
         });
 
         // Insert encrypted deposit into queue
@@ -638,7 +656,7 @@ contract ZonePortal is IZonePortal {
             }
 
             if (!success) {
-                _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+                _enqueueWithdrawalBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
                 emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
                 return;
             }
@@ -660,16 +678,16 @@ contract ZonePortal is IZonePortal {
             emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, true);
         } catch {
             // Callback failed: bounce back to zone (only amount, not fee)
-            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+            _enqueueWithdrawalBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
             emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
         }
     }
 
-    /// @notice Enqueue a bounce-back deposit for failed callback
+    /// @notice Enqueue a bounce-back deposit for a failed withdrawal callback
     /// @param _token The token from the failed withdrawal
     /// @param amount The amount to bounce back
     /// @param fallbackRecipient The zone address to receive the bounce-back
-    function _enqueueBounceBack(
+    function _enqueueWithdrawalBounceBack(
         address _token,
         uint128 amount,
         address fallbackRecipient
@@ -681,14 +699,15 @@ contract ZonePortal is IZonePortal {
             sender: address(this),
             to: fallbackRecipient,
             amount: amount,
-            memo: bytes32(0)
+            memo: bytes32(0),
+            bouncebackRecipient: address(0)
         });
 
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
-        emit BounceBack(newCurrentDepositQueueHash, fallbackRecipient, _token, amount);
+        emit WithdrawalBounceBack(newCurrentDepositQueueHash, fallbackRecipient, _token, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
