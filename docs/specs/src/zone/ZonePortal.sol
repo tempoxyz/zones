@@ -483,10 +483,9 @@ contract ZonePortal is IZonePortal {
         if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
             revert DepositPolicyForbids();
         }
-        // TODO(T2): also check isAuthorizedMintRecipient for compound policies
-        // if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
-        //     revert DepositPolicyForbids();
-        // }
+        if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
+            revert DepositPolicyForbids();
+        }
 
         // Calculate deposit fee
         uint128 fee = calculateDepositFee();

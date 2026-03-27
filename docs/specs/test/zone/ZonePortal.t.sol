@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import { TIP20 } from "../../src/TIP20.sol";
 import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
+import { ITIP403Registry } from "../../src/interfaces/ITIP403Registry.sol";
 
 import { BLOCKHASH_HISTORY_WINDOW } from "../../src/zone/BlockHashHistory.sol";
 import {
@@ -282,6 +283,80 @@ contract ZonePortalTest is BaseTest {
         assertTrue(hash1 != hash2);
         assertTrue(hash2 != hash3);
         assertTrue(hash1 != hash3);
+    }
+
+    function test_deposit_revertsWhenCompoundPolicyBlocksMintRecipient() public {
+        uint128 depositAmount = 1000e6;
+
+        address[] memory senderAccounts = new address[](2);
+        senderAccounts[0] = alice;
+        senderAccounts[1] = address(portal);
+        uint64 senderPolicyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, senderAccounts
+        );
+
+        address[] memory recipientAccounts = new address[](3);
+        recipientAccounts[0] = alice;
+        recipientAccounts[1] = address(portal);
+        recipientAccounts[2] = bob;
+        uint64 recipientPolicyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, recipientAccounts
+        );
+
+        address[] memory mintRecipientAccounts = new address[](1);
+        mintRecipientAccounts[0] = charlie;
+        uint64 mintRecipientPolicyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
+        );
+
+        uint64 compoundPolicyId =
+            registry.createCompoundPolicy(senderPolicyId, recipientPolicyId, mintRecipientPolicyId);
+        vm.prank(pathUSDAdmin);
+        pathUSD.changeTransferPolicyId(compoundPolicyId);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        vm.expectRevert(IZonePortal.DepositPolicyForbids.selector);
+        portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"));
+        vm.stopPrank();
+    }
+
+    function test_deposit_allowsCompoundPolicyMintRecipient() public {
+        uint128 depositAmount = 1000e6;
+
+        address[] memory senderAccounts = new address[](2);
+        senderAccounts[0] = alice;
+        senderAccounts[1] = address(portal);
+        uint64 senderPolicyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, senderAccounts
+        );
+
+        address[] memory recipientAccounts = new address[](3);
+        recipientAccounts[0] = alice;
+        recipientAccounts[1] = address(portal);
+        recipientAccounts[2] = bob;
+        uint64 recipientPolicyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, recipientAccounts
+        );
+
+        address[] memory mintRecipientAccounts = new address[](1);
+        mintRecipientAccounts[0] = bob;
+        uint64 mintRecipientPolicyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
+        );
+
+        uint64 compoundPolicyId =
+            registry.createCompoundPolicy(senderPolicyId, recipientPolicyId, mintRecipientPolicyId);
+        vm.prank(pathUSDAdmin);
+        pathUSD.changeTransferPolicyId(compoundPolicyId);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        bytes32 depositHash = portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"));
+        vm.stopPrank();
+
+        assertEq(portal.currentDepositQueueHash(), depositHash);
+        assertEq(pathUSD.balanceOf(address(portal)), depositAmount);
     }
 
     /*//////////////////////////////////////////////////////////////
