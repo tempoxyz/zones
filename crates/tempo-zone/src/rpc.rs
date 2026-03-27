@@ -306,10 +306,11 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
     async fn terminal_event_for_deposit(
         &self,
         deposit_hash: B256,
+        from_block: u64,
     ) -> Result<Option<TerminalDepositEvent>, JsonRpcError> {
         let filter = Filter::new()
             .address(ZONE_INBOX_ADDRESS)
-            .from_block(0)
+            .from_block(from_block)
             .event_signature(vec![
                 ZoneInbox::DepositProcessed::SIGNATURE_HASH,
                 ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH,
@@ -978,7 +979,7 @@ where
                             continue;
                         }
 
-                        let terminal = self.terminal_event_for_deposit(deposit_hash).await?;
+                        let terminal = self.terminal_event_for_deposit(deposit_hash, 1).await?;
                         let status = regular_deposit_status(terminal)?;
 
                         deposits.push(DepositStatusEntry {
@@ -998,7 +999,7 @@ where
                         token,
                         amount,
                     } => {
-                        let terminal = self.terminal_event_for_deposit(deposit_hash).await?;
+                        let terminal = self.terminal_event_for_deposit(deposit_hash, 1).await?;
 
                         let include = match (&terminal, sender == auth.caller) {
                             (_, true) => true,
