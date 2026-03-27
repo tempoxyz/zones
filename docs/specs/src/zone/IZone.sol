@@ -496,11 +496,7 @@ interface IZonePortal {
         uint128 amount
     );
 
-    event DepositBounceBack(
-        address indexed bouncebackRecipient,
-        address token,
-        uint128 amount
-    );
+    event DepositBounceBack(address indexed bouncebackRecipient, address token, uint128 amount);
 
     event SequencerTransferStarted(
         address indexed currentSequencer, address indexed pendingSequencer

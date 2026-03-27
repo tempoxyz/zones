@@ -91,7 +91,8 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
 
             IERC20(tokenOut).approve(targetPortal, amountOut);
-            IZonePortal(targetPortal).depositEncrypted(tokenOut, amountOut, keyIndex, encrypted, msg.sender);
+            IZonePortal(targetPortal)
+                .depositEncrypted(tokenOut, amountOut, keyIndex, encrypted, msg.sender);
         } else {
             (, // skip isEncrypted
                 address tokenOut,

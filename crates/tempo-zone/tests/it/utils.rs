@@ -3024,6 +3024,7 @@ impl L1Fixture {
             amount,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         }
     }
 
@@ -3090,6 +3091,7 @@ impl L1Fixture {
             ciphertext: vec![0u8; 64], // ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE = 64
             nonce: [0u8; 12],
             tag: [0u8; 16],
+            bounceback_recipient: Address::ZERO,
         }
     }
 
@@ -3108,6 +3110,7 @@ impl L1Fixture {
             amount,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         }
     }
 
@@ -3169,6 +3172,7 @@ impl L1Fixture {
             ciphertext,
             nonce,
             tag,
+            bounceback_recipient: Address::ZERO,
         }
     }
 }

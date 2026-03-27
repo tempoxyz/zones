@@ -525,7 +525,16 @@ contract ZonePortal is IZonePortal {
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
 
-        emit DepositMade(newCurrentDepositQueueHash, msg.sender, _token, to, netAmount, fee, memo, bouncebackRecipient);
+        emit DepositMade(
+            newCurrentDepositQueueHash,
+            msg.sender,
+            _token,
+            to,
+            netAmount,
+            fee,
+            memo,
+            bouncebackRecipient
+        );
     }
 
     /// @notice Deposit with encrypted recipient and memo
@@ -656,7 +665,9 @@ contract ZonePortal is IZonePortal {
             }
 
             if (!success) {
-                _enqueueWithdrawalBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+                _enqueueWithdrawalBounceBack(
+                    _token, withdrawal.amount, withdrawal.fallbackRecipient
+                );
                 emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
                 return;
             }

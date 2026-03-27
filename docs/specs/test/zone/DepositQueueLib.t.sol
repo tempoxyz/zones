@@ -119,7 +119,11 @@ contract DepositQueueLibTest is Test {
     function test_enqueue_emptyToEmpty() public pure {
         // An empty deposit struct should still produce a valid hash
         Deposit memory d = Deposit({
-            token: address(0x1000), sender: address(0), to: address(0), amount: 0, memo: bytes32(0),
+            token: address(0x1000),
+            sender: address(0),
+            to: address(0),
+            amount: 0,
+            memo: bytes32(0),
             bouncebackRecipient: address(0)
         });
 

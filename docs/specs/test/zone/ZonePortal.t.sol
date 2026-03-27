@@ -251,7 +251,8 @@ contract ZonePortalTest is BaseTest {
         // Approve and deposit
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        bytes32 hash1 = portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo1"), address(0));
+        bytes32 hash1 =
+            portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo1"), address(0));
         vm.stopPrank();
 
         // Verify hash chain updated
@@ -269,7 +270,8 @@ contract ZonePortalTest is BaseTest {
         // First deposit from alice
         vm.startPrank(alice);
         pathUSD.approve(address(portal), amount1);
-        bytes32 hash1 = portal.deposit(address(pathUSD), alice, amount1, bytes32("memo1"), address(0));
+        bytes32 hash1 =
+            portal.deposit(address(pathUSD), alice, amount1, bytes32("memo1"), address(0));
         vm.stopPrank();
 
         // Second deposit from bob
@@ -384,7 +386,8 @@ contract ZonePortalTest is BaseTest {
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        bytes32 depositHash = portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"), address(0));
+        bytes32 depositHash =
+            portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"), address(0));
         vm.stopPrank();
 
         assertEq(portal.currentDepositQueueHash(), depositHash);
@@ -1947,8 +1950,9 @@ contract ZonePortalTest is BaseTest {
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        bytes32 hash =
-            portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), address(0));
+        bytes32 hash = portal.depositEncrypted(
+            address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), address(0)
+        );
         vm.stopPrank();
 
         assertEq(portal.currentDepositQueueHash(), hash);
@@ -1966,7 +1970,8 @@ contract ZonePortalTest is BaseTest {
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        bytes32 hash = portal.depositEncrypted(address(pathUSD), depositAmount, 0, encrypted, address(0));
+        bytes32 hash =
+            portal.depositEncrypted(address(pathUSD), depositAmount, 0, encrypted, address(0));
         vm.stopPrank();
 
         // Reconstruct expected hash using the same encoding as DepositQueueLib
@@ -1993,7 +1998,9 @@ contract ZonePortalTest is BaseTest {
         bytes32 h1 = portal.deposit(address(pathUSD), alice, amount, bytes32("memo"), address(0));
 
         // Encrypted deposit from alice
-        bytes32 h2 = portal.depositEncrypted(address(pathUSD), amount, 0, _makeEncryptedPayload(), address(0));
+        bytes32 h2 = portal.depositEncrypted(
+            address(pathUSD), amount, 0, _makeEncryptedPayload(), address(0)
+        );
         vm.stopPrank();
 
         // Both should update the same queue
@@ -2014,7 +2021,9 @@ contract ZonePortalTest is BaseTest {
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), address(0));
+        portal.depositEncrypted(
+            address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), address(0)
+        );
         vm.stopPrank();
 
         assertEq(pathUSD.balanceOf(alice), aliceBefore - depositAmount);
@@ -2080,7 +2089,9 @@ contract ZonePortalTest is BaseTest {
 
         // Should revert with EncryptionKeyExpired for key index 0
         vm.expectRevert();
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), address(0));
+        portal.depositEncrypted(
+            address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), address(0)
+        );
         vm.stopPrank();
     }
 
@@ -2091,7 +2102,9 @@ contract ZonePortalTest is BaseTest {
 
         // No keys set, index 0 is invalid
         vm.expectRevert(abi.encodeWithSelector(IZonePortal.InvalidEncryptionKeyIndex.selector, 0));
-        portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), address(0));
+        portal.depositEncrypted(
+            address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), address(0)
+        );
         vm.stopPrank();
     }
 

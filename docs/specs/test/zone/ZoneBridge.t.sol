@@ -172,7 +172,8 @@ contract ZoneBridgeTest is BaseTest {
         );
 
         // Zone inbox (advances Tempo state and processes deposits)
-        l2Inbox = new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState), address(0));
+        l2Inbox =
+            new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState), address(0));
         l2ZoneToken.setMinter(address(l2Inbox), true);
 
         // Zone outbox (handles withdrawals)
@@ -252,7 +253,12 @@ contract ZoneBridgeTest is BaseTest {
     {
         // Record the deposit
         Deposit memory d = Deposit({
-            token: address(l2ZoneToken), sender: sender, to: to, amount: amount, memo: memo, bouncebackRecipient: address(0)
+            token: address(l2ZoneToken),
+            sender: sender,
+            to: to,
+            amount: amount,
+            memo: memo,
+            bouncebackRecipient: address(0)
         });
 
         // Calculate the new hash (matches what Tempo portal computes)
@@ -393,8 +399,9 @@ contract ZoneBridgeTest is BaseTest {
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 l1DepositHash =
-            l1Portal.deposit(address(l2ZoneToken), alice, depositAmount, bytes32("hello zone"), address(0));
+        bytes32 l1DepositHash = l1Portal.deposit(
+            address(l2ZoneToken), alice, depositAmount, bytes32("hello zone"), address(0)
+        );
         vm.stopPrank();
 
         // Verify L1 state
@@ -1120,15 +1127,17 @@ contract ZoneBridgeTest is BaseTest {
         // === STEP 2: Alice makes a regular deposit ===
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), depositAmount * 2);
-        bytes32 h1 =
-            l1Portal.deposit(address(l2ZoneToken), alice, depositAmount, bytes32("regular"), address(0));
+        bytes32 h1 = l1Portal.deposit(
+            address(l2ZoneToken), alice, depositAmount, bytes32("regular"), address(0)
+        );
         vm.stopPrank();
 
         // === STEP 3: Bob makes an encrypted deposit ===
         EncryptedDepositPayload memory payload = _makeEncryptedPayload();
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h2 = l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload, address(0));
+        bytes32 h2 =
+            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload, address(0));
         vm.stopPrank();
 
         // === STEP 4: Carol makes another regular deposit ===
@@ -1138,7 +1147,9 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.setMinter(address(this), false);
         vm.startPrank(carol);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h3 = l1Portal.deposit(address(l2ZoneToken), carol, depositAmount, bytes32("carol"), address(0));
+        bytes32 h3 = l1Portal.deposit(
+            address(l2ZoneToken), carol, depositAmount, bytes32("carol"), address(0)
+        );
         vm.stopPrank();
 
         assertEq(l1Portal.currentDepositQueueHash(), h3, "L1 hash should be after 3rd deposit");
@@ -1255,7 +1266,8 @@ contract ZoneBridgeTest is BaseTest {
 
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h1 = l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload1, address(0));
+        bytes32 h1 =
+            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload1, address(0));
         vm.stopPrank();
 
         // === STEP 3: Sequencer rotates to second encryption key ===
@@ -1267,7 +1279,8 @@ contract ZoneBridgeTest is BaseTest {
 
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h2 = l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 1, payload2, address(0));
+        bytes32 h2 =
+            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 1, payload2, address(0));
         vm.stopPrank();
 
         assertEq(l1Portal.currentDepositQueueHash(), h2, "L1 hash after both deposits");
