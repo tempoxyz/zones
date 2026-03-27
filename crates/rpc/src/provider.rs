@@ -9,7 +9,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use alloy_primitives::{Address, hex};
+use alloy_primitives::hex;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
@@ -33,8 +33,6 @@ pub struct ZoneProviderConfig {
     pub zone_id: u32,
     /// Chain identifier.
     pub chain_id: u64,
-    /// ZonePortal contract address on L1.
-    pub zone_portal: Address,
     /// How long each generated token is valid. Default: 600s, max: 1800s.
     pub token_ttl: Duration,
     /// The private zone RPC URL.
@@ -107,20 +105,14 @@ fn build_provider_with_token(
     let now = now_secs();
     let expires_at = now + config.token_ttl.as_secs();
 
-    let (fields, digest) = build_token_fields(
-        config.zone_id,
-        config.chain_id,
-        config.zone_portal,
-        now,
-        expires_at,
-    );
+    let (fields, digest) = build_token_fields(config.zone_id, config.chain_id, now, expires_at);
 
     let sig = config
         .signer
         .sign_hash_sync(&digest)
         .map_err(|e| eyre::eyre!("failed to sign zone auth token: {e}"))?;
 
-    // Build blob: <65-byte sig><49-byte fields>
+    // Build blob: <65-byte sig><29-byte fields>
     let mut blob = Vec::with_capacity(65 + fields.len());
     blob.extend_from_slice(&sig.r().to_be_bytes::<32>());
     blob.extend_from_slice(&sig.s().to_be_bytes::<32>());

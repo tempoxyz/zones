@@ -269,7 +269,6 @@ impl ZoneRpcApi for MockZoneRpcApi {
 
 const ZONE_ID: u32 = 1;
 const CHAIN_ID: u64 = 42;
-const PORTAL: Address = Address::ZERO;
 
 struct TestContext {
     addr: std::net::SocketAddr,
@@ -286,7 +285,7 @@ impl TestContext {
             retry_connection_interval: std::time::Duration::from_millis(100),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
-            zone_portal: PORTAL,
+            zone_portal: Address::ZERO,
             sequencer: signer.address(),
         };
         let addr = start_private_rpc(config, Arc::new(api)).await.unwrap();
@@ -295,7 +294,7 @@ impl TestContext {
 
     fn build_token(&self) -> String {
         let now = now_secs();
-        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
         let sig = self.signer.sign_hash_sync(&digest).expect("signing failed");
 
         let mut blob = Vec::with_capacity(65 + fields.len());
@@ -793,7 +792,7 @@ async fn ws_roundtrip_with_p256_auth() {
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let signing_key = P256SigningKey::random(&mut thread_rng());
     let now = now_secs();
-    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
     let token = build_token_with_signature(
         sign_p256_signature(digest, &signing_key).expect("p256 signing should succeed"),
         &fields,
@@ -818,7 +817,7 @@ async fn ws_roundtrip_with_webauthn_auth() {
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let signing_key = P256SigningKey::random(&mut thread_rng());
     let now = now_secs();
-    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
     let token = build_token_with_signature(
         sign_webauthn_signature(&signing_key, digest).expect("webauthn signing should succeed"),
         &fields,
@@ -843,7 +842,7 @@ async fn ws_roundtrip_with_keychain_auth() {
     let root_account = Address::repeat_byte(0x55);
     let access_signer = P256SigningKey::random(&mut thread_rng());
     let now = now_secs();
-    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
     let (signature, key_id) = sign_keychain_signature(digest, &access_signer, root_account, 0x04)
         .expect("keychain signing should succeed");
     let ctx = TestContext::start(MockZoneRpcApi::with_key(
@@ -874,7 +873,7 @@ async fn ws_reject_unauthorized_keychain_token() {
     let access_signer = P256SigningKey::random(&mut thread_rng());
     let ctx = TestContext::start(MockZoneRpcApi::default()).await;
     let now = now_secs();
-    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
     let (signature, _key_id) = sign_keychain_signature(digest, &access_signer, root_account, 0x04)
         .expect("keychain signing should succeed");
     let token = build_token_with_signature(signature, &fields);
@@ -894,7 +893,7 @@ async fn ws_keychain_lookup_failure_returns_500() {
     let access_signer = P256SigningKey::random(&mut thread_rng());
     let ctx = TestContext::start(MockZoneRpcApi::with_key_lookup_error("key lookup failed")).await;
     let now = now_secs();
-    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
     let (signature, _key_id) = sign_keychain_signature(digest, &access_signer, root_account, 0x04)
         .expect("keychain signing should succeed");
     let token = build_token_with_signature(signature, &fields);
