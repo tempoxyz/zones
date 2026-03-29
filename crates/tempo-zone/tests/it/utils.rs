@@ -2216,6 +2216,14 @@ pub(crate) async fn start_local_zone_with_fixture(
 ) -> eyre::Result<(ZoneTestNode, L1Fixture)> {
     let zone = ZoneTestNode::start_local().await?;
     let fixture = L1Fixture::new();
+
+    // Local tests have no real L1, so the RPC fallback in resolve_transfer_policy_id
+    // fails. Seed pathUSD with the default allow-all policy (mirrors L1 default).
+    use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
+    zone.policy_cache()
+        .write()
+        .set_token_policy(PATH_USD_ADDRESS, 0, ALLOW_ALL_POLICY_ID);
+
     fixture.seed_l1_cache(
         zone.l1_state_cache(),
         Address::ZERO,
