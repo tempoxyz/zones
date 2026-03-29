@@ -20,7 +20,7 @@ tempo-node.workspace = true
 tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
-tempo-alloy = { workspace = true, features = ["tempo-compat"] }
+tempo-alloy.workspace = true
 tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
