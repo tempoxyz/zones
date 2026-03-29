@@ -28,9 +28,8 @@ The signed message is the `keccak256` hash of the following packed encoding:
 bytes32 authorizationTokenHash = keccak256(abi.encodePacked(
     bytes32(0x54656d706f5a6f6e65525043),  // "TempoZoneRPC" magic prefix
     uint8(version),                         // spec version (currently 0)
-    uint32(zoneId),                         // zone this key is valid for
+    uint32(zoneId),                         // zone this key is valid for (0 = unscoped)
     uint64(chainId),                        // zone chain ID (replay protection)
-    address(zonePortal),                    // ZonePortal address on Tempo
     uint64(issuedAt),                       // unix timestamp (seconds) of issuance
     uint64(expiresAt)                       // unix timestamp (seconds) of expiry
 ));
@@ -39,6 +38,14 @@ bytes32 authorizationTokenHash = keccak256(abi.encodePacked(
 The `version` field MUST be `0` for this version of the spec. The RPC server MUST reject authorization tokens with an unrecognized version. This allows future revisions to change authorization token semantics (e.g., adding scoped permissions) without ambiguity.
 
 This hash is the challenge that must be signed. Using a raw `keccak256` hash (rather than EIP-191 personal messages or EIP-712 typed data) allows all Tempo signature types to sign the same message consistently — P256 and WebAuthn signers cannot produce EIP-191 prefixed signatures. The `"TempoZoneRPC"` magic prefix provides domain separation, ensuring that authorization token hashes cannot collide with Tempo transaction hashes or other signing contexts.
+
+### Unscoped tokens
+
+A `zoneId` of `0` indicates an **unscoped** authorization token that is valid for any zone. Zone IDs are assigned by `ZoneFactory` starting at 1, so `0` is never a valid zone ID.
+
+When the RPC server receives a token with `zoneId == 0`, it MUST skip the zone ID check and accept the token for any zone. All other validation rules (version, chain ID, expiry, signature) still apply. The `chainId` field continues to provide cross-network replay protection.
+
+Unscoped tokens are useful for applications and SDKs that interact with multiple zones on the same network without managing separate tokens per zone. Since authorization tokens are read-only credentials (no RPC method authenticated solely by a token may modify state), the additional exposure is limited to read access across zones the user has accounts in.
 
 ### Signature types
 
@@ -109,9 +116,8 @@ This allows session keys and scoped Access Keys to authenticate to the RPC with 
 
 The RPC server MUST reject authorization tokens where:
 
-- `zoneId` does not equal the zone's configured `zoneId`.
+- `zoneId` does not equal the zone's configured `zoneId` **and** `zoneId` is not `0` (an unscoped token with `zoneId == 0` is valid for any zone — see [Unscoped tokens](#unscoped-tokens)).
 - `chainId` does not equal the zone's configured chain ID (`eth_chainId`).
-- `zonePortal` does not equal the zone's configured Tempo ZonePortal address.
 - `expiresAt - issuedAt > 1800` (maximum validity window is 30 minutes).
 - `expiresAt <= now` (key has expired).
 - `issuedAt > now + 60` (clock skew tolerance of 60 seconds into the future).
@@ -137,10 +143,10 @@ Content-Type: application/json
 The `X-Authorization-Token` value is a single hex-encoded blob containing the concatenation of the signature and the authorization token fields:
 
 ```
-<signature bytes><version: 1 byte><zoneId: 4 bytes><chainId: 8 bytes><zonePortal: 20 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
+<signature bytes><version: 1 byte><zoneId: 4 bytes><chainId: 8 bytes><issuedAt: 8 bytes><expiresAt: 8 bytes>
 ```
 
-The authorization token fields are always exactly 49 bytes (1 + 4 + 8 + 20 + 8 + 8). To parse the blob, the RPC server reads the **last 49 bytes** as the authorization token fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` for legacy V1 or `0x04` for V2 and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
+The authorization token fields are always exactly 29 bytes (1 + 4 + 8 + 8 + 8). To parse the blob, the RPC server reads the **last 29 bytes** as the authorization token fields, and treats everything before them as the signature. The signature is then parsed using the same detection rules as [Tempo transaction signatures](/protocol/transactions/spec-tempo-transaction#signature-types) (secp256k1 is exactly 65 bytes; P256 starts with `0x01` and is 130 bytes; WebAuthn starts with `0x02` and is variable-length; Keychain starts with `0x03` for legacy V1 or `0x04` for V2 and is variable-length). Parsing from the end avoids any ambiguity with variable-length signature types.
 
 Requests without an authorization token receive a `401 Unauthorized` HTTP response. Requests with an expired, malformed, or unauthorized token receive `403 Forbidden`. If Keychain token verification fails because the server cannot read `AccountKeychain.getKey(...)`, the server returns `500 Internal Server Error`.
 
@@ -485,7 +491,7 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 
 - **Side channels via timing**: Scoped methods that must fetch data before checking authorization are subject to a mandatory 100 ms response floor (see [Timing side channels and the 100 ms speed bump](#timing-side-channels-and-the-100-ms-speed-bump)). This ensures that `eth_getTransactionByHash` for a non-existent transaction and for another user's transaction have indistinguishable response times.
 - **Nonce privacy**: `eth_getTransactionCount` for non-authenticated accounts returns `0x0` rather than an error. This avoids revealing whether an account exists. The constant `0x0` response is indistinguishable from a genuinely new account.
-- **Authorization token replay**: Authorization tokens are scoped to a specific zone (`zoneId` and `chainId`) and a specific portal (`zonePortal`), with a maximum 30-minute window. Authorization tokens are strictly read-only credentials — no RPC method that is authenticated solely by an authorization token may modify state (see [Withdrawals](#zone-specific-rpc-methods)). The RPC server SHOULD implement nonce tracking or rate limiting to further reduce the window for abuse if a token is intercepted, but replay of a read-only token cannot move funds.
+- **Authorization token replay**: Authorization tokens are scoped to a specific zone (`zoneId`) and network (`chainId`), with a maximum 30-minute window. When `zoneId` is `0` (unscoped), the token is valid across all zones on that network. Authorization tokens are strictly read-only credentials — no RPC method that is authenticated solely by an authorization token may modify state (see [Withdrawals](#zone-specific-rpc-methods)). The RPC server SHOULD implement nonce tracking or rate limiting to further reduce the window for abuse if a token is intercepted, but replay of a read-only token cannot move funds.
 - **Simulation override extensions**: Some Ethereum clients support non-standard simulation extensions (state override sets and block override objects) on `eth_call`/`eth_estimateGas`. Privacy zones MUST reject these extensions for non-sequencer callers, because they can bypass or distort normal state access assumptions used by this spec's privacy model.
 - **Keychain key revocation and expiry**: When a root account revokes a Keychain key on-chain, the RPC server MUST stop accepting that key within 1 second of importing the block that contains the revocation. Cached Keychain verifications MUST also honor key expiry: a cache entry MUST expire no later than `min(authorizationToken.expiresAt, keyExpiry)` where `keyExpiry` is read from `AccountKeychain.getKey(...)`. In the current `AccountKeychain` implementation, inactive or revoked keys are surfaced as `keyId == 0` and `expiry == 0`, so those results MUST be treated as immediately invalid rather than "never expires." The recommended implementation is event-driven: the zone node watches for `KeyRevoked(account, publicKey)` events emitted by the AccountKeychain precompile during block execution and immediately evicts matching entries from the authorization token cache. This requires no cryptography — just a cache lookup and delete. As a fallback, implementations MAY poll the precompile via `getKey(user_address, keyId)`, but the 1-second deadline still applies.
 - **P256/WebAuthn key compromise**: Unlike secp256k1, P256 and WebAuthn keys include the public key in the signature. This means the public key is visible to the RPC server on every request. This is not a security concern (public keys are public), but implementations should be aware that the key material is transmitted in the clear over the connection.

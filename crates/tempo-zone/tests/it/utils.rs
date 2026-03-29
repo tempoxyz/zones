@@ -2255,7 +2255,6 @@ fn build_auth_token(
     signer: &alloy_signer_local::PrivateKeySigner,
     zone_id: u32,
     chain_id: u64,
-    portal: Address,
 ) -> String {
     use alloy_signer::SignerSync;
     use zone::rpc::auth::build_token_fields;
@@ -2263,7 +2262,7 @@ fn build_auth_token(
     let now = now_secs();
     let expires_at = now + 600;
 
-    let (fields, digest) = build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    let (fields, digest) = build_token_fields(zone_id, chain_id, now, expires_at);
     let sig = signer.sign_hash_sync(&digest).expect("signing failed");
 
     let mut blob = Vec::with_capacity(65 + fields.len());
@@ -2279,32 +2278,24 @@ fn build_auth_token_with_signature(
     signature: TempoSignature,
     zone_id: u32,
     chain_id: u64,
-    portal: Address,
 ) -> String {
     use zone::rpc::auth::build_token_fields;
 
     let now = now_secs();
     let expires_at = now + 600;
 
-    let (fields, _) = build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    let (fields, _) = build_token_fields(zone_id, chain_id, now, expires_at);
     auth_tokens::build_token_with_signature(signature, &fields)
 }
 
-fn build_p256_auth_token(
-    signing_key: &P256SigningKey,
-    zone_id: u32,
-    chain_id: u64,
-    portal: Address,
-) -> String {
+fn build_p256_auth_token(signing_key: &P256SigningKey, zone_id: u32, chain_id: u64) -> String {
     let now = now_secs();
     let expires_at = now + 600;
-    let (_, digest) =
-        zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    let (_, digest) = zone::rpc::auth::build_token_fields(zone_id, chain_id, now, expires_at);
     build_auth_token_with_signature(
         sign_p256_signature(digest, signing_key).expect("p256 signing failed"),
         zone_id,
         chain_id,
-        portal,
     )
 }
 
@@ -2312,19 +2303,16 @@ fn build_webauthn_auth_token(
     signing_key: &P256SigningKey,
     zone_id: u32,
     chain_id: u64,
-    portal: Address,
     challenge_digest: Option<B256>,
 ) -> String {
     let now = now_secs();
     let expires_at = now + 600;
-    let (_, digest) =
-        zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    let (_, digest) = zone::rpc::auth::build_token_fields(zone_id, chain_id, now, expires_at);
     build_auth_token_with_signature(
         sign_webauthn_signature(signing_key, challenge_digest.unwrap_or(digest))
             .expect("webauthn signing failed"),
         zone_id,
         chain_id,
-        portal,
     )
 }
 
@@ -2334,17 +2322,15 @@ fn build_keychain_auth_token(
     version: u8,
     zone_id: u32,
     chain_id: u64,
-    portal: Address,
 ) -> (String, Address) {
     let now = now_secs();
     let expires_at = now + 600;
-    let (_, digest) =
-        zone::rpc::auth::build_token_fields(zone_id, chain_id, portal, now, expires_at);
+    let (_, digest) = zone::rpc::auth::build_token_fields(zone_id, chain_id, now, expires_at);
     let (signature, key_id) = sign_keychain_signature(digest, signing_key, root_account, version)
         .expect("keychain signing failed");
 
     (
-        build_auth_token_with_signature(signature, zone_id, chain_id, portal),
+        build_auth_token_with_signature(signature, zone_id, chain_id),
         key_id,
     )
 }
@@ -2485,39 +2471,22 @@ impl PrivateRpcTestCtx {
             &self.sequencer_signer,
             self.config.zone_id,
             self.config.chain_id,
-            self.config.zone_portal,
         )
     }
 
     /// Build an auth token for a regular (non-sequencer) user.
     pub(crate) fn user_token(&self, signer: &alloy_signer_local::PrivateKeySigner) -> String {
-        build_auth_token(
-            signer,
-            self.config.zone_id,
-            self.config.chain_id,
-            self.config.zone_portal,
-        )
+        build_auth_token(signer, self.config.zone_id, self.config.chain_id)
     }
 
     /// Build a P256 auth token for a non-sequencer caller.
     pub(crate) fn p256_token(&self, signing_key: &P256SigningKey) -> String {
-        build_p256_auth_token(
-            signing_key,
-            self.config.zone_id,
-            self.config.chain_id,
-            self.config.zone_portal,
-        )
+        build_p256_auth_token(signing_key, self.config.zone_id, self.config.chain_id)
     }
 
     /// Build a WebAuthn auth token for a non-sequencer caller.
     pub(crate) fn webauthn_token(&self, signing_key: &P256SigningKey) -> String {
-        build_webauthn_auth_token(
-            signing_key,
-            self.config.zone_id,
-            self.config.chain_id,
-            self.config.zone_portal,
-            None,
-        )
+        build_webauthn_auth_token(signing_key, self.config.zone_id, self.config.chain_id, None)
     }
 
     /// Build a WebAuthn auth token with an overridden challenge digest.
@@ -2530,7 +2499,6 @@ impl PrivateRpcTestCtx {
             signing_key,
             self.config.zone_id,
             self.config.chain_id,
-            self.config.zone_portal,
             Some(challenge_digest),
         )
     }
@@ -2548,7 +2516,6 @@ impl PrivateRpcTestCtx {
             version,
             self.config.zone_id,
             self.config.chain_id,
-            self.config.zone_portal,
         )
     }
 
@@ -2602,15 +2569,14 @@ impl PrivateRpcTestCtx {
         private_rpc_call_no_auth(&self.private_rpc_url, method, params).await
     }
 
-    /// Build an auth token with custom zone_id, chain_id, and portal (for negative testing).
+    /// Build an auth token with custom zone_id and chain_id (for negative testing).
     pub(crate) fn build_bad_token(
         &self,
         signer: &alloy_signer_local::PrivateKeySigner,
         zone_id: u32,
         chain_id: u64,
-        portal: Address,
     ) -> String {
-        build_auth_token(signer, zone_id, chain_id, portal)
+        build_auth_token(signer, zone_id, chain_id)
     }
 
     /// Inject an empty L1 block and wait for it to be processed.
