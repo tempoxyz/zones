@@ -2280,11 +2280,7 @@ fn build_auth_token_with_signature(
     auth_tokens::build_token_with_signature(signature, &fields)
 }
 
-fn build_p256_auth_token(
-    signing_key: &P256SigningKey,
-    zone_id: u32,
-    chain_id: u64,
-) -> String {
+fn build_p256_auth_token(signing_key: &P256SigningKey, zone_id: u32, chain_id: u64) -> String {
     let now = now_secs();
     let expires_at = now + 600;
     let (_, digest) = zone::rpc::auth::build_token_fields(zone_id, chain_id, now, expires_at);
@@ -2482,12 +2478,7 @@ impl PrivateRpcTestCtx {
 
     /// Build a WebAuthn auth token for a non-sequencer caller.
     pub(crate) fn webauthn_token(&self, signing_key: &P256SigningKey) -> String {
-        build_webauthn_auth_token(
-            signing_key,
-            self.config.zone_id,
-            self.config.chain_id,
-            None,
-        )
+        build_webauthn_auth_token(signing_key, self.config.zone_id, self.config.chain_id, None)
     }
 
     /// Build a WebAuthn auth token with an overridden challenge digest.

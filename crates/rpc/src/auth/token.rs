@@ -100,11 +100,7 @@ impl AuthorizationToken {
     /// Validate token fields against the server's zone configuration.
     ///
     /// A `zone_id` of `0` is unscoped and accepted for any zone.
-    pub fn validate(
-        &self,
-        expected_zone_id: u32,
-        expected_chain_id: u64,
-    ) -> Result<(), AuthError> {
+    pub fn validate(&self, expected_zone_id: u32, expected_chain_id: u64) -> Result<(), AuthError> {
         if self.version != 0 {
             return Err(AuthError::UnsupportedVersion(self.version));
         }
