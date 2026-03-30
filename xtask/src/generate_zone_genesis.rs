@@ -39,6 +39,7 @@ use tempo_precompiles::{
     tip403_registry::TIP403Registry,
 };
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
+use zone::precompiles::ZoneTokenFactory;
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -51,15 +52,13 @@ const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const TEMPO_STATE_READER_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000004");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-const ALPHA_USD_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000001");
-const BETA_USD_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000002");
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct GenerateZoneGenesis {
     #[arg(short, long)]
     pub(crate) output: PathBuf,
 
-    #[arg(long, default_value_t = 13371)]
+    #[arg(long)]
     pub(crate) chain_id: u64,
 
     #[arg(long, default_value_t = TEMPO_T0_BASE_FEE.into())]
@@ -79,6 +78,20 @@ pub(crate) struct GenerateZoneGenesis {
 
     #[arg(long, default_value = "docs/specs/out")]
     pub(crate) specs_out: PathBuf,
+
+    /// Include CreateX factory in genesis.
+    #[arg(long)]
+    pub(crate) with_createx: bool,
+
+    /// Include Safe Singleton Factory in genesis.
+    #[arg(long)]
+    pub(crate) with_safe_deployer: bool,
+
+    /// Include Arachnid CREATE2 factory in genesis.
+    /// The factory is always used internally to deploy Permit2; this flag
+    /// controls whether it remains in the final genesis state.
+    #[arg(long)]
+    pub(crate) with_create2_factory: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -115,7 +128,6 @@ impl GenerateZoneGenesis {
         initialize_tip403_registry(&mut evm)?;
         initialize_tip20_factory(&mut evm)?;
         create_path_usd_token(&mut evm)?;
-        create_extra_tokens(&mut evm)?;
         initialize_fee_manager(&mut evm)?;
         initialize_stablecoin_dex(&mut evm)?;
         initialize_nonce_manager(&mut evm)?;
@@ -220,6 +232,9 @@ impl GenerateZoneGenesis {
             .accounts
             .iter()
             .filter(|(addr, _)| **addr != DEPLOYER)
+            .filter(|(addr, _)| {
+                self.with_create2_factory || **addr != ARACHNID_CREATE2_FACTORY_ADDRESS
+            })
             .map(|(address, account)| {
                 let storage: Option<BTreeMap<_, _>> = if !account.storage.is_empty() {
                     Some(
@@ -258,22 +273,26 @@ impl GenerateZoneGenesis {
                 ..Default::default()
             },
         );
-        genesis_alloc.insert(
-            CREATEX_ADDRESS,
-            GenesisAccount {
-                code: Some(Bytes::from_static(&CreateX::DEPLOYED_BYTECODE)),
-                nonce: Some(1),
-                ..Default::default()
-            },
-        );
-        genesis_alloc.insert(
-            SAFE_DEPLOYER_ADDRESS,
-            GenesisAccount {
-                code: Some(Bytes::from_static(&SafeDeployer::DEPLOYED_BYTECODE)),
-                nonce: Some(1),
-                ..Default::default()
-            },
-        );
+        if self.with_createx {
+            genesis_alloc.insert(
+                CREATEX_ADDRESS,
+                GenesisAccount {
+                    code: Some(Bytes::from_static(&CreateX::DEPLOYED_BYTECODE)),
+                    nonce: Some(1),
+                    ..Default::default()
+                },
+            );
+        }
+        if self.with_safe_deployer {
+            genesis_alloc.insert(
+                SAFE_DEPLOYER_ADDRESS,
+                GenesisAccount {
+                    code: Some(Bytes::from_static(&SafeDeployer::DEPLOYED_BYTECODE)),
+                    nonce: Some(1),
+                    ..Default::default()
+                },
+            );
+        }
 
         if let Some(sequencer) = self.sequencer {
             genesis_alloc.entry(sequencer).or_default().balance =
@@ -463,7 +482,7 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
     Ok(())
 }
 
-/// Initialize the TIP20Factory precompile (required before creating any TIP20 tokens).
+/// Initialize the ZoneTokenFactory precompile (required before creating any TIP20 tokens).
 fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
@@ -471,9 +490,9 @@ fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
-        || TIP20Factory::new().initialize(),
+        || ZoneTokenFactory::new().initialize(),
     )?;
-    println!("Initialized TIP20Factory");
+    println!("Initialized ZoneTokenFactory");
     Ok(())
 }
 
@@ -523,54 +542,6 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<(
     )?;
 
     println!("Created pathUSD fee token at {PATH_USD_ADDRESS}");
-    Ok(())
-}
-
-/// Create AlphaUSD and BetaUSD tokens at their reserved TIP20 addresses,
-/// mirroring the L1 genesis setup.
-fn create_extra_tokens(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let admin = DEPLOYER;
-
-    for (address, name) in [
-        (ALPHA_USD_ADDRESS, "AlphaUSD"),
-        (BETA_USD_ADDRESS, "BetaUSD"),
-    ] {
-        let ctx = evm.ctx_mut();
-        StorageCtx::enter_evm(
-            &mut ctx.journaled_state,
-            &ctx.block,
-            &ctx.cfg,
-            &ctx.tx,
-            || {
-                TIP20Factory::new().create_token_reserved_address(
-                    address,
-                    name,
-                    name,
-                    "USD",
-                    PATH_USD_ADDRESS,
-                    admin,
-                )?;
-
-                let mut token = TIP20Token::from_address(address)?;
-                token.grant_role_internal(admin, *ISSUER_ROLE)?;
-                token.grant_role_internal(Address::ZERO, *ISSUER_ROLE)?;
-                token.grant_role_internal(ZONE_INBOX_ADDRESS, *ISSUER_ROLE)?;
-                token.grant_role_internal(ZONE_OUTBOX_ADDRESS, *ISSUER_ROLE)?;
-
-                token.set_supply_cap(
-                    admin,
-                    ITIP20::setSupplyCapCall {
-                        newSupplyCap: U256::from(u128::MAX),
-                    },
-                )?;
-
-                Ok::<(), tempo_precompiles::error::TempoPrecompileError>(())
-            },
-        )?;
-
-        println!("Created {name} token at {address}");
-    }
-
     Ok(())
 }
 

@@ -59,17 +59,16 @@ localnet accounts="1000" reset="false" profile="maxperf" features="asm-keccak" a
                       {{args}}
 
 [group('zone')]
-[doc('Approves the ZonePortal to spend max TEMPO. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
-max-approve-portal:
+[doc('Approves the ZonePortal to spend max tokens. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars.')]
+max-approve-portal token="0x20C0000000000000000000000000000000000000":
     #!/bin/bash
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
-    TOKEN="0x20C0000000000000000000000000000000000000"
     HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
-    echo "Approving ZonePortal for max TEMPO..."
-    cast send "$TOKEN" "approve(address,uint256)" "$PORTAL" "$(cast max-uint)" \
+    echo "Approving ZonePortal for max tokens ({{token}})..."
+    cast send "{{token}}" "approve(address,uint256)" "$PORTAL" "$(cast max-uint)" \
         --rpc-url "$HTTP_RPC" --private-key "$PK"
     echo "Approved!"
 
@@ -89,7 +88,9 @@ send-deposit amount="1000000" to="" token="0x20C00000000000000000000000000000000
     TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" \
         --rpc-url "$RPC" --private-key "$PK" --json)
     TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
-    echo "Deposit sent!"
+    L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
+    L1_BLOCK_DEC=$(printf '%d' "$L1_BLOCK")
+    echo "Deposit sent! (block $L1_BLOCK_DEC)"
     echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
 
 [group('zone')]
@@ -111,12 +112,25 @@ zone-info identifier:
     cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
-create-zone name:
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
+create-zone name token="":
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    ZONE_TOKEN_L1="{{token}}"
+    if [[ -z "$ZONE_TOKEN_L1" ]]; then
+        ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    fi
+    # Resolve well-known aliases (lowercased for case-insensitive matching)
+    ZONE_TOKEN_LOWER=$(echo "$ZONE_TOKEN_L1" | tr '[:upper:]' '[:lower:]')
+    case "$ZONE_TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            ZONE_TOKEN_L1="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000002" ;;
+    esac
     SEQ_KEY="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}"
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
@@ -128,6 +142,7 @@ create-zone name:
     echo "Building xtask..."
     cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
+    echo "Initial portal token: $ZONE_TOKEN_L1"
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
@@ -135,6 +150,50 @@ create-zone name:
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$PK"
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
+
+[group('zone')]
+[doc('Deploys SwapAndDepositRouter on L1 for an existing zone and saves it to generated/<name>/zone.json. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+deploy-router name dex="0xDEc0000000000000000000000000000000000000":
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    ZONE_DIR="generated/{{name}}"
+    ZONE_JSON="$ZONE_DIR/zone.json"
+    if [[ ! -f "$ZONE_JSON" ]]; then
+        echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    echo "Building Solidity specs..."
+    (cd docs/specs && forge build --skip test) || true
+    cargo run -p tempo-xtask -- deploy-router \
+        --zone-dir "$ZONE_DIR" \
+        --l1-rpc-url "$HTTP_RPC" \
+        --private-key "$PK" \
+        --stablecoin-dex "{{dex}}"
+
+[group('zone')]
+[doc('Runs a same-zone router demo: creates temporary tokens + DEX liquidity, withdraws token A from the zone, swaps on L1, and deposits token B back into the same zone via an encrypted deposit. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+demo-swap-and-deposit name amount="100000000" tick="0" rpc=zone_rpc:
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
+    HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    ZONE_DIR="generated/{{name}}"
+    ZONE_JSON="$ZONE_DIR/zone.json"
+    if [[ ! -f "$ZONE_JSON" ]]; then
+        echo "Error: $ZONE_JSON not found. Run 'just create-zone {{name}}' first." >&2
+        exit 1
+    fi
+    cargo run -p tempo-xtask -- demo-swap-and-deposit \
+        --zone-dir "$ZONE_DIR" \
+        --l1-rpc-url "$HTTP_RPC" \
+        --zone-rpc-url "{{rpc}}" \
+        --private-key "$PK" \
+        --amount "{{amount}}" \
+        --tick "{{tick}}"
 
 [group('zone')]
 [doc('Starts a Tempo Zone L2 node, subscribing to L1 deposits. Pass the zone name used in create-zone. Use profile=release for production.')]
@@ -194,13 +253,20 @@ max-approve-outbox token="0x20C0000000000000000000000000000000000000" rpc=zone_r
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     OUTBOX="0x1c00000000000000000000000000000000000002"
     echo "Approving ZoneOutbox for max zone tokens..."
-    cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
-        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 100000
-    echo "Approved!"
+    TX_OUTPUT=$(cast send "{{token}}" "approve(address,uint256)" "$OUTBOX" "$(cast max-uint)" \
+        --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 150000 --json)
+    STATUS=$(echo "$TX_OUTPUT" | jq -r '.status')
+    if [[ "$STATUS" == "0x1" ]]; then
+        echo "Approved!"
+    else
+        echo "Transaction failed!"
+        echo "$TX_OUTPUT" | jq .
+        exit 1
+    fi
 
 [group('zone')]
 [doc('Sends a withdrawal request on the zone (L2) back to Tempo L1. Requires PRIVATE_KEY env var. Run max-approve-outbox first.')]
-send-withdrawal amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" rpc=zone_rpc:
+send-withdrawal amount="1000000" to="" token="0x20C0000000000000000000000000000000000000" memo="0x0000000000000000000000000000000000000000000000000000000000000000" gas-limit="0" fallback-recipient="" data="0x" reveal-to="0x" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
@@ -215,8 +281,8 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     fi
     echo "Requesting withdrawal of {{amount}} to $TO (fallback: $FALLBACK)..."
     L2_OUTPUT=$(cast send "$OUTBOX" \
-        "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes)" \
-        "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" \
+        "requestWithdrawal(address,address,uint128,bytes32,uint64,address,bytes,bytes)" \
+        "{{token}}" "$TO" "{{amount}}" "{{memo}}" "{{gas-limit}}" "$FALLBACK" "{{data}}" "{{reveal-to}}" \
         --rpc-url "{{rpc}}" --private-key "$PK" --gas-limit 500000 --json)
     L2_TX=$(echo "$L2_OUTPUT" | jq -r '.transactionHash')
     L2_BLOCK=$(echo "$L2_OUTPUT" | jq -r '.blockNumber')
@@ -248,6 +314,250 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     done
 
 [group('zone')]
+[doc('Enables a TIP-20 token on the ZonePortal for bridging. Token can be an address or alias (pathusd, alphausd, betausd). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and SEQUENCER_KEY env vars.')]
+enable-token token:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var (only the sequencer can enable tokens)}"
+    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    TOKEN="{{token}}"
+    # Resolve well-known aliases (lowercased for case-insensitive matching)
+    TOKEN_LOWER=$(echo "$TOKEN" | tr '[:upper:]' '[:lower:]')
+    case "$TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            TOKEN="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            TOKEN="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            TOKEN="0x20c0000000000000000000000000000000000002" ;;
+    esac
+    echo "Enabling token $TOKEN on portal $PORTAL..."
+    TX_OUTPUT=$(cast send "$PORTAL" "enableToken(address)" "$TOKEN" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
+    L1_BLOCK_DEC=$(printf '%d' "$L1_BLOCK")
+    echo "L1 tx: $TX_HASH (block $L1_BLOCK_DEC)"
+    echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
+    # Read token metadata from L1
+    NAME=$(cast call "$TOKEN" "name()(string)" --rpc-url "$HTTP_RPC" 2>/dev/null || echo "???")
+    SYMBOL=$(cast call "$TOKEN" "symbol()(string)" --rpc-url "$HTTP_RPC" 2>/dev/null || echo "???")
+    echo "Waiting for zone to process L1 block $L1_BLOCK_DEC (token: $NAME / $SYMBOL)..."
+    ZONE_RPC="${ZONE_RPC_URL:-http://localhost:8546}"
+    INBOX="0x1c00000000000000000000000000000000000001"
+    while true; do
+        LOGS=$(cast logs --address "$INBOX" --from-block 1 --rpc-url "$ZONE_RPC" \
+            "TokenEnabled(address indexed token, string name, string symbol, string currency)" \
+            "$TOKEN" --json 2>/dev/null || echo "[]")
+        if [[ "$LOGS" != "[]" && "$LOGS" != "" && "$LOGS" != "null" ]]; then
+            echo "✅ Token enabled on zone: $NAME ($SYMBOL) at $TOKEN"
+            break
+        fi
+        sleep 0.5
+    done
+
+[group('tip403')]
+[doc('Creates a new TIP-20 token on L1 via TIP20Factory. Returns the token address. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+create-token name symbol salt="0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    FACTORY="0x20FC000000000000000000000000000000000000"
+    QUOTE_TOKEN="0x20C0000000000000000000000000000000000000"
+    ADMIN=$(cast wallet address "$PK")
+    # Predict the address first
+    TOKEN_ADDR=$(cast call "$FACTORY" \
+        "getTokenAddress(address,bytes32)(address)" "$ADMIN" "{{salt}}" \
+        --rpc-url "$HTTP_RPC")
+    echo "Creating TIP-20 token '{{name}}' ({{symbol}}) at $TOKEN_ADDR..."
+    TX_OUTPUT=$(cast send "$FACTORY" \
+        "createToken(string,string,string,address,address,bytes32)" \
+        "{{name}}" "{{symbol}}" "USD" "$QUOTE_TOKEN" "$ADMIN" "{{salt}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    echo "Token created!"
+    echo "  Address:  $TOKEN_ADDR"
+    echo "  Name:     {{name}}"
+    echo "  Symbol:   {{symbol}}"
+    echo "  Currency: USD"
+    echo "  Admin:    $ADMIN"
+    echo "  L1 tx:    $TX_HASH"
+
+[group('tip403')]
+[doc('Mints TIP-20 tokens to an address on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars. Caller must have ISSUER_ROLE.')]
+mint-tokens token to="" amount="1000000000":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    TO="{{to}}"
+    if [[ -z "$TO" ]]; then
+        TO=$(cast wallet address "$PK")
+    fi
+    echo "Minting {{amount}} tokens to $TO on token {{token}}..."
+    cast send "{{token}}" "mint(address,uint256)" "$TO" "{{amount}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    BALANCE=$(cast call "{{token}}" "balanceOf(address)(uint256)" "$TO" --rpc-url "$HTTP_RPC")
+    echo "Balance of $TO: $BALANCE"
+
+[group('tip403')]
+[doc('Sets the supply cap for a TIP-20 token on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars. Caller must be token admin.')]
+set-supply-cap token cap="340282366920938463463374607431768211455":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    echo "Setting supply cap to {{cap}} on token {{token}}..."
+    cast send "{{token}}" "setSupplyCap(uint256)" "{{cap}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Supply cap set!"
+
+[group('tip403')]
+[doc('Grants ISSUER_ROLE on a TIP-20 token so the caller can mint. Requires L1_RPC_URL and PRIVATE_KEY env vars. Caller must be token admin.')]
+grant-issuer-role token to="":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    TO="{{to}}"
+    if [[ -z "$TO" ]]; then
+        TO=$(cast wallet address "$PK")
+    fi
+    ISSUER_ROLE=$(cast keccak "ISSUER_ROLE")
+    echo "Granting ISSUER_ROLE to $TO on token {{token}}..."
+    cast send "{{token}}" "grantRole(bytes32,address)" "$ISSUER_ROLE" "$TO" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Done!"
+
+[group('tip403')]
+[doc('Creates a TIP-403 whitelist or blacklist policy on L1. Type: 0=whitelist, 1=blacklist. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+create-policy type="0":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    ADMIN=$(cast wallet address "$PK")
+    TYPE_NAME="whitelist"
+    if [[ "{{type}}" == "1" ]]; then
+        TYPE_NAME="blacklist"
+    fi
+    echo "Creating $TYPE_NAME policy on L1 (admin: $ADMIN)..."
+    TX_OUTPUT=$(cast send "$REGISTRY" \
+        "createPolicy(address,uint8)(uint64)" "$ADMIN" "{{type}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    # Extract the policy ID from the PolicyCreated event log in the receipt
+    POLICY_ID_HEX=$(echo "$TX_OUTPUT" | jq -r '.logs[] | select(.topics[0] == "0x718d87917f0c4cfd1263707ef0e77c656ed8d8bfaca06152bdb0b8094142ec27") | .topics[1]')
+    POLICY_ID=$(printf '%d' "$POLICY_ID_HEX")
+    echo "Policy created!"
+    echo "  Policy ID: $POLICY_ID"
+    echo "  Type:      $TYPE_NAME"
+    echo "  Admin:     $ADMIN"
+    echo "  L1 tx:     $TX_HASH"
+
+[group('tip403')]
+[doc('Creates a compound TIP-403 policy from existing sub-policies. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+create-compound-policy sender-policy-id recipient-policy-id mint-recipient-policy-id="1":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    echo "Creating compound policy (sender={{sender-policy-id}}, recipient={{recipient-policy-id}}, mint={{mint-recipient-policy-id}})..."
+    TX_OUTPUT=$(cast send "$REGISTRY" \
+        "createCompoundPolicy(uint64,uint64,uint64)" \
+        "{{sender-policy-id}}" "{{recipient-policy-id}}" "{{mint-recipient-policy-id}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    COUNTER=$(cast call "$REGISTRY" "policyIdCounter()(uint64)" --rpc-url "$HTTP_RPC" | awk '{print $1}')
+    POLICY_ID=$((COUNTER - 1))
+    echo "Compound policy created!"
+    echo "  Policy ID:         $POLICY_ID"
+    echo "  Sender sub-policy: {{sender-policy-id}}"
+    echo "  Recipient sub-policy: {{recipient-policy-id}}"
+    echo "  Mint recipient sub-policy: {{mint-recipient-policy-id}}"
+    echo "  L1 tx:             $TX_HASH"
+
+[group('tip403')]
+[doc('Adds or removes an account from a whitelist policy on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+modify-whitelist policy-id account allowed="true":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    echo "Modifying whitelist policy {{policy-id}}: account={{account}} allowed={{allowed}}..."
+    cast send "$REGISTRY" \
+        "modifyPolicyWhitelist(uint64,address,bool)" "{{policy-id}}" "{{account}}" "{{allowed}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Done!"
+
+[group('tip403')]
+[doc('Adds or removes an account from a blacklist policy on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+modify-blacklist policy-id account restricted="true":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    echo "Modifying blacklist policy {{policy-id}}: account={{account}} restricted={{restricted}}..."
+    cast send "$REGISTRY" \
+        "modifyPolicyBlacklist(uint64,address,bool)" "{{policy-id}}" "{{account}}" "{{restricted}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    echo "Done!"
+
+[group('tip403')]
+[doc('Assigns a transfer policy to a TIP-20 token on L1. Requires L1_RPC_URL and PRIVATE_KEY env vars. Caller must be token admin.')]
+set-transfer-policy token policy-id:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    echo "Setting transfer policy {{policy-id}} on token {{token}}..."
+    cast send "{{token}}" "changeTransferPolicyId(uint64)" "{{policy-id}}" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK"
+    CURRENT=$(cast call "{{token}}" "transferPolicyId()(uint64)" --rpc-url "$HTTP_RPC")
+    echo "Transfer policy set to: $CURRENT"
+
+[group('tip403')]
+[doc('Checks if an address is authorized under a policy on L1. Requires L1_RPC_URL env var.')]
+check-authorized policy-id account:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    REGISTRY="0x403C000000000000000000000000000000000000"
+    RESULT=$(cast call "$REGISTRY" "isAuthorized(uint64,address)(bool)" "{{policy-id}}" "{{account}}" --rpc-url "$HTTP_RPC")
+    echo "Policy {{policy-id}}, account {{account}}: authorized=$RESULT"
+
+[group('tip403')]
+[doc('Reads the transfer policy ID for a TIP-20 token. Requires L1_RPC_URL env var.')]
+token-policy token rpc="":
+    #!/bin/bash
+    set -euo pipefail
+    RPC_URL="{{rpc}}"
+    if [[ -z "$RPC_URL" ]]; then
+        RPC_URL="${L1_RPC_URL:?Set L1_RPC_URL env var or pass rpc= parameter}"
+        RPC_URL=$(echo "$RPC_URL" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    fi
+    POLICY_ID=$(cast call "{{token}}" "transferPolicyId()(uint64)" --rpc-url "$RPC_URL")
+    NAME=$(cast call "{{token}}" "name()(string)" --rpc-url "$RPC_URL" 2>/dev/null || echo "???")
+    echo "$NAME ({{token}}): transferPolicyId=$POLICY_ID"
+
+[group('zone')]
 [doc('Checks TIP-20 token balance for an account on the zone (port 8546)')]
 check-balance account token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
     @printf "Balance of {{account}}: " && cast call "{{token}}" "balanceOf(address)(uint256)" "{{account}}" --rpc-url "{{rpc}}"
@@ -264,19 +574,17 @@ zone-auth-token name:
         exit 1
     fi
     ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
-    PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     GENESIS_JSON="generated/{{name}}/genesis.json"
     CHAIN_ID=$(jq -r '.config.chainId' "$GENESIS_JSON")
     NOW=$(date +%s)
     EXPIRES=$((NOW + 600))
     MAGIC="54656d706f5a6f6e655250430000000000000000000000000000000000000000"
     VERSION="00"
-    ZONE_ID_HEX=$(printf '%016x' "$ZONE_ID")
+    ZONE_ID_HEX=$(printf '%08x' "$ZONE_ID")
     CHAIN_ID_HEX=$(printf '%016x' "$CHAIN_ID")
-    PORTAL_HEX=$(echo "$PORTAL" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
     ISSUED_HEX=$(printf '%016x' "$NOW")
     EXPIRES_HEX=$(printf '%016x' "$EXPIRES")
-    FIELDS="${VERSION}${ZONE_ID_HEX}${CHAIN_ID_HEX}${PORTAL_HEX}${ISSUED_HEX}${EXPIRES_HEX}"
+    FIELDS="${VERSION}${ZONE_ID_HEX}${CHAIN_ID_HEX}${ISSUED_HEX}${EXPIRES_HEX}"
     DIGEST=$(cast keccak "0x${MAGIC}${FIELDS}")
     SIG=$(cast wallet sign --no-hash "$DIGEST" --private-key "$PK")
     SIG_HEX=$(echo "$SIG" | sed 's/0x//')
@@ -310,17 +618,33 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
-[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Requires L1_RPC_URL env var.')]
-deploy-zone name:
+[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL env var.')]
+deploy-zone name token="":
     #!/bin/bash
     set -euo pipefail
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     OUTPUT="generated/{{name}}"
+    ZONE_TOKEN_L1="{{token}}"
+    if [[ -z "$ZONE_TOKEN_L1" ]]; then
+        ZONE_TOKEN_L1="${ZONE_TOKEN:-0x20C0000000000000000000000000000000000000}"
+    fi
+    # Resolve well-known aliases (lowercased for case-insensitive matching)
+    ZONE_TOKEN_LOWER=$(echo "$ZONE_TOKEN_L1" | tr '[:upper:]' '[:lower:]')
+    case "$ZONE_TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            ZONE_TOKEN_L1="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000002" ;;
+    esac
 
     echo "============================================"
     echo "  Deploying Zone: {{name}}"
     echo "============================================"
+    echo ""
+    echo "  Initial portal token: $ZONE_TOKEN_L1"
     echo ""
 
     # Step 1: Generate a new sequencer keypair
@@ -348,6 +672,7 @@ deploy-zone name:
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
+        --initial-token "$ZONE_TOKEN_L1" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$SEQUENCER_KEY"
     echo ""
@@ -377,6 +702,7 @@ deploy-zone name:
     echo "  Zone ID:         $ZONE_ID"
     echo "  Zone Name:       {{name}}"
     echo "  Portal:          $PORTAL"
+    echo "  Initial Token:   $ZONE_TOKEN_L1"
     echo "  Sequencer:       $SEQUENCER_ADDR"
     echo "  Anchor Block:    $ANCHOR_BLOCK"
     echo ""
@@ -409,6 +735,23 @@ deploy-zone name:
                       --datadir "$DATADIR" \
                       --log.file.directory "$DATADIR/logs" \
                       --sequencer-key "$SEQUENCER_KEY"
+
+[group('zone')]
+[doc('Spam deposit transactions to measure portal throughput. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Example: just spam-deposits 10 10 200000 1 (10 txs, 10 per block, 200000 amount, encrypted)')]
+spam-deposits total="20" per-block="10" amount="1000000" encrypted="" token="0x20C0000000000000000000000000000000000000" lead-time="3":
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    ARGS="--total {{total}} --per-block {{per-block}} --amount {{amount}} --token {{token}} --lead-time {{lead-time}}"
+    if [[ "{{encrypted}}" == "true" || "{{encrypted}}" == "1" ]]; then
+        ARGS="$ARGS --encrypted"
+    fi
+    cargo run -p tempo-xtask -- spam-deposits --private-key "$PK" $ARGS
+
+[group('zone')]
+[doc('Runs the full TIP-20 + TIP-403 blacklist demo: creates token, enables on zone, blacklists address, shows deposit bounce, unblacklists, shows deposit success, withdraws. Requires PRIVATE_KEY (sequencer key) and L1_PORTAL_ADDRESS env vars.')]
+demo-blacklist amount="500000" rpc=zone_rpc:
+    cargo run -p tempo-xtask -- demo-blacklist --zone-rpc-url {{rpc}} --amount {{amount}}
 
 # Docs commands
 [group('docs')]

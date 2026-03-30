@@ -15,7 +15,7 @@ target "chef" {
   platforms = ["linux/amd64"]
   args = {
     RUST_PROFILE = "profiling"
-    RUST_FEATURES = "asm-keccak,jemalloc,otlp"
+    RUST_FEATURES = "jemalloc"
     EXTRA_RUSTFLAGS = "-C force-frame-pointers=yes"
   }
 }
@@ -36,7 +36,7 @@ target "_common" {
   platforms = ["linux/amd64"]
 }
 
-target "tempo" {
+target "tempo-zone" {
   inherits = ["_common", "docker-metadata"]
-  target = "tempo"
+  target = "tempo-zone"
 }

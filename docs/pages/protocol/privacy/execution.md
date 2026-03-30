@@ -64,22 +64,20 @@ By fixing the gas cost:
 
 ### System mint and burn permissions
 
-On Tempo, `mint()` and `burn()` on a TIP-20 require the caller to hold `ISSUER_ROLE`. On a privacy zone, the zone token is a bridged representation — tokens are minted when deposits arrive from Tempo and burned when withdrawals are requested. The zone's system contracts need to perform these operations without holding `ISSUER_ROLE`.
+On Tempo, `mint()` and `burn()` on a TIP-20 require the caller to hold `ISSUER_ROLE`. On a zone, the token is a bridged representation — tokens are minted when deposits arrive from Tempo and burned when withdrawals are requested. `ISSUER_ROLE` is not used on zones. The sole mint/burn authorities are the zone system contracts:
 
-The TIP-20 precompile on a privacy zone extends the mint/burn authorization to include the zone system contracts:
-
-| Operation | Standard TIP-20 access | Privacy zone access |
-|-----------|----------------------|-------------------|
-| `mint(to, amount)` | `ISSUER_ROLE` only | `ISSUER_ROLE` **or** ZoneInbox (`0x1c...0001`) |
-| `burn(from, amount)` | `ISSUER_ROLE` only | `ISSUER_ROLE` **or** ZoneOutbox (`0x1c...0002`) |
+| Operation | Standard TIP-20 (Tempo) | Zone access |
+|-----------|------------------------|-------------|
+| `mint(to, amount)` | `ISSUER_ROLE` only | ZoneInbox (`0x1c...0001`) only |
+| `burn(from, amount)` | `ISSUER_ROLE` only | ZoneOutbox (`0x1c...0002`) only |
 
 Authorization is **operation-specific**: ZoneInbox access applies to `mint` only, and ZoneOutbox access applies to `burn` only. Implementations MUST NOT use a shared "inbox-or-outbox" check for both operations.
 
 **ZoneInbox mints** during deposit processing in `advanceTempo()`:
 
-- Regular deposit: `mint(deposit.to, deposit.amount)` — credits the recipient.
-- Encrypted deposit (decryption succeeded): `mint(decrypted.to, deposit.amount)` — credits the decrypted recipient.
-- Encrypted deposit (decryption failed): `mint(deposit.sender, deposit.amount)` — refunds the sender.
+- Regular deposit: `mint(deposit.to, deposit.amount)` — credits the recipient on the zone.
+- Encrypted deposit (decryption succeeded): `mint(decrypted.to, deposit.amount)` — credits the decrypted recipient on the zone.
+- Encrypted deposit (decryption failed): `mint(deposit.sender, deposit.amount)` — credits the depositor's address on the zone (same address as their L1 account). The L1 funds remain escrowed in the portal.
 
 **ZoneOutbox burns** during withdrawal requests in `requestWithdrawal()`:
 
@@ -88,8 +86,6 @@ Authorization is **operation-specific**: ZoneInbox access applies to `mint` only
 - The burned tokens are released on Tempo when the sequencer processes the withdrawal.
 
 **Gas costs**: `mint` and `burn` retain standard variable gas costs (not the fixed 100,000). These functions are only called by system contracts during sequencer operations, so there is no user-exploitable gas side channel.
-
-**`ISSUER_ROLE` is preserved** for forward compatibility but is not expected to be granted to any external party on a zone — the zone token supply is entirely controlled by the bridge mechanism.
 
 ## EVM restrictions
 

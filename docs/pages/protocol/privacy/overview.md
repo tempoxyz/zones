@@ -16,7 +16,7 @@ This document proposes a new validium protocol designed for Tempo. It is a desig
 ## Non-goals
 
 - No attempt to solve data availability, forced inclusion, or censorship resistance.
-- No upgradeability or governance model.
+- No governance model. Upgradeability is handled via Tempo L1 hard forks (see [Hard fork activation](#hard-fork-activation)).
 - No general messaging. Multi-asset bridging is supported for all TIP-20 tokens enabled by the sequencer.
 
 ## Terminology
@@ -56,6 +56,16 @@ A zone is created via `ZoneFactory.createZone(...)` with:
 - `zoneParams`: initial configuration (genesis block hash, genesis Tempo block hash/number).
 
 The factory deploys a `ZonePortal` that escrows enabled tokens on Tempo and a `ZoneMessenger` for withdrawal callbacks. The initial token is automatically enabled at deployment.
+
+### Chain ID
+
+Each zone has a unique EIP-155 chain ID derived deterministically from its on-chain zone ID:
+
+```
+chain_id = 4217000000 + zone_id
+```
+
+The prefix `4217` corresponds to the Tempo L1 chain ID. This ensures replay protection between zones — a transaction signed for one zone cannot be replayed on another. The chain ID is set in the zone's genesis configuration during creation and validated by the zone node at startup.
 
 ### Token management
 
@@ -328,7 +338,7 @@ interface IZoneToken {
 }
 
 struct ZoneInfo {
-    uint64 zoneId;
+    uint32 zoneId;
     address portal;
     address messenger;
     address initialToken;       // first TIP-20 enabled at creation
@@ -361,7 +371,7 @@ struct Deposit {
 
 struct Withdrawal {
     address token;              // TIP-20 token being withdrawn
-    address sender;             // who initiated the withdrawal on the zone
+    bytes32 senderTag;          // keccak256(abi.encodePacked(sender, txHash)) — see Authenticated withdrawals
     address to;                 // Tempo recipient
     uint128 amount;             // amount to send to recipient (excludes fee)
     uint128 fee;                // processing fee for sequencer (calculated at request time)
@@ -369,6 +379,7 @@ struct Withdrawal {
     uint64 gasLimit;            // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient;  // zone address for bounce-back if call fails
     bytes callbackData;         // calldata for IWithdrawalReceiver (if gasLimit > 0, max 1KB)
+    bytes encryptedSender;      // ECDH-encrypted (sender, txHash) for revealTo key, or empty
 }
 ```
 
@@ -471,7 +482,7 @@ interface IZoneFactory {
     }
 
     event ZoneCreated(
-        uint64 indexed zoneId,
+        uint32 indexed zoneId,
         address indexed portal,
         address indexed messenger,
         address initialToken,
@@ -482,9 +493,9 @@ interface IZoneFactory {
         uint64 genesisTempoBlockNumber
     );
 
-    function createZone(CreateZoneParams calldata params) external returns (uint64 zoneId, address portal);
-    function zoneCount() external view returns (uint64);
-    function zones(uint64 zoneId) external view returns (ZoneInfo memory);
+    function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
+    function zoneCount() external view returns (uint32);
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
 }
 ```
@@ -671,7 +682,7 @@ interface IZoneMessenger {
     /// @param data Calldata for the target
     function relayMessage(
         address token,
-        address sender,
+        bytes32 senderTag,
         address target,
         uint128 amount,
         uint64 gasLimit,
@@ -680,7 +691,7 @@ interface IZoneMessenger {
 }
 ```
 
-The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` to authenticate the call, and receive the L2 origin as the `sender` parameter in `onWithdrawalReceived`. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
+The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then calls the target with `data`. Both are atomic: if the callback reverts, the transfer is also reverted. Receivers check `msg.sender == zoneMessenger` to authenticate the call, and receive the `senderTag` in `onWithdrawalReceived` (see [Authenticated withdrawals](#authenticated-withdrawals)). This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
 
 #### Withdrawal receiver
 
@@ -695,7 +706,7 @@ interface IWithdrawalReceiver {
     /// @param callbackData The callback data from the withdrawal request
     /// @return The function selector to confirm successful handling
     function onWithdrawalReceived(
-        address sender,
+        bytes32 senderTag,
         address token,
         uint128 amount,
         bytes calldata callbackData
@@ -714,9 +725,18 @@ Zones have four system contract predeploys at fixed addresses:
 - **ZoneOutbox** (0x1c00000000000000000000000000000000000002) - Handles withdrawal requests back to Tempo
 - **ZoneConfig** (0x1c00000000000000000000000000000000000003) - Central configuration that reads sequencer from L1
 
-#### Zone tokens
+#### Zone token model
 
-Each enabled TIP-20 token is bridged from Tempo to the zone. Each is deployed at the **same address** on the zone as on Tempo. Users interact with them via the standard TIP-20 interface for transfers and approvals. The zone sequencer mints the correct token when processing deposits and burns the correct token when withdrawals are requested. The zone node must deploy/configure zone-side representations for each enabled token.
+Zones have **no TIP-20 factory**. All TIP-20 tokens on a zone are bridged representations of Tempo tokens — there is no mechanism to create or issue new tokens on the zone itself. Contract creation is disabled (`CREATE` and `CREATE2` revert), so users cannot deploy token contracts either.
+
+Each enabled TIP-20 token is deployed on the zone at the **same address** as on Tempo. When the sequencer calls `enableToken(token)` on the L1 portal, the zone node provisions a zone-side TIP-20 precompile at that address in the next genesis or state update. Users interact with zone tokens via the standard TIP-20 interface for transfers and approvals.
+
+The total supply of each zone token is controlled exclusively by the bridge:
+
+- **Mint on deposit**: `ZoneInbox` mints tokens when processing deposits from Tempo.
+- **Burn on withdrawal**: `ZoneOutbox` burns tokens when users request withdrawals back to Tempo.
+
+The zone-side supply of each token always equals the net deposits minus net withdrawals for that token. The corresponding Tempo-side tokens are held in escrow by the `ZonePortal`. No other actor can mint or burn zone tokens — system contracts (`ZoneInbox`, `ZoneOutbox`) are the sole mint/burn authorities.
 
 #### ZoneConfig predeploy
 
@@ -920,7 +940,8 @@ interface IZoneOutbox {
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
-        bytes data
+        bytes data,
+        bytes revealTo
     );
 
     event TempoGasRateUpdated(uint128 tempoGasRate);
@@ -984,6 +1005,7 @@ interface IZoneOutbox {
     /// @param gasLimit Gas limit for messenger callback (0 = no callback).
     /// @param fallbackRecipient Zone address for bounce-back if callback fails.
     /// @param data Calldata for the target (max 1KB).
+    /// @param revealTo Compressed secp256k1 public key (33 bytes) to encrypt sender reveal to, or empty.
     function requestWithdrawal(
         address token,
         address to,
@@ -991,7 +1013,8 @@ interface IZoneOutbox {
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
-        bytes calldata data
+        bytes calldata data,
+        bytes calldata revealTo
     ) external;
 
     /// @notice Finalize batch at end of final block - build withdrawal hash and write to state.
@@ -1130,7 +1153,7 @@ Notes:
 - The portal only stores `currentDepositQueueHash`, not individual deposits. The sequencer must track deposits off-chain.
 - Tempo state advancement is combined with deposit processing in `ZoneInbox.advanceTempo()`, which calls `TempoState.finalizeTempo()` internally.
 - The proof validates an exact match to `currentDepositQueueHash` from Tempo state, ensuring it cannot claim to process fake deposits.
-- Each enabled TIP-20 is deployed at the **same address** on the zone as on Tempo. The zone node must deploy/configure zone-side representations for each enabled token.
+- Each enabled TIP-20 is deployed at the **same address** on the zone as on Tempo. Zone tokens are precompiles provisioned by the zone node — there is no TIP-20 factory on zones.
 
 ### Encrypted deposits
 
@@ -1203,7 +1226,7 @@ This ensures deposits are processed in the exact order they were made, regardles
 - **Sequencer trust**: Users trust the sequencer to decrypt correctly and credit the right recipient. A malicious sequencer could steal encrypted deposits.
 - **On-chain verification**: The sequencer provides the ECDH shared secret, which enables on-chain decryption verification via GCM tag validation without revealing the private key. See "On-chain decryption verification" below.
 - **Key rotation**: The portal maintains a history of encryption keys. Each encrypted deposit includes the `keyIndex` the user encrypted to, allowing the prover to look up the correct key for decryption. See "Encryption key history" below.
-- **Malformed ciphertext**: If decryption fails, the sequencer may refund to `sender` or hold funds pending resolution.
+- **Malformed ciphertext**: If decryption fails (invalid ciphertext, wrong key, corrupted data), the zone mints tokens to `sender`'s address on the zone — the same address as their L1 account. The L1 funds remain escrowed in the portal. This ensures chain progress is never blocked by invalid encrypted deposits.
 
 **On-chain decryption verification:**
 
@@ -1258,7 +1281,7 @@ bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", "");
 // Step 4: Try to decrypt using AES-GCM precompile
 (bytes memory plaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(...);
 
-// Step 5: If decryption fails, return funds to sender (don't block chain)
+// Step 5: If decryption fails, credit depositor's address on zone (L1 funds stay escrowed)
 if (!valid) {
     IZoneToken(ed.token).mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(...);
@@ -1367,7 +1390,7 @@ if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
 
 // Step 6: Handle success or failure
 if (!valid) {
-    // Decryption failed - return funds to sender
+    // Decryption failed - credit depositor's address on zone (L1 funds stay escrowed)
     IZoneToken(ed.token).mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
 } else {
@@ -1528,7 +1551,7 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
     }
 
     // Try callback via messenger for atomicity
-    try IZoneMessenger(messenger).relayMessage(w.token, w.sender, w.to, w.amount, w.gasLimit, w.callbackData) {
+    try IZoneMessenger(messenger).relayMessage(w.token, w.senderTag, w.to, w.amount, w.gasLimit, w.callbackData) {
         // Success: tokens transferred and callback executed
     } catch {
         // Callback failed: bounce back to zone
@@ -1537,7 +1560,7 @@ function processWithdrawal(Withdrawal calldata w, bytes32 remainingQueue) extern
 }
 ```
 
-The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` to authenticate the call, and receive the L2 origin as the `sender` parameter in `onWithdrawalReceived`. This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
+The messenger does `ITIP20(token).transferFrom(portal, target, amount)` then executes the callback. Both are atomic: if the callback reverts, the transferFrom reverts too, and funds remain in the portal for bounce-back. Receivers check `msg.sender == messenger` to authenticate the call, and receive the `senderTag` in `onWithdrawalReceived` (see [Authenticated withdrawals](#authenticated-withdrawals)). This enables composable withdrawals where funds can flow directly into Tempo contracts (e.g., DEX swaps, staking, cross-zone deposits).
 
 ## Withdrawal failure and bounce-back
 
@@ -1624,7 +1647,7 @@ Each zone runs as separate Tempo zone node (based on the Tempo client). It uses 
 ### State commitments
 
 - **Zone block hash**: Computed from the zone block header after execution. The zone block header is a simplified Ethereum header that includes:
-  - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`
+  - `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`, `protocolVersion`
   - **Omitted fields**: `gasLimit`, `gasUsed` (zones have no hard gas limit), `logsBloom`, `extraData` (not needed for proofs)
 - **Transactions/receipts roots**: Computed over the full ordered list `[advanceTempo?, user txs..., finalizeWithdrawalBatch?]`.
 - **Transactions root**: Committed in the block hash but not proven on-chain. This prevents sequencer revisionism (claiming different transactions led to the state) while avoiding expensive transaction proof verification.
@@ -1642,6 +1665,7 @@ Each zone runs as separate Tempo zone node (based on the Tempo client). It uses 
 | `receiptsRoot` | ✓ | ✗ | Committed but not proven on-chain; batch params read from state instead |
 | `number` | ✓ | ✓ | Proof validates block number as part of the header transition |
 | `timestamp` | ✓ | ✓ | Proof validates timestamp is monotonically increasing from previous block |
+| `protocolVersion` | ✓ | ✓ | Proof validates version matches the expected fork for the imported L1 block |
 | `gasLimit` | ✗ | N/A | Omitted — zones have no hard gas limit |
 | `gasUsed` | ✗ | N/A | Omitted — zones have no hard gas limit |
 | `logsBloom` | ✗ | N/A | Omitted — not needed for proofs |
@@ -1699,6 +1723,251 @@ Tempo Node
     ├── In-memory State Store
     └── SP1 Prover (mock for dev)
 ```
+
+## Hard fork activation
+
+Zones activate hard fork upgrades in lockstep with Tempo L1 using same-block activation. The trigger is importing the fork L1 block: the zone block whose `advanceTempo` imports the fork L1 block uses the new execution rules for its entire scope. The new verifier is deployed on L1 as part of the Tempo hard fork; no on-chain action is required from the zone operator.
+
+### Definitions
+
+A zone hard fork is defined by:
+
+- Fork L1 block number (`F`): the L1 block number at which the fork activates. This is embedded in the zone node's chain specification and the prover program; the portal does not need to know it.
+- `forkVerifier`: the new `IVerifier` contract deployed on Tempo L1 as part of the hard fork.
+
+A zone block is a **post-fork zone block** if the L1 block it imports via `advanceTempo` has number `>= F`. A **fork-spanning batch** is a batch whose zone blocks include both pre-fork and post-fork zone blocks.
+
+### Activation rule
+
+The fork activates in the zone block that imports the fork L1 block, not the following block. The entire zone block — `advanceTempo`, user transactions, `finalizeWithdrawalBatch` — uses new execution rules. The EVM is configured with the new ruleset at the start of the block, before any transaction executes.
+
+The trigger is L1 block number, not timestamp. Each zone block maps to exactly one L1 block, so the block number is unambiguous even when the zone is catching up from behind.
+
+Same-block activation is necessary for correctness: if the fork changes the L1 header format, the new parsing code must be active in the zone block that first encounters the new format. Running `advanceTempo` under old rules against a post-fork L1 header would require fragile forward-compatibility shims.
+
+### Verifier routing
+
+The portal maintains two verifier slots. The batch submitter specifies which verifier to use; the portal checks that the specified address is one of the two active verifiers:
+
+```solidity
+address public verifier;              // pre-fork verifier
+address public forkVerifier;          // post-fork verifier (address(0) if no fork yet)
+uint64  public forkActivationBlock;   // L1 block at which forkVerifier was set (0 = no fork)
+
+function submitBatch(address targetVerifier, uint64 tempoBlockNumber, ...) external {
+    require(
+        targetVerifier == verifier || targetVerifier == forkVerifier,
+        "unknown verifier"
+    );
+    if (targetVerifier == verifier && forkActivationBlock != 0) {
+        require(tempoBlockNumber < forkActivationBlock, "use fork verifier");
+    }
+    require(IVerifier(targetVerifier).verify(...), "invalid proof");
+    ...
+}
+```
+
+The sequencer knows which prover it used and passes the corresponding verifier. The portal enforces that the old verifier is only used for batches whose `tempoBlockNumber` predates the fork. `forkActivationBlock` is set to `block.number` during `setForkVerifier` — no explicit `F` parameter is needed since the system transaction executes at the fork block itself.
+
+This prevents a non-upgraded node (or a malicious one that bypasses fork signaling) from submitting post-fork batches proved under old rules to the old verifier.
+
+The `IVerifier` interface is unchanged across forks. New proof parameters are passed via the opaque `verifierConfig` bytes.
+
+### Two-verifier invariant
+
+At most two verifiers are active at any time. When a new fork occurs, the previous fork's verifier is promoted to the `verifier` slot, and the new fork verifier takes the `forkVerifier` slot. The verifier that was in the `verifier` slot (from two forks ago) is deprecated.
+
+The L1 hard fork executes:
+
+```
+verifier            = forkVerifier       // promote previous fork verifier
+forkVerifier        = new_fork_verifier  // set new fork verifier
+forkActivationBlock = block.number       // record cutoff for old verifier
+```
+
+For the first fork, `verifier` retains its original value (set at zone creation) and `forkVerifier` is populated for the first time.
+
+This means the previous verifier remains active between forks, allowing zones that are behind to submit pre-fork batches. At the next fork, the N-2 verifier is deprecated. A zone that has not caught up past the N-2 fork boundary by the time the N-1 fork arrives can no longer submit those old batches.
+
+### Prover selection
+
+The zone node decides which prover to invoke. The new prover produces proofs against a new verification key, which only the fork verifier accepts. Since the fork verifier is not deployed until block `F`, the node must use the old prover for all batches submitted before `F`:
+
+- **Pre-fork batches** (all zone blocks import L1 block `< F`): proved with the old prover, submitted to the old verifier.
+- **Post-fork and fork-spanning batches** (any zone block imports L1 block `>= F`): proved with the new prover, submitted to the fork verifier. These can only be submitted after block `F`.
+
+The node determines which prover to use by checking the L1 block numbers in the batch against `F` from its chain specification.
+
+### Prover behavior
+
+The new prover program contains both old and new execution rules. For each zone block in a batch, it checks the L1 block number imported by `advanceTempo` and applies the corresponding rules:
+
+- Blocks importing L1 block `< F`: old rules
+- Blocks importing L1 block `>= F`: new rules
+
+The fork L1 block number is hardcoded in the prover program (same as how Ethereum clients embed fork block numbers). The resulting verification key reflects the complete dual-rule program. The fork verifier is deployed with this key.
+
+Each successive prover program is a superset: the fork N prover uses the fork N-1 prover's complete logic as its "old rules" branch. This means the fork N verifier can verify batches containing blocks from before fork N-1 as well — it applies old rules correctly for those blocks.
+
+Fork-spanning batches (containing both pre-fork and post-fork zone blocks) are proven in a single proof by the fork prover. The fork verifier validates them.
+
+### Zone node behavior
+
+The zone node determines the ruleset by inspecting the next L1 block in the deposit queue before building each zone block. The fork L1 block number is embedded in the node's chain specification. If the next L1 block has number `>= F`, the EVM is configured with new rules for that zone block.
+
+If the fork changes zone predeploy contract behavior (TempoState, ZoneInbox, ZoneOutbox, ZoneConfig), new contract bytecode is injected at the predeploy addresses as part of the fork zone block's state transition, before `advanceTempo` executes.
+
+#### Fork signaling
+
+`ZoneFactory` maintains a `protocolVersion` counter, incremented at each hard fork. Each zone node binary embeds the highest protocol version it supports. Before building a zone block, the node checks whether the L1 block it is about to import bumped `protocolVersion` beyond its supported version. If so, the node refuses to produce the block and halts with a clear error directing the operator to upgrade.
+
+This guarantees that an outdated node never produces zone blocks under incorrect rules — the zone halts cleanly rather than diverging.
+
+### L1 hard fork actions
+
+The Tempo L1 hard fork block executes:
+
+1. Deploy the fork `IVerifier` contract with the verification key for the new prover program.
+2. Call `ZoneFactory.setForkVerifier(forkVerifier)` via system transaction, which rotates verifiers on all registered portals and updates `_validVerifiers`.
+3. Increment `ZoneFactory.protocolVersion`.
+4. New zones created after the fork use the fork verifier as their initial verifier.
+
+### Sequencer upgrade path
+
+The new zone node binary and prover program are released before the fork. Operators upgrade off-chain at their convenience — no on-chain transaction is needed. When the fork L1 block arrives, the zone node activates new rules automatically and the sequencer uses the new prover for post-fork batches.
+
+If the operator does not upgrade before the fork, the zone node detects the unsupported protocol version and halts cleanly — no invalid blocks are produced. Settlement pauses because no new batches are submitted. User funds in the portal remain safe; the zone resumes once the operator upgrades.
+
+### Open questions
+
+- **Portal interface changes**: If a fork needs to change `submitBatch` or `IVerifier` signatures, portal bytecode must be upgraded. The `verifierConfig` opaque bytes handle most parameter extensions, but not interface-level changes.
+- **Predeploy upgrade mechanism**: Zone predeploy bytecode updates at fork time should be specified per-fork. A general injection mechanism (analogous to Ethereum EIPs specifying state changes at fork blocks) may be worth standardizing.
+- **L1 block number vs timestamp**: If L1 forks are timestamp-based, the zone node and prover must derive `F` as the first L1 block at or after the fork timestamp. Since the portal no longer needs `F`, this is purely an off-chain concern.
+
+## Authenticated withdrawals
+
+Zone transactions are private — the zone is a validium and transaction data is not published on L1. However, when a withdrawal is processed on L1 via `processWithdrawal`, the full `Withdrawal` struct (including `sender`) is passed in calldata and is publicly visible. This leaks the sender's identity.
+
+Authenticated withdrawals replace the plaintext sender with a commitment that only the sender can open, enabling selective disclosure: the recipient (or any other party the sender chooses) can verify the sender's identity, while the public cannot.
+
+### Sender tag
+
+The `sender` field in the `Withdrawal` struct is replaced with a `senderTag` and a new `encryptedSender` field:
+
+```solidity
+struct Withdrawal {
+    address token;
+    bytes32 senderTag;          // keccak256(abi.encodePacked(sender, txHash))
+    address to;
+    uint128 amount;
+    uint128 fee;
+    bytes32 memo;
+    uint64 gasLimit;
+    address fallbackRecipient;
+    bytes callbackData;
+    bytes encryptedSender;      // ECDH-encrypted (sender, txHash) for a target key, or empty
+}
+```
+
+The sequencer computes both fields when building the withdrawal in `finalizeWithdrawalBatch`:
+
+```
+senderTag       = keccak256(abi.encodePacked(sender, txHash))
+encryptedSender = ECDH_Encrypt((sender, txHash), revealTo)   // empty if no revealTo
+```
+
+where `sender` is the address that called `requestWithdrawal` on the zone and `txHash` is the hash of that transaction. The `txHash` acts as a 32-byte blinding factor — it is private to the zone (transaction data is not published on L1) and known only to the sender and the sequencer.
+
+The sender cannot encrypt `txHash` into the withdrawal transaction themselves (the hash depends on the transaction contents, creating a circular dependency). Instead, the sequencer performs the encryption post-hoc: it knows `sender`, `txHash`, and the target key after processing the transaction.
+
+### Reveal key
+
+The sender specifies an optional `revealTo` public key when requesting the withdrawal:
+
+```solidity
+function requestWithdrawal(
+    address token,
+    address to,
+    uint128 amount,
+    bytes32 memo,
+    uint64 gasLimit,
+    address fallbackRecipient,
+    bytes calldata data,
+    bytes calldata revealTo     // compressed secp256k1 public key (33 bytes), or empty
+) external;
+```
+
+If `revealTo` is provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH (same scheme as encrypted deposits) and populates `encryptedSender` in the L1-facing `Withdrawal` struct. If empty, `encryptedSender` is empty and the sender can reveal `txHash` manually.
+
+The `revealTo` key is stored in the zone's pending withdrawal state so the sequencer can use it during `finalizeWithdrawalBatch`. It does not appear in the L1-facing struct — only the encrypted output does.
+
+### Encrypted sender format
+
+When `revealTo` is specified, `encryptedSender` contains:
+
+```
+ephemeralPubKey (33 bytes) || ciphertext (52 bytes) || mac (16 bytes)
+```
+
+The sequencer generates an ephemeral key pair `(r, R = r*G)`, derives a shared secret `S = r * revealTo`, and encrypts `abi.encodePacked(sender, txHash)` (52 bytes) using a symmetric cipher keyed by `S`. The holder of the private key corresponding to `revealTo` derives the same shared secret via `S = privKey * R` and decrypts.
+
+### Selective disclosure
+
+Two disclosure modes:
+
+**Manual reveal** (`revealTo` empty): The sender reveals `txHash` to any party off-chain. The verifier checks `keccak256(abi.encodePacked(sender_address, txHash)) == senderTag`.
+
+**Encrypted reveal** (`revealTo` specified): The holder of the `revealTo` private key decrypts `encryptedSender` to obtain `(sender, txHash)` and verifies against `senderTag`. No off-chain communication with the sender is needed.
+
+The sender can use both modes: specify `revealTo` for a primary recipient (e.g., target zone sequencer) and later reveal `txHash` manually to additional parties.
+
+### Zone-to-zone transfers
+
+For cross-zone withdrawals (Zone A to Zone B), the sender sets `revealTo` to Zone B's sequencer public key. The flow:
+
+1. Sender on Zone A calls `requestWithdrawal` with `revealTo = pubKeySeqB`.
+2. Zone A's sequencer processes the transaction, computes `senderTag` and `encryptedSender`.
+3. The withdrawal is proven and submitted to L1. `processWithdrawal` transfers tokens to Zone B's portal.
+4. Zone B's sequencer observes the incoming deposit, reads `encryptedSender` from the withdrawal data.
+5. Zone B's sequencer decrypts with its private key to learn `(sender, txHash)`.
+6. Zone B's sequencer verifies `keccak256(sender || txHash) == senderTag`.
+7. Zone B can now attribute the deposit to the sender, enabling sender-aware processing on Zone B.
+
+Each zone sequencer's public key is already published (used for encrypted deposits), so the sender can look it up without additional infrastructure.
+
+### Trust model
+
+The sequencer computes `senderTag` and `encryptedSender`, and includes them in the `Withdrawal` struct. The struct is hashed into the withdrawal queue chain, which is committed in the batch proof. The sequencer is trusted to compute both correctly — a malicious sequencer could insert incorrect values, and the batch proof would still be valid since the prover does not verify the tag's preimage or the encryption.
+
+This is a modest extension of the existing trust model: the sequencer is already trusted for liveness, transaction ordering, and withdrawal processing. Adding honest sender tag computation and encryption to that set is a small incremental assumption.
+
+To upgrade to trustless sender authentication, the `senderTag` computation can be moved into the ZK circuit. The prover would verify `senderTag == keccak256(abi.encodePacked(sender, txHash))` for the actual sender of each withdrawal transaction. The encryption would remain sequencer-mediated (ZK-proving ECDH encryption is expensive), but the commitment would be trustless. The on-chain interface and reveal flow remain unchanged.
+
+### Impact on callback withdrawals
+
+For simple withdrawals (`gasLimit == 0`), the sender field is not used in execution — only `to` and `amount` matter. The `senderTag` replacement has no functional impact.
+
+For callback withdrawals (`gasLimit > 0`), `IWithdrawalReceiver.onWithdrawalReceived` receives `bytes32 senderTag` instead of `address sender`:
+
+```solidity
+function onWithdrawalReceived(
+    bytes32 senderTag,
+    address token,
+    uint128 amount,
+    bytes calldata callbackData
+) external returns (bytes4);
+```
+
+Receiving contracts that need the sender's identity can decrypt `encryptedSender` off-chain (if they hold the `revealTo` key) or receive `txHash` via `callbackData` or a separate channel.
+
+### Zone-side changes
+
+`ZoneOutbox.requestWithdrawal` records the pending withdrawal with the plaintext `sender` and the `revealTo` key. The sequencer computes `senderTag` and `encryptedSender` when building the L1-facing `Withdrawal` struct in `finalizeWithdrawalBatch`. The zone-side `WithdrawalRequested` event continues to include the plaintext `sender` since zone events are private.
+
+### Open questions
+
+- **Sequencer-signed tag**: A per-withdrawal sequencer signature over `senderTag` would let recipients verify authenticity without trusting the batch proof context. This adds ~65 bytes per withdrawal. Whether this overhead is justified depends on the verification use case.
+- **revealTo for non-zone recipients**: Individual L1 recipients could also publish a public key (e.g., via ENS or an on-chain registry) to receive encrypted sender reveals without manual coordination.
 
 ## Open questions
 

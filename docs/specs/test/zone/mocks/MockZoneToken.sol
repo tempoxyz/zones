@@ -10,11 +10,15 @@ contract MockZoneToken is IZoneToken {
 
     string public name;
     string public symbol;
+    string public currency;
     uint8 public constant decimals = 6;
 
     uint256 public totalSupply;
     mapping(address => uint256) public balanceOf;
     mapping(address => mapping(address => uint256)) public allowance;
+
+    /// @notice Transfer policy ID (1 = always-allow, matches TIP-20 default)
+    uint64 public transferPolicyId = 1;
 
     /// @notice Addresses authorized to mint (ZoneInbox)
     mapping(address => bool) public minters;
@@ -34,6 +38,7 @@ contract MockZoneToken is IZoneToken {
     constructor(string memory _name, string memory _symbol) {
         name = _name;
         symbol = _symbol;
+        currency = "USD";
         admin = msg.sender;
     }
 

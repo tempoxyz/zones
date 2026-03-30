@@ -1,10 +1,9 @@
-use alloy::{
-    primitives::{Address, U256},
-    providers::ProviderBuilder,
-};
+use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
 use zone::abi::{ZoneFactory, ZonePortal};
+
+use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct ZoneInfoCmd {
@@ -19,7 +18,7 @@ pub(crate) struct ZoneInfoCmd {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    #[arg(long, default_value = "0x8F3F0d21D01648d9373B3688CAc91b5253D3874C")]
+    #[arg(long, default_value_t = MODERATO_ZONE_FACTORY)]
     zone_factory: Address,
 }
 
@@ -47,7 +46,7 @@ impl ZoneInfoCmd {
             found.ok_or_else(|| eyre!("no zone found with portal address {portal}"))?
         } else {
             self.identifier
-                .parse::<u64>()
+                .parse::<u32>()
                 .map_err(|_| eyre!("expected a zone ID (integer) or portal address (0x...)"))?
         };
 
@@ -99,10 +98,9 @@ impl ZoneInfoCmd {
         }
 
         // Enabled tokens
-        let token_count = portal.enabledTokenCount().call().await?;
-        println!("\nEnabled Tokens ({token_count})");
-        for i in 0..token_count.to::<u64>() {
-            let token = portal.enabledTokenAt(U256::from(i)).call().await?;
+        let tokens = portal.enabled_tokens().await?;
+        println!("\nEnabled Tokens ({})", tokens.len());
+        for (i, token) in tokens.iter().enumerate() {
             println!("  [{i}] {token}");
         }
 

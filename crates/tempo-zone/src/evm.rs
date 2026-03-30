@@ -10,11 +10,12 @@ use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
     block::{BlockExecutorFactory, BlockExecutorFor},
     precompiles::PrecompilesMap,
-    revm::{Inspector, database::State, inspector::NoOpInspector},
+    revm::{Inspector, inspector::NoOpInspector},
 };
 use alloy_provider::{Provider, ProviderBuilder};
 use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
+    block::StateDB,
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
@@ -31,14 +32,17 @@ use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoT
 use crate::executor::ZoneBlockExecutor;
 
 use crate::{
-    abi::TEMPO_STATE_READER_ADDRESS,
+    abi::{TEMPO_STATE_READER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS},
     l1_state::{
-        L1StateProvider, L1StateProviderConfig, L1StorageReader, SharedL1StateCache,
-        TempoStateReader,
+        L1StateProvider, L1StateProviderConfig, L1StorageReader, PolicyProvider,
+        SharedL1StateCache, TempoStateReader,
     },
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+        ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
+        ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
+    tx_context::ZoneTxContext,
     witness::{RecordingL1StateProvider, SharedRecordedReads},
 };
 
@@ -53,6 +57,8 @@ type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 #[derive(Clone)]
 pub struct ZoneEvmFactory {
     l1_reader: Arc<dyn L1StorageReader>,
+    l1_provider: L1StateProvider,
+    policy_provider: Option<PolicyProvider>,
 }
 
 impl std::fmt::Debug for ZoneEvmFactory {
@@ -62,23 +68,113 @@ impl std::fmt::Debug for ZoneEvmFactory {
 }
 
 impl ZoneEvmFactory {
-    /// Create a new factory with the given L1 storage reader.
-    pub fn new(l1_reader: Arc<dyn L1StorageReader>) -> Self {
-        Self { l1_reader }
+    /// Create a new factory with the given L1 state provider.
+    ///
+    /// The `L1StateProvider` is used both as the default [`L1StorageReader`]
+    /// (for the TempoStateReader precompile) and for sequencer lookups.
+    pub fn new(l1_provider: L1StateProvider) -> Self {
+        Self {
+            l1_reader: Arc::new(l1_provider.clone()),
+            l1_provider,
+            policy_provider: None,
+        }
+    }
+
+    /// Create a new factory with a custom [`L1StorageReader`].
+    ///
+    /// Used when wrapping the provider in a [`RecordingL1StateProvider`] for
+    /// witness generation.
+    pub fn new_with_reader(
+        l1_reader: Arc<dyn L1StorageReader>,
+        l1_provider: L1StateProvider,
+    ) -> Self {
+        Self {
+            l1_reader,
+            l1_provider,
+            policy_provider: None,
+        }
+    }
+
+    /// Set the policy provider for the TIP-403 proxy precompile.
+    pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
+        self.policy_provider = Some(policy_provider);
+        self
     }
 
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
         &self,
         mut evm: TempoEvm<DB, I>,
     ) -> TempoEvm<DB, I> {
+        let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| {
             Some(TempoStateReader::create(self.l1_reader.clone()))
         });
+        precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
             Some(ChaumPedersenVerify.into())
         });
         precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| Some(AesGcmDecrypt.into()));
+        precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
+            Some(ZoneTokenFactory::create(&cfg))
+        });
+        let registry = self
+            .policy_provider
+            .clone()
+            .map(ZoneTip403ProxyRegistry::new);
+        let sequencer: Arc<dyn crate::precompiles::SequencerExt> =
+            Arc::new(self.l1_provider.clone());
+
+        if let Some(provider) = self.policy_provider.clone() {
+            precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
+                Some(ZoneTip403ProxyRegistry::create(provider.clone()))
+            });
+        }
+
+        // Override the TIP-20 precompile lookup so that all TIP-20 token
+        // calls go through ZoneTip20Token. When a live policy provider is
+        // available, the wrapper also enforces TIP-403 policy checks; without
+        // one, it still applies privacy, fixed-gas, and bridge-auth rules.
+        //
+        // This replaces the upstream `extend_tempo_precompiles` lookup, so we
+        // must also handle the non-TIP-20 Tempo precompiles that are only
+        // registered via that lookup (FeeManager, StablecoinDEX, etc.).
+        // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
+        // static map via `apply_precompile` and take priority over this.
+        let zone_cfg = cfg.clone();
+        precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
+            use tempo_precompiles::{
+                ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
+                TIP_FEE_MANAGER_ADDRESS, VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
+                account_keychain::AccountKeychain, nonce::NonceManager,
+                stablecoin_dex::StablecoinDEX, tip_fee_manager::TipFeeManager,
+                tip20::is_tip20_prefix, validator_config::ValidatorConfig,
+                validator_config_v2::ValidatorConfigV2,
+            };
+
+            if is_tip20_prefix(*address) {
+                Some(ZoneTip20Token::create(
+                    *address,
+                    &zone_cfg,
+                    registry.clone(),
+                    sequencer.clone(),
+                ))
+            } else if *address == TIP_FEE_MANAGER_ADDRESS {
+                Some(TipFeeManager::create_precompile(&zone_cfg))
+            } else if *address == STABLECOIN_DEX_ADDRESS {
+                Some(StablecoinDEX::create_precompile(&zone_cfg))
+            } else if *address == NONCE_PRECOMPILE_ADDRESS {
+                Some(NonceManager::create_precompile(&zone_cfg))
+            } else if *address == VALIDATOR_CONFIG_ADDRESS {
+                Some(ValidatorConfig::create_precompile(&zone_cfg))
+            } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
+                Some(AccountKeychain::create_precompile(&zone_cfg))
+            } else if *address == VALIDATOR_CONFIG_V2_ADDRESS {
+                Some(ValidatorConfigV2::create_precompile(&zone_cfg))
+            } else {
+                None
+            }
+        });
         evm
     }
 }
@@ -179,9 +275,10 @@ pub struct ZoneEvmConfig {
 }
 
 impl ZoneEvmConfig {
-    /// Create a new zone EVM config with the given chain spec and L1 storage reader.
-    pub fn new(chain_spec: Arc<TempoChainSpec>, l1_reader: Arc<dyn L1StorageReader>) -> Self {
-        let zone_factory = ZoneEvmFactory::new(l1_reader);
+    /// Create a new zone EVM config with the given chain spec and L1 state
+    /// provider.
+    pub fn new(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
+        let zone_factory = ZoneEvmFactory::new(l1_provider);
         let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
@@ -195,15 +292,19 @@ impl ZoneEvmConfig {
 
     /// Create a new zone EVM config with recording enabled.
     ///
-    /// Wraps the given L1 reader in a [`RecordingL1StateProvider`] so all
+    /// Wraps the given L1 provider in a [`RecordingL1StateProvider`] so all
     /// `TempoStateReader` precompile reads are captured for witness generation.
     pub fn new_with_recording(
         chain_spec: Arc<TempoChainSpec>,
-        l1_reader: Arc<dyn L1StorageReader>,
+        l1_provider: L1StateProvider,
     ) -> Self {
-        let recording = Arc::new(RecordingL1StateProvider::new(l1_reader));
+        let recording =
+            Arc::new(RecordingL1StateProvider::new(Arc::new(l1_provider.clone())));
         let recorded_reads = recording.recorded_reads();
-        let zone_factory = ZoneEvmFactory::new(recording.clone() as Arc<dyn L1StorageReader>);
+        let zone_factory = ZoneEvmFactory::new_with_reader(
+            recording.clone() as Arc<dyn L1StorageReader>,
+            l1_provider,
+        );
         let inner = TempoEvmConfig::new(chain_spec.clone());
         let block_assembler = ZoneBlockAssembler::new(chain_spec);
         Self {
@@ -236,16 +337,24 @@ impl ZoneEvmConfig {
     ///
     /// Intended for CLI subcommands (import, stage, re-execute) that need a type-compatible
     /// EVM config but don't have access to an L1 RPC connection. Transactions calling the
-    /// TempoStateReader precompile will get a reverted / empty response.
+    /// TempoStateReader precompile will get a reverted / empty response. The
+    /// portal address defaults to the zero address in this mode, so sequencer
+    /// reads are treated as unavailable.
     pub fn new_without_l1(chain_spec: Arc<TempoChainSpec>) -> Self {
         let cache = SharedL1StateCache::default();
-        let config = L1StateProviderConfig::default();
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
+        let config = crate::l1_state::L1StateProviderConfig::default();
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
-        Self::new(chain_spec, Arc::new(l1_provider))
+        Self::new(chain_spec, l1_provider)
+    }
+
+    /// Set the policy provider for the TIP-403 proxy precompile.
+    pub fn with_policy_provider(mut self, policy_provider: PolicyProvider) -> Self {
+        self.zone_factory = self.zone_factory.with_policy_provider(policy_provider);
+        self
     }
 
     /// Returns the chain spec.
@@ -266,12 +375,12 @@ impl BlockExecutorFactory for ZoneEvmConfig {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: TempoEvm<&'a mut State<DB>, I>,
+        evm: TempoEvm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
     ) -> impl BlockExecutorFor<'a, Self, DB, I>
     where
-        DB: Database + 'a,
-        I: Inspector<TempoCtx<&'a mut State<DB>>> + 'a,
+        DB: StateDB + 'a,
+        I: Inspector<TempoCtx<DB>> + 'a,
     {
         ZoneBlockExecutor::new(evm, ctx, self.chain_spec())
     }
@@ -317,7 +426,11 @@ impl ConfigureEvm for ZoneEvmConfig {
                 parent_hash: block.header().parent_hash(),
                 parent_beacon_block_root: block.header().parent_beacon_block_root(),
                 ommers: &[],
-                withdrawals: block.body().withdrawals.as_ref().map(Cow::Borrowed),
+                withdrawals: block
+                    .body()
+                    .withdrawals
+                    .as_ref()
+                    .map(|withdrawals| Cow::Borrowed(withdrawals.as_slice())),
                 extra_data: block.header().extra_data().clone(),
                 tx_count_hint: Some(block.body().transactions.len()),
             },

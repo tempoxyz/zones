@@ -6,10 +6,14 @@
 //! exercised via queue injection (with the L1 state cache seeded for precompile reads).
 
 use alloy::primitives::{Address, B256, U256, address};
-use tempo_contracts::precompiles::ITIP20;
+use alloy_eips::NumHash;
 use tempo_precompiles::PATH_USD_ADDRESS;
-use zone::abi::{
-    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox,
+use zone::{
+    ChainTempoStateExt,
+    abi::{
+        TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox,
+        ZoneOutbox,
+    },
 };
 
 use crate::utils::{
@@ -147,44 +151,20 @@ async fn test_two_zones_independent_deposits() -> eyre::Result<()> {
 
     // L1 block 1: deposit to Alice on zone1, empty on zone2
     let b1 = fixture.next_block();
-    let d1 = L1Fixture::make_deposit_for_block(
-        b1.header.inner.number,
-        PATH_USD_ADDRESS,
-        sender,
-        alice,
-        500_000,
-    );
+    let d1 = L1Fixture::make_deposit_for_block(PATH_USD_ADDRESS, sender, alice, 500_000);
     fixture.enqueue(&b1, zone1.deposit_queue(), vec![d1]);
     fixture.enqueue(&b1, zone2.deposit_queue(), vec![]);
 
     // L1 block 2: empty on zone1, deposit to Bob on zone2
     let b2 = fixture.next_block();
-    let d2 = L1Fixture::make_deposit_for_block(
-        b2.header.inner.number,
-        PATH_USD_ADDRESS,
-        sender,
-        bob,
-        700_000,
-    );
+    let d2 = L1Fixture::make_deposit_for_block(PATH_USD_ADDRESS, sender, bob, 700_000);
     fixture.enqueue(&b2, zone1.deposit_queue(), vec![]);
     fixture.enqueue(&b2, zone2.deposit_queue(), vec![d2]);
 
     // L1 block 3: deposits on both zones
     let b3 = fixture.next_block();
-    let d3a = L1Fixture::make_deposit_for_block(
-        b3.header.inner.number,
-        PATH_USD_ADDRESS,
-        sender,
-        alice,
-        300_000,
-    );
-    let d3b = L1Fixture::make_deposit_for_block(
-        b3.header.inner.number,
-        PATH_USD_ADDRESS,
-        sender,
-        bob,
-        200_000,
-    );
+    let d3a = L1Fixture::make_deposit_for_block(PATH_USD_ADDRESS, sender, alice, 300_000);
+    let d3b = L1Fixture::make_deposit_for_block(PATH_USD_ADDRESS, sender, bob, 200_000);
     fixture.enqueue(&b3, zone1.deposit_queue(), vec![d3a]);
     fixture.enqueue(&b3, zone2.deposit_queue(), vec![d3b]);
 
@@ -375,9 +355,8 @@ async fn test_large_deposit_batch() -> eyre::Result<()> {
     .await?;
 
     // Verify all recipients received the correct amount
-    let zone_token = ITIP20::new(PATH_USD_ADDRESS, zone.provider());
     for recipient in &recipients {
-        let balance = zone_token.balanceOf(*recipient).call().await?;
+        let balance = zone.balance_of(PATH_USD_ADDRESS, *recipient).await?;
         assert_eq!(
             balance,
             U256::from(amount_each),
@@ -436,6 +415,67 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
         last_batch.withdrawalQueueHash,
         B256::ZERO,
         "lastBatch.withdrawalQueueHash should be zero with no withdrawals"
+    );
+
+    Ok(())
+}
+
+/// Verify that `ChainTempoStateExt` on the committed `Chain` from a canon state
+/// notification returns the correct L1 block NumHash after zone blocks are mined.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_chain_tempo_state_ext_from_canon_notification() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+    let mut canon_rx = zone.subscribe_to_canonical_state();
+
+    // Inject 3 empty L1 blocks — each produces a zone block.
+    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+
+    // Wait for tempoBlockNumber to reach 3 via RPC (ensures blocks are mined).
+    zone.wait_for_tempo_block_number(3, DEFAULT_TIMEOUT).await?;
+
+    // Drain canon notifications and collect the L1 NumHash from each committed chain.
+    let mut num_hashes: Vec<NumHash> = Vec::new();
+    while let Ok(notification) = canon_rx.try_recv() {
+        let chain = notification.committed();
+        let nh = chain.tempo_num_hash();
+        if nh.number > 0 {
+            num_hashes.push(nh);
+        }
+    }
+
+    // We should have received notifications for blocks 1, 2, 3.
+    assert!(
+        num_hashes.len() >= 3,
+        "expected at least 3 canon notifications with non-zero tempoBlockNumber, got {}",
+        num_hashes.len()
+    );
+
+    // Verify the L1 block numbers are monotonically increasing.
+    for window in num_hashes.windows(2) {
+        assert!(
+            window[1].number > window[0].number,
+            "L1 block numbers should be increasing: {} -> {}",
+            window[0].number,
+            window[1].number
+        );
+    }
+
+    // The last notification should match the final L1 block number (3).
+    let last = num_hashes.last().unwrap();
+    assert_eq!(
+        last.number, 3,
+        "last canon notification should have tempoBlockNumber == 3"
+    );
+    assert_ne!(last.hash, B256::ZERO, "tempoBlockHash should be non-zero");
+
+    // Cross-check against the on-chain TempoState.
+    let tempo_state = TempoState::new(TEMPO_STATE_ADDRESS, zone.provider());
+    let on_chain_hash = tempo_state.tempoBlockHash().call().await?;
+    assert_eq!(
+        last.hash, on_chain_hash,
+        "Chain ext hash should match on-chain tempoBlockHash"
     );
 
     Ok(())

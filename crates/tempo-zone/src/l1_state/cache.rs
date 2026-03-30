@@ -14,8 +14,8 @@
 //!
 //! ## Write path
 //!
-//! - The [`L1ChainNotificationListener`](super::listener::L1ChainNotificationListener) writes
-//!   storage diffs for tracked contracts as they arrive, tagged with the L1 tip block number.
+//! - The [`L1Subscriber`](crate::l1::L1Subscriber) writes storage diffs for tracked contracts
+//!   as they arrive, tagged with the L1 tip block number.
 //! - The [`L1StateProvider`](super::provider::L1StateProvider) writes RPC-fetched values on
 //!   cache miss, tagged with the block number that was requested.
 //!
@@ -41,7 +41,7 @@ use std::{
 /// the `tempoBlockNumber` it committed to, even if the L1 chain has since advanced.
 ///
 /// The anchor tracks the latest L1 block the cache has received data for, used by the
-/// [`L1StateListener`](super::listener::L1StateListener) for reorg detection.
+/// [`L1Subscriber`](crate::l1::L1Subscriber) for reorg detection.
 #[derive(Debug, Default)]
 pub struct L1StateCache {
     tracked_contracts: HashSet<Address>,

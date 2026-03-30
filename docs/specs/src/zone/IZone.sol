@@ -15,7 +15,7 @@ interface IZoneToken {
 
 /// @notice Common types for the Zone protocol
 struct ZoneInfo {
-    uint64 zoneId;
+    uint32 zoneId;
     address portal;
     address messenger;
     address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
@@ -44,7 +44,7 @@ struct BlockTransition {
 /// @notice Deposit queue transition inputs/outputs for batch proofs
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
 ///      that nextProcessedHash is an ancestor of (or equal to) currentDepositQueueHash.
-///      This allows partial deposit processing when maxDepositsPerTempoBlock is set.
+///      This allows partial deposit processing.
 struct DepositQueueTransition {
     bytes32 prevProcessedHash; // where proof starts (verified against zone state)
     bytes32 nextProcessedHash; // where zone processed up to (proof output)
@@ -148,6 +148,31 @@ struct DecryptionData {
 /*//////////////////////////////////////////////////////////////
                     CRYPTOGRAPHIC PRECOMPILES
 //////////////////////////////////////////////////////////////*/
+
+/// @notice Token to be enabled on the zone via the TIP20 factory
+struct EnabledToken {
+    address token;
+    string name;
+    string symbol;
+    string currency;
+}
+
+/// @title ITIP20ZoneFactory
+/// @notice Interface for the zone's TIP20 factory that enables new tokens
+interface ITIP20ZoneFactory {
+
+    function enableToken(
+        address token,
+        string calldata name,
+        string calldata symbol,
+        string calldata currency
+    )
+        external;
+
+}
+
+// TIP20 factory predeploy address
+address constant TIP20_FACTORY_ADDRESS = 0x20Fc000000000000000000000000000000000000;
 
 // Precompile address for Chaum-Pedersen proof verification
 // Predeploy at 0x1c00000000000000000000000000000000000100
@@ -264,7 +289,7 @@ interface ITempoStateReader {
 
 struct Withdrawal {
     address token; // TIP-20 token being withdrawn
-    address sender; // who initiated the withdrawal on the zone
+    bytes32 senderTag; // keccak256(abi.encodePacked(sender, txHash))
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     uint128 fee; // processing fee for sequencer (calculated at request time)
@@ -272,6 +297,21 @@ struct Withdrawal {
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient; // zone address for bounce-back if call fails
     bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
+    bytes encryptedSender; // optional encrypted (sender, txHash) reveal payload
+}
+
+struct PendingWithdrawal {
+    address token; // TIP-20 token being withdrawn
+    address sender; // who initiated the withdrawal on the zone
+    bytes32 txHash; // hash of the zone transaction that requested the withdrawal
+    address to; // Tempo recipient
+    uint128 amount; // amount to send to recipient (excludes fee)
+    uint128 fee; // processing fee for sequencer (calculated at request time)
+    bytes32 memo; // user-provided context
+    uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
+    address fallbackRecipient; // zone address for bounce-back if call fails
+    bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
+    bytes revealTo; // optional compressed secp256k1 pubkey for sender reveal encryption
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -292,6 +332,18 @@ address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
 
 // TempoStateReader precompile address (0x1c00...0004)
 address constant TEMPO_STATE_READER = 0x1c00000000000000000000000000000000000004;
+
+// ZoneTxContext precompile address (0x1c00...0005)
+address constant ZONE_TX_CONTEXT = 0x1C00000000000000000000000000000000000005;
+
+/// @title IZoneTxContext
+/// @notice Interface for the zone precompile that exposes the currently executing tx hash
+interface IZoneTxContext {
+
+    /// @notice Returns the hash of the currently executing zone transaction
+    function currentTxHash() external returns (bytes32);
+
+}
 
 /*//////////////////////////////////////////////////////////////
                 ZONE PORTAL STORAGE SLOT CONSTANTS
@@ -373,7 +425,7 @@ interface IZoneFactory {
     }
 
     event ZoneCreated(
-        uint64 indexed zoneId,
+        uint32 indexed zoneId,
         address indexed portal,
         address indexed messenger,
         address initialToken,
@@ -387,13 +439,15 @@ interface IZoneFactory {
     error InvalidToken();
     error InvalidSequencer();
     error InvalidVerifier();
+    error InsufficientGas();
+    error ZoneIdOverflow();
 
     function isValidVerifier(address verifier) external view returns (bool);
     function createZone(CreateZoneParams calldata params)
         external
-        returns (uint64 zoneId, address portal);
-    function zoneCount() external view returns (uint64);
-    function zones(uint64 zoneId) external view returns (ZoneInfo memory);
+        returns (uint32 zoneId, address portal);
+    function zoneCount() external view returns (uint32);
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
     function isZoneMessenger(address messenger) external view returns (bool);
 
@@ -470,7 +524,7 @@ interface IZonePortal {
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
     /// @notice Emitted when sequencer enables a new TIP-20 token for bridging
-    event TokenEnabled(address indexed token);
+    event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
     /// @notice Emitted when sequencer pauses deposits for a token
     event DepositsPaused(address indexed token);
@@ -490,6 +544,7 @@ interface IZonePortal {
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
+    error DepositPolicyForbids();
     error DepositTooSmall();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
@@ -502,7 +557,7 @@ interface IZonePortal {
     /// @notice Maximum allowed gas fee rate (1e18)
     function MAX_GAS_FEE_RATE() external view returns (uint128);
 
-    function zoneId() external view returns (uint64);
+    function zoneId() external view returns (uint32);
     function messenger() external view returns (address);
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
@@ -668,14 +723,14 @@ interface IZoneMessenger {
     /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
     /// @param token The TIP-20 token to transfer
-    /// @param sender The L2 origin address
+    /// @param senderTag The authenticated sender commitment from the zone
     /// @param target The Tempo recipient
     /// @param amount Tokens to transfer from portal to target
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
     function relayMessage(
         address token,
-        address sender,
+        bytes32 senderTag,
         address target,
         uint128 amount,
         uint64 gasLimit,
@@ -690,7 +745,7 @@ interface IZoneMessenger {
 interface IWithdrawalReceiver {
 
     function onWithdrawalReceived(
-        address sender,
+        bytes32 senderTag,
         address token,
         uint128 amount,
         bytes calldata callbackData
@@ -799,15 +854,14 @@ interface IZoneInbox {
     event EncryptedDepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
-    event MaxDepositsPerTempoBlockUpdated(uint256 maxDepositsPerTempoBlock);
+    /// @notice Emitted when a TIP-20 token is enabled on the zone via advanceTempo
+    event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
     error OnlySequencer();
     error InvalidDepositQueueHash();
     error MissingDecryptionData();
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
-    error TooManyDeposits();
-
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);
 
@@ -820,22 +874,14 @@ interface IZoneInbox {
     /// @notice The zone's last processed deposit queue hash
     function processedDepositQueueHash() external view returns (bytes32);
 
-    /// @notice Maximum number of deposits the sequencer will process per Tempo block (0 = unlimited)
-    function maxDepositsPerTempoBlock() external view returns (uint256);
-
-    /// @notice Set the maximum number of deposits to process per Tempo block. Only callable by sequencer.
-    /// @dev Set to 0 for unlimited. Provides an additional layer of protection against deposit spam.
-    /// @param _maxDepositsPerTempoBlock The maximum number of deposits per Tempo block
-    function setMaxDepositsPerTempoBlock(uint256 _maxDepositsPerTempoBlock) external;
-
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
     /// @dev This is the main entry point for the sequencer at block start.
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the unified queue (regular and encrypted)
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
     ///
-    ///      The sequencer may process a bounded subset of pending deposits (up to
-    ///      maxDepositsPerTempoBlock). The proof validates contiguity: processedDepositQueueHash
+    ///      The sequencer may process a bounded subset of pending deposits.
+    ///      The proof validates contiguity: processedDepositQueueHash
     ///      must be an ancestor of (or equal to) Tempo's currentDepositQueueHash.
     ///
     ///      For encrypted deposits, the sequencer provides DecryptionData with the
@@ -844,10 +890,12 @@ interface IZoneInbox {
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)
     /// @param decryptions Decryption data for encrypted deposits (1:1 with encrypted deposits, in order)
+    /// @param enabledTokens Tokens to enable on the zone via the TIP20 factory
     function advanceTempo(
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
-        DecryptionData[] calldata decryptions
+        DecryptionData[] calldata decryptions,
+        EnabledToken[] calldata enabledTokens
     )
         external;
 
@@ -873,7 +921,8 @@ interface IZoneOutbox {
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
-        bytes data
+        bytes data,
+        bytes revealTo
     );
 
     event TempoGasRateUpdated(uint128 tempoGasRate);
@@ -931,7 +980,8 @@ interface IZoneOutbox {
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
-        bytes calldata data
+        bytes calldata data,
+        bytes calldata revealTo
     )
         external;
 
@@ -942,7 +992,8 @@ interface IZoneOutbox {
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(
         uint256 count,
-        uint64 blockNumber
+        uint64 blockNumber,
+        bytes[] calldata encryptedSenders
     )
         external
         returns (bytes32 withdrawalQueueHash);

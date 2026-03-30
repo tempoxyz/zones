@@ -8,16 +8,19 @@ import {
     DecryptionData,
     Deposit,
     DepositType,
+    EnabledToken,
     EncryptedDeposit,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
+    ITIP20ZoneFactory,
     ITempoState,
     IZoneConfig,
     IZoneInbox,
     IZoneToken,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    QueuedDeposit
+    QueuedDeposit,
+    TIP20_FACTORY_ADDRESS
 } from "./IZone.sol";
 import { TempoState } from "./TempoState.sol";
 
@@ -42,10 +45,6 @@ contract ZoneInbox is IZoneInbox {
 
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
-
-    /// @notice Maximum number of deposits to process per Tempo block (0 = unlimited)
-    /// @dev Sequencer-configurable cap to prevent deposit spam from exceeding zone block gas limits.
-    uint256 public maxDepositsPerTempoBlock;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -160,20 +159,6 @@ contract ZoneInbox is IZoneInbox {
     }
 
     /*//////////////////////////////////////////////////////////////
-                         DEPOSIT CAP CONFIGURATION
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Set the maximum number of deposits to process per Tempo block. Only callable by sequencer.
-    /// @dev Set to 0 for unlimited. Provides an additional layer of protection against deposit spam
-    ///      that could exceed zone block gas limits.
-    /// @param _maxDepositsPerTempoBlock The maximum number of deposits per Tempo block
-    function setMaxDepositsPerTempoBlock(uint256 _maxDepositsPerTempoBlock) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
-        maxDepositsPerTempoBlock = _maxDepositsPerTempoBlock;
-        emit MaxDepositsPerTempoBlockUpdated(_maxDepositsPerTempoBlock);
-    }
-
-    /*//////////////////////////////////////////////////////////////
                          SYSTEM TRANSACTION
     //////////////////////////////////////////////////////////////*/
 
@@ -182,7 +167,6 @@ contract ZoneInbox is IZoneInbox {
     ///      1. Advances the zone's view of Tempo by processing the header
     ///      2. Processes deposits from the unified queue (regular + encrypted)
     ///      3. Validates the resulting hash chain is an ancestor of Tempo's currentDepositQueueHash
-    ///      The sequencer may process a bounded subset of deposits (up to maxDepositsPerTempoBlock).
     ///      The proof validates contiguity (ancestor check) rather than exact equality.
     ///      Protocol and proof enforce at most one call at the start of a block (or zero if skipping).
     /// @param header RLP-encoded Tempo block header
@@ -191,19 +175,23 @@ contract ZoneInbox is IZoneInbox {
     function advanceTempo(
         bytes calldata header,
         QueuedDeposit[] calldata deposits,
-        DecryptionData[] calldata decryptions
+        DecryptionData[] calldata decryptions,
+        EnabledToken[] calldata enabledTokens
     )
         external
     {
         if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
 
-        // Enforce deposit cap (0 = unlimited)
-        if (maxDepositsPerTempoBlock > 0 && deposits.length > maxDepositsPerTempoBlock) {
-            revert TooManyDeposits();
-        }
-
         // Step 1: Advance Tempo state (validates chain continuity internally)
         _tempoState.finalizeTempo(header);
+
+        // Enable new tokens
+        for (uint256 i = 0; i < enabledTokens.length; i++) {
+            EnabledToken calldata t = enabledTokens[i];
+            ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS)
+                .enableToken(t.token, t.name, t.symbol, t.currency);
+            emit TokenEnabled(t.token, t.name, t.symbol, t.currency);
+        }
 
         // Step 2: Process deposits and build hash chain
         bytes32 currentHash = processedDepositQueueHash;
@@ -284,8 +272,8 @@ contract ZoneInbox is IZoneInbox {
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
                 if (!valid) {
-                    // Decryption failed (user encrypted garbage or corrupted data)
-                    // Return funds to sender instead of blocking chain progress
+                    // Decryption failed: credit the depositor's address on the zone.
+                    // L1 funds remain escrowed in the portal.
                     IZoneToken(ed.token).mint(ed.sender, ed.amount);
                     emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                 } else {
@@ -304,7 +292,7 @@ contract ZoneInbox is IZoneInbox {
         // Step 3: Validate against Tempo state
         // Read currentDepositQueueHash from the portal's storage using the new Tempo state.
         // The proof validates that our processedDepositQueueHash is an ancestor of (or equal to)
-        // tempoCurrentHash, allowing partial deposit processing when maxDepositsPerTempoBlock is set.
+        // tempoCurrentHash, allowing partial deposit processing.
         // On-chain we only need to verify the hash chain when all deposits have been caught up.
         bytes32 tempoCurrentHash =
             _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);

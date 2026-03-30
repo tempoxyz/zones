@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 # tempo
 zone = { path = "../../crates/tempo-zone" }
+zone-primitives.workspace = true
 tempo-chainspec = { workspace = true, features = ["cli"] }
 
 # reth
@@ -29,17 +30,17 @@ alloy-provider.workspace = true
 alloy-signer-local.workspace = true
 
 # tempo (networking)
-tempo-alloy = { workspace = true, features = ["tempo-compat"] }
+tempo-alloy = { workspace = true }
 # tls
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
 # misc
 clap.workspace = true
+eyre.workspace = true
 const-hex.workspace = true
 k256.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-eyre.workspace = true
 
 [[bin]]
 name = "tempo-zone"

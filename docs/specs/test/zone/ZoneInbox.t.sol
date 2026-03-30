@@ -9,6 +9,7 @@ import {
     DecryptionData,
     Deposit,
     DepositType,
+    EnabledToken,
     EncryptedDeposit,
     EncryptedDepositPayload,
     IAesGcmDecrypt,
@@ -69,7 +70,9 @@ contract ZoneInboxTest is Test {
     }
 
     function _advanceTempo(Deposit[] memory deposits) internal {
-        inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0));
+        inbox.advanceTempo(
+            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -231,96 +234,6 @@ contract ZoneInboxTest is Test {
         // Sequencer should succeed
         vm.prank(sequencer);
         _advanceTempo(deposits);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                    MAX DEPOSITS PER TEMPO BLOCK TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_setMaxDepositsPerTempoBlock_onlySequencer() public {
-        vm.prank(alice);
-        vm.expectRevert(IZoneInbox.OnlySequencer.selector);
-        inbox.setMaxDepositsPerTempoBlock(10);
-
-        vm.prank(sequencer);
-        inbox.setMaxDepositsPerTempoBlock(10);
-        assertEq(inbox.maxDepositsPerTempoBlock(), 10);
-    }
-
-    function test_setMaxDepositsPerTempoBlock_emitsEvent() public {
-        vm.prank(sequencer);
-        vm.expectEmit(false, false, false, true);
-        emit IZoneInbox.MaxDepositsPerTempoBlockUpdated(5);
-        inbox.setMaxDepositsPerTempoBlock(5);
-    }
-
-    function test_setMaxDepositsPerTempoBlock_zeroMeansUnlimited() public {
-        vm.prank(sequencer);
-        inbox.setMaxDepositsPerTempoBlock(10);
-        assertEq(inbox.maxDepositsPerTempoBlock(), 10);
-
-        vm.prank(sequencer);
-        inbox.setMaxDepositsPerTempoBlock(0);
-        assertEq(inbox.maxDepositsPerTempoBlock(), 0);
-    }
-
-    function test_advanceTempo_respectsMaxDepositsPerTempoBlock() public {
-        vm.prank(sequencer);
-        inbox.setMaxDepositsPerTempoBlock(1);
-
-        Deposit[] memory deposits = new Deposit[](2);
-        deposits[0] = Deposit({
-            token: address(zoneToken), sender: alice, to: alice, amount: 100e6, memo: bytes32("d1")
-        });
-        deposits[1] = Deposit({
-            token: address(zoneToken), sender: bob, to: bob, amount: 200e6, memo: bytes32("d2")
-        });
-
-        bytes32 h0 = bytes32(0);
-        bytes32 h1 = keccak256(abi.encode(DepositType.Regular, deposits[0], h0));
-        bytes32 h2 = keccak256(abi.encode(DepositType.Regular, deposits[1], h1));
-
-        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h2);
-
-        vm.prank(sequencer);
-        vm.expectRevert(IZoneInbox.TooManyDeposits.selector);
-        _advanceTempo(deposits);
-
-        // Process one at a time should work
-        Deposit[] memory oneDeposit = new Deposit[](1);
-        oneDeposit[0] = deposits[0];
-
-        vm.prank(sequencer);
-        _advanceTempo(oneDeposit);
-        assertEq(inbox.processedDepositQueueHash(), h1);
-        assertEq(zoneToken.balanceOf(alice), 100e6);
-    }
-
-    function test_advanceTempo_unlimitedDepositsWhenCapIsZero() public {
-        assertEq(inbox.maxDepositsPerTempoBlock(), 0);
-
-        Deposit[] memory deposits = new Deposit[](3);
-        deposits[0] = Deposit({
-            token: address(zoneToken), sender: alice, to: alice, amount: 100e6, memo: bytes32("d1")
-        });
-        deposits[1] = Deposit({
-            token: address(zoneToken), sender: bob, to: bob, amount: 200e6, memo: bytes32("d2")
-        });
-        deposits[2] = Deposit({
-            token: address(zoneToken), sender: alice, to: bob, amount: 300e6, memo: bytes32("d3")
-        });
-
-        bytes32 h0 = bytes32(0);
-        bytes32 h1 = keccak256(abi.encode(DepositType.Regular, deposits[0], h0));
-        bytes32 h2 = keccak256(abi.encode(DepositType.Regular, deposits[1], h1));
-        bytes32 h3 = keccak256(abi.encode(DepositType.Regular, deposits[2], h2));
-
-        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, h3);
-
-        vm.prank(sequencer);
-        _advanceTempo(deposits);
-
-        assertEq(inbox.processedDepositQueueHash(), h3);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -587,7 +500,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
         // Verify minting to the decrypted recipient
         assertEq(zoneToken.balanceOf(recipient), amount);
@@ -640,7 +553,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
         // Funds should go to sender (alice), not the decrypted recipient
         assertEq(zoneToken.balanceOf(alice), amount);
@@ -687,7 +600,7 @@ contract ZoneInboxTest is Test {
         });
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
         // Regular deposit: bob gets 100e6
         // Encrypted deposit: recipient gets 200e6
@@ -715,7 +628,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.MissingDecryptionData.selector);
-        inbox.advanceTempo("", deposits, emptyDecs);
+        inbox.advanceTempo("", deposits, emptyDecs, new EnabledToken[](0));
     }
 
     function test_advanceTempo_extraDecryptionData() public {
@@ -746,7 +659,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.ExtraDecryptionData.selector);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -874,7 +787,7 @@ contract ZoneInboxTest is Test {
 
         vm.prank(sequencer);
         vm.expectRevert(IZoneInbox.InvalidSharedSecretProof.selector);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -954,7 +867,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(shortPlaintext, true, recipient, memo);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
         // Deposit should bounce to sender (alice) because plaintext length != 64
         assertEq(zoneToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
@@ -977,7 +890,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(longPlaintext, true, recipient, memo);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
         // Deposit should bounce to sender
         assertEq(zoneToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
@@ -995,7 +908,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(emptyPlaintext, true, recipient, memo);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
         // Deposit should bounce to sender
         assertEq(zoneToken.balanceOf(alice), 1000e6, "sender should receive bounced funds");
@@ -1014,7 +927,7 @@ contract ZoneInboxTest is Test {
             _setupEncryptedDepositWithPlaintext(correctPlaintext, true, recipient, memo);
 
         vm.prank(sequencer);
-        inbox.advanceTempo("", deposits, decs);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
 
         // Deposit should succeed — minted to the decrypted recipient
         assertEq(zoneToken.balanceOf(recipient), 1000e6, "recipient should receive funds");

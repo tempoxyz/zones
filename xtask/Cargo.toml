@@ -17,6 +17,8 @@ zone = { path = "../crates/tempo-zone" }
 tempo-contracts.workspace = true
 tempo-evm.workspace = true
 tempo-precompiles.workspace = true
+tempo-primitives.workspace = true
+zone-primitives.workspace = true
 tempo-revm.workspace = true
 
 alloy = { workspace = true, features = [
@@ -32,10 +34,13 @@ alloy = { workspace = true, features = [
   "signer-mnemonic",
   "sol-types",
 ] }
+alloy-eips.workspace = true
 alloy-rlp.workspace = true
 clap = { version = "4.5.45", features = ["derive", "env"] }
 const-hex.workspace = true
 eyre.workspace = true
+futures.workspace = true
+rand.workspace = true
 reth-evm.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -20,16 +20,21 @@ tempo-node.workspace = true
 tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
-tempo-alloy = { workspace = true, features = ["tempo-compat"] }
+tempo-alloy = { workspace = true }
+tempo-contracts.workspace = true
+tempo-precompiles.workspace = true
+zone-precompiles = { workspace = true, features = ["std"] }
+zone-primitives = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-prover = { workspace = true, features = ["serde"] }
+zone-rpc.workspace = true
 
 # reth
 reth-basic-payload-builder.workspace = true
 reth-chainspec.workspace = true
 reth-errors.workspace = true
 reth-eth-wire-types.workspace = true
-reth-ethereum.workspace = true
 reth-evm.workspace = true
+reth-metrics.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-payload-builder.workspace = true
@@ -40,19 +45,20 @@ reth-revm.workspace = true
 reth-rpc.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
+reth-rpc-eth-types.workspace = true
 reth-storage-api.workspace = true
+reth-tasks.workspace = true
 reth-transaction-pool.workspace = true
 reth-trie-common.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
-alloy-contract.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
-alloy-signer.workspace = true
+alloy-rpc-client.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
@@ -63,24 +69,18 @@ alloy-transport.workspace = true
 # revm
 revm.workspace = true
 
-# rpc
-axum.workspace = true
-
 # misc
-async-trait.workspace = true
 aes-gcm.workspace = true
+async-trait.workspace = true
+metrics.workspace = true
 k256.workspace = true
-rand.workspace = true
-sha2.workspace = true
-reqwest.workspace = true
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
+either.workspace = true
 eyre.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 futures.workspace = true
 parking_lot.workspace = true
-thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 sp1-sdk = { version = "6.0.1", optional = true, features = ["network"] }
@@ -101,7 +101,10 @@ alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-sol-types.workspace = true
 alloy-trie = "0.9"
+base64.workspace = true
 const-hex.workspace = true
+p256.workspace = true
+rand.workspace = true
 reth-ethereum = { workspace = true, features = ["node", "test-utils"] }
 zone-prover = { workspace = true, features = ["test-utils"] }
 reth-node-builder.workspace = true
@@ -109,14 +112,32 @@ reth-node-core.workspace = true
 reth-rpc-builder.workspace = true
 reth-tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
+alloy-signer.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
 tempo-payload-types.workspace = true
-tempo-precompiles.workspace = true
+sha2.workspace = true
+tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+tokio-tungstenite.workspace = true
 zone-test-utils.workspace = true
 
 [features]
 default = []
 succinct-prover = ["dep:sp1-sdk", "dep:zone-prover-sp1-program"]
+test-utils = [
+	"reth-chainspec/test-utils",
+	"reth-ethereum/test-utils",
+	"reth-evm/test-utils",
+	"reth-node-builder/test-utils",
+	"reth-payload-builder/test-utils",
+	"reth-primitives-traits/test-utils",
+	"reth-provider/test-utils",
+	"reth-revm/test-utils",
+	"reth-transaction-pool/test-utils",
+	"tempo-precompiles/test-utils",
+	"tempo-transaction-pool/test-utils"
+]

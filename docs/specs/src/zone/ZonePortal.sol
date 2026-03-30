@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+import { TIP403Registry } from "../TIP403Registry.sol";
 import { ITIP20 } from "../interfaces/ITIP20.sol";
 
 import { TempoUtilities } from "../TempoUtilities.sol";
@@ -35,6 +36,10 @@ contract ZonePortal is IZonePortal {
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice TIP-403 registry for transfer policy authorization checks
+    TIP403Registry internal constant TIP403_REGISTRY =
+        TIP403Registry(0x403c000000000000000000000000000000000000);
+
     /// @notice Fixed gas value for deposit fee calculation
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
     ///      This provides a stable pricing basis for deposits while allowing sequencer
@@ -48,7 +53,7 @@ contract ZonePortal is IZonePortal {
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
 
-    uint64 public immutable zoneId;
+    uint32 public immutable zoneId;
     address public immutable messenger;
     address public immutable verifier;
     uint64 public immutable genesisTempoBlockNumber;
@@ -93,7 +98,7 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     constructor(
-        uint64 _zoneId,
+        uint32 _zoneId,
         address _initialToken,
         address _messenger,
         address _sequencer,
@@ -230,7 +235,12 @@ contract ZonePortal is IZonePortal {
         // Give messenger max approval for this token
         ITIP20(_token).approve(messenger, type(uint256).max);
 
-        emit TokenEnabled(_token);
+        // Read token metadata for the event so zone-side can create matching TIP-20
+        string memory name = ITIP20(_token).name();
+        string memory symbol = ITIP20(_token).symbol();
+        string memory currency = ITIP20(_token).currency();
+
+        emit TokenEnabled(_token, name, symbol, currency);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -467,6 +477,16 @@ contract ZonePortal is IZonePortal {
         if (!cfg.enabled) revert TokenNotEnabled();
         if (!cfg.depositsActive) revert DepositsNotActive();
 
+        // Enforce TIP-403 policy: the recipient must be authorized under the
+        // token's transfer policy before accepting the deposit.
+        uint64 policyId = ITIP20(_token).transferPolicyId();
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
+            revert DepositPolicyForbids();
+        }
+        if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
+            revert DepositPolicyForbids();
+        }
+
         // Calculate deposit fee
         uint128 fee = calculateDepositFee();
         if (amount <= fee) revert DepositTooSmall();
@@ -631,7 +651,7 @@ contract ZonePortal is IZonePortal {
         try IZoneMessenger(messenger)
             .relayMessage(
                 _token,
-                withdrawal.sender,
+                withdrawal.senderTag,
                 withdrawal.to,
                 withdrawal.amount,
                 withdrawal.gasLimit,

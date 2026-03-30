@@ -20,9 +20,19 @@ use reth_ethereum::chainspec::EthChainSpec;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone::{ProofGenerator, ZoneNode, evm::ZoneEvmConfig};
+use zone_primitives::constants::zone_chain_id;
+
+type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();
+
+const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
+    "tungstenite=warn,",
+    "alloy_pubsub=warn,",
+    "alloy_transport_ws=warn,",
+    "rustls::client=warn"
+);
 
 /// Tempo Zone CLI arguments.
 #[derive(Debug, Clone, clap::Args)]
@@ -39,7 +49,7 @@ struct ZoneArgs {
     #[arg(
         long = "block.interval-ms",
         env = "BLOCK_INTERVAL_MS",
-        default_value = "250"
+        default_value_t = 250
     )]
     pub block_interval_ms: u64,
 
@@ -52,7 +62,7 @@ struct ZoneArgs {
     #[arg(
         long = "zone.poll-interval-secs",
         env = "ZONE_POLL_INTERVAL_SECS",
-        default_value = "1"
+        default_value_t = 1
     )]
     pub zone_poll_interval_secs: u64,
 
@@ -61,7 +71,7 @@ struct ZoneArgs {
     #[arg(
         long = "zone.batch-interval-secs",
         env = "ZONE_BATCH_INTERVAL_SECS",
-        default_value = "60"
+        default_value_t = 60
     )]
     pub zone_batch_interval_secs: u64,
 
@@ -69,7 +79,7 @@ struct ZoneArgs {
     #[arg(
         long = "withdrawal-poll-interval-secs",
         env = "WITHDRAWAL_POLL_INTERVAL_SECS",
-        default_value = "5"
+        default_value_t = 5
     )]
     pub poll_interval_secs: u64,
 
@@ -78,10 +88,27 @@ struct ZoneArgs {
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]
     pub l1_genesis_block_number: Option<u64>,
 
+    /// Maximum number of concurrent L1 receipt fetches. Used directly for
+    /// the live stream; halved for backfill (which sends 2 requests per block).
+    #[arg(
+        long = "l1.fetch-concurrency",
+        env = "L1_FETCH_CONCURRENCY",
+        default_value_t = 4
+    )]
+    pub l1_fetch_concurrency: usize,
+
+    /// Interval in milliseconds between WebSocket reconnection attempts to L1.
+    #[arg(
+        long = "l1.retry-connection-interval",
+        env = "L1_RETRY_CONNECTION_INTERVAL_MS",
+        default_value_t = 100
+    )]
+    pub l1_retry_connection_interval_ms: u64,
+
     /// Zone ID for the private RPC auth token validation.
     /// Must match the zone's on-chain ID from ZoneFactory.
     #[arg(long = "zone.id", env = "ZONE_ID", default_value_t = 0)]
-    pub zone_id: u64,
+    pub zone_id: u32,
 
     /// Port for the private zone RPC server (0 for OS-assigned).
     #[arg(
@@ -116,6 +143,19 @@ enum ProverBackend {
     Succinct,
 }
 
+fn prepend_log_filter(filter: &mut String, directives: &str) {
+    if filter.is_empty() {
+        *filter = directives.to_owned();
+    } else {
+        *filter = format!("{directives},{filter}");
+    }
+}
+
+fn apply_zone_log_filters(cli: &mut ZoneCli) {
+    prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
+    prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
+}
+
 fn main() {
     reth_cli_util::sigsegv_handler::install();
 
@@ -136,8 +176,10 @@ fn main() {
         )
     };
 
-    if let Err(err) = Cli::<TempoChainSpecParser, ZoneArgs>::parse()
-        .run_with_components::<ZoneNode>(components, async move |mut builder, args| {
+    let mut cli = ZoneCli::parse();
+    apply_zone_log_filters(&mut cli);
+
+    let run_result = cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
             // Disable peer discovery — the zone node has no peering.
@@ -145,6 +187,8 @@ fn main() {
             // Disable the auth (Engine API) server — the zone node derives blocks
             // from L1, so no external consensus client or Engine API is needed.
             builder.config_mut().rpc.disable_auth_server = true;
+            builder.config_mut().rpc.rpc_max_logs_per_response = 1_000_000u64.into();
+            builder.config_mut().rpc.rpc_max_blocks_per_filter = 1_000_000u64.into();
 
             // Parse the sequencer key to derive the address for block building
             // and the k256 secret key for ECIES decryption of encrypted deposits.
@@ -164,23 +208,53 @@ fn main() {
                 args.l1_genesis_block_number,
                 sequencer_addr,
                 sequencer_secret_key,
+                args.l1_fetch_concurrency,
+                Duration::from_millis(args.l1_retry_connection_interval_ms),
             );
             let witness_store = node.witness_store();
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
             info!(target: "reth::cli", "Tempo Zone node started");
 
+            // Verify the chain ID matches the deterministic derivation from the zone ID.
+            // Skip when zone_id is 0 (local testing default).
+            if args.zone_id != 0 {
+                let expected_chain_id = zone_chain_id(args.zone_id);
+                let actual_chain_id = handle.node.chain_spec().chain().id();
+                if actual_chain_id != expected_chain_id {
+                    eyre::bail!(
+                        "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
+                        args.zone_id,
+                        expected_chain_id,
+                        actual_chain_id,
+                    );
+                }
+            }
+
             // Launch the private zone RPC server.
             let eth_handlers = handle.node.eth_handlers().clone();
+            let zone_rpc_url = handle
+                .node
+                .rpc_server_handle()
+                .http_url()
+                .expect("HTTP RPC server must be enabled for sequencer mode");
             let private_rpc_config = zone::rpc::PrivateRpcConfig {
                 listen_addr: ([0, 0, 0, 0], args.private_rpc_port).into(),
+                l1_rpc_url: args.l1_rpc_url.clone(),
+                zone_rpc_url: zone_rpc_url.clone(),
+                retry_connection_interval: Duration::from_millis(
+                    args.l1_retry_connection_interval_ms,
+                ),
                 zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
                 zone_portal: args.portal_address,
                 sequencer: sequencer_addr,
             };
-            let api: Arc<dyn zone::rpc::ZoneRpcApi> =
-                Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers));
+            let api: Arc<dyn zone::rpc::ZoneRpcApi> = Arc::new(zone::rpc::TempoZoneRpc::new(
+                eth_handlers,
+                private_rpc_config.clone(),
+            )
+            .await?);
             let local_addr = zone::rpc::start_private_rpc(private_rpc_config, api).await?;
             info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 
@@ -191,15 +265,15 @@ fn main() {
                 "Starting sequencer background tasks"
             );
 
-                // Create a read-only L1 provider for the proof generator
-                // (separate from the walletted provider used for batch submission).
-                let l1_proof_provider = alloy_provider::ProviderBuilder::new_with_network::<
-                    tempo_alloy::TempoNetwork,
-                >()
-                .connect(&args.l1_rpc_url)
-                .await
-                .expect("valid L1 RPC URL for proof generator")
-                .erased();
+            // Create a read-only L1 provider for the proof generator
+            // (separate from the walletted provider used for batch submission).
+            let l1_proof_provider = alloy_provider::ProviderBuilder::new_with_network::<
+                tempo_alloy::TempoNetwork,
+            >()
+            .connect(&args.l1_rpc_url)
+            .await
+            .expect("valid L1 RPC URL for proof generator")
+            .erased();
 
             let proof_generator: Arc<dyn zone::BatchProofGenerator> = match args.prover_backend {
                 ProverBackend::Soft => Arc::new(ProofGenerator::new(
@@ -235,15 +309,13 @@ fn main() {
                 }
             };
 
-            let zone_rpc_url = handle
-                .node
-                .rpc_server_handle()
-                .http_url()
-                .expect("HTTP RPC server must be enabled for sequencer mode");
 
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
                 l1_rpc_url: args.l1_rpc_url,
+                retry_connection_interval: Duration::from_millis(
+                    args.l1_retry_connection_interval_ms,
+                ),
                 withdrawal_poll_interval: Duration::from_secs(
                     args.poll_interval_secs,
                 ),
@@ -264,8 +336,8 @@ fn main() {
                 "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
             );
 
-            // If any sequencer task exits, log it.
-            tokio::spawn(async move {
+            // Spawn as critical tasks — node shuts down if either exits.
+            handle.node.task_executor.spawn_critical_task("zone-monitor", async move {
                 tokio::select! {
                     res = seq_handle.withdrawal_handle => {
                         tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
@@ -291,8 +363,9 @@ fn main() {
 
             handle.node_exit_future.await?;
             Ok(())
-        })
-    {
+        });
+
+    if let Err(err) = run_result {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
     }

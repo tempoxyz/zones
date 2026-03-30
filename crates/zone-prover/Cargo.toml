@@ -28,7 +28,7 @@ revm.workspace = true
 tempo-chainspec.workspace = true
 tempo-evm = { workspace = true, default-features = false }
 tempo-revm.workspace = true
-tempo-primitives = { git = "https://github.com/tempoxyz/tempo", tag = "v1.2.0", default-features = false }
+tempo-primitives = { workspace = true, default-features = false }
 
 # reth
 reth-primitives-traits.workspace = true

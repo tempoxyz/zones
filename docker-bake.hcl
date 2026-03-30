@@ -7,7 +7,7 @@ variable "VERGEN_GIT_SHA_SHORT" {
 }
 
 group "default" {
-  targets = ["tempo", "tempo-bench", "tempo-sidecar", "tempo-xtask"]
+  targets = ["tempo-zone"]
 }
 
 target "docker-metadata" {}
@@ -19,7 +19,7 @@ target "chef" {
   platforms = ["linux/amd64"]
   args = {
     RUST_PROFILE = "profiling"
-    RUST_FEATURES = "asm-keccak,jemalloc,otlp"
+    RUST_FEATURES = "jemalloc"
   }
 }
 
@@ -38,22 +38,7 @@ target "_common" {
   platforms = ["linux/amd64"]
 }
 
-target "tempo" {
+target "tempo-zone" {
   inherits = ["_common", "docker-metadata"]
-  target = "tempo"
-}
-
-target "tempo-bench" {
-  inherits = ["_common", "docker-metadata"]
-  target = "tempo-bench"
-}
-
-target "tempo-sidecar" {
-  inherits = ["_common", "docker-metadata"]
-  target = "tempo-sidecar"
-}
-
-target "tempo-xtask" {
-  inherits = ["_common", "docker-metadata"]
-  target = "tempo-xtask"
+  target = "tempo-zone"
 }
