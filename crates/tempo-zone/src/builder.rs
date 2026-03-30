@@ -12,7 +12,7 @@ use crate::{
 };
 use alloy_consensus::{Signed, Transaction, TxLegacy, TxReceipt};
 use alloy_eips::eip4895::Withdrawals;
-use alloy_primitives::{Address, B256, Bytes, U256};
+use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolEvent};
 use either::Either;
@@ -594,7 +594,7 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes, Log, U256, address};
+    use alloy_primitives::{Address, B256, Bytes, Log, U256, address};
     use alloy_sol_types::{SolCall, SolEvent};
     use reth_primitives_traits::SealedHeader;
     use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxType};
