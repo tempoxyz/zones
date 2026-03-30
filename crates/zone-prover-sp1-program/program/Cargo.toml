@@ -9,7 +9,4 @@ alloy-primitives = { version = "1.5.4", default-features = false }
 sp1-zkvm = "6.0.1"
 zone-prover = { path = "../../zone-prover", default-features = false, features = ["serde"] }
 
-[patch.crates-io]
-revm = { path = "../../../third_party/revm-34.0.0-patched" }
-
 [workspace]
