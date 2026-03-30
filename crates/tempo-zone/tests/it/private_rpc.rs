@@ -146,8 +146,8 @@ fn validate_rejects_expired() {
 #[test]
 fn validate_rejects_window_too_large() {
     let now = now_secs();
-    // 2000s window > 1800s max
-    let token = make_test_token(0, 42, 1337, now, now + 2000);
+    // 31 days > 30-day max
+    let token = make_test_token(0, 42, 1337, now, now + 31 * 86400);
     assert!(token.validate(42, 1337).is_err());
 }
 

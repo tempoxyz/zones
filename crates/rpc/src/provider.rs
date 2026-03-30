@@ -33,7 +33,7 @@ pub struct ZoneProviderConfig {
     pub zone_id: u32,
     /// Chain identifier.
     pub chain_id: u64,
-    /// How long each generated token is valid. Default: 600s, max: 1800s.
+    /// How long each generated token is valid. Default: 600s, max: 2592000s (30 days).
     pub token_ttl: Duration,
     /// The private zone RPC URL.
     pub rpc_url: url::Url,
