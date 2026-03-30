@@ -12,6 +12,7 @@ members = [
   "crates/primitives",
   "crates/tempo-zone",
   "crates/rpc",
+  "crates/zone-stf",
   "xtask",
 ]
 
@@ -99,6 +100,7 @@ tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "e33
 # zones
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
+zone-stf = { path = "crates/zone-stf" }
 zone-rpc = { path = "crates/rpc" }
 
 # reth
@@ -131,6 +133,7 @@ reth-rpc-eth-types = { git = "https://github.com/paradigmxyz/reth", rev = "7f4a9
 reth-storage-api = { git = "https://github.com/paradigmxyz/reth", rev = "7f4a9a0" }
 reth-tasks = { git = "https://github.com/paradigmxyz/reth", rev = "7f4a9a0" }
 reth-tracing = { git = "https://github.com/paradigmxyz/reth", rev = "7f4a9a0" }
+reth-trie-common = { git = "https://github.com/paradigmxyz/reth", rev = "7f4a9a0" }
 reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "7f4a9a0" }
 revm = { version = "36.0.0", features = ["optional_fee_charge"] }
 
