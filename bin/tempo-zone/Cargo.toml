@@ -26,8 +26,11 @@ reth-tracing.workspace = true
 
 # alloy
 alloy-primitives.workspace = true
+alloy-provider.workspace = true
 alloy-signer-local.workspace = true
 
+# tempo (networking)
+tempo-alloy = { workspace = true }
 # tls
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 
@@ -47,3 +50,4 @@ path = "src/main.rs"
 default = ["jemalloc"]
 
 jemalloc = ["reth-cli-util/jemalloc", "reth-ethereum/jemalloc"]
+succinct-prover = ["zone/succinct-prover"]

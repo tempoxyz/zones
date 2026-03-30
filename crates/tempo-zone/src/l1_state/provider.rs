@@ -263,6 +263,12 @@ impl L1StateProvider {
     }
 }
 
+impl super::L1StorageReader for L1StateProvider {
+    fn get_storage(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
+        self.get_storage(address, slot, block_number)
+    }
+}
+
 impl SequencerExt for L1StateProvider {
     fn latest_sequencer(&self) -> Option<Address> {
         self.get_latest_sequencer().ok()

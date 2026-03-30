@@ -24,13 +24,15 @@
 //!
 //! [`L1StateProvider`]: super::provider::L1StateProvider
 
+use std::sync::Arc;
+
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Bytes;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::{debug, error, warn};
 
-use super::provider::L1StateProvider;
+use super::L1StorageReader;
 
 alloy_sol_types::sol! {
     /// Read a single storage slot from a Tempo L1 contract at a specific block height.
@@ -69,12 +71,12 @@ pub struct TempoStateReader;
 
 impl TempoStateReader {
     /// Create a [`DynPrecompile`] that dispatches `readStorageAt` and
-    /// `readStorageBatchAt` calls to the given [`L1StateProvider`].
+    /// `readStorageBatchAt` calls to the given [`L1StorageReader`].
     ///
-    /// The returned precompile captures `provider` by move and can be registered in a
+    /// The returned precompile captures `provider` by `Arc` and can be registered in a
     /// [`PrecompilesMap`](alloy_evm::precompiles::PrecompilesMap) at the TempoStateReader
     /// predeploy address.
-    pub fn create(provider: L1StateProvider) -> DynPrecompile {
+    pub fn create(provider: Arc<dyn L1StorageReader>) -> DynPrecompile {
         DynPrecompile::new_stateful(
             PrecompileId::Custom("TempoStateReader".into()),
             move |input| {
@@ -96,10 +98,10 @@ impl TempoStateReader {
 
                 let result = if selector == readStorageAtCall::SELECTOR {
                     debug!(target: "zone::precompile", "TempoStateReader: readStorageAt");
-                    Self::handle_single_slot(&provider, data)
+                    Self::handle_single_slot(provider.as_ref(), data)
                 } else if selector == readStorageBatchAtCall::SELECTOR {
                     debug!(target: "zone::precompile", "TempoStateReader: readStorageBatchAt");
-                    Self::handle_multi_slot(&provider, data)
+                    Self::handle_multi_slot(provider.as_ref(), data)
                 } else {
                     warn!(target: "zone::precompile", selector = ?selector, "TempoStateReader: unknown selector");
                     Ok(PrecompileOutput::new_reverted(0, Bytes::new()))
@@ -125,7 +127,7 @@ impl TempoStateReader {
     /// Decodes the ABI calldata, performs a synchronous lookup via the provider at the specified
     /// L1 block number (cache first, then RPC fallback), and returns the ABI-encoded `bytes32`
     /// value. Returns a hard [`PrecompileError`] if both the cache and RPC fallback fail.
-    fn handle_single_slot(provider: &L1StateProvider, data: &[u8]) -> PrecompileResult {
+    fn handle_single_slot(provider: &dyn L1StorageReader, data: &[u8]) -> PrecompileResult {
         let call = readStorageAtCall::abi_decode(data)
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 
@@ -150,7 +152,7 @@ impl TempoStateReader {
     /// L1 block number (cache first, then RPC fallback), and returns the ABI-encoded `bytes32[]`
     /// result. If **any** slot fails both cache and RPC lookup, the entire call fails with a
     /// hard [`PrecompileError`].
-    fn handle_multi_slot(provider: &L1StateProvider, data: &[u8]) -> PrecompileResult {
+    fn handle_multi_slot(provider: &dyn L1StorageReader, data: &[u8]) -> PrecompileResult {
         let call = readStorageBatchAtCall::abi_decode(data)
             .map_err(|_| PrecompileError::other("ABI decode failed"))?;
 

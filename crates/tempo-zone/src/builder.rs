@@ -46,7 +46,7 @@ use tempo_primitives::{
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
 use tempo_transaction_pool::TempoTransactionPool;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use super::node::ZoneNode;
 
@@ -59,9 +59,17 @@ struct RequestedWithdrawalContext {
 }
 
 /// Factory for constructing the zone payload builder.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ZonePayloadFactory;
+pub struct ZonePayloadFactory {
+    witness_store: crate::witness::SharedWitnessStore,
+}
+
+impl ZonePayloadFactory {
+    pub fn new(witness_store: crate::witness::SharedWitnessStore) -> Self {
+        Self { witness_store }
+    }
+}
 
 impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, ZoneEvmConfig>
     for ZonePayloadFactory
@@ -80,6 +88,7 @@ where
             pool,
             provider: ctx.provider().clone(),
             evm_config,
+            witness_store: self.witness_store,
         })
     }
 }
@@ -93,6 +102,140 @@ pub struct ZonePayloadBuilder<Provider> {
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
     evm_config: ZoneEvmConfig,
+    witness_store: crate::witness::SharedWitnessStore,
+}
+
+impl<Provider> ZonePayloadBuilder<Provider>
+where
+    Provider: StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone,
+{
+    /// Snapshot recorded state accesses and store them for the zone monitor.
+    ///
+    /// The builder does NOT generate MPT proofs — that is deferred to the
+    /// monitor, which merges accesses from all blocks in the batch and
+    /// generates proofs against S₀ (the initial state root) in one shot.
+    ///
+    /// `prepared` contains the already-processed deposits and decryptions.
+    /// `header_rlp` is the RLP-encoded Tempo header used in `advanceTempo`.
+    fn store_block_witness(
+        &self,
+        parent_header: &reth_primitives_traits::SealedHeader<TempoHeader>,
+        sealed_block: &Arc<reth_primitives_traits::SealedBlock<tempo_primitives::Block>>,
+        recorded_accesses: &crate::witness::RecordedAccesses,
+        l1_reads: Vec<crate::witness::RecordedL1Read>,
+        prepared: &PreparedL1Block,
+        header_rlp: Vec<u8>,
+        finalize_withdrawal_batch_count: U256,
+    ) {
+        use alloy_consensus::BlockHeader;
+        use zone_stf::types::{
+            ChaumPedersenProof, DecryptionData, DepositType, QueuedDeposit, ZoneBlock, ZoneHeader,
+        };
+
+        let block_number = sealed_block.number();
+
+        let access_snapshot = crate::witness::AccessSnapshot {
+            accounts: recorded_accesses.accessed_accounts(),
+            storage: recorded_accesses.accessed_storage(),
+        };
+
+        // Extract user transactions by stripping system txs.
+        // Layout: [advanceTempo, ...user_txs..., finalizeWdBatch]
+        let all_txs: Vec<_> = sealed_block.body().transactions().collect();
+        let skip_front = 1; // advanceTempo is always first
+        let skip_back = 1; // finalizeWithdrawalBatch is always last
+        let user_tx_bytes: Vec<Vec<u8>> = if all_txs.len() > skip_front + skip_back {
+            all_txs[skip_front..all_txs.len() - skip_back]
+                .iter()
+                .map(|tx| alloy_rlp::encode(*tx))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        let deposits: Vec<QueuedDeposit> = prepared
+            .queued_deposits
+            .iter()
+            .map(|qd| {
+                let deposit_type = match qd.depositType {
+                    abi::DepositType::Regular => DepositType::Regular,
+                    abi::DepositType::Encrypted => DepositType::Encrypted,
+                    _ => DepositType::Regular,
+                };
+                QueuedDeposit {
+                    deposit_type,
+                    deposit_data: qd.depositData.clone(),
+                }
+            })
+            .collect();
+
+        let decryptions: Vec<DecryptionData> = prepared
+            .decryptions
+            .iter()
+            .map(|d| DecryptionData {
+                shared_secret: d.sharedSecret,
+                shared_secret_y_parity: d.sharedSecretYParity,
+                to: d.to,
+                memo: d.memo,
+                cp_proof: ChaumPedersenProof {
+                    s: d.cpProof.s,
+                    c: d.cpProof.c,
+                },
+            })
+            .collect();
+
+        let zone_block = ZoneBlock {
+            number: block_number,
+            parent_hash: parent_header.hash(),
+            timestamp: sealed_block.timestamp(),
+            beneficiary: sealed_block.beneficiary(),
+            gas_limit: sealed_block.gas_limit(),
+            base_fee_per_gas: sealed_block.base_fee_per_gas().unwrap_or_default(),
+            expected_state_root: sealed_block.state_root(),
+            tempo_header_rlp: Some(header_rlp.clone()),
+            deposits,
+            decryptions,
+            finalize_withdrawal_batch_count: Some(finalize_withdrawal_batch_count),
+            transactions: user_tx_bytes,
+        };
+
+        let state_root = parent_header.state_root();
+        let prev_block_header = ZoneHeader {
+            parent_hash: parent_header.parent_hash(),
+            beneficiary: parent_header.beneficiary(),
+            state_root,
+            transactions_root: parent_header.transactions_root(),
+            receipts_root: parent_header.receipts_root(),
+            number: parent_header.number(),
+            timestamp: parent_header.timestamp(),
+        };
+
+        let chain_id = {
+            use reth_chainspec::EthChainSpec;
+            self.provider.chain_spec().chain().id()
+        };
+
+        let witness = crate::witness::BuiltBlockWitness {
+            zone_block,
+            access_snapshot: access_snapshot.clone(),
+            prev_block_header,
+            parent_block_hash: parent_header.hash(),
+            l1_reads,
+            chain_id,
+            tempo_header_rlp: Some(header_rlp),
+        };
+
+        let mut store = self.witness_store.lock().expect("witness store poisoned");
+        store.insert(block_number, witness);
+
+        info!(
+            target: "zone::witness",
+            block_number,
+            accounts = access_snapshot.accounts.len(),
+            storage_accounts = access_snapshot.storage.len(),
+            "Stored block witness data (accesses only, proof generation deferred)"
+        );
+    }
 }
 
 impl<Provider> PayloadBuilder for ZonePayloadBuilder<Provider>
@@ -187,10 +330,17 @@ where
         let state_provider = self.provider.state_by_block_hash(parent_header.hash())?;
         let state_provider: Box<dyn StateProvider> = state_provider;
         let state = StateProviderDatabase::new(&state_provider);
+
+        // Wrap the database in a RecordingDatabase to capture all state accesses
+        // for witness generation. The `accesses` handle is cloned so we can
+        // retrieve recorded data after the State is consumed.
+        let recorded_accesses = crate::witness::RecordedAccesses::new();
+        let recording_db = crate::witness::RecordingDatabase::new(
+            Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>,
+            recorded_accesses.clone(),
+        );
         let mut db = State::builder()
-            .with_database(
-                Box::new(cached_reads.as_db_mut(state)) as Box<dyn Database<Error = ProviderError>>
-            )
+            .with_database(recording_db)
             .with_bundle_update()
             .build();
 
@@ -232,8 +382,26 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
+        // Set the L1 recording block index for this zone block.
+        // Block index is 0-based within a batch; for single-block-per-build this is always 0.
+        // TODO(multi-block): Re-index zone_block_index in ProofGenerator when
+        // merging L1 reads across blocks. Currently always 0 because the builder
+        // produces one block at a time.
+        self.evm_config.set_l1_recording_block_index(0);
+
         // Execute advanceTempo system transaction — exactly one per zone block.
+        let header_rlp = alloy_rlp::encode(&*prepared.header);
         {
+            // Log header details for debugging chain continuity
+            info!(
+                target: "zone::payload",
+                l1_block_number = prepared.header.number(),
+                l1_parent_hash = %prepared.header.parent_hash(),
+                l1_block_hash = %prepared.header.hash(),
+                header_rlp_len = header_rlp.len(),
+                "advanceTempo header details"
+            );
+
             let advance_tx = build_advance_tempo_tx(prepared);
             let mut reverted = false;
             match builder.execute_transaction_with_result_closure(advance_tx, |result| {
@@ -371,8 +539,9 @@ where
                 }
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let finalize_withdrawal_count = U256::from(requested_withdrawals.len());
         let finalize_tx = build_finalize_withdrawal_batch_tx(
-            U256::from(requested_withdrawals.len()),
+            finalize_withdrawal_count,
             block_number,
             encrypted_senders,
         );
@@ -416,6 +585,17 @@ where
         let sealed_block = Arc::new(block.sealed_block().clone());
         let elapsed = start.elapsed();
 
+        // Collect recorded L1 reads from the precompile wrapper.
+        let l1_reads = self.evm_config.take_l1_reads().unwrap_or_default();
+
+        debug!(
+            target: "zone::payload",
+            accounts = recorded_accesses.accessed_accounts().len(),
+            storage_accounts = recorded_accesses.accessed_storage().len(),
+            l1_reads = l1_reads.len(),
+            "Recorded state accesses for witness generation"
+        );
+
         info!(
             number = sealed_block.number(),
             l1_block = prepared.header.number(),
@@ -426,6 +606,17 @@ where
             tx_count = sealed_block.body().transactions.len(),
             ?elapsed,
             "Built zone payload"
+        );
+
+        // Store recorded accesses for the monitor to generate proofs later.
+        self.store_block_witness(
+            &parent_header,
+            &sealed_block,
+            &recorded_accesses,
+            l1_reads,
+            prepared,
+            header_rlp,
+            finalize_withdrawal_count,
         );
 
         let eth_payload = EthBuiltPayload::new(sealed_block, total_fees, requests);

@@ -26,7 +26,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, Bytes};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_transport::layers::RetryBackoffLayer;
@@ -40,6 +40,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
     batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_slot_withdrawals},
+    proof::BatchProofGenerator,
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -116,6 +117,9 @@ pub struct ZoneMonitor {
     /// and incremented each time a batch with a non-zero
     /// `withdrawal_queue_hash` is successfully submitted to L1.
     portal_withdrawal_queue_tail: u64,
+    /// Node-internal proof generator — owns the witness store, state provider,
+    /// and L1 provider. The monitor calls a single method per batch.
+    proof_generator: Arc<dyn BatchProofGenerator>,
     /// Most recent zone block observed from the L2 RPC.
     latest_observed_zone_block: u64,
 }
@@ -126,11 +130,15 @@ impl ZoneMonitor {
     /// Builds a read-only HTTP provider (no wallet) pointed at the Zone L2 RPC,
     /// instantiates the on-chain contract handles, and creates a [`BatchSubmitter`]
     /// backed by the shared `l1_provider` for posting batches to the ZonePortal on L1.
+    ///
+    /// Proof generation is delegated entirely to the `proof_generator`, which runs
+    /// inside the node and has direct state provider access.
     pub async fn new(
         config: ZoneMonitorConfig,
         l1_provider: DynProvider<TempoNetwork>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
+        proof_generator: Arc<dyn BatchProofGenerator>,
     ) -> Result<Self> {
         let zone_rpc_url = config.zone_rpc_url.clone();
         let retry_layer = RetryBackoffLayer::new(
@@ -156,6 +164,7 @@ impl ZoneMonitor {
             l1_provider,
             withdrawal_store,
             withdrawal_notify,
+            proof_generator,
         )
         .await
     }
@@ -166,6 +175,7 @@ impl ZoneMonitor {
         l1_provider: DynProvider<TempoNetwork>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
+        proof_generator: Arc<dyn BatchProofGenerator>,
     ) -> Result<Self> {
         let metrics = crate::metrics::ZoneMonitorMetrics::default();
         let outbox = ZoneOutbox::new(config.outbox_address, provider.clone());
@@ -256,6 +266,7 @@ impl ZoneMonitor {
             prev_processed_deposit_hash,
             prev_zone_block_hash,
             portal_withdrawal_queue_tail,
+            proof_generator,
             latest_observed_zone_block: last_submitted_zone_block,
         })
     }
@@ -360,6 +371,8 @@ impl ZoneMonitor {
     /// withdrawals, we recompute the combined hash from the collected withdrawal structs.
     #[instrument(skip(self), fields(from, to))]
     async fn process_block_range(&mut self, from: u64, to: u64) -> Result<()> {
+        // TODO(production): Add a max batch size cap to prevent OOM on large
+        // block ranges (e.g., after a long outage). Chunk into sub-batches.
         let block_count = to - from + 1;
         info!(from, to, block_count, "Processing zone block range");
 
@@ -401,6 +414,28 @@ impl ZoneMonitor {
             );
         }
 
+        // --- 3. Generate proof for the batch ---
+        let portal_withdrawal_batch_index = self
+            .batch_submitter
+            .read_portal_withdrawal_batch_index()
+            .await?;
+        let expected_withdrawal_batch_index = portal_withdrawal_batch_index
+            .checked_add(1)
+            .ok_or_else(|| {
+                eyre::eyre!("portal withdrawalBatchIndex overflow: {portal_withdrawal_batch_index}")
+            })?;
+        let (verifier_config, proof) = self
+            .proof_generator
+            .generate_batch_proof(
+                from,
+                to,
+                end_state.tempo_block_number,
+                self.prev_zone_block_hash,
+                expected_withdrawal_batch_index,
+            )
+            .await?;
+
+        // --- 4. Build and submit BatchData ---
         let batch_data = BatchData {
             tempo_block_number: end_state.tempo_block_number,
             prev_block_hash: self.prev_zone_block_hash,
@@ -408,6 +443,8 @@ impl ZoneMonitor {
             prev_processed_deposit_hash: self.prev_processed_deposit_hash,
             next_processed_deposit_hash: end_state.processed_deposit_hash,
             withdrawal_queue_hash,
+            verifier_config,
+            proof,
         };
 
         self.submit_batch_with_retry(&batch_data, to, all_withdrawals)
@@ -482,6 +519,8 @@ impl ZoneMonitor {
                 prev_processed_deposit_hash: self.prev_processed_deposit_hash,
                 next_processed_deposit_hash: step_state.processed_deposit_hash,
                 withdrawal_queue_hash,
+                verifier_config: Bytes::new(),
+                proof: Bytes::new(),
             };
 
             info!(
@@ -793,11 +832,13 @@ impl ZoneMonitor {
 /// advances on successful submission.
 ///
 /// The `l1_provider` must already include the sequencer wallet for signing L1 transactions.
+/// Proof generation is delegated to the `proof_generator`.
 pub fn spawn_zone_monitor(
     config: ZoneMonitorConfig,
     l1_provider: DynProvider<TempoNetwork>,
     withdrawal_store: SharedWithdrawalStore,
     withdrawal_notify: Arc<Notify>,
+    proof_generator: Arc<dyn BatchProofGenerator>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut monitor = loop {
@@ -806,6 +847,7 @@ pub fn spawn_zone_monitor(
                 l1_provider.clone(),
                 withdrawal_store.clone(),
                 withdrawal_notify.clone(),
+                proof_generator.clone(),
             )
             .await
             {
@@ -849,6 +891,22 @@ mod tests {
     use alloy_transport::mock::Asserter;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::TempoHeader;
+
+    struct NoopBatchProofGenerator;
+
+    #[async_trait::async_trait]
+    impl BatchProofGenerator for NoopBatchProofGenerator {
+        async fn generate_batch_proof(
+            &self,
+            _from: u64,
+            _to: u64,
+            _tempo_block_number: u64,
+            _prev_block_hash: B256,
+            _expected_withdrawal_batch_index: u64,
+        ) -> Result<(Bytes, Bytes)> {
+            Ok((Bytes::new(), Bytes::new()))
+        }
+    }
 
     fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -910,6 +968,7 @@ mod tests {
             prev_processed_deposit_hash: B256::repeat_byte(0xaa),
             prev_zone_block_hash: B256::repeat_byte(0xbb),
             portal_withdrawal_queue_tail: 3,
+            proof_generator: Arc::new(NoopBatchProofGenerator),
             latest_observed_zone_block: 50,
         }
     }
@@ -938,6 +997,7 @@ mod tests {
             mock_provider(l1.clone()),
             SharedWithdrawalStore::new(),
             Arc::new(Notify::new()),
+            Arc::new(NoopBatchProofGenerator),
         )
         .await
         {
@@ -1004,6 +1064,8 @@ mod tests {
             prev_processed_deposit_hash: B256::repeat_byte(0x77),
             next_processed_deposit_hash: B256::repeat_byte(0x66),
             withdrawal_queue_hash: B256::ZERO,
+            verifier_config: Bytes::new(),
+            proof: Bytes::new(),
         };
 
         monitor

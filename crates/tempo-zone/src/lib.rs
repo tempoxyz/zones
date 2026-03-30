@@ -20,9 +20,11 @@ mod node;
 pub mod nonce_keys;
 pub mod payload;
 pub mod precompiles;
+pub mod proof;
 pub mod rpc;
 mod tx_context;
 pub mod withdrawals;
+pub mod witness;
 pub mod zonemonitor;
 
 pub use batch::{BatchData, BatchSubmitter};
@@ -34,7 +36,9 @@ pub use l1::{
 pub use l1_state::{PolicyProvider, SharedL1StateCache, SharedPolicyCache};
 pub use node::{ZoneExecutorBuilder, ZoneNode};
 pub use payload::{ZonePayloadAttributes, ZonePayloadTypes};
+pub use proof::{BatchProofGenerator, ProofGenerator};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
+pub use witness::{SharedWitnessStore, WitnessStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 
 use std::{sync::Arc, time::Duration};
@@ -89,9 +93,8 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 ///
 /// This is the top-level POC entrypoint that starts:
 /// - **Zone monitor** — polls the Zone L2 for new blocks, extracts withdrawal events into the
-///   shared store, builds [`BatchData`], and submits each batch **synchronously** to the
-///   ZonePortal on Tempo L1 (with empty proof bytes). Local state only advances on
-///   successful submission.
+///   shared store, builds [`BatchData`], and submits each batch to the ZonePortal on Tempo L1.
+///   Proof generation is delegated to the `proof_generator`.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawal` for each pending withdrawal.
 ///
@@ -102,6 +105,7 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 pub async fn spawn_zone_sequencer(
     config: ZoneSequencerConfig,
     signer: PrivateKeySigner,
+    proof_generator: Arc<dyn BatchProofGenerator>,
 ) -> ZoneSequencerHandle {
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
@@ -151,6 +155,7 @@ pub async fn spawn_zone_sequencer(
         l1_provider,
         withdrawal_store,
         withdrawal_notify,
+        proof_generator,
     );
 
     ZoneSequencerHandle {

@@ -2207,7 +2207,29 @@ pub(crate) async fn spawn_sequencer(
         batch_interval: Duration::from_millis(500),
     };
 
-    zone::spawn_zone_sequencer(config, sequencer_signer).await
+    let noop_proof_gen: Arc<dyn zone::proof::BatchProofGenerator> =
+        Arc::new(NoopBatchProofGenerator);
+    zone::spawn_zone_sequencer(config, sequencer_signer, noop_proof_gen).await
+}
+
+/// No-op proof generator for integration tests (POC mode — empty proof bytes).
+struct NoopBatchProofGenerator;
+
+#[async_trait::async_trait]
+impl zone::proof::BatchProofGenerator for NoopBatchProofGenerator {
+    async fn generate_batch_proof(
+        &self,
+        _from: u64,
+        _to: u64,
+        _tempo_block_number: u64,
+        _prev_block_hash: B256,
+        _expected_withdrawal_batch_index: u64,
+    ) -> eyre::Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
+        Ok((
+            alloy_primitives::Bytes::new(),
+            alloy_primitives::Bytes::new(),
+        ))
+    }
 }
 
 /// Start a local zone node with an L1Fixture already seeded for `seed_blocks` blocks.

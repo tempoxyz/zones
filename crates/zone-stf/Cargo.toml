@@ -51,3 +51,4 @@ alloy-rlp.workspace = true
 alloy-trie = "0.9"
 tempo-primitives.workspace = true
 zone-stf = { path = ".", features = ["test-utils"] }
+zone-test-utils.workspace = true

@@ -8,15 +8,18 @@
 
 use std::{sync::Arc, time::Duration};
 
+use alloy_provider::Provider;
+
 use alloy_primitives::Address;
 use clap::Parser;
+use eyre as _;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 
 use reth_ethereum::chainspec::EthChainSpec;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use zone::{ZoneNode, evm::ZoneEvmConfig};
+use zone::{ProofGenerator, ZoneNode, evm::ZoneEvmConfig};
 use zone_primitives::constants::zone_chain_id;
 
 type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
@@ -114,6 +117,30 @@ struct ZoneArgs {
         default_value_t = 8544
     )]
     pub private_rpc_port: u16,
+
+    /// Batch proof backend implementation.
+    #[arg(
+        long = "prover.backend",
+        env = "ZONE_PROVER_BACKEND",
+        value_enum,
+        default_value_t = ProverBackend::Soft
+    )]
+    pub prover_backend: ProverBackend,
+
+    /// Skip local SP1 simulation before dispatching to the Succinct prover network.
+    #[arg(
+        long = "prover.succinct.skip-simulation",
+        env = "ZONE_PROVER_SUCCINCT_SKIP_SIMULATION",
+        default_value_t = false
+    )]
+    pub prover_succinct_skip_simulation: bool,
+}
+
+#[derive(Debug, Clone, Copy, clap::ValueEnum, Default)]
+enum ProverBackend {
+    #[default]
+    Soft,
+    Succinct,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -175,7 +202,6 @@ fn main() {
                     .expect("invalid sequencer key hex");
                 k256::SecretKey::from_slice(&bytes).expect("invalid secp256k1 secret key")
             };
-
             let node = ZoneNode::new(
                 args.l1_rpc_url.clone(),
                 args.portal_address,
@@ -185,6 +211,7 @@ fn main() {
                 args.l1_fetch_concurrency,
                 Duration::from_millis(args.l1_retry_connection_interval_ms),
             );
+            let witness_store = node.witness_store();
 
             let handle = builder.node(node).launch_with_debug_capabilities().await?;
             info!(target: "reth::cli", "Tempo Zone node started");
@@ -238,6 +265,51 @@ fn main() {
                 "Starting sequencer background tasks"
             );
 
+            // Create a read-only L1 provider for the proof generator
+            // (separate from the walletted provider used for batch submission).
+            let l1_proof_provider = alloy_provider::ProviderBuilder::new_with_network::<
+                tempo_alloy::TempoNetwork,
+            >()
+            .connect(&args.l1_rpc_url)
+            .await
+            .expect("valid L1 RPC URL for proof generator")
+            .erased();
+
+            let proof_generator: Arc<dyn zone::BatchProofGenerator> = match args.prover_backend {
+                ProverBackend::Soft => Arc::new(ProofGenerator::new(
+                    handle.node.provider().clone(),
+                    witness_store.clone(),
+                    l1_proof_provider,
+                    sequencer_addr,
+                )),
+                ProverBackend::Succinct => {
+                    #[cfg(feature = "succinct-prover")]
+                    {
+                        info!(
+                            target: "reth::cli",
+                            "Using Succinct (SP1 prover network) batch proof backend"
+                        );
+                        Arc::new(zone::proof::SuccinctBatchProofGenerator::new(
+                            handle.node.provider().clone(),
+                            witness_store.clone(),
+                            l1_proof_provider,
+                            sequencer_addr,
+                            zone::proof::SuccinctNetworkProverConfig {
+                                skip_simulation: args.prover_succinct_skip_simulation,
+                            },
+                        ).await?)
+                    }
+                    #[cfg(not(feature = "succinct-prover"))]
+                    {
+                        return Err(eyre::eyre!(
+                            "prover backend 'succinct' requested, but this binary was built \
+                             without the 'succinct-prover' feature"
+                        ));
+                    }
+                }
+            };
+
+
             let sequencer_config = zone::ZoneSequencerConfig {
                 portal_address: args.portal_address,
                 l1_rpc_url: args.l1_rpc_url,
@@ -255,7 +327,9 @@ fn main() {
                 batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
             };
 
-            let seq_handle = zone::spawn_zone_sequencer(sequencer_config, sequencer_signer).await;
+            let seq_handle =
+                zone::spawn_zone_sequencer(sequencer_config, sequencer_signer, proof_generator)
+                    .await;
 
             info!(
                 target: "reth::cli",

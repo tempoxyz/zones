@@ -87,6 +87,8 @@ pub struct ZoneNode {
     sequencer_key: k256::SecretKey,
     /// Address of the L1 deposit portal contract.
     portal_address: alloy_primitives::Address,
+    /// Shared witness store for builder → monitor communication.
+    witness_store: crate::witness::SharedWitnessStore,
     /// Optional pre-configured list of enabled token addresses. When set, the
     /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
@@ -133,6 +135,8 @@ impl ZoneNode {
             ..Default::default()
         };
 
+        let witness_store: crate::witness::SharedWitnessStore = Default::default();
+
         Self {
             deposit_queue,
             l1_config,
@@ -142,8 +146,14 @@ impl ZoneNode {
             sequencer,
             sequencer_key,
             portal_address,
+            witness_store,
             initial_tokens: None,
         }
+    }
+
+    /// Get a clone of the shared witness store handle.
+    pub fn witness_store(&self) -> crate::witness::SharedWitnessStore {
+        self.witness_store.clone()
     }
 
     /// Set the initial list of enabled token addresses.
@@ -175,6 +185,10 @@ impl ZoneNode {
     /// Returns a [`ComponentsBuilder`] configured for a Zone node.
     pub fn components<N>(
         executor_builder: ZoneExecutorBuilder,
+        _sequencer: alloy_primitives::Address,
+        _sequencer_key: k256::SecretKey,
+        _portal_address: alloy_primitives::Address,
+        witness_store: crate::witness::SharedWitnessStore,
     ) -> ComponentsBuilder<
         N,
         ZonePoolBuilder,
@@ -190,7 +204,9 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(executor_builder)
-            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory))
+            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory::new(
+                witness_store,
+            )))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -467,7 +483,13 @@ where
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
         );
-        Self::components(executor_builder)
+        Self::components(
+            executor_builder,
+            self.sequencer,
+            self.sequencer_key.clone(),
+            self.portal_address,
+            self.witness_store.clone(),
+        )
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -569,7 +591,7 @@ where
         )
         .await?;
 
-        let mut evm_config = ZoneEvmConfig::new(ctx.chain_spec(), l1_provider);
+        let mut evm_config = ZoneEvmConfig::new_with_recording(ctx.chain_spec(), l1_provider);
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -585,7 +607,7 @@ where
         let policy_provider =
             crate::l1_state::PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
         evm_config = evm_config.with_policy_provider(policy_provider);
-        info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
+        info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles (recording enabled)");
 
         Ok(evm_config)
     }

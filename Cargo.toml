@@ -13,6 +13,7 @@ members = [
   "crates/tempo-zone",
   "crates/rpc",
   "crates/zone-stf",
+  "crates/zone-test-utils",
   "xtask",
 ]
 
@@ -102,6 +103,7 @@ zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
 zone-stf = { path = "crates/zone-stf" }
 zone-rpc = { path = "crates/rpc" }
+zone-test-utils = { path = "crates/zone-test-utils" }
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "7f4a9a0" }
@@ -164,6 +166,7 @@ commonware-utils = "2026.2.0"
 
 # misc
 aes-gcm = "0.10.3"
+async-trait = "0.1.89"
 base64 = "0.22.1"
 clap = { version = "4.5.45", features = ["derive"] }
 const-hex = { version = "1.15.0" }

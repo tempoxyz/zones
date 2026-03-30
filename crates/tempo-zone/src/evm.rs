@@ -33,29 +33,62 @@ use crate::executor::ZoneBlockExecutor;
 
 use crate::{
     abi::{TEMPO_STATE_READER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS},
-    l1_state::{L1StateProvider, PolicyProvider, SharedL1StateCache, TempoStateReader},
+    l1_state::{
+        L1StateProvider, L1StorageReader, PolicyProvider, SharedL1StateCache, TempoStateReader,
+    },
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
         ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
     tx_context::ZoneTxContext,
+    witness::{RecordingL1StateProvider, SharedRecordedReads},
 };
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
 /// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the
 /// [`TempoStateReader`] precompile for reading Tempo L1 storage from zone contracts.
-#[derive(Debug, Clone)]
+///
+/// The L1 storage reader is stored as `Arc<dyn L1StorageReader>` to allow swapping
+/// in a [`RecordingL1StateProvider`](crate::witness::RecordingL1StateProvider) during
+/// witness generation without changing the factory's type.
+#[derive(Clone)]
 pub struct ZoneEvmFactory {
+    l1_reader: Arc<dyn L1StorageReader>,
     l1_provider: L1StateProvider,
     policy_provider: Option<PolicyProvider>,
 }
 
+impl std::fmt::Debug for ZoneEvmFactory {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZoneEvmFactory").finish()
+    }
+}
+
 impl ZoneEvmFactory {
     /// Create a new factory with the given L1 state provider.
+    ///
+    /// The `L1StateProvider` is used both as the default [`L1StorageReader`]
+    /// (for the TempoStateReader precompile) and for sequencer lookups.
     pub fn new(l1_provider: L1StateProvider) -> Self {
         Self {
+            l1_reader: Arc::new(l1_provider.clone()),
+            l1_provider,
+            policy_provider: None,
+        }
+    }
+
+    /// Create a new factory with a custom [`L1StorageReader`].
+    ///
+    /// Used when wrapping the provider in a [`RecordingL1StateProvider`] for
+    /// witness generation.
+    pub fn new_with_reader(
+        l1_reader: Arc<dyn L1StorageReader>,
+        l1_provider: L1StateProvider,
+    ) -> Self {
+        Self {
+            l1_reader,
             l1_provider,
             policy_provider: None,
         }
@@ -74,7 +107,7 @@ impl ZoneEvmFactory {
         let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| {
-            Some(TempoStateReader::create(self.l1_provider.clone()))
+            Some(TempoStateReader::create(self.l1_reader.clone()))
         });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
@@ -230,10 +263,18 @@ pub struct ZoneEvmConfig {
     inner: TempoEvmConfig,
     zone_factory: ZoneEvmFactory,
     block_assembler: ZoneBlockAssembler,
+    /// Shared handle for L1 read recordings. Present when the L1 reader is
+    /// wrapped in a [`RecordingL1StateProvider`] (normal sequencer operation).
+    /// `None` for CLI subcommands that don't produce proofs.
+    #[allow(dead_code)]
+    recorded_l1_reads: Option<SharedRecordedReads>,
+    /// Handle to the recording provider for setting `zone_block_index`.
+    /// Stored as `Arc` so the builder can call `set_zone_block_index`.
+    recording_l1_provider: Option<Arc<RecordingL1StateProvider>>,
 }
 
 impl ZoneEvmConfig {
-    /// Create a new zone EVM config with the given chain spec, L1 state
+    /// Create a new zone EVM config with the given chain spec and L1 state
     /// provider.
     pub fn new(chain_spec: Arc<TempoChainSpec>, l1_provider: L1StateProvider) -> Self {
         let zone_factory = ZoneEvmFactory::new(l1_provider);
@@ -243,6 +284,50 @@ impl ZoneEvmConfig {
             inner,
             zone_factory,
             block_assembler,
+            recorded_l1_reads: None,
+            recording_l1_provider: None,
+        }
+    }
+
+    /// Create a new zone EVM config with recording enabled.
+    ///
+    /// Wraps the given L1 provider in a [`RecordingL1StateProvider`] so all
+    /// `TempoStateReader` precompile reads are captured for witness generation.
+    pub fn new_with_recording(
+        chain_spec: Arc<TempoChainSpec>,
+        l1_provider: L1StateProvider,
+    ) -> Self {
+        let recording = Arc::new(RecordingL1StateProvider::new(Arc::new(l1_provider.clone())));
+        let recorded_reads = recording.recorded_reads();
+        let zone_factory = ZoneEvmFactory::new_with_reader(
+            recording.clone() as Arc<dyn L1StorageReader>,
+            l1_provider,
+        );
+        let inner = TempoEvmConfig::new(chain_spec.clone());
+        let block_assembler = ZoneBlockAssembler::new(chain_spec);
+        Self {
+            inner,
+            zone_factory,
+            block_assembler,
+            recorded_l1_reads: Some(recorded_reads),
+            recording_l1_provider: Some(recording),
+        }
+    }
+
+    /// Take all recorded L1 reads since the last call, clearing the buffer.
+    ///
+    /// Returns `None` if recording is not enabled (CLI subcommands).
+    pub fn take_l1_reads(&self) -> Option<Vec<crate::witness::RecordedL1Read>> {
+        self.recording_l1_provider.as_ref().map(|p| p.take_reads())
+    }
+
+    /// Set the zone block index for subsequent L1 read recordings.
+    ///
+    /// Must be called before each zone block execution so reads are
+    /// tagged with the correct block index in the batch.
+    pub fn set_l1_recording_block_index(&self, index: u64) {
+        if let Some(p) = &self.recording_l1_provider {
+            p.set_zone_block_index(index);
         }
     }
 
