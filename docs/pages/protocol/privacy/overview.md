@@ -62,10 +62,14 @@ The factory deploys a `ZonePortal` that escrows enabled tokens on Tempo and a `Z
 Each zone has a unique EIP-155 chain ID derived deterministically from its on-chain zone ID:
 
 ```
+# mainnet zones
 chain_id = 421700000 + zone_id
+
+# testnet zones (Moderato)
+chain_id = 1424310000 + zone_id
 ```
 
-The prefix `4217` corresponds to the Tempo L1 chain ID. This ensures replay protection between zones — a transaction signed for one zone cannot be replayed on another. The chain ID is set in the zone's genesis configuration during creation and validated by the zone node at startup.
+The mainnet prefix `4217` corresponds to the Tempo L1 chain ID; the testnet prefix `142431` encodes `1` (testnet marker) + `42431` (Moderato chain ID). Both ranges stay within the EIP-2294 "Safe Range" (`< 2^31 - 1`) and do not overlap. This ensures replay protection between zones — a transaction signed for one zone cannot be replayed on another. The chain ID is set in the zone's genesis configuration during creation and validated by the zone node at startup.
 
 ### Token management
 
