@@ -2225,7 +2225,10 @@ impl zone::proof::BatchProofGenerator for NoopBatchProofGenerator {
         _prev_block_hash: B256,
         _expected_withdrawal_batch_index: u64,
     ) -> eyre::Result<(alloy_primitives::Bytes, alloy_primitives::Bytes)> {
-        Ok((alloy_primitives::Bytes::new(), alloy_primitives::Bytes::new()))
+        Ok((
+            alloy_primitives::Bytes::new(),
+            alloy_primitives::Bytes::new(),
+        ))
     }
 }
 

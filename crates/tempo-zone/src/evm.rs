@@ -298,8 +298,7 @@ impl ZoneEvmConfig {
         chain_spec: Arc<TempoChainSpec>,
         l1_provider: L1StateProvider,
     ) -> Self {
-        let recording =
-            Arc::new(RecordingL1StateProvider::new(Arc::new(l1_provider.clone())));
+        let recording = Arc::new(RecordingL1StateProvider::new(Arc::new(l1_provider.clone())));
         let recorded_reads = recording.recorded_reads();
         let zone_factory = ZoneEvmFactory::new_with_reader(
             recording.clone() as Arc<dyn L1StorageReader>,

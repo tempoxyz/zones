@@ -1,11 +1,15 @@
-use std::error::Error;
-use std::str::FromStr;
+use std::{error::Error, str::FromStr};
 
-use sp1_sdk::network::B256;
-use sp1_sdk::network::proto::types::{
-    ExecuteFailureCause, ExecutionStatus, FulfillmentStatus, ProofRequestError, SettlementStatus,
+use sp1_sdk::{
+    ProverClient,
+    network::{
+        B256,
+        proto::types::{
+            ExecuteFailureCause, ExecutionStatus, FulfillmentStatus, ProofRequestError,
+            SettlementStatus,
+        },
+    },
 };
-use sp1_sdk::ProverClient;
 
 fn fmt_fulfillment_status(raw: i32) -> String {
     FulfillmentStatus::try_from(raw)
@@ -77,7 +81,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
             req.execute_fail_cause,
             fmt_execute_fail_cause(req.execute_fail_cause),
         );
-        println!("error={} ({})", req.error, fmt_proof_request_error(req.error));
+        println!(
+            "error={} ({})",
+            req.error,
+            fmt_proof_request_error(req.error)
+        );
         println!(
             "settlement_status={} ({})",
             req.settlement_status,

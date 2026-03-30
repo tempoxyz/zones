@@ -1,14 +1,16 @@
 use std::error::Error;
 
-use sp1_sdk::ProverClient;
-use sp1_sdk::network::{
-    client::NetworkClient,
-    proto::{
-        GetFilteredProofRequestsResponse,
-        types::{ExecutionStatus, FulfillmentStatus},
+use sp1_sdk::{
+    ProverClient,
+    network::{
+        Address, B256, NetworkMode,
+        client::NetworkClient,
+        proto::{
+            GetFilteredProofRequestsResponse,
+            types::{ExecutionStatus, FulfillmentStatus},
+        },
+        signer::NetworkSigner,
     },
-    signer::NetworkSigner,
-    Address, B256, NetworkMode,
 };
 
 fn network_mode_from_env() -> NetworkMode {
@@ -114,8 +116,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
             println!("explorer_url={explorer}/request/{request_id}");
             println!("requester={requester_addr}");
             println!("version={}", latest.version);
-            println!("fulfillment_status={}", fmt_fulfillment_status(latest.fulfillment_status));
-            println!("execution_status={}", fmt_execution_status(latest.execution_status));
+            println!(
+                "fulfillment_status={}",
+                fmt_fulfillment_status(latest.fulfillment_status)
+            );
+            println!(
+                "execution_status={}",
+                fmt_execution_status(latest.execution_status)
+            );
             println!("created_at_unix={}", latest.created_at);
             println!("updated_at_unix={}", latest.updated_at);
             println!("cycles={:?}", latest.cycles);

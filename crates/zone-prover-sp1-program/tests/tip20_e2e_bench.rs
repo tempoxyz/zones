@@ -168,9 +168,7 @@ fn env_u64(name: &str, default: u64) -> u64 {
 }
 
 fn env_optional_u64(name: &str) -> Option<u64> {
-    std::env::var(name)
-        .ok()
-        .and_then(|v| v.parse::<u64>().ok())
+    std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok())
 }
 
 fn default_succinct_gas_limit(transfer_count: usize) -> u64 {
@@ -906,10 +904,7 @@ async fn run_succinct(
         {
             println!(
                 "succinct request status: transfer_count={} request_id={} fulfillment_status={} execution_status={}",
-                case.transfer_count,
-                request_id_str,
-                status_tuple.0,
-                status_tuple.1
+                case.transfer_count, request_id_str, status_tuple.0, status_tuple.1
             );
             last_status = Some(status_tuple);
             last_status_log = Instant::now();

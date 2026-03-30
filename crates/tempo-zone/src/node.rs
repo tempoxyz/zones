@@ -591,8 +591,7 @@ where
         )
         .await?;
 
-        let mut evm_config =
-            ZoneEvmConfig::new_with_recording(ctx.chain_spec(), l1_provider);
+        let mut evm_config = ZoneEvmConfig::new_with_recording(ctx.chain_spec(), l1_provider);
 
         // Create PolicyProvider for the TIP-403 proxy precompile.
         let policy_l1 = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
