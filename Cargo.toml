@@ -13,6 +13,7 @@ members = [
   "crates/tempo-zone",
   "crates/rpc",
   "crates/zone-stf",
+  "crates/zone-sp1-program",
   "crates/zone-test-utils",
   "xtask",
 ]

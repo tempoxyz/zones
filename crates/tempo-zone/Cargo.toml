@@ -83,6 +83,7 @@ parking_lot.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 sp1-sdk = { version = "6.0.1", optional = true, features = ["network"] }
+zone-sp1-program = { path = "../zone-sp1-program", optional = true }
 
 [dev-dependencies]
 alloy = { workspace = true, features = [
@@ -125,7 +126,7 @@ zone-test-utils.workspace = true
 
 [features]
 default = []
-succinct-prover = ["dep:sp1-sdk"]
+succinct-prover = ["dep:sp1-sdk", "dep:zone-sp1-program"]
 test-utils = [
 	"reth-chainspec/test-utils",
 	"reth-ethereum/test-utils",

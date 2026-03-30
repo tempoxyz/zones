@@ -1,0 +1,15 @@
+[package]
+name = "zone-sp1-guest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+alloy-primitives = { version = "1.5.4", default-features = false }
+sp1-zkvm = "6.0.1"
+zone-stf = { path = "../../zone-stf", default-features = false, features = ["serde"] }
+
+[patch.crates-io]
+revm = { path = "../../../third_party/revm-34.0.0-patched" }
+
+[workspace]

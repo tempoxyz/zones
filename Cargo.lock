@@ -16005,6 +16005,7 @@ dependencies = [
  "zone-precompiles",
  "zone-primitives",
  "zone-rpc",
+ "zone-sp1-program",
  "zone-stf",
  "zone-test-utils",
 ]
@@ -16081,6 +16082,32 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "zone-sp1-program"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-rlp",
+ "alloy-signer",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "reth-primitives-traits",
+ "revm",
+ "serde_json",
+ "sp1-build",
+ "sp1-sdk",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-primitives",
+ "tempo-revm",
+ "tokio",
+ "zone-stf",
+ "zone-test-utils",
 ]
 
 [[package]]
