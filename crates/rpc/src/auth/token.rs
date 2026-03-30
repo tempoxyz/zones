@@ -110,7 +110,7 @@ impl AuthorizationToken {
         if self.chain_id != expected_chain_id {
             return Err(AuthError::ChainIdMismatch);
         }
-        if self.expires_at.saturating_sub(self.issued_at) > 1800 {
+        if self.expires_at.saturating_sub(self.issued_at) > 2_592_000 {
             return Err(AuthError::WindowTooLarge);
         }
 
