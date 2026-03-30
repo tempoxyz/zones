@@ -45,9 +45,13 @@ struct BlockTransition {
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
 ///      that nextProcessedHash is an ancestor of (or equal to) currentDepositQueueHash.
 ///      This allows partial deposit processing.
+///      The deposit numbers mirror the hash chain for easy status checking:
+///      a deposit with number N is confirmed once lastProcessedDepositNumber >= N.
 struct DepositQueueTransition {
     bytes32 prevProcessedHash; // where proof starts (verified against zone state)
     bytes32 nextProcessedHash; // where zone processed up to (proof output)
+    uint64 prevDepositNumber; // deposit counter at prevProcessedHash
+    uint64 nextDepositNumber; // deposit counter at nextProcessedHash
 }
 
 /// @notice Deposit type discriminator for the unified deposit queue
@@ -472,14 +476,16 @@ interface IZonePortal {
         address to,
         uint128 netAmount,
         uint128 fee,
-        bytes32 memo
+        bytes32 memo,
+        uint64 depositNumber
     );
 
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
-        bytes32 withdrawalQueueHash
+        bytes32 withdrawalQueueHash,
+        uint64 lastProcessedDepositNumber
     );
 
     event WithdrawalProcessed(
@@ -490,7 +496,8 @@ interface IZonePortal {
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed fallbackRecipient,
         address token,
-        uint128 amount
+        uint128 amount,
+        uint64 depositNumber
     );
 
     event SequencerTransferStarted(
@@ -510,7 +517,8 @@ interface IZonePortal {
         uint8 ephemeralPubkeyYParity,
         bytes ciphertext,
         bytes12 nonce,
-        bytes16 tag
+        bytes16 tag,
+        uint64 depositNumber
     );
 
     /// @notice Emitted when sequencer updates their encryption key
@@ -827,7 +835,8 @@ interface IZoneInbox {
         bytes32 indexed tempoBlockHash,
         uint64 indexed tempoBlockNumber,
         uint256 depositsProcessed,
-        bytes32 newProcessedDepositQueueHash
+        bytes32 newProcessedDepositQueueHash,
+        uint64 lastProcessedDepositNumber
     );
 
     event DepositProcessed(

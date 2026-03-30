@@ -306,7 +306,8 @@ contract ZoneInboxTest is Test {
             keccak256(abi.encode(GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER + 1)),
             GENESIS_TEMPO_BLOCK_NUMBER + 1,
             1,
-            expectedHash
+            expectedHash,
+            1
         );
         _advanceTempo(deposits);
     }
