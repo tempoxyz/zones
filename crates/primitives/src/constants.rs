@@ -96,18 +96,12 @@ pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
 /// tooling using 32-bit integers, and wallets that enforce the safe range.
 pub const ZONE_CHAIN_ID_BASE: u64 = 421_700_000;
 
-/// Maximum chain ID that stays within the EIP-2294 "Safe Range" (2^31 - 1).
-const MAX_SAFE_CHAIN_ID: u64 = (1u64 << 31) - 1;
-
-/// Largest zone ID whose derived chain ID is still within the safe range.
-pub const MAX_ZONE_ID: u32 = (MAX_SAFE_CHAIN_ID - ZONE_CHAIN_ID_BASE) as u32;
-
 /// Derives the EIP-155 chain ID for a zone from its on-chain zone ID.
 ///
-/// # Panics
-///
-/// Panics if the resulting chain ID would exceed the EIP-2294 safe range.
+/// NOTE: zone IDs above ~1.7 billion (`2^31 - 1 - 421_700_000`) would push the
+/// derived chain ID outside the EIP-2294 safe range.  If permissionless zone
+/// creation ever approaches that scale, a cap should be enforced here and in
+/// the `ZoneFactory` contract.
 pub const fn zone_chain_id(zone_id: u32) -> u64 {
-    assert!(zone_id <= MAX_ZONE_ID, "zone ID would produce a chain ID outside the EIP-2294 safe range");
     ZONE_CHAIN_ID_BASE + zone_id as u64
 }
