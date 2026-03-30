@@ -129,12 +129,12 @@ Each batch submission includes:
 - `tempoBlockNumber` - Block zone committed to (from zone's TempoState)
 - `recentTempoBlockNumber` - Optional recent block for ancestry proof (0 = direct lookup)
 - `blockTransition` - Zone block hash transition (prevBlockHash → nextBlockHash)
-- `depositQueueTransition` - Deposit queue processing (prevProcessedHash → nextProcessedHash)
+- `depositQueueTransition` - Deposit queue processing (prevProcessedHash → nextProcessedHash, prevDepositNumber → nextDepositNumber)
 - `withdrawalQueueTransition` - Withdrawal queue hash (hash chain for this batch, or 0 if none)
 - `verifierConfig` - Opaque payload for verifier (domain separation/attestation)
 - `proof` - Validity proof or TEE attestation
 
-The portal tracks `withdrawalBatchIndex`, `blockHash` (last proven batch block), `lastSyncedTempoBlockNumber` (Tempo block zone synced to), `currentDepositQueueHash` (deposit queue head), and a fixed-size ring buffer for withdrawals.
+The portal tracks `withdrawalBatchIndex`, `blockHash` (last proven batch block), `lastSyncedTempoBlockNumber` (Tempo block zone synced to), `currentDepositQueueHash` (deposit queue head), `depositCount` (total deposits enqueued), `lastProcessedDepositNumber` (last confirmed deposit), and a fixed-size ring buffer for withdrawals.
 
 **Ancestry proofs for historical blocks**: If `tempoBlockNumber` is outside the EIP-2935 window (~8192 blocks), use `recentTempoBlockNumber` to specify a recent block still in EIP-2935. The proof verifies the ancestry chain (via parent hashes) from `tempoBlockNumber` to `recentTempoBlockNumber` inside the ZK proof, avoiding expensive on-chain header verification. This prevents zone bricking after extended downtime.
 
@@ -150,10 +150,14 @@ struct BlockTransition {
 
 /// @notice Deposit queue transition inputs/outputs for batch proofs
 /// @dev The proof reads currentDepositQueueHash from Tempo state to validate
-///      that nextProcessedHash matches currentDepositQueueHash for now. 
+///      that nextProcessedHash matches currentDepositQueueHash for now.
+///      The deposit numbers mirror the hash chain for easy status checking:
+///      a deposit with number N is confirmed once lastProcessedDepositNumber >= N.
 struct DepositQueueTransition {
     bytes32 prevProcessedHash;     // where proof starts (verified against zone state)
     bytes32 nextProcessedHash;     // where zone processed up to (proof output)
+    uint64 prevDepositNumber;      // deposit counter at prevProcessedHash
+    uint64 nextDepositNumber;      // deposit counter at nextProcessedHash
 }
 
 interface IVerifier {
@@ -195,7 +199,7 @@ The zone has access to Tempo state via the TempoState predeploy, so the proof ca
 
 `verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
 
-`submitBatch` verifies that `prevBlockHash == blockHash`, then calls the verifier. On success it updates `withdrawalBatchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with `withdrawalBatchIndex`, `nextProcessedDepositQueueHash`, `nextBlockHash`, and `withdrawalQueueHash` for off-chain auditing.
+`submitBatch` verifies that `prevBlockHash == blockHash`, then calls the verifier. On success it updates `withdrawalBatchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, `lastProcessedDepositNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with `withdrawalBatchIndex`, `nextProcessedDepositQueueHash`, `nextBlockHash`, `withdrawalQueueHash`, and `lastProcessedDepositNumber` for off-chain auditing.
 
 ### Ancestry proofs for historical blocks
 
@@ -228,16 +232,27 @@ newHash = keccak256(abi.encode(deposit, prevHash))
 
 Where `deposit` is a `Deposit` struct containing the sender, recipient, amount, and memo. Tempo state advancement and deposit processing are combined in the ZoneInbox's `advanceTempo()` function, which calls `TempoState.finalizeTempo()` internally.
 
-The portal tracks `currentDepositQueueHash` where new deposits land. The zone tracks its own `processedDepositQueueHash` in EVM state.
+The portal tracks `currentDepositQueueHash` where new deposits land, and `depositCount` — a monotonic counter incremented on every deposit (regular, encrypted, or bounce-back). Each deposit is assigned a unique `depositNumber` (1-indexed) that is emitted in `DepositMade`, `EncryptedDepositMade`, and `BounceBack` events. The zone tracks its own `processedDepositQueueHash` and `processedDepositNumber` in EVM state.
 
-**Proof requirements**: The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof. The zone's `advanceTempo()` function processes deposits and updates the zone's `processedDepositQueueHash`. The proof ensures this was done correctly by validating the Tempo state read. For now, the on-chain inbox requires an exact match.
+**Proof requirements**: The proof validates deposit processing by reading `currentDepositQueueHash` from Tempo state inside the proof. The zone's `advanceTempo()` function processes deposits and updates the zone's `processedDepositQueueHash` and `processedDepositNumber`. The proof ensures this was done correctly by validating the Tempo state read. The `DepositQueueTransition` in `submitBatch` includes both hash transitions and deposit number transitions (`prevDepositNumber` → `nextDepositNumber`), and the portal stores `lastProcessedDepositNumber` from the transition.
 
 **After batch accepted**:
 1. `lastSyncedTempoBlockNumber = tempoBlockNumber` (record how far Tempo state was synced)
+2. `lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber` (record the last deposit confirmed by proof)
 
-New deposits continue to land in `currentDepositQueueHash` while proofs are in flight. Users can check if their deposit is processed by comparing their deposit's Tempo block number against `lastSyncedTempoBlockNumber`.
+New deposits continue to land in `currentDepositQueueHash` while proofs are in flight.
 
 Proofs or attestations are assumed to be fast. No data availability is required by the verifier.
+
+### Checking deposit status
+
+Each deposit is assigned a monotonic `depositNumber` when enqueued on Tempo. To check whether a deposit has been processed by the zone:
+
+1. Read `depositNumber` from the `DepositMade` or `EncryptedDepositMade` event (e.g. `42`).
+2. Read `lastProcessedDepositNumber` from the `ZonePortal` (a public storage variable).
+3. If `lastProcessedDepositNumber >= depositNumber`, the deposit has been included in a proven batch and confirmed on Tempo.
+
+This is a simple integer comparison that anyone can perform without reconstructing the hash chain.
 
 ## Withdrawal queue
 
@@ -511,14 +526,16 @@ interface IZonePortal {
         address to,
         uint128 netAmount,
         uint128 fee,
-        bytes32 memo
+        bytes32 memo,
+        uint64 depositNumber
     );
 
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
-        bytes32 withdrawalQueueHash
+        bytes32 withdrawalQueueHash,
+        uint64 lastProcessedDepositNumber
     );
 
     event WithdrawalProcessed(
@@ -530,7 +547,8 @@ interface IZonePortal {
     event BounceBack(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed fallbackRecipient,
-        uint128 amount
+        uint128 amount,
+        uint64 depositNumber
     );
 
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
@@ -548,7 +566,8 @@ interface IZonePortal {
         uint8 ephemeralPubkeyYParity,
         bytes ciphertext,
         bytes12 nonce,
-        bytes16 tag
+        bytes16 tag,
+        uint64 depositNumber
     );
 
     /// @notice Emitted when sequencer updates their encryption key
@@ -593,6 +612,8 @@ interface IZonePortal {
     function withdrawalBatchIndex() external view returns (uint64);
     function blockHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
+    function depositCount() external view returns (uint64);
+    function lastProcessedDepositNumber() external view returns (uint64);
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
@@ -845,7 +866,8 @@ interface IZoneInbox {
         bytes32 indexed tempoBlockHash,
         uint64 indexed tempoBlockNumber,
         uint256 depositsProcessed,
-        bytes32 newProcessedDepositQueueHash
+        bytes32 newProcessedDepositQueueHash,
+        uint64 lastProcessedDepositNumber
     );
 
     event DepositProcessed(
@@ -889,6 +911,9 @@ interface IZoneInbox {
 
     /// @notice The zone's last processed deposit queue hash.
     function processedDepositQueueHash() external view returns (bytes32);
+
+    /// @notice The zone's last processed deposit number.
+    function processedDepositNumber() external view returns (uint64);
 
     /// @notice Advance Tempo state and process deposits in a single sequencer-only call.
     /// @dev This is the main entry point for the sequencer at block start.
