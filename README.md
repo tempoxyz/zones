@@ -2,7 +2,7 @@
 
 Zones are sidechains anchored to Tempo. Each zone has its own sequencer, genesis state, and portal contract that escrows deposits and processes withdrawals.
 
-**Explorers:** [Moderato](https://explore.moderato.tempo.xyz/) · [Devnet](https://explore.devnet.tempo.xyz/)
+**Explorers:** [Moderato](https://explore.moderato.tempo.xyz/)
 
 This repository contains the `tempo-zone` node, zone-specific precompiles and RPC support, and the `just` workflows for deploying and operating zones on Tempo.
 
