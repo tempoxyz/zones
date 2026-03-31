@@ -363,8 +363,10 @@ contract ZoneBridgeTest is BaseTest {
             0,
             BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: l2BlockHash }),
             DepositQueueTransition({
-                prevProcessedHash: bytes32(0), nextProcessedHash: newProcessedDepositQueueHash,
-                prevDepositNumber: 0, nextDepositNumber: 0
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: newProcessedDepositQueueHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
             }),
             withdrawalQueueHash,
             "",
