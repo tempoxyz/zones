@@ -9,7 +9,7 @@ Zones are L2 chains anchored to Tempo L1. Each zone has its own sequencer, genes
 The fastest way to deploy and run a zone on moderato:
 
 ```bash
-export L1_RPC_URL="wss://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
+export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
 just deploy-zone my-zone
 ```
 
@@ -74,12 +74,12 @@ All zone commands need an L1 RPC URL.
 
 **Moderato testnet:**
 ```bash
-export L1_RPC_URL="wss://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
+export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
 ```
 
 **Devnet:**
 ```bash
-export L1_RPC_URL="wss://eng:bold-raman-silly-torvalds@rpc.devnet.tempoxyz.dev"
+export L1_RPC_URL="wss://rpc.devnet.tempoxyz.dev"
 ```
 
 ### 2. Generate a Sequencer Key
