@@ -1,10 +1,12 @@
 # Tempo Zones
 
-Zones are sidechains anchored to Tempo L1. Each zone has its own sequencer, genesis state, and portal contract on L1 that escrows deposits and processes withdrawals.
+Zones are sidechains anchored to Tempo. Each zone has its own sequencer, genesis state, and portal contract that escrows deposits and processes withdrawals.
 
 **Explorers:** [Moderato](https://explore.moderato.tempo.xyz/) · [Devnet](https://explore.devnet.tempo.xyz/)
 
-This repository contains the `tempo-zone` node, zone-specific precompiles and RPC support, and the `just` workflows for deploying and operating zones on Tempo L1.
+This repository contains the `tempo-zone` node, zone-specific precompiles and RPC support, and the `just` workflows for deploying and operating zones on Tempo.
+
+For the main Tempo repository, see [tempoxyz/tempo](https://github.com/tempoxyz/tempo).
 
 ## Quick Start
 
@@ -31,9 +33,9 @@ just deploy-zone my-zone alphausd
 `just deploy-zone` will:
 
 - Generate a fresh sequencer keypair
-- Fund the sequencer on L1 via `tempo_fundAddress`
+- Fund the sequencer via `tempo_fundAddress`
 - Build the Solidity specs
-- Deploy a zone on L1 via `ZoneFactory`
+- Deploy a zone via `ZoneFactory`
 - Generate `generated/<name>/genesis.json` and `generated/<name>/zone.json`
 - Register the sequencer encryption key and start the zone node
 
@@ -47,9 +49,9 @@ just zone-up my-zone false release
 
 ## How Zones Work
 
-- A zone sequencer subscribes to Tempo L1 for headers, deposits, and token-enablement events, including backfill from the zone's anchor block.
-- The zone builds one sidechain block per L1 block, processing L1-driven state transitions through system transactions before app transactions.
-- The zone monitor batches zone blocks back to L1 and processes withdrawals from the zone back to L1 users.
+- A zone sequencer subscribes to Tempo for headers, deposits, and token-enablement events, including backfill from the zone's anchor block.
+- The zone builds one sidechain block per Tempo block, processing Tempo-driven state transitions through system transactions before app transactions.
+- The zone monitor batches zone blocks back to Tempo and processes withdrawals from the zone back to Tempo users.
 
 ## More Docs
 
