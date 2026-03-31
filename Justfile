@@ -358,6 +358,19 @@ enable-token token:
         sleep 0.5
     done
 
+[group('zone')]
+[doc('Lists TIP-20 token addresses currently enabled on the ZonePortal. Pass a portal address or set L1_PORTAL_ADDRESS. Requires L1_RPC_URL.')]
+list-enabled-tokens portal="":
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PORTAL="{{portal}}"
+    if [[ -z "$PORTAL" ]]; then
+        PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var or pass a portal address}"
+    fi
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    for ((i=0,n=$(cast call "$PORTAL" "enabledTokenCount()(uint256)" --rpc-url "$HTTP_RPC"); i<n; i++)); do cast call "$PORTAL" "enabledTokenAt(uint256)(address)" "$i" --rpc-url "$HTTP_RPC"; done
+
 [group('tip403')]
 [doc('Creates a new TIP-20 token on L1 via TIP20Factory. Returns the token address. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
 create-token name symbol salt="0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890":
