@@ -1,6 +1,6 @@
 # Tempo Zones
 
-Zones are L2 chains anchored to Tempo L1. Each zone has its own sequencer, genesis state, and portal contract on L1 that escrows deposits and processes withdrawals.
+Zones are sidechains anchored to Tempo L1. Each zone has its own sequencer, genesis state, and portal contract on L1 that escrows deposits and processes withdrawals.
 
 **Explorers:** [Moderato](https://explore.moderato.tempo.xyz/) · [Devnet](https://explore.devnet.tempo.xyz/)
 
@@ -48,7 +48,7 @@ just zone-up my-zone false release
 ## How Zones Work
 
 - A zone sequencer subscribes to Tempo L1 for headers, deposits, and token-enablement events, including backfill from the zone's anchor block.
-- The zone builds one L2 block per L1 block, processing L1-driven state transitions through system transactions before app transactions.
+- The zone builds one sidechain block per L1 block, processing L1-driven state transitions through system transactions before app transactions.
 - The zone monitor batches zone blocks back to L1 and processes withdrawals from the zone back to L1 users.
 
 ## More Docs
