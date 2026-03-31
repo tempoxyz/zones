@@ -1,0 +1,49 @@
+[package]
+name = "tempo-zone"
+description = "Tempo Zone L2 node binary"
+default-run = "tempo-zone"
+
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# tempo
+zone = { path = "../../crates/tempo-zone" }
+zone-primitives.workspace = true
+tempo-chainspec = { workspace = true, features = ["cli"] }
+
+# reth
+reth-cli-util.workspace = true
+reth-consensus.workspace = true
+reth-ethereum = { workspace = true, features = ["cli"] }
+reth-tracing.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+alloy-signer-local.workspace = true
+
+# tls
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+
+# misc
+clap.workspace = true
+eyre.workspace = true
+const-hex.workspace = true
+k256.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[[bin]]
+name = "tempo-zone"
+path = "src/main.rs"
+
+[features]
+default = ["jemalloc"]
+
+jemalloc = ["reth-cli-util/jemalloc", "reth-ethereum/jemalloc"]
