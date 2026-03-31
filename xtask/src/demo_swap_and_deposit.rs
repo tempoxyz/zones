@@ -1,31 +1,28 @@
 use alloy::{
     network::EthereumWallet,
-    primitives::{Address, B256, Bytes, U256, keccak256},
+    primitives::{Address, B256, Bytes, U256},
     providers::{Provider, ProviderBuilder},
-    signers::{Signer, local::PrivateKeySigner},
     sol,
-    sol_types::SolValue,
 };
 use eyre::{WrapErr as _, eyre};
-use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
 use std::{path::PathBuf, time::Duration};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::{
     IRolesAuth, ITIP20 as TIP20Token, ITIP20Factory as TIP20Factory,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
-use zone::{
-    abi::{
-        EncryptedDepositPayload, SwapAndDepositRouterEncryptedCallback, ZONE_OUTBOX_ADDRESS,
-        ZoneOutbox, ZonePortal,
-    },
-    precompiles::ecies::encrypt_deposit,
-};
+use zone::abi::{ZONE_OUTBOX_ADDRESS, ZoneOutbox, ZonePortal};
 
-use crate::zone_utils::{
-    ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
-    normalize_http_rpc, token_balance, wait_for_balance, wait_for_deposit_processed,
-    wait_for_token_enabled, wait_for_withdrawal_processed,
+use crate::{
+    bridge_utils::{
+        EncryptionKeyMode, build_encrypted_deposit_payload, build_encrypted_router_callback,
+        parse_private_key,
+    },
+    zone_utils::{
+        ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
+        normalize_http_rpc, token_balance, wait_for_balance, wait_for_deposit_processed,
+        wait_for_token_enabled, wait_for_withdrawal_processed,
+    },
 };
 
 const DEMO_PATHUSD_GAS_NET: u128 = 5_000_000;
@@ -314,17 +311,17 @@ impl DemoSwapAndDeposit {
             receipt.transaction_hash
         );
 
-        let portal_contract_seq = ZonePortal::new(portal, &l1_seq);
-        let callback_data = build_encrypted_router_callback(
-            &portal_contract_seq,
+        let payload = build_encrypted_deposit_payload(
+            &l1_seq,
             portal,
-            beta,
             operator,
             B256::ZERO,
-            expected_beta,
-            &sequencer_key,
+            EncryptionKeyMode::EnsureRegistered {
+                sequencer_private_key: &sequencer_key,
+            },
         )
         .await?;
+        let callback_data = build_encrypted_router_callback(beta, &payload, expected_beta);
         let l1_from_block = l1.get_block_number().await.unwrap_or(0);
         let receipt = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2_operator)
             .requestWithdrawal(
@@ -546,142 +543,4 @@ async fn enable_token_with_retry<P: Provider<TempoNetwork>>(
     Err(last_err
         .map(|err| eyre!(err))
         .unwrap_or_else(|| eyre!("enableToken failed after retries")))
-}
-
-fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
-    private_key
-        .strip_prefix("0x")
-        .unwrap_or(private_key)
-        .parse()
-        .wrap_err("invalid private key")
-}
-
-async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(
-    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
-    portal_address: Address,
-    token_out: Address,
-    recipient: Address,
-    memo: B256,
-    min_amount_out: u128,
-    sequencer_private_key: &str,
-) -> eyre::Result<Bytes> {
-    let (key, key_index) =
-        ensure_sequencer_encryption_key(portal, portal_address, sequencer_private_key).await?;
-    let y_parity = key.normalized_y_parity().ok_or_else(|| {
-        eyre!(
-            "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
-            key.yParity
-        )
-    })?;
-
-    let encrypted =
-        encrypt_deposit(&key.x, y_parity, recipient, memo, portal_address, key_index)
-            .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
-
-    let callback = SwapAndDepositRouterEncryptedCallback {
-        token_out,
-        target_portal: portal_address,
-        key_index,
-        encrypted: EncryptedDepositPayload {
-            ephemeralPubkeyX: encrypted.eph_pub_x,
-            ephemeralPubkeyYParity: encrypted.eph_pub_y_parity,
-            ciphertext: Bytes::from(encrypted.ciphertext),
-            nonce: encrypted.nonce.into(),
-            tag: encrypted.tag.into(),
-        },
-        min_amount_out,
-    };
-
-    Ok(Bytes::from(callback.abi_encode()))
-}
-
-async fn ensure_sequencer_encryption_key<P: Provider<TempoNetwork>>(
-    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
-    portal_address: Address,
-    sequencer_private_key: &str,
-) -> eyre::Result<(ZonePortal::sequencerEncryptionKeyReturn, U256)> {
-    let (expected_x, expected_y_parity) = derive_encryption_public_key(sequencer_private_key)
-        .wrap_err("failed to derive the sequencer encryption public key from SEQUENCER_KEY")?;
-    let key_count = portal
-        .encryptionKeyCount()
-        .call()
-        .await
-        .wrap_err("failed to read portal encryption key count")?;
-
-    let needs_registration = if key_count == U256::ZERO {
-        println!("  Registering the sequencer encryption key on the portal");
-        true
-    } else {
-        let current_key = portal
-            .sequencerEncryptionKey()
-            .call()
-            .await
-            .wrap_err("failed to read the active sequencer encryption key")?;
-        let current_y_parity = current_key.normalized_y_parity().ok_or_else(|| {
-            eyre!(
-                "unexpected portal yParity {:#x}, expected 0/1 or 0x02/0x03",
-                current_key.yParity
-            )
-        })?;
-        if current_key.x == expected_x && current_y_parity == expected_y_parity {
-            false
-        } else {
-            println!(
-                "  Portal encryption key does not match SEQUENCER_KEY; registering the current sequencer key"
-            );
-            true
-        }
-    };
-
-    if needs_registration {
-        register_sequencer_encryption_key(portal, portal_address, sequencer_private_key).await?;
-    }
-
-    portal
-        .encryption_key()
-        .await
-        .wrap_err("failed to fetch the active sequencer encryption key")
-}
-
-async fn register_sequencer_encryption_key<P: Provider<TempoNetwork>>(
-    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
-    portal_address: Address,
-    sequencer_private_key: &str,
-) -> eyre::Result<()> {
-    let (x, y_parity) = derive_encryption_public_key(sequencer_private_key)
-        .wrap_err("failed to derive the sequencer encryption public key")?;
-    let signer = parse_private_key(sequencer_private_key)?;
-    let message = keccak256((portal_address, x, U256::from(y_parity)).abi_encode());
-    let sig = signer
-        .sign_hash(&message)
-        .await
-        .wrap_err("failed to sign the encryption key proof-of-possession")?;
-    let pop_v = sig.v() as u8 + 27;
-    let pop_r = B256::from(sig.r().to_be_bytes::<32>());
-    let pop_s = B256::from(sig.s().to_be_bytes::<32>());
-
-    let receipt = portal
-        .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
-        .send_sync()
-        .await
-        .wrap_err("failed to send setSequencerEncryptionKey")?;
-    check(&receipt, "setSequencerEncryptionKey")?;
-    println!(
-        "  Sequencer encryption key registered on L1  [tx: {}]",
-        receipt.transaction_hash
-    );
-    Ok(())
-}
-
-fn derive_encryption_public_key(sequencer_private_key: &str) -> eyre::Result<(B256, u8)> {
-    let key_str = sequencer_private_key
-        .strip_prefix("0x")
-        .unwrap_or(sequencer_private_key);
-    let enc_key = k256::SecretKey::from_slice(&const_hex::decode(key_str)?)?;
-    let scalar: Scalar = *enc_key.to_nonzero_scalar();
-    let pub_point = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
-    let encoded = pub_point.to_encoded_point(true);
-    let x = B256::from_slice(encoded.x().unwrap().as_slice());
-    let y_parity = encoded.as_bytes()[0];
-    Ok((x, y_parity))
 }

@@ -216,6 +216,31 @@ export ZONE_RPC_URL="http://localhost:8546"
 just send-deposit-encrypted 1000000
 ```
 
+#### Reusable Encrypted Payload Builder
+
+If you want to separate encryption from submission, build the encrypted `(recipient, memo)` payload once and reuse it later for encrypted deposits or routed withdrawals. The helper prints JSON, which makes it easy to stash in a file or pipe into another command.
+
+```bash
+# Build reusable payload JSON for the zone's current sequencer key
+just build-encrypted-deposit-payload my-zone
+
+# Build reusable payload JSON for a specific recipient and memo
+just build-encrypted-deposit-payload my-zone <recipient-address> 0x0000000000000000000000000000000000000000000000000000000000000042
+```
+
+To reuse the output with an encrypted deposit, write it to a file and pass it back in:
+
+```bash
+just build-encrypted-deposit-payload my-zone > /tmp/encrypted-payload.json
+cargo run -p tempo-xtask -- encrypted-deposit \
+  --amount 1000000 \
+  --payload-file /tmp/encrypted-payload.json \
+  --private-key "$PRIVATE_KEY" \
+  --zone-rpc-url "${ZONE_RPC_URL:-http://localhost:8546}"
+```
+
+The helper is read-only: it uses the target portal's currently active encryption key and fails if no active key is registered.
+
 #### Check balance on the zone
 
 ```bash
@@ -234,9 +259,58 @@ just send-withdrawal 1000000 <recipient-address>   # withdraw to a specific addr
 
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
 
+#### Routed Withdrawal via Router
+
+Use this when you want to route a withdrawal through the L1 router and deposit the result into a target zone. The source and target zones can be the same for a same-zone swap-and-deposit flow, or different for a cross-zone transfer. When the source and target tokens differ, pass `min-out` to protect the L1 swap.
+
+For optional overrides like `min-out`, `router`, and `target-rpc`, use the xtask directly because it is clearer than positional `just` arguments:
+
+```bash
+# Same-zone routed swap and deposit
+cargo run -p tempo-xtask -- send-routed-withdrawal \
+  --source-zone my-zone \
+  --source-token alphausd \
+  --target-zone my-zone \
+  --target-token betausd \
+  --amount 100000000 \
+  --min-amount-out 950000 \
+  --source-rpc-url http://localhost:8546 \
+  --target-rpc-url http://localhost:8546 \
+  --private-key "$PRIVATE_KEY"
+
+# Cross-zone transfer with the same token on both sides
+cargo run -p tempo-xtask -- send-routed-withdrawal \
+  --source-zone zone-a \
+  --source-token pathusd \
+  --target-zone zone-b \
+  --target-token pathusd \
+  --amount 1000000 \
+  --source-rpc-url http://localhost:8546 \
+  --target-rpc-url http://localhost:8547 \
+  --private-key "$PRIVATE_KEY"
+```
+
+If the source zone's metadata does not already contain the router address, pass it explicitly with `router=<address>`. You can also use zone IDs or portal addresses instead of names when you already know them:
+
+```bash
+cargo run -p tempo-xtask -- send-routed-withdrawal \
+  --source-zone 1 \
+  --source-token alphausd \
+  --target-zone 0x8f2aecbC9eC1dc5875f5f602d821a73F8b1826cD \
+  --target-token betausd \
+  --amount 100000000 \
+  --min-amount-out 950000 \
+  --router 0x032969016bC8C2fd8CaB0B51cbd41F55525e3724 \
+  --source-rpc-url http://localhost:8546 \
+  --target-rpc-url http://localhost:8547 \
+  --private-key "$PRIVATE_KEY"
+```
+
 #### Router Swap + Deposit Demo (Same Zone)
 
-This demo exercises the `SwapAndDepositRouter` flow against a running zone. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone via an encrypted deposit. If the portal does not already have the current sequencer encryption key registered, the demo registers it automatically before building the routed callback payload.
+This is the full self-contained same-zone demo. It creates temporary `AlphaUSD` and `BetaUSD` tokens on L1, seeds matching StablecoinDEX liquidity, withdraws `AlphaUSD` from the zone to the router, swaps on L1, and deposits `BetaUSD` back into the same zone via the reusable encrypted payload path. If the portal does not already have the current sequencer encryption key registered, the demo registers it automatically before building the routed callback payload.
+
+If you only want the reusable building blocks, use `just build-encrypted-deposit-payload ...` and `just send-routed-withdrawal ...` instead.
 
 Prerequisites:
 - A running zone with an active sequencer
@@ -486,9 +560,11 @@ graph TB
 | `just max-approve-portal` | Approve portal to spend tokens on L1 |
 | `just send-deposit [to]` | Deposit tokens from L1 to zone (defaults to sender) |
 | `just send-deposit-encrypted [to]` | Encrypted deposit — hides recipient and memo on-chain |
+| `just build-encrypted-deposit-payload <target-zone> [recipient] [memo]` | Build reusable encrypted deposit payload JSON for a target zone |
 | `just enable-token <token>` | Enable a TIP-20 token on the portal for bridging (sequencer only) |
 | `just max-approve-outbox` | Approve outbox to spend tokens on zone |
 | `just send-withdrawal [to]` | Withdraw tokens from zone to L1 (defaults to sender) |
+| `just send-routed-withdrawal <source-zone> <source-token> <target-zone> <target-token>` | Route a withdrawal through the router and deposit into the target zone |
 | `just demo-swap-and-deposit <name>` | Self-contained same-zone router demo: create tokens, seed DEX liquidity, swap on L1, deposit output back into the zone |
 | `just check-balance <addr>` | Check token balance on the zone |
 | `just zone-auth-token <name>` | Generate a signed private RPC auth token (10 min TTL) |

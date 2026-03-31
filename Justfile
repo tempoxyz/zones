@@ -95,16 +95,38 @@ send-deposit amount="1000000" to="" token="0x20C00000000000000000000000000000000
 
 [group('zone')]
 [doc('Sends an encrypted deposit to the ZonePortal on L1 (recipient and memo are hidden on-chain). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and PRIVATE_KEY env vars. Run max-approve-portal first.')]
-send-deposit-encrypted amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" rpc=zone_rpc:
+send-deposit-encrypted amount="1000000" to="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" token="0x20C0000000000000000000000000000000000000" payload-file="" rpc=zone_rpc:
     #!/bin/bash
     set -euo pipefail
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
-    TO="{{to}}"
-    if [[ -z "$TO" ]]; then
-        TO=$(cast wallet address "$PK")
+    ARGS=(--amount "{{amount}}" --token "{{token}}" --zone-rpc-url "{{rpc}}" --private-key "$PK")
+    if [[ -n "{{payload-file}}" ]]; then
+        ARGS+=(--payload-file "{{payload-file}}")
+        if [[ -n "{{to}}" ]]; then
+            ARGS+=(--to "{{to}}")
+        fi
+    else
+        TO="{{to}}"
+        if [[ -z "$TO" ]]; then
+            TO=$(cast wallet address "$PK")
+        fi
+        ARGS+=(--memo "{{memo}}" --to "$TO")
     fi
-    ARGS="--amount {{amount}} --token {{token}} --memo {{memo}} --to $TO --zone-rpc-url {{rpc}}"
-    cargo run -p tempo-xtask -- encrypted-deposit --private-key "$PK" $ARGS
+    cargo run -p tempo-xtask -- encrypted-deposit "${ARGS[@]}"
+
+[group('zone')]
+[doc('Builds reusable encrypted deposit payload JSON for a target zone. Target zone may be a name, zone ID, or portal address. Defaults recipient to the PRIVATE_KEY signer address. Requires L1_RPC_URL; PRIVATE_KEY is only needed when omitting the recipient.')]
+build-encrypted-deposit-payload target-zone recipient="" memo="0x0000000000000000000000000000000000000000000000000000000000000000":
+    #!/bin/bash
+    set -euo pipefail
+    ARGS=(--target-zone "{{target-zone}}" --memo "{{memo}}")
+    if [[ -n "{{recipient}}" ]]; then
+        ARGS+=(--recipient "{{recipient}}")
+    fi
+    if [[ -n "${PRIVATE_KEY:-}" ]]; then
+        ARGS+=(--private-key "$PRIVATE_KEY")
+    fi
+    cargo run -p tempo-xtask -- build-encrypted-deposit-payload "${ARGS[@]}"
 
 [group('zone')]
 [doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...).')]
@@ -312,6 +334,39 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
         fi
         sleep 0.25
     done
+
+[group('zone')]
+[doc('Approves the source token on the source zone, builds encrypted router callback data, and submits a routed withdrawal in one command. Source and target zones may be names, zone IDs, or portal addresses. Swaps require min-out. Requires L1_RPC_URL and PRIVATE_KEY env vars.')]
+send-routed-withdrawal source-zone source-token target-zone target-token amount="1000000" recipient="" memo="0x0000000000000000000000000000000000000000000000000000000000000000" min-out="" router="" source-rpc=zone_rpc target-rpc="" fallback-recipient="":
+    #!/bin/bash
+    set -euo pipefail
+    PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
+    ARGS=(
+        --source-zone "{{source-zone}}"
+        --source-token "{{source-token}}"
+        --target-zone "{{target-zone}}"
+        --target-token "{{target-token}}"
+        --amount "{{amount}}"
+        --source-rpc-url "{{source-rpc}}"
+        --private-key "$PK"
+        --memo "{{memo}}"
+    )
+    if [[ -n "{{recipient}}" ]]; then
+        ARGS+=(--recipient "{{recipient}}")
+    fi
+    if [[ -n "{{min-out}}" ]]; then
+        ARGS+=(--min-amount-out "{{min-out}}")
+    fi
+    if [[ -n "{{router}}" ]]; then
+        ARGS+=(--router "{{router}}")
+    fi
+    if [[ -n "{{target-rpc}}" ]]; then
+        ARGS+=(--target-rpc-url "{{target-rpc}}")
+    fi
+    if [[ -n "{{fallback-recipient}}" ]]; then
+        ARGS+=(--fallback-recipient "{{fallback-recipient}}")
+    fi
+    cargo run -p tempo-xtask -- send-routed-withdrawal "${ARGS[@]}"
 
 [group('zone')]
 [doc('Enables a TIP-20 token on the ZonePortal for bridging. Token can be an address or alias (pathusd, alphausd, betausd). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and SEQUENCER_KEY env vars.')]

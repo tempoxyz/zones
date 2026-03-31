@@ -5,17 +5,19 @@
 
 use alloy::{
     network::{EthereumWallet, primitives::ReceiptResponse},
-    primitives::{Address, B256, Bytes, address},
+    primitives::{Address, B256, U256, address},
     providers::{Provider, ProviderBuilder},
-    rpc::types::Filter,
-    signers::local::PrivateKeySigner,
-    sol_types::SolEvent,
 };
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
-use zone::{
-    abi::{EncryptedDepositPayload, ZoneInbox, ZonePortal},
-    precompiles::ecies::encrypt_deposit,
+use zone::abi::ZonePortal;
+
+use crate::{
+    bridge_utils::{
+        BuiltEncryptedDepositPayload, EncryptionKeyMode, build_encrypted_deposit_payload,
+        parse_private_key, read_payload_json, resolve_zone_ref,
+    },
+    zone_utils::{EncryptedDepositResult, wait_for_encrypted_deposit_result},
 };
 
 #[derive(Debug, clap::Parser)]
@@ -26,7 +28,7 @@ pub(crate) struct EncryptedDeposit {
 
     /// ZonePortal contract address on Tempo L1.
     #[arg(long, env = "L1_PORTAL_ADDRESS")]
-    portal: Address,
+    portal: Option<Address>,
 
     /// Private key (hex) for signing the deposit transaction.
     #[arg(long, env = "PRIVATE_KEY")]
@@ -48,6 +50,10 @@ pub(crate) struct EncryptedDeposit {
     #[arg(long, default_value_t = B256::ZERO)]
     memo: B256,
 
+    /// Read a prebuilt encrypted payload JSON file from disk, or '-' for stdin.
+    #[arg(long)]
+    payload_file: Option<String>,
+
     /// Zone L2 RPC URL. If set, waits for the deposit to be processed on L2.
     #[arg(long, env = "ZONE_RPC_URL")]
     zone_rpc_url: Option<String>,
@@ -55,13 +61,8 @@ pub(crate) struct EncryptedDeposit {
 
 impl EncryptedDeposit {
     pub(crate) async fn run(self) -> eyre::Result<()> {
-        let key_str = self
-            .private_key
-            .strip_prefix("0x")
-            .unwrap_or(&self.private_key);
-        let signer: PrivateKeySigner = key_str.parse()?;
+        let signer = parse_private_key(&self.private_key)?;
         let sender = signer.address();
-        let to = self.to.unwrap_or(sender);
         let wallet = EthereumWallet::from(signer);
         let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(wallet)
@@ -76,46 +77,44 @@ impl EncryptedDeposit {
             None
         };
 
-        let portal = ZonePortal::new(self.portal, &provider);
+        let default_to = self.to.unwrap_or(sender);
+        let (portal_address, key_index, payload, wait_to, wait_memo) =
+            if let Some(payload_file) = self.payload_file.as_deref() {
+                resolve_prebuilt_payload(self.portal, self.to, read_payload_json(payload_file)?)?
+            } else {
+                let portal_address = self.portal.ok_or_else(|| {
+                    eyre!("portal address is required unless --payload-file is provided")
+                })?;
+                let resolved_zone =
+                    resolve_zone_ref(&portal_address.to_string(), &provider, None).await?;
+                let built = build_encrypted_deposit_payload(
+                    &provider,
+                    portal_address,
+                    default_to,
+                    self.memo,
+                    EncryptionKeyMode::ReadOnly {
+                        expected_sequencer_private_key: resolved_zone.sequencer_key.as_deref(),
+                    },
+                )
+                .await?;
+                (
+                    portal_address,
+                    built.key_index,
+                    built.encrypted_deposit_payload,
+                    Some(default_to),
+                    Some(self.memo),
+                )
+            };
 
-        // Fetch sequencer encryption key
-        println!("Fetching sequencer encryption key...");
-        let (key, key_index) = portal
-            .encryption_key()
-            .await
-            .wrap_err("failed to fetch encryption key — is one set?")?;
+        let portal = ZonePortal::new(portal_address, &provider);
 
-        let seq_pub_x = key.x;
-        let seq_pub_y_parity = key.normalized_y_parity().ok_or_else(|| {
-            eyre!(
-                "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
-                key.yParity
-            )
-        })?;
         println!(
-            "Encryption key index: {key_index}, x: {seq_pub_x}, parity: {seq_pub_y_parity:#x}"
+            "Sending encrypted deposit of {} to portal {}...",
+            self.amount, portal_address
         );
-
-        // Encrypt (to, memo) to the sequencer's public key
-        let enc = encrypt_deposit(
-            &seq_pub_x,
-            seq_pub_y_parity,
-            to,
-            self.memo,
-            self.portal,
-            key_index,
-        )
-        .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
-
-        let payload = EncryptedDepositPayload {
-            ephemeralPubkeyX: enc.eph_pub_x,
-            ephemeralPubkeyYParity: enc.eph_pub_y_parity,
-            ciphertext: Bytes::from(enc.ciphertext),
-            nonce: enc.nonce.into(),
-            tag: enc.tag.into(),
+        if let Some(wait_to) = wait_to {
+            println!("  Expected recipient on zone: {wait_to}");
         };
-
-        println!("Sending encrypted deposit of {} to {to}...", self.amount);
         let receipt = portal
             .depositEncrypted(self.token, self.amount, key_index, payload)
             .send_sync()
@@ -133,8 +132,10 @@ impl EncryptedDeposit {
 
         // Wait for L2 processing if zone RPC is provided
         if let (Some(zone_rpc), Some(from_block)) = (&self.zone_rpc_url, l2_from_block) {
-            self.wait_for_l2_processing(zone_rpc, from_block, sender, to)
-                .await?;
+            self.wait_for_l2_processing(
+                zone_rpc, from_block, sender, wait_to, self.token, wait_memo,
+            )
+            .await?;
         }
 
         Ok(())
@@ -146,61 +147,168 @@ impl EncryptedDeposit {
         zone_rpc: &str,
         from_block: u64,
         sender: Address,
-        to: Address,
+        to: Option<Address>,
+        token: Address,
+        memo: Option<B256>,
     ) -> eyre::Result<()> {
-        use zone::abi::ZONE_INBOX_ADDRESS;
-
         println!("Waiting for encrypted deposit to be processed on L2...");
-        let l2 = ProviderBuilder::new().connect(zone_rpc).await?;
-
-        let processed_filter = Filter::new()
-            .address(ZONE_INBOX_ADDRESS)
-            .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
-            .from_block(from_block);
-
-        let failed_filter = Filter::new()
-            .address(ZONE_INBOX_ADDRESS)
-            .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
-            .from_block(from_block);
-
-        loop {
-            // Check for successful processing
-            let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
-            for log in &logs {
-                if let Ok(event) = ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
-                    && event.data.sender == sender
-                    && event.data.to == to
-                {
-                    let block = log.block_number.unwrap_or(0);
-                    println!("Encrypted deposit processed on L2! (block {block})");
-                    println!("  Token:  {}", event.data.token);
-                    println!("  Sender: {}", event.data.sender);
-                    println!("  To:     {}", event.data.to);
-                    println!("  Amount: {}", event.data.amount);
-                    println!("  Memo:   {}", event.data.memo);
-                    return Ok(());
-                }
+        let l2 = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect(zone_rpc)
+            .await?;
+        match wait_for_encrypted_deposit_result(&l2, from_block, sender, to, Some(token), memo)
+            .await?
+        {
+            EncryptedDepositResult::Processed {
+                block,
+                token,
+                sender,
+                to,
+                amount,
+                memo,
+            } => {
+                println!("Encrypted deposit processed on L2! (block {block})");
+                println!("  Token:  {token}");
+                println!("  Sender: {sender}");
+                println!("  To:     {to}");
+                println!("  Amount: {amount}");
+                println!("  Memo:   {memo}");
             }
-
-            // Check for failure
-            let failed_logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
-            for log in &failed_logs {
-                if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
-                    && event.data.sender == sender
-                {
-                    let block = log.block_number.unwrap_or(0);
-                    println!(
-                        "WARNING: Encrypted deposit FAILED on L2 (block {block}). \
-                         Funds returned to sender."
-                    );
-                    println!("  Token:  {}", event.data.token);
-                    println!("  Sender: {}", event.data.sender);
-                    println!("  Amount: {}", event.data.amount);
-                    return Ok(());
-                }
+            EncryptedDepositResult::Failed {
+                block,
+                token,
+                sender,
+                amount,
+            } => {
+                println!(
+                    "WARNING: Encrypted deposit FAILED on L2 (block {block}). Funds returned to sender."
+                );
+                println!("  Token:  {token}");
+                println!("  Sender: {sender}");
+                println!("  Amount: {amount}");
             }
-
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
         }
+
+        Ok(())
+    }
+}
+
+fn resolve_prebuilt_payload(
+    cli_portal: Option<Address>,
+    cli_to: Option<Address>,
+    built: BuiltEncryptedDepositPayload,
+) -> eyre::Result<(
+    Address,
+    U256,
+    zone::abi::EncryptedDepositPayload,
+    Option<Address>,
+    Option<B256>,
+)> {
+    let portal_address = match cli_portal {
+        Some(portal) if portal != built.target_portal => {
+            return Err(eyre!(
+                "--portal {} does not match targetPortal {} from payload file",
+                portal,
+                built.target_portal
+            ));
+        }
+        Some(portal) => portal,
+        None => built.target_portal,
+    };
+
+    Ok((
+        portal_address,
+        built.key_index,
+        built.encrypted_deposit_payload,
+        cli_to,
+        None,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bridge_utils::{BuiltEncryptedDepositPayloadJson, payload_json_to_string};
+    use clap::Parser as _;
+    use std::{
+        fs,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+    use zone::abi::EncryptedDepositPayload;
+
+    fn temp_payload_path() -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "tempo-xtask-encrypted-deposit-{}-{}.json",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ))
+    }
+
+    fn sample_payload() -> eyre::Result<BuiltEncryptedDepositPayload> {
+        Ok(BuiltEncryptedDepositPayload {
+            target_portal: "0x9000000000000000000000000000000000000009".parse()?,
+            key_index: U256::from(7),
+            encrypted_deposit_payload: EncryptedDepositPayload {
+                ephemeralPubkeyX:
+                    "0x0000000000000000000000000000000000000000000000000000000000001234".parse()?,
+                ephemeralPubkeyYParity: 3,
+                ciphertext: vec![0xaa, 0xbb, 0xcc].into(),
+                nonce: [0x11; 12].into(),
+                tag: [0x22; 16].into(),
+            },
+        })
+    }
+
+    #[test]
+    fn payload_file_args_parse_without_portal() -> eyre::Result<()> {
+        let path = temp_payload_path();
+        fs::write(&path, payload_json_to_string(&sample_payload()?)?)?;
+
+        let args = EncryptedDeposit::try_parse_from([
+            "tempo-xtask",
+            "--l1-rpc-url",
+            "http://127.0.0.1:8545",
+            "--private-key",
+            "0x59c6995e998f97a5a0044966f094538e7dca4a5c7f75b61e8eac2e5c9c1b06f2",
+            "--amount",
+            "1000000",
+            "--payload-file",
+            path.to_str().unwrap(),
+        ])?;
+
+        assert_eq!(args.payload_file.as_deref(), path.to_str());
+        assert!(args.portal.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn prebuilt_payload_branch_reuses_file_contents() -> eyre::Result<()> {
+        let path = temp_payload_path();
+        let expected = sample_payload()?;
+        fs::write(&path, payload_json_to_string(&expected)?)?;
+
+        let round_tripped: BuiltEncryptedDepositPayloadJson =
+            serde_json::from_str(&fs::read_to_string(&path)?)?;
+        let built = round_tripped.into_built()?;
+        let (portal, key_index, payload, wait_to, wait_memo) = resolve_prebuilt_payload(
+            None,
+            Some("0x1000000000000000000000000000000000000001".parse()?),
+            built,
+        )?;
+
+        assert_eq!(portal, expected.target_portal);
+        assert_eq!(key_index, expected.key_index);
+        assert_eq!(
+            payload.ciphertext,
+            expected.encrypted_deposit_payload.ciphertext
+        );
+        assert_eq!(
+            wait_to,
+            Some("0x1000000000000000000000000000000000000001".parse()?)
+        );
+        assert_eq!(wait_memo, None);
+        Ok(())
     }
 }

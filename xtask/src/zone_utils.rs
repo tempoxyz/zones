@@ -1,6 +1,6 @@
 use alloy::{
     network::primitives::ReceiptResponse,
-    primitives::{Address, U256, address},
+    primitives::{Address, B256, U256, address},
     providers::Provider,
     rpc::types::Filter,
     sol_types::SolEvent,
@@ -76,6 +76,22 @@ impl ZoneMetadata {
             .transpose()
     }
 
+    pub(crate) fn get_optional_u32(&self, key: &str) -> eyre::Result<Option<u32>> {
+        self.value
+            .get(key)
+            .map(|value| {
+                value
+                    .as_u64()
+                    .ok_or_else(|| eyre!("{key} in {} is not an integer", self.path.display()))
+                    .and_then(|value| {
+                        u32::try_from(value).map_err(|_| {
+                            eyre!("{key} in {} does not fit in u32", self.path.display())
+                        })
+                    })
+            })
+            .transpose()
+    }
+
     pub(crate) fn get_optional_string(&self, key: &str) -> Option<String> {
         self.value
             .get(key)
@@ -105,6 +121,24 @@ pub(crate) fn check(receipt: &impl ReceiptResponse, label: &str) -> eyre::Result
         return Err(eyre!("{label} reverted"));
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum EncryptedDepositResult {
+    Processed {
+        block: u64,
+        token: Address,
+        sender: Address,
+        to: Address,
+        amount: u128,
+        memo: B256,
+    },
+    Failed {
+        block: u64,
+        token: Address,
+        sender: Address,
+        amount: u128,
+    },
 }
 
 pub(crate) async fn fund_l1_wallet<P: Provider<TempoNetwork>>(
@@ -238,4 +272,61 @@ pub(crate) async fn wait_for_withdrawal_processed<P: Provider<TempoNetwork>>(
     Err(eyre!(
         "timeout waiting for WithdrawalProcessed(to={to}, token={token}, amount={amount}, callbackSuccess={callback_success})"
     ))
+}
+
+pub(crate) async fn wait_for_encrypted_deposit_result<P: Provider<TempoNetwork>>(
+    l2: &P,
+    from_block: u64,
+    sender: Address,
+    to: Option<Address>,
+    token: Option<Address>,
+    memo: Option<B256>,
+) -> eyre::Result<EncryptedDepositResult> {
+    let processed_filter = Filter::new()
+        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
+        .from_block(from_block);
+
+    let failed_filter = Filter::new()
+        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
+        .from_block(from_block);
+
+    loop {
+        let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
+        for log in &logs {
+            if let Ok(event) = ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
+                && event.data.sender == sender
+                && to.is_none_or(|to| event.data.to == to)
+                && token.is_none_or(|token| event.data.token == token)
+                && memo.is_none_or(|memo| event.data.memo == memo)
+            {
+                return Ok(EncryptedDepositResult::Processed {
+                    block: log.block_number.unwrap_or(0),
+                    token: event.data.token,
+                    sender: event.data.sender,
+                    to: event.data.to,
+                    amount: event.data.amount,
+                    memo: event.data.memo,
+                });
+            }
+        }
+
+        let failed_logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
+        for log in &failed_logs {
+            if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
+                && event.data.sender == sender
+                && token.is_none_or(|token| event.data.token == token)
+            {
+                return Ok(EncryptedDepositResult::Failed {
+                    block: log.block_number.unwrap_or(0),
+                    token: event.data.token,
+                    sender: event.data.sender,
+                    amount: event.data.amount,
+                });
+            }
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
 }
