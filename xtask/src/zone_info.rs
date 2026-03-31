@@ -11,10 +11,7 @@ pub(crate) struct ZoneInfoCmd {
     identifier: String,
 
     /// Tempo L1 HTTP RPC URL.
-    #[arg(
-        long,
-        default_value = "https://rpc.moderato.tempo.xyz"
-    )]
+    #[arg(long, default_value = "https://rpc.moderato.tempo.xyz")]
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.

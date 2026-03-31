@@ -57,10 +57,7 @@ pub(crate) struct CreateZone {
     output: PathBuf,
 
     /// Tempo L1 HTTP RPC URL used to fetch headers and send the createZone transaction.
-    #[arg(
-        long,
-        default_value = "https://rpc.moderato.tempo.xyz"
-    )]
+    #[arg(long, default_value = "https://rpc.moderato.tempo.xyz")]
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
