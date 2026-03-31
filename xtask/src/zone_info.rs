@@ -13,7 +13,7 @@ pub(crate) struct ZoneInfoCmd {
     /// Tempo L1 HTTP RPC URL.
     #[arg(
         long,
-        default_value = "https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
+        default_value = "https://rpc.moderato.tempo.xyz"
     )]
     l1_rpc_url: String,
 

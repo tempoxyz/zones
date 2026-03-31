@@ -25,7 +25,7 @@ pub(crate) struct DeployRouter {
     #[arg(
         long,
         env = "L1_RPC_URL",
-        default_value = "https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
+        default_value = "https://rpc.moderato.tempo.xyz"
     )]
     l1_rpc_url: String,
 

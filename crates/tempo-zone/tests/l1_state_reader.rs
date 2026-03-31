@@ -16,7 +16,7 @@ const ZONE_PORTAL: Address = address!("0x1bc99e6a8c4689f1884527152ba542f01231614
 
 fn l1_rpc_url() -> String {
     std::env::var("L1_RPC_URL")
-        .unwrap_or_else(|_| "https://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz".into())
+        .unwrap_or_else(|_| "https://rpc.moderato.tempo.xyz".into())
 }
 
 async fn make_provider() -> L1StateProvider {

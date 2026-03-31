@@ -20,7 +20,7 @@ Prerequisites:
 Deploy and start a zone on Moderato:
 
 ```bash
-export L1_RPC_URL="wss://eng:bold-raman-silly-torvalds@rpc.moderato.tempo.xyz"
+export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
 just deploy-zone my-zone
 ```
 
