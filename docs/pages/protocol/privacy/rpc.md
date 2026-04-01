@@ -118,11 +118,13 @@ The RPC server MUST reject authorization tokens where:
 
 - `zoneId` does not equal the zone's configured `zoneId` **and** `zoneId` is not `0` (an unscoped token with `zoneId == 0` is valid for any zone — see [Unscoped tokens](#unscoped-tokens)).
 - `chainId` does not equal the zone's configured chain ID (`eth_chainId`).
-- `expiresAt - issuedAt > 2592000` (maximum validity window is 30 days).
+- `expiresAt - issuedAt > 2592000` (protocol maximum validity window is 30 days).
 - `expiresAt <= now` (key has expired).
 - `issuedAt > now + 60` (clock skew tolerance of 60 seconds into the future).
 - The signature is malformed or does not verify.
 - For Keychain signatures: the signing key is not authorized, is revoked, or is expired in the AccountKeychain.
+
+Implementations MAY enforce a shorter local maximum validity window as configuration, but they MUST NOT accept tokens longer than 30 days.
 
 ### Sequencer access
 

@@ -16,7 +16,7 @@ use reth_ethereum::cli::Cli;
 use reth_ethereum::chainspec::EthChainSpec;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
-use zone::{ZoneNode, evm::ZoneEvmConfig};
+use zone::{ZoneNode, evm::ZoneEvmConfig, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS};
 use zone_primitives::constants::zone_chain_id;
 
 type ZoneCli = Cli<TempoChainSpecParser, ZoneArgs>;
@@ -114,6 +114,15 @@ struct ZoneArgs {
         default_value_t = 8544
     )]
     pub private_rpc_port: u16,
+
+    /// Maximum auth token validity window the private RPC accepts, in seconds.
+    /// Must be less than or equal to the protocol maximum of 2592000 seconds (30 days).
+    #[arg(
+        long = "private-rpc.max-auth-token-validity-secs",
+        env = "PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS",
+        default_value_t = DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS
+    )]
+    pub private_rpc_max_auth_token_validity_secs: u64,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -220,6 +229,9 @@ fn main() {
                 ),
                 zone_id: args.zone_id,
                 chain_id: handle.node.chain_spec().chain().id(),
+                max_auth_token_validity: Duration::from_secs(
+                    args.private_rpc_max_auth_token_validity_secs,
+                ),
                 zone_portal: args.portal_address,
                 sequencer: sequencer_addr,
             };
