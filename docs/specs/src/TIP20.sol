@@ -58,6 +58,11 @@ contract TIP20 is ITIP20, TIP20RolesAuth {
         nextQuoteToken = _quoteToken;
         // No currency registry; all tokens use 6 decimals by default
 
+        // USD-denominated tokens are eligible for fee payment by default
+        if (keccak256(bytes(_currency)) == keccak256(bytes("USD"))) {
+            isFeeToken = true;
+        }
+
         hasRole[admin][DEFAULT_ADMIN_ROLE] = true; // Grant admin role to first admin.
         emit RoleMembershipUpdated(DEFAULT_ADMIN_ROLE, admin, sender, true);
     }
@@ -75,6 +80,7 @@ contract TIP20 is ITIP20, TIP20RolesAuth {
     //////////////////////////////////////////////////////////////*/
 
     bool public paused = false;
+    bool public isFeeToken = false;
     uint256 public supplyCap = type(uint128).max; // Default to cap at uint128.max
 
     /*//////////////////////////////////////////////////////////////

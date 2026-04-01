@@ -5,6 +5,8 @@ import { IFeeAMM } from "./IFeeAMM.sol";
 
 interface IFeeManager is IFeeAMM {
 
+    error NotFeeToken();
+
     event UserTokenSet(address indexed user, address indexed token);
     event ValidatorTokenSet(address indexed validator, address indexed token);
     event FeesDistributed(address indexed validator, address indexed token, uint256 amount);

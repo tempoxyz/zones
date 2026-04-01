@@ -144,6 +144,9 @@ interface ITIP20 {
 
     function decimals() external pure returns (uint8);
 
+    /// @notice Returns whether this token can be used to pay transaction fees.
+    function isFeeToken() external view returns (bool);
+
     function globalRewardPerToken() external view returns (uint256);
 
     /// @notice Mints new tokens to a specified address.

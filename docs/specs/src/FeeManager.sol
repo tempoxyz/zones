@@ -19,21 +19,26 @@ contract FeeManager is IFeeManager, FeeAMM {
         _;
     }
 
+    function _requireFeeToken(address token) internal view {
+        if (!ITIP20(token).isFeeToken()) revert NotFeeToken();
+    }
+
     function setValidatorToken(address token) external onlyDirectCall {
         require(msg.sender != block.coinbase, "CANNOT_CHANGE_WITHIN_BLOCK");
-        _requireUSDTIP20(token);
+        _requireFeeToken(token);
         validatorTokens[msg.sender] = token;
         emit ValidatorTokenSet(msg.sender, token);
     }
 
     function setUserToken(address token) external onlyDirectCall {
-        _requireUSDTIP20(token);
+        _requireFeeToken(token);
         userTokens[msg.sender] = token;
         emit UserTokenSet(msg.sender, token);
     }
 
     function collectFeePreTx(address user, address userToken, uint256 maxAmount) external {
         require(msg.sender == address(0), "ONLY_PROTOCOL");
+        _requireFeeToken(userToken);
 
         address validatorToken = validatorTokens[block.coinbase];
         if (validatorToken == address(0)) {
@@ -56,6 +61,7 @@ contract FeeManager is IFeeManager, FeeAMM {
         external
     {
         require(msg.sender == address(0), "ONLY_PROTOCOL");
+        _requireFeeToken(userToken);
 
         address feeRecipient = block.coinbase;
         address validatorToken = validatorTokens[feeRecipient];

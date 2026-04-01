@@ -105,14 +105,13 @@ contract FeeManagerTest is BaseTest {
     }
 
     function test_setValidatorToken_RevertsIf_NonUSDToken() public {
-        vm.prank(validator);
-        vm.coinbase(validator);
+        vm.prank(validator, validator);
 
         TIP20 eurToken =
             TIP20(factory.createToken("EuroToken", "EUR", "EUR", pathUSD, admin, bytes32("eur")));
 
         if (!isTempo) {
-            vm.expectRevert("INVALID_TOKEN");
+            vm.expectRevert(IFeeManager.NotFeeToken.selector);
         }
 
         try amm.setValidatorToken(address(eurToken)) {
@@ -187,6 +186,63 @@ contract FeeManagerTest is BaseTest {
         } catch {
             // Expected to revert
         }
+    }
+
+    function test_collectFeePreTx_RevertsIf_NonFeeToken() public {
+        TIP20 eurToken =
+            TIP20(factory.createToken("EuroToken", "EUR", "EUR", pathUSD, admin, bytes32("eur2")));
+
+        vm.startPrank(admin);
+        eurToken.grantRole(_ISSUER_ROLE, admin);
+        eurToken.mint(user, 10_000e18);
+        vm.stopPrank();
+
+        vm.prank(address(0));
+        vm.coinbase(validator);
+
+        if (!isTempo) {
+            vm.expectRevert(IFeeManager.NotFeeToken.selector);
+        }
+
+        try amm.collectFeePreTx(user, address(eurToken), 100e18) {
+            if (isTempo) {
+                revert CallShouldHaveReverted();
+            }
+        } catch {
+            // Expected to revert
+        }
+    }
+
+    function test_collectFeePostTx_RevertsIf_NonFeeToken() public {
+        TIP20 eurToken =
+            TIP20(factory.createToken("EuroToken2", "EUR2", "EUR", pathUSD, admin, bytes32("eur3")));
+
+        vm.prank(address(0));
+        vm.coinbase(validator);
+
+        if (!isTempo) {
+            vm.expectRevert(IFeeManager.NotFeeToken.selector);
+        }
+
+        try amm.collectFeePostTx(user, 100e18, 80e18, address(eurToken)) {
+            if (isTempo) {
+                revert CallShouldHaveReverted();
+            }
+        } catch {
+            // Expected to revert
+        }
+    }
+
+    function test_isFeeToken_TrueForUSD() public view {
+        assertTrue(userToken.isFeeToken());
+        assertTrue(validatorToken.isFeeToken());
+        assertTrue(pathUSD.isFeeToken());
+    }
+
+    function test_isFeeToken_FalseForNonUSD() public {
+        TIP20 eurToken =
+            TIP20(factory.createToken("EuroToken3", "EUR3", "EUR", pathUSD, admin, bytes32("eur4")));
+        assertFalse(eurToken.isFeeToken());
     }
 
     function test_collectFeePreTx_RevertsIf_InsufficientLiquidity() public {
