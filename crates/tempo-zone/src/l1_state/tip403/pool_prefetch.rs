@@ -7,6 +7,8 @@
 //! via the [`PolicyTaskHandle`](super::PolicyTaskHandle), warming the policy cache
 //! before block building.
 
+use std::collections::HashSet;
+
 use alloy_primitives::TxKind;
 use alloy_sol_types::SolCall;
 use reth_transaction_pool::TransactionPool;
@@ -74,9 +76,13 @@ where
         // Resolve the fee payer (may differ from sender for AA txs with delegated fees)
         let fee_payer = tx.transaction.inner().fee_payer(sender).unwrap_or(sender);
 
+        let mut prefetched = HashSet::new();
+
         // Pre-fetch fee payer authorization for the fee token (every tx pays fees)
-        debug!(%fee_token, %fee_payer, "Pre-fetching TIP-403 fee token authorization");
-        let _ = handle.send_resolve_policy(fee_token, fee_payer, AuthRole::Sender);
+        if prefetched.insert((fee_token, fee_payer, AuthRole::Sender)) {
+            debug!(%fee_token, %fee_payer, "Pre-fetching TIP-403 fee token authorization");
+            let _ = handle.send_resolve_policy(fee_token, fee_payer, AuthRole::Sender);
+        }
 
         for (kind, input) in tx.transaction.inner().calls() {
             let TxKind::Call(token) = kind else {
@@ -115,13 +121,15 @@ where
                 continue;
             };
 
-            if token != fee_token || transfer_sender != fee_payer {
+            if prefetched.insert((token, transfer_sender, AuthRole::Sender)) {
                 debug!(%token, %transfer_sender, "Pre-fetching TIP-403 sender authorization");
                 let _ = handle.send_resolve_policy(token, transfer_sender, AuthRole::Sender);
             }
 
-            debug!(%token, recipient = %recipient, "Pre-fetching TIP-403 recipient authorization");
-            let _ = handle.send_resolve_policy(token, recipient, AuthRole::Recipient);
+            if prefetched.insert((token, recipient, AuthRole::Recipient)) {
+                debug!(%token, recipient = %recipient, "Pre-fetching TIP-403 recipient authorization");
+                let _ = handle.send_resolve_policy(token, recipient, AuthRole::Recipient);
+            }
         }
     }
 
