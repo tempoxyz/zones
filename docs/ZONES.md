@@ -464,7 +464,7 @@ graph TB
 | `--withdrawal-poll-interval-secs` | 5 | How often (seconds) the withdrawal processor polls the L1 queue |
 | `--http.port` | 8546 | HTTP JSON-RPC port |
 | `--private-rpc.port` | 8544 | Private RPC server port |
-| `--private-rpc.max-auth-token-validity-secs` | 2592000 | Maximum auth token validity the private RPC accepts, in seconds (up to 30 days) |
+| `--private-rpc.max-auth-token-validity-secs` | 2592000 | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
 
 ### Environment Variables
 
@@ -474,7 +474,7 @@ graph TB
 | `SEQUENCER_KEY` | For sequencing | Sequencer private key |
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
-| `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds (up to 30 days) |
+| `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
 
 ## Justfile Commands Reference

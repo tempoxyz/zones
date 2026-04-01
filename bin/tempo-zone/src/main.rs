@@ -116,7 +116,7 @@ struct ZoneArgs {
     pub private_rpc_port: u16,
 
     /// Maximum auth token validity window the private RPC accepts, in seconds.
-    /// Must be less than or equal to the protocol maximum of 2592000 seconds (30 days).
+    /// The effective limit is capped at the 30 day protocol maximum.
     #[arg(
         long = "private-rpc.max-auth-token-validity-secs",
         env = "PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS",
