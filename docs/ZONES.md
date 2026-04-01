@@ -449,6 +449,8 @@ graph TB
 | pathUSD (TIP-20) | `0x20C0000000000000000000000000000000000000` |
 | ZoneFactory (moderato) | `0x7Cc496Dc634b718289c192b59CF90262C5228545` |
 
+The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zone` and `zone-info` point at it automatically, and `deploy-router` falls back to it when `zone.json` does not already record `zoneFactory`.
+
 ### Zone Node CLI Options
 
 | Flag | Default | Description |

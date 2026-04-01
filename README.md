@@ -39,6 +39,14 @@ just deploy-zone my-zone alphausd
 - Generate `generated/<name>/genesis.json` and `generated/<name>/zone.json`
 - Register the sequencer encryption key and start the zone node
 
+### Key Addresses
+
+| Contract | Address | Explorer |
+|----------|---------|----------|
+| ZoneFactory (moderato) | `0x7Cc496Dc634b718289c192b59CF90262C5228545` | [View on Moderato explorer](https://explore.moderato.tempo.xyz/address/0x7Cc496Dc634b718289c192b59CF90262C5228545) |
+
+`just create-zone`, `just deploy-zone`, and `just zone-info` default to this Moderato `ZoneFactory`. `just deploy-router` also falls back to it when `zone.json` does not already include `zoneFactory`.
+
 `zone.json` stores the deployed portal address, zone ID, anchor block, and sequencer metadata used by later commands such as `just zone-up` and `just deploy-router`.
 
 To restart the same zone later:
