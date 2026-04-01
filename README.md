@@ -47,6 +47,18 @@ To restart the same zone later:
 just zone-up my-zone false release
 ```
 
+## Query the Private RPC
+
+With `PRIVATE_KEY` set to your zone wallet, you can hit the private RPC on `http://localhost:8544` with a one-liner. `just zone-auth-token` reads `generated/<name>/zone.json`, signs a short-lived auth token, and `cast rpc` passes it through the `X-Authorization-Token` header:
+
+```bash
+cast rpc zone_getAuthorizationTokenInfo \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $(just zone-auth-token my-zone)"
+```
+
+See [docs/ZONES.md](docs/ZONES.md) for more private RPC examples, including reusable tokens and `eth_call` queries.
+
 ## How Zones Work
 
 - A zone sequencer subscribes to Tempo for headers, deposits, and token-enablement events, including backfill from the zone's anchor block.
