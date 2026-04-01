@@ -97,6 +97,7 @@ contract ZoneBridgeTest is BaseTest {
     //////////////////////////////////////////////////////////////*/
 
     MockWithdrawalReceiver public withdrawalReceiver;
+    address public verifier;
     uint32 public zoneId;
 
     bytes32 constant GENESIS_BLOCK_HASH = keccak256("genesis");
@@ -128,7 +129,8 @@ contract ZoneBridgeTest is BaseTest {
         super.setUp();
 
         // === Deploy L1 Contracts ===
-        l1Factory = new ZoneFactory(); // Keep factory for verifier only
+        l1Factory = new ZoneFactory();
+        verifier = l1Factory.verifier();
         withdrawalReceiver = new MockWithdrawalReceiver();
 
         // Deploy zone token FIRST (used for both L1 escrow and zone-side operations).
@@ -155,7 +157,7 @@ contract ZoneBridgeTest is BaseTest {
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
             address(messengerContract),
             admin, // sequencer
-            l1Factory.verifier(),
+            address(l1Factory),
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber
         );
@@ -359,6 +361,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Submit to Tempo
         l1Portal.submitBatch(
+            verifier,
             uint64(block.number - 1),
             0,
             BlockTransition({ prevBlockHash: l1Portal.blockHash(), nextBlockHash: l2BlockHash }),

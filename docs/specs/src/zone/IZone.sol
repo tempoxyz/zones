@@ -20,7 +20,6 @@ struct ZoneInfo {
     address messenger;
     address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
     address sequencer;
-    address verifier;
     bytes32 genesisBlockHash;
     bytes32 genesisTempoBlockHash;
     uint64 genesisTempoBlockNumber;
@@ -420,7 +419,6 @@ interface IZoneFactory {
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (sequencer can enable more later)
         address sequencer;
-        address verifier;
         ZoneParams zoneParams;
     }
 
@@ -430,7 +428,6 @@ interface IZoneFactory {
         address indexed messenger,
         address initialToken,
         address sequencer,
-        address verifier,
         bytes32 genesisBlockHash,
         bytes32 genesisTempoBlockHash,
         uint64 genesisTempoBlockNumber
@@ -441,8 +438,10 @@ interface IZoneFactory {
     error InvalidVerifier();
     error InsufficientGas();
     error ZoneIdOverflow();
+    error UnknownVerifier();
+    error UseForkVerifier();
 
-    function isValidVerifier(address verifier) external view returns (bool);
+    function isValidVerifier(address v) external view returns (bool);
     function createZone(CreateZoneParams calldata params)
         external
         returns (uint32 zoneId, address portal);
@@ -450,6 +449,26 @@ interface IZoneFactory {
     function zones(uint32 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
     function isZoneMessenger(address messenger) external view returns (bool);
+
+    /// @notice Current active verifier (pre-fork or promoted from previous forkVerifier)
+    function verifier() external view returns (address);
+
+    /// @notice Post-fork verifier (address(0) if no fork yet)
+    function forkVerifier() external view returns (address);
+
+    /// @notice L1 block number at which forkVerifier was set (0 = no fork)
+    function forkActivationBlock() external view returns (uint64);
+
+    /// @notice Protocol version counter, incremented at each hard fork
+    function protocolVersion() external view returns (uint64);
+
+    /// @notice Rotate verifiers and increment protocolVersion. Called as L1 system transaction.
+    function setForkVerifier(address newForkVerifier) external;
+
+    /// @notice Validate that targetVerifier is recognized and allowed for the given tempoBlockNumber.
+    /// @dev Called by portals during submitBatch. Reverts if the verifier is unknown or if
+    ///      the old verifier is used for a batch at or past the fork activation block.
+    function validateVerifier(address targetVerifier, uint64 tempoBlockNumber) external view;
 
 }
 
@@ -562,7 +581,7 @@ interface IZonePortal {
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
     function zoneGasRate() external view returns (uint128);
-    function verifier() external view returns (address);
+    function zoneFactory() external view returns (IZoneFactory);
     function withdrawalBatchIndex() external view returns (uint64);
     function blockHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
@@ -700,6 +719,7 @@ interface IZonePortal {
 
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
     function submitBatch(
+        address targetVerifier,
         uint64 tempoBlockNumber,
         uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,

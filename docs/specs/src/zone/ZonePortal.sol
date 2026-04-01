@@ -18,6 +18,7 @@ import {
     EncryptedDepositPayload,
     EncryptionKeyEntry,
     IVerifier,
+    IZoneFactory,
     IZoneMessenger,
     IZonePortal,
     QueuedDeposit,
@@ -55,7 +56,7 @@ contract ZonePortal is IZonePortal {
 
     uint32 public immutable zoneId;
     address public immutable messenger;
-    address public immutable verifier;
+    IZoneFactory public immutable zoneFactory;
     uint64 public immutable genesisTempoBlockNumber;
 
     /// @notice Current sequencer address
@@ -102,14 +103,14 @@ contract ZonePortal is IZonePortal {
         address _initialToken,
         address _messenger,
         address _sequencer,
-        address _verifier,
+        address _factory,
         bytes32 _genesisBlockHash,
         uint64 _genesisTempoBlockNumber
     ) {
         zoneId = _zoneId;
         messenger = _messenger;
         sequencer = _sequencer;
-        verifier = _verifier;
+        zoneFactory = IZoneFactory(_factory);
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
 
@@ -696,9 +697,11 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
+    /// @param targetVerifier The verifier to use (must be recognized by the factory)
     /// @param tempoBlockNumber Block number zone committed to (from zone's TempoState)
     /// @param recentTempoBlockNumber Optional recent block for ancestry proof (0 = use direct lookup)
     function submitBatch(
+        address targetVerifier,
         uint64 tempoBlockNumber,
         uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
@@ -713,6 +716,9 @@ contract ZonePortal is IZonePortal {
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
         }
+
+        // Validate verifier is recognized and allowed for this tempoBlockNumber
+        zoneFactory.validateVerifier(targetVerifier, tempoBlockNumber);
 
         // Validate tempoBlockNumber is valid (applies to both direct and ancestry modes)
         if (tempoBlockNumber < genesisTempoBlockNumber) revert InvalidTempoBlockNumber();
@@ -739,7 +745,7 @@ contract ZonePortal is IZonePortal {
         }
 
         // Verify proof (handles both direct and ancestry modes)
-        bool valid = IVerifier(verifier)
+        bool valid = IVerifier(targetVerifier)
             .verify(
                 tempoBlockNumber,
                 anchorBlockNumber,

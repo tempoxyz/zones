@@ -68,6 +68,7 @@ contract ZoneIntegrationTest is BaseTest {
 
     // Helpers
     TrackingReceiver public receiver;
+    address public verifier;
     uint32 public zoneId;
 
     bytes32 constant GENESIS_BLOCK_HASH = keccak256("genesis");
@@ -77,7 +78,8 @@ contract ZoneIntegrationTest is BaseTest {
     function setUp() public override {
         super.setUp();
 
-        l1Factory = new ZoneFactory(); // Keep for verifier only
+        l1Factory = new ZoneFactory();
+        verifier = l1Factory.verifier();
         receiver = new TrackingReceiver();
 
         // Deploy zone token FIRST
@@ -101,7 +103,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(l2ZoneToken),
             address(messengerContract),
             admin,
-            l1Factory.verifier(),
+            address(l1Factory),
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber
         );
@@ -305,6 +307,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Submit L1 batch for first deposit
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
+            verifier,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -400,6 +403,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Submit L1 batch
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
+            verifier,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -467,6 +471,7 @@ contract ZoneIntegrationTest is BaseTest {
         bytes32 wHash1 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
+            verifier,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -492,6 +497,7 @@ contract ZoneIntegrationTest is BaseTest {
         bytes32 wHash2 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
+            verifier,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -517,6 +523,7 @@ contract ZoneIntegrationTest is BaseTest {
         bytes32 wHash3 = _finalizeWithdrawalBatch(type(uint256).max);
 
         l1Portal.submitBatch(
+            verifier,
             uint64(block.number - 1),
             0,
             BlockTransition({
@@ -614,6 +621,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Submit batch with withdrawals
         vm.roll(block.number + 1);
         l1Portal.submitBatch(
+            verifier,
             uint64(block.number - 1),
             0,
             BlockTransition({

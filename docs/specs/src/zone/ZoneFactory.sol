@@ -27,7 +27,18 @@ contract ZoneFactory is IZoneFactory {
     mapping(address => bool) internal _isZonePortal;
     mapping(address => bool) internal _isZoneMessenger;
     mapping(address => bool) internal _validVerifiers;
-    address internal _verifier;
+
+    /// @notice Current active verifier (pre-fork or promoted from previous forkVerifier)
+    address public verifier;
+
+    /// @notice Post-fork verifier (address(0) if no fork yet)
+    address public forkVerifier;
+
+    /// @notice L1 block number at which forkVerifier was set (0 = no fork)
+    uint64 public forkActivationBlock;
+
+    /// @notice Protocol version counter, incremented at each hard fork
+    uint64 public protocolVersion;
 
     /// @notice Tracks deployment count for CREATE address prediction
     /// @dev Contracts start with nonce 1, not 0. Nonce 1 is used by the Verifier deployment
@@ -41,7 +52,7 @@ contract ZoneFactory is IZoneFactory {
     constructor() {
         address v = address(new Verifier());
         _validVerifiers[v] = true;
-        _verifier = v;
+        verifier = v;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -55,7 +66,6 @@ contract ZoneFactory is IZoneFactory {
         // Validate initial token is a TIP-20
         if (!TempoUtilities.isTIP20(params.initialToken)) revert InvalidToken();
         if (params.sequencer == address(0)) revert InvalidSequencer();
-        if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
         if (gasleft() < ZONE_CREATION_GAS) revert InsufficientGas();
 
         zoneId = _nextZoneId;
@@ -89,7 +99,7 @@ contract ZoneFactory is IZoneFactory {
             params.initialToken,
             messengerAddress,
             params.sequencer,
-            params.verifier,
+            address(this),
             params.zoneParams.genesisBlockHash,
             params.zoneParams.genesisTempoBlockNumber
         );
@@ -105,7 +115,6 @@ contract ZoneFactory is IZoneFactory {
             messenger: messengerAddress,
             initialToken: params.initialToken,
             sequencer: params.sequencer,
-            verifier: params.verifier,
             genesisBlockHash: params.zoneParams.genesisBlockHash,
             genesisTempoBlockHash: params.zoneParams.genesisTempoBlockHash,
             genesisTempoBlockNumber: params.zoneParams.genesisTempoBlockNumber
@@ -120,7 +129,6 @@ contract ZoneFactory is IZoneFactory {
             messengerAddress,
             params.initialToken,
             params.sequencer,
-            params.verifier,
             params.zoneParams.genesisBlockHash,
             params.zoneParams.genesisTempoBlockHash,
             params.zoneParams.genesisTempoBlockNumber
@@ -156,6 +164,37 @@ contract ZoneFactory is IZoneFactory {
     }
 
     /*//////////////////////////////////////////////////////////////
+                          VERIFIER MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Rotate verifiers and increment protocolVersion.
+    /// @dev Called as an L1 system transaction at hard fork time. O(1) — no per-zone iteration.
+    ///      On first fork: verifier keeps its value, forkVerifier is set.
+    ///      On subsequent forks: previous forkVerifier promoted to verifier, new one installed.
+    function setForkVerifier(address newForkVerifier) external {
+        if (forkVerifier != address(0)) {
+            verifier = forkVerifier;
+        }
+        forkVerifier = newForkVerifier;
+        forkActivationBlock = uint64(block.number);
+        _validVerifiers[newForkVerifier] = true;
+        protocolVersion++;
+    }
+
+    /// @notice Validate that targetVerifier is recognized and allowed for tempoBlockNumber.
+    /// @dev Called by portals during submitBatch.
+    function validateVerifier(address targetVerifier, uint64 tempoBlockNumber) external view {
+        if (targetVerifier != verifier && targetVerifier != forkVerifier) {
+            revert UnknownVerifier();
+        }
+        if (targetVerifier == verifier && forkActivationBlock != 0) {
+            if (tempoBlockNumber >= forkActivationBlock) {
+                revert UseForkVerifier();
+            }
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
                                  VIEWS
     //////////////////////////////////////////////////////////////*/
 
@@ -178,10 +217,6 @@ contract ZoneFactory is IZoneFactory {
 
     function isValidVerifier(address v) external view returns (bool) {
         return _validVerifiers[v];
-    }
-
-    function verifier() external view returns (address) {
-        return _verifier;
     }
 
 }

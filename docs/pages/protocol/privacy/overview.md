@@ -52,8 +52,9 @@ A zone is created via `ZoneFactory.createZone(...)` with:
 
 - `initialToken`: the first Tempo TIP-20 address to enable. The sequencer can enable additional tokens later via `ZonePortal.enableToken()`.
 - `sequencer`: permissioned sequencer address.
-- `verifier`: `IVerifier` implementation for proof or attestation.
 - `zoneParams`: initial configuration (genesis block hash, genesis Tempo block hash/number).
+
+The verifier is not per-zone — it is owned by `ZoneFactory` and shared across all zones. See [Hard fork upgrades](#hard-fork-upgrades) for the verifier lifecycle.
 
 The factory deploys a `ZonePortal` that escrows enabled tokens on Tempo and a `ZoneMessenger` for withdrawal callbacks. The initial token is automatically enabled at deployment.
 
@@ -126,6 +127,7 @@ The sequencer posts batches to Tempo via a single `submitBatch` call (sequencer-
 
 Each batch submission includes:
 
+- `targetVerifier` - Address of the verifier to use (must be recognized by `ZoneFactory`)
 - `tempoBlockNumber` - Block zone committed to (from zone's TempoState)
 - `recentTempoBlockNumber` - Optional recent block for ancestry proof (0 = direct lookup)
 - `blockTransition` - Zone block hash transition (prevBlockHash → nextBlockHash)
@@ -195,7 +197,7 @@ The zone has access to Tempo state via the TempoState predeploy, so the proof ca
 
 `verifierData` + `proof` are opaque to the portal: ZK systems can ignore `verifierData`, while TEEs can pack attestation envelopes/quotes and measurement checks into `verifierData` for the verifier contract to enforce.
 
-`submitBatch` verifies that `prevBlockHash == blockHash`, then calls the verifier. On success it updates `withdrawalBatchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with `withdrawalBatchIndex`, `nextProcessedDepositQueueHash`, `nextBlockHash`, and `withdrawalQueueHash` for off-chain auditing.
+`submitBatch` first validates the `targetVerifier` via `ZoneFactory.validateVerifier(targetVerifier, tempoBlockNumber)`, which checks the verifier is recognized and that the old verifier is not used for batches at or past the fork activation block. It then verifies `prevBlockHash == blockHash`, calls the target verifier, and on success updates `withdrawalBatchIndex`, `blockHash`, `lastSyncedTempoBlockNumber`, adds withdrawals to the queue, and emits `BatchSubmitted` with `withdrawalBatchIndex`, `nextProcessedDepositQueueHash`, `nextBlockHash`, and `withdrawalQueueHash` for off-chain auditing.
 
 ### Ancestry proofs for historical blocks
 
@@ -343,7 +345,6 @@ struct ZoneInfo {
     address messenger;
     address initialToken;       // first TIP-20 enabled at creation
     address sequencer;
-    address verifier;
     bytes32 genesisBlockHash;
     bytes32 genesisTempoBlockHash;
     uint64 genesisTempoBlockNumber;
@@ -477,7 +478,6 @@ interface IZoneFactory {
     struct CreateZoneParams {
         address initialToken;   // first TIP-20 to enable (sequencer can enable more later)
         address sequencer;
-        address verifier;
         ZoneParams zoneParams;
     }
 
@@ -487,7 +487,6 @@ interface IZoneFactory {
         address indexed messenger,
         address initialToken,
         address sequencer,
-        address verifier,
         bytes32 genesisBlockHash,
         bytes32 genesisTempoBlockHash,
         uint64 genesisTempoBlockNumber
@@ -497,6 +496,14 @@ interface IZoneFactory {
     function zoneCount() external view returns (uint32);
     function zones(uint32 zoneId) external view returns (ZoneInfo memory);
     function isZonePortal(address portal) external view returns (bool);
+
+    // Verifier lifecycle (centralized — shared across all zones)
+    function verifier() external view returns (address);
+    function forkVerifier() external view returns (address);
+    function forkActivationBlock() external view returns (uint64);
+    function protocolVersion() external view returns (uint64);
+    function setForkVerifier(address newForkVerifier) external;
+    function validateVerifier(address targetVerifier, uint64 tempoBlockNumber) external view;
 }
 ```
 
@@ -579,7 +586,7 @@ interface IZonePortal {
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
     function zoneGasRate() external view returns (uint128);
-    function verifier() external view returns (address);
+    function zoneFactory() external view returns (IZoneFactory);
     function genesisTempoBlockNumber() external view returns (uint64);
 
     /// @notice Token registry (multi-asset support)
@@ -651,6 +658,7 @@ interface IZonePortal {
 
     /// @notice Submit a batch and verify the proof. Only callable by the sequencer.
     function submitBatch(
+        address targetVerifier,
         uint64 tempoBlockNumber,
         uint64 recentTempoBlockNumber,
         BlockTransition calldata blockTransition,
@@ -1747,14 +1755,16 @@ Same-block activation is necessary for correctness: if the fork changes the L1 h
 
 ### Verifier routing
 
-The portal maintains two verifier slots. The batch submitter specifies which verifier to use; the portal checks that the specified address is one of the two active verifiers:
+Verifier state is centralized in `ZoneFactory`, shared across all zones. The batch submitter specifies which verifier to use; the portal delegates validation to the factory:
 
 ```solidity
+// In ZoneFactory:
 address public verifier;              // pre-fork verifier
 address public forkVerifier;          // post-fork verifier (address(0) if no fork yet)
 uint64  public forkActivationBlock;   // L1 block at which forkVerifier was set (0 = no fork)
+uint64  public protocolVersion;       // incremented at each hard fork
 
-function submitBatch(address targetVerifier, uint64 tempoBlockNumber, ...) external {
+function validateVerifier(address targetVerifier, uint64 tempoBlockNumber) external view {
     require(
         targetVerifier == verifier || targetVerifier == forkVerifier,
         "unknown verifier"
@@ -1762,30 +1772,39 @@ function submitBatch(address targetVerifier, uint64 tempoBlockNumber, ...) exter
     if (targetVerifier == verifier && forkActivationBlock != 0) {
         require(tempoBlockNumber < forkActivationBlock, "use fork verifier");
     }
-    require(IVerifier(targetVerifier).verify(...), "invalid proof");
-    ...
 }
+
+// In ZonePortal.submitBatch:
+zoneFactory.validateVerifier(targetVerifier, tempoBlockNumber);
+require(IVerifier(targetVerifier).verify(...), "invalid proof");
 ```
 
-The sequencer knows which prover it used and passes the corresponding verifier. The portal enforces that the old verifier is only used for batches whose `tempoBlockNumber` predates the fork. `forkActivationBlock` is set to `block.number` during `setForkVerifier` — no explicit `F` parameter is needed since the system transaction executes at the fork block itself.
+The sequencer knows which prover it used and passes the corresponding verifier. The factory enforces that the old verifier is only used for batches whose `tempoBlockNumber` predates the fork. `forkActivationBlock` is set to `block.number` during `setForkVerifier` — no explicit `F` parameter is needed since the system transaction executes at the fork block itself.
 
 This prevents a non-upgraded node (or a malicious one that bypasses fork signaling) from submitting post-fork batches proved under old rules to the old verifier.
 
 The `IVerifier` interface is unchanged across forks. New proof parameters are passed via the opaque `verifierConfig` bytes.
 
+Centralizing verifier state in the factory means hard fork upgrades are **O(1)** — a single `setForkVerifier` call updates state for all zones, rather than iterating over every portal.
+
 ### Two-verifier invariant
 
 At most two verifiers are active at any time. When a new fork occurs, the previous fork's verifier is promoted to the `verifier` slot, and the new fork verifier takes the `forkVerifier` slot. The verifier that was in the `verifier` slot (from two forks ago) is deprecated.
 
-The L1 hard fork executes:
+The L1 hard fork executes a single system transaction on `ZoneFactory`:
 
-```
-verifier            = forkVerifier       // promote previous fork verifier
-forkVerifier        = new_fork_verifier  // set new fork verifier
-forkActivationBlock = block.number       // record cutoff for old verifier
+```solidity
+function setForkVerifier(address newForkVerifier) external {
+    if (forkVerifier != address(0)) {
+        verifier = forkVerifier;       // promote previous fork verifier
+    }
+    forkVerifier = newForkVerifier;    // set new fork verifier
+    forkActivationBlock = block.number; // record cutoff for old verifier
+    protocolVersion++;
+}
 ```
 
-For the first fork, `verifier` retains its original value (set at zone creation) and `forkVerifier` is populated for the first time.
+For the first fork, `verifier` retains its original value (set at factory deployment) and `forkVerifier` is populated for the first time.
 
 This means the previous verifier remains active between forks, allowing zones that are behind to submit pre-fork batches. At the next fork, the N-2 verifier is deprecated. A zone that has not caught up past the N-2 fork boundary by the time the N-1 fork arrives can no longer submit those old batches.
 

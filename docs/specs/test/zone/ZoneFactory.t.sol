@@ -31,7 +31,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             sequencer: admin,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -52,7 +51,6 @@ contract ZoneFactoryTest is BaseTest {
         assertTrue(info.messenger != address(0));
         assertEq(info.initialToken, address(pathUSD));
         assertEq(info.sequencer, admin);
-        assertEq(info.verifier, zoneFactory.verifier());
         assertEq(info.genesisBlockHash, GENESIS_BLOCK_HASH);
         assertEq(info.genesisTempoBlockHash, GENESIS_TEMPO_BLOCK_HASH);
     }
@@ -61,7 +59,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             sequencer: admin,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -87,7 +84,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params1 = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             sequencer: admin,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -100,7 +96,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params2 = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             sequencer: alice,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: keccak256("genesis2"),
                 genesisTempoBlockHash: keccak256("tempoGenesis2"),
@@ -127,7 +122,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             sequencer: admin,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -146,7 +140,7 @@ contract ZoneFactoryTest is BaseTest {
             if (
                 logs[i].topics[0]
                     == keccak256(
-                        "ZoneCreated(uint32,address,address,address,address,address,bytes32,bytes32,uint64)"
+                        "ZoneCreated(uint32,address,address,address,address,bytes32,bytes32,uint64)"
                     )
             ) {
                 found = true;
@@ -171,7 +165,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(0),
             sequencer: admin,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -190,7 +183,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: notTip20,
             sequencer: admin,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -206,7 +198,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: alice, // EOA, not a contract
             sequencer: admin,
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -226,7 +217,6 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             sequencer: address(0),
-            verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
@@ -235,26 +225,6 @@ contract ZoneFactoryTest is BaseTest {
         });
 
         vm.expectRevert(IZoneFactory.InvalidSequencer.selector);
-        zoneFactory.createZone(params);
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                       INVALID VERIFIER TESTS
-    //////////////////////////////////////////////////////////////*/
-
-    function test_createZone_revertsOnInvalidVerifier() public {
-        IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
-            initialToken: address(pathUSD),
-            sequencer: admin,
-            verifier: address(0xdead),
-            zoneParams: ZoneParams({
-                genesisBlockHash: GENESIS_BLOCK_HASH,
-                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
-                genesisTempoBlockNumber: uint64(block.number)
-            })
-        });
-
-        vm.expectRevert(IZoneFactory.InvalidVerifier.selector);
         zoneFactory.createZone(params);
     }
 

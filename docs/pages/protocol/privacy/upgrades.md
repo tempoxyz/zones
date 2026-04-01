@@ -43,8 +43,7 @@ Operators upgrade nodes          │   verifiers on all portals   │ Provers us
 
 6. **Prepare the L1 system transaction payload.** Encode the calls that the L1 fork block will execute:
    - Deploy the verifier contract.
-   - `ZoneFactory.setForkVerifier(forkVerifier)` — rotates verifiers on all registered portals.
-   - Increment `ZoneFactory.protocolVersion`.
+   - `ZoneFactory.setForkVerifier(forkVerifier)` — rotates the centralized verifier state and increments `protocolVersion`. This is a single O(1) call that applies to all zones.
 
 7. **Release binaries.** Publish the zone node binary and prover program. Operators can upgrade at their convenience — no on-chain transaction is required. The node runs under old rules until the fork L1 block arrives.
 
@@ -55,14 +54,16 @@ Operators upgrade nodes          │   verifiers on all portals   │ Provers us
 The Tempo L1 hard fork block executes the following as system transactions:
 
 1. Deploy the fork `IVerifier` contract with the new verification key.
-2. Call `ZoneFactory.setForkVerifier(forkVerifier)`. For each registered portal, this performs verifier rotation:
-   - `portal.verifier = portal.forkVerifier` (promote previous fork verifier)
-   - `portal.forkVerifier = new_fork_verifier` (install new fork verifier)
-   - `portal.forkActivationBlock = block.number` (record cutoff — old verifier rejected for batches at or past this L1 block)
+2. Call `ZoneFactory.setForkVerifier(newForkVerifier)`. This is a single O(1) call that updates centralized state in the factory:
+   - If `forkVerifier != address(0)`: `verifier = forkVerifier` (promote previous fork verifier)
+   - `forkVerifier = newForkVerifier` (install new fork verifier)
+   - `forkActivationBlock = block.number` (record cutoff — old verifier rejected for batches at or past this L1 block)
+   - `protocolVersion++`
    - For the first fork, `verifier` retains its original value and `forkVerifier` is populated for the first time.
-3. Increment `ZoneFactory.protocolVersion`.
 
-After this block, new zones created via the factory use the fork verifier as their initial verifier.
+No per-portal iteration is needed — verifier state is centralized in `ZoneFactory` and portals delegate validation to the factory via `validateVerifier()` at batch submission time.
+
+After this block, the factory's `verifier()` returns the current active verifier for new zones.
 
 ### Post-fork
 
@@ -94,11 +95,11 @@ A zone that falls more than one full fork cycle behind risks having its oldest b
 
 ## Verifier lifecycle
 
-The portal maintains two verifier slots and a `forkActivationBlock` cutoff. The batch submitter specifies which verifier to use; the portal checks that it is one of the two recognized addresses and that the old verifier is only used for batches predating the fork. Across successive forks, the slots rotate:
+`ZoneFactory` maintains two verifier slots and a `forkActivationBlock` cutoff. The batch submitter specifies which verifier to use; the portal delegates validation to the factory, which checks that it is one of the two recognized addresses and that the old verifier is only used for batches predating the fork. Across successive forks, the slots rotate:
 
 | Event | `verifier` | `forkVerifier` | `forkActivationBlock` |
 |-------|-----------|----------------|----------------------|
-| Zone creation | V0 | `address(0)` | 0 |
+| Factory deployment | V0 | `address(0)` | 0 |
 | Fork 1 (block F1) | V0 | V1 | F1 |
 | Fork 2 (block F2) | V1 | V2 | F2 |
 | Fork 3 (block F3) | V2 | V3 | F3 |
