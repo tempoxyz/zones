@@ -3,18 +3,6 @@
 //! A simplified block executor for zone nodes that wraps [`EthBlockExecutor`] directly.
 //! Unlike the Tempo L1 [`TempoBlockExecutor`], this executor does **not** enforce subblock
 //! ordering, shared-gas accounting, or the end-of-block subblock metadata system transaction.
-//!
-//! ## Multi-token fee support
-//!
-//! The Tempo EVM handler calls `TipFeeManager::new().collect_fee_pre_tx()`
-//! directly in Rust. When the user's fee token differs from the sequencer's
-//! `validatorToken`, the handler routes through `FeeAMM` — which requires
-//! liquidity pools that don't exist on zones.
-//!
-//! To bypass this, the executor writes `validatorTokens[beneficiary]` to match
-//! the transaction's fee token before each transaction. The handler then sees
-//! `validator_token == user_token` and skips the AMM path entirely, crediting
-//! fees directly in the user's chosen token.
 
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
@@ -62,14 +50,9 @@ where
         }
     }
 
-    /// Writes `validatorTokens[beneficiary] = fee_token` to the FeeManager
-    /// storage so that the handler's `TipFeeManager` sees matching tokens and
-    /// skips the FeeAMM swap path.
-    ///
-    /// Uses the same `get_fee_token` resolution as the handler to determine the
-    /// fee token for any transaction type (AA explicit, userTokens storage,
-    /// TIP-20 inference, DEX inference, or default PATH_USD).
-    fn set_validator_token_for_tx(&mut self) {
+    /// Overrides `validatorTokens[beneficiary]` to match the resolved fee token
+    /// so the handler skips FeeAMM.
+    fn override_validator_token(&mut self) {
         let ctx = self.inner.evm.ctx_mut();
         let fee_payer = ctx.tx.fee_payer().unwrap_or(ctx.tx.caller());
         let spec = ctx.cfg.spec;
@@ -113,7 +96,7 @@ where
 
         // Override the validator's fee token preference to match this
         // transaction's resolved fee token, so the handler skips FeeAMM.
-        self.set_validator_token_for_tx();
+        self.override_validator_token();
 
         let _tx_hash_guard = tx_context::set_current_tx_hash(*recovered.tx().tx_hash());
         self.inner
@@ -207,7 +190,10 @@ mod tests {
             let fee_manager = TipFeeManager::new();
 
             // 1. Validator token defaults to PATH_USD.
-            assert_eq!(fee_manager.get_validator_token(sequencer)?, DEFAULT_FEE_TOKEN);
+            assert_eq!(
+                fee_manager.get_validator_token(sequencer)?,
+                DEFAULT_FEE_TOKEN
+            );
 
             // 2. No FeeAMM pools exist.
             for (a, b) in [
@@ -222,9 +208,21 @@ mod tests {
 
             // 3. Three transactions, each paying in a different token.
             let txs = [
-                (beta_usd.address(), U256::from(5_000u64), U256::from(3_000u64)),
-                (gamma_usd.address(), U256::from(8_000u64), U256::from(7_000u64)),
-                (path_usd.address(), U256::from(4_000u64), U256::from(2_000u64)),
+                (
+                    beta_usd.address(),
+                    U256::from(5_000u64),
+                    U256::from(3_000u64),
+                ),
+                (
+                    gamma_usd.address(),
+                    U256::from(8_000u64),
+                    U256::from(7_000u64),
+                ),
+                (
+                    path_usd.address(),
+                    U256::from(4_000u64),
+                    U256::from(2_000u64),
+                ),
             ];
 
             let mut fee_manager = TipFeeManager::new();
@@ -249,8 +247,14 @@ mod tests {
                 (beta_usd.address(), gamma_usd.address()),
             ] {
                 let pool = fee_manager.pools[PoolKey::new(a, b).get_id()].read()?;
-                assert_eq!(pool.reserve_user_token, 0, "pool {a}-{b} user reserve should be 0");
-                assert_eq!(pool.reserve_validator_token, 0, "pool {a}-{b} validator reserve should be 0");
+                assert_eq!(
+                    pool.reserve_user_token, 0,
+                    "pool {a}-{b} user reserve should be 0"
+                );
+                assert_eq!(
+                    pool.reserve_validator_token, 0,
+                    "pool {a}-{b} validator reserve should be 0"
+                );
             }
 
             Ok(())
@@ -269,8 +273,7 @@ mod tests {
             let mut fee_manager = TipFeeManager::new();
 
             // Write via the Mapping handler (what the executor does via journal sstore).
-            fee_manager.validator_tokens[sequencer]
-                .write(token)?;
+            fee_manager.validator_tokens[sequencer].write(token)?;
 
             // Read back via TipFeeManager API.
             let read_back = fee_manager.get_validator_token(sequencer)?;
