@@ -1944,6 +1944,7 @@ mod tests {
             fallbackRecipient: fallback_recipient,
             token,
             amount: 123_456,
+            depositNumber: 1,
         };
         let log = Log {
             inner: alloy_primitives::Log {
