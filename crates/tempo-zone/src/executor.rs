@@ -65,11 +65,9 @@ where
         let slot = TipFeeManager::new().validator_tokens[beneficiary].slot();
 
         let _ = ctx.journal_mut().load_account(TIP_FEE_MANAGER_ADDRESS);
-        let _ = ctx.journal_mut().sstore(
-            TIP_FEE_MANAGER_ADDRESS,
-            slot,
-            fee_token.into_word().into(),
-        );
+        let _ =
+            ctx.journal_mut()
+                .sstore(TIP_FEE_MANAGER_ADDRESS, slot, fee_token.into_word().into());
     }
 }
 
