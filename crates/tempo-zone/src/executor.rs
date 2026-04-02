@@ -10,7 +10,6 @@ use alloy_evm::{
     block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
     eth::{EthBlockExecutor, EthTxResult},
 };
-use alloy_primitives::U256;
 use reth_evm::block::StateDB;
 use reth_revm::Inspector;
 use revm::context::{ContextTr, JournalTr, Transaction};
@@ -69,7 +68,7 @@ where
         let _ = ctx.journal_mut().sstore(
             TIP_FEE_MANAGER_ADDRESS,
             slot,
-            U256::from_be_bytes(fee_token.into_array()),
+            fee_token.into_word().into(),
         );
     }
 }
