@@ -184,12 +184,11 @@ impl ZoneMonitor {
             .call()
             .await
             .wrap_err("failed to read zoneFactory during zone monitor startup")?;
-        let target_verifier: Address =
-            ZoneFactory::new(factory_address, l1_provider.clone())
-                .verifier()
-                .call()
-                .await
-                .wrap_err("failed to read verifier from ZoneFactory during zone monitor startup")?;
+        let target_verifier: Address = ZoneFactory::new(factory_address, l1_provider.clone())
+            .verifier()
+            .call()
+            .await
+            .wrap_err("failed to read verifier from ZoneFactory during zone monitor startup")?;
 
         let batch_submitter = BatchSubmitter::new(
             config.portal_address,
