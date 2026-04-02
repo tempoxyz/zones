@@ -1234,7 +1234,8 @@ The zone can verify encrypted deposit decryption on-chain without the sequencer 
 
 ```solidity
 struct DecryptionData {
-    bytes32 sharedSecret;       // ECDH shared secret (sequencerPriv * ephemeralPub)
+    bytes32 sharedSecret;       // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
+    uint8 sharedSecretYParity;  // Y coordinate parity of the shared secret point (0x02 or 0x03)
     address to;                 // Decrypted recipient
     bytes32 memo;               // Decrypted memo
     ChaumPedersenProof cpProof; // Proof of correct shared secret derivation
@@ -1268,6 +1269,7 @@ bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
     ed.encrypted.ephemeralPubX,
     ed.encrypted.ephemeralPubYParity,
     dec.sharedSecret,
+    dec.sharedSecretYParity,
     seqPubX,          // looked up on-chain, not from dec
     seqPubYParity,    // looked up on-chain, not from dec
     dec.cpProof
@@ -1276,7 +1278,11 @@ if (!proofValid) revert InvalidSharedSecretProof();
 
 // Step 3: Derive AES key using HKDF-SHA256 (in Solidity)
 // Note: Encryption key validity is already validated on Tempo side in ZonePortal.depositEncrypted()
-bytes32 aesKey = _hkdfSha256(dec.sharedSecret, "ecies-aes-key", "");
+bytes32 aesKey = _hkdfSha256(
+    dec.sharedSecret,
+    "ecies-aes-key",
+    abi.encodePacked(tempoPortal, ed.keyIndex, ed.encrypted.ephemeralPubkeyX)
+);
 
 // Step 4: Try to decrypt using AES-GCM precompile
 (bytes memory plaintext, bool valid) = IAesGcmDecrypt(AES_GCM_DECRYPT).decrypt(...);
@@ -1314,6 +1320,7 @@ interface IChaumPedersenVerify {
         bytes32 ephemeralPubX,
         uint8 ephemeralPubYParity,
         bytes32 sharedSecret,
+        uint8 sharedSecretYParity,
         bytes32 sequencerPubX,
         uint8 sequencerPubYParity,
         ChaumPedersenProof calldata proof
@@ -1357,6 +1364,7 @@ bool proofValid = IChaumPedersenVerify(CHAUM_PEDERSEN_VERIFY).verifyProof(
     ed.encrypted.ephemeralPubX,
     ed.encrypted.ephemeralPubYParity,
     dec.sharedSecret,
+    dec.sharedSecretYParity,
     seqPubX,          // looked up on-chain, not from dec
     seqPubYParity,    // looked up on-chain, not from dec
     dec.cpProof
@@ -1366,8 +1374,8 @@ if (!proofValid) revert InvalidSharedSecretProof();
 // Step 3: Derive AES key from shared secret using HKDF-SHA256 (in Solidity)
 bytes32 aesKey = _hkdfSha256(
     dec.sharedSecret,
-    "ecies-aes-key",  // salt
-    ""                // info (empty)
+    "ecies-aes-key",
+    abi.encodePacked(tempoPortal, ed.keyIndex, ed.encrypted.ephemeralPubkeyX)
 );
 
 // Step 4: Decrypt using AES-256-GCM precompile
