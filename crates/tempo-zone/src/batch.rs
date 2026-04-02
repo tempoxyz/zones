@@ -95,6 +95,9 @@ pub struct BatchSubmitter {
     genesis_tempo_block_number: u64,
     /// Concurrency for pipelined L1 header fetching in ancestry mode.
     l1_fetch_concurrency: usize,
+    /// Address of the verifier to pass as `targetVerifier` in `submitBatch`.
+    /// Read from `ZoneFactory.verifier()` at startup.
+    target_verifier: Address,
 }
 
 impl BatchSubmitter {
@@ -105,6 +108,7 @@ impl BatchSubmitter {
         portal_address: Address,
         l1_provider: DynProvider<TempoNetwork>,
         genesis_tempo_block_number: u64,
+        target_verifier: Address,
     ) -> Self {
         let portal = ZonePortal::new(portal_address, l1_provider.clone());
         Self {
@@ -113,6 +117,7 @@ impl BatchSubmitter {
             portal,
             genesis_tempo_block_number,
             l1_fetch_concurrency: 16,
+            target_verifier,
         }
     }
 
@@ -195,6 +200,7 @@ impl BatchSubmitter {
         let pending = self
             .portal
             .submitBatch(
+                self.target_verifier,
                 batch.tempo_block_number,
                 recent_tempo_block_number,
                 block_transition,

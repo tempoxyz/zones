@@ -38,7 +38,7 @@ use tracing::{error, info, instrument, warn};
 use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
-    abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
+    abi::{self, TempoState, ZoneFactory, ZoneInbox, ZoneOutbox, ZonePortal},
     batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_slot_withdrawals},
     withdrawals::SharedWithdrawalStore,
 };
@@ -172,17 +172,30 @@ impl ZoneMonitor {
         let inbox = ZoneInbox::new(config.inbox_address, provider.clone());
         let tempo_state = TempoState::new(config.tempo_state_address, provider.clone());
 
-        let genesis_tempo_block_number: u64 =
-            ZonePortal::new(config.portal_address, l1_provider.clone())
-                .genesisTempoBlockNumber()
+        let portal_instance = ZonePortal::new(config.portal_address, l1_provider.clone());
+        let genesis_tempo_block_number: u64 = portal_instance
+            .genesisTempoBlockNumber()
+            .call()
+            .await
+            .wrap_err("failed to read genesisTempoBlockNumber during zone monitor startup")?;
+
+        let factory_address: Address = portal_instance
+            .zoneFactory()
+            .call()
+            .await
+            .wrap_err("failed to read zoneFactory during zone monitor startup")?;
+        let target_verifier: Address =
+            ZoneFactory::new(factory_address, l1_provider.clone())
+                .verifier()
                 .call()
                 .await
-                .wrap_err("failed to read genesisTempoBlockNumber during zone monitor startup")?;
+                .wrap_err("failed to read verifier from ZoneFactory during zone monitor startup")?;
 
         let batch_submitter = BatchSubmitter::new(
             config.portal_address,
             l1_provider,
             genesis_tempo_block_number,
+            target_verifier,
         );
 
         let (prev_zone_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
@@ -904,7 +917,7 @@ mod tests {
             inbox: ZoneInbox::new(Address::repeat_byte(0x33), zone_provider.clone()),
             tempo_state: TempoState::new(Address::repeat_byte(0x44), zone_provider),
             withdrawal_store: SharedWithdrawalStore::new(),
-            batch_submitter: BatchSubmitter::new(portal_address, l1_provider, 0),
+            batch_submitter: BatchSubmitter::new(portal_address, l1_provider, 0, Address::ZERO),
             withdrawal_notify: Arc::new(Notify::new()),
             last_submitted_zone_block: 10,
             prev_processed_deposit_hash: B256::repeat_byte(0xaa),

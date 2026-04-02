@@ -978,12 +978,10 @@ impl L1TestNode {
         l1_header.encode(&mut rlp_buf);
         let genesis_tempo_block_hash = keccak256(&rlp_buf);
 
-        let verifier_address = factory.verifier().call().await?;
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
                 token: PATH_USD_ADDRESS,
                 sequencer,
-                verifier: verifier_address,
                 zoneParams: ZoneFactory::ZoneParams {
                     genesisBlockHash: B256::ZERO,
                     genesisTempoBlockHash: genesis_tempo_block_hash,
