@@ -123,7 +123,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
 
     // Execute deposit on L1
     let deposit_receipt = portal
-        .deposit(l1_token_address, recipient, deposit_amount, B256::ZERO)
+        .deposit(l1_token_address, recipient, deposit_amount, B256::ZERO, Address::ZERO)
         .send()
         .await?
         .get_receipt()

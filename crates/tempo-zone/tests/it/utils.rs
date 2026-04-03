@@ -1931,7 +1931,7 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, recipient, amount, B256::ZERO)
+            .deposit(PATH_USD_ADDRESS, recipient, amount, B256::ZERO, Address::ZERO)
             .send()
             .await?
             .get_receipt()
@@ -1986,7 +1986,7 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(token, self.address, amount, B256::ZERO)
+            .deposit(token, self.address, amount, B256::ZERO, Address::ZERO)
             .send()
             .await?
             .get_receipt()
@@ -2091,6 +2091,7 @@ impl ZoneAccount {
                     nonce: alloy_primitives::FixedBytes(enc.nonce),
                     tag: alloy_primitives::FixedBytes(enc.tag),
                 },
+                Address::ZERO,
             )
             .send()
             .await?

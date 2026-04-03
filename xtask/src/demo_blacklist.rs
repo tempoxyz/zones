@@ -329,7 +329,7 @@ impl DemoBlacklist {
             let mut pending = None;
             for attempt in 0..5u32 {
                 match portal
-                    .deposit(token_addr, admin, deposit_amount, B256::ZERO)
+                    .deposit(token_addr, admin, deposit_amount, B256::ZERO, Address::ZERO)
                     .send()
                     .await
                 {
@@ -467,7 +467,7 @@ impl DemoBlacklist {
         let gas_fund: u128 = 100_000;
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, target, gas_fund, B256::ZERO)
+            .deposit(PATH_USD_ADDRESS, target, gas_fund, B256::ZERO, Address::ZERO)
             .send_sync()
             .await?;
         check(&receipt, "deposit pathUSD to target for gas")?;
@@ -646,7 +646,7 @@ async fn send_encrypted_deposit<P: Provider<TempoNetwork>>(
     };
 
     let receipt = portal
-        .depositEncrypted(token, amount, key_index, payload)
+        .depositEncrypted(token, amount, key_index, payload, Address::ZERO)
         .send_sync()
         .await
         .wrap_err("depositEncrypted send failed")?;
