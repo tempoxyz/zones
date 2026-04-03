@@ -426,7 +426,7 @@ export default defineConfig({
           },
           {
             text: 'Tempo Zones (draft)',
-            link: '/protocol/privacy/overview',
+            link: 'https://github.com/tempoxyz/zones/blob/main/docs/SPEC.md',
           },
           {
             text: 'Stablecoin DEX',

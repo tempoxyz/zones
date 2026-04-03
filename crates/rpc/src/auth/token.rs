@@ -37,7 +37,7 @@ pub struct AuthContext {
 /// The token is a hex-encoded blob: `<signature><version:1><zoneId:4><chainId:8><issuedAt:8><expiresAt:8>`.
 /// The last 29 bytes are always the fixed fields; everything before is the variable-length signature.
 ///
-/// See `docs/pages/protocol/privacy/rpc.md` — "Transport" and "Message" sections.
+/// See `docs/SPEC.md` — "RPC Specification" section.
 #[derive(Debug, Clone)]
 pub struct AuthorizationToken {
     /// Spec version (must be 0).
