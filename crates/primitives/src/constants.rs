@@ -83,14 +83,47 @@ pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
     U256::from_le_bytes(le)
 };
 
-/// Base offset for deriving zone chain IDs: `4217000000 + zone_id`.
+/// Base offset for deriving **mainnet** zone chain IDs: `421_700_000 + zone_id`.
 ///
 /// Each zone gets a unique EIP-155 chain ID derived from its on-chain zone ID
-/// assigned by the `ZoneFactory` contract. The prefix `4217` comes from the
-/// Tempo L1 chain ID.
-pub const ZONE_CHAIN_ID_BASE: u64 = 4_217_000_000;
+/// assigned by the `ZoneFactory` contract.
+///
+/// # Range safety
+///
+/// EIP-2294 and ENSIP-11 reserve bit 31 (`0x8000_0000`) for coin-type flags,
+/// making chain IDs ≥ 2^31 (2,147,483,647) unsafe in parts of the ecosystem
+/// (ENS multi-chain address resolution, some JavaScript tooling that uses
+/// 32-bit integers, etc.).
+///
+/// The ranges are chosen so that both mainnet and testnet zones stay well below
+/// that limit while remaining non-overlapping:
+///
+/// | Network  | Base            | Example zone 1     | Ceiling (2^31 − 1)    |
+/// |----------|-----------------|--------------------|-----------------------|
+/// | Mainnet  | `421_700_000`   | `421_700_001`      | 2,147,483,647         |
+/// | Testnet  | `1_424_310_000` | `1_424_310_001`    | 2,147,483,647         |
+///
+/// This gives ~1 billion mainnet zone IDs (up to zone ~1,002,600,000) before
+/// the testnet range is reached, and ~723 million testnet zone IDs before
+/// exceeding `2^31 − 1`.
+///
+/// WARNING: If the `ZoneFactory` ever allows zone IDs large enough to push
+/// `base + zone_id` past `2^31 − 1`, a cap should be enforced both in the
+/// Solidity contract and here.
+pub const ZONE_CHAIN_ID_BASE: u64 = 421_700_000;
 
-/// Derives the EIP-155 chain ID for a zone from its on-chain zone ID.
+/// Base offset for deriving **testnet** (Moderato) zone chain IDs:
+/// `1_424_310_000 + zone_id`.
+///
+/// See [`ZONE_CHAIN_ID_BASE`] for range-safety rationale.
+pub const ZONE_CHAIN_ID_BASE_TESTNET: u64 = 1_424_310_000;
+
+/// Derives the EIP-155 chain ID for a **mainnet** zone from its on-chain zone ID.
 pub const fn zone_chain_id(zone_id: u32) -> u64 {
     ZONE_CHAIN_ID_BASE + zone_id as u64
+}
+
+/// Derives the EIP-155 chain ID for a **testnet** zone from its on-chain zone ID.
+pub const fn zone_chain_id_testnet(zone_id: u32) -> u64 {
+    ZONE_CHAIN_ID_BASE_TESTNET + zone_id as u64
 }

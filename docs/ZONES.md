@@ -458,7 +458,7 @@ The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zo
 | `--l1.rpc-url` | (required) | L1 WebSocket RPC URL |
 | `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
 | `--l1.genesis-block-number` | (from zone.json) | L1 block when the zone was created |
-| `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth). The zone's chain ID is derived as `4217000000 + zone_id`. |
+| `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth). The zone's chain ID is derived as `421700000 + zone_id` (mainnet) or `1424310000 + zone_id` (testnet). |
 | `--sequencer-key` | (optional) | Sequencer private key for block production |
 | `--block.interval-ms` | 250 | Block building interval |
 | `--zone.batch-interval-secs` | 60 | Max seconds to accumulate zone blocks before submitting a batch to L1 |
