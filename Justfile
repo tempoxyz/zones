@@ -587,6 +587,7 @@ zone-auth-token name:
         exit 1
     fi
     ZONE_ID=$(jq -r '.zoneId' "$ZONE_JSON")
+    PORTAL=$(jq -r '.portal' "$ZONE_JSON")
     GENESIS_JSON="generated/{{name}}/genesis.json"
     CHAIN_ID=$(jq -r '.config.chainId' "$GENESIS_JSON")
     NOW=$(date +%s)
@@ -595,9 +596,10 @@ zone-auth-token name:
     VERSION="00"
     ZONE_ID_HEX=$(printf '%08x' "$ZONE_ID")
     CHAIN_ID_HEX=$(printf '%016x' "$CHAIN_ID")
+    PORTAL_HEX=$(echo "$PORTAL" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
     ISSUED_HEX=$(printf '%016x' "$NOW")
     EXPIRES_HEX=$(printf '%016x' "$EXPIRES")
-    FIELDS="${VERSION}${ZONE_ID_HEX}${CHAIN_ID_HEX}${ISSUED_HEX}${EXPIRES_HEX}"
+    FIELDS="${VERSION}${ZONE_ID_HEX}${CHAIN_ID_HEX}${PORTAL_HEX}${ISSUED_HEX}${EXPIRES_HEX}"
     DIGEST=$(cast keccak "0x${MAGIC}${FIELDS}")
     SIG=$(cast wallet sign --no-hash "$DIGEST" --private-key "$PK")
     SIG_HEX=$(echo "$SIG" | sed 's/0x//')

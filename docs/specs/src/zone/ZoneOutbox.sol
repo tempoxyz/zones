@@ -400,6 +400,36 @@ contract ZoneOutbox is IZoneOutbox {
         emit BatchFinalized(withdrawalQueueHash, currentWithdrawalBatchIndex);
     }
 
+    /// @notice Enqueue a bounce-back withdrawal for a failed deposit
+    /// @dev Only callable by the ZoneInbox during advanceTempo. Creates a zero-fee,
+    ///      zero-callback withdrawal that returns escrowed funds to the depositor's
+    ///      bouncebackRecipient on L1.
+    function enqueueDepositBounceBack(
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
+    )
+        external
+    {
+        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+
+        _pendingWithdrawals.push(
+            PendingWithdrawal({
+                token: token,
+                sender: address(0),
+                txHash: bytes32(0),
+                to: bouncebackRecipient,
+                amount: amount,
+                fee: 0,
+                memo: bytes32(0),
+                gasLimit: 0,
+                fallbackRecipient: address(0),
+                callbackData: "",
+                revealTo: ""
+            })
+        );
+    }
+
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256) {
         if (_pendingWithdrawalsHead >= _pendingWithdrawals.length) {

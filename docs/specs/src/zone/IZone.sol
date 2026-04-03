@@ -63,6 +63,7 @@ struct Deposit {
     address to;
     uint128 amount;
     bytes32 memo;
+    address bouncebackRecipient; // L1 address for refund if zone-side processing fails (address(0) for bounce-back deposits)
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -90,6 +91,7 @@ struct EncryptedDeposit {
     uint128 amount; // Amount (public, for accounting)
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+    address bouncebackRecipient; // L1 address for refund if zone-side processing fails
 }
 
 /// @notice Historical record of an encryption key with its activation block
@@ -472,7 +474,8 @@ interface IZonePortal {
         address to,
         uint128 netAmount,
         uint128 fee,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient
     );
 
     event BatchSubmitted(
@@ -486,12 +489,14 @@ interface IZonePortal {
         address indexed to, address token, uint128 amount, bool callbackSuccess
     );
 
-    event BounceBack(
+    event WithdrawalBounceBack(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed fallbackRecipient,
         address token,
         uint128 amount
     );
+
+    event DepositBounceBack(address indexed bouncebackRecipient, address token, uint128 amount);
 
     event SequencerTransferStarted(
         address indexed currentSequencer, address indexed pendingSequencer
@@ -674,7 +679,8 @@ interface IZonePortal {
         address token,
         address to,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -688,12 +694,14 @@ interface IZonePortal {
     /// @param amount Amount to deposit
     /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
     /// @param encrypted The encrypted payload (recipient and memo)
+    /// @param bouncebackRecipient L1 address for refund if zone-side processing fails
     /// @return newCurrentDepositQueueHash The new deposit queue hash
     function depositEncrypted(
         address token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted
+        EncryptedDepositPayload calldata encrypted,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -854,6 +862,17 @@ interface IZoneInbox {
     event EncryptedDepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
+
+    /// @notice Emitted when a regular deposit fails zone-side (e.g., TIP-403 blocks the mint)
+    event DepositFailed(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        address to,
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
+    );
+
     /// @notice Emitted when a TIP-20 token is enabled on the zone via advanceTempo
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
@@ -997,6 +1016,17 @@ interface IZoneOutbox {
     )
         external
         returns (bytes32 withdrawalQueueHash);
+
+    /// @notice Enqueue a bounce-back withdrawal for a failed deposit
+    /// @dev Only callable by the ZoneInbox during advanceTempo when a deposit mint fails.
+    ///      The bounce-back withdrawal returns escrowed funds to the depositor's
+    ///      bouncebackRecipient on L1.
+    function enqueueDepositBounceBack(
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
+    )
+        external;
 
 }
 

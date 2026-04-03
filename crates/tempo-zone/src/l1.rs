@@ -28,8 +28,8 @@ use crate::{
         EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_PENDING_SEQUENCER_SLOT,
         PORTAL_SEQUENCER_SLOT,
         ZonePortal::{
-            self, BounceBack, DepositMade, EncryptedDepositMade, SequencerTransferStarted,
-            SequencerTransferred, TokenEnabled, ZonePortalEvents,
+            self, DepositMade, EncryptedDepositMade, SequencerTransferStarted,
+            SequencerTransferred, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
         },
     },
     ext::TempoStateExt,
@@ -787,6 +787,8 @@ pub struct Deposit {
     pub fee: u128,
     /// User-provided memo.
     pub memo: B256,
+    /// Bounceback recipient on L1 (receives funds if the zone rejects the deposit).
+    pub bounceback_recipient: Address,
 }
 
 impl Deposit {
@@ -799,11 +801,12 @@ impl Deposit {
             amount: event.netAmount,
             fee: event.fee,
             memo: event.memo,
+            bounceback_recipient: event.bouncebackRecipient,
         }
     }
 
     /// Create a bounce-back deposit from an event.
-    pub fn from_bounce_back(event: BounceBack, portal_address: Address) -> Self {
+    pub fn from_bounce_back(event: WithdrawalBounceBack, portal_address: Address) -> Self {
         Self {
             token: event.token,
             sender: portal_address,
@@ -811,6 +814,7 @@ impl Deposit {
             amount: event.amount,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         }
     }
 }
@@ -838,6 +842,8 @@ pub struct EncryptedDeposit {
     pub nonce: [u8; 12],
     /// GCM authentication tag (16 bytes).
     pub tag: [u8; 16],
+    /// Bounceback recipient on L1 (receives funds if the zone rejects the deposit).
+    pub bounceback_recipient: Address,
 }
 
 impl EncryptedDeposit {
@@ -854,6 +860,7 @@ impl EncryptedDeposit {
             ciphertext: event.ciphertext.to_vec(),
             nonce: event.nonce.0,
             tag: event.tag.0,
+            bounceback_recipient: Address::ZERO,
         }
     }
 }
@@ -880,6 +887,7 @@ impl L1Deposit {
                         to: d.to,
                         amount: d.amount,
                         memo: d.memo,
+                        bouncebackRecipient: d.bounceback_recipient,
                     },
                     prev_hash,
                 )
@@ -900,6 +908,7 @@ impl L1Deposit {
                             nonce: d.nonce.into(),
                             tag: d.tag.into(),
                         },
+                        bouncebackRecipient: d.bounceback_recipient,
                     },
                     prev_hash,
                 )
@@ -981,7 +990,7 @@ impl L1PortalEvents {
     const SIGNATURE_HASHES: [B256; 6] = [
         DepositMade::SIGNATURE_HASH,
         EncryptedDepositMade::SIGNATURE_HASH,
-        BounceBack::SIGNATURE_HASH,
+        WithdrawalBounceBack::SIGNATURE_HASH,
         TokenEnabled::SIGNATURE_HASH,
         SequencerTransferStarted::SIGNATURE_HASH,
         SequencerTransferred::SIGNATURE_HASH,
@@ -1032,7 +1041,7 @@ impl L1PortalEvents {
                 self.deposits
                     .push(L1Deposit::Encrypted(EncryptedDeposit::from_event(event)));
             }
-            ZonePortalEvents::BounceBack(event) => {
+            ZonePortalEvents::WithdrawalBounceBack(event) => {
                 info!(
                     l1_block = block_number,
                     token = %event.token,
@@ -1143,6 +1152,7 @@ impl L1BlockDeposits {
                         to: d.to,
                         amount: d.amount,
                         memo: d.memo,
+                        bouncebackRecipient: d.bounceback_recipient,
                     };
                     queued_deposits.push(abi::QueuedDeposit {
                         depositType: abi::DepositType::Regular,
@@ -1165,6 +1175,7 @@ impl L1BlockDeposits {
                                     nonce: d.nonce.into(),
                                     tag: d.tag.into(),
                                 },
+                                bouncebackRecipient: d.bounceback_recipient,
                             }
                             .abi_encode(),
                         ),
@@ -1939,7 +1950,7 @@ mod tests {
         let portal_address = address!("0x0000000000000000000000000000000000000ABC");
         let fallback_recipient = address!("0x00000000000000000000000000000000000000F1");
         let token = address!("0x0000000000000000000000000000000000002000");
-        let event = BounceBack {
+        let event = WithdrawalBounceBack {
             newCurrentDepositQueueHash: B256::with_last_byte(0x42),
             fallbackRecipient: fallback_recipient,
             token,
@@ -2138,6 +2149,7 @@ mod tests {
             amount: 1000,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         });
 
         queue.enqueue(
@@ -2164,6 +2176,7 @@ mod tests {
             amount: 2000,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         });
 
         queue.enqueue(
@@ -2185,6 +2198,7 @@ mod tests {
                 amount: 1000,
                 fee: 0,
                 memo: B256::ZERO,
+                bounceback_recipient: Address::ZERO,
             }),
             L1Deposit::Regular(Deposit {
                 token: address!("0x0000000000000000000000000000000000001000"),
@@ -2193,6 +2207,7 @@ mod tests {
                 amount: 2000,
                 fee: 0,
                 memo: B256::ZERO,
+                bounceback_recipient: Address::ZERO,
             }),
         ];
 
@@ -2224,6 +2239,7 @@ mod tests {
             amount: 500,
             fee: 0,
             memo: FixedBytes::from([0xABu8; 32]),
+            bounceback_recipient: Address::ZERO,
         })];
 
         queue.enqueue(
@@ -2248,6 +2264,7 @@ mod tests {
             amount: 100,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         });
 
         let d2 = L1Deposit::Regular(Deposit {
@@ -2257,6 +2274,7 @@ mod tests {
             amount: 200,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         });
 
         let h10 = make_test_header(10);
@@ -2295,6 +2313,7 @@ mod tests {
             ciphertext: vec![0x42u8; 64],
             nonce: [0x01; 12],
             tag: [0x02; 16],
+            bounceback_recipient: Address::ZERO,
         };
 
         // Compute via PendingDeposits (Rust implementation)
@@ -2314,6 +2333,7 @@ mod tests {
                 nonce: encrypted.nonce.into(),
                 tag: encrypted.tag.into(),
             },
+            bouncebackRecipient: Address::ZERO,
         };
         let expected = keccak256((DepositType::Encrypted, abi_encrypted, B256::ZERO).abi_encode());
 
@@ -2341,6 +2361,7 @@ mod tests {
             amount: 500_000,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         };
 
         let encrypted = EncryptedDeposit {
@@ -2354,6 +2375,7 @@ mod tests {
             ciphertext: vec![0x55u8; 64],
             nonce: [0x0A; 12],
             tag: [0x0B; 16],
+            bounceback_recipient: Address::ZERO,
         };
 
         let deposits = vec![
@@ -2373,6 +2395,7 @@ mod tests {
                     to: regular.to,
                     amount: regular.amount,
                     memo: regular.memo,
+                    bouncebackRecipient: Address::ZERO,
                 },
                 B256::ZERO,
             )
@@ -2394,6 +2417,7 @@ mod tests {
                         nonce: encrypted.nonce.into(),
                         tag: encrypted.tag.into(),
                     },
+                    bouncebackRecipient: Address::ZERO,
                 },
                 hash_1,
             )
@@ -2420,6 +2444,7 @@ mod tests {
             ciphertext: vec![0x99u8; 64],
             nonce: [0x03; 12],
             tag: [0x04; 16],
+            bounceback_recipient: Address::ZERO,
         };
 
         let deposits = vec![L1Deposit::Encrypted(encrypted)];
@@ -2640,6 +2665,7 @@ mod tests {
             amount: 100,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         });
         assert!(matches!(
             queue.try_enqueue(seal(h1), L1PortalEvents::from_deposits(vec![d1]), vec![]),
@@ -2655,6 +2681,7 @@ mod tests {
             amount: 200,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         });
         assert!(matches!(
             queue.try_enqueue(seal(h2), L1PortalEvents::from_deposits(vec![d2]), vec![]),
@@ -2688,6 +2715,7 @@ mod tests {
             amount,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         })
     }
 

@@ -12,7 +12,7 @@ workspace = true
 
 [dependencies]
 # tempo
-tempo-alloy.workspace = true
+tempo-alloy = { workspace = true, features = ["tempo-compat"] }
 tempo-contracts.workspace = true
 tempo-primitives.workspace = true
 

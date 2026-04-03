@@ -52,6 +52,7 @@ macro_rules! define_abi {
                 address to;
                 uint128 amount;
                 bytes32 memo;
+                address bouncebackRecipient;
             }
 
             /// Encrypted deposit payload (ECIES encrypted recipient and memo)
@@ -72,6 +73,7 @@ macro_rules! define_abi {
                 uint128 amount;
                 uint256 keyIndex;
                 EncryptedDepositPayload encrypted;
+                address bouncebackRecipient;
             }
 
             #[derive(Debug)]
@@ -120,7 +122,8 @@ macro_rules! define_abi {
                     address to,
                     uint128 netAmount,
                     uint128 fee,
-                    bytes32 memo
+                    bytes32 memo,
+                    address bouncebackRecipient
                 );
 
                 #[derive(Debug)]
@@ -155,9 +158,16 @@ macro_rules! define_abi {
                 event WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess);
 
                 #[derive(Debug)]
-                event BounceBack(
+                event WithdrawalBounceBack(
                     bytes32 indexed newCurrentDepositQueueHash,
                     address indexed fallbackRecipient,
+                    address token,
+                    uint128 amount
+                );
+
+                #[derive(Debug)]
+                event DepositBounceBack(
+                    address indexed bouncebackRecipient,
                     address token,
                     uint128 amount
                 );
@@ -734,6 +744,7 @@ mod tests {
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
             memo: B256::ZERO,
+            bouncebackRecipient: Address::ZERO,
         };
 
         let encoded = d.abi_encode();
@@ -757,6 +768,7 @@ mod tests {
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
             memo: B256::ZERO,
+            bouncebackRecipient: Address::ZERO,
         };
 
         let deposit_data = Bytes::from(deposit.abi_encode());
@@ -816,6 +828,7 @@ mod tests {
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
             memo: B256::ZERO,
+            bouncebackRecipient: Address::ZERO,
         };
         let prev_hash = B256::ZERO;
 

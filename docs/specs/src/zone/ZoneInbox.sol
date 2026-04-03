@@ -16,6 +16,7 @@ import {
     ITempoState,
     IZoneConfig,
     IZoneInbox,
+    IZoneOutbox,
     IZoneToken,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
@@ -43,6 +44,9 @@ contract ZoneInbox is IZoneInbox {
     /// @notice The TempoState predeploy address (stored as concrete type for internal use)
     TempoState internal immutable _tempoState;
 
+    /// @notice The ZoneOutbox predeploy (for enqueuing deposit bouncebacks)
+    IZoneOutbox public immutable outbox;
+
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
 
@@ -50,10 +54,16 @@ contract ZoneInbox is IZoneInbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config, address _tempoPortalAddr, address _tempoStateAddr) {
+    constructor(
+        address _config,
+        address _tempoPortalAddr,
+        address _tempoStateAddr,
+        address _outbox
+    ) {
         config = IZoneConfig(_config);
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
+        outbox = IZoneOutbox(_outbox);
     }
 
     /// @notice The TempoState predeploy address
@@ -207,10 +217,23 @@ contract ZoneInbox is IZoneInbox {
                 // Advance the hash chain with type discriminator
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
-                // Mint the correct zone-side TIP-20 token to the recipient
-                IZoneToken(d.token).mint(d.to, d.amount);
-
-                emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
+                if (d.bouncebackRecipient != address(0)) {
+                    // Normal deposit: try minting, bounce back on failure
+                    try IZoneToken(d.token).mint(d.to, d.amount) {
+                        emit DepositProcessed(
+                            currentHash, d.sender, d.to, d.token, d.amount, d.memo
+                        );
+                    } catch {
+                        outbox.enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
+                        emit DepositFailed(
+                            currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient
+                        );
+                    }
+                } else {
+                    // Bounce-back deposit from a failed withdrawal — always succeeds
+                    IZoneToken(d.token).mint(d.to, d.amount);
+                    emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
+                }
             } else {
                 // Decode encrypted deposit
                 EncryptedDeposit memory ed = abi.decode(qd.depositData, (EncryptedDeposit));
@@ -272,16 +295,46 @@ contract ZoneInbox is IZoneInbox {
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
                 if (!valid) {
-                    // Decryption failed: credit the depositor's address on the zone.
-                    // L1 funds remain escrowed in the portal.
-                    IZoneToken(ed.token).mint(ed.sender, ed.amount);
-                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+                    // Decryption failed: try crediting the depositor's address on the zone.
+                    if (ed.bouncebackRecipient != address(0)) {
+                        try IZoneToken(ed.token).mint(ed.sender, ed.amount) {
+                            emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+                        } catch {
+                            outbox.enqueueDepositBounceBack(
+                                ed.token, ed.amount, ed.bouncebackRecipient
+                            );
+                            emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+                        }
+                    } else {
+                        IZoneToken(ed.token).mint(ed.sender, ed.amount);
+                        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+                    }
                 } else {
-                    // Decryption succeeded - mint the correct zone-side TIP-20 to the decrypted recipient
-                    IZoneToken(ed.token).mint(dec.to, ed.amount);
-                    emit EncryptedDepositProcessed(
-                        currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
-                    );
+                    // Decryption succeeded: try minting to the decrypted recipient
+                    if (ed.bouncebackRecipient != address(0)) {
+                        try IZoneToken(ed.token).mint(dec.to, ed.amount) {
+                            emit EncryptedDepositProcessed(
+                                currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
+                            );
+                        } catch {
+                            outbox.enqueueDepositBounceBack(
+                                ed.token, ed.amount, ed.bouncebackRecipient
+                            );
+                            emit DepositFailed(
+                                currentHash,
+                                ed.sender,
+                                dec.to,
+                                ed.token,
+                                ed.amount,
+                                ed.bouncebackRecipient
+                            );
+                        }
+                    } else {
+                        IZoneToken(ed.token).mint(dec.to, ed.amount);
+                        emit EncryptedDepositProcessed(
+                            currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
+                        );
+                    }
                 }
             }
         }
