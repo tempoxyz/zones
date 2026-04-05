@@ -1931,7 +1931,13 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, recipient, amount, B256::ZERO, Address::ZERO)
+            .deposit(
+                PATH_USD_ADDRESS,
+                recipient,
+                amount,
+                B256::ZERO,
+                Address::ZERO,
+            )
             .send()
             .await?
             .get_receipt()
@@ -1986,7 +1992,13 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(token, self.address, amount, B256::ZERO, Address::ZERO)
+            .deposit(
+                token,
+                self.address,
+                amount,
+                B256::ZERO,
+                Address::ZERO,
+            )
             .send()
             .await?
             .get_receipt()

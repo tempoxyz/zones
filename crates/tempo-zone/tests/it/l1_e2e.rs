@@ -1250,7 +1250,13 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
 
         let portal = ZonePortal::new(portal_address, &dev_provider);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, alice, deposit_amount, B256::ZERO, Address::ZERO)
+            .deposit(
+                PATH_USD_ADDRESS,
+                alice,
+                deposit_amount,
+                B256::ZERO,
+                Address::ZERO,
+            )
             .send()
             .await?
             .get_receipt()
