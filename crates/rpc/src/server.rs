@@ -219,7 +219,7 @@ pub(crate) async fn authenticate_token(
     let token = auth::parse_auth_header(token_value)?;
 
     // Validate token fields against server config
-    token.validate(config.zone_id, config.chain_id, config.zone_portal)?;
+    token.validate(config.zone_id, config.chain_id)?;
 
     let signature =
         TempoSignature::from_bytes(&token.signature).map_err(|_| AuthError::InvalidSignature)?;
@@ -400,7 +400,7 @@ mod tests {
         let root_account = Address::repeat_byte(0x55);
         let access_signer = P256SigningKey::random(&mut thread_rng());
         let now = now_secs();
-        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, PORTAL, now, now + 600);
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
         let (signature, key_id) =
             sign_keychain_signature(digest, &access_signer, root_account, 0x04)
                 .expect("keychain signing failed");

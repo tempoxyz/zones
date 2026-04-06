@@ -172,12 +172,7 @@ async fn test_auth_rejection() -> eyre::Result<()> {
     );
 
     // Valid signature but wrong chain ID → 403
-    let bad_token = ctx.build_bad_token(
-        &ctx.sequencer_signer,
-        1,
-        ctx.config.chain_id + 1,
-        Address::ZERO,
-    );
+    let bad_token = ctx.build_bad_token(&ctx.sequencer_signer, 1, ctx.config.chain_id + 1);
     let (status, _) = ctx
         .call_raw("eth_blockNumber", serde_json::json!([]), &bad_token)
         .await?;
