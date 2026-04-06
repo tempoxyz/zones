@@ -35,7 +35,7 @@ pub struct ZoneProviderConfig {
     pub chain_id: u64,
     /// ZonePortal contract address on L1.
     pub zone_portal: Address,
-    /// How long each generated token is valid. Default: 600s, max: 1800s.
+    /// How long each generated token is valid. Default: 600s, max: 2592000s (30 days).
     pub token_ttl: Duration,
     /// The private zone RPC URL.
     pub rpc_url: url::Url,

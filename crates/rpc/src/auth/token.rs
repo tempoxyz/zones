@@ -43,7 +43,7 @@ pub struct AuthContext {
 pub struct AuthorizationToken {
     /// Spec version (must be 0).
     pub version: u8,
-    /// Zone ID.
+    /// Zone ID (0 = unscoped, valid for any zone).
     pub zone_id: u32,
     /// Chain ID.
     pub chain_id: u64,
@@ -104,6 +104,8 @@ impl AuthorizationToken {
     }
 
     /// Validate token fields against the server's zone configuration.
+    ///
+    /// A `zone_id` of `0` is unscoped and accepted for any zone.
     pub fn validate(
         &self,
         expected_zone_id: u32,
@@ -113,7 +115,7 @@ impl AuthorizationToken {
         if self.version != 0 {
             return Err(AuthError::UnsupportedVersion(self.version));
         }
-        if self.zone_id != expected_zone_id {
+        if self.zone_id != 0 && self.zone_id != expected_zone_id {
             return Err(AuthError::ZoneIdMismatch);
         }
         if self.chain_id != expected_chain_id {
@@ -122,7 +124,7 @@ impl AuthorizationToken {
         if self.zone_portal != expected_portal {
             return Err(AuthError::ZonePortalMismatch);
         }
-        if self.expires_at.saturating_sub(self.issued_at) > 1800 {
+        if self.expires_at.saturating_sub(self.issued_at) > 2_592_000 {
             return Err(AuthError::WindowTooLarge);
         }
 
@@ -146,6 +148,8 @@ impl AuthorizationToken {
 ///
 /// Returns `(fields, digest)` where `fields` is the 49-byte suffix
 /// and `digest` is the keccak256 hash to be signed.
+///
+/// Pass `zone_id = 0` for an unscoped token valid for any zone.
 pub fn build_token_fields(
     zone_id: u32,
     chain_id: u64,
