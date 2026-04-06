@@ -1,97 +1,60 @@
-# Tempo Zones
+<!-- TODO: add logo -->
+<!-- <p align="center"><a href="https://tempo.xyz/zones"><img src="assets/logo.png" alt="Tempo Zones" width="400"></a></p> -->
 
-Zones are sidechains anchored to Tempo. Each zone has its own sequencer, genesis state, and portal contract that escrows deposits and processes withdrawals.
+<h1 align="center">Tempo Zones</h1>
 
-**Explorers:** [Moderato](https://explore.moderato.tempo.xyz/)
+---
 
-This repository contains the `tempo-zone` node, zone-specific precompiles and RPC support, and the `just` workflows for deploying and operating zones on Tempo.
+Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo), with native support for confidential balances and transactions. Zones inherit compliance from Tempo Mainnet and support interoperability with Tempo for moving assets in and out of zones.
 
-For the main Tempo repository, see [tempoxyz/tempo](https://github.com/tempoxyz/tempo).
+You can get started today by [deploying a zone](#getting-started) on Tempo testnet, reading the [full zone documentation](docs/ZONES.md), or exploring the [Zone specs](https://docs.tempo.xyz/protocol).
 
-## Quick Start
+## What Makes Zones Interesting
 
-Prerequisites:
+- **Private balances and transactions.** State access requires account authentication at the RPC layer. This ensures that only the authorized account holder can access balances and transaction history. The zone operator maintains full visibility into state for compliance.
 
-- [Rust toolchain](https://rustup.rs/)
-- [Foundry](https://book.getfoundry.sh/getting-started/installation) (`cast`, `forge`)
-- [`just`](https://github.com/casey/just#packages)
-- [`jq`](https://jqlang.github.io/jq/download/)
+- **Encrypted deposits and withdrawals.** When depositing into a zone, users can encrypt the recipient to not reveal who receives funds inside the zone. Encrypted withdrawals are also possible, allowing the sender to be replaced with a commitment, preserving recipient verifiability without exposing the sender when withdrawing to Tempo mainnet.
 
-Deploy and start a zone on Moderato:
+- **Zone to zone transfers.** Zones interoperate with Tempo Mainnet via withdrawals with optional calldata. A withdrawal can execute on mainnet and deposit into another zone, enabling flows like zone to zone transfers or swaps between a withdrawal and depositing into a different zone.
+
+- **Compliance inherited from Tempo Mainnet.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist, freeze) are mirrored into the zone each block. Enforcement is proven as part of batch validity.
+
+
+TODO: something about speed of withdrawals, near instant
+
+
+
+
+
+
+## Getting Started
+
+Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/getting-started/installation), [`just`](https://github.com/casey/just#packages), [`jq`](https://jqlang.github.io/jq/download/)
 
 ```bash
+# Deploy and start a zone on Moderato testnet
 export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
 just deploy-zone my-zone
-```
 
-To choose a different initial TIP-20 on the portal at deploy time, pass it as the second positional argument:
-
-```bash
-just deploy-zone my-zone alphausd
-```
-
-`just deploy-zone` will:
-
-- Generate a fresh sequencer keypair
-- Fund the sequencer via `tempo_fundAddress`
-- Build the Solidity specs
-- Deploy a zone via `ZoneFactory`
-- Generate `generated/<name>/genesis.json` and `generated/<name>/zone.json`
-- Register the sequencer encryption key and start the zone node
-
-### Key Addresses
-
-| Contract | Address | Explorer |
-|----------|---------|----------|
-| ZoneFactory (moderato) | `0x7Cc496Dc634b718289c192b59CF90262C5228545` | [View on Moderato explorer](https://explore.moderato.tempo.xyz/address/0x7Cc496Dc634b718289c192b59CF90262C5228545) |
-
-`just create-zone`, `just deploy-zone`, and `just zone-info` default to this Moderato `ZoneFactory`. `just deploy-router` also falls back to it when `zone.json` does not already include `zoneFactory`.
-
-`zone.json` stores the deployed portal address, zone ID, anchor block, and sequencer metadata used by later commands such as `just zone-up` and `just deploy-router`.
-
-To restart the same zone later:
-
-```bash
+# Restart later
 just zone-up my-zone false release
-```
 
-## How Zones Work
-
-- A zone sequencer subscribes to Tempo for headers, deposits, and token-enablement events, including backfill from the zone's anchor block.
-- The zone builds one sidechain block per Tempo block, processing Tempo-driven state transitions through system transactions before app transactions.
-- The zone monitor batches zone blocks back to Tempo and processes withdrawals from the zone back to Tempo users.
-
-## More Docs
-
-See [docs/ZONES.md](docs/ZONES.md) for:
-
-- Step-by-step setup and deployment
-- Deposits, withdrawals, and private RPC usage
-- Router demos and TIP-403 policy flows
-- Architecture, configuration, and command reference
-
-## Development
-
-```bash
-git clone https://github.com/tempoxyz/zones.git
-cd zones
+# Build from source
 cargo build --bin tempo-zone
 cargo test --workspace
 ```
 
-The main binary in this repository is `tempo-zone`:
+`deploy-zone` generates a sequencer keypair, funds it on L1, deploys the portal via `ZoneFactory`, generates genesis, and starts the node.
 
-```bash
-cargo run --bin tempo-zone -- node --help
-```
+See [docs/ZONES.md](docs/ZONES.md) for the full guide — deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command reference.
 
 ## Contributing
 
-Our contributor guidelines can be found in [`CONTRIBUTING.md`](https://github.com/tempoxyz/tempo?tab=contributing-ov-file).
+See [`CONTRIBUTING.md`](https://github.com/tempoxyz/tempo?tab=contributing-ov-file).
 
 ## Security
 
-See [`SECURITY.md`](https://github.com/tempoxyz/tempo?tab=security-ov-file). Note: Tempo is still undergoing audit and does not have an active bug bounty. Submissions will not be eligible for a bounty until audits have concluded.
+See [`SECURITY.md`](https://github.com/tempoxyz/tempo?tab=security-ov-file).
 
 ## License
 
