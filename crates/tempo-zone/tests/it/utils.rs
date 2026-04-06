@@ -2493,12 +2493,7 @@ impl PrivateRpcTestCtx {
 
     /// Build a WebAuthn auth token for a non-sequencer caller.
     pub(crate) fn webauthn_token(&self, signing_key: &P256SigningKey) -> String {
-        build_webauthn_auth_token(
-            signing_key,
-            self.config.zone_id,
-            self.config.chain_id,
-            None,
-        )
+        build_webauthn_auth_token(signing_key, self.config.zone_id, self.config.chain_id, None)
     }
 
     /// Build a WebAuthn auth token with an overridden challenge digest.
