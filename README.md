@@ -68,7 +68,6 @@ just send-withdrawal 1000000 <recipient-address>  # withdraw to a specific addre
 
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
 
-```
 
 See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command reference.
 
