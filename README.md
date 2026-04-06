@@ -17,7 +17,7 @@ You can get started today by [deploying a zone](#getting-started) on Tempo testn
 
 - **Zone to zone transfers.** Zones interoperate with Tempo Mainnet via withdrawals with optional calldata. A withdrawal can execute on mainnet and deposit into another zone, enabling flows like zone to zone transfers or swaps between a withdrawal and depositing into a different zone.
 
-- **Compliance inherited from Tempo Mainnet.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist, freeze) are mirrored into the zone each block. Enforcement is proven as part of batch validity.
+- **Compliance inherited from Tempo Mainnet.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist) are mirrored from Tempo Mainnet and enforced on zones. Issuers set the policy once on mainnet and the zone picks it up automatically. If an issuer freezes an address or updates a blacklist on mainnet, the zone inherits the change in the next block.
 
 
 TODO: something about speed of withdrawals, near instant
