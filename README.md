@@ -19,13 +19,7 @@ You can get started today by [deploying a zone](#getting-started) on Tempo testn
 
 - **Compliance inherited from Tempo Mainnet.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist) are mirrored from Tempo Mainnet and enforced on zones. Issuers set the policy once on mainnet and the zone picks it up automatically. If an issuer freezes an address or updates a blacklist on mainnet, the zone inherits the change in the next block.
 
-
-TODO: something about speed of withdrawals, near instant
-
-
-
-
-
+- **Fast withdrawals.** The zone processes transactions every 250ms and submits batches of withdrawals to Tempo Mainnet, where blocks are produced every ~500ms. Once batches are accepted and the attached proof is validated, withdrawals are processed and funds are released from escrow.
 
 ## Getting Started
 
