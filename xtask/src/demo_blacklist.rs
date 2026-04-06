@@ -329,13 +329,7 @@ impl DemoBlacklist {
             let mut pending = None;
             for attempt in 0..5u32 {
                 match portal
-                    .deposit(
-                        token_addr,
-                        admin,
-                        deposit_amount,
-                        B256::ZERO,
-                        Address::ZERO,
-                    )
+                    .deposit(token_addr, admin, deposit_amount, B256::ZERO, Address::ZERO)
                     .send()
                     .await
                 {
