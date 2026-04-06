@@ -1101,6 +1101,46 @@ mod tests {
     }
 
     #[test]
+    fn transfer_fails_closed_on_policy_resolution_error() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::failing())?;
+
+        let calldata: Bytes = ITIP20::transferCall {
+            to: harness.bob,
+            amount: U256::from(100u64),
+        }
+        .abi_encode()
+        .into();
+
+        let result = harness.call(harness.alice, calldata, 100_000, false);
+        assert!(
+            result.is_err(),
+            "transfer must fail when policy resolution errors"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn mint_defers_to_l1_on_policy_resolution_error() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::failing())?;
+
+        let calldata: Bytes = ITIP20::mintCall {
+            to: harness.alice,
+            amount: U256::from(100u64),
+        }
+        .abi_encode()
+        .into();
+
+        let result = harness.call(harness.issuer, calldata, 100_000, false);
+        assert!(
+            result.is_ok(),
+            "mint must proceed when policy resolution errors (L1 enforces policy at deposit time)"
+        );
+
+        Ok(())
+    }
+
+    #[test]
     fn has_role_enforces_account_or_sequencer_access() -> TestResult {
         let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
         let calldata: Bytes = IRolesAuth::hasRoleCall {
