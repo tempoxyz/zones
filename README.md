@@ -9,6 +9,7 @@ Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/te
 
 You can get started today by [deploying a zone](#getting-started) on Tempo testnet, reading the [full zone documentation](docs/ZONES.md), or exploring the [Zone specs](https://docs.tempo.xyz/protocol).
 
+
 ## What Makes Zones Interesting
 
 - **Private balances and transactions.** State access requires account authentication at the RPC layer. This ensures that only the authorized account holder can access balances and transaction history. The zone operator maintains full visibility into state for compliance.
@@ -21,9 +22,13 @@ You can get started today by [deploying a zone](#getting-started) on Tempo testn
 
 - **Fast withdrawals.** The zone processes transactions every 250ms and submits batches of withdrawals to Tempo Mainnet, where blocks are produced every ~500ms. Once batches are accepted and the attached proof is validated, withdrawals are processed and funds are released from escrow.
 
+
 ## Getting Started
 
 Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/getting-started/installation), [`just`](https://github.com/casey/just#packages), [`jq`](https://jqlang.github.io/jq/download/)
+
+
+## Deploying a Zone
 
 ```bash
 # Deploy and start a zone on Moderato testnet
@@ -31,24 +36,42 @@ export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
 just deploy-zone my-zone
 
 # Restart later
-just zone-up my-zone false release
-
-# Build from source
-cargo build --bin tempo-zone
-cargo test --workspace
+just zone-up my-zone
 ```
 
 `deploy-zone` generates a sequencer keypair, funds it on L1, deploys the portal via `ZoneFactory`, generates genesis, and starts the node.
 
-See [docs/ZONES.md](docs/ZONES.md) for the full guide — deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command reference.
 
-## Contributing
 
-See [`CONTRIBUTING.md`](https://github.com/tempoxyz/tempo?tab=contributing-ov-file).
+## Depositing into a Zone
 
-## Security
+```bash
+export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
+just max-approve-portal
+just send-deposit 1000000                       # deposit to your own address
+just send-deposit 1000000 <recipient-address>   # deposit to a specific address
+```
 
-See [`SECURITY.md`](https://github.com/tempoxyz/tempo?tab=security-ov-file).
+
+```bash
+just send-deposit-encrypted 1000000                       # to your own address
+just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
+```
+
+## Withdrawing from Zone to Tempo
+
+```bash
+just max-approve-outbox
+just send-withdrawal 1000000  # withdraw to your own address
+just send-withdrawal 1000000 <recipient-address>  # withdraw to a specific address
+```
+
+The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
+
+```
+
+See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command reference.
+
 
 ## License
 
