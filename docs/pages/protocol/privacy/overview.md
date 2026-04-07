@@ -1230,17 +1230,17 @@ This ensures deposits are processed in the exact order they were made, regardles
 
 **On-chain decryption verification:**
 
-The zone can verify encrypted deposit decryption on-chain without the sequencer revealing their private key. The sequencer provides the ECDH shared secret alongside the decrypted data:
+The zone can verify encrypted deposit decryption on-chain without the sequencer revealing their private key. The sequencer provides the ECDH shared secret and a proof of correct derivation:
 
 ```solidity
 struct DecryptionData {
     bytes32 sharedSecret;       // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
     uint8 sharedSecretYParity;  // Y coordinate parity of the shared secret point (0x02 or 0x03)
-    address to;                 // Decrypted recipient
-    bytes32 memo;               // Decrypted memo
     ChaumPedersenProof cpProof; // Proof of correct shared secret derivation
 }
 ```
+
+The decrypted `(to, memo)` are derived on-chain from the AES-GCM decryption of the ciphertext and do not need to be supplied by the sequencer.
 
 Verification works by leveraging the AES-GCM authentication tag:
 
@@ -1387,11 +1387,12 @@ bytes32 aesKey = _hkdfSha256(
     ed.encrypted.tag
 );
 
-// Step 5: Verify decrypted plaintext matches claimed (to, memo)
+// Step 5: Decode the decrypted (to, memo) from the plaintext
 // Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)] = 64 bytes
+address decryptedTo;
+bytes32 decryptedMemo;
 if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
-    (address decryptedTo, bytes32 decryptedMemo) = EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
-    valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);
+    (decryptedTo, decryptedMemo) = EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
 } else {
     valid = false;
 }
@@ -1402,16 +1403,22 @@ if (!valid) {
     IZoneToken(ed.token).mint(ed.sender, ed.amount);
     emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
 } else {
-    // Decryption succeeded - mint correct zone-side TIP-20 to decrypted recipient
-    IZoneToken(ed.token).mint(dec.to, ed.amount);
-    emit EncryptedDepositProcessed(currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo);
+    // Decryption succeeded — try minting to the decrypted recipient.
+    // If the mint fails (e.g. recipient is blacklisted by TIP-403 policy),
+    // fall back to crediting the depositor instead.
+    try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
+        emit EncryptedDepositProcessed(currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo);
+    } catch {
+        IZoneToken(ed.token).mint(ed.sender, ed.amount);
+        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+    }
 }
 ```
 
 **Key properties:**
 - **Zero-knowledge security**: Chaum-Pedersen proof verifies shared secret without exposing sequencer's private key to EVM
 - **Griefing resistance**: Invalid encryptions can be detected and rejected, preventing chain blockage
-- **Graceful failure**: Invalid encrypted deposits return funds to sender instead of reverting
+- **Graceful failure**: Invalid encrypted deposits or policy-rejected mints return funds to sender instead of reverting
 - **Cryptographic proof**: GCM tag validation proves decryption correctness
 - **On-chain verification**: All verification happens on-chain via precompiles
 - **Standard crypto**: Uses well-established ECIES, ECDH, Chaum-Pedersen, HKDF-SHA256, and AES-256-GCM

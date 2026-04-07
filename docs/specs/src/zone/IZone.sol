@@ -137,11 +137,11 @@ struct ChaumPedersenProof {
 ///      without exposing the sequencer's private key.
 ///      The sequencer's public key is looked up from the deposit's keyIndex on-chain,
 ///      so it does not need to be included here.
+///      The decrypted (to, memo) are derived on-chain from the AES-GCM decryption and
+///      do not need to be supplied by the sequencer.
 struct DecryptionData {
     bytes32 sharedSecret; // ECDH shared secret (x-coordinate of privSeq * ephemeralPub)
     uint8 sharedSecretYParity; // Y coordinate parity of the shared secret point (0x02 or 0x03)
-    address to; // Decrypted recipient
-    bytes32 memo; // Decrypted memo
     ChaumPedersenProof cpProof; // Proof of correct shared secret derivation
 }
 

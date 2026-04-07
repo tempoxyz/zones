@@ -76,8 +76,8 @@ Authorization is **operation-specific**: ZoneInbox access applies to `mint` only
 **ZoneInbox mints** during deposit processing in `advanceTempo()`:
 
 - Regular deposit: `mint(deposit.to, deposit.amount)` — credits the recipient on the zone.
-- Encrypted deposit (decryption succeeded): `mint(decrypted.to, deposit.amount)` — credits the decrypted recipient on the zone.
-- Encrypted deposit (decryption failed): `mint(deposit.sender, deposit.amount)` — credits the depositor's address on the zone (same address as their L1 account). The L1 funds remain escrowed in the portal.
+- Encrypted deposit (decryption succeeded): `mint(decrypted.to, deposit.amount)` — credits the decrypted recipient on the zone. If the mint fails (e.g. recipient is blacklisted by TIP-403 policy), falls back to crediting the depositor.
+- Encrypted deposit (decryption failed or mint rejected): `mint(deposit.sender, deposit.amount)` — credits the depositor's address on the zone (same address as their L1 account). The L1 funds remain escrowed in the portal.
 
 **ZoneOutbox burns** during withdrawal requests in `requestWithdrawal()`:
 

@@ -1124,7 +1124,7 @@ impl L1BlockDeposits {
         self,
         sequencer_key: &k256::SecretKey,
         portal_address: Address,
-        policy_provider: &crate::l1_state::PolicyProvider,
+        _policy_provider: &crate::l1_state::PolicyProvider,
     ) -> eyre::Result<PreparedL1Block> {
         use crate::precompiles::ecies;
 
@@ -1190,46 +1190,15 @@ impl L1BlockDeposits {
                             recipient = %dec.to,
                             token = %d.token,
                             amount = %d.amount,
-                            "Decrypted encrypted deposit, checking policy"
+                            "Decrypted encrypted deposit"
                         );
 
-                        // Check TIP-403 policy via the provider (cache-first, RPC fallback).
-                        // Errors are propagated so the engine retries rather than allowing
-                        // unauthorized deposits through.
-                        let authorized = policy_provider
-                            .is_authorized_async(
-                                d.token,
-                                dec.to,
-                                l1_block_number,
-                                crate::l1_state::AuthRole::MintRecipient,
-                            )
-                            .await?;
-
-                        let recipient = if authorized {
-                            debug!(
-                                target: "zone::engine",
-                                recipient = %dec.to,
-                                token = %d.token,
-                                "Policy authorized encrypted deposit recipient"
-                            );
-                            dec.to
-                        } else {
-                            warn!(
-                                target: "zone::engine",
-                                sender = %d.sender,
-                                recipient = %dec.to,
-                                token = %d.token,
-                                amount = %d.amount,
-                                "Encrypted deposit recipient unauthorized, redirecting to sender"
-                            );
-                            d.sender
-                        };
-
+                        // TIP-403 policy enforcement happens on-chain: ZoneInbox
+                        // wraps the mint in try/catch and falls back to crediting
+                        // the depositor if the recipient is unauthorized.
                         let decryption = abi::DecryptionData {
                             sharedSecret: dec.proof.shared_secret,
                             sharedSecretYParity: dec.proof.shared_secret_y_parity,
-                            to: recipient,
-                            memo: dec.memo,
                             cpProof: abi::ChaumPedersenProof {
                                 s: dec.proof.cp_proof_s,
                                 c: dec.proof.cp_proof_c,
@@ -1257,8 +1226,6 @@ impl L1BlockDeposits {
                         let decryption = abi::DecryptionData {
                             sharedSecret: proof.shared_secret,
                             sharedSecretYParity: proof.shared_secret_y_parity,
-                            to: d.sender,
-                            memo: B256::ZERO,
                             cpProof: abi::ChaumPedersenProof {
                                 s: proof.cp_proof_s,
                                 c: proof.cp_proof_c,
@@ -1278,8 +1245,6 @@ impl L1BlockDeposits {
                     let decryption = abi::DecryptionData {
                         sharedSecret: B256::ZERO,
                         sharedSecretYParity: 0x02,
-                        to: d.sender,
-                        memo: B256::ZERO,
                         cpProof: abi::ChaumPedersenProof {
                             s: B256::ZERO,
                             c: B256::ZERO,

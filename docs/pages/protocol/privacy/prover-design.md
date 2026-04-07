@@ -160,11 +160,10 @@ pub enum DepositType {
 }
 
 /// Mirrors the Solidity `DecryptionData` struct from IZone.sol
-/// Provided by the sequencer for each encrypted deposit
+/// Provided by the sequencer for each encrypted deposit.
+/// The decrypted (to, memo) are derived on-chain from AES-GCM decryption.
 pub struct DecryptionData {
     pub shared_secret: B256,  // ECDH shared secret (x-coordinate)
-    pub to: Address,          // Decrypted recipient
-    pub memo: B256,           // Decrypted memo
     pub cp_proof: ChaumPedersenProof, // Proof of correct shared secret derivation
 }
 

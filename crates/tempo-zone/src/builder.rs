@@ -690,8 +690,6 @@ mod tests {
             decryptions: vec![abi::DecryptionData {
                 sharedSecret: B256::ZERO,
                 sharedSecretYParity: 0x02,
-                to: sender,
-                memo: B256::ZERO,
                 cpProof: abi::ChaumPedersenProof {
                     s: B256::ZERO,
                     c: B256::ZERO,
