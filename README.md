@@ -72,6 +72,37 @@ just send-withdrawal 1000000 <recipient-address>  # withdraw to a specific addre
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
 
 
+## Querying the Private RPC
+
+Zone balances are private by default. Every RPC request must include a signed authorization token that proves you control the querying account.
+
+`just zone-auth-token` reads `generated/<name>/zone.json` and signs a short-lived auth token:
+
+```bash
+export PRIVATE_KEY=<zone-wallet-private-key>
+
+# generate an auth token
+TOKEN=$(just zone-auth-token my-zone)
+```
+
+Pass the token via the `X-Authorization-Token` header on any RPC call:
+
+```bash
+# verify your auth token works
+cast rpc zone_getAuthorizationTokenInfo \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+
+# query your native balance
+cast rpc eth_getBalance "$(cast wallet address $PRIVATE_KEY)" "latest" \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+
+# query your TIP-20 balance 
+just check-balance-private my-zone <token-address>  # or pass a specific token address
+```
+
+
 See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command references.
 
 
