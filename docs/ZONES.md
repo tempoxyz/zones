@@ -266,21 +266,55 @@ just demo-swap-and-deposit my-zone amount=100000000 tick=0
 
 This is a same-zone demo only. The command creates its own temporary tokens and DEX liquidity automatically, so you do not need to pre-create assets or seed the order book yourself.
 
-#### Check balance via Private RPC
+#### Query the Private RPC
 
-The private RPC (port 8544) requires a signed auth token derived from your private key. This ensures only the account owner can query their own balance.
+The private RPC (port 8544) requires a signed auth token derived from your private key. This ensures only the account owner can query their own scoped state.
+
+Use the built-in helper if you only want a quick balance check:
 
 ```bash
-# Check your balance (generates auth token automatically)
 just check-balance-private my-zone
-
-# Generate a reusable auth token (valid for 10 minutes)
-TOKEN=$(just zone-auth-token my-zone)
-curl -s http://localhost:8544 \
-  -H "Content-Type: application/json" \
-  -H "x-authorization-token: $TOKEN" \
-  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
 ```
+
+For direct RPC calls, `just zone-auth-token` generates a 10-minute token from `generated/<name>/zone.json`, and `cast rpc` forwards it with `X-Authorization-Token`.
+HTTP header names are case-insensitive, so `x-authorization-token` works too, but the examples here use the canonical casing from the spec.
+
+One-liner to verify the private endpoint and inspect the authenticated account:
+
+```bash
+cast rpc zone_getAuthorizationTokenInfo \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $(just zone-auth-token my-zone)"
+```
+
+If you want to make multiple requests, generate the token once and reuse it:
+
+```bash
+TOKEN=$(just zone-auth-token my-zone)
+
+cast rpc zone_getAuthorizationTokenInfo \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+
+cast rpc eth_blockNumber \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+```
+
+To query your own TIP-20 balance directly with `eth_call`, derive the authenticated account from `PRIVATE_KEY`, encode `balanceOf(address)`, and send the call through the private endpoint:
+
+```bash
+ADDR=$(cast wallet address "$PRIVATE_KEY")
+DATA=$(cast calldata "balanceOf(address)" "$ADDR")
+
+cast rpc eth_call \
+  "{\"from\":\"$ADDR\",\"to\":\"0x20C0000000000000000000000000000000000000\",\"data\":\"$DATA\"}" \
+  latest \
+  --rpc-url http://localhost:8544 \
+  --rpc-headers "X-Authorization-Token: $TOKEN"
+```
+
+Swap the `to` address above if you want to query a different zone TIP-20.
 
 #### Check portal status on L1
 
@@ -466,6 +500,7 @@ The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zo
 | `--withdrawal-poll-interval-secs` | 5 | How often (seconds) the withdrawal processor polls the L1 queue |
 | `--http.port` | 8546 | HTTP JSON-RPC port |
 | `--private-rpc.port` | 8544 | Private RPC server port |
+| `--private-rpc.max-auth-token-validity-secs` | 2592000 | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
 
 ### Environment Variables
 
@@ -475,6 +510,7 @@ The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zo
 | `SEQUENCER_KEY` | For sequencing | Sequencer private key |
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
+| `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
 
 ## Justfile Commands Reference

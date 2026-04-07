@@ -39,7 +39,10 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
-    batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_slot_withdrawals},
+    batch::{
+        AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_slot_withdrawals,
+        log_query_ranges,
+    },
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -316,22 +319,36 @@ impl ZoneMonitor {
     /// correct signal is `BatchFinalized` events with non-zero withdrawal hashes.
     async fn has_pending_withdrawals(&self, latest_block: u64) -> bool {
         let from = self.last_submitted_zone_block + 1;
-        match self
-            .outbox
-            .BatchFinalized_filter()
-            .from_block(from)
-            .to_block(latest_block)
-            .query()
-            .await
-        {
-            Ok(events) => events
-                .iter()
-                .any(|(event, _)| !event.withdrawalQueueHash.is_zero()),
-            Err(e) => {
-                warn!(error = %e, "Failed to check for finalized withdrawal batches");
-                false
+        for (chunk_from, chunk_to) in log_query_ranges(from, latest_block) {
+            match self
+                .outbox
+                .BatchFinalized_filter()
+                .from_block(chunk_from)
+                .to_block(chunk_to)
+                .query()
+                .await
+            {
+                Ok(events) => {
+                    if events
+                        .iter()
+                        .any(|(event, _)| !event.withdrawalQueueHash.is_zero())
+                    {
+                        return true;
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        from = chunk_from,
+                        to = chunk_to,
+                        error = %e,
+                        "Failed to check for finalized withdrawal batches"
+                    );
+                    return false;
+                }
             }
         }
+
+        false
     }
 
     /// Process a range of zone blocks as a single batch, or split into multiple

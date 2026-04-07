@@ -43,8 +43,6 @@ The `deploy-zone` command generates a sequencer keypair, funds it on L1, deploys
 just zone-up my-zone
 ```
 
-
-
 ## Depositing into a Zone
 
 ```bash
