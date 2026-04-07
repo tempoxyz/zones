@@ -16,11 +16,11 @@ You can get started today by [deploying a zone](#getting-started) on Tempo testn
 
 - **Encrypted deposits and withdrawals.** When depositing into a zone, users can encrypt the recipient to not reveal who receives funds inside the zone. Encrypted withdrawals are also possible, allowing the sender to be replaced with a commitment, preserving recipient verifiability without exposing the sender when withdrawing to Tempo mainnet.
 
-- **Zone to zone transfers.** Zones interoperate with Tempo Mainnet via withdrawals with optional calldata. A withdrawal can execute on mainnet and deposit into another zone, enabling flows like zone to zone transfers or swaps between a withdrawal and depositing into a different zone.
+- **Zone to zone transfers.** Zones interoperate with Tempo Mainnet via withdrawals with optional calldata. Withdrawal calldata can execute on Tempo and deposit into another zone, enabling flows like zone to zone transfers or executing a swap between sending amounts to another zone.
 
-- **Compliance inherited from Tempo Mainnet.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist) are mirrored from Tempo Mainnet and enforced on zones. Issuers set the policy once on mainnet and the zone picks it up automatically. If an issuer freezes an address or updates a blacklist on mainnet, the zone inherits the change in the next block.
+- **Compliance inherited from Tempo Mainnet.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist) are mirrored from Tempo and enforced on zones. Issuers set the policy once on Tempo and the zone picks it up automatically. If an issuer freezes an address or updates a blacklist on Tempo, the zone inherits the change in the next block.
 
-- **Fast withdrawals.** The zone processes transactions every 250ms and submits batches of withdrawals to Tempo Mainnet, where blocks are produced every ~500ms. Once batches are accepted and the attached proof is validated, withdrawals are processed and funds are released from escrow.
+- **Fast withdrawals.** The zone processes transactions every 250ms and submits batches of withdrawals to Tempo, where blocks are produced every ~500ms. Once batches are accepted and the attached proof is validated, withdrawals are processed and funds are released from escrow.
 
 
 ## Getting Started
@@ -34,12 +34,14 @@ Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/
 # Deploy and start a zone on Moderato testnet
 export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
 just deploy-zone my-zone
-
-# Restart later
-just zone-up my-zone
 ```
 
-`deploy-zone` generates a sequencer keypair, funds it on L1, deploys the portal via `ZoneFactory`, generates genesis, and starts the node.
+The `deploy-zone` command generates a sequencer keypair, funds it on L1, deploys the portal via `ZoneFactory`, generates genesis, and starts the node.
+
+```bash
+# Start/restart a zone after initial deployment
+just zone-up my-zone
+```
 
 
 
@@ -48,12 +50,14 @@ just zone-up my-zone
 ```bash
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
 just max-approve-portal
+
+# deposit into the zone
 just send-deposit 1000000                       # deposit to your own address
 just send-deposit 1000000 <recipient-address>   # deposit to a specific address
 ```
 
-
 ```bash
+# send an encrypted deposit
 just send-deposit-encrypted 1000000                       # to your own address
 just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
 ```
@@ -61,15 +65,16 @@ just send-deposit-encrypted 1000000 <recipient-address>   # to a specific addres
 ## Withdrawing from Zone to Tempo
 
 ```bash
+
+# withdraw from the zone
 just max-approve-outbox
-just send-withdrawal 1000000  # withdraw to your own address
 just send-withdrawal 1000000 <recipient-address>  # withdraw to a specific address
 ```
 
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
 
 
-See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command reference.
+See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command references.
 
 
 ## License
