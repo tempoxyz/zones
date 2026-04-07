@@ -16,7 +16,7 @@ pub enum AuthError {
     ZoneIdMismatch,
     #[error("chain ID mismatch")]
     ChainIdMismatch,
-    #[error("validity window too large (max 2592000s)")]
+    #[error("validity window too large")]
     WindowTooLarge,
     #[error("authorization token expired")]
     Expired,
