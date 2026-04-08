@@ -3,7 +3,7 @@
 use tempo_precompiles::PATH_USD_ADDRESS;
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TestStablecoinDEX, start_local_zone_with_fixture, STABLECOIN_DEX_ADDRESS,
+    DEFAULT_TIMEOUT, STABLECOIN_DEX_ADDRESS, TestStablecoinDEX, start_local_zone_with_fixture,
 };
 
 /// The StablecoinDEX precompile should be disabled on zones — any call to
