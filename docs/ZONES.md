@@ -482,16 +482,16 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 
 | Precompile | Address | Zone Behavior |
 |------------|---------|---------------|
-| Standard EVM (ecrecover, SHA-256, etc.) | `0x01`–`0x0a`+ | **Unchanged** — standard Ethereum precompiles inherited from Tempo's active hardfork are available as-is. |
+| Standard EVM (ecrecover, SHA-256, etc.) | `0x01`–`0x0a`, `0x0100` on T1C+ | **Unchanged** — standard Ethereum precompiles inherited from Tempo's active hardfork (Prague pre-T1C, Osaka at T1C+) are available as-is. |
 | TIP-20 tokens | `0x20C0…` prefix | **Replaced** — routed through `ZoneTip20Token`, which adds privacy (caller-scoped reads), fixed gas for transfers, bridge-auth for mint/burn, and TIP-403 policy enforcement via the L1-synced cache. |
 | TIP20Factory | `0x20FC…0000` | **Replaced** — `ZoneTokenFactory` exposes only `enableToken(address, name, symbol, currency)`, called by ZoneInbox during `advanceTempo` to initialize bridged tokens. |
-| TIP403Registry | `0x403C…0000` | **Replaced** — `ZoneTip403ProxyRegistry` delegates policy checks to a cache-first, L1-RPC-fallback provider instead of reading local storage. |
+| TIP403Registry | `0x403C…0000` | **Replaced** — read-only `ZoneTip403ProxyRegistry` serves authorization queries from a cache-first, L1-RPC-fallback provider. Mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) revert — policy state is managed on L1. |
 | TipFeeManager | `0xfeec…0000` | **Present** — the precompile is still registered, but its liquidity pools are not used by transactions. The zone executor overrides `validatorTokens` to match each transaction's fee token, so the FeeAMM swap path is bypassed and fees are collected directly in the user's token. |
-| StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge.
-| NonceManager | `0x4E4F…0000` | **Unchanged** — passed through from L1. |
-| ValidatorConfig (legacy) | `0xCCCC…0000` | **Unchanged** — passed through from L1. |
-| ValidatorConfigV2 | `0xCCCC…0001` | **Unchanged** — passed through from L1. |
-| AccountKeychain | `0xAAAA…0000` | **Unchanged** — passed through from L1. |
+| StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge. |
+| NonceManager | `0x4E4F…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
+| ValidatorConfig (legacy) | `0xCCCC…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
+| ValidatorConfigV2 | `0xCCCC…0001` | **Unchanged** — same implementation as L1, runs locally on zone state. |
+| AccountKeychain | `0xAAAA…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
 | AddressRegistry | `0xFDC0…0000` | **Not registered** — the address has no zone precompile implementation. |
 | SignatureVerifier | `0x5165…0000` | **Not registered** — the address has no zone precompile implementation. |
 
