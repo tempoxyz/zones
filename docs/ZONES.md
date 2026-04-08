@@ -487,7 +487,7 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | TIP20Factory | `0x20FC…0000` | **Replaced** — `ZoneTokenFactory` exposes only `enableToken(address, name, symbol, currency)`, called by ZoneInbox during `advanceTempo` to initialize bridged tokens. |
 | TIP403Registry | `0x403C…0000` | **Replaced** — `ZoneTip403ProxyRegistry` delegates policy checks to a cache-first, L1-RPC-fallback provider instead of reading local storage. |
 | TipFeeManager | `0xfeec…0000` | **Present** — the precompile is still registered, but its liquidity pools are not used by transactions. The zone executor overrides `validatorTokens` to match each transaction's fee token, so the FeeAMM swap path is bypassed and fees are collected directly in the user's token. |
-| StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. The L1 DEX is not relevant on zones. |
+| StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge.
 | NonceManager | `0x4E4F…0000` | **Unchanged** — passed through from L1. |
 | ValidatorConfig (legacy) | `0xCCCC…0000` | **Unchanged** — passed through from L1. |
 | ValidatorConfigV2 | `0xCCCC…0001` | **Unchanged** — passed through from L1. |
