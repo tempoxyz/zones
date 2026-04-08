@@ -209,6 +209,9 @@ contract ZonePortal is IZonePortal {
     function enableToken(address _token) external onlySequencer {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
         if (!TempoUtilities.isTIP20(_token)) revert TokenNotEnabled();
+        if (keccak256(bytes(ITIP20(_token).currency())) != keccak256(bytes("USD"))) {
+            revert InvalidCurrency();
+        }
         _enableTokenInternal(_token);
     }
 

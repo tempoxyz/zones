@@ -573,6 +573,7 @@ interface IZonePortal {
     error TokenNotEnabled();
     error DepositsNotActive();
     error TokenAlreadyEnabled();
+    error InvalidCurrency();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);

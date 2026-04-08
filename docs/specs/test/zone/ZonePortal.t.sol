@@ -2397,4 +2397,31 @@ contract ZonePortalTest is BaseTest {
         );
     }
 
+    /*//////////////////////////////////////////////////////////////
+                         ENABLE TOKEN TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_enableToken_succeeds_for_usd() public {
+        // Create a USD token
+        TIP20 usdToken = TIP20(
+            factory.createToken("AlphaUSD", "aUSD", "USD", pathUSD, admin, bytes32("alphaUsd"))
+        );
+
+        // Enable it on the portal (admin is the sequencer)
+        portal.enableToken(address(usdToken));
+
+        assertTrue(portal.isTokenEnabled(address(usdToken)), "USD token should be enabled");
+    }
+
+    function test_enableToken_reverts_for_non_usd() public {
+        // Create a non-USD token (EUR)
+        TIP20 eurToken = TIP20(
+            factory.createToken("EuroStable", "EURs", "EUR", pathUSD, admin, bytes32("eurToken"))
+        );
+
+        // Enabling a non-USD token on the portal should revert
+        vm.expectRevert(IZonePortal.InvalidCurrency.selector);
+        portal.enableToken(address(eurToken));
+    }
+
 }
