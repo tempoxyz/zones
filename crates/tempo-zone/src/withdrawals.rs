@@ -186,6 +186,15 @@ pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count:
 //  Withdrawal processor
 // ---------------------------------------------------------------------------
 
+struct StoreSnapshot {
+    batch_count: usize,
+    first_slot: Option<u64>,
+    last_slot: Option<u64>,
+    prev_slot: Option<u64>,
+    next_slot: Option<u64>,
+    withdrawals: Option<Vec<abi::Withdrawal>>,
+}
+
 /// Background task that processes withdrawals from the ZonePortal queue on Tempo L1.
 ///
 /// The processor waits for a [`Notify`] signal from the batch submitter (indicating a batch
@@ -206,15 +215,6 @@ pub struct WithdrawalProcessor {
     notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
     metrics: WithdrawalProcessorMetrics,
-}
-
-struct StoreSnapshot {
-    batch_count: usize,
-    first_slot: Option<u64>,
-    last_slot: Option<u64>,
-    prev_slot: Option<u64>,
-    next_slot: Option<u64>,
-    withdrawals: Option<Vec<abi::Withdrawal>>,
 }
 
 impl WithdrawalProcessor {
