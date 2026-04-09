@@ -205,7 +205,6 @@ pub struct WithdrawalProcessor {
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
     repair_notify: Arc<Notify>,
-    last_repair_request_at: Option<Instant>,
     metrics: WithdrawalProcessorMetrics,
 }
 
@@ -228,24 +227,8 @@ impl WithdrawalProcessor {
             store,
             notify,
             repair_notify,
-            last_repair_request_at: None,
             metrics: WithdrawalProcessorMetrics::default(),
         }
-    }
-
-    /// Request a monitor-side repair, but no more frequently than the fallback poll interval.
-    fn request_monitor_repair(&mut self) -> bool {
-        let now = Instant::now();
-        if self
-            .last_repair_request_at
-            .is_some_and(|last| now.duration_since(last) < self.config.fallback_poll_interval)
-        {
-            return false;
-        }
-
-        self.last_repair_request_at = Some(now);
-        self.repair_notify.notify_one();
-        true
     }
 
     /// Run the processor loop. This method never returns under normal operation.
@@ -319,7 +302,7 @@ impl WithdrawalProcessor {
         let withdrawals = match withdrawals {
             Some(w) if !w.is_empty() => w,
             _ => {
-                let repair_request_sent = self.request_monitor_repair();
+                self.repair_notify.notify_one();
                 warn!(
                     slot = head_val,
                     tail = tail_val,
@@ -329,7 +312,6 @@ impl WithdrawalProcessor {
                     store_last_slot,
                     prev_store_slot,
                     next_store_slot,
-                    repair_request_sent,
                     "No withdrawal data in store for current head slot"
                 );
                 return Ok(());
@@ -725,51 +707,6 @@ mod tests {
         timeout(Duration::from_millis(50), repair_notify.notified())
             .await
             .expect("missing head slot should request a monitor resync");
-        assert!(l1.read_q().is_empty());
-    }
-
-    #[tokio::test]
-    async fn process_queue_throttles_repeated_monitor_repair_requests() {
-        let l1 = Asserter::new();
-        for _ in 0..3 {
-            l1.push_success(&abi_encode_u64(51));
-            l1.push_success(&abi_encode_u64(71));
-        }
-
-        let config = WithdrawalProcessorConfig {
-            portal_address: address!("0x7069DeC4E64Fd07334A0933eDe836C17259c9B23"),
-            l1_rpc_url: "http://unused.test".to_string(),
-            fallback_poll_interval: Duration::from_millis(50),
-        };
-        let notify = Arc::new(Notify::new());
-        let repair_notify = Arc::new(Notify::new());
-        let mut processor = WithdrawalProcessor::new(
-            config,
-            mock_provider(l1.clone()),
-            SharedWithdrawalStore::new(),
-            notify,
-            repair_notify.clone(),
-        );
-
-        processor.process_queue().await.unwrap();
-        timeout(Duration::from_millis(20), repair_notify.notified())
-            .await
-            .expect("first missing head slot should request a monitor resync");
-
-        processor.process_queue().await.unwrap();
-        assert!(
-            timeout(Duration::from_millis(20), repair_notify.notified())
-                .await
-                .is_err(),
-            "repeat repair requests should be throttled"
-        );
-
-        tokio::time::sleep(Duration::from_millis(60)).await;
-
-        processor.process_queue().await.unwrap();
-        timeout(Duration::from_millis(20), repair_notify.notified())
-            .await
-            .expect("repair requests should resume after the cooldown");
         assert!(l1.read_q().is_empty());
     }
 }
