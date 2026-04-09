@@ -286,8 +286,10 @@ impl WithdrawalProcessor {
     /// Process the current head slot of the portal's withdrawal queue on Tempo L1.
     #[instrument(skip_all)]
     async fn process_queue(&mut self) -> eyre::Result<()> {
-        let head: alloy_primitives::U256 = self.portal.withdrawalQueueHead().call().await?;
-        let tail: alloy_primitives::U256 = self.portal.withdrawalQueueTail().call().await?;
+        let head_call = self.portal.withdrawalQueueHead();
+        let tail_call = self.portal.withdrawalQueueTail();
+        let (head, tail): (alloy_primitives::U256, alloy_primitives::U256) =
+            tokio::try_join!(head_call.call(), tail_call.call())?;
 
         let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
         let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
