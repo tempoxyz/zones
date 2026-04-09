@@ -109,6 +109,11 @@ impl WithdrawalStore {
         self.batches.insert(batch_index, withdrawals);
     }
 
+    /// Replace the entire store with an authoritative set of pending batches.
+    pub(crate) fn replace_batches(&mut self, batches: BTreeMap<u64, Vec<abi::Withdrawal>>) {
+        self.batches = batches;
+    }
+
     /// Get all withdrawals for a batch.
     pub fn get_batch(&self, batch_index: u64) -> Option<&Vec<abi::Withdrawal>> {
         self.batches.get(&batch_index)
@@ -125,6 +130,32 @@ impl WithdrawalStore {
 
     pub fn batch_count(&self) -> usize {
         self.batches.len()
+    }
+
+    /// Return the smallest and largest portal slot indices currently present.
+    fn slot_range(&self) -> Option<(u64, u64)> {
+        let first = *self.batches.keys().next()?;
+        let last = *self.batches.keys().next_back()?;
+        Some((first, last))
+    }
+
+    /// Return a compact summary of the store as `(batch_count, first_slot, last_slot)`.
+    pub(crate) fn summary(&self) -> (usize, Option<u64>, Option<u64>) {
+        let (first_slot, last_slot) = self
+            .slot_range()
+            .map_or((None, None), |(first, last)| (Some(first), Some(last)));
+        (self.batch_count(), first_slot, last_slot)
+    }
+
+    /// Return the nearest populated slots before and after `slot`, if any exist.
+    fn neighboring_slots(&self, slot: u64) -> (Option<u64>, Option<u64>) {
+        let prev = self.batches.range(..slot).next_back().map(|(&idx, _)| idx);
+        let next = self
+            .batches
+            .range(slot.saturating_add(1)..)
+            .next()
+            .map(|(&idx, _)| idx);
+        (prev, next)
     }
 }
 
@@ -173,6 +204,8 @@ pub struct WithdrawalProcessor {
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
+    repair_notify: Arc<Notify>,
+    last_repair_request_at: Option<Instant>,
     metrics: WithdrawalProcessorMetrics,
 }
 
@@ -185,6 +218,7 @@ impl WithdrawalProcessor {
         provider: DynProvider<TempoNetwork>,
         store: SharedWithdrawalStore,
         notify: Arc<Notify>,
+        repair_notify: Arc<Notify>,
     ) -> Self {
         let portal = ZonePortal::new(config.portal_address, provider);
 
@@ -193,8 +227,25 @@ impl WithdrawalProcessor {
             portal,
             store,
             notify,
+            repair_notify,
+            last_repair_request_at: None,
             metrics: WithdrawalProcessorMetrics::default(),
         }
+    }
+
+    /// Request a monitor-side repair, but no more frequently than the fallback poll interval.
+    fn request_monitor_repair(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .last_repair_request_at
+            .is_some_and(|last| now.duration_since(last) < self.config.fallback_poll_interval)
+        {
+            return false;
+        }
+
+        self.last_repair_request_at = Some(now);
+        self.repair_notify.notify_one();
+        true
     }
 
     /// Run the processor loop. This method never returns under normal operation.
@@ -229,7 +280,27 @@ impl WithdrawalProcessor {
 
         let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
         let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
-        let store_batch_count = self.store.lock().batch_count();
+        let (
+            store_batch_count,
+            withdrawals,
+            store_first_slot,
+            store_last_slot,
+            prev_store_slot,
+            next_store_slot,
+        ) = {
+            let store = self.store.lock();
+            let (store_batch_count, store_first_slot, store_last_slot) = store.summary();
+            let withdrawals = store.get_batch(head_val).cloned();
+            let (prev_store_slot, next_store_slot) = store.neighboring_slots(head_val);
+            (
+                store_batch_count,
+                withdrawals,
+                store_first_slot,
+                store_last_slot,
+                prev_store_slot,
+                next_store_slot,
+            )
+        };
         self.record_queue_metrics(head_val, tail_val, store_batch_count);
 
         if head_val == tail_val {
@@ -245,18 +316,21 @@ impl WithdrawalProcessor {
             "Withdrawal queue has pending slots"
         );
 
-        let withdrawals = {
-            let store = self.store.lock();
-            store.get_batch(head_val).cloned()
-        };
-
         let withdrawals = match withdrawals {
             Some(w) if !w.is_empty() => w,
             _ => {
+                let repair_request_sent = self.request_monitor_repair();
                 warn!(
                     slot = head_val,
-                    store_batches = self.store.lock().batch_count(),
-                    "No withdrawal data in store for current head slot, waiting for data"
+                    tail = tail_val,
+                    pending_slots,
+                    store_batches = store_batch_count,
+                    store_first_slot,
+                    store_last_slot,
+                    prev_store_slot,
+                    next_store_slot,
+                    repair_request_sent,
+                    "No withdrawal data in store for current head slot"
                 );
                 return Ok(());
             }
@@ -413,9 +487,11 @@ pub fn spawn_withdrawal_processor(
     provider: DynProvider<TempoNetwork>,
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
+    repair_notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut processor = WithdrawalProcessor::new(config, provider, store, notify);
+        let mut processor =
+            WithdrawalProcessor::new(config, provider, store, notify, repair_notify);
         loop {
             if let Err(e) = processor.run().await {
                 error!(error = %e, "Withdrawal processor failed, restarting in 5s");
@@ -429,8 +505,22 @@ pub fn spawn_withdrawal_processor(
 mod tests {
     use super::*;
     use crate::abi::EMPTY_SENTINEL;
-    use alloy_primitives::{address, keccak256};
+    use alloy_primitives::{Bytes, U256, address, keccak256};
+    use alloy_provider::{Provider, ProviderBuilder};
     use alloy_sol_types::SolValue;
+    use alloy_transport::mock::Asserter;
+    use tempo_alloy::TempoNetwork;
+    use tokio::time::timeout;
+
+    fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
+        ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter)
+            .erased()
+    }
+
+    fn abi_encode_u64(value: u64) -> Bytes {
+        Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>())
+    }
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
@@ -586,5 +676,100 @@ mod tests {
 
         store.add_batch(1, vec![test_withdrawal(addr, 999)]);
         assert_eq!(store.batch_count(), 2);
+    }
+
+    #[test]
+    fn store_replace_batches_reconciles_authoritative_view() {
+        let mut store = WithdrawalStore::new();
+        let addr = address!("0x0000000000000000000000000000000000000042");
+
+        store.add_batch(0, vec![test_withdrawal(addr, 100)]);
+        store.add_batch(9, vec![test_withdrawal(addr, 900)]);
+
+        let mut reconciled = BTreeMap::new();
+        reconciled.insert(5, vec![test_withdrawal(addr, 500)]);
+        reconciled.insert(6, vec![test_withdrawal(addr, 600)]);
+
+        store.replace_batches(reconciled);
+
+        assert!(!store.has_batch(0));
+        assert!(!store.has_batch(9));
+        assert!(store.has_batch(5));
+        assert!(store.has_batch(6));
+        assert_eq!(store.batch_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn process_queue_requests_monitor_resync_when_head_slot_missing() {
+        let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(51));
+        l1.push_success(&abi_encode_u64(71));
+
+        let config = WithdrawalProcessorConfig {
+            portal_address: address!("0x7069DeC4E64Fd07334A0933eDe836C17259c9B23"),
+            l1_rpc_url: "http://unused.test".to_string(),
+            fallback_poll_interval: Duration::from_secs(1),
+        };
+        let notify = Arc::new(Notify::new());
+        let repair_notify = Arc::new(Notify::new());
+        let mut processor = WithdrawalProcessor::new(
+            config,
+            mock_provider(l1.clone()),
+            SharedWithdrawalStore::new(),
+            notify,
+            repair_notify.clone(),
+        );
+
+        processor.process_queue().await.unwrap();
+
+        timeout(Duration::from_millis(50), repair_notify.notified())
+            .await
+            .expect("missing head slot should request a monitor resync");
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_queue_throttles_repeated_monitor_repair_requests() {
+        let l1 = Asserter::new();
+        for _ in 0..3 {
+            l1.push_success(&abi_encode_u64(51));
+            l1.push_success(&abi_encode_u64(71));
+        }
+
+        let config = WithdrawalProcessorConfig {
+            portal_address: address!("0x7069DeC4E64Fd07334A0933eDe836C17259c9B23"),
+            l1_rpc_url: "http://unused.test".to_string(),
+            fallback_poll_interval: Duration::from_millis(50),
+        };
+        let notify = Arc::new(Notify::new());
+        let repair_notify = Arc::new(Notify::new());
+        let mut processor = WithdrawalProcessor::new(
+            config,
+            mock_provider(l1.clone()),
+            SharedWithdrawalStore::new(),
+            notify,
+            repair_notify.clone(),
+        );
+
+        processor.process_queue().await.unwrap();
+        timeout(Duration::from_millis(20), repair_notify.notified())
+            .await
+            .expect("first missing head slot should request a monitor resync");
+
+        processor.process_queue().await.unwrap();
+        assert!(
+            timeout(Duration::from_millis(20), repair_notify.notified())
+                .await
+                .is_err(),
+            "repeat repair requests should be throttled"
+        );
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        processor.process_queue().await.unwrap();
+        timeout(Duration::from_millis(20), repair_notify.notified())
+            .await
+            .expect("repair requests should resume after the cooldown");
+        assert!(l1.read_q().is_empty());
     }
 }
