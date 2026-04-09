@@ -240,6 +240,10 @@ impl WithdrawalProcessor {
         }
     }
 
+    /// Read the current store contents relevant to `slot` under a single lock.
+    ///
+    /// This keeps the diagnostic fields used in missing-slot logs consistent
+    /// with each other and with the batch lookup result.
     fn capture_store_snapshot(&self, slot: u64) -> StoreSnapshot {
         let store = self.store.lock();
         let (batch_count, first_slot, last_slot) = store.summary();
