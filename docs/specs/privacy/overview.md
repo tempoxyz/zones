@@ -1,7 +1,5 @@
 # Tempo Zones (Draft)
 
-This document proposes a new validium protocol designed for Tempo. It is a design overview, not a full specification.
-
 ## Goals
 
 - Create a Tempo-native validium called a zone.
