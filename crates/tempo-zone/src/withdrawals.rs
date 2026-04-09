@@ -208,6 +208,15 @@ pub struct WithdrawalProcessor {
     metrics: WithdrawalProcessorMetrics,
 }
 
+struct StoreSnapshot {
+    batch_count: usize,
+    first_slot: Option<u64>,
+    last_slot: Option<u64>,
+    prev_slot: Option<u64>,
+    next_slot: Option<u64>,
+    withdrawals: Option<Vec<abi::Withdrawal>>,
+}
+
 impl WithdrawalProcessor {
     /// Create a new withdrawal processor from a shared L1 provider.
     ///
@@ -228,6 +237,21 @@ impl WithdrawalProcessor {
             notify,
             repair_notify,
             metrics: WithdrawalProcessorMetrics::default(),
+        }
+    }
+
+    fn capture_store_snapshot(&self, slot: u64) -> StoreSnapshot {
+        let store = self.store.lock();
+        let (batch_count, first_slot, last_slot) = store.summary();
+        let (prev_slot, next_slot) = store.neighboring_slots(slot);
+
+        StoreSnapshot {
+            batch_count,
+            first_slot,
+            last_slot,
+            prev_slot,
+            next_slot,
+            withdrawals: store.get_batch(slot).cloned(),
         }
     }
 
@@ -263,27 +287,14 @@ impl WithdrawalProcessor {
 
         let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
         let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
-        let (
-            store_batch_count,
+        let StoreSnapshot {
+            batch_count: store_batch_count,
+            first_slot: store_first_slot,
+            last_slot: store_last_slot,
+            prev_slot: prev_store_slot,
+            next_slot: next_store_slot,
             withdrawals,
-            store_first_slot,
-            store_last_slot,
-            prev_store_slot,
-            next_store_slot,
-        ) = {
-            let store = self.store.lock();
-            let (store_batch_count, store_first_slot, store_last_slot) = store.summary();
-            let withdrawals = store.get_batch(head_val).cloned();
-            let (prev_store_slot, next_store_slot) = store.neighboring_slots(head_val);
-            (
-                store_batch_count,
-                withdrawals,
-                store_first_slot,
-                store_last_slot,
-                prev_store_slot,
-                next_store_slot,
-            )
-        };
+        } = self.capture_store_snapshot(head_val);
         self.record_queue_metrics(head_val, tail_val, store_batch_count);
 
         if head_val == tail_val {
