@@ -122,6 +122,7 @@ pub async fn spawn_zone_sequencer(
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());
+    let withdrawal_repair_notify = Arc::new(Notify::new());
 
     let withdrawal_config = WithdrawalProcessorConfig {
         portal_address: config.portal_address,
@@ -145,12 +146,14 @@ pub async fn spawn_zone_sequencer(
         l1_provider.clone(),
         withdrawal_store.clone(),
         withdrawal_notify.clone(),
+        withdrawal_repair_notify.clone(),
     );
     let monitor_handle = spawn_zone_monitor(
         monitor_config,
         l1_provider,
         withdrawal_store,
         withdrawal_notify,
+        withdrawal_repair_notify,
     );
 
     ZoneSequencerHandle {
