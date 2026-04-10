@@ -285,6 +285,7 @@ impl TestContext {
             retry_connection_interval: std::time::Duration::from_millis(100),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
+            max_auth_token_validity: zone_rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
             zone_portal: Address::ZERO,
             sequencer: signer.address(),
         };
