@@ -111,6 +111,8 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 | TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
 | Predeploy | A system contract deployed at a fixed address on the zone at genesis. |
 
+<br>
+
 ## System Overview
 
 Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
@@ -146,6 +148,8 @@ sequenceDiagram
 
     Portal->>User: processWithdrawal(), tokens released from escrow
 ```
+
+<br>
 
 ## Zone Deployment
 
@@ -205,38 +209,51 @@ Token supply on the zone is controlled exclusively by the system contracts:
 
 The zone-side supply of each token always equals net deposits minus net withdrawals. The corresponding tokens on Tempo are held in escrow by the portal. No other actor can mint or burn zone tokens.
 
-## Sequencer Operations
+<br>
 
-<!-- Everything the sequencer does to configure and operate a zone after deployment. -->
+## Sequencer Operations
 
 ### Token Management
 
-<!-- enableToken (irreversible), pauseDeposits/resumeDeposits, non-custodial withdrawal guarantee. Sequencer can enable additional TIP-20 tokens at any time. Enablement is permanent (append-only). -->
+The sequencer manages which TIP-20 tokens are available on the zone:
+
+- `enableToken(token)`: Enable a new TIP-20 for deposits and withdrawals. This is **irreversible**. Once enabled, a token can never be disabled.
+- `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
+- `resumeDeposits(token)`: Resume deposits for a previously paused token.
+
+The portal maintains a `TokenConfig` per token with an `enabled` flag (permanent) and a `depositsActive` flag (toggleable), along with an append-only `enabledTokens` list. This enforces the non-custodial withdrawal guarantee: the sequencer can halt deposits but can never prevent users from withdrawing an enabled token.
 
 ### Gas Rate Configuration
 
-<!-- 
-- zoneGasRate: token units per gas unit on the zone (set via ZonePortal.setZoneGasRate)
-  - Used to calculate deposit fees: FIXED_DEPOSIT_GAS * zoneGasRate
-- tempoGasRate: token units per gas unit on Tempo (set via ZoneOutbox.setTempoGasRate)
-  - Used to calculate withdrawal fees: gasLimit * tempoGasRate
-- Sequencer takes risk on gas price fluctuations
-- Single uniform rate applies to all tokens
--->
+The sequencer configures two gas rates that determine fees for deposits and withdrawals:
+
+| Rate | Set via | Used for |
+|------|---------|----------|
+| `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` |
+| `tempoGasRate` | `ZoneOutbox.setTempoGasRate()` | Withdrawal fees: `gasLimit * tempoGasRate` |
+
+Both rates are denominated in token units per gas unit. A single uniform `zoneGasRate` applies to all tokens. Fees are paid in the same token being deposited or withdrawn.
+
+The sequencer takes the risk on Tempo gas price fluctuations for withdrawals. If actual gas costs on Tempo exceed the fee collected, the sequencer covers the difference. If costs are lower, the sequencer keeps the surplus.
 
 ### Encryption Key Management
 
-<!--
-- setSequencerEncryptionKey with proof of possession (ECDSA sig)
-- Key history: append-only list, users specify keyIndex when encrypting
-- Key rotation: previous key valid for ENCRYPTION_KEY_GRACE_PERIOD (86400 blocks)
-- isEncryptionKeyValid, encryptionKeyAtBlock lookups
-- Why keyIndex: avoids race condition between signing and inclusion
--->
+The sequencer publishes a secp256k1 encryption public key used for [encrypted deposits](#encrypted-deposits). The key is set via `setSequencerEncryptionKey(x, yParity, popV, popR, popS)` on the portal, which requires a proof of possession (an ECDSA signature proving control of the corresponding private key).
+
+The portal stores all historical encryption keys in an append-only list. Users specify a `keyIndex` when making encrypted deposits, referencing which key they encrypted to. This avoids a race condition where a key rotates between transaction signing and block inclusion.
+
+When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_PERIOD` (86,400 blocks, roughly 1 day). After that, deposits using the old key are rejected. The current key never expires. Users can call `isEncryptionKeyValid(keyIndex)` before signing to check validity.
 
 ### Sequencer Transfer
 
-<!-- Two-step process on L1 only (transferSequencer → acceptSequencer), L1 as single source of truth. Zone-side contracts read sequencer from L1 via ZoneConfig. -->
+The sequencer can transfer control to a new address via a two-step process on Tempo:
+
+1. Current sequencer calls `ZonePortal.transferSequencer(newSequencer)` to nominate a new sequencer.
+2. New sequencer calls `ZonePortal.acceptSequencer()` to accept the transfer.
+
+Sequencer management happens exclusively on Tempo. Zone-side contracts read the sequencer address from the portal via `ZoneConfig`, so the transfer takes effect on the zone once `advanceTempo` imports the Tempo block containing the accepted transfer. The two-step pattern prevents accidental transfers to incorrect addresses.
+
+<br>
 
 ## Deposits
 
@@ -260,6 +277,8 @@ The zone-side supply of each token always equals net deposits minus net withdraw
 
 <!-- Chaum-Pedersen proof, AES-GCM decryption, HKDF key derivation, failure handling -->
 
+<br>
+
 ## Zone Execution
 
 ### Fee Accounting
@@ -281,6 +300,8 @@ The zone-side supply of each token always equals net deposits minus net withdraw
 - Fixed 100k gas for transfers (side channel prevention)
 - CREATE/CREATE2 disabled
 -->
+
+<br>
 
 ## Tempo L1 State Reads
 
@@ -323,6 +344,8 @@ The zone-side supply of each token always equals net deposits minus net withdraw
 - Proofs should only reference finalized Tempo blocks to avoid reorg risk
 -->
 
+<br>
+
 ## TIP-403 Policies
 
 <!-- TIP-403 policy enforcement is a headline feature — compliance inherited from Tempo automatically. -->
@@ -347,6 +370,8 @@ The zone-side supply of each token always equals net deposits minus net withdraw
 - Portal address MUST be whitelisted for restricted policies
 - Impact on withdrawals: if policy restricts portal or recipient, withdrawal fails and bounces back
 -->
+
+<br>
 
 ## Private RPC
 
@@ -447,6 +472,8 @@ comprehensive — the RPC is the primary interface users interact with and the m
 - Design principle: explicit errors for user-supplied mismatches, silent 0x0/null for queries about others (avoids leaking "data exists but you can't see it")
 -->
 
+<br>
+
 ## Proving System
 
 <!-- The proving system is proof-agnostic. The core is a pure state transition function in Rust (no_std) that executes zone blocks and outputs commitments for on-chain verification. Any proving backend can run this function. The on-chain verifier is abstracted behind IVerifier and the portal does not care how the proof was produced. -->
@@ -507,6 +534,8 @@ comprehensive — the RPC is the primary interface users interact with and the m
 - Reference to prover-design.md for full implementation details
 -->
 
+<br>
+
 ## Batch Submission
 
 ### submitBatch
@@ -524,6 +553,8 @@ comprehensive — the RPC is the primary interface users interact with and the m
 ### Proof Requirements
 
 <!-- Enumerated list of everything the proof must validate -->
+
+<br>
 
 ## Withdrawals
 
@@ -575,6 +606,8 @@ Impact on callback withdrawals: onWithdrawalReceived receives bytes32 senderTag 
 - Generalizes beyond zone-to-zone: withdraw + swap on Tempo DEX + deposit into another zone
 -->
 
+<br>
+
 ## Zone Precompiles
 
 <!-- Zone-specific precompiles beyond the standard Tempo TIP-20 precompile. These are deployed at fixed addresses in the 0x1c... range. -->
@@ -608,6 +641,8 @@ Impact on callback withdrawals: onWithdrawalReceived receives bytes32 senderTag 
 - Gas cost: ~1000 base + ~500 per 32 bytes
 - HKDF-SHA256 key derivation is done in Solidity using SHA256 precompile (0x02)
 -->
+
+<br>
 
 ## Contracts and Interfaces
 
@@ -651,13 +686,19 @@ Impact on callback withdrawals: onWithdrawalReceived receives bytes32 senderTag 
 
 <!-- Read-only on zone, reads policy from Tempo via TempoState -->
 
+<br>
+
 ## Network Upgrades and Hard Fork Activation
 
 <!-- Brief summary of activation rule, verifier routing, two-verifier invariant. Link to upgrades.md for full process -->
 
+<br>
+
 # Security Considerations
 
 <!-- Consolidated: sequencer trust, verifier trust anchor, encrypted deposit trust, bounce-back guarantees, TIP-403 policy changes, token pause effects -->
+
+<br>
 
 # Open Questions
 
