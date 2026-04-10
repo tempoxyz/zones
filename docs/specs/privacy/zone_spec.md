@@ -49,8 +49,17 @@
     - [Block Responses](#block-responses)
     - [Event Filtering](#event-filtering)
     - [Timing Side Channels](#timing-side-channels)
+    - [WebSocket Subscriptions](#websocket-subscriptions)
     - [Zone-Specific Methods](#zone-specific-methods)
-  - [Batch Submission and Proving](#batch-submission-and-proving)
+    - [Error Codes](#error-codes)
+  - [Proving System](#proving-system)
+    - [State Transition Function](#state-transition-function)
+    - [Witness Structure](#witness-structure)
+    - [Batch Output](#batch-output)
+    - [Block Execution](#block-execution)
+    - [Tempo State Proofs](#tempo-state-proofs)
+    - [Deployment Modes](#deployment-modes)
+  - [Batch Submission](#batch-submission)
     - [submitBatch](#submitbatch)
     - [Verifier Interface](#verifier-interface)
     - [Anchor Block Validation](#anchor-block-validation)
@@ -391,6 +400,17 @@ comprehensive — the RPC is the primary interface users interact with and the m
 - Methods that don't need it: eth_getBalance (check before fetch), eth_call (from validated before execution)
 -->
 
+### WebSocket Subscriptions
+
+<!--
+- eth_subscribe("newHeads"): allowed, pushes block headers (logsBloom zeroed for non-sequencer)
+- eth_subscribe("logs"): scoped to authenticated account, same event filtering rules
+- eth_subscribe("newPendingTransactions"): DISABLED — mempool observation
+- Auth token provided during WebSocket handshake, scopes all subscriptions
+- Connection terminated when auth token expires — client must reconnect with fresh token
+- Keychain revocation: connection terminated within 1 second of importing revocation block
+-->
+
 ### Zone-Specific Methods
 
 <!--
@@ -400,7 +420,79 @@ comprehensive — the RPC is the primary interface users interact with and the m
 - No state-changing methods via auth token — withdrawals require signed transactions
 -->
 
-## Batch Submission and Proving
+### Error Codes
+
+<!--
+- -32001: Authorization token required
+- -32002: Authorization token expired
+- -32003: Transaction rejected (sender mismatch on eth_sendRawTransaction)
+- -32004: Account mismatch (from mismatch on eth_call/eth_estimateGas)
+- -32005: Sequencer only
+- -32006: Method disabled
+- Design principle: explicit errors for user-supplied mismatches, silent 0x0/null for queries about others (avoids leaking "data exists but you can't see it")
+-->
+
+## Proving System
+
+<!-- The proving system is backend-agnostic. The core is a pure state transition function in Rust (no_std) that executes zone blocks and outputs commitments for on-chain verification. The same function runs in ZKVMs (SP1) to produce validity proofs OR in TEEs (SGX/TDX) to produce attestations. The on-chain verifier is abstracted behind IVerifier — the portal doesn't know or care which backend produced the proof. -->
+
+### State Transition Function
+
+<!--
+- prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error>
+- Pure function: takes witness, executes EVM transitions, outputs commitments
+- Core commitment is zone block hash transition (not raw state root)
+- no_std compatible for ZKVM/TEE portability
+-->
+
+### Witness Structure
+
+<!--
+- PublicInputs: prev_block_hash, tempo_block_number, anchor_block_number, anchor_block_hash, expected_withdrawal_batch_index, sequencer
+- BatchWitness: public_inputs, prev_block_header, zone_blocks, initial_zone_state, tempo_state_proofs, tempo_ancestry_headers
+- ZoneBlock: number, parent_hash, timestamp, beneficiary, tempo_header_rlp (optional), deposits, decryptions, finalize_withdrawal_batch_count (optional), transactions
+- ZoneStateWitness: accounts with MPT proofs, state_root — only includes accounts/slots accessed during batch
+- Missing witness data must error, not default to zero (prevents prover from omitting non-zero state)
+-->
+
+### Batch Output
+
+<!--
+- BlockTransition: prev_block_hash → next_block_hash
+- DepositQueueTransition: prev_processed_hash → next_processed_hash
+- withdrawal_queue_hash: hash chain for this batch (0 if none)
+- LastBatchCommitment: withdrawal_batch_index from ZoneOutbox.lastBatch
+-->
+
+### Block Execution
+
+<!--
+- For each block: validate parent hash, block number, timestamp monotonicity, beneficiary == sequencer
+- System tx: advanceTempo (optional, start of block) — processes deposits, validates Tempo header binding
+- User txs: executed in order via revm
+- System tx: finalizeWithdrawalBatch (required in final block only, absent in intermediate blocks)
+- Block hash computed from simplified zone header (parentHash, beneficiary, stateRoot, transactionsRoot, receiptsRoot, number, timestamp, protocolVersion)
+-->
+
+### Tempo State Proofs
+
+<!--
+- BatchStateProof: deduplicated node_pool (MPT nodes) + L1StateRead list
+- Each read specifies: zone_block_index, tempo_block_number, account, slot, node_path, expected value
+- Verified once per proof, indexed for on-demand access during execution
+- Anchor validation: direct (anchor == tempo block, hashes match) or ancestry (parent-hash chain verified inside proof)
+-->
+
+### Deployment Modes
+
+<!--
+- ZKVM (SP1): witness read from zkvm::io, output committed via zkvm::io::commit
+- TEE (SGX/TDX): ecall entry point, witness deserialized from pointer
+- Same prove_zone_batch function in both modes
+- Reference to prover-design.md for full implementation details
+-->
+
+## Batch Submission
 
 ### submitBatch
 
