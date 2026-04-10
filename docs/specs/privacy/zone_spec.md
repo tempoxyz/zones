@@ -21,7 +21,7 @@
     - [Deposit Fees](#deposit-fees)
     - [Deposit Queue](#deposit-queue)
     - [Encrypted Deposits](#encrypted-deposits)
-    - [On-Chain Decryption Verification](#on-chain-decryption-verification)
+    - [Onchain Decryption Verification](#onchain-decryption-verification)
   - [Zone Execution](#zone-execution)
     - [Fee Accounting](#fee-accounting)
     - [Block Structure](#block-structure)
@@ -117,7 +117,7 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 
 Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
 
-On the Tempo side, an on-chain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
+On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
 On Tempo, each zone has a **portal** that escrows deposited tokens. When a user deposits, the portal locks their tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
@@ -242,7 +242,7 @@ The sequencer publishes a secp256k1 encryption public key used for [encrypted de
 
 The portal stores all historical encryption keys in an append-only list. Users specify a `keyIndex` when making encrypted deposits, referencing which key they encrypted to. This avoids a race condition where a key rotates between transaction signing and block inclusion.
 
-When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_PERIOD` (86,400 blocks, roughly 1 day). After that, deposits using the old key are rejected. The current key never expires. Users can call `isEncryptionKeyValid(keyIndex)` before signing to check validity.
+When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_PERIOD` (86,400 blocks). After that, deposits using the old key are rejected. The current key never expires. Users can call `isEncryptionKeyValid(keyIndex)` before signing to check validity.
 
 ### Sequencer Transfer
 
@@ -257,9 +257,21 @@ Sequencer management happens exclusively on Tempo. Zone-side contracts read the 
 
 ## Deposits
 
+Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, the portal escrows the tokens and appends the deposit to a hash chain, and the sequencer mints equivalent tokens on the zone.
+
 ### Regular Deposits
 
-<!-- User calls deposit() → escrow → queue hash → sequencer observes → advanceTempo → mint -->
+A user deposits by calling `deposit(token, to, amount, memo)` on the portal. The portal:
+
+1. Validates the token is enabled and deposits are active.
+2. Transfers `amount` from the user into escrow.
+3. Deducts the deposit fee (see [Deposit Fees](#deposit-fees)) and pays it to the sequencer immediately.
+4. Appends the deposit to the deposit queue hash chain with the net amount (`amount - fee`).
+5. Emits `DepositMade`.
+
+The sequencer observes `DepositMade` events and relays deposits to the zone via `ZoneInbox.advanceTempo()`. This function processes deposits in order, minting the zone-side TIP-20 token to each recipient: `mint(deposit.to, deposit.amount)`.
+
+Deposits always succeed on the zone. There are no callbacks or failure modes for regular deposits. If the sequencer withholds deposits, funds remain in escrow with no forced inclusion mechanism.
 
 ### Deposit Fees
 
@@ -273,7 +285,7 @@ Sequencer management happens exclusively on Tempo. Zone-side contracts read the 
 
 <!-- ECIES with secp256k1, what's public vs private (token/sender/amount public, to/memo encrypted), processing flow. References encryption keys from Sequencer Operations. -->
 
-### On-Chain Decryption Verification
+### Onchain Decryption Verification
 
 <!-- Chaum-Pedersen proof, AES-GCM decryption, HKDF key derivation, failure handling -->
 
@@ -476,7 +488,7 @@ comprehensive — the RPC is the primary interface users interact with and the m
 
 ## Proving System
 
-<!-- The proving system is proof-agnostic. The core is a pure state transition function in Rust (no_std) that executes zone blocks and outputs commitments for on-chain verification. Any proving backend can run this function. The on-chain verifier is abstracted behind IVerifier and the portal does not care how the proof was produced. -->
+<!-- The proving system is proof-agnostic. The core is a pure state transition function in Rust (no_std) that executes zone blocks and outputs commitments for onchain verification. Any proving backend can run this function. The onchain verifier is abstracted behind IVerifier and the portal does not care how the proof was produced. -->
 
 ### State Transition Function
 
@@ -540,7 +552,7 @@ comprehensive — the RPC is the primary interface users interact with and the m
 
 ### submitBatch
 
-<!-- Parameters, what gets updated on-chain -->
+<!-- Parameters, what gets updated onchain -->
 
 ### Verifier Interface
 
