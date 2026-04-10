@@ -31,6 +31,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
 use parking_lot::Mutex;
@@ -44,6 +45,8 @@ use crate::{
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
+
+const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared handle to the withdrawal store.
 #[derive(Clone)]
@@ -341,6 +344,7 @@ impl WithdrawalProcessor {
             "Processing withdrawal batch"
         );
         let slot_started_at = Instant::now();
+        let slot_queue_hash = abi::Withdrawal::queue_hash(&withdrawals);
 
         for (i, withdrawal) in withdrawals.iter().enumerate() {
             self.metrics.withdrawals_processed_total.increment(1);
@@ -398,12 +402,32 @@ impl WithdrawalProcessor {
                 Ok(pending) => {
                     let tx_hash = *pending.tx_hash();
                     match pending
-                        .with_required_confirmations(1)
-                        .with_timeout(Some(std::time::Duration::from_secs(30)))
-                        .watch()
+                        .with_timeout(Some(PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT))
+                        .get_receipt()
                         .await
                     {
-                        Ok(_) => {
+                        Ok(receipt) => {
+                            if !receipt.status() {
+                                self.metrics.withdrawals_failed_total.increment(1);
+                                self.metrics.withdrawals_reverted_total.increment(1);
+                                self.record_slot_duration(slot_started_at.elapsed());
+                                self.repair_notify.notify_one();
+
+                                error!(
+                                    slot = head_val,
+                                    index = i,
+                                    %tx_hash,
+                                    to = %withdrawal.to,
+                                    amount = %withdrawal.amount,
+                                    queue_head = head_val,
+                                    queue_tail = tail_val,
+                                    expected_slot_queue_hash = %slot_queue_hash,
+                                    expected_remaining_queue = %remaining_queue,
+                                    "processWithdrawal tx was included but reverted; keeping batch in store and requesting repair"
+                                );
+                                return Ok(());
+                            }
+
                             self.metrics.withdrawals_confirmed_total.increment(1);
                             info!(
                                 slot = head_val,
@@ -422,6 +446,8 @@ impl WithdrawalProcessor {
                                 slot = head_val,
                                 index = i,
                                 %tx_hash,
+                                expected_slot_queue_hash = %slot_queue_hash,
+                                expected_remaining_queue = %remaining_queue,
                                 to = %withdrawal.to,
                                 amount = %withdrawal.amount,
                                 error = %e,
@@ -437,6 +463,8 @@ impl WithdrawalProcessor {
                     error!(
                         slot = head_val,
                         index = i,
+                        expected_slot_queue_hash = %slot_queue_hash,
+                        expected_remaining_queue = %remaining_queue,
                         to = %withdrawal.to,
                         amount = %withdrawal.amount,
                         error = %e,
