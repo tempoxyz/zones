@@ -7,7 +7,6 @@
   - [Terminology](#terminology)
   - [System Overview](#system-overview)
   - [Zone Deployment](#zone-deployment)
-    - [Creating a Zone](#creating-a-zone)
     - [Chain ID](#chain-id)
     - [Tempo Contracts](#tempo-contracts)
     - [Zone Predeploys](#zone-predeploys)
@@ -150,27 +149,61 @@ sequenceDiagram
 
 ## Zone Deployment
 
-<!-- This section covers everything about creating and configuring a zone — the contracts, predeploys, and token model that make up a deployed zone. -->
+A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following parameters:
 
-### Creating a Zone
+| Parameter | Description |
+|-----------|-------------|
+| `initialToken` | The first TIP-20 token to enable. The sequencer can enable additional tokens later. |
+| `sequencer` | The address that will operate the zone. |
+| `verifier` | The `IVerifier` contract used to validate batch proofs. |
+| `zoneParams` | Genesis configuration: genesis block hash, genesis Tempo block hash, and genesis Tempo block number. |
 
-<!-- ZoneFactory.createZone params: initialToken, sequencer, verifier, zoneParams. What gets deployed (portal, messenger). -->
+The factory assigns a unique `zoneId`, deploys a [`ZonePortal`](#izoneportal) and a [`ZoneMessenger`](#izonemessenger), and enables the initial token. The [`ZoneCreated`](#izonefactory) event emits all deployment parameters.
 
 ### Chain ID
 
-<!-- Derivation formula: 4217000000 + zone_id. Replay protection between zones. -->
+Each zone has a unique chain ID derived from its zone ID:
+
+```
+chain_id = 4217000000 + zone_id
+```
+
+The prefix `4217` is derived from the Tempo chain ID. This ensures replay protection between zones. A transaction signed for one zone cannot be replayed on another. The chain ID is set in the zone's genesis configuration and validated by the zone node at startup.
 
 ### Tempo Contracts
 
-<!-- ZoneFactory, ZonePortal, ZoneMessenger — what each is, what it does, how they relate -->
+A single [`ZoneFactory`](#izonefactory) on Tempo creates zones and maintains the registry of all deployed zones. When a zone is created, the factory deploys two contracts for it:
+
+| Contract | Purpose |
+|----------|---------|
+| [`ZonePortal`](#izoneportal) | Escrows deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
+| [`ZoneMessenger`](#izonemessenger) | Relays withdrawal callbacks. When a withdrawal includes calldata, the messenger transfers tokens from the portal to the recipient and executes the callback atomically. Deployed separately from the portal to isolate callback execution. |
+
+The portal gives the messenger max approval for each enabled token so that withdrawal callbacks can transfer tokens from escrow to the recipient in a single call.
 
 ### Zone Predeploys
 
-<!-- TempoState, ZoneInbox, ZoneOutbox, ZoneConfig — fixed addresses, purpose of each, how they read L1 state -->
+Each zone has four system contracts deployed at genesis at fixed addresses:
+
+| Predeploy | Address | Purpose |
+|-----------|---------|---------|
+| [`TempoState`](#itempostate) | `0x1c00...0000` | Stores finalized Tempo block headers and provides storage read access to Tempo contracts. |
+| [`ZoneInbox`](#izoneinbox) | `0x1c00...0001` | Advances the zone's view of Tempo and processes incoming deposits. Sole mint authority. |
+| [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
+| [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
+
+`ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo L1 State Reads](#tempo-l1-state-reads) for details.
 
 ### Zone Token Model
 
-<!-- No factory on zone, no contract deployment, same addresses as Tempo. Mint on deposit (ZoneInbox), burn on withdrawal (ZoneOutbox). Total supply = net deposits - net withdrawals. -->
+Zones have no TIP-20 factory and contract creation is disabled (`CREATE` and `CREATE2` revert). All TIP-20 tokens on a zone are representations of Tempo tokens, deployed at the same address as on Tempo. When the sequencer enables a token on the portal, the zone node provisions a TIP-20 precompile at that address.
+
+Token supply on the zone is controlled exclusively by the system contracts:
+
+- `ZoneInbox` mints tokens when processing deposits from Tempo.
+- `ZoneOutbox` burns tokens when users request withdrawals.
+
+The zone-side supply of each token always equals net deposits minus net withdrawals. The corresponding tokens on Tempo are held in escrow by the portal. No other actor can mint or burn zone tokens.
 
 ## Sequencer Operations
 
