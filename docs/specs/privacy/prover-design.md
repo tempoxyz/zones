@@ -16,6 +16,27 @@ The core commitment is the **zone block hash transition** (not the raw state roo
 pub fn prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error>
 ```
 
+## Batch Submission
+
+The sequencer settles a batch by calling `submitBatch` on the portal. A batch covers one or more zone blocks and carries:
+
+- `tempoBlockNumber`: the Tempo block the zone committed to through `TempoState`
+- `recentTempoBlockNumber`: an optional recent Tempo block used for ancestry mode
+- `blockTransition`: the previous and next zone block hashes
+- `depositQueueTransition`: the zone's processed-deposit progress
+- `withdrawalQueueHash`: the withdrawal commitment produced by `ZoneOutbox.lastBatch()`
+- `verifierConfig`: opaque verifier-specific configuration
+- `proof`: the proof bytes or TEE attestation
+
+The portal checks that the submitted `prevBlockHash` matches its stored `blockHash`, invokes the verifier, and on success updates:
+
+- `blockHash`
+- `withdrawalBatchIndex`
+- `lastSyncedTempoBlockNumber`
+- the Tempo-side withdrawal queue
+
+This document focuses on what the prover must prove for that submission to be accepted.
+
 ## Witness Structure
 
 ```rust
@@ -185,6 +206,57 @@ The executor must enforce at most one `advanceTempo` at the start of each block
 final block of the batch. The block hash is computed from the simplified zone header:
 `parentHash`, `beneficiary`, `stateRoot`, `transactionsRoot`, `receiptsRoot`, `number`, `timestamp`, `protocolVersion`.
 The transactions and receipts roots are computed over the full ordered list of zone transactions.
+
+### Queue commitments
+
+The prover does not send individual deposits and withdrawals back to Tempo one by one. Instead, it proves transitions over the queue commitments that Tempo already tracks.
+
+#### Deposit queue
+
+Tempo-to-zone deposits append to a single unified hash chain. Regular deposits and encrypted deposits share the same ordered queue, distinguished by a type tag:
+
+```text
+regular deposit:   keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
+encrypted deposit: keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
+```
+
+The portal only tracks the current head, `currentDepositQueueHash`. The zone tracks its own `processedDepositQueueHash`. The prover's job is to show that:
+
+- `ZoneInbox.advanceTempo()` read the correct Tempo-side queue head from finalized Tempo state
+- the zone processed deposits in order
+- the zone advanced `processedDepositQueueHash` to the claimed next value
+
+That is why `DepositQueueTransition` is a first-class proof output.
+
+#### Withdrawal queue
+
+Zone-to-Tempo withdrawals are accumulated inside `ZoneOutbox` during normal block execution. In the final block of a batch, `finalizeWithdrawalBatch(count)` turns the pending withdrawals into a single `withdrawalQueueHash` and stores it in `ZoneOutbox.lastBatch()`.
+
+On the Tempo side, the portal keeps a fixed-size ring buffer of batch-level withdrawal slots. Each accepted batch appends one slot, and each processed withdrawal removes from the oldest slot.
+
+Within a slot, the withdrawal hash chain is arranged with the oldest withdrawal outermost so FIFO processing is cheap:
+
+```text
+slot = keccak256(abi.encode(w1, keccak256(abi.encode(w2, keccak256(abi.encode(w3, EMPTY_SENTINEL))))))
+```
+
+The prover does not need to model Tempo-side dequeue operations. It only needs to prove that the zone-side `lastBatch` state produced the claimed `withdrawalQueueHash` and `withdrawalBatchIndex`. The portal then enqueues that commitment after verification succeeds.
+
+## Queue design rationale
+
+Both queues are FIFO, but the efficient on-chain operation is different on each side:
+
+| Queue | On-chain operation | Proved operation | Preferred outermost element |
+|-------|--------------------|------------------|-----------------------------|
+| Deposit queue | Add new deposits on Tempo | Remove deposits inside the zone | Newest deposit |
+| Withdrawal queue | Remove processed withdrawals on Tempo | Add withdrawals inside the zone | Oldest withdrawal |
+
+This is why the two commitments use different shapes even though both are conceptually queues:
+
+- **Deposit queue**: Tempo only needs O(1) append, so each new deposit wraps the outside of the existing hash chain.
+- **Withdrawal queue**: Tempo needs O(1) dequeue, so the oldest withdrawal must sit at the outside of the current slot commitment.
+
+That inversion is intentional. The expensive full-queue work happens in the proof, where O(N) queue construction is acceptable. The Tempo-side contracts only touch the outermost layer of the relevant commitment.
 
 ### Zone State Witness
 
@@ -518,6 +590,62 @@ fn execute_zone_block(
     Ok((tx_root, receipts_root))
 }
 ```
+
+## Implementation architecture
+
+### Node architecture
+
+Each zone runs as its own execution environment attached to Tempo. A zone node:
+
+- watches finalized Tempo headers and relevant Tempo-side contract state
+- imports Tempo state through `ZoneInbox.advanceTempo(...)`
+- executes zone transactions with `revm` plus zone-specific precompiles
+- accumulates zone blocks into batches
+- produces proofs or attestations and submits them back to Tempo
+- monitors the Tempo-side withdrawal queue and drains it in order
+
+One Tempo node may host more than one zone executor. The proving logic and witness model in this document are therefore per-zone, even when the underlying operator runs multiple zones on the same infrastructure.
+
+### Runtime structure
+
+The execution model assumed by the prover design is:
+
+- user transactions execute in `revm`
+- system flows such as `advanceTempo(...)` and `finalizeWithdrawalBatch(...)` are injected as sequencer-controlled calls
+- zone state can be held in an in-memory execution database, with persistence handled outside the proof model
+- the proving backend may be a ZKVM or a TEE, but both consume the same logical witness and produce the same public commitments
+
+### State commitments
+
+The proof commits to the zone block hash, not just the raw post-state root. The simplified zone header includes:
+
+- `parentHash`
+- `beneficiary`
+- `stateRoot`
+- `transactionsRoot`
+- `receiptsRoot`
+- `number`
+- `timestamp`
+- `protocolVersion`
+
+This gives the proof a stable commitment to chain structure, execution result, and fork versioning without carrying unused Ethereum header fields that zones do not need.
+
+#### Block header field coverage
+
+| Field | In hash | Proven | How verified |
+|-------|---------|--------|--------------|
+| `parentHash` | Yes | Yes | Portal checks previous hash continuity and the proof checks per-block chaining |
+| `beneficiary` | Yes | Yes | Proof checks it matches the registered sequencer |
+| `stateRoot` | Yes | Yes | Core execution commitment |
+| `transactionsRoot` | Yes | No | Commits to executed transaction ordering without forcing on-chain transaction-proof verification |
+| `receiptsRoot` | Yes | No | Commits to execution receipts while keeping proof access on `lastBatch` state |
+| `number` | Yes | Yes | Proof checks block-number progression |
+| `timestamp` | Yes | Yes | Proof checks non-decreasing timestamps |
+| `protocolVersion` | Yes | Yes | Proof checks the correct fork version for the imported Tempo block |
+| `gasLimit` | No | N/A | Omitted because zones do not use an Ethereum-style hard gas limit |
+| `gasUsed` | No | N/A | Omitted from the simplified header |
+| `logsBloom` | No | N/A | Not needed for proving |
+| `extraData` | No | N/A | Not needed for proving |
 
 ## Deployment Modes
 
