@@ -97,7 +97,13 @@
 
 # Abstract
 
-<!-- One paragraph: what zones are, why they exist, what this document specifies -->
+A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a dedicated sequencer that is the sole block producer, settling back to Tempo via validity proofs or TEE attestations.
+
+Funds enter a zone through deposits on Tempo, where they are held in escrow by the zone's portal contract. The zone mints equivalent tokens internally and burns them when users withdraw. Validity proofs guarantee that the sequencer executed every transaction correctly. The sequencer orders and includes transactions but cannot forge state transitions. Privacy is achieved through a combination of execution-level access controls, a scoped RPC interface that authenticates every request, and encrypted deposits that hide the recipient from on-chain observers.
+
+Zones inherit compliance from Tempo. TIP-403 policies (whitelists, blacklists) are read from Tempo state and enforced on every zone-side transfer. Issuers configure policies once on Tempo and zones pick it up automatically. Zones interoperate with Tempo, and Tempo's fast block times make zone-to-zone transfers practical through composable withdrawals that settle on Tempo and deposit into another zone.
+
+This document specifies the zone protocol: deployment, sequencer operations, deposits, execution, the private RPC interface, the proving system, batch submission, withdrawals, precompiles, contract interfaces, and the network upgrade process.
 
 # Motivation
 
