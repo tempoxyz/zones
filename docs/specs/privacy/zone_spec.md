@@ -106,7 +106,16 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 
 ## Terminology
 
-<!-- Define: Tempo, Zone, Portal, Batch, Sequencer, Verifier, Enabled tokens, etc. -->
+| Term | Definition |
+|------|------------|
+| Tempo | The base chain that zones settle to. |
+| Zone | A private execution environment anchored to Tempo. |
+| Portal | The Tempo-side contract that escrows deposited tokens and finalizes withdrawals for a zone. |
+| Batch | A sequencer-produced commitment covering one or more zone blocks, submitted to Tempo with a proof. |
+| Enabled token | A TIP-20 token that the sequencer has activated for deposits and withdrawals on a zone. Enablement is permanent. |
+| TIP-20 | Tempo's fungible token standard. |
+| TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
+| Predeploy | A system contract deployed at a fixed address on the zone at genesis. |
 
 ## Parameters
 
