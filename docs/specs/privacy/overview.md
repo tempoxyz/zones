@@ -35,7 +35,7 @@ The main trade-off is that privacy and liveness both depend on the sequencer. Pu
 
 ## System components
 
-At the highest level, the user interacts with Tempo for deposits and withdrawals and with the zone sequencer for private execution. The sequencer runs the zone, imports finalized Tempo state, and hands execution data to the prover. The prover produces a proof or attestation that Tempo verifies before accepting a batch.
+At the highest level, the user interacts with Tempo for deposits and withdrawals and with the zone RPC for private execution. The sequencer runs the zone, imports finalized Tempo state, and hands execution data to the prover. The prover produces a proof or attestation that Tempo verifies before accepting a batch.
 
 ```mermaid
 flowchart LR
@@ -48,20 +48,21 @@ flowchart LR
     end
 
     subgraph Zone["Zone"]
+        RPC["Private RPC"]
         Sequencer["Sequencer"]
         ZoneExec["Private zone execution"]
         Prover["Prover"]
     end
 
-    User -->|submit private transactions| Sequencer
+    User -->|submit private transactions and queries| RPC
     User -->|deposit and withdraw| Portal
+    RPC -->|forward transactions and scoped reads| Sequencer
     TempoStateSrc -->|headers and contract state| Sequencer
     Sequencer -->|orders transactions| ZoneExec
     ZoneExec -->|execution witness| Prover
     Sequencer -->|submitBatch| Portal
     Prover -->|proof or attestation| Verifier
     Verifier -->|verify batch| Portal
-    Portal -->|finalize withdrawals on Tempo| User
 ```
 
 ## System smart contracts
