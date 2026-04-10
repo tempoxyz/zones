@@ -5,7 +5,6 @@
 - [Abstract](#abstract)
 - [Specification](#specification)
   - [Terminology](#terminology)
-  - [Parameters](#parameters)
   - [System Overview](#system-overview)
     - [What is a Zone](#what-is-a-zone)
     - [Architecture](#architecture)
@@ -116,10 +115,6 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 | TIP-20 | Tempo's fungible token standard. |
 | TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
 | Predeploy | A system contract deployed at a fixed address on the zone at genesis. |
-
-## Parameters
-
-<!-- Table of constants: WITHDRAWAL_QUEUE_CAPACITY, FIXED_DEPOSIT_GAS, ENCRYPTION_KEY_GRACE_PERIOD, EMPTY_SENTINEL, chain ID prefix, etc. -->
 
 ## System Overview
 
