@@ -3,7 +3,6 @@
 **Table of Contents**
 
 - [Abstract](#abstract)
-- [Motivation](#motivation)
 - [Specification](#specification)
   - [Terminology](#terminology)
   - [Parameters](#parameters)
@@ -102,10 +101,6 @@ A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone
 Funds enter a zone through deposits on Tempo, where they are held in escrow. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from escrow on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Withdrawals support optional callbacks, making them composable with Tempo contracts and enabling zone-to-zone transfers.
 
 This document specifies the zone protocol: deployment, sequencer operations, deposits, execution, the private RPC interface, the proving system, batch submission, withdrawals, precompiles, contract interfaces, and the network upgrade process.
-
-# Motivation
-
-<!-- Why private transactions on Tempo, why validium architecture, design goals and non-goals -->
 
 # Specification
 
