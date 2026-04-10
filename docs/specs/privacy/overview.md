@@ -38,12 +38,13 @@ The main trade-off is that privacy and liveness both depend on the sequencer. Pu
 ```mermaid
 flowchart LR
     User["User"]
-    Verifier["Verifier"]
 
     subgraph Tempo["Tempo"]
         Factory["ZoneFactory"]
         Portal["ZonePortal"]
+        SubmitBatch["submitBatch(...)"]
         Messenger["ZoneMessenger"]
+        Verifier["Verifier"]
     end
 
     subgraph Zone["Zone"]
@@ -63,9 +64,11 @@ flowchart LR
     Sequencer -->|advanceTempo + process deposits| Inbox
     Sequencer -->|execute transactions| ZoneState
     ZoneState --> Outbox
-    Outbox -->|withdrawal batch commitment| Portal
-    Sequencer -->|submitBatch / processWithdrawal| Portal
-    Portal -->|verify batch| Verifier
+    Outbox -->|withdrawal batch commitment| SubmitBatch
+    Sequencer -->|submitBatch(...)| SubmitBatch
+    SubmitBatch -->|verify batch| Verifier
+    SubmitBatch -->|update proven progress| Portal
+    Sequencer -->|processWithdrawal(...)| Portal
     Portal -->|callback withdrawals| Messenger
 ```
 
