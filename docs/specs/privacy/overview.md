@@ -42,7 +42,7 @@ flowchart LR
     subgraph Tempo["Tempo"]
         Factory["ZoneFactory"]
         Portal["ZonePortal"]
-        SubmitBatch["submitBatch(...)"]
+        SubmitBatch["submitBatch"]
         Messenger["ZoneMessenger"]
         Verifier["Verifier"]
     end
@@ -65,10 +65,10 @@ flowchart LR
     Sequencer -->|execute transactions| ZoneState
     ZoneState --> Outbox
     Outbox -->|withdrawal batch commitment| SubmitBatch
-    Sequencer -->|submitBatch(...)| SubmitBatch
+    Sequencer -->|submitBatch| SubmitBatch
     SubmitBatch -->|verify batch| Verifier
     SubmitBatch -->|update proven progress| Portal
-    Sequencer -->|processWithdrawal(...)| Portal
+    Sequencer -->|processWithdrawal| Portal
     Portal -->|callback withdrawals| Messenger
 ```
 
