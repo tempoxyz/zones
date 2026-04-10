@@ -275,11 +275,26 @@ Deposits always succeed on the zone. There are no callbacks or failure modes for
 
 ### Deposit Fees
 
-<!-- FIXED_DEPOSIT_GAS * zoneGasRate, deducted from amount, paid to sequencer -->
+Each deposit incurs a fixed processing fee:
+
+```
+fee = FIXED_DEPOSIT_GAS * zoneGasRate
+    = 100,000 * zoneGasRate
+```
+
+The fee is paid in the same token being deposited. It is deducted from the deposit amount and paid to the sequencer immediately on Tempo. The deposit queue stores the net amount (`amount - fee`), which is what gets minted on the zone. A deposit must be large enough to cover the fee; otherwise the portal reverts with `DepositTooSmall`.
 
 ### Deposit Queue
 
-<!-- Hash chain structure: newest-outermost, O(1) addition, diagram -->
+Deposits flow from Tempo to the zone through a hash chain. The portal tracks a single `currentDepositQueueHash` representing the head of the chain. Each new deposit wraps the existing hash:
+
+```
+currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, deposit, currentDepositQueueHash))
+```
+
+The newest deposit is always outermost, making onchain addition O(1). The zone tracks its own `processedDepositQueueHash` in state. During `advanceTempo()`, the zone processes deposits oldest-first, rebuilding the hash chain and validating that the result matches `currentDepositQueueHash` read from Tempo state via `TempoState.readTempoStorageSlot()`.
+
+After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced. Users can check whether their deposit has been processed by comparing their deposit's Tempo block number against this value.
 
 ### Encrypted Deposits
 
