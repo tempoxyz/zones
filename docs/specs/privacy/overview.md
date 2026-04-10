@@ -42,27 +42,29 @@ flowchart LR
     User["User"]
 
     subgraph Tempo["Tempo"]
-        TempoStateSrc["Finalized Tempo state"]
-        Portal["ZonePortal and Tempo contracts"]
+        direction TB
+        TempoStateSrc["Finalized state"]
         Verifier["Verifier"]
+        Portal["ZonePortal and contracts"]
+        Verifier -->|verification result| Portal
     end
 
     subgraph Zone["Zone"]
+        direction TB
         RPC["Private RPC"]
         Sequencer["Sequencer"]
-        ZoneExec["Private zone execution"]
+        ZoneExec["Private execution"]
         Prover["Prover"]
+        RPC -->|private txs and queries| Sequencer
+        Sequencer -->|orders txs| ZoneExec
+        ZoneExec -->|execution witness| Prover
     end
 
-    User -->|submit private transactions and queries| RPC
-    User -->|deposit and withdraw| Portal
-    RPC -->|forward transactions and scoped reads| Sequencer
-    TempoStateSrc -->|headers and contract state| Sequencer
-    Sequencer -->|orders transactions| ZoneExec
-    ZoneExec -->|execution witness| Prover
-    Sequencer -->|submitBatch| Portal
+    User -->|uses zone RPC| RPC
+    User -->|deposits and withdrawals| Portal
+    TempoStateSrc -->|headers and state| Sequencer
+    Sequencer -->|submit batch| Portal
     Prover -->|proof or attestation| Verifier
-    Verifier -->|verify batch| Portal
 ```
 
 ## System smart contracts
