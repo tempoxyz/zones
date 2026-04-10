@@ -6,10 +6,6 @@
 - [Specification](#specification)
   - [Terminology](#terminology)
   - [System Overview](#system-overview)
-    - [What is a Zone](#what-is-a-zone)
-    - [Architecture](#architecture)
-    - [Lifecycle](#lifecycle)
-    - [Trust Model](#trust-model)
   - [Zone Deployment](#zone-deployment)
     - [Creating a Zone](#creating-a-zone)
     - [Chain ID](#chain-id)
@@ -95,7 +91,7 @@
 
 # Abstract
 
-A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a dedicated sequencer that is the sole block producer, settling back to Tempo via validity proofs or TEE attestations.
+A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a dedicated sequencer that is the sole block producer, settling back to Tempo through a proof-agnostic verification system.
 
 Funds enter a zone through deposits on Tempo, where they are held in escrow. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from escrow on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Withdrawals support optional callbacks, making them composable with Tempo contracts and enabling zone-to-zone transfers.
 
@@ -109,7 +105,7 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 |------|------------|
 | Tempo | The base chain that zones settle to. |
 | Zone | A private execution environment anchored to Tempo. |
-| Portal | The Tempo-side contract that escrows deposited tokens and finalizes withdrawals for a zone. |
+| Portal | The contract on Tempo that escrows deposited tokens and finalizes withdrawals for a zone. |
 | Batch | A sequencer-produced commitment covering one or more zone blocks, submitted to Tempo with a proof. |
 | Enabled token | A TIP-20 token that the sequencer has activated for deposits and withdrawals on a zone. Enablement is permanent. |
 | TIP-20 | Tempo's fungible token standard. |
@@ -118,56 +114,39 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 
 ## System Overview
 
-<!-- This section should give the reader a complete mental model of what zones are and how the system works before any component details. No contracts, no interfaces, no predeploy addresses — just concepts, roles, and flows. -->
+Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
 
-### What is a Zone
+On the Tempo side, an on-chain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
-<!-- 
-- A zone is a private validium anchored to Tempo
-- One permissioned sequencer per zone
-- Supports multiple TIP-20 tokens for bridging and gas
-- Settlement via ZK validity proofs or TEE attestations
-- DA fully trusted to sequencer — no forced inclusion, no censorship resistance
-- Why "zone" and not "rollup" or "L2" — framing around privacy, not scaling
--->
+On Tempo, each zone has a **portal** that escrows deposited tokens. When a user deposits, the portal locks their tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
-### Architecture
+Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer.
 
-<!-- 
-- High-level architecture diagram: Tempo (L1) ↔ Zone (L2)
-- Sequencer: orders transactions, produces blocks, posts batches to Tempo
-- Verifier: proves state transitions (ZK or TEE), abstracted behind IVerifier
-- Users: deposit tokens from Tempo into zones, transact privately, withdraw back to Tempo
-- Tempo side: factory creates zones, portal escrows tokens, messenger handles withdrawal callbacks
-- Zone side: predeploys manage Tempo state reads, deposit processing, withdrawal requests, and config
-- How the two sides communicate: deposits flow Tempo→Zone via deposit queue, withdrawals flow Zone→Tempo via withdrawal queue, batches prove correctness
--->
+When a user wants to exit, they request a withdrawal on the zone. Their tokens are burned, and the withdrawal is added to a pending list. At the end of a batch, the sequencer finalizes all pending withdrawals into a hash chain and generates a proof covering the full batch of zone blocks. The sequencer submits this batch and proof to the portal on Tempo, which verifies the proof and queues the withdrawals. The sequencer then processes each withdrawal, releasing tokens from escrow to the recipient.
 
-### Lifecycle
+```mermaid
+sequenceDiagram
+    participant User
+    participant Portal as Tempo (Portal)
+    participant Zone as Zone (Sequencer)
 
-<!-- 
-- Sequence diagram showing the full end-to-end flow:
-  1. Zone created on Tempo (factory deploys portal + messenger)
-  2. User deposits TIP-20 on Tempo (portal escrows, appends to deposit queue)
-  3. Sequencer observes deposit, advances Tempo state on zone, mints tokens
-  4. Users transact on zone (private transfers, approvals)
-  5. User requests withdrawal on zone (tokens burned, added to pending)
-  6. Sequencer finalizes withdrawal batch at end of block
-  7. Sequencer generates proof/attestation for the batch
-  8. Sequencer submits batch to Tempo portal (proof verified, state updated)
-  9. Sequencer processes withdrawals on Tempo (tokens released from escrow)
-- This should be a mermaid sequence diagram or similar
--->
+    User->>Portal: deposit(token, to, amount)
+    Portal->>Portal: escrow tokens, append to deposit queue
+    Zone->>Portal: observe deposit
+    Zone->>Zone: advanceTempo(), mint tokens to recipient
 
-### Trust Model
+    User->>Zone: transact privately
 
-<!--
-- Sequencer is trusted for liveness, ordering, and data availability
-- No permissionless fallback — if sequencer halts, zone halts
-- Verifier is a trust anchor — faulty verifier can steal/lock funds
-- Non-custodial withdrawal guarantee: once a token is enabled, withdrawals can never be disabled
-- Users accept sequencer trust in exchange for privacy, low cost, and fast settlement
--->
+    User->>Zone: requestWithdrawal()
+    Zone->>Zone: burn tokens, add to pending withdrawals
+    Zone->>Zone: finalizeWithdrawalBatch()
+    Zone->>Zone: generate proof
+
+    Zone->>Portal: submitBatch(proof)
+    Portal->>Portal: verify proof, queue withdrawals
+
+    Portal->>User: processWithdrawal(), tokens released from escrow
+```
 
 ## Zone Deployment
 
@@ -437,7 +416,7 @@ comprehensive — the RPC is the primary interface users interact with and the m
 
 ## Proving System
 
-<!-- The proving system is backend-agnostic. The core is a pure state transition function in Rust (no_std) that executes zone blocks and outputs commitments for on-chain verification. The same function runs in ZKVMs (SP1) to produce validity proofs OR in TEEs (SGX/TDX) to produce attestations. The on-chain verifier is abstracted behind IVerifier — the portal doesn't know or care which backend produced the proof. -->
+<!-- The proving system is proof-agnostic. The core is a pure state transition function in Rust (no_std) that executes zone blocks and outputs commitments for on-chain verification. Any proving backend can run this function. The on-chain verifier is abstracted behind IVerifier and the portal does not care how the proof was produced. -->
 
 ### State Transition Function
 
@@ -445,7 +424,7 @@ comprehensive — the RPC is the primary interface users interact with and the m
 - prove_zone_batch(witness: BatchWitness) -> Result<BatchOutput, Error>
 - Pure function: takes witness, executes EVM transitions, outputs commitments
 - Core commitment is zone block hash transition (not raw state root)
-- no_std compatible for ZKVM/TEE portability
+- no_std compatible for portability across proving backends
 -->
 
 ### Witness Structure
@@ -489,9 +468,9 @@ comprehensive — the RPC is the primary interface users interact with and the m
 ### Deployment Modes
 
 <!--
-- ZKVM (SP1): witness read from zkvm::io, output committed via zkvm::io::commit
-- TEE (SGX/TDX): ecall entry point, witness deserialized from pointer
-- Same prove_zone_batch function in both modes
+- The state transition function is proof-agnostic and runs in any backend
+- Examples: ZKVM, TEE, or any environment that can execute the no_std Rust function
+- Same prove_zone_batch function regardless of backend
 - Reference to prover-design.md for full implementation details
 -->
 
