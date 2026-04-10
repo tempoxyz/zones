@@ -1,26 +1,26 @@
 # Tempo Zones (Draft)
 
-This document is the entry point to the zone specifications. It introduces the main ideas first, then adds enough structure for a technical reader to understand how zones fit together before jumping into the detailed specs.
+This document is the entry point to the zone specifications, giving an overview of all essential ideas and components of Tempo Zones.
 
-A zone is a Tempo-anchored validium. Execution happens on a separate chain operated by a permissioned sequencer. Settlement happens on Tempo, where deposits are escrowed and withdrawals are finalized after a verifier accepts the zone's batch proof or attestation.
+A zone is a Tempo-anchored validium. Execution happens on a separate chain operated by a permissioned sequencer. Settlement happens on Tempo, where deposits are locked and withdrawals are finalized after a verifier accepts the zone's batch proof or attestation.
 
-This overview intentionally avoids interface-by-interface detail. For exact proof inputs, RPC method tables, and upgrade mechanics, follow the links to the dedicated specs at the end of this document.
+For interface-by-interface detail, exact proof inputs, RPC method tables, and upgrade mechanics, follow the links to the dedicated specs at the end of this document.
 
-## Start with the mental model
+## Zones mental model
 
 The simplest way to think about a zone is:
 
-- **Tempo** is the settlement chain. It holds escrowed assets, deploys zone contracts, and is the place where withdrawals ultimately land.
+- **Tempo** is the settlement chain. It holds locked assets, deploys zone contracts, and is the place where withdrawals ultimately land.
 - A **zone** is a separate execution chain with its own state, blocks, and transactions.
 - Each zone has exactly one permissioned **sequencer** that orders transactions, imports finalized Tempo state, and submits batches back to Tempo.
 - A **verifier** checks that a submitted batch was executed correctly. This can be a ZK verifier or a verifier for a TEE attestation.
-- The **portal** is the Tempo-side contract that escrows funds, accepts verified batches, and processes withdrawals.
+- The **portal** is the Tempo-side contract that holds locked funds, accepts verified batches, and processes withdrawals.
 - Liveness and data availability are trusted to the sequencer. If the sequencer halts or withholds data, users cannot force progress.
 
-Two consequences fall out of that model immediately:
+Two consequences of this model are:
 
 1. Zones can keep user activity private from the public chain because transaction data is not posted on Tempo.
-2. Zones are not trying to solve censorship resistance or data availability. They trade those properties away for privacy and simpler settlement.
+2. Zones are not trying to solve censorship resistance or data availability.
 
 ## What zones optimize for
 
@@ -74,7 +74,7 @@ flowchart LR
 | Component | Lives on | Role |
 |-----------|----------|------|
 | `ZoneFactory` | Tempo | Creates zones and records their top-level parameters. |
-| `ZonePortal` | Tempo | Escrows deposits, tracks proven progress, verifies batches, and finalizes withdrawals. |
+| `ZonePortal` | Tempo | Retains locked deposits, tracks proven progress, verifies batches, and finalizes withdrawals. |
 | `ZoneMessenger` | Tempo | Executes callback withdrawals atomically with the token transfer. |
 | `Verifier` | Tempo | Accepts or rejects the batch proof or attestation supplied by the sequencer. |
 | `TempoState` | Zone | Stores the zone's imported view of finalized Tempo state. |
@@ -83,7 +83,7 @@ flowchart LR
 | `ZoneConfig` | Zone | Reads sequencer and token configuration from Tempo via `TempoState`. |
 | Zone TIP-20 predeploys | Zone | Represent bridged assets inside the zone at the same addresses they use on Tempo. |
 
-The important design choice is that Tempo remains the source of truth for escrow, token enablement, and verifier configuration, while the zone remains the place where private execution happens.
+The important design choice is that Tempo remains the source of truth for locked balances, token enablement, and verifier configuration, while the zone remains the place where private execution happens.
 
 ## How money and state move through a zone
 
@@ -97,7 +97,7 @@ sequenceDiagram
     participant Tempo as Tempo recipient
 
     User->>Portal: deposit(...)
-    Portal-->>Portal: escrow tokens and append deposit queue
+    Portal-->>Portal: lock tokens and append deposit queue
     Sequencer->>Zone: advanceTempo() and process deposits
     Sequencer->>Zone: execute user transactions
     Sequencer->>Zone: finalizeWithdrawalBatch()
@@ -114,14 +114,12 @@ A user enters the zone by depositing an enabled TIP-20 token into `ZonePortal` o
 
 At a high level:
 
-- The portal transfers the token into escrow on Tempo.
+- The portal keeps the tokens locked on Tempo.
 - The portal appends the deposit to the deposit queue.
 - The sequencer later imports the relevant finalized Tempo block through `ZoneInbox.advanceTempo()`.
 - `ZoneInbox` mints the corresponding zone-side TIP-20 balance to the recipient.
 
 Zones also support **encrypted deposits**. In that mode, the deposited token and amount remain public on Tempo, but the recipient and memo are encrypted to the sequencer's published encryption key. This gives users a private on-ramp into the zone without exposing the recipient address on Tempo.
-
-Deposits do not have a permissionless fallback path. If the sequencer refuses to process them, the funds remain escrowed in the portal until the sequencer resumes making progress.
 
 ### 2. Execute transactions inside the zone
 
@@ -130,7 +128,7 @@ Once funds are inside the zone, users submit transactions to the sequencer rathe
 The zone behaves like a restricted EVM environment:
 
 - TIP-20 balances live inside zone token predeploys.
-- The sequencer can import finalized Tempo state through `TempoState`.
+- The sequencer imports finalized Tempo state through `TempoState`.
 - User transactions, deposit processing, and withdrawal requests all execute against the zone's private state.
 
 This is where most of the privacy properties come from. The zone does not publish its transaction stream on Tempo, and the execution environment itself restricts balance and allowance reads so contracts cannot trivially leak private account data.
@@ -152,8 +150,6 @@ The portal accepts the batch only if the verifier confirms that the state transi
 - the next processed deposit queue hash
 - the latest Tempo block number the zone has synced to
 - the next withdrawal batch that can be processed
-
-If the referenced Tempo block hash has rotated out of the EIP-2935 history window, the proof can use an ancestry path to a more recent Tempo block. That detail lives in the [prover design](./prover-design), but the high-level idea is simple: zones can recover from long periods of inactivity without needing a special "reset" path.
 
 ### 4. Withdraw from a zone back to Tempo
 
@@ -240,7 +236,7 @@ Zones are not hiding information from the sequencer. The sequencer sees the zone
 
 | Property | What zones guarantee | What zones do not guarantee |
 |----------|----------------------|-----------------------------|
-| Correctness | If the verifier is sound, the sequencer cannot forge state transitions or steal escrowed funds by posting an invalid batch. | Zones do not remove the verifier as a trust anchor. A critical bug in the verifier or proving system is a safety risk. |
+| Correctness | If the verifier is sound, the sequencer cannot forge state transitions or steal locked funds by posting an invalid batch. | Zones do not remove the verifier as a trust anchor. A critical bug in the verifier or proving system is a safety risk. |
 | Withdrawals | Once a token is enabled, users keep a withdrawal path for that token. Failed callback withdrawals bounce back instead of blocking the queue. | Zones do not guarantee immediate exits. The sequencer still has to keep processing batches and withdrawals. |
 | Liveness | None beyond what the sequencer provides. | There is no forced inclusion, no permissionless exit path, and no automatic recovery if the sequencer halts. |
 | Data availability | None beyond what the sequencer provides. | Users cannot reconstruct zone state without the sequencer's data if the sequencer withholds it. |
@@ -262,7 +258,7 @@ The factory deploys the zone's `ZonePortal` and `ZoneMessenger` on Tempo. The zo
 Each zone has a deterministic EIP-155 chain ID:
 
 ```text
-chain_id = 4217000000 + zone_id
+chain_id = 421700000 + zone_id
 ```
 
 That gives every zone a separate signing domain, so a transaction signed for one zone cannot be replayed on another.
