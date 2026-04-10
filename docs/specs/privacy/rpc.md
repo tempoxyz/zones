@@ -7,7 +7,7 @@ This document specifies the RPC interface for Tempo privacy zones. The design st
 - Expose a familiar Ethereum JSON-RPC so that existing tooling (wallets, SDKs, block explorers) can connect with minimal changes.
 - Authenticate every request via a short-lived authorization token tied to an Ethereum account.
 - Ensure that no RPC call leaks information about accounts other than the caller's own.
-- Work in concert with the [execution environment modifications](./execution) that enforce privacy at the EVM level.
+- Work in concert with the [execution environment modifications](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md) that enforce privacy at the EVM level.
 
 ## Non-goals
 
@@ -189,8 +189,8 @@ These methods are available to any authenticated caller but filter results to on
 |--------|-------------|
 | `eth_getBalance` | Returns the native balance for the authenticated account only. Queries for other accounts return `0x0`. |
 | `eth_getTransactionCount` | Returns the nonce for the authenticated account only. Queries for other accounts return `0x0`. |
-| `eth_call` | Executes the call with `from` set to the authenticated account. The [execution environment](./execution) enforces `balanceOf` access control at the EVM level, so callers can only query their own balance. Calls that attempt to read other accounts' state will revert. |
-| `eth_estimateGas` | Only allowed when `from` equals the authenticated account. TIP-20 transfers always return the [fixed 100,000 gas](./execution#fixed-gas-constant-transfer-cost). |
+| `eth_call` | Executes the call with `from` set to the authenticated account. The [execution environment](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md) enforces `balanceOf` access control at the EVM level, so callers can only query their own balance. Calls that attempt to read other accounts' state will revert. |
+| `eth_estimateGas` | Only allowed when `from` equals the authenticated account. TIP-20 transfers always return the [fixed 100,000 gas](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md#fixed-gas-constant-transfer-cost). |
 
 #### Transaction access
 
@@ -250,7 +250,7 @@ These methods are only available when the authenticated account is the sequencer
 |--------|-------|
 | `eth_createAccessList` | Returns the set of storage slots a transaction would access. Could reveal storage layout of accounts the transaction interacts with, especially if smart contracts are added in the future. |
 | `eth_getCode` | Zone predeploys are precompiles (no EVM bytecode); user accounts never have code. Raw code inspection has no legitimate non-sequencer use case. |
-| `eth_getStorageAt` | Raw storage reads bypass all access control. A caller could read TIP-20 balance mappings directly, defeating [execution-level `balanceOf` restrictions](./execution#balance-privacy-balanceof-access-control), or probe account existence via nonce/storage slots. |
+| `eth_getStorageAt` | Raw storage reads bypass all access control. A caller could read TIP-20 balance mappings directly, defeating [execution-level `balanceOf` restrictions](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md#balance-privacy-balanceof-access-control), or probe account existence via nonce/storage slots. |
 | `eth_getBlockByNumber` (with `true`) | Full block with all transactions — sequencer only |
 | `eth_getBlockByHash` (with `true`) | Full block with all transactions — sequencer only |
 | `eth_getBlockTransactionCountByNumber` | Transaction counts reveal activity levels |
@@ -498,12 +498,12 @@ In addition to standard JSON-RPC error codes, the zone RPC uses:
 - **Keychain key revocation and expiry**: When a root account revokes a Keychain key on-chain, the RPC server MUST stop accepting that key within 1 second of importing the block that contains the revocation. Cached Keychain verifications MUST also honor key expiry: a cache entry MUST expire no later than `min(authorizationToken.expiresAt, keyExpiry)` where `keyExpiry` is read from `AccountKeychain.getKey(...)`. In the current `AccountKeychain` implementation, inactive or revoked keys are surfaced as `keyId == 0` and `expiry == 0`, so those results MUST be treated as immediately invalid rather than "never expires." The recommended implementation is event-driven: the zone node watches for `KeyRevoked(account, publicKey)` events emitted by the AccountKeychain precompile during block execution and immediately evicts matching entries from the authorization token cache. This requires no cryptography — just a cache lookup and delete. As a fallback, implementations MAY poll the precompile via `getKey(user_address, keyId)`, but the 1-second deadline still applies.
 - **P256/WebAuthn key compromise**: Unlike secp256k1, P256 and WebAuthn keys include the public key in the signature. This means the public key is visible to the RPC server on every request. This is not a security concern (public keys are public), but implementations should be aware that the key material is transmitted in the clear over the connection.
 - **Metadata leakage**: Even with content-level privacy, connection-level metadata (IP addresses, request timing, request frequency) can leak information. Deployments SHOULD use TLS and MAY require additional transport-level privacy measures.
-- **Fixed gas and transfer receipts**: The [fixed 100,000 gas cost](./execution#fixed-gas-constant-transfer-cost) on TIP-20 transfers ensures that `gasUsed` in transaction receipts is identical for all transfers. Without this, an observer who obtains a receipt (e.g., the sender) could infer whether the recipient was a new or existing account.
+- **Fixed gas and transfer receipts**: The [fixed 100,000 gas cost](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md#fixed-gas-constant-transfer-cost) on TIP-20 transfers ensures that `gasUsed` in transaction receipts is identical for all transfers. Without this, an observer who obtains a receipt (e.g., the sender) could infer whether the recipient was a new or existing account.
 - **Block header sanitization**: Block headers returned to non-sequencer callers have `logsBloom` zeroed (see [Block responses](#block-responses)). The Bloom filter would otherwise allow probing whether a specific address had activity in a given block, defeating per-account event scoping. This applies to all code paths that return block headers: `eth_getBlockByNumber`, `eth_getBlockByHash`, and `eth_subscribe("newHeads")`. Aggregate fields like `gasUsed` are intentionally public — the zone does not hide overall activity volume, only per-account details.
 
 ## Implementation notes
 
-- The zone node enforces access control at two layers: the RPC server (request filtering) and the [EVM execution environment](./execution) (TIP-20 modifications). Both layers are required — see [Interaction with RPC](./execution#interaction-with-rpc) for why neither layer alone is sufficient.
+- The zone node enforces access control at two layers: the RPC server (request filtering) and the [EVM execution environment](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md) (TIP-20 modifications). Both layers are required — see [Interaction with RPC](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md#interaction-with-rpc) for why neither layer alone is sufficient.
 - Filter state (from `eth_newFilter`) is stored per-authenticated-account. Filters created by one authorization token are accessible by subsequent authorization tokens for the same account.
 - The zone node SHOULD cache authorization token verification results for the duration of token validity to avoid repeated signature recovery. For Keychain Access Keys, cache entries MUST have a TTL bounded by the earlier of authorization-token expiry and the active key's `expiry`, and MUST be invalidated within 1 second of importing a block that revokes the key (see [Keychain key revocation and expiry](#security-considerations)). The recommended approach is to hook into block import and evict cache entries when `KeyRevoked` events are observed.
 - P256 and WebAuthn signature verification is more expensive than secp256k1. The RPC server SHOULD aggressively cache verified authorization tokens to amortize the verification cost. A verified authorization token can be cached by its hash for the remaining duration of its validity.

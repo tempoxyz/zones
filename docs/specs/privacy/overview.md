@@ -199,7 +199,7 @@ There are two explicit processing fees in the system:
 - **Deposit fee**: `FIXED_DEPOSIT_GAS * zoneGasRate`
 - **Withdrawal fee**: `gasLimit * tempoGasRate`
 
-The exact accounting rules, including fixed TIP-20 gas costs and zone-side mint/burn permissions, live in the [execution specification](./execution).
+The exact accounting rules, including fixed TIP-20 gas costs and zone-side mint/burn permissions, live in the [execution specification](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md).
 
 ## How zones stay private
 
@@ -218,7 +218,7 @@ Inside the zone itself:
 - TIP-20 transfer-family operations use fixed gas to avoid leaking storage-state information.
 - Contract creation is currently disabled to reduce privacy footguns.
 
-These details live in the [execution specification](./execution).
+These details live in the [execution specification](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md).
 
 ### RPC-level privacy
 
@@ -229,7 +229,7 @@ The RPC server adds a second layer:
 - transaction lookup and log access are filtered
 - dangerous raw state access methods are restricted or disabled
 
-These details live in the [RPC specification](./rpc).
+These details live in the [RPC specification](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/rpc.md).
 
 ### Sequencer visibility
 
@@ -272,17 +272,17 @@ Operationally:
 - The sequencer can enable new tokens later.
 - Upgrades activate in lockstep with Tempo hard forks when the zone imports the fork Tempo block.
 
-The full hard-fork model, including verifier rotation and operator failure modes, lives in the [upgrades specification](./upgrades).
+The full hard-fork model, including verifier rotation and operator failure modes, lives in the [upgrades specification](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/upgrades.md).
 
 ## Where to go next
 
 If you want the deep details, read the specs in this order:
 
-1. [Execution](./execution) for fee accounting, token management, fixed gas costs, and execution-level privacy rules.
-2. [Zone Prover Design](./prover-design) for batch inputs, queue commitments, ancestry proofs, and verifier-facing outputs.
-3. [Tempo-side contracts](./contracts-tempo.md) for `ZoneFactory`, `ZonePortal`, `ZoneMessenger`, and withdrawal processing on Tempo.
-4. [Zone-side contracts](./contracts-zone.md) for `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, and authenticated-withdrawal mechanics.
-5. [RPC](./rpc) for authorization tokens, method access control, scoped queries, and timing defenses.
-6. [Upgrades](./upgrades) for same-block fork activation, verifier rotation, and operator upgrade paths.
+1. [Execution](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md) for fee accounting, token management, fixed gas costs, and execution-level privacy rules.
+2. [Zone Prover Design](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/prover-design.md) for batch inputs, queue commitments, ancestry proofs, and verifier-facing outputs.
+3. [Tempo-side contracts](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/contracts-tempo.md) for `ZoneFactory`, `ZonePortal`, `ZoneMessenger`, and withdrawal processing on Tempo.
+4. [Zone-side contracts](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/contracts-zone.md) for `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, and authenticated-withdrawal mechanics.
+5. [RPC](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/rpc.md) for authorization tokens, method access control, scoped queries, and timing defenses.
+6. [Upgrades](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/upgrades.md) for same-block fork activation, verifier rotation, and operator upgrade paths.
 
 This overview intentionally omits the exact queue layouts, witness structures, RPC method tables, and fork rollout edge cases. Those are the right kind of details for the dedicated specs, not for the first document a reader sees.

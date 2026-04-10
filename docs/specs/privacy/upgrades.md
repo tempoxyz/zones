@@ -4,7 +4,7 @@ This document describes both the protocol rules and the operational process for 
 
 The core idea is same-block activation: a zone switches to the new rules in the zone block that imports the Tempo block where the fork activates. Nothing on the zone waits for "the next block" once the triggering Tempo block has been imported.
 
-For the high-level system model, see the [overview](./overview). For the proof interface affected by upgrades, see the [Zone Prover Design](./prover-design).
+For the high-level system model, see the [overview](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/overview.md). For the proof interface affected by upgrades, see the [Zone Prover Design](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/prover-design.md).
 
 ## Upgrade model
 

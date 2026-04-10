@@ -2,7 +2,7 @@
 
 This document specifies how a zone executes transactions once funds are inside the zone. It covers fee tokens, fee accounting, TIP-20 behavior, token management, and the EVM-level restrictions that make zones private by default.
 
-For the end-to-end zone flow, see the [overview](./overview). For proof construction, see the [Zone Prover Design](./prover-design). For RPC-layer privacy controls, see the [Zone RPC Specification](./rpc).
+For the end-to-end zone flow, see the [overview](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/overview.md). For proof construction, see the [Zone Prover Design](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/prover-design.md). For RPC-layer privacy controls, see the [Zone RPC Specification](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/rpc.md).
 
 A zone still executes an EVM-like state transition, but it changes a few core rules:
 
@@ -168,7 +168,7 @@ This restriction removes a large class of privacy footguns. In particular, it pr
 
 ## Interaction with RPC
 
-These execution-level rules are only one layer of the privacy model. The [RPC specification](./rpc) adds a second layer of access control:
+These execution-level rules are only one layer of the privacy model. The [RPC specification](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/rpc.md) adds a second layer of access control:
 
 - Execution-level changes prevent information leaks from inside the EVM.
 - RPC-level changes prevent raw state inspection, unrestricted transaction lookup, and unscoped event access.

@@ -10,7 +10,7 @@ These contracts live on Tempo and are responsible for:
 - withdrawal processing on Tempo
 - callback-based interoperability through `ZoneMessenger`
 
-For zone predeploys and zone-side execution entry points, see [Zone-side contracts](./contracts-zone.md). For verifier semantics, proof inputs, and queue commitments, see [Zone Prover Design](./prover-design). For execution-level token behavior inside the zone, see [Execution](./execution).
+For zone predeploys and zone-side execution entry points, see [Zone-side contracts](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/contracts-zone.md). For verifier semantics, proof inputs, and queue commitments, see [Zone Prover Design](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/prover-design.md). For execution-level token behavior inside the zone, see [Execution](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md).
 
 ## Shared Tempo-facing types
 
@@ -84,7 +84,7 @@ struct DepositQueueTransition {
 }
 ```
 
-`senderTag` and `encryptedSender` are part of the authenticated-withdrawal design. The zone-side generation rules are specified in [Zone-side contracts](./contracts-zone.md#authenticated-withdrawals).
+`senderTag` and `encryptedSender` are part of the authenticated-withdrawal design. The zone-side generation rules are specified in [Zone-side contracts](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/contracts-zone.md#authenticated-withdrawals).
 
 ## `ZoneFactory`
 
@@ -133,7 +133,7 @@ interface IZoneFactory {
 }
 ```
 
-The exact hard-fork sequencing and verifier-slot rotation rules are specified in [Upgrades](./upgrades).
+The exact hard-fork sequencing and verifier-slot rotation rules are specified in [Upgrades](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/upgrades.md).
 
 ## `ZonePortal`
 
@@ -182,7 +182,7 @@ The portal keeps a history of encryption keys so deposits can explicitly target 
 3. updates `blockHash`, `withdrawalBatchIndex`, and `lastSyncedTempoBlockNumber`
 4. appends the batch's `withdrawalQueueHash` to the Tempo-side withdrawal ring buffer when the batch contains withdrawals
 
-The detailed proof obligations and queue-commitment semantics live in [Zone Prover Design](./prover-design).
+The detailed proof obligations and queue-commitment semantics live in [Zone Prover Design](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/prover-design.md).
 
 ### Withdrawal processing
 

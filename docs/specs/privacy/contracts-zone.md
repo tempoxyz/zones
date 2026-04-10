@@ -10,7 +10,7 @@ These contracts are predeploys or precompile-backed contracts that live inside t
 - exposing zone configuration derived from Tempo-side state
 - enforcing token policy behavior inside the zone
 
-For Tempo-side settlement contracts, see [Tempo-side zone contracts](./contracts-tempo). For proof semantics and queue commitments, see [Zone Prover Design](./prover-design). For execution-level token rules, see [Execution](./execution).
+For Tempo-side settlement contracts, see [Tempo-side zone contracts](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/contracts-tempo.md). For proof semantics and queue commitments, see [Zone Prover Design](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/prover-design.md). For execution-level token rules, see [Execution](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md).
 
 ## Fixed addresses and token model
 
