@@ -33,7 +33,38 @@ Zones are designed to combine four properties:
 
 The main trade-off is that privacy and liveness both depend on the sequencer. Public observers are blind, but the sequencer sees the zone's full activity.
 
-## System at a glance
+## System components
+
+At the highest level, the user interacts with Tempo for deposits and withdrawals and with the zone sequencer for private execution. The sequencer runs the zone, imports finalized Tempo state, and hands execution data to the prover. The prover produces a proof or attestation that Tempo verifies before accepting a batch.
+
+```mermaid
+flowchart LR
+    User["User"]
+
+    subgraph Tempo["Tempo"]
+        TempoStateSrc["Finalized Tempo state"]
+        Portal["ZonePortal and Tempo contracts"]
+        Verifier["Verifier"]
+    end
+
+    subgraph Zone["Zone"]
+        Sequencer["Sequencer"]
+        ZoneExec["Private zone execution"]
+        Prover["Prover"]
+    end
+
+    User -->|submit private transactions| Sequencer
+    User -->|deposit and withdraw| Portal
+    TempoStateSrc -->|headers and contract state| Sequencer
+    Sequencer -->|orders transactions| ZoneExec
+    ZoneExec -->|execution witness| Prover
+    Sequencer -->|submitBatch| Portal
+    Prover -->|proof or attestation| Verifier
+    Verifier -->|verify batch| Portal
+    Portal -->|finalize withdrawals on Tempo| User
+```
+
+## System smart contracts
 
 ```mermaid
 flowchart LR
@@ -71,8 +102,6 @@ flowchart LR
     Sequencer -->|processWithdrawal| Portal
     Portal -->|callback withdrawals| Messenger
 ```
-
-## Core components (smart contracts)
 
 | Component | Lives on | Role |
 |-----------|----------|------|
