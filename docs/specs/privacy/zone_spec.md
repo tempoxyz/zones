@@ -328,7 +328,19 @@ Deposits are processed in the exact order they were made, regardless of type.
 
 ### Onchain Decryption Verification
 
-<!-- Chaum-Pedersen proof, AES-GCM decryption, HKDF key derivation, failure handling -->
+When the sequencer processes an encrypted deposit on the zone, it claims the ciphertext decrypts to a specific `(to, memo)`. The zone verifies this onchain without the sequencer revealing their private key.
+
+The sequencer provides the ECDH shared secret alongside the decrypted data. Verification proceeds in three steps:
+
+1. **Chaum-Pedersen proof.** The sequencer provides a zero-knowledge proof that the shared secret was correctly derived: "I know `privSeq` such that `pubSeq = privSeq * G` AND `sharedSecretPoint = privSeq * ephemeralPub`." The [Chaum-Pedersen Verify](#chaum-pedersen-verify) precompile checks this proof. The sequencer's public key is looked up from the onchain key history, not supplied by the sequencer, preventing key substitution.
+
+2. **AES-GCM decryption.** The zone derives an AES-256 key from the shared secret using HKDF-SHA256 (implemented in Solidity using the SHA256 precompile at `0x02`). The HKDF info string includes `tempoPortal`, `keyIndex`, and `ephemeralPubkeyX` for domain separation. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts the ciphertext and validates the GCM authentication tag.
+
+3. **Plaintext validation.** The zone confirms the decrypted plaintext matches the `(to, memo)` the sequencer claimed. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes.
+
+If any step fails (invalid proof, GCM tag mismatch, plaintext mismatch), the zone mints the tokens to the sender's address on the zone instead. The Tempo-side funds remain in escrow. This ensures chain progress is never blocked by invalid encrypted deposits.
+
+The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
 
 <br>
 
