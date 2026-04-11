@@ -348,15 +348,34 @@ The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit
 
 ### Fee Accounting
 
-<!-- Multi-token gas via feeToken field, sequencer accepts all enabled tokens -->
+Zone transactions specify which enabled TIP-20 token to use for gas fees via a `feeToken` field. The sequencer accepts all enabled tokens as gas. Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit.
 
 ### Block Structure
 
-<!-- advanceTempo (optional) → user txs → finalizeWithdrawalBatch (final block only) -->
+Each zone block contains system transactions and user transactions in a fixed order:
+
+1. `ZoneInbox.advanceTempo(header, deposits, decryptions)` (optional, at the start of the block). Advances the zone's view of Tempo, processes any pending deposits, and verifies encrypted deposit decryptions. If omitted, the zone's Tempo binding carries forward from the previous block.
+2. User transactions, executed in order.
+3. `ZoneOutbox.finalizeWithdrawalBatch(count)` (required in the final block of a batch, absent in intermediate blocks). Constructs the withdrawal hash chain from pending withdrawals and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called even if there are zero withdrawals so the batch index advances.
+
+A batch covers one or more zone blocks. The sequencer controls batch frequency. Intermediate blocks within a batch contain only `advanceTempo` (optional) and user transactions.
 
 ### Block Header Format
 
-<!-- Simplified header fields, field coverage table (in hash / proven / how verified) -->
+Zone blocks use a simplified header with fewer fields than a standard Ethereum header:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `parentHash` | `bytes32` | Hash of the parent block header |
+| `beneficiary` | `address` | Sequencer address (must match the registered sequencer) |
+| `stateRoot` | `bytes32` | MPT root of the zone state after executing all transactions |
+| `transactionsRoot` | `bytes32` | Root computed over the ordered list of block transactions |
+| `receiptsRoot` | `bytes32` | Root computed over the ordered list of transaction receipts |
+| `number` | `uint64` | Block number |
+| `timestamp` | `uint64` | Block timestamp (must be monotonically increasing) |
+| `protocolVersion` | `uint64` | Zone protocol version |
+
+The block hash is `keccak256` of the RLP-encoded header. Batch proofs commit to block hash transitions (`prevBlockHash` to `nextBlockHash`), not raw state roots, so the proof covers the full header structure.
 
 ### Privacy Modifications
 
