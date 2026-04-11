@@ -447,102 +447,114 @@ If a TIP-403 policy restricts the portal address or a withdrawal recipient, the 
 
 ## Private RPC
 
-<!-- 
-This is a critical section. Zones expose a modified Ethereum JSON-RPC that enforces privacy.
-Every request is authenticated and scoped to the caller's account. This section should be
-comprehensive — the RPC is the primary interface users interact with and the main attack surface.
--->
+Zones expose a modified Ethereum JSON-RPC where every request is authenticated and every response is scoped to the caller's account. The RPC is the primary user interface and the main attack surface for privacy leaks. This section summarizes the design; the full specification is in the [Zone RPC Specification](./rpc.md).
 
 ### Authorization Tokens
 
-<!-- 
-- Every request requires X-Authorization-Token header
-- Signed message: keccak256(TempoZoneRPC magic, version, zoneId, chainId, issuedAt, expiresAt)
-- Wire format: signature || token fields (last 29 bytes)
-- Unscoped tokens (zoneId=0) valid for any zone
-- Max validity: 30 days
-- Validation rules (expiry, clock skew, chain ID, zone ID)
--->
+Every RPC request must include an authorization token in the `X-Authorization-Token` HTTP header. The token proves the caller controls a Tempo account and scopes all responses to that account.
+
+The signed message is `keccak256` of a packed encoding containing a `"TempoZoneRPC"` magic prefix, a version byte (currently `0`), the `zoneId`, `chainId`, `issuedAt`, and `expiresAt` timestamps. The wire format concatenates the signature and the 29-byte token fields, with the token fields always at the end.
+
+A `zoneId` of `0` indicates an unscoped token valid for any zone. Zone IDs start at 1, so `0` is never a valid zone ID. The maximum validity window is 30 days (`expiresAt - issuedAt <= 2592000`). A clock skew tolerance of 60 seconds is allowed for `issuedAt`.
 
 ### Signature Types
 
-<!--
-- secp256k1, P256, WebAuthn, Keychain (V1/V2)
-- Same format as Tempo transaction signatures
-- Keychain: wraps inner sig + user_address, authenticates as root account
-- Zone has independent AccountKeychain (not mirrored from L1)
--->
+Authorization token signatures follow the same format as Tempo transaction signatures:
+
+| Type | Detection | Authentication |
+|------|-----------|----------------|
+| secp256k1 | 65 bytes, no prefix | Standard `ecrecover` |
+| P256 | Prefix `0x01`, 130 bytes | Public key embedded in signature |
+| WebAuthn | Prefix `0x02`, variable length | P256 key via WebAuthn assertion |
+| Keychain V1 | Prefix `0x03` | Wraps inner sig + `user_address`, authenticates as root account |
+| Keychain V2 | Prefix `0x04` | Same as V1 but binds `user_address` into signing hash |
+
+Keychain keys allow session keys and scoped access keys to authenticate to the RPC with the same permissions as the root account. The zone has its own independent `AccountKeychain` instance, not mirrored from Tempo. Users must register keychain keys on the zone directly.
 
 ### Method Access Control
 
-<!--
-- Default deny: unlisted methods return -32601
-- Four categories: allowed, scoped, restricted (sequencer-only), disabled
-- Allowed: eth_chainId, eth_blockNumber, eth_gasPrice, etc.
-- Scoped: eth_getBalance (returns 0x0 for non-self), eth_getTransactionByHash (null for non-self), eth_getLogs (filtered), eth_sendRawTransaction (sender must match), eth_call/eth_estimateGas (from must match)
-- Restricted: eth_getBlockByNumber with full txs, trace/debug/admin/txpool
-- Disabled: eth_getProof (leaks trie structure), pending tx filters (mempool observation)
-- Error vs silent response: explicit errors for user-supplied mismatches, silent 0x0/null for queries about others
-- State override rejection for non-sequencer callers
--->
+The RPC uses a default-deny model. Any method not explicitly listed returns `-32601` (method not found). Methods fall into four categories:
+
+**Allowed.** Public zone information available to any authenticated caller: `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_feeHistory`, `eth_getBlockByNumber` (without full transactions), `eth_syncing`, `net_version`, `web3_clientVersion`, and others.
+
+**Scoped.** Available to any authenticated caller but filtered to the caller's account:
+
+- `eth_getBalance`, `eth_getTransactionCount`: return `0x0` for non-self queries (no error, to avoid leaking account existence).
+- `eth_getTransactionByHash`, `eth_getTransactionReceipt`: return `null` if the caller is not the sender.
+- `eth_sendRawTransaction`: rejects if the transaction sender does not match the authenticated account.
+- `eth_call`, `eth_estimateGas`: `from` must equal the authenticated account. State override sets and block override objects are rejected for non-sequencer callers.
+- `eth_getLogs`, `eth_getFilterLogs`, `eth_getFilterChanges`: filtered to TIP-20 events where the caller is a relevant party (see [Event Filtering](#event-filtering)).
+
+**Restricted (sequencer-only).** `eth_getStorageAt`, `eth_getCode`, `eth_getBlockByNumber` with full transactions, `eth_getBlockReceipts`, `debug_*`, `admin_*`, `txpool_*`, and other methods that expose raw state or full block data.
+
+**Disabled.** `eth_getProof` (leaks trie structure), `eth_newPendingTransactionFilter` and `eth_subscribe("newPendingTransactions")` (mempool observation), and mining-related methods.
 
 ### Block Responses
 
-<!--
-- Non-sequencer: transactions always empty array, logsBloom zeroed
-- Sequencer: full block data
-- Rationale: tx ordering and per-address activity reveal correlations
--->
+For non-sequencer callers, block responses are modified:
+
+- The `transactions` field is always an empty array, regardless of the `include_transactions` parameter.
+- The `logsBloom` field is zeroed. The Bloom filter summarizes all log topics and emitting addresses in the block; returning the real value would allow probing whether a specific address had activity in that block.
+- All other header fields (`number`, `hash`, `parentHash`, `timestamp`, `stateRoot`, `gasUsed`, etc.) are returned normally. Aggregate activity metrics are intentionally public.
+
+The sequencer receives full block data.
 
 ### Event Filtering
 
-<!--
-- Only TIP-20 events returned (Transfer, Approval, TransferWithMemo, Mint, Burn)
-- Filtered to authenticated account as relevant party
-- Address filter must be zone token or omitted
-- Topic injection + post-filtering
-- All other events (system, config) filtered out
--->
+All log queries are restricted to TIP-20 events where the authenticated account is a relevant party:
+
+| Event | Relevant if |
+|-------|-------------|
+| `Transfer(from, to, amount)` | `from == caller` OR `to == caller` |
+| `Approval(owner, spender, amount)` | `owner == caller` OR `spender == caller` |
+| `TransferWithMemo(from, to, amount, memo)` | `from == caller` OR `to == caller` |
+| `Mint(to, amount)` | `to == caller` |
+| `Burn(from, amount)` | `from == caller` |
+
+All other events (system events, configuration events) are filtered out. The `address` filter parameter must be a zone token address or omitted. The RPC server injects topic filters to restrict indexed address parameters to the caller, then post-filters results as a final pass.
 
 ### Timing Side Channels
 
-<!--
-- 100ms minimum response time on: eth_getTransactionByHash, eth_getTransactionReceipt, eth_getLogs, eth_getFilterLogs, eth_getFilterChanges
-- Why: fetch-then-check methods leak existence via timing difference
-- Methods that don't need it: eth_getBalance (check before fetch), eth_call (from validated before execution)
--->
+Scoped methods that fetch data before checking authorization leak existence via timing differences. The RPC server enforces a minimum response time of 100ms on `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getLogs`, `eth_getFilterLogs`, and `eth_getFilterChanges`.
+
+Methods where authorization is checked before any data fetch (`eth_getBalance`, `eth_call`, `eth_sendRawTransaction`) do not need the speed bump.
 
 ### WebSocket Subscriptions
 
-<!--
-- eth_subscribe("newHeads"): allowed, pushes block headers (logsBloom zeroed for non-sequencer)
-- eth_subscribe("logs"): scoped to authenticated account, same event filtering rules
-- eth_subscribe("newPendingTransactions"): DISABLED — mempool observation
-- Auth token provided during WebSocket handshake, scopes all subscriptions
-- Connection terminated when auth token expires — client must reconnect with fresh token
-- Keychain revocation: connection terminated within 1 second of importing revocation block
--->
+WebSocket connections follow the same authorization model. The authorization token is provided during the handshake and scopes all subscriptions for that connection.
+
+- `eth_subscribe("newHeads")`: allowed, pushes block headers with `logsBloom` zeroed for non-sequencer callers.
+- `eth_subscribe("logs")`: scoped to the authenticated account using the same event filtering rules.
+- `eth_subscribe("newPendingTransactions")`: disabled.
+
+The connection is terminated when the authorization token expires. For keychain-authenticated connections, the server must also terminate the connection within 1 second of importing a block that revokes the keychain key.
 
 ### Zone-Specific Methods
 
-<!--
-- zone_getAuthorizationTokenInfo: returns authenticated account + expiry
-- zone_getZoneInfo: zoneId, zoneTokens, sequencer, chainId
-- zone_getDepositStatus: scoped deposit processing status
-- No state-changing methods via auth token — withdrawals require signed transactions
--->
+The zone exposes three methods under the `zone_` namespace:
+
+| Method | Access | Description |
+|--------|--------|-------------|
+| `zone_getAuthorizationTokenInfo` | Any authenticated | Returns the authenticated account address and token expiry |
+| `zone_getZoneInfo` | Any authenticated | Returns `zoneId`, `zoneTokens`, `sequencer`, `chainId` |
+| `zone_getDepositStatus(tempoBlockNumber)` | Scoped | Returns deposit processing status for the given Tempo block, filtered to deposits where the caller is the sender or recipient |
+
+There are no state-changing methods via authorization token. Withdrawals require a signed transaction submitted via `eth_sendRawTransaction`.
 
 ### Error Codes
 
-<!--
-- -32001: Authorization token required
-- -32002: Authorization token expired
-- -32003: Transaction rejected (sender mismatch on eth_sendRawTransaction)
-- -32004: Account mismatch (from mismatch on eth_call/eth_estimateGas)
-- -32005: Sequencer only
-- -32006: Method disabled
-- Design principle: explicit errors for user-supplied mismatches, silent 0x0/null for queries about others (avoids leaking "data exists but you can't see it")
--->
+| Code | Message | When |
+|------|---------|------|
+| `-32001` | Authorization token required | No token provided |
+| `-32002` | Authorization token expired | Token has expired |
+| `-32003` | Transaction rejected | Sender mismatch on `eth_sendRawTransaction` |
+| `-32004` | Account mismatch | `from` mismatch on `eth_call` / `eth_estimateGas` |
+| `-32005` | Sequencer only | Method requires sequencer access |
+| `-32006` | Method disabled | Method not available on zones |
+
+Methods where the user explicitly supplies a mismatched parameter return explicit errors (the user already knows the address they provided). Methods that query about other accounts return silent dummy values (`0x0`, `null`, empty results) to avoid revealing "data exists but you can't see it."
+
+See the [Zone RPC Specification](./rpc.md) for the complete method tables, wire format details, and security considerations.
 
 <br>
 
