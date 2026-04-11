@@ -298,7 +298,33 @@ After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to re
 
 ### Encrypted Deposits
 
-<!-- ECIES with secp256k1, what's public vs private (token/sender/amount public, to/memo encrypted), processing flow. References encryption keys from Sequencer Operations. -->
+Users can encrypt the recipient and memo of a deposit so that only the sequencer can see who received the funds. The token, sender, and amount remain public (required for onchain escrow accounting), but the `to` address and `memo` are encrypted.
+
+The encryption scheme is ECIES with secp256k1:
+
+1. The user generates an ephemeral keypair and derives a shared secret via ECDH with the sequencer's published encryption key.
+2. The user derives an AES-256 key from the shared secret using HKDF-SHA256.
+3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
+4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)).
+
+The portal escrows the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`. The sequencer decrypts the payload off-chain and provides the decrypted `(to, memo)` when processing the deposit on the zone via `advanceTempo()`.
+
+Regular and encrypted deposits share a single ordered queue with a type discriminator in the hash:
+
+```
+keccak256(abi.encode(DepositType.Regular, deposit, prevHash))
+keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
+```
+
+Deposits are processed in the exact order they were made, regardless of type.
+
+| Field | Visibility | Reason |
+|-------|------------|--------|
+| `token` | Public | Required for onchain escrow accounting and zone-side minting |
+| `sender` | Public | Required for refunds if decryption fails |
+| `amount` | Public | Required for onchain accounting |
+| `to` | Encrypted | Only the sequencer learns the recipient |
+| `memo` | Encrypted | Only the sequencer learns the payment context |
 
 ### Onchain Decryption Verification
 
