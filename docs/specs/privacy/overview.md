@@ -70,40 +70,31 @@ flowchart TB
 ## System smart contracts
 
 ```mermaid
-flowchart LR
+flowchart TB
     User["User"]
 
     subgraph Tempo["Tempo"]
-        Factory["ZoneFactory"]
-        Portal["ZonePortal"]
-        SubmitBatch["submitBatch"]
-        Messenger["ZoneMessenger"]
-        Verifier["Verifier"]
+        direction LR
+        Factory["ZoneFactory"] -->|create zone| Portal["ZonePortal"]
+        SubmitBatch["submitBatch"] -->|verify batch| Verifier["Verifier"]
+        SubmitBatch -->|update progress| Portal
+        Portal -->|callback withdrawals| Messenger["ZoneMessenger"]
     end
 
     subgraph Zone["Zone"]
-        Sequencer["Sequencer / zone node"]
-        TempoState["TempoState"]
-        Inbox["ZoneInbox"]
-        Outbox["ZoneOutbox"]
-        Config["ZoneConfig"]
-        ZoneState["Zone state"]
+        direction LR
+        TempoState["TempoState"] --> Config["ZoneConfig"]
+        Sequencer["Sequencer / zone node"] -->|advanceTempo| Inbox["ZoneInbox"]
+        Sequencer -->|execute txs| ZoneState["Zone state"]
+        ZoneState --> Outbox["ZoneOutbox"]
     end
 
-    Factory -->|create zone| Portal
     User -->|deposit TIP-20| Portal
     Portal -->|deposit queue| Inbox
     Sequencer -->|import finalized Tempo headers| TempoState
-    TempoState --> Config
-    Sequencer -->|advanceTempo + process deposits| Inbox
-    Sequencer -->|execute transactions| ZoneState
-    ZoneState --> Outbox
     Outbox -->|withdrawal batch commitment| SubmitBatch
-    Sequencer -->|submitBatch| SubmitBatch
-    SubmitBatch -->|verify batch| Verifier
-    SubmitBatch -->|update proven progress| Portal
-    Sequencer -->|processWithdrawal| Portal
-    Portal -->|callback withdrawals| Messenger
+    Sequencer -->|submit batch| SubmitBatch
+    Sequencer -->|process withdrawals| Portal
 ```
 
 | Component | Lives on | Role |
