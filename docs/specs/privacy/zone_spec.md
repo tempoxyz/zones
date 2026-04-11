@@ -27,7 +27,7 @@
     - [Block Structure](#block-structure)
     - [Block Header Format](#block-header-format)
     - [Privacy Modifications](#privacy-modifications)
-  - [Tempo L1 State Reads](#tempo-l1-state-reads)
+  - [Tempo State Reads](#tempo-state-reads)
     - [TempoState Predeploy](#tempostate-predeploy)
     - [Header Finalization](#header-finalization)
     - [Storage Reads](#storage-reads)
@@ -379,81 +379,69 @@ The block hash is `keccak256` of the RLP-encoded header. Batch proofs commit to 
 
 ### Privacy Modifications
 
-<!-- Brief summary of execution-level privacy changes, link to execution.md for full details:
-- balanceOf/allowance access control
-- Fixed 100k gas for transfers (side channel prevention)
-- CREATE/CREATE2 disabled
--->
+Zone execution differs from standard Tempo execution in three areas. These changes are enforced at the EVM level, not just at the RPC layer, so they apply to all code paths including user transactions, `eth_call` simulations, and prover re-execution.
+
+- **Balance and allowance access control.** `balanceOf(account)` reverts unless `msg.sender` is the account owner or the sequencer. `allowance(owner, spender)` reverts unless `msg.sender` is the owner, the spender, or the sequencer.
+- **Fixed gas for transfers.** All TIP-20 transfer and approve operations charge a fixed 100,000 gas regardless of storage layout. This eliminates a side channel where variable gas costs reveal whether a recipient has previously received tokens.
+- **Contract creation disabled.** `CREATE` and `CREATE2` revert. The zone runs only predeploys and TIP-20 token precompiles. Arbitrary contract deployment would allow users to circumvent the execution-level privacy controls.
+
+See the [Execution Environment Specification](./execution.md) for full details.
 
 <br>
 
-## Tempo L1 State Reads
+## Tempo State Reads
 
-<!-- This is the core mechanism for how the zone reads Tempo L1 state. Everything — sequencer identity, deposit queue hashes, token enablement, TIP-403 policies — flows through this. -->
+The zone reads all of its configuration from Tempo: the sequencer address, the token registry, the deposit queue hash, and TIP-403 policy state. Everything flows through the `TempoState` predeploy.
 
 ### TempoState Predeploy
 
-<!--
-- Address: 0x1c00000000000000000000000000000000000000
-- Stores finalized Tempo header fields (wrapper + inner Ethereum fields)
-- tempoBlockHash is always keccak256(RLP(TempoHeader)), committing to full header
-- Tempo header RLP format: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
--->
+`TempoState` is deployed at `0x1c00000000000000000000000000000000000000`. It stores finalized Tempo block header fields and provides storage read access to Tempo contracts.
+
+The predeploy exposes Tempo wrapper fields (`generalGasLimit`, `sharedGasLimit`) and selected inner Ethereum header fields (`parentHash`, `beneficiary`, `stateRoot`, `blockNumber`, `timestamp`, etc.). The `tempoBlockHash` is always `keccak256(RLP(TempoHeader))`, committing to the complete header contents even though only a subset of fields are stored.
+
+Tempo headers are RLP-encoded as `rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])`, where `inner` is a standard Ethereum header.
 
 ### Header Finalization
 
-<!--
-- ZoneInbox calls finalizeTempo(header) to advance zone's view of Tempo
-- Validates chain continuity (parent hash, block number +1)
-- Stores wrapper fields and selected inner fields
-- If block omits advanceTempo, Tempo binding carries over from previous block
--->
+`ZoneInbox.advanceTempo()` calls `TempoState.finalizeTempo(header)` to advance the zone's view of Tempo. This function decodes the RLP header, validates chain continuity (parent hash must match the previous finalized header, block number must increment by one), and stores the header fields.
+
+If a block omits `advanceTempo`, the Tempo binding carries forward from the previous block. Multiple blocks can share the same Tempo binding.
 
 ### Storage Reads
 
-<!--
-- readTempoStorageSlot(account, slot): read a storage slot from any Tempo contract
-- RESTRICTED to system contracts only (ZoneInbox, ZoneOutbox, ZoneConfig)
-- User transactions cannot directly read Tempo state
-- Implementation: precompile stubs, actual reads validated against tempoStateRoot by zone node
-- Prover includes Merkle proofs for each unique account+slot accessed during batch
-- Used by: ZoneConfig (sequencer address, token registry), ZoneInbox (deposit queue hash), TIP-403 Registry (policy state)
--->
+`TempoState` provides `readTempoStorageSlot(account, slot)` for reading storage from any Tempo contract. This function is restricted to zone system contracts only: `ZoneInbox`, `ZoneOutbox`, and `ZoneConfig`. User transactions cannot call it.
+
+The function is a precompile stub. The actual storage reads are performed by the zone node and validated against the `tempoStateRoot` from the finalized header. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
+
+System contracts use storage reads for:
+
+- `ZoneConfig`: sequencer address, token registry from the portal
+- `ZoneInbox`: `currentDepositQueueHash` from the portal
+- `TIP403Registry`: policy state from Tempo
 
 ### Staleness and Finality
 
-<!--
-- Staleness depends on how frequently sequencer calls advanceTempo
-- Zone client must only finalize headers after L1 finality
-- Proofs should only reference finalized Tempo blocks to avoid reorg risk
--->
+The zone's view of Tempo is only as current as the most recent `advanceTempo` call. If the sequencer advances Tempo infrequently, zone-side reads of portal state (sequencer address, deposit queue, token registry) may lag behind Tempo.
+
+The zone node must only finalize Tempo headers that have reached finality on Tempo. Proofs should only reference finalized Tempo blocks to avoid reorg risk.
 
 <br>
 
 ## TIP-403 Policies
 
-<!-- TIP-403 policy enforcement is a headline feature — compliance inherited from Tempo automatically. -->
+Zones inherit compliance policies from Tempo automatically. Token issuers set transfer policies once on Tempo, and zones enforce them without any additional configuration.
 
 ### Policy Enforcement on Zones
 
-<!--
-- TIP403Registry deployed at same address as on Tempo
-- Read-only: does NOT support writing policies on zone
-- isAuthorized reads policy state from Tempo via TempoState.readTempoStorageSlot
-- Zone-side TIP-20 transfers enforce Tempo TIP-403 policies automatically
-- Every transfer checks isAuthorized(policyId, from) AND isAuthorized(policyId, to)
--->
+The zone has a `TIP403Registry` deployed at the same address as on Tempo. This contract is read-only and does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via `TempoState.readTempoStorageSlot()`.
+
+Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorized(policyId, to)` before executing. If either check fails, the transfer reverts.
 
 ### Policy Inheritance
 
-<!--
-- Issuers set policy once on Tempo, zone picks it up automatically
-- If issuer freezes an address or updates a blacklist on Tempo, zone inherits next time advanceTempo runs
-- Policy types: WHITELIST (must be in set), BLACKLIST (must not be in set)
-- Policy ID 1 is "always-allow" (default for most tokens)
-- Portal address MUST be whitelisted for restricted policies
-- Impact on withdrawals: if policy restricts portal or recipient, withdrawal fails and bounces back
--->
+Issuers manage policies exclusively on Tempo. When an issuer freezes an address, updates a blacklist, or modifies a whitelist on Tempo, the zone inherits the change the next time `advanceTempo` imports a Tempo block containing the update.
+
+If a TIP-403 policy restricts the portal address or a withdrawal recipient, the withdrawal fails on Tempo and bounces back to the sender's `fallbackRecipient` on the zone (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 <br>
 
