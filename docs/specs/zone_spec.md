@@ -170,7 +170,7 @@ The factory assigns a unique `zoneId`, deploys a [`ZonePortal`](#izoneportal) an
 Each zone has a unique chain ID derived from its zone ID:
 
 ```
-chain_id = 4217000000 + zone_id
+chain_id = 421700000 + zone_id
 ```
 
 The prefix `4217` is derived from the Tempo chain ID. This ensures replay protection between zones. A transaction signed for one zone cannot be replayed on another. The chain ID is set in the zone's genesis configuration and validated by the zone node at startup.
