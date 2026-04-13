@@ -219,7 +219,7 @@ The sequencer manages which TIP-20 tokens are available on the zone:
 - `pauseDeposits(token)`: Pause new deposits for a token. Does not affect withdrawals.
 - `resumeDeposits(token)`: Resume deposits for a previously paused token.
 
-The portal maintains a `TokenConfig` per token with an `enabled` flag (permanent) and a `depositsActive` flag (toggleable), along with an append-only `enabledTokens` list. This enforces the non-custodial withdrawal guarantee: the sequencer can halt deposits but can never prevent users from withdrawing an enabled token.
+The portal maintains a `TokenConfig` per token with an `enabled` flag and a configurable `depositsActive` flag, along with an append-only `enabledTokens` list. The sequencer can halt deposits but cannot disable withdrawals for an enabled token. Note that token issuers can independently restrict transfers via TIP-403 policies, which may cause withdrawals to fail and bounce back (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 ### Gas Rate Configuration
 
