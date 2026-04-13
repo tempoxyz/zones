@@ -135,7 +135,7 @@ sequenceDiagram
     U->>T: ZonePortal.deposit()
     T->>T: lock tokens, append to deposit queue
 
-    Note over Z: Import and mint
+    Note over Z: Process deposit
     Z-->>T: observe DepositMade
     Z->>Z: ZoneInbox.advanceTempo()
     Z->>Z: mint tokens to recipient
@@ -150,7 +150,7 @@ sequenceDiagram
     Z->>T: ZonePortal.submitBatch()
     T->>T: verify proof, queue withdrawals
 
-    Note over T: Processing
+    Note over T: Withdraw
     Z->>T: ZonePortal.processWithdrawal()
     T->>U: release tokens
 ```
@@ -290,6 +290,7 @@ sequenceDiagram
     Note over T: emit DepositMade
     Z-->>T: observe DepositMade
     Z->>Z: ZoneInbox.advanceTempo()
+    Z->>Z: process deposit
     Z->>Z: TIP20.mint(to, amount)
 ```
 
