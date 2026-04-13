@@ -90,7 +90,7 @@
 
 A Tempo Zone is a private execution environment anchored to Tempo. Inside a zone, balances, transfers, and transaction history are invisible to block explorers, indexers, and other users. Each zone is operated by a dedicated sequencer that is the sole block producer, settling back to Tempo through a proof-agnostic verification system.
 
-Funds enter a zone through deposits on Tempo, where they are held in escrow. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from escrow on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Withdrawals support optional callbacks, making them composable with Tempo contracts and enabling zone-to-zone transfers.
+Funds enter a zone through deposits on Tempo, where they are locked in the portal. The zone mints equivalent tokens, and users transact privately with balances and transaction history hidden behind authenticated RPC access and execution-level controls. When users withdraw, tokens are burned on the zone and released from the portal on Tempo. Proofs guarantee that the sequencer executed every transaction correctly and cannot forge state transitions. Withdrawals support optional callbacks, making them composable with Tempo contracts and enabling zone-to-zone transfers.
 
 This document specifies the zone protocol: deployment, sequencer operations, deposits, execution, the private RPC interface, the proving system, batch submission, withdrawals, precompiles, contract interfaces, and the network upgrade process.
 
@@ -102,7 +102,7 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 |------|------------|
 | Tempo | The base chain that zones settle to. |
 | Zone | A private execution environment anchored to Tempo. |
-| Portal | The contract on Tempo that escrows deposited tokens and finalizes withdrawals for a zone. |
+| Portal | The contract on Tempo that locks deposited tokens and finalizes withdrawals for a zone. |
 | Batch | A sequencer-produced commitment covering one or more zone blocks, submitted to Tempo with a proof. |
 | Enabled token | A TIP-20 token that the sequencer has activated for deposits and withdrawals on a zone. Enablement is permanent. |
 | TIP-20 | Tempo's fungible token standard. |
@@ -117,11 +117,11 @@ Each zone is operated by a **sequencer** that collects transactions, produces bl
 
 On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
-On Tempo, each zone has a **portal** that escrows deposited tokens. When a user deposits, the portal locks their tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
+On Tempo, each zone has a **portal** that locks deposited tokens. When a user deposits, the portal locks their tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
 Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer. The zone does not post transaction data; data availability is entrusted to the sequencer.
 
-When a user wants to exit, they request a withdrawal on the zone. Their tokens are burned, and the withdrawal is added to a pending list. At the end of a batch, the sequencer finalizes all pending withdrawals into a hash chain and generates a proof covering the full batch of zone blocks. The sequencer submits this batch and proof to the portal on Tempo, which verifies the proof and queues the withdrawals. The sequencer then processes each withdrawal, releasing tokens from escrow to the recipient.
+When a user wants to exit, they request a withdrawal on the zone. Their tokens are burned, and the withdrawal is added to a pending list. At the end of a batch, the sequencer finalizes all pending withdrawals into a hash chain and generates a proof covering the full batch of zone blocks. The sequencer submits this batch and proof to the portal on Tempo, which verifies the proof and queues the withdrawals. The sequencer then processes each withdrawal, releasing tokens from the portal to the recipient.
 
 ```mermaid
 sequenceDiagram
@@ -130,7 +130,7 @@ sequenceDiagram
     participant Zone as Zone (Sequencer)
 
     User->>Portal: deposit(token, to, amount)
-    Portal->>Portal: escrow tokens, append to deposit queue
+    Portal->>Portal: lock tokens, append to deposit queue
     Zone->>Portal: observe deposit
     Zone->>Zone: advanceTempo(), mint tokens to recipient
 
@@ -144,7 +144,7 @@ sequenceDiagram
     Zone->>Portal: submitBatch(proof)
     Portal->>Portal: verify proof, queue withdrawals
 
-    Portal->>User: processWithdrawal(), tokens released from escrow
+    Portal->>User: processWithdrawal(), tokens released from portal
 ```
 
 <br>
@@ -178,10 +178,10 @@ A single [`ZoneFactory`](#izonefactory) on Tempo creates zones and maintains the
 
 | Contract | Purpose |
 |----------|---------|
-| [`ZonePortal`](#izoneportal) | Escrows deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
+| [`ZonePortal`](#izoneportal) | Locks deposited tokens, accepts batch submissions, verifies proofs, and processes withdrawals. Manages the token registry and deposit/withdrawal queues. |
 | [`ZoneMessenger`](#izonemessenger) | Relays withdrawal callbacks. When a withdrawal includes calldata, the messenger transfers tokens from the portal to the recipient and executes the callback atomically. Deployed separately from the portal to isolate callback execution. |
 
-The portal gives the messenger max approval for each enabled token so that withdrawal callbacks can transfer tokens from escrow to the recipient in a single call.
+The portal gives the messenger max approval for each enabled token so that withdrawal callbacks can transfer tokens from the portal to the recipient in a single call.
 
 ### Zone Predeploys
 
@@ -205,7 +205,7 @@ Token supply on the zone is controlled exclusively by the system contracts:
 - `ZoneInbox` mints tokens when processing deposits from Tempo.
 - `ZoneOutbox` burns tokens when users request withdrawals.
 
-The zone-side supply of each token always equals net deposits minus net withdrawals. The corresponding tokens on Tempo are held in escrow by the portal. No other actor can mint or burn zone tokens.
+The zone-side supply of each token always equals net deposits minus net withdrawals. The corresponding tokens on Tempo are locked in the portal. No other actor can mint or burn zone tokens.
 
 <br>
 
@@ -255,21 +255,21 @@ Sequencer management happens exclusively on Tempo. Zone-side contracts read the 
 
 ## Deposits
 
-Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, the portal escrows the tokens and appends the deposit to a hash chain, and the sequencer mints equivalent tokens on the zone.
+Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, the portal locks the tokens and appends the deposit to a hash chain, and the sequencer mints equivalent tokens on the zone.
 
 ### Regular Deposits
 
 A user deposits by calling `deposit(token, to, amount, memo)` on the portal. The portal:
 
 1. Validates the token is enabled and deposits are active.
-2. Transfers `amount` from the user into escrow.
+2. Transfers `amount` from the user into the portal.
 3. Deducts the deposit fee (see [Deposit Fees](#deposit-fees)) and pays it to the sequencer immediately.
 4. Appends the deposit to the deposit queue hash chain with the net amount (`amount - fee`).
 5. Emits `DepositMade`.
 
 The sequencer observes `DepositMade` events and relays deposits to the zone via `ZoneInbox.advanceTempo()`. This function processes deposits in order, minting the zone-side TIP-20 token to each recipient: `mint(deposit.to, deposit.amount)`.
 
-Deposits always succeed on the zone. There are no callbacks or failure modes for regular deposits. If the sequencer withholds deposits, funds remain in escrow with no forced inclusion mechanism.
+Deposits always succeed on the zone. There are no callbacks or failure modes for regular deposits. If the sequencer withholds deposits, funds remain locked in the portal with no forced inclusion mechanism.
 
 ### Deposit Fees
 
@@ -296,7 +296,7 @@ After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to re
 
 ### Encrypted Deposits
 
-Users can encrypt the recipient and memo of a deposit so that only the sequencer can see who received the funds. The token, sender, and amount remain public (required for onchain escrow accounting), but the `to` address and `memo` are encrypted.
+Users can encrypt the recipient and memo of a deposit so that only the sequencer can see who received the funds. The token, sender, and amount remain public (required for onchain accounting), but the `to` address and `memo` are encrypted.
 
 The encryption scheme is ECIES with secp256k1:
 
@@ -305,7 +305,7 @@ The encryption scheme is ECIES with secp256k1:
 3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
 4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)).
 
-The portal escrows the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`. The sequencer decrypts the payload off-chain and provides the decrypted `(to, memo)` when processing the deposit on the zone via `advanceTempo()`.
+The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`. The sequencer decrypts the payload off-chain and provides the decrypted `(to, memo)` when processing the deposit on the zone via `advanceTempo()`.
 
 Regular and encrypted deposits share a single ordered queue with a type discriminator in the hash:
 
@@ -318,7 +318,7 @@ Deposits are processed in the exact order they were made, regardless of type.
 
 | Field | Visibility | Reason |
 |-------|------------|--------|
-| `token` | Public | Required for onchain escrow accounting and zone-side minting |
+| `token` | Public | Required for onchain accounting and zone-side minting |
 | `sender` | Public | Required for refunds if decryption fails |
 | `amount` | Public | Required for onchain accounting |
 | `to` | Encrypted | Only the sequencer learns the recipient |
@@ -336,7 +336,7 @@ The sequencer provides the ECDH shared secret alongside the decrypted data. Veri
 
 3. **Plaintext validation.** The zone confirms the decrypted plaintext matches the `(to, memo)` the sequencer claimed. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes.
 
-If any step fails (invalid proof, GCM tag mismatch, plaintext mismatch), the zone mints the tokens to the sender's address on the zone instead. The Tempo-side funds remain in escrow. This ensures chain progress is never blocked by invalid encrypted deposits.
+If any step fails (invalid proof, GCM tag mismatch, plaintext mismatch), the zone mints the tokens to the sender's address on the zone instead. The Tempo-side funds remain locked in the portal. This ensures chain progress is never blocked by invalid encrypted deposits.
 
 The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
 
@@ -344,7 +344,7 @@ The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit
 
 ## Withdrawals
 
-Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawal on the zone, tokens are burned, and the sequencer eventually processes the withdrawal on Tempo, releasing tokens from escrow.
+Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawal on the zone, tokens are burned, and the sequencer eventually processes the withdrawal on Tempo, releasing tokens from the portal.
 
 ```mermaid
 sequenceDiagram
