@@ -23,7 +23,7 @@ In addition, each enabled TIP-20 token appears inside the zone at the same addre
 
 ### Zone token model
 
-Zones do not have a token factory. Every zone token is a bridged representation of a Tempo TIP-20.
+Zones do not have an unrestricted token factory. Every zone token is a bridged representation of a Tempo TIP-20.
 
 - enabling a token on the Tempo portal makes it available on the zone
 - `ZoneInbox` mints on deposit
@@ -31,6 +31,25 @@ Zones do not have a token factory. Every zone token is a bridged representation 
 - no user or issuer can arbitrarily create new zone-side token contracts
 
 This is what keeps zone-side token supply tied to Tempo-side escrow.
+
+## Tempo system contract availability
+
+A zone does not mirror every Tempo system contract. Zone contracts and user transactions may only rely on the following Tempo-native addresses and replacements:
+
+| Tempo contract / precompile | Zone status | Notes |
+| --- | --- | --- |
+| TIP-20 token addresses | Available for enabled tokens only | Each enabled token appears at the same address it uses on Tempo, but executes with the zone's privacy-preserving TIP-20 rules. |
+| `TIP20Factory` | Replaced | The same address is reused for a zone-specific `ZoneTokenFactory` that only supports `enableToken(...)` during `ZoneInbox.advanceTempo(...)`. It cannot create arbitrary new assets. |
+| `TIP403Registry` | Replaced | The same address is reused for a read-only proxy. Zone transfers read Tempo policy state through `TempoState` instead of owning policy state locally. |
+| `AccountKeychain` | Available | The zone exposes its own `AccountKeychain` instance at the standard address. Its state is local to the zone and is not mirrored from Tempo L1. |
+| `Nonce` | Available | The standard nonce precompile remains available for zone transactions. |
+| `FeeManager` | Available | The fee-manager address remains available for zone fee accounting, but zones do not expose a separate `FeeAMM` conversion path. Fees are charged and credited in the chosen fee token. |
+| `FeeAMM` | Disabled | Zones do not have an in-zone fee AMM or pool-based fee conversion mechanism. |
+| `ValidatorConfig` / `ValidatorConfigV2` | Disabled | Validator-configuration are not relevant to zones which use a single sequencer. |
+| `StablecoinDEX` | Disabled | The standard `StablecoinDEX` address is reserved, but contracts must not rely on a live DEX inside the zone. |
+| `ZoneFactory`, `ZonePortal`, `ZoneMessenger` | Tempo-only | These contracts exist only on Tempo. Zone contracts access Tempo settlement and configuration state indirectly through `TempoState` and `ZoneConfig`. |
+
+Unless this document explicitly says otherwise, a Tempo system contract should be treated as unavailable inside the zone. Zone-only helpers such as `TempoStateReader` and `ZoneTxContext` are separate zone precompiles, not Tempo contracts.
 
 ## Shared zone-side types
 
