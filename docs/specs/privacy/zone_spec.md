@@ -83,8 +83,6 @@
     - [IZoneConfig](#izoneconfig)
     - [TIP-403 Registry](#tip-403-registry)
   - [Network Upgrades and Hard Fork Activation](#network-upgrades-and-hard-fork-activation)
-- [Security Considerations](#security-considerations)
-- [Open Questions](#open-questions)
 
 ---
 
