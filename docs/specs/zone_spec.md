@@ -259,34 +259,6 @@ Sequencer management happens exclusively on Tempo. Zone-side contracts read the 
 
 Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, the portal locks the tokens and appends the deposit to a hash chain, and the sequencer mints equivalent tokens on the zone.
 
-```mermaid
-sequenceDiagram
-    participant User
-    participant ZonePortal as ZonePortal (Tempo)
-    participant Sequencer
-    participant ZoneInbox as ZoneInbox (Zone)
-
-    User->>ZonePortal: deposit(token, to, amount, memo)
-    ZonePortal->>ZonePortal: transfer tokens into portal
-    ZonePortal->>ZonePortal: deduct fee, append to deposit queue
-    ZonePortal-->>Sequencer: emit DepositMade
-
-    Sequencer->>ZoneInbox: advanceTempo(header, deposits)
-    ZoneInbox->>ZoneInbox: validate deposit queue hash against Tempo state
-    ZoneInbox->>ZoneInbox: mint(to, amount) for each deposit
-
-    Note over User,ZonePortal: Encrypted deposit variant
-    User->>ZonePortal: depositEncrypted(token, amount, keyIndex, encrypted)
-    ZonePortal->>ZonePortal: transfer tokens into portal
-    ZonePortal-->>Sequencer: emit EncryptedDepositMade
-
-    Sequencer->>Sequencer: decrypt (to, memo) off-chain
-    Sequencer->>ZoneInbox: advanceTempo(header, deposits, decryptions)
-    ZoneInbox->>ZoneInbox: verify Chaum-Pedersen proof
-    ZoneInbox->>ZoneInbox: decrypt and validate via AES-GCM
-    ZoneInbox->>ZoneInbox: mint(decrypted.to, amount)
-```
-
 ### Regular Deposits
 
 A user deposits by calling `deposit(token, to, amount, memo)` on the portal. The portal:
@@ -323,6 +295,23 @@ currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, deposit, cur
 The newest deposit is always outermost, making onchain addition O(1). The zone tracks its own `processedDepositQueueHash` in state. During `advanceTempo()`, the zone processes deposits oldest-first, rebuilding the hash chain and validating that the result matches `currentDepositQueueHash` read from Tempo state via `TempoState.readTempoStorageSlot()`.
 
 After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced. Users can check whether their deposit has been processed by comparing their deposit's Tempo block number against this value.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant ZonePortal as ZonePortal (Tempo)
+    participant Sequencer
+    participant ZoneInbox as ZoneInbox (Zone)
+
+    User->>ZonePortal: deposit(token, to, amount, memo)
+    ZonePortal->>ZonePortal: transfer tokens into portal
+    ZonePortal->>ZonePortal: deduct fee, append to deposit queue
+    ZonePortal-->>Sequencer: emit DepositMade
+
+    Sequencer->>ZoneInbox: advanceTempo(header, deposits)
+    ZoneInbox->>ZoneInbox: validate deposit queue hash against Tempo state
+    ZoneInbox->>ZoneInbox: mint(to, amount) for each deposit
+```
 
 ### Encrypted Deposits
 
@@ -369,6 +358,29 @@ The sequencer provides the ECDH shared secret alongside the decrypted data. Veri
 If any step fails (invalid proof, GCM tag mismatch, plaintext mismatch), the zone mints the tokens to the sender's address on the zone instead. The Tempo-side funds remain locked in the portal. This ensures chain progress is never blocked by invalid encrypted deposits.
 
 The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant ZonePortal as ZonePortal (Tempo)
+    participant Sequencer
+    participant ZoneInbox as ZoneInbox (Zone)
+
+    User->>ZonePortal: depositEncrypted(token, amount, keyIndex, encrypted)
+    ZonePortal->>ZonePortal: transfer tokens into portal
+    ZonePortal->>ZonePortal: append to deposit queue
+    ZonePortal-->>Sequencer: emit EncryptedDepositMade
+
+    Sequencer->>Sequencer: decrypt (to, memo) off-chain
+    Sequencer->>ZoneInbox: advanceTempo(header, deposits, decryptions)
+    ZoneInbox->>ZoneInbox: verify Chaum-Pedersen proof (shared secret)
+    ZoneInbox->>ZoneInbox: derive AES key via HKDF-SHA256
+    ZoneInbox->>ZoneInbox: decrypt and validate via AES-GCM
+    ZoneInbox->>ZoneInbox: mint(decrypted.to, amount)
+
+    Note over ZoneInbox: If verification fails
+    ZoneInbox->>ZoneInbox: mint(sender, amount) as fallback
+```
 
 <br>
 
