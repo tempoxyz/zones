@@ -6,7 +6,6 @@
 - [Specification](#specification)
   - [Terminology](#terminology)
   - [System Overview](#system-overview)
-    - [Trust Model](#trust-model)
   - [Zone Deployment](#zone-deployment)
     - [Chain ID](#chain-id)
     - [Tempo Contracts](#tempo-contracts)
@@ -122,17 +121,7 @@ On Tempo, each zone has a **portal** that locks deposited tokens. When a user de
 
 Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer. The zone does not post transaction data; data availability is entrusted to the sequencer. The sequencer sees the zone's full transaction flow, balances, and ordering — the privacy target is the public chain and everyone who is not operating the sequencer.
 
-### Trust Model
-
-| Property | What zones guarantee | What zones do not guarantee |
-|----------|----------------------|-----------------------------|
-| Correctness | Assuming the verifier is sound, the sequencer cannot forge state transitions or steal locked funds by posting an invalid batch. | A critical bug in the verifier could allow a malicious sequencer to steal funds. |
-| Withdrawals | Once a token is enabled, users retain a withdrawal path for that token. Failed callback withdrawals bounce back instead of blocking the queue. | The sequencer must keep processing batches and withdrawals. There is no forced exit mechanism. |
-| Liveness | None beyond what the sequencer provides. | There is no forced inclusion, no permissionless exit path, and no automatic recovery if the sequencer halts. |
-| Data availability | None beyond what the sequencer provides. | Users cannot reconstruct zone state without the sequencer's data. |
-| Privacy | Public observers on Tempo cannot see zone balances or transactions. | The sequencer can see all zone activity. |
-
-**Zones are safe against theft if the verifier is sound, but they are not trustless for liveness, data availability, or sequencer-side privacy.**
+Zones rely on the following trust assumptions: the verifier must be sound for state transition integrity, the sequencer is trusted for liveness and data availability, and there is no forced inclusion or permissionless exit mechanism. Privacy protects against public observers on Tempo but not against the sequencer, who has full visibility into zone activity.
 
 When a user wants to exit, they request a withdrawal on the zone. Their tokens are burned, and the withdrawal is added to a pending list. At the end of a batch, the sequencer finalizes all pending withdrawals into a hash chain and generates a proof covering the full batch of zone blocks. The sequencer submits this batch and proof to the portal on Tempo, which verifies the proof and queues the withdrawals. The sequencer then processes each withdrawal, releasing tokens from the portal to the recipient.
 
