@@ -128,25 +128,26 @@ When a user wants to exit, they request a withdrawal on the zone. Their tokens a
 ```mermaid
 sequenceDiagram
     participant User
-    participant Portal as Tempo (Portal)
-    participant Zone as Zone (Sequencer)
+    participant Tempo
+    participant Sequencer
+    participant Zone
 
-    User->>Portal: deposit(token, to, amount)
-    Portal->>Portal: lock tokens, append to deposit queue
-    Zone->>Portal: observe deposit
-    Zone->>Zone: advanceTempo(), mint tokens to recipient
+    User->>Tempo: ZonePortal.deposit(token, to, amount)
+    Tempo->>Tempo: lock tokens, append to deposit queue
+    Sequencer->>Zone: ZoneInbox.advanceTempo()
+    Zone->>Zone: mint tokens to recipient
 
     User->>Zone: transact privately
 
-    User->>Zone: requestWithdrawal()
+    User->>Zone: ZoneOutbox.requestWithdrawal()
     Zone->>Zone: burn tokens, add to pending withdrawals
-    Zone->>Zone: finalizeWithdrawalBatch()
-    Zone->>Zone: generate proof
+    Zone->>Zone: ZoneOutbox.finalizeWithdrawalBatch()
 
-    Zone->>Portal: submitBatch(proof)
-    Portal->>Portal: verify proof, queue withdrawals
+    Sequencer->>Tempo: ZonePortal.submitBatch(proof)
+    Tempo->>Tempo: verify proof, queue withdrawals
 
-    Portal->>User: processWithdrawal(), tokens released from portal
+    Sequencer->>Tempo: ZonePortal.processWithdrawal()
+    Tempo->>User: tokens released from portal
 ```
 
 <br>
@@ -299,18 +300,18 @@ After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to re
 ```mermaid
 sequenceDiagram
     participant User
-    participant ZonePortal as ZonePortal (Tempo)
+    participant Tempo
     participant Sequencer
-    participant ZoneInbox as ZoneInbox (Zone)
+    participant Zone
 
-    User->>ZonePortal: deposit(token, to, amount, memo)
-    ZonePortal->>ZonePortal: transfer tokens into portal
-    ZonePortal->>ZonePortal: deduct fee, append to deposit queue
-    ZonePortal-->>Sequencer: emit DepositMade
+    User->>Tempo: ZonePortal.deposit(token, to, amount, memo)
+    Tempo->>Tempo: transfer tokens into portal
+    Tempo->>Tempo: deduct fee, append to deposit queue
+    Tempo-->>Sequencer: emit DepositMade
 
-    Sequencer->>ZoneInbox: advanceTempo(header, deposits)
-    ZoneInbox->>ZoneInbox: validate deposit queue hash against Tempo state
-    ZoneInbox->>ZoneInbox: mint(to, amount) for each deposit
+    Sequencer->>Zone: ZoneInbox.advanceTempo(header, deposits)
+    Zone->>Zone: validate deposit queue hash against Tempo state
+    Zone->>Zone: mint(to, amount) for each deposit
 ```
 
 ### Encrypted Deposits
@@ -362,24 +363,24 @@ The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit
 ```mermaid
 sequenceDiagram
     participant User
-    participant ZonePortal as ZonePortal (Tempo)
+    participant Tempo
     participant Sequencer
-    participant ZoneInbox as ZoneInbox (Zone)
+    participant Zone
 
-    User->>ZonePortal: depositEncrypted(token, amount, keyIndex, encrypted)
-    ZonePortal->>ZonePortal: transfer tokens into portal
-    ZonePortal->>ZonePortal: append to deposit queue
-    ZonePortal-->>Sequencer: emit EncryptedDepositMade
+    User->>Tempo: ZonePortal.depositEncrypted(token, amount, keyIndex, encrypted)
+    Tempo->>Tempo: transfer tokens into portal
+    Tempo->>Tempo: append to deposit queue
+    Tempo-->>Sequencer: emit EncryptedDepositMade
 
     Sequencer->>Sequencer: decrypt (to, memo) off-chain
-    Sequencer->>ZoneInbox: advanceTempo(header, deposits, decryptions)
-    ZoneInbox->>ZoneInbox: verify Chaum-Pedersen proof (shared secret)
-    ZoneInbox->>ZoneInbox: derive AES key via HKDF-SHA256
-    ZoneInbox->>ZoneInbox: decrypt and validate via AES-GCM
-    ZoneInbox->>ZoneInbox: mint(decrypted.to, amount)
+    Sequencer->>Zone: ZoneInbox.advanceTempo(header, deposits, decryptions)
+    Zone->>Zone: verify Chaum-Pedersen proof (shared secret)
+    Zone->>Zone: derive AES key via HKDF-SHA256
+    Zone->>Zone: decrypt and validate via AES-GCM
+    Zone->>Zone: mint(decrypted.to, amount)
 
-    Note over ZoneInbox: If verification fails
-    ZoneInbox->>ZoneInbox: mint(sender, amount) as fallback
+    Note over Zone: If verification fails
+    Zone->>Zone: mint(sender, amount) as fallback
 ```
 
 <br>
@@ -391,24 +392,25 @@ Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawa
 ```mermaid
 sequenceDiagram
     participant User
-    participant ZoneOutbox as ZoneOutbox (Zone)
-    participant ZonePortal as ZonePortal (Tempo)
-    participant ZoneMessenger as ZoneMessenger (Tempo)
+    participant Zone
+    participant Sequencer
+    participant Tempo
 
-    User->>ZoneOutbox: approve outbox for amount + fee
-    User->>ZoneOutbox: requestWithdrawal()
-    ZoneOutbox->>ZoneOutbox: burn tokens, add to pending list
+    User->>Zone: approve ZoneOutbox for amount + fee
+    User->>Zone: ZoneOutbox.requestWithdrawal()
+    Zone->>Zone: burn tokens, add to pending list
 
-    ZoneOutbox->>ZoneOutbox: finalizeWithdrawalBatch() (end of batch)
-    ZoneOutbox->>ZonePortal: submitBatch(proof, withdrawalQueueHash)
-    ZonePortal->>ZonePortal: verify proof, queue withdrawals
+    Zone->>Zone: ZoneOutbox.finalizeWithdrawalBatch() (end of batch)
+    Sequencer->>Tempo: ZonePortal.submitBatch(proof, withdrawalQueueHash)
+    Tempo->>Tempo: verify proof, queue withdrawals
 
-    ZonePortal->>ZonePortal: processWithdrawal() (simple)
-    ZonePortal->>User: transfer tokens
+    Sequencer->>Tempo: ZonePortal.processWithdrawal() (simple)
+    Tempo->>User: transfer tokens
 
-    Note over ZonePortal: OR (callback withdrawal)
-    ZonePortal->>ZoneMessenger: relayMessage()
-    ZoneMessenger->>User: transfer + callback
+    Note over Tempo: OR (callback withdrawal)
+    Sequencer->>Tempo: ZonePortal.processWithdrawal() (callback)
+    Tempo->>Tempo: ZoneMessenger.relayMessage()
+    Tempo->>User: transfer + callback
 ```
 
 ### Withdrawal Request
