@@ -6,6 +6,7 @@
 - [Specification](#specification)
   - [Terminology](#terminology)
   - [System Overview](#system-overview)
+    - [Trust Model](#trust-model)
   - [Zone Deployment](#zone-deployment)
     - [Chain ID](#chain-id)
     - [Tempo Contracts](#tempo-contracts)
@@ -119,7 +120,19 @@ On the Tempo side, an onchain **verifier** contract validates that each batch wa
 
 On Tempo, each zone has a **portal** that locks deposited tokens. When a user deposits, the portal locks their tokens and appends the deposit to a queue. The sequencer observes the deposit, advances the zone's view of Tempo, and mints equivalent tokens on the zone.
 
-Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer. The zone does not post transaction data; data availability is entrusted to the sequencer.
+Users transact on the zone privately. Balances, transfers, and transaction history are only visible to the account holder and the sequencer. The zone does not post transaction data; data availability is entrusted to the sequencer. The sequencer sees the zone's full transaction flow, balances, and ordering — the privacy target is the public chain and everyone who is not operating the sequencer.
+
+### Trust Model
+
+| Property | What zones guarantee | What zones do not guarantee |
+|----------|----------------------|-----------------------------|
+| Correctness | Assuming the verifier is sound, the sequencer cannot forge state transitions or steal locked funds by posting an invalid batch. | A critical bug in the verifier could allow a malicious sequencer to steal funds. |
+| Withdrawals | Once a token is enabled, users retain a withdrawal path for that token. Failed callback withdrawals bounce back instead of blocking the queue. | The sequencer must keep processing batches and withdrawals. There is no forced exit mechanism. |
+| Liveness | None beyond what the sequencer provides. | There is no forced inclusion, no permissionless exit path, and no automatic recovery if the sequencer halts. |
+| Data availability | None beyond what the sequencer provides. | Users cannot reconstruct zone state without the sequencer's data. |
+| Privacy | Public observers on Tempo cannot see zone balances or transactions. | The sequencer can see all zone activity. |
+
+**Zones are safe against theft if the verifier is sound, but they are not trustless for liveness, data availability, or sequencer-side privacy.**
 
 When a user wants to exit, they request a withdrawal on the zone. Their tokens are burned, and the withdrawal is added to a pending list. At the end of a batch, the sequencer finalizes all pending withdrawals into a hash chain and generates a proof covering the full batch of zone blocks. The sequencer submits this batch and proof to the portal on Tempo, which verifies the proof and queues the withdrawals. The sequencer then processes each withdrawal, releasing tokens from the portal to the recipient.
 
@@ -515,8 +528,6 @@ Zone execution differs from standard Tempo execution in three areas. These chang
 - **Fixed gas for transfers.** All TIP-20 transfer and approve operations charge a fixed 100,000 gas regardless of storage layout. This eliminates a side channel where variable gas costs reveal whether a recipient has previously received tokens.
 - **Contract creation disabled.** `CREATE` and `CREATE2` revert. The zone runs only predeploys and TIP-20 token precompiles. Arbitrary contract deployment would allow users to circumvent the execution-level privacy controls.
 
-See the [Execution Environment Specification](./execution.md) for full details.
-
 <br>
 
 ## Tempo State Reads
@@ -577,7 +588,7 @@ If a TIP-403 policy restricts the portal address or a withdrawal recipient, the 
 
 ## Private RPC
 
-Zones expose a modified Ethereum JSON-RPC where every request is authenticated and every response is scoped to the caller's account. The RPC is the primary user interface and the main attack surface for privacy leaks. This section summarizes the design; the full specification is in the [Zone RPC Specification](./rpc.md).
+Zones expose a modified Ethereum JSON-RPC where every request is authenticated and every response is scoped to the caller's account. The RPC is the primary user interface and the main attack surface for privacy leaks.
 
 ### Authorization Tokens
 
@@ -684,8 +695,6 @@ There are no state-changing methods via authorization token. Withdrawals require
 
 Methods where the user explicitly supplies a mismatched parameter return explicit errors (the user already knows the address they provided). Methods that query about other accounts return silent dummy values (`0x0`, `null`, empty results) to avoid revealing "data exists but you can't see it."
 
-See the [Zone RPC Specification](./rpc.md) for the complete method tables, wire format details, and security considerations.
-
 <br>
 
 ## Proving System
@@ -745,7 +754,7 @@ Anchor validation ensures the zone's view of Tempo is correct. If `anchor_block_
 
 ### Deployment Modes
 
-The state transition function runs in any backend that can execute the `no_std` Rust function. Examples include ZKVMs and TEE environments. The same `prove_zone_batch` function is used regardless of backend. See the [Prover Design Specification](./prover-design.md) for full implementation details.
+The state transition function runs in any backend that can execute the `no_std` Rust function. Examples include ZKVMs and TEE environments. The same `prove_zone_batch` function is used regardless of backend.
 
 <br>
 
@@ -831,8 +840,6 @@ Each enabled TIP-20 token is deployed as a precompile at the same address as on 
 - `balanceOf` and `allowance` are restricted to the account owner (or sequencer).
 - Transfer-family operations (`transfer`, `transferFrom`, `approve`) charge a fixed 100,000 gas.
 - `mint` is restricted to `ZoneInbox`. `burn` is restricted to `ZoneOutbox`.
-
-See the [Execution Environment Specification](./execution.md) for the full access control and gas rules.
 
 ### Chaum-Pedersen Verify
 
@@ -1158,5 +1165,3 @@ The portal maintains two verifier slots (`verifier` and `forkVerifier`). At each
 `ZoneFactory` maintains a `protocolVersion` counter incremented at each fork. Zone nodes embed the highest protocol version they support and halt cleanly if the imported Tempo block bumps `protocolVersion` beyond their supported version, preventing an outdated node from producing blocks under incorrect rules.
 
 No onchain action is required from zone operators. The new verifier is deployed and rotated as part of the Tempo hard fork. Operators upgrade their zone node binary and prover program before the fork; when the fork Tempo block arrives, the node activates new rules automatically.
-
-See the [Upgrade Process Specification](./upgrades.md) for the full artifact list, timeline, and operational procedures.
