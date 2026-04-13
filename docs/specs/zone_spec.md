@@ -623,6 +623,18 @@ The signed message is `keccak256` of a packed encoding containing a `"TempoZoneR
 
 A `zoneId` of `0` indicates an unscoped token valid for any zone. Zone IDs start at 1, so `0` is never a valid zone ID. The maximum validity window is 30 days (`expiresAt - issuedAt <= 2592000`). A clock skew tolerance of 60 seconds is allowed for `issuedAt`.
 
+The RPC server rejects authorization tokens where:
+
+- `zoneId` does not match the zone's configured `zoneId` and is not `0`.
+- `chainId` does not match the zone's chain ID.
+- `expiresAt - issuedAt > 2592000`.
+- `expiresAt <= now`.
+- `issuedAt > now + 60`.
+- The signature is malformed or does not verify.
+- For Keychain signatures: the signing key is not authorized, revoked, or expired in the zone's `AccountKeychain`.
+
+Requests without an authorization token receive HTTP `401`. Requests with an invalid or expired token receive HTTP `403`.
+
 ### Signature Types
 
 Authorization token signatures follow the same format as Tempo transaction signatures:
@@ -641,7 +653,7 @@ Keychain keys allow session keys and scoped access keys to authenticate to the R
 
 The RPC uses a default-deny model. Any method not explicitly listed returns `-32601` (method not found). Methods fall into four categories:
 
-**Allowed.** Public zone information available to any authenticated caller: `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_feeHistory`, `eth_getBlockByNumber` (without full transactions), `eth_syncing`, `net_version`, `web3_clientVersion`, and others.
+**Allowed.** `eth_chainId`, `eth_blockNumber`, `eth_gasPrice`, `eth_maxPriorityFeePerGas`, `eth_feeHistory`, `eth_getBlockByNumber` and `eth_getBlockByHash` (without full transactions), `eth_syncing`, `eth_coinbase`, `net_version`, `net_listening`, `web3_clientVersion`, `web3_sha3`.
 
 **Scoped.** Available to any authenticated caller but filtered to the caller's account:
 
@@ -650,10 +662,11 @@ The RPC uses a default-deny model. Any method not explicitly listed returns `-32
 - `eth_sendRawTransaction`: rejects if the transaction sender does not match the authenticated account.
 - `eth_call`, `eth_estimateGas`: `from` must equal the authenticated account. State override sets and block override objects are rejected for non-sequencer callers.
 - `eth_getLogs`, `eth_getFilterLogs`, `eth_getFilterChanges`: filtered to TIP-20 events where the caller is a relevant party (see [Event Filtering](#event-filtering)).
+- `eth_newFilter`, `eth_newBlockFilter`, `eth_uninstallFilter`: allowed, filters are scoped to the authenticated account.
 
-**Restricted (sequencer-only).** `eth_getStorageAt`, `eth_getCode`, `eth_getBlockByNumber` with full transactions, `eth_getBlockReceipts`, `debug_*`, `admin_*`, `txpool_*`, and other methods that expose raw state or full block data.
+**Restricted (sequencer-only).** Methods that expose raw state, full block data, or transaction-level detail that would break per-account privacy. This includes raw state access (`eth_getStorageAt`, `eth_getCode`, `eth_createAccessList`), full block queries (`eth_getBlockByNumber`/`eth_getBlockByHash` with full transactions, `eth_getBlockReceipts`, `eth_getBlockTransactionCountByNumber`/`Hash`, `eth_getTransactionByBlockNumberAndIndex`/`HashAndIndex`, `eth_getUncleCountByBlockNumber`/`Hash`), and all `debug_*`, `admin_*`, and `txpool_*` namespace methods.
 
-**Disabled.** `eth_getProof` (leaks trie structure), `eth_newPendingTransactionFilter` and `eth_subscribe("newPendingTransactions")` (mempool observation), and mining-related methods.
+**Disabled.** Methods not available on zones. `eth_getProof` leaks trie structure. `eth_newPendingTransactionFilter` and `eth_subscribe("newPendingTransactions")` enable mempool observation. Uncle query methods (`eth_getUncleByBlockNumberAndIndex`, `eth_getUncleByBlockHashAndIndex`) and mining methods (`eth_mining`, `eth_hashrate`, `eth_getWork`, `eth_submitWork`, `eth_submitHashrate`) do not apply to zones.
 
 ### Block Responses
 
