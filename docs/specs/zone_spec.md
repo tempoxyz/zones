@@ -259,6 +259,34 @@ Sequencer management happens exclusively on Tempo. Zone-side contracts read the 
 
 Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, the portal locks the tokens and appends the deposit to a hash chain, and the sequencer mints equivalent tokens on the zone.
 
+```mermaid
+sequenceDiagram
+    participant User
+    participant ZonePortal as ZonePortal (Tempo)
+    participant Sequencer
+    participant ZoneInbox as ZoneInbox (Zone)
+
+    User->>ZonePortal: deposit(token, to, amount, memo)
+    ZonePortal->>ZonePortal: transfer tokens into portal
+    ZonePortal->>ZonePortal: deduct fee, append to deposit queue
+    ZonePortal-->>Sequencer: emit DepositMade
+
+    Sequencer->>ZoneInbox: advanceTempo(header, deposits)
+    ZoneInbox->>ZoneInbox: validate deposit queue hash against Tempo state
+    ZoneInbox->>ZoneInbox: mint(to, amount) for each deposit
+
+    Note over User,ZonePortal: Encrypted deposit variant
+    User->>ZonePortal: depositEncrypted(token, amount, keyIndex, encrypted)
+    ZonePortal->>ZonePortal: transfer tokens into portal
+    ZonePortal-->>Sequencer: emit EncryptedDepositMade
+
+    Sequencer->>Sequencer: decrypt (to, memo) off-chain
+    Sequencer->>ZoneInbox: advanceTempo(header, deposits, decryptions)
+    ZoneInbox->>ZoneInbox: verify Chaum-Pedersen proof
+    ZoneInbox->>ZoneInbox: decrypt and validate via AES-GCM
+    ZoneInbox->>ZoneInbox: mint(decrypted.to, amount)
+```
+
 ### Regular Deposits
 
 A user deposits by calling `deposit(token, to, amount, memo)` on the portal. The portal:
@@ -351,24 +379,24 @@ Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawa
 ```mermaid
 sequenceDiagram
     participant User
-    participant Zone as Zone (ZoneOutbox)
-    participant Portal as Tempo (Portal)
+    participant ZoneOutbox as ZoneOutbox (Zone)
+    participant ZonePortal as ZonePortal (Tempo)
+    participant ZoneMessenger as ZoneMessenger (Tempo)
 
-    User->>Zone: approve outbox for amount + fee
-    User->>Zone: requestWithdrawal()
-    Zone->>Zone: burn tokens, add to pending list
+    User->>ZoneOutbox: approve outbox for amount + fee
+    User->>ZoneOutbox: requestWithdrawal()
+    ZoneOutbox->>ZoneOutbox: burn tokens, add to pending list
 
-    Zone->>Zone: finalizeWithdrawalBatch() (end of batch)
-    Zone->>Portal: submitBatch(proof, withdrawalQueueHash)
-    Portal->>Portal: verify proof, queue withdrawals
+    ZoneOutbox->>ZoneOutbox: finalizeWithdrawalBatch() (end of batch)
+    ZoneOutbox->>ZonePortal: submitBatch(proof, withdrawalQueueHash)
+    ZonePortal->>ZonePortal: verify proof, queue withdrawals
 
-    Portal->>Portal: processWithdrawal() (simple)
-    Portal->>User: transfer tokens
+    ZonePortal->>ZonePortal: processWithdrawal() (simple)
+    ZonePortal->>User: transfer tokens
 
-    Note over Portal: OR (callback withdrawal)
-    Portal->>Portal: processWithdrawal() (callback)
-    Portal->>Portal: messenger.relayMessage()
-    Portal->>User: transfer + callback
+    Note over ZonePortal: OR (callback withdrawal)
+    ZonePortal->>ZoneMessenger: relayMessage()
+    ZoneMessenger->>User: transfer + callback
 ```
 
 ### Withdrawal Request
