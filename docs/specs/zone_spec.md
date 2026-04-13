@@ -28,7 +28,7 @@
     - [Withdrawal Batching](#withdrawal-batching)
     - [Withdrawal Queue](#withdrawal-queue)
     - [Withdrawal Processing](#withdrawal-processing)
-    - [Callback Withdrawals](#callback-withdrawals)
+    - [Withdrawal Callbacks](#withdrawal-callbacks)
     - [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)
     - [Authenticated Withdrawals](#authenticated-withdrawals)
     - [Zone-to-Zone Transfers](#zone-to-zone-transfers)
@@ -202,7 +202,7 @@ Each zone has four system contracts deployed at genesis at fixed addresses:
 | [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
 | [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
 
-`ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo L1 State Reads](#tempo-l1-state-reads) for details.
+`ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
 
 ### Zone Token Model
 
@@ -451,7 +451,7 @@ The withdrawal is popped unconditionally, regardless of success or failure. If `
 
 For simple withdrawals (`gasLimit == 0`), the portal transfers tokens directly to the recipient.
 
-### Callback Withdrawals
+### Withdrawal Callbacks
 
 For withdrawals with `gasLimit > 0`, the portal delegates to the `ZoneMessenger`. The messenger calls `transferFrom` to move tokens from the portal to the recipient, then calls the recipient with the provided `callbackData`. Both operations are atomic: if the callback reverts, the transfer reverts too.
 
@@ -486,7 +486,7 @@ senderTag = keccak256(abi.encodePacked(sender, txHash))
 
 The `txHash` is the hash of the `requestWithdrawal` transaction on the zone. Since zone transaction data is not published, `txHash` acts as a blinding factor known only to the sender and the sequencer.
 
-The sender can optionally specify a `revealTo` public key (compressed secp256k1, 33 bytes) when requesting the withdrawal. If provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH and populates `encryptedSender` in the withdrawal struct.
+The sender can optionally specify a `revealTo` public key (compressed secp256k1, 33 bytes) when requesting the withdrawal. If provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH and populates `encryptedSender` in the withdrawal struct. The wire format is `ephemeralPubKey (33 bytes) || ciphertext (52 bytes) || mac (16 bytes)`.
 
 Two disclosure modes are available:
 
@@ -864,7 +864,7 @@ Each enabled TIP-20 token is deployed as a precompile at the same address as on 
 
 - `balanceOf` and `allowance` are restricted to the account owner (or sequencer).
 - Transfer-family operations (`transfer`, `transferFrom`, `approve`) charge a fixed 100,000 gas.
-- `mint` is restricted to `ZoneInbox`. `burn` is restricted to `ZoneOutbox`.
+- `mint` is restricted to `ZoneInbox`, `burn` is restricted to `ZoneOutbox`.
 
 ### Chaum-Pedersen Verify
 
