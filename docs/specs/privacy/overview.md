@@ -30,38 +30,28 @@ Zones are designed to combine four properties:
 
 The main trade-off is that privacy and liveness both depend on the sequencer. Public observers are blind, but the sequencer sees the zone's full activity.
 
-## System components
+## System schema
 
-At the highest level, the user interacts with Tempo for deposits and withdrawals and with the zone RPC for private execution. The sequencer runs the zone, imports finalized Tempo state, and hands execution data to the prover. The prover produces a proof or attestation that Tempo verifies before accepting a batch.
+At the highest level, a zone is made up of six main pieces: the user, the RPC surface the user talks to, the zone chain itself, the sequencer or operator that runs it, the prover that produces settlement artifacts, and Tempo as the settlement layer.
 
 ```mermaid
 flowchart TB
     User["User"]
+    RPC["RPC"]
+    Sequencer["Sequencer / Operator"]
+    ZoneChain["Zone chain"]
+    Prover["Prover"]
+    Tempo["Tempo"]
 
-    subgraph Zone["Zone"]
-        direction LR
-        RPC["Private RPC"]
-        Sequencer["Sequencer"]
-        ZoneExec["Private execution"]
-        Prover["Prover"]
-        RPC -->|private txs and queries| Sequencer
-        Sequencer -->|orders txs| ZoneExec
-        ZoneExec -->|execution witness| Prover
-    end
-
-    subgraph Tempo["Tempo"]
-        direction TB
-        Portal["ZonePortal and contracts"]
-        Verifier["Verifier"]
-        TempoStateSrc["Finalized state"]
-        Verifier -->|verification result| Portal
-    end
-
-    User -->|uses zone RPC| RPC
-    User -->|deposits and withdrawals| Portal
-    TempoStateSrc -->|headers and state| Sequencer
-    Sequencer -->|submit batch| Portal
-    Prover -->|proof or attestation| Verifier
+    User -->|submits transactions and queries| RPC
+    User -->|deposits and withdrawals| Tempo
+    RPC -->|forwards transactions and serves reads| ZoneChain
+    Sequencer -->|operates| RPC
+    Sequencer -->|orders blocks| ZoneChain
+    ZoneChain -->|execution witness and batch data| Prover
+    Sequencer -->|requests proofs| Prover
+    Prover -->|proof or attestation| Tempo
+    Tempo -->|settlement and finalized state| ZoneChain
 ```
 
 ## System smart contracts
