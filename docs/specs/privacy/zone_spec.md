@@ -22,6 +22,16 @@
     - [Deposit Queue](#deposit-queue)
     - [Encrypted Deposits](#encrypted-deposits)
     - [Onchain Decryption Verification](#onchain-decryption-verification)
+  - [Withdrawals](#withdrawals)
+    - [Withdrawal Request](#withdrawal-request)
+    - [Withdrawal Fees](#withdrawal-fees)
+    - [Withdrawal Batching](#withdrawal-batching)
+    - [Withdrawal Queue](#withdrawal-queue)
+    - [Withdrawal Processing](#withdrawal-processing)
+    - [Callback Withdrawals](#callback-withdrawals)
+    - [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)
+    - [Authenticated Withdrawals](#authenticated-withdrawals)
+    - [Zone-to-Zone Transfers](#zone-to-zone-transfers)
   - [Zone Execution](#zone-execution)
     - [Fee Accounting](#fee-accounting)
     - [Block Structure](#block-structure)
@@ -57,16 +67,6 @@
     - [Verifier Interface](#verifier-interface)
     - [Anchor Block Validation](#anchor-block-validation)
     - [Proof Requirements](#proof-requirements)
-  - [Withdrawals](#withdrawals)
-    - [Withdrawal Request](#withdrawal-request)
-    - [Withdrawal Fees](#withdrawal-fees)
-    - [Withdrawal Batching](#withdrawal-batching)
-    - [Withdrawal Queue](#withdrawal-queue)
-    - [Withdrawal Processing](#withdrawal-processing)
-    - [Callback Withdrawals](#callback-withdrawals)
-    - [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)
-    - [Authenticated Withdrawals](#authenticated-withdrawals)
-    - [Zone-to-Zone Transfers](#zone-to-zone-transfers)
   - [Zone Precompiles](#zone-precompiles)
     - [TIP-20 Token Precompile](#tip-20-token-precompile)
     - [Chaum-Pedersen Verify](#chaum-pedersen-verify)
@@ -341,6 +341,138 @@ The sequencer provides the ECDH shared secret alongside the decrypted data. Veri
 If any step fails (invalid proof, GCM tag mismatch, plaintext mismatch), the zone mints the tokens to the sender's address on the zone instead. The Tempo-side funds remain in escrow. This ensures chain progress is never blocked by invalid encrypted deposits.
 
 The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
+
+<br>
+
+## Withdrawals
+
+Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawal on the zone, tokens are burned, and the sequencer eventually processes the withdrawal on Tempo, releasing tokens from escrow.
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant Zone as Zone (ZoneOutbox)
+    participant Portal as Tempo (Portal)
+
+    User->>Zone: approve outbox for amount + fee
+    User->>Zone: requestWithdrawal()
+    Zone->>Zone: burn tokens, add to pending list
+
+    Zone->>Zone: finalizeWithdrawalBatch() (end of batch)
+    Zone->>Portal: submitBatch(proof, withdrawalQueueHash)
+    Portal->>Portal: verify proof, queue withdrawals
+
+    Portal->>Portal: processWithdrawal() (simple)
+    Portal->>User: transfer tokens
+
+    Note over Portal: OR (callback withdrawal)
+    Portal->>Portal: processWithdrawal() (callback)
+    Portal->>Portal: messenger.relayMessage()
+    Portal->>User: transfer + callback
+```
+
+### Withdrawal Request
+
+A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token.
+
+The outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender (zone events are private).
+
+### Withdrawal Fees
+
+The withdrawal fee compensates the sequencer for Tempo-side gas costs:
+
+```
+fee = gasLimit * tempoGasRate
+```
+
+The user specifies `gasLimit` covering all execution costs on Tempo (processing overhead plus any callback). The fee is paid in the same token being withdrawn. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`; the sequencer keeps the fee.
+
+### Withdrawal Batching
+
+At the end of the final block in a batch, the sequencer calls `finalizeWithdrawalBatch(count)` on the `ZoneOutbox`. This constructs a hash chain from pending withdrawals by processing them in reverse order (newest to oldest), so the oldest withdrawal ends up outermost:
+
+```
+withdrawalQueueHash = EMPTY_SENTINEL
+for i from (count - 1) down to 0:
+    withdrawalQueueHash = keccak256(abi.encode(withdrawals[i], withdrawalQueueHash))
+```
+
+The function writes `withdrawalQueueHash` and `withdrawalBatchIndex` to `lastBatch` storage, where the proof reads them. The call is required even if there are zero withdrawals (use `count = 0`) so the batch index advances. The `withdrawalBatchIndex` ensures batches are submitted in order, preventing the sequencer from omitting batches that contain withdrawals.
+
+### Withdrawal Queue
+
+The portal stores withdrawals in a fixed-size ring buffer with `WITHDRAWAL_QUEUE_CAPACITY = 100`. Each batch gets its own slot.
+
+The portal tracks `head` (oldest unprocessed batch) and `tail` (where the next batch writes). Both are raw counters that never wrap; modular arithmetic (`index % 100`) is used for slot indexing. Empty slots contain `EMPTY_SENTINEL` (`0xff...ff`) instead of `0x00` to avoid storage clearing and gas refund incentive issues.
+
+When `submitBatch` includes a non-zero `withdrawalQueueHash`, it is written to `slots[tail % 100]` and `tail` advances. The queue reverts with `WithdrawalQueueFull` if `tail - head >= 100`.
+
+### Withdrawal Processing
+
+The sequencer processes withdrawals on Tempo by calling `processWithdrawal(withdrawal, remainingQueue)` on the portal. The portal verifies `keccak256(abi.encode(withdrawal, remainingQueue)) == slots[head % 100]`, then executes the withdrawal.
+
+The withdrawal is popped unconditionally, regardless of success or failure. If `remainingQueue` is zero (last item in the slot), the slot is set to `EMPTY_SENTINEL` and `head` advances. Otherwise, the slot is updated to `remainingQueue`.
+
+For simple withdrawals (`gasLimit == 0`), the portal transfers tokens directly to the recipient.
+
+### Callback Withdrawals
+
+For withdrawals with `gasLimit > 0`, the portal delegates to the `ZoneMessenger`. The messenger calls `transferFrom` to move tokens from the portal to the recipient, then calls the recipient with the provided `callbackData`. Both operations are atomic: if the callback reverts, the transfer reverts too.
+
+Receiving contracts must implement `IWithdrawalReceiver` and return `onWithdrawalReceived.selector` to confirm successful handling. Receivers authenticate the call by checking `msg.sender == messenger`.
+
+This enables composable withdrawals where funds flow directly into Tempo contracts (DEX swaps, staking, cross-zone deposits).
+
+### Withdrawal Failures and Bounce-Back
+
+Withdrawals can fail for several reasons:
+
+- TIP-403 policy restricts the portal or recipient
+- The token is paused
+- The callback reverts (out of gas, logic error)
+- The receiver returns the wrong selector
+
+When a withdrawal fails, the portal bounces back the funds by creating a new deposit to `fallbackRecipient` on the zone:
+
+```
+currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDeposit, currentDepositQueueHash))
+```
+
+The zone processes the bounce-back deposit like any other deposit, crediting `fallbackRecipient`. The sequencer keeps the fee regardless of success or failure.
+
+### Authenticated Withdrawals
+
+Zone transactions are private, but when a withdrawal is processed on Tempo, the `Withdrawal` struct is passed in calldata and publicly visible. To avoid leaking the sender's identity, the `sender` field is replaced with a `senderTag` commitment:
+
+```
+senderTag = keccak256(abi.encodePacked(sender, txHash))
+```
+
+The `txHash` is the hash of the `requestWithdrawal` transaction on the zone. Since zone transaction data is not published, `txHash` acts as a blinding factor known only to the sender and the sequencer.
+
+The sender can optionally specify a `revealTo` public key (compressed secp256k1, 33 bytes) when requesting the withdrawal. If provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH and populates `encryptedSender` in the withdrawal struct.
+
+Two disclosure modes are available:
+
+- **Manual reveal**: The sender shares `txHash` with a verifier off-chain. The verifier checks `keccak256(abi.encodePacked(sender, txHash)) == senderTag`.
+- **Encrypted reveal**: The holder of the `revealTo` private key decrypts `encryptedSender` to obtain `(sender, txHash)` and verifies against `senderTag`. No off-chain communication needed.
+
+The sequencer computes `senderTag` and `encryptedSender` during `finalizeWithdrawalBatch`. This is trusted: a malicious sequencer could insert incorrect values. This is a modest extension of the existing trust model, where the sequencer is already trusted for liveness and transaction ordering.
+
+For callback withdrawals, `IWithdrawalReceiver.onWithdrawalReceived` receives `bytes32 senderTag` instead of a plaintext sender address.
+
+### Zone-to-Zone Transfers
+
+Zones do not interoperate directly. Zone-to-zone transfers work through composable withdrawals on Tempo.
+
+The sender on Zone A requests a withdrawal with `revealTo` set to Zone B's sequencer public key and `callbackData` that deposits into Zone B's portal. The flow:
+
+1. Zone A processes the withdrawal and submits the batch to Tempo.
+2. `processWithdrawal` on Tempo transfers tokens to Zone B's portal via the messenger callback.
+3. Zone B's sequencer observes the incoming deposit and decrypts `encryptedSender` to learn `(sender, txHash)`.
+4. Zone B verifies `keccak256(sender || txHash) == senderTag`, enabling sender-aware processing.
+
+Sequencer encryption keys are already published (used for encrypted deposits), so no additional infrastructure is needed. This pattern generalizes beyond zone-to-zone: a withdrawal can swap on a Tempo DEX and deposit into another zone in a single composable flow.
 
 <br>
 
@@ -689,140 +821,6 @@ The proof must validate:
 5. `ZoneOutbox.lastBatch().withdrawalQueueHash` matches the submitted `withdrawalQueueHash`.
 6. Every zone block `beneficiary` matches `sequencer`.
 7. Deposit processing is correct (the zone read `currentDepositQueueHash` from Tempo state and processed deposits accordingly).
-
-<br>
-
-## Withdrawals
-
-Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawal on the zone, tokens are burned, and the sequencer eventually processes the withdrawal on Tempo, releasing tokens from escrow.
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant Zone as Zone (ZoneOutbox)
-    participant Portal as Tempo (Portal)
-
-    User->>Zone: approve outbox for amount + fee
-    User->>Zone: requestWithdrawal()
-    Zone->>Zone: burn tokens, add to pending list
-
-    Zone->>Zone: finalizeWithdrawalBatch() (end of batch)
-    Zone->>Portal: submitBatch(proof, withdrawalQueueHash)
-    Portal->>Portal: verify proof, queue withdrawals
-
-    Portal->>Portal: processWithdrawal() (simple)
-    Portal->>User: transfer tokens
-
-    Note over Portal: OR (callback withdrawal)
-    Portal->>Portal: processWithdrawal() (callback)
-    Portal->>Portal: messenger.relayMessage()
-    Portal->>User: transfer + callback
-```
-
-### Withdrawal Request
-
-A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token.
-
-The outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender (zone events are private).
-
-### Withdrawal Fees
-
-The withdrawal fee compensates the sequencer for Tempo-side gas costs:
-
-```
-fee = gasLimit * tempoGasRate
-```
-
-The user specifies `gasLimit` covering all execution costs on Tempo (processing overhead plus any callback). The fee is paid in the same token being withdrawn. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`; the sequencer keeps the fee.
-
-### Withdrawal Batching
-
-At the end of the final block in a batch, the sequencer calls `finalizeWithdrawalBatch(count)` on the `ZoneOutbox`. This constructs a hash chain from pending withdrawals by processing them in reverse order (newest to oldest), so the oldest withdrawal ends up outermost:
-
-```
-withdrawalQueueHash = EMPTY_SENTINEL
-for i from (count - 1) down to 0:
-    withdrawalQueueHash = keccak256(abi.encode(withdrawals[i], withdrawalQueueHash))
-```
-
-The function writes `withdrawalQueueHash` and `withdrawalBatchIndex` to `lastBatch` storage, where the proof reads them. The call is required even if there are zero withdrawals (use `count = 0`) so the batch index advances. The `withdrawalBatchIndex` ensures batches are submitted in order, preventing the sequencer from omitting batches that contain withdrawals.
-
-### Withdrawal Queue
-
-The portal stores withdrawals in a fixed-size ring buffer with `WITHDRAWAL_QUEUE_CAPACITY = 100`. Each batch gets its own slot.
-
-The portal tracks `head` (oldest unprocessed batch) and `tail` (where the next batch writes). Both are raw counters that never wrap; modular arithmetic (`index % 100`) is used for slot indexing. Empty slots contain `EMPTY_SENTINEL` (`0xff...ff`) instead of `0x00` to avoid storage clearing and gas refund incentive issues.
-
-When `submitBatch` includes a non-zero `withdrawalQueueHash`, it is written to `slots[tail % 100]` and `tail` advances. The queue reverts with `WithdrawalQueueFull` if `tail - head >= 100`.
-
-### Withdrawal Processing
-
-The sequencer processes withdrawals on Tempo by calling `processWithdrawal(withdrawal, remainingQueue)` on the portal. The portal verifies `keccak256(abi.encode(withdrawal, remainingQueue)) == slots[head % 100]`, then executes the withdrawal.
-
-The withdrawal is popped unconditionally, regardless of success or failure. If `remainingQueue` is zero (last item in the slot), the slot is set to `EMPTY_SENTINEL` and `head` advances. Otherwise, the slot is updated to `remainingQueue`.
-
-For simple withdrawals (`gasLimit == 0`), the portal transfers tokens directly to the recipient.
-
-### Callback Withdrawals
-
-For withdrawals with `gasLimit > 0`, the portal delegates to the `ZoneMessenger`. The messenger calls `transferFrom` to move tokens from the portal to the recipient, then calls the recipient with the provided `callbackData`. Both operations are atomic: if the callback reverts, the transfer reverts too.
-
-Receiving contracts must implement `IWithdrawalReceiver` and return `onWithdrawalReceived.selector` to confirm successful handling. Receivers authenticate the call by checking `msg.sender == messenger`.
-
-This enables composable withdrawals where funds flow directly into Tempo contracts (DEX swaps, staking, cross-zone deposits).
-
-### Withdrawal Failures and Bounce-Back
-
-Withdrawals can fail for several reasons:
-
-- TIP-403 policy restricts the portal or recipient
-- The token is paused
-- The callback reverts (out of gas, logic error)
-- The receiver returns the wrong selector
-
-When a withdrawal fails, the portal bounces back the funds by creating a new deposit to `fallbackRecipient` on the zone:
-
-```
-currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDeposit, currentDepositQueueHash))
-```
-
-The zone processes the bounce-back deposit like any other deposit, crediting `fallbackRecipient`. The sequencer keeps the fee regardless of success or failure.
-
-### Authenticated Withdrawals
-
-Zone transactions are private, but when a withdrawal is processed on Tempo, the `Withdrawal` struct is passed in calldata and publicly visible. To avoid leaking the sender's identity, the `sender` field is replaced with a `senderTag` commitment:
-
-```
-senderTag = keccak256(abi.encodePacked(sender, txHash))
-```
-
-The `txHash` is the hash of the `requestWithdrawal` transaction on the zone. Since zone transaction data is not published, `txHash` acts as a blinding factor known only to the sender and the sequencer.
-
-The sender can optionally specify a `revealTo` public key (compressed secp256k1, 33 bytes) when requesting the withdrawal. If provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH and populates `encryptedSender` in the withdrawal struct.
-
-Two disclosure modes are available:
-
-- **Manual reveal**: The sender shares `txHash` with a verifier off-chain. The verifier checks `keccak256(abi.encodePacked(sender, txHash)) == senderTag`.
-- **Encrypted reveal**: The holder of the `revealTo` private key decrypts `encryptedSender` to obtain `(sender, txHash)` and verifies against `senderTag`. No off-chain communication needed.
-
-The sequencer computes `senderTag` and `encryptedSender` during `finalizeWithdrawalBatch`. This is trusted: a malicious sequencer could insert incorrect values. This is a modest extension of the existing trust model, where the sequencer is already trusted for liveness and transaction ordering.
-
-For callback withdrawals, `IWithdrawalReceiver.onWithdrawalReceived` receives `bytes32 senderTag` instead of a plaintext sender address.
-
-### Zone-to-Zone Transfers
-
-Zones do not interoperate directly. Zone-to-zone transfers work through composable withdrawals on Tempo.
-
-The sender on Zone A requests a withdrawal with `revealTo` set to Zone B's sequencer public key and `callbackData` that deposits into Zone B's portal. The flow:
-
-1. Zone A processes the withdrawal and submits the batch to Tempo.
-2. `processWithdrawal` on Tempo transfers tokens to Zone B's portal via the messenger callback.
-3. Zone B's sequencer observes the incoming deposit and decrypts `encryptedSender` to learn `(sender, txHash)`.
-4. Zone B verifies `keccak256(sender || txHash) == senderTag`, enabling sender-aware processing.
-
-Sequencer encryption keys are already published (used for encrypted deposits), so no additional infrastructure is needed. This pattern generalizes beyond zone-to-zone: a withdrawal can swap on a Tempo DEX and deposit into another zone in a single composable flow.
-
-<br>
 
 ## Zone Precompiles
 
