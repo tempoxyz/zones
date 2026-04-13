@@ -10,8 +10,6 @@ These contracts live on Tempo and are responsible for:
 - withdrawal processing on Tempo
 - callback-based interoperability through `ZoneMessenger`
 
-For zone predeploys and zone-side execution entry points, see [Zone-side contracts](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/contracts-zone.md). For verifier semantics, proof inputs, and queue commitments, see [Zone Prover Design](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/prover-design.md). For execution-level token behavior inside the zone, see [Execution](https://github.com/tempoxyz/zones/blob/docs/zones-specs-entrypoint/docs/specs/privacy/execution.md).
-
 ## Shared Tempo-facing types
 
 ```solidity
@@ -165,11 +163,11 @@ The portal also holds the deposit-side gas rate:
 
 Regular deposits:
 
-- transfer the token into portal escrow
+- transfer the token into portal where they remain locked while in the zone
 - deduct the processing fee
-- append the net deposit to `currentDepositQueueHash`
+- append the net deposit to the commitment in `currentDepositQueueHash`
 
-Encrypted deposits follow the same accounting path, but the Tempo-visible payload only reveals the public accounting fields. Recipient and memo are encrypted to the sequencer's published key.
+Encrypted deposits follow the same accounting path, but the Tempo-visible payload only reveals the public accounting fields. Recipient and memo are encrypted to the sequencer's public key.
 
 The portal keeps a history of encryption keys so deposits can explicitly target the correct key version with `keyIndex`.
 
@@ -286,9 +284,9 @@ interface IZonePortal {
 
 ## `ZoneMessenger`
 
-Each zone has a dedicated `ZoneMessenger` on Tempo. The portal gives the messenger approval for enabled tokens so callback withdrawals can pull funds from portal escrow.
+Each zone has a dedicated `ZoneMessenger` on Tempo. The portal gives the messenger approval for enabled tokens so callback withdrawals can pull funds from the ZonePortal.
 
-`ZoneMessenger` is the Tempo-side composition hook for zones. It is what lets a withdrawal land in another contract rather than just in a wallet.
+`ZoneMessenger` is the Tempo-side composition hook for zones. It allows zone accounts to make smart contract calls on Tempo without sending a separate transaction.
 
 ```solidity
 interface IZoneMessenger {
