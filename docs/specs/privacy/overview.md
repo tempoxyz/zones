@@ -2,25 +2,22 @@
 
 This document is the entry point to the zone specifications, giving an overview of all essential ideas and components of Tempo Zones.
 
-A zone is a Tempo-anchored validium. Execution happens on a separate chain operated by a permissioned sequencer. Settlement happens on Tempo, where deposits are locked and withdrawals are finalized after a verifier accepts the zone's batch proof or attestation.
+A zone is a Tempo-anchored validium. Execution happens on a separate chain operated by a chain-specific sequencer (also called operator). Settlement happens on Tempo, where deposits are locked and withdrawals are finalized after a verifier accepts the zone's batch proof or attestation.
 
 For interface-by-interface detail, exact proof inputs, RPC method tables, and upgrade mechanics, follow the links to the dedicated specs at the end of this document.
 
-## Zones mental model
+## Zones introduction
 
-The simplest way to think about a zone is:
+Tempo zones work as single-sequencer, private validium chains. What this means is that:
 
-- **Tempo** is the settlement chain. It holds locked assets, deploys zone contracts, and is the place where withdrawals ultimately land.
+- **Tempo** is the settlement chain. It holds locked assets, deploys zone contracts, and processes withdrawals.
 - A **zone** is a separate execution chain with its own state, blocks, and transactions.
-- Each zone has exactly one permissioned **sequencer** that orders transactions, imports finalized Tempo state, and submits batches back to Tempo.
+- Each zone has exactly one chain-specific **sequencer** that orders transactions, imports finalized Tempo state, and submits batches back to Tempo.
 - A **verifier** checks that a submitted batch was executed correctly. This can be a ZK verifier or a verifier for a TEE attestation.
 - The **portal** is the Tempo-side contract that holds locked funds, accepts verified batches, and processes withdrawals.
 - Liveness and data availability are trusted to the sequencer. If the sequencer halts or withholds data, users cannot force progress.
 
-Two consequences of this model are:
-
-1. Zones can keep user activity private from the public chain because transaction data is not posted on Tempo.
-2. Zones are not trying to solve censorship resistance or data availability.
+Thanks to this model, zones can keep user activity private from the public chain because transaction data is not posted on Tempo.
 
 ## What zones optimize for
 
