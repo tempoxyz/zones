@@ -820,7 +820,7 @@ flowchart TB
         subgraph BSP["tempo_state_proofs"]
             direction TB
             BSPBOX["BatchStateProof<br/>node_pool"]
-            READ["L1StateRead[k]<br/>zone_block_index<br/>tempo_block_number<br/>account<br/>slot<br/>node_path<br/>value"]
+            READ["L1StateRead[k]<br/>zone_block_index<br/>tempo_block_number<br/>account<br/>slot<br/>value"]
             BSPBOX ~~~ READ
         end
 
@@ -982,7 +982,7 @@ pub struct BatchStateProof {
     /// Deduplicated pool of all MPT nodes
     pub node_pool: HashMap<B256, Vec<u8>>,
 
-    /// Tempo state reads with proof paths
+    /// Tempo state reads verified against the shared node pool
     pub reads: Vec<L1StateRead>,
 }
 
@@ -996,9 +996,6 @@ pub struct L1StateRead {
     /// Tempo account and storage slot
     pub account: Address,
     pub slot: U256,
-
-    /// Path through node_pool from leaf to state root
-    pub node_path: Vec<B256>,
 
     /// Expected value
     pub value: U256,
@@ -1031,9 +1028,9 @@ For each block in the batch, the prover:
 System contracts read Tempo state during execution (deposit queue hash, sequencer address, token registry, TIP-403 policies). The witness includes a `BatchStateProof` containing:
 
 - A deduplicated `node_pool` of MPT nodes, keyed by `keccak256(rlp(node))`. Each node is verified exactly once.
-- A list of `L1StateRead` entries, each specifying the zone block index, Tempo block number, account, storage slot, node path through the pool, and expected value.
+- A list of `L1StateRead` entries, each specifying the zone block index, Tempo block number, account, storage slot, and expected value.
 
-Reads are indexed and verified on demand during execution. Because many reads access the same accounts and storage trie paths, the deduplicated pool significantly reduces proof size and prover cost compared to including separate MPT proofs per read.
+Reads are indexed and verified on demand during execution. For each read, the prover walks the account trie and storage trie starting from the `TempoState` root currently bound for that block, using nodes from the shared `node_pool` to prove the requested `(account, slot) -> value` mapping. Because many reads access the same accounts and storage trie paths, the deduplicated pool significantly reduces proof size and prover cost compared to including separate MPT proofs per read.
 
 Anchor validation ensures the zone's view of Tempo is correct. If `anchor_block_number` equals `tempo_block_number`, the zone's `tempoBlockHash` must match `anchor_block_hash` directly. If `anchor_block_number` is greater (for zones that have been offline longer than the EIP-2935 window), the proof verifies the parent-hash chain from `tempo_block_number` to `anchor_block_number` using the ancestry headers in the witness.
 
