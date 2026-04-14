@@ -175,10 +175,15 @@ The factory assigns a unique `zoneId`, deploys a [`ZonePortal`](#izoneportal) an
 Each zone has a unique chain ID derived from its zone ID:
 
 ```
-chain_id = 421700000 + zone_id
+chain_id = ZONE_CHAIN_ID_BASE + (zone_id % ZONE_CHAIN_ID_RANGE)
 ```
 
-The prefix `4217` is derived from the Tempo chain ID. This ensures replay protection between zones. A transaction signed for one zone cannot be replayed on another. The chain ID is set in the zone's genesis configuration and validated by the zone node at startup.
+| Network | Base | Range | Chain ID span |
+|---------|------|-------|---------------|
+| Mainnet | `421,700,000` | `1,002,610,000` | `[421,700,000, 1,424,310,000)` |
+| Testnet | `1,424,310,000` | `723,173,648` | `[1,424,310,000, 2,147,483,648)` |
+
+The mainnet base `4217` prefix is derived from the Tempo chain ID. Ranges are chosen so all chain IDs stay below `2^31` (the EIP-2294 safe ceiling). The modular wrap ensures chain IDs never leave their designated range even with arbitrarily large zone IDs. This ensures replay protection between zones. A transaction signed for one zone cannot be replayed on another. The chain ID is set in the zone's genesis configuration and validated by the zone node at startup.
 
 ### Tempo Contracts
 
@@ -429,7 +434,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
 
 ### Withdrawal Batching
 
-At the end of the final block in a batch, the sequencer calls `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox`. The `blockNumber` must match the current zone block number. The `encryptedSenders` array carries one ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`). This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
+As the last transaction in every zone block, the sequencer calls `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox`. The `blockNumber` must match the current zone block number. The `encryptedSenders` array carries one ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`). This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
 
 ```
 withdrawalQueueHash = EMPTY_SENTINEL
@@ -528,9 +533,7 @@ Each zone block contains system transactions and user transactions in a fixed or
 
 1. `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` (optional, at the start of the block). Advances the zone's view of Tempo, enables newly-bridged tokens, processes any pending deposits, and verifies encrypted deposit decryptions. If omitted, the zone's Tempo binding carries forward from the previous block.
 2. User transactions, executed in order.
-3. `ZoneOutbox.finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` (required in the final block of a batch, absent in intermediate blocks). Constructs the withdrawal hash chain from pending withdrawals, populates `encryptedSender` for authenticated withdrawals, and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called even if there are zero withdrawals so the batch index advances.
-
-A batch covers one or more zone blocks, with each batch interval targeting 250 milliseconds. The sequencer controls batch frequency, and intermediate blocks within a batch contain only `advanceTempo` (optional) and user transactions.
+3. `ZoneOutbox.finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` (required, last transaction in every block). Constructs the withdrawal hash chain from pending withdrawals, populates `encryptedSender` for authenticated withdrawals, and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called even if there are zero withdrawals so the batch index advances. In the current implementation, every zone block is a batch (1:1 mapping).
 
 ### Block Header Format
 
@@ -604,7 +607,7 @@ Zones inherit compliance policies from Tempo automatically. Token issuers set tr
 
 ### Policy Enforcement on Zones
 
-The zone has a `TIP403Registry` deployed at the same address as on Tempo. This contract is read-only and does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via `TempoState.readTempoStorageSlot()`.
+The zone has a `TIP403Registry` proxy precompile deployed at the same address as on Tempo (`0x403C...0000`). This precompile is read-only and does not support writing policies. Its `isAuthorized` function resolves policy queries via the zone node's policy provider (cache-first, L1 RPC fallback).
 
 Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorized(policyId, to)` before executing. If either check fails, the transfer reverts.
 
@@ -664,14 +667,17 @@ The RPC uses a default-deny model. Any method not explicitly listed returns `-32
 
 - `eth_getBalance`, `eth_getTransactionCount`: return `0x0` for non-self queries (no error, to avoid leaking account existence).
 - `eth_getTransactionByHash`, `eth_getTransactionReceipt`: return `null` if the caller is not the sender.
-- `eth_sendRawTransaction`: rejects if the transaction sender does not match the authenticated account.
+- `eth_sendRawTransaction`, `eth_sendRawTransactionSync`: rejects if the transaction sender does not match the authenticated account. The `Sync` variant waits for inclusion and returns the receipt.
 - `eth_call`, `eth_estimateGas`: `from` must equal the authenticated account. State override sets and block override objects are rejected for non-sequencer callers.
+- `eth_fillTransaction`: fills defaults (nonce, gas limit, fees, chain ID) on an unsigned transaction and returns the filled result without signing or submitting. `from` must match the authenticated account.
 - `eth_getLogs`, `eth_getFilterLogs`, `eth_getFilterChanges`: filtered to TIP-20 events where the caller is a relevant party (see [Event Filtering](#event-filtering)).
 - `eth_newFilter`, `eth_newBlockFilter`, `eth_uninstallFilter`: allowed, filters are scoped to the authenticated account.
 
 **Restricted (sequencer-only).** Methods that expose raw state, full block data, or transaction-level detail that would break per-account privacy. This includes raw state access (`eth_getStorageAt`, `eth_getCode`, `eth_createAccessList`), full block queries (`eth_getBlockByNumber`/`eth_getBlockByHash` with full transactions, `eth_getBlockReceipts`, `eth_getBlockTransactionCountByNumber`/`Hash`, `eth_getTransactionByBlockNumberAndIndex`/`HashAndIndex`, `eth_getUncleCountByBlockNumber`/`Hash`), and all `debug_*`, `admin_*`, and `txpool_*` namespace methods.
 
-**Disabled.** Methods not available on zones. `eth_getProof` leaks trie structure. `eth_newPendingTransactionFilter` and `eth_subscribe("newPendingTransactions")` enable mempool observation. Uncle query methods (`eth_getUncleByBlockNumberAndIndex`, `eth_getUncleByBlockHashAndIndex`) and mining methods (`eth_mining`, `eth_hashrate`, `eth_getWork`, `eth_submitWork`, `eth_submitHashrate`) do not apply to zones.
+**Disabled.** Methods explicitly rejected with `-32006`. `eth_newPendingTransactionFilter` and `eth_subscribe("newPendingTransactions")` enable mempool observation. Mining methods (`eth_mining`, `eth_hashrate`, `eth_getWork`, `eth_submitWork`, `eth_submitHashrate`) do not apply to zones.
+
+Methods not listed above (including `eth_getProof` and any other unrecognized method) return `-32601` (method not found) per the default-deny model.
 
 ### Block Responses
 
@@ -699,7 +705,9 @@ All other events (system events, configuration events) are filtered out. The `ad
 
 ### Timing Side Channels
 
-Scoped methods that fetch data before checking authorization leak existence via timing differences. The RPC server enforces a minimum response time of 100ms on `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getLogs`, `eth_getFilterLogs`, and `eth_getFilterChanges`.
+Scoped methods that fetch data before checking authorization leak existence via timing differences. The RPC server should enforce a minimum response time of 100ms on `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getLogs`, `eth_getFilterLogs`, and `eth_getFilterChanges`.
+
+> **Note:** The 100ms response-time padding is not yet implemented. The current RPC relies on pre-filtering (scoping topic filters before querying) to reduce timing leakage, but does not enforce a minimum response time.
 
 Methods where authorization is checked before any data fetch (`eth_getBalance`, `eth_call`, `eth_sendRawTransaction`) do not need the speed bump.
 
@@ -727,14 +735,22 @@ There are no state-changing methods via authorization token. Withdrawals require
 
 ### Error Codes
 
+Authentication failures are returned at the HTTP layer, not as JSON-RPC errors:
+
+| HTTP Status | When |
+|-------------|------|
+| `401 Unauthorized` | No `X-Authorization-Token` header provided |
+| `403 Forbidden` | Token is invalid, expired, or signature does not verify |
+
+JSON-RPC error codes for method-level failures:
+
 | Code | Message | When |
 |------|---------|------|
-| `-32001` | Authorization token required | No token provided |
-| `-32002` | Authorization token expired | Token has expired |
 | `-32003` | Transaction rejected | Sender mismatch on `eth_sendRawTransaction` |
 | `-32004` | Account mismatch | `from` mismatch on `eth_call` / `eth_estimateGas` |
 | `-32005` | Sequencer only | Method requires sequencer access |
 | `-32006` | Method disabled | Method not available on zones |
+| `-32601` | Method not found | Unrecognized method (default-deny) |
 
 Methods where the user explicitly supplies a mismatched parameter return explicit errors (the user already knows the address they provided). Methods that query about other accounts return silent dummy values (`0x0`, `null`, empty results) to avoid revealing "data exists but you can't see it."
 
@@ -781,7 +797,7 @@ For each block in the batch, the prover:
 1. Validates `parent_hash` matches the previous block's hash, `number` increments by one, `timestamp` is non-decreasing, and `beneficiary` equals the registered sequencer.
 2. Executes `advanceTempo` if present (start of block): finalizes the Tempo header, processes deposits, verifies encrypted deposit decryptions.
 3. Executes user transactions in order.
-4. Executes `finalizeWithdrawalBatch` if present (required in the final block, absent in intermediate blocks).
+4. Executes `finalizeWithdrawalBatch` (required as the last transaction in every block).
 5. Computes the block hash from the simplified zone header fields (see [Block Header Format](#block-header-format)).
 
 ### Tempo State Proofs
@@ -1204,7 +1220,7 @@ Reads the sequencer address, token registry, and encryption key from the portal 
 
 ### TIP-403 Registry
 
-Deployed at the same address as on Tempo. Read-only on the zone. Its `isAuthorized(policyId, account)` function reads policy state from Tempo via `TempoState.readTempoStorageSlot()`. Zone-side TIP-20 transfers call this automatically.
+Deployed at the same address as on Tempo (`0x403C...0000`). Read-only on the zone. Its `isAuthorized(policyId, account)` function resolves policy queries via a dedicated proxy precompile backed by the zone node's policy provider (cache-first, L1 RPC fallback). Zone-side TIP-20 transfers call this automatically.
 
 <br>
 
