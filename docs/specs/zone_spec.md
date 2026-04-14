@@ -60,6 +60,7 @@
     - [Witness Structure](#witness-structure)
     - [Input Schematic](#input-schematic)
     - [Detailed Input Definitions](#detailed-input-definitions)
+    - [Shared Trie Proof Format](#shared-trie-proof-format)
     - [Batch Output](#batch-output)
     - [Block Execution](#block-execution)
     - [Tempo State Proofs](#tempo-state-proofs)
@@ -1008,13 +1009,17 @@ pub struct L1StateRead {
 }
 ```
 
-`ZoneStateWitness` now uses the same shared `node_pool` pattern as `BatchStateProof`. Instead of attaching a separate proof vector to each account and storage slot, the witness carries one deduplicated repository of RLP-encoded trie nodes plus decoded `ZoneAccountRead` and `ZoneStorageRead` entries describing which account / slot values must be proven against the initial zone-state root.
+### Shared Trie Proof Format
 
-Missing leaves are represented by non-membership proofs, not by omitting the read and not by storing an explicit all-zero leaf in the trie. If the account walk proves that an account leaf is absent from the state trie, the prover interprets that account as the canonical empty account: `nonce = 0`, `balance = 0`, `code = None`, `code_hash = KECCAK_EMPTY`, and an empty storage trie. Likewise, if the storage walk proves that a storage leaf is absent from the account's storage trie, the prover interprets that slot value as zero. This matches Ethereum's canonical trie semantics: deleted accounts and zeroed storage slots are removed from the current trie, so the trie root looks as if that leaf were absent rather than preserving an explicit zero-valued entry.
+`ZoneStateWitness` and `BatchStateProof` both use the same trie-proof encoding:
 
-All of these proofs are relative to the initial zone state at the start of the batch, not to the later mutated state after some zone blocks have already executed. `ZoneStateWitness` is therefore a bootstrap witness: it proves the starting contents of the accounts and storage slots that execution may touch, and the prover materializes that verified data into its in-memory execution state before replaying any blocks.
+- `node_pool` is a deduplicated map from `keccak256(rlp(node))` to the node's raw RLP bytes. The prover validates each node once by recomputing the hash.
+- Each read descriptor (`ZoneAccountRead`, `ZoneStorageRead`, or `L1StateRead`) states which decoded account or storage value must be proven against a bound trie root.
+- Verification walks the account trie using `keccak256(account)` and, when needed, the storage trie using `keccak256(slot)`, fetching branch, extension, and leaf nodes from `node_pool`.
+- Missing leaves are represented by valid non-membership proofs. An absent account is interpreted as the canonical empty account: `nonce = 0`, `balance = 0`, `code = None`, `code_hash = KECCAK_EMPTY`, and an empty storage trie. An absent storage leaf is interpreted as zero. Deleted accounts and zeroed storage slots are absent from the current trie rather than preserved as explicit zero-valued leaves.
+- Client databases may still retain historical nodes that are no longer reachable from the current root, but those stale nodes are irrelevant to proof verification because only nodes reachable from the bound root contribute to the proof.
 
-To verify a `ZoneStateWitness`, the prover first checks that the initial execution state root matches `ZoneStateWitness.state_root` and is consistent with `prev_block_header.state_root`. It then validates each node in `node_pool` once by recomputing `keccak256(rlp(node))`. For each `ZoneAccountRead`, the prover derives the account-trie key from `keccak256(account)` and walks the state trie from `state_root` using nodes from `node_pool`. If the walk ends at an account leaf, the decoded nonce, balance, and code hash must match the read, and `code` must be either absent with `code_hash = KECCAK_EMPTY` or present with `keccak256(code) == code_hash`. If the walk is a valid non-membership proof, the read is interpreted as the canonical empty account instead. For each `ZoneStorageRead`, the prover first determines the account's storage root from the verified account walk, then derives the storage-trie key from `keccak256(slot)` and walks that storage trie using nodes from `node_pool`. If the walk ends at a slot leaf, the decoded value must match `ZoneStorageRead.value`; if it is a valid non-membership proof, the slot value is interpreted as zero. Once this initialization step succeeds, block execution reads and writes the materialized account / storage values directly; it does not re-verify Merkle proofs on every in-block access. Missing account or storage reads are errors; they must not silently default to zero.
+`ZoneStateWitness` applies this shared trie proof format to the initial zone-state root at batch start. `account_reads` and `storage_reads` describe the decoded account and storage values needed to bootstrap execution. To initialize execution, the prover checks that `ZoneStateWitness.state_root` is consistent with `prev_block_header.state_root`, validates `node_pool`, proves each `ZoneAccountRead` and `ZoneStorageRead` against that initial root, materializes the resulting account and storage values into the execution state, and only then starts replaying blocks. Missing account or storage reads are errors; they must not silently default to zero.
 
 ### Batch Output
 
@@ -1039,18 +1044,12 @@ After the initial `ZoneStateWitness` has been verified and loaded into the execu
 
 ### Tempo State Proofs
 
-System contracts read Tempo state during execution (deposit queue hash, sequencer address, token registry, TIP-403 policies). Unlike `ZoneStateWitness`, which is verified once against the initial zone-state root at batch start, `BatchStateProof` is interpreted against the Tempo root currently bound in `TempoState` at the moment of each read. If `advanceTempo()` runs during the batch, later reads are therefore verified against the newer Tempo root, not the root from the start of the batch. The witness includes a `BatchStateProof` containing:
+System contracts read Tempo state during execution (deposit queue hash, sequencer address, token registry, TIP-403 policies). `BatchStateProof` applies the [shared trie proof format](#shared-trie-proof-format) to the Tempo root currently bound in `TempoState` at the moment of each read. If `advanceTempo()` runs during the batch, later reads are therefore verified against the newer Tempo root, not the root from the start of the batch. The witness includes a `BatchStateProof` containing:
 
 - A deduplicated `node_pool` of MPT nodes, keyed by `keccak256(rlp(node))`. Each node is verified exactly once.
 - A list of `L1StateRead` entries, each specifying the zone block index, Tempo block number, account, storage slot, and expected value.
 
-Reads are indexed and verified on demand during execution. For each read, the prover walks the account trie and storage trie starting from the `TempoState` root currently bound for that block, using nodes from the shared `node_pool` to prove the requested `(account, slot) -> value` mapping. Because many reads access the same accounts and storage trie paths, the deduplicated pool significantly reduces proof size and prover cost compared to including separate MPT proofs per read.
-
-`BatchStateProof` uses the same shared-pool pattern as `ZoneStateWitness`. `node_pool` is a shared repository of RLP-encoded trie nodes, and each `L1StateRead` says only which account, slot, and value must be proven at a particular bound Tempo block. Verification proceeds from the root down: use the `tempoStateRoot` currently bound in `TempoState`, derive the account-trie key from `keccak256(account)`, fetch the referenced branch / extension / leaf nodes from `node_pool`, and reconstruct the walk until the account leaf is reached. From the account leaf, extract the storage root, derive the storage-trie key from `keccak256(slot)`, and repeat the same process in the storage trie until the slot leaf is reached. The read is valid only if the final decoded slot value equals `L1StateRead.value`.
-
-As with `ZoneStateWitness`, missing leaves are proved by non-membership. If the account walk proves that the account leaf is absent, the read is interpreted against the canonical empty account; if the storage walk proves that the slot leaf is absent, the slot value is interpreted as zero. The current trie therefore contains no explicit tombstone for deleted accounts or zeroed storage slots. Client databases may still retain historical nodes that are no longer reachable from the current root, but those stale nodes are irrelevant to proof verification because only nodes reachable from the bound root contribute to the proof.
-
-`ZoneStateWitness` and `BatchStateProof` now intentionally share the same witness shape: a bound root, a shared deduplicated `node_pool`, and per-read descriptors that say which decoded account / slot values must be proven. The difference is timing, not structure. `ZoneStateWitness` is verified once against the initial zone-state root at batch start, while `BatchStateProof` reads are verified against the Tempo root currently bound in `TempoState` at the moment of each read.
+Reads are indexed and verified on demand during execution. Each `L1StateRead` is additionally tagged with `zone_block_index` and `tempo_block_number` so the prover can bind that read to the correct in-batch `TempoState`. The proof shape is the same as `ZoneStateWitness`; the difference is timing. `ZoneStateWitness` is verified once against the initial zone-state root at batch start, while `BatchStateProof` reads are verified against the Tempo root currently bound in `TempoState` at the moment of each read.
 
 Anchor validation ensures the zone's view of Tempo is correct. If `anchor_block_number` equals `tempo_block_number`, the zone's `tempoBlockHash` must match `anchor_block_hash` directly. If `anchor_block_number` is greater (for zones that have been offline longer than the EIP-2935 window), the proof verifies the parent-hash chain from `tempo_block_number` to `anchor_block_number` using the ancestry headers in the witness.
 
