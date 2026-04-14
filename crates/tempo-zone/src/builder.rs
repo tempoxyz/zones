@@ -38,7 +38,6 @@ use reth_transaction_pool::{
 };
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
-use tempo_consensus::TEMPO_SHARED_GAS_DIVISOR;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::TempoBuiltPayload;
 use tempo_primitives::{
@@ -197,8 +196,6 @@ where
         let chain_spec = self.provider.chain_spec();
 
         let block_gas_limit = parent_header.gas_limit();
-        let shared_gas_limit = block_gas_limit / TEMPO_SHARED_GAS_DIVISOR;
-        let general_gas_limit = 0;
 
         let mut cumulative_gas_used = 0u64;
         let total_fees = U256::ZERO;
@@ -219,8 +216,10 @@ where
                         withdrawals: attributes.withdrawals().cloned().map(Withdrawals::new),
                         extra_data: attributes.extra_data(),
                     },
-                    general_gas_limit,
-                    shared_gas_limit,
+                    // Zones don't use L1 gas sections. These fields are required
+                    // by TempoNextBlockEnvAttributes but ignored by the zone executor.
+                    general_gas_limit: 0,
+                    shared_gas_limit: block_gas_limit,
                     timestamp_millis_part: attributes.timestamp_millis_part(),
                     subblock_fee_recipients: Default::default(),
                 },
@@ -289,7 +288,7 @@ where
                 );
                 continue;
             }
-            let gas_limit_left = block_gas_limit.saturating_sub(shared_gas_limit);
+            let gas_limit_left = block_gas_limit;
             if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
                 best_txs.mark_invalid(
                     &pool_tx,
