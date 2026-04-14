@@ -193,7 +193,7 @@ The portal gives the messenger max approval for each enabled token so that withd
 
 ### Zone Predeploys
 
-Each zone has four system contracts deployed at genesis at fixed addresses:
+Each zone has six system contracts deployed at genesis at fixed addresses:
 
 | Predeploy | Address | Purpose |
 |-----------|---------|---------|
@@ -201,12 +201,14 @@ Each zone has four system contracts deployed at genesis at fixed addresses:
 | [`ZoneInbox`](#izoneinbox) | `0x1c00...0001` | Advances the zone's view of Tempo and processes incoming deposits. Sole mint authority. |
 | [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
 | [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
+| `TempoStateReader` | `0x1c00...0004` | Precompile stub for reading Tempo L1 storage. Actual reads are performed by the zone node and validated against the `tempoStateRoot`. |
+| `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
 
 `ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.
 
 ### Zone Token Model
 
-Zones have no TIP-20 factory and contract creation is disabled (`CREATE` and `CREATE2` revert). All TIP-20 tokens on a zone are representations of Tempo tokens, deployed at the same address as on Tempo. When the sequencer enables a token on the portal, the zone node provisions a TIP-20 precompile at that address.
+Contract creation is disabled on zones (`CREATE` and `CREATE2` revert). All TIP-20 tokens on a zone are representations of Tempo tokens, deployed at the same address as on Tempo. When the sequencer enables a token on the portal, the zone's TIP-20 factory precompile (at `0x20Fc000000000000000000000000000000000000`) provisions a TIP-20 token precompile at that address. The factory is called by `ZoneInbox` during `advanceTempo` and is not user-accessible.
 
 Token supply on the zone is controlled exclusively by the system contracts:
 
@@ -236,7 +238,7 @@ The sequencer configures two gas rates that determine fees for deposits and with
 | Rate | Set via | Used for |
 |------|---------|----------|
 | `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` |
-| `tempoGasRate` | `ZoneOutbox.setTempoGasRate()` | Withdrawal fees: `gasLimit * tempoGasRate` |
+| `tempoGasRate` | `ZoneOutbox.setTempoGasRate()` | Withdrawal fees: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
 
 Both rates are denominated in token units per gas unit. A single uniform `zoneGasRate` applies to all tokens. Fees are paid in the same token being deposited or withdrawn.
 
@@ -419,14 +421,15 @@ sequenceDiagram
 The withdrawal fee compensates the sequencer for Tempo-side gas costs:
 
 ```
-fee = gasLimit * tempoGasRate
+fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    = (50,000 + gasLimit) * tempoGasRate
 ```
 
-The user specifies `gasLimit` covering all execution costs on Tempo (processing overhead plus any callback). The fee is paid in the same token being withdrawn. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`; the sequencer keeps the fee.
+`WITHDRAWAL_BASE_GAS` (50,000) covers the fixed overhead of processing a withdrawal on Tempo (queue dequeue, transfer, event emission). The user specifies `gasLimit` covering any additional execution costs (e.g., callback gas). For simple withdrawals with no callback, use `gasLimit = 0`. The fee is paid in the same token being withdrawn. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`; the sequencer keeps the fee.
 
 ### Withdrawal Batching
 
-At the end of the final block in a batch, the sequencer calls `finalizeWithdrawalBatch(count)` on the `ZoneOutbox`. This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
+At the end of the final block in a batch, the sequencer calls `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox`. The `blockNumber` must match the current zone block number. The `encryptedSenders` array carries one ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`). This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
 
 ```
 withdrawalQueueHash = EMPTY_SENTINEL
@@ -487,7 +490,7 @@ senderTag = keccak256(abi.encodePacked(sender, txHash))
 
 The `txHash` is the hash of the `requestWithdrawal` transaction on the zone. Since zone transaction data is not published, `txHash` acts as a blinding factor known only to the sender and the sequencer.
 
-The sender can optionally specify a `revealTo` public key (compressed secp256k1, 33 bytes) when requesting the withdrawal. If provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH and populates `encryptedSender` in the withdrawal struct. The wire format is `ephemeralPubKey (33 bytes) || ciphertext (52 bytes) || mac (16 bytes)`.
+The sender can optionally specify a `revealTo` public key (compressed secp256k1, 33 bytes) when requesting the withdrawal. If provided, the sequencer encrypts `(sender, txHash)` to that key using ECDH and populates `encryptedSender` in the withdrawal struct. The wire format is `ephemeralPubKey (33 bytes) || nonce (12 bytes) || ciphertext (52 bytes) || tag (16 bytes)` totaling 113 bytes.
 
 Two disclosure modes are available:
 
@@ -523,9 +526,9 @@ Zone transactions specify which enabled TIP-20 token to use for gas fees via a `
 
 Each zone block contains system transactions and user transactions in a fixed order:
 
-1. `ZoneInbox.advanceTempo(header, deposits, decryptions)` (optional, at the start of the block). Advances the zone's view of Tempo, processes any pending deposits, and verifies encrypted deposit decryptions. If omitted, the zone's Tempo binding carries forward from the previous block.
+1. `ZoneInbox.advanceTempo(header, deposits, decryptions, enabledTokens)` (optional, at the start of the block). Advances the zone's view of Tempo, enables newly-bridged tokens, processes any pending deposits, and verifies encrypted deposit decryptions. If omitted, the zone's Tempo binding carries forward from the previous block.
 2. User transactions, executed in order.
-3. `ZoneOutbox.finalizeWithdrawalBatch(count)` (required in the final block of a batch, absent in intermediate blocks). Constructs the withdrawal hash chain from pending withdrawals and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called even if there are zero withdrawals so the batch index advances.
+3. `ZoneOutbox.finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` (required in the final block of a batch, absent in intermediate blocks). Constructs the withdrawal hash chain from pending withdrawals, populates `encryptedSender` for authenticated withdrawals, and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called even if there are zero withdrawals so the batch index advances.
 
 A batch covers one or more zone blocks, with each batch interval targeting 250 milliseconds. The sequencer controls batch frequency, and intermediate blocks within a batch contain only `advanceTempo` (optional) and user transactions.
 
@@ -541,7 +544,7 @@ Zone blocks use a simplified header with fewer fields than a standard Ethereum h
 | `transactionsRoot` | `bytes32` | Root computed over the ordered list of block transactions |
 | `receiptsRoot` | `bytes32` | Root computed over the ordered list of transaction receipts |
 | `number` | `uint64` | Block number |
-| `timestamp` | `uint64` | Block timestamp (must be monotonically increasing) |
+| `timestamp` | `uint64` | Block timestamp (must be non-decreasing) |
 | `protocolVersion` | `uint64` | Zone protocol version |
 
 The block hash is `keccak256` of the RLP-encoded header. Batch proofs commit to block hash transitions (`prevBlockHash` to `nextBlockHash`), not raw state roots, so the proof covers the full header structure.
@@ -576,15 +579,16 @@ If a block omits `advanceTempo`, the Tempo binding carries forward from the prev
 
 ### Storage Reads
 
-`TempoState` provides `readTempoStorageSlot(account, slot)` for reading storage from any Tempo contract. This function is restricted to zone system contracts only: `ZoneInbox`, `ZoneOutbox`, and `ZoneConfig`. User transactions cannot call it.
+`TempoState` provides `readTempoStorageSlot(account, slot)` for reading storage from any Tempo contract. This function is restricted to zone system contracts (`ZoneInbox`, `ZoneOutbox`, `ZoneConfig`). User transactions cannot call it.
 
 The function is a precompile stub. The actual storage reads are performed by the zone node and validated against the `tempoStateRoot` from the finalized header. The prover includes Merkle proofs for each unique account and storage slot accessed by system contracts during the batch.
 
-System contracts use storage reads for:
+Current callers:
 
+- `ZoneInbox`: `currentDepositQueueHash` and encryption keys from the portal
 - `ZoneConfig`: sequencer address, token registry from the portal
-- `ZoneInbox`: `currentDepositQueueHash` from the portal
-- `TIP403Registry`: policy state from Tempo
+
+TIP-403 policy authorization on the zone is handled by a dedicated read-only proxy precompile (at the same address as the L1 `TIP403Registry`), which resolves policy queries via the zone node's policy provider rather than calling `readTempoStorageSlot` directly.
 
 ### Staleness and Finality
 
@@ -1149,10 +1153,13 @@ Address: `0x1c00000000000000000000000000000000000001`
 interface IZoneInbox {
     function processedDepositQueueHash() external view returns (bytes32);
     function advanceTempo(
-        bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions
+        bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions,
+        EnabledToken[] calldata enabledTokens
     ) external;
 }
 ```
+
+`EnabledToken` carries token metadata (`token`, `name`, `symbol`, `currency`) for provisioning zone-side TIP-20 precompiles via the TIP-20 factory.
 
 ### IZoneOutbox
 
@@ -1167,10 +1174,16 @@ interface IZoneOutbox {
 
     function requestWithdrawal(
         address token, address to, uint128 amount, bytes32 memo,
+        uint64 gasLimit, address fallbackRecipient, bytes calldata data
+    ) external;
+
+    function requestWithdrawal(
+        address token, address to, uint128 amount, bytes32 memo,
         uint64 gasLimit, address fallbackRecipient, bytes calldata data, bytes calldata revealTo
     ) external;
 
-    function finalizeWithdrawalBatch(uint256 count) external returns (bytes32 withdrawalQueueHash);
+    function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders)
+        external returns (bytes32 withdrawalQueueHash);
 }
 ```
 
@@ -1197,15 +1210,17 @@ Deployed at the same address as on Tempo. Read-only on the zone. Its `isAuthoriz
 
 ## Network Upgrades and Hard Fork Activation
 
+> **Note:** The verifier rotation and protocol version mechanisms described below are the target design. The current `ZonePortal` implementation declares `verifier` as `immutable`, so the rotation mechanism is not yet implemented. This section will be updated when the upgrade contracts are deployed.
+
 Zones activate hard fork upgrades in lockstep with Tempo using same-block activation. The trigger is the Tempo block number: the zone block whose `advanceTempo` imports the fork Tempo block uses the new execution rules for its entire scope.
 
-The portal maintains two verifier slots (`verifier` and `forkVerifier`). At each fork, verifiers rotate: the previous fork verifier is promoted to `verifier`, and the new fork verifier takes the `forkVerifier` slot. At most two verifiers are active at any time. The `IVerifier` interface is unchanged across forks; new proof parameters are passed via the opaque `verifierConfig` bytes.
+The portal will maintain two verifier slots (`verifier` and `forkVerifier`). At each fork, verifiers rotate: the previous fork verifier is promoted to `verifier`, and the new fork verifier takes the `forkVerifier` slot. At most two verifiers are active at any time. The `IVerifier` interface is unchanged across forks; new proof parameters are passed via the opaque `verifierConfig` bytes.
 
-`ZoneFactory` maintains a `protocolVersion` counter incremented at each fork. Zone nodes embed the highest protocol version they support and halt cleanly if the imported Tempo block bumps `protocolVersion` beyond their supported version, preventing an outdated node from producing blocks under incorrect rules.
+`ZoneFactory` will maintain a `protocolVersion` counter incremented at each fork. Zone nodes embed the highest protocol version they support and halt cleanly if the imported Tempo block bumps `protocolVersion` beyond their supported version, preventing an outdated node from producing blocks under incorrect rules.
 
 No onchain action is required from zone operators. The new verifier is deployed and rotated as part of the Tempo hard fork. Operators upgrade their zone node binary and prover program before the fork; when the fork Tempo block arrives, the node activates new rules automatically.
 
-The portal enforces a `forkActivationBlock` cutoff where batches targeting the old `verifier` must have `tempoBlockNumber < forkActivationBlock`. This prevents post-fork batches from being submitted against old verification rules.
+The portal will enforce a `forkActivationBlock` cutoff where batches targeting the old `verifier` must have `tempoBlockNumber < forkActivationBlock`. This prevents post-fork batches from being submitted against old verification rules.
 
 The Tempo hard fork block executes the following as system transactions:
 
