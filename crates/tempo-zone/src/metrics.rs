@@ -79,6 +79,12 @@ pub(crate) struct L1SubscriberMetrics {
 
     /// Number of reconnect attempts after the subscriber exits or errors.
     pub reconnects: Counter,
+
+    /// Most recent finalized L1 block number observed by the subscriber.
+    pub latest_l1_finalized_block: Gauge,
+
+    /// Number of live blocks buffered waiting for finalization.
+    pub live_buffer_size: Gauge,
 }
 
 /// Metrics emitted by the zone monitor and batch submitter.

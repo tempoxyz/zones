@@ -309,7 +309,12 @@ impl L1Subscriber {
         Ok(Some(on_chain + 1))
     }
 
-    /// Backfill deposit events from the starting block to the current L1 tip.
+    /// Backfill deposit events from the starting block to the current L1
+    /// finalized tip.
+    ///
+    /// Only backfills to the finalized block — not the latest — so the zone
+    /// never commits to blocks that could be reorged away by Commonware
+    /// consensus.
     #[instrument(skip(self, l1_provider))]
     async fn sync_to_l1_tip(
         &mut self,
@@ -334,22 +339,25 @@ impl L1Subscriber {
             from = from.max(adjusted);
         }
 
-        let tip = l1_provider.get_block_number().await?;
-        self.record_seen_block(tip, 0);
-        if from > tip {
-            info!(from, tip, "Already synced to L1 tip");
+        let finalized = Self::query_finalized_block_number(l1_provider).await?;
+        self.subscriber_metrics
+            .latest_l1_finalized_block
+            .set(finalized as f64);
+        self.record_seen_block(finalized, 0);
+        if from > finalized {
+            info!(from, finalized, "Already synced to L1 finalized tip");
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
             return Ok(());
         }
 
         info!(
             from,
-            tip,
-            blocks = tip - from + 1,
-            "Backfilling deposit events"
+            finalized,
+            blocks = finalized - from + 1,
+            "Backfilling deposit events to finalized tip"
         );
         let start = std::time::Instant::now();
-        let result = self.backfill(l1_provider, from, tip).await;
+        let result = self.backfill(l1_provider, from, finalized).await;
         self.subscriber_metrics
             .backfill_duration_seconds
             .record(start.elapsed().as_secs_f64());
@@ -357,6 +365,18 @@ impl L1Subscriber {
             self.subscriber_metrics.current_l1_lag_blocks.set(0.0);
         }
         result
+    }
+
+    /// Query the L1's finalized block number.
+    async fn query_finalized_block_number(
+        l1_provider: &impl Provider<TempoNetwork>,
+    ) -> eyre::Result<u64> {
+        use alloy_rpc_types_eth::BlockNumberOrTag;
+        let header = l1_provider
+            .get_header_by_number(BlockNumberOrTag::Finalized)
+            .await?
+            .ok_or_else(|| eyre::eyre!("L1 finalized block header not available"))?;
+        Ok(header.inner.inner.number())
     }
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
@@ -465,14 +485,16 @@ impl L1Subscriber {
     /// Run the L1 subscriber until the stream ends or an error occurs.
     ///
     /// Connects to the L1 node (HTTP or WebSocket), backfills deposit events
-    /// to the current L1 tip, then listens for new block headers. Each block —
-    /// with or without deposits — is enqueued so the zone engine sees a strict
-    /// sequential chain.
+    /// to the current L1 finalized tip, then listens for new block headers.
+    /// Each block — with or without deposits — is enqueued so the zone engine
+    /// sees a strict sequential chain.
     ///
-    /// Live-streamed blocks are buffered one block behind: a block is only
-    /// flushed to the deposit queue once the next block arrives with a
-    /// matching parent hash, proving the buffered block is canonical. This
-    /// prevents the zone from committing to an L1 tip that gets reorged away.
+    /// Live-streamed blocks are buffered until they are finalized on L1. The
+    /// subscriber periodically polls the L1 finalized block number and flushes
+    /// all buffered blocks at or below that height to the deposit queue. This
+    /// prevents the zone from committing to blocks that could be reorged away
+    /// by Commonware consensus, which can have >1 notarized-but-not-finalized
+    /// block at a time.
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
     pub async fn run(mut self) -> eyre::Result<()> {
@@ -482,89 +504,212 @@ impl L1Subscriber {
 
         let provider = self.connect().await?;
 
-        // Backfill to the current tip before subscribing.
-        // Backfilled blocks are historical and considered confirmed.
+        // Backfill to the current finalized tip before subscribing.
+        // Backfilled blocks are historical and finalized.
         self.sync_to_l1_tip(&provider).await?;
 
         info!(portal = %self.config.portal_address, "Listening for L1 blocks");
         let mut stream = self.l1_block_stream(&provider).await?;
 
-        // Confirmation buffer: holds the latest unconfirmed L1 block.
-        // A block is only flushed to the deposit queue once the NEXT block
-        // arrives with a matching parent hash, proving the buffered block
-        // is on the canonical chain.
-        let mut unconfirmed_tip: Option<(
-            SealedHeader<TempoHeader>,
-            L1PortalEvents,
-            Vec<PolicyEvent>,
-        )> = None;
+        // Finalization buffer: holds live blocks that have not yet been
+        // finalized on L1. Blocks are flushed to the deposit queue once the
+        // L1 finalized block number reaches or exceeds their height.
+        let mut live_buffer: Vec<BufferedLiveBlock> = Vec::new();
+
+        // Poll finalization on a timer so we flush even when no new blocks
+        // arrive (e.g. finalization advancing without new views).
+        let mut finalization_poll = tokio::time::interval(std::time::Duration::from_millis(500));
+        finalization_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            let stream_wait_start = std::time::Instant::now();
-            let next = stream.try_next().await?;
-            self.subscriber_metrics
-                .stream_try_next_duration_seconds
-                .record(stream_wait_start.elapsed().as_secs_f64());
-            let Some((header, receipts)) = next else {
-                break;
-            };
-            let block_number = header.number();
-            let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
-            let (events, policy_events) = self.extract_events(block_number, &receipts);
-            self.record_seen_block(block_number, 0);
+            tokio::select! {
+                next = stream.try_next() => {
+                    let stream_wait_start = std::time::Instant::now();
+                    let Some((header, receipts)) = next? else {
+                        break;
+                    };
+                    self.subscriber_metrics
+                        .stream_try_next_duration_seconds
+                        .record(stream_wait_start.elapsed().as_secs_f64());
 
-            // If we have a buffered tip, check if the new block confirms it.
-            if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
-                if sealed.parent_hash() == tip_header.hash() {
-                    // Confirmed — apply policy events, update L1 state anchor,
-                    // and flush to the queue.
-                    let tip_number = tip_header.number();
-                    let tip_hash = tip_header.hash();
-                    let tip_parent = tip_header.parent_hash();
-                    self.apply_policy_events(tip_number, &tip_policy_events);
-                    self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
-                    self.apply_portal_state_events(tip_number, &tip_events);
-                    match self
-                        .deposit_queue
-                        .try_enqueue(tip_header, tip_events, tip_policy_events)
-                    {
-                        EnqueueOutcome::Accepted => {
-                            self.subscriber_metrics.blocks_enqueued.increment(1);
-                        }
-                        EnqueueOutcome::Duplicate => {}
-                        EnqueueOutcome::NeedBackfill { from, to } => {
-                            // Gap between queue head and confirmed tip — backfill
-                            // the missing range including the tip (re-fetched from
-                            // the provider since try_enqueue consumed ownership).
+                    let block_number = header.number();
+                    let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
+                    let (events, policy_events) =
+                        self.extract_events(block_number, &receipts);
+                    self.record_seen_block(block_number, 0);
+
+                    // Enforce chain continuity against the live buffer.
+                    if let Some(tail) = live_buffer.last() {
+                        let tail_number = tail.header.number();
+                        let tail_hash = tail.header.hash();
+
+                        if block_number == tail_number {
+                            if sealed.hash() == tail_hash {
+                                // Duplicate, skip.
+                                continue;
+                            }
+                            // Same height, different hash — reorg at this height.
+                            let purge_idx = live_buffer.len() - 1;
+                            self.purge_live_buffer(&mut live_buffer, purge_idx);
+                        } else if block_number == tail_number + 1 {
+                            if sealed.parent_hash() != tail_hash {
+                                // Parent mismatch — walk backwards to find attachment point.
+                                self.purge_live_buffer_by_parent(&mut live_buffer, sealed.parent_hash());
+                            }
+                        } else if block_number > tail_number + 1 {
+                            // Gap in the live stream — drop the entire buffer.
+                            // Finalized blocks will be recovered via backfill on
+                            // the next finalization poll.
                             warn!(
-                                from,
-                                to,
-                                tip = tip_number,
-                                "Backfilling gap before confirmed tip"
+                                tail_number,
+                                new_block = block_number,
+                                gap = block_number - tail_number - 1,
+                                "Gap in live L1 stream, clearing buffer"
                             );
-                            self.backfill(&provider, from, tip_number).await?;
+                            self.purge_live_buffer(&mut live_buffer, 0);
+                        } else {
+                            // Block behind our buffer — duplicate/stale, skip.
+                            continue;
                         }
                     }
-                } else {
-                    // Reorg — discard the buffered tip and clear L1 state cache.
-                    self.subscriber_metrics.reorgs_detected.increment(1);
-                    warn!(
-                        discarded_block = tip_header.number(),
-                        discarded_hash = %tip_header.hash(),
-                        new_block = block_number,
-                        new_parent = %sealed.parent_hash(),
-                        "Discarding unconfirmed L1 block (reorg)"
-                    );
-                    self.config.l1_state_cache.write().clear();
+
+                    live_buffer.push(BufferedLiveBlock {
+                        header: sealed,
+                        events,
+                        policy_events,
+                    });
+                    self.subscriber_metrics
+                        .live_buffer_size
+                        .set(live_buffer.len() as f64);
+
+                    // Opportunistically flush finalized blocks.
+                    if let Err(e) = self.flush_finalized(&provider, &mut live_buffer).await {
+                        warn!(error = %e, "Failed to query L1 finalized block");
+                    }
+                }
+                _ = finalization_poll.tick() => {
+                    if !live_buffer.is_empty()
+                        && let Err(e) = self.flush_finalized(&provider, &mut live_buffer).await
+                    {
+                        warn!(error = %e, "Failed to query L1 finalized block (timer)");
+                    }
                 }
             }
-
-            // Buffer the new block as unconfirmed tip.
-            unconfirmed_tip = Some((sealed, events, policy_events));
         }
 
         warn!("L1 block subscription stream ended");
         Ok(())
+    }
+
+    /// Flush all buffered live blocks that are at or below the current L1
+    /// finalized block number.
+    async fn flush_finalized(
+        &mut self,
+        l1_provider: &DynProvider<TempoNetwork>,
+        live_buffer: &mut Vec<BufferedLiveBlock>,
+    ) -> eyre::Result<()> {
+        let finalized = Self::query_finalized_block_number(l1_provider).await?;
+        self.subscriber_metrics
+            .latest_l1_finalized_block
+            .set(finalized as f64);
+
+        let flush_count = live_buffer
+            .iter()
+            .take_while(|b| b.header.number() <= finalized)
+            .count();
+
+        if flush_count == 0 {
+            return Ok(());
+        }
+
+        let to_flush: Vec<_> = live_buffer.drain(..flush_count).collect();
+        self.subscriber_metrics
+            .live_buffer_size
+            .set(live_buffer.len() as f64);
+
+        for block in to_flush {
+            let block_number = block.header.number();
+            let block_hash = block.header.hash();
+            let parent_hash = block.header.parent_hash();
+
+            self.apply_policy_events(block_number, &block.policy_events);
+            self.update_l1_state_anchor(block_number, block_hash, parent_hash);
+            self.apply_portal_state_events(block_number, &block.events);
+
+            match self
+                .deposit_queue
+                .try_enqueue(block.header, block.events, block.policy_events)
+            {
+                EnqueueOutcome::Accepted => {
+                    self.subscriber_metrics.blocks_enqueued.increment(1);
+                }
+                EnqueueOutcome::Duplicate => {}
+                EnqueueOutcome::NeedBackfill { from, to } => {
+                    warn!(
+                        from,
+                        to,
+                        finalized_block = block_number,
+                        "Backfilling gap before finalized block"
+                    );
+                    self.backfill(l1_provider, from, block_number).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Purge live buffer entries from `idx` onwards (reorg detected).
+    /// Recomputes `tracked_tokens` to avoid leaking tokens from reorged blocks.
+    fn purge_live_buffer(&mut self, live_buffer: &mut Vec<BufferedLiveBlock>, idx: usize) {
+        let purged = live_buffer.split_off(idx);
+        if !purged.is_empty() {
+            self.subscriber_metrics
+                .reorgs_detected
+                .increment(purged.len() as u64);
+            warn!(
+                purged_blocks = purged.len(),
+                from_number = purged.first().map(|b| b.header.number()),
+                to_number = purged.last().map(|b| b.header.number()),
+                "Purging reorged blocks from live buffer"
+            );
+            // Recompute tracked_tokens: start from confirmed state and replay
+            // surviving buffered blocks.
+            self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
+            for block in live_buffer.iter() {
+                for enabled in &block.events.enabled_tokens {
+                    if !self.tracked_tokens.contains(&enabled.token) {
+                        self.tracked_tokens.push(enabled.token);
+                    }
+                }
+            }
+        }
+        self.subscriber_metrics
+            .live_buffer_size
+            .set(live_buffer.len() as f64);
+    }
+
+    /// Purge live buffer entries that don't connect to the given parent hash.
+    /// Walks backwards from the tail to find the block matching `parent_hash`,
+    /// then purges everything after it.
+    fn purge_live_buffer_by_parent(
+        &mut self,
+        live_buffer: &mut Vec<BufferedLiveBlock>,
+        parent_hash: B256,
+    ) {
+        // Find the block whose hash matches the new block's parent.
+        if let Some(attach_idx) = live_buffer
+            .iter()
+            .rposition(|b| b.header.hash() == parent_hash)
+        {
+            // Purge everything after the attachment point.
+            if attach_idx + 1 < live_buffer.len() {
+                self.purge_live_buffer(live_buffer, attach_idx + 1);
+            }
+        } else {
+            // Can't find attachment — purge entire buffer.
+            self.purge_live_buffer(live_buffer, 0);
+        }
     }
 
     /// Extract portal and policy events from pre-fetched receipts (no RPC).
@@ -1096,6 +1241,19 @@ impl L1PortalEvents {
         log.topic0()
             .is_some_and(|t| Self::SIGNATURE_HASHES.contains(t))
     }
+}
+
+/// An L1 block buffered in the live stream, awaiting finalization.
+///
+/// Once the L1 finalized block number reaches or exceeds this block's height,
+/// its contents are flushed to the deposit queue.
+struct BufferedLiveBlock {
+    /// The sealed L1 block header (caches the block hash).
+    header: SealedHeader<TempoHeader>,
+    /// Portal events extracted from this block.
+    events: L1PortalEvents,
+    /// TIP-403 policy events extracted from this block's receipts.
+    policy_events: Vec<PolicyEvent>,
 }
 
 /// An L1 block's header paired with the deposits found in that block.
