@@ -1002,6 +1002,10 @@ pub struct L1StateRead {
 }
 ```
 
+`ZoneStateWitness` uses conventional per-object Merkle Patricia Trie proofs. `accounts` maps each zone account touched during the batch to an `AccountWitness`. Within an `AccountWitness`, `account_proof` is the ordered list of RLP-encoded trie nodes needed to prove that account's existence (or emptiness) against the `ZoneStateWitness.state_root`. `storage_proofs` applies the same idea one level deeper: for each accessed storage slot, the witness includes the ordered list of RLP-encoded storage-trie nodes proving that slot's value under the account's storage root. In other words, `HashMap<U256, Vec<Vec<u8>>>` means "for each storage slot, give me the sequence of trie nodes needed to prove that slot."
+
+To verify a `ZoneStateWitness`, the prover first checks that the initial execution state root matches `ZoneStateWitness.state_root` and is consistent with `prev_block_header.state_root`. Then, whenever execution touches an account, it replays `account_proof` from the state root using `keccak256(address)` as the trie key, decodes the resulting account leaf, and checks that the decoded nonce, balance, code hash, and storage root agree with the fields in `AccountWitness`. Whenever execution touches a storage slot, it starts from that decoded storage root and replays the corresponding `storage_proofs[slot]` using `keccak256(slot)` as the storage-trie key, checking that the terminal leaf matches `storage[slot]`. Missing account or storage proofs are errors; they must not silently default to zero.
+
 ### Batch Output
 
 The state transition function produces:
@@ -1031,6 +1035,10 @@ System contracts read Tempo state during execution (deposit queue hash, sequence
 - A list of `L1StateRead` entries, each specifying the zone block index, Tempo block number, account, storage slot, and expected value.
 
 Reads are indexed and verified on demand during execution. For each read, the prover walks the account trie and storage trie starting from the `TempoState` root currently bound for that block, using nodes from the shared `node_pool` to prove the requested `(account, slot) -> value` mapping. Because many reads access the same accounts and storage trie paths, the deduplicated pool significantly reduces proof size and prover cost compared to including separate MPT proofs per read.
+
+The interpretation of `BatchStateProof` is slightly different from `ZoneStateWitness`. Here the witness does not attach a separate proof vector to each read. Instead, `node_pool` is a shared repository of RLP-encoded trie nodes, and each `L1StateRead` says only which account, slot, and value must be proven at a particular bound Tempo block. Verification proceeds from the root down: use the `tempoStateRoot` currently bound in `TempoState`, derive the account-trie key from `keccak256(account)`, fetch the referenced branch / extension / leaf nodes from `node_pool`, and reconstruct the walk until the account leaf is reached. From the account leaf, extract the storage root, derive the storage-trie key from `keccak256(slot)`, and repeat the same process in the storage trie until the slot leaf is reached. The read is valid only if the final decoded slot value equals `L1StateRead.value`.
+
+This split is intentional. `ZoneStateWitness` proves the starting zone state with explicit per-account and per-slot proof lists, while `BatchStateProof` proves many Tempo reads against a shared deduplicated pool because large batches may reuse the same trie nodes across thousands of reads. The two structures serve the same cryptographic purpose, but they optimize the witness differently.
 
 Anchor validation ensures the zone's view of Tempo is correct. If `anchor_block_number` equals `tempo_block_number`, the zone's `tempoBlockHash` must match `anchor_block_hash` directly. If `anchor_block_number` is greater (for zones that have been offline longer than the EIP-2935 window), the proof verifies the parent-hash chain from `tempo_block_number` to `anchor_block_number` using the ancestry headers in the witness.
 
