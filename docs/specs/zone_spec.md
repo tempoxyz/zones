@@ -1033,7 +1033,7 @@ After the initial `ZoneStateWitness` has been verified and loaded into the execu
 
 ### Tempo State Proofs
 
-System contracts read Tempo state during execution (deposit queue hash, sequencer address, token registry, TIP-403 policies). The witness includes a `BatchStateProof` containing:
+System contracts read Tempo state during execution (deposit queue hash, sequencer address, token registry, TIP-403 policies). Unlike `ZoneStateWitness`, which is verified once against the initial zone-state root at batch start, `BatchStateProof` is interpreted against the Tempo root currently bound in `TempoState` at the moment of each read. If `advanceTempo()` runs during the batch, later reads are therefore verified against the newer Tempo root, not the root from the start of the batch. The witness includes a `BatchStateProof` containing:
 
 - A deduplicated `node_pool` of MPT nodes, keyed by `keccak256(rlp(node))`. Each node is verified exactly once.
 - A list of `L1StateRead` entries, each specifying the zone block index, Tempo block number, account, storage slot, and expected value.
