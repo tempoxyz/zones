@@ -765,118 +765,72 @@ The witness contains everything needed to re-execute the batch:
 
 ### Input Schematic
 
-The prover inputs are nested containers. `BatchWitness` is the top-level object passed into `prove_zone_batch`, and the schematic below shows one representative entry for repeated collections such as `ZoneBlock[i]`, `QueuedDeposit[j]`, `AccountWitness[address]`, and `L1StateRead[k]`.
+The prover inputs are nested containers. `BatchWitness` is the top-level object passed into `prove_zone_batch`, and the schematic below shows one representative entry for repeated collections such as `ZoneBlock[i]`, `QueuedDeposit[j]`, `AccountWitness[address]`, and `L1StateRead[k]`. To keep the picture readable, the boxes list field names rather than repeating every Rust scalar type.
 
 ```mermaid
-flowchart TD
+flowchart TB
     subgraph BW["BatchWitness"]
         direction TB
 
-        subgraph PI["public_inputs: PublicInputs"]
-            direction TB
-            pi1["prev_block_hash: B256"]
-            pi2["tempo_block_number: u64"]
-            pi3["anchor_block_number: u64"]
-            pi4["anchor_block_hash: B256"]
-            pi5["expected_withdrawal_batch_index: u64"]
-            pi6["sequencer: Address"]
-        end
+        PI["PublicInputs<br/>prev_block_hash<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
 
-        subgraph PH["prev_block_header: ZoneHeader"]
-            direction TB
-            ph1["parent_hash: B256"]
-            ph2["beneficiary: Address"]
-            ph3["state_root: B256"]
-            ph4["transactions_root: B256"]
-            ph5["receipts_root: B256"]
-            ph6["number: u64"]
-            ph7["timestamp: u64"]
-            ph8["protocol_version: u64"]
-        end
+        PH["ZoneHeader<br/>parent_hash<br/>beneficiary<br/>state_root<br/>transactions_root<br/>receipts_root<br/>number<br/>timestamp<br/>protocol_version"]
 
-        subgraph ZBL["zone_blocks: list of ZoneBlock"]
+        subgraph ZBL["zone_blocks"]
             direction TB
-            subgraph ZB["ZoneBlock[i]"]
+            ZB["ZoneBlock[i]<br/>number<br/>parent_hash<br/>timestamp<br/>beneficiary<br/>protocol_version<br/>tempo_header_rlp<br/>finalize_withdrawal_batch_count<br/>transactions"]
+
+            subgraph DEP["deposits"]
                 direction TB
-                zb1["number: u64"]
-                zb2["parent_hash: B256"]
-                zb3["timestamp: u64"]
-                zb4["beneficiary: Address"]
-                zb5["protocol_version: u64"]
-                zb6["tempo_header_rlp: optional header bytes"]
+                QD["QueuedDeposit[j]<br/>deposit_type<br/>deposit_data"]
 
-                subgraph DEP["deposits: list of QueuedDeposit"]
+                subgraph PAYLOAD["deposit_data payload"]
                     direction TB
-                    subgraph QD["QueuedDeposit[j]"]
-                        direction TB
-                        qd1["deposit_type: Regular or Encrypted"]
-                        qd2["deposit_data: ABI-encoded Deposit or EncryptedDeposit"]
-                    end
+                    D["Deposit<br/>token<br/>sender<br/>to<br/>amount<br/>memo"]
+
+                    ED["EncryptedDeposit<br/>token<br/>sender<br/>amount<br/>keyIndex<br/>encrypted"]
+
+                    EDP["EncryptedDepositPayload<br/>ephemeralPubkeyX<br/>ephemeralPubkeyYParity<br/>ciphertext<br/>nonce<br/>tag"]
+
+                    D ~~~ ED
+                    ED ~~~ EDP
                 end
 
-                subgraph DEC["decryptions: list of DecryptionData"]
-                    direction TB
-                    subgraph DD["DecryptionData[k]"]
-                        direction TB
-                        dd1["shared_secret: B256"]
-                        dd2["shared_secret_y_parity: u8"]
-                        dd3["to: Address"]
-                        dd4["memo: B256"]
-
-                        subgraph CP["cp_proof: ChaumPedersenProof"]
-                            direction TB
-                            cp1["s: B256"]
-                            cp2["c: B256"]
-                        end
-                    end
-                end
-
-                zb7["finalize_withdrawal_batch_count: optional U256"]
-                zb8["transactions: list of Transaction"]
+                QD ~~~ D
             end
-        end
 
-        subgraph ZSW["initial_zone_state: ZoneStateWitness"]
-            direction TB
-            zsw1["state_root: B256"]
-
-            subgraph ACCS["accounts: map of Address to AccountWitness"]
+            subgraph DEC["decryptions"]
                 direction TB
-                subgraph AW["AccountWitness[address]"]
-                    direction TB
-                    aw1["nonce: u64"]
-                    aw2["balance: U256"]
-                    aw3["code_hash: B256"]
-                    aw4["code: optional bytecode"]
-                    aw5["storage: map of slot to value"]
-                    aw6["account_proof: list of MPT nodes"]
-                    aw7["storage_proofs: map of slot to proof"]
-                end
+                DD["DecryptionData[k]<br/>shared_secret<br/>shared_secret_y_parity<br/>to<br/>memo<br/>cp_proof"]
+                CP["ChaumPedersenProof<br/>s<br/>c"]
+                DD ~~~ CP
             end
+
+            ZB ~~~ QD
+            QD ~~~ DD
         end
 
-        subgraph BSP["tempo_state_proofs: BatchStateProof"]
+        subgraph ZSW["initial_zone_state"]
             direction TB
-            bsp1["node_pool: map of node hash to RLP node bytes"]
-
-            subgraph READS["reads: list of L1StateRead"]
-                direction TB
-                subgraph READ["L1StateRead[k]"]
-                    direction TB
-                    lr1["zone_block_index: u64"]
-                    lr2["tempo_block_number: u64"]
-                    lr3["account: Address"]
-                    lr4["slot: U256"]
-                    lr5["node_path: list of B256"]
-                    lr6["value: U256"]
-                end
-            end
+            ZSWBOX["ZoneStateWitness<br/>state_root"]
+            AW["AccountWitness[address]<br/>nonce<br/>balance<br/>code_hash<br/>code<br/>storage<br/>account_proof<br/>storage_proofs"]
+            ZSWBOX ~~~ AW
         end
 
-        subgraph AH["tempo_ancestry_headers: list of header RLP bytes"]
+        subgraph BSP["tempo_state_proofs"]
             direction TB
-            ah1["header[h]: bytes"]
+            BSPBOX["BatchStateProof<br/>node_pool"]
+            READ["L1StateRead[k]<br/>zone_block_index<br/>tempo_block_number<br/>account<br/>slot<br/>node_path<br/>value"]
+            BSPBOX ~~~ READ
         end
+
+        AH["tempo_ancestry_headers<br/>header bytes [0..n]"]
+
+        PI ~~~ PH
+        PH ~~~ ZB
+        ZB ~~~ ZSWBOX
+        ZSWBOX ~~~ BSPBOX
+        BSPBOX ~~~ AH
     end
 ```
 
