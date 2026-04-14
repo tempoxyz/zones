@@ -68,6 +68,7 @@ alloy-transport.workspace = true
 revm.workspace = true
 
 # misc
+jsonrpsee = { version = "0.26.0", features = ["ws-client"] }
 metrics.workspace = true
 k256.workspace = true
 url = "2"

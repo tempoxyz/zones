@@ -14,11 +14,13 @@ use alloy_rpc_types_eth::{BlockId, Log};
 use alloy_sol_types::{SolEvent, SolEventInterface, SolValue};
 use alloy_transport::Authorization;
 use futures::{Stream, StreamExt, TryStreamExt as _};
+use jsonrpsee::ws_client::WsClientBuilder;
 use parking_lot::Mutex;
 use reth_primitives_traits::SealedHeader;
 use reth_storage_api::StateProviderFactory;
 use std::{pin::Pin, sync::Arc};
 use tempo_alloy::TempoNetwork;
+use tempo_node::rpc::consensus::{Event as ConsensusEvent, TempoConsensusApiClient};
 use tempo_primitives::TempoHeader;
 use tracing::{debug, error, info, instrument, warn};
 
@@ -490,11 +492,12 @@ impl L1Subscriber {
     /// sees a strict sequential chain.
     ///
     /// Live-streamed blocks are buffered until they are finalized on L1. The
-    /// subscriber periodically polls the L1 finalized block number and flushes
-    /// all buffered blocks at or below that height to the deposit queue. This
-    /// prevents the zone from committing to blocks that could be reorged away
-    /// by Commonware consensus, which can have >1 notarized-but-not-finalized
-    /// block at a time.
+    /// subscriber listens to L1 finalization events via the
+    /// `consensus_subscribe` RPC and flushes all buffered blocks at or below
+    /// the finalized height to the deposit queue. This prevents the zone from
+    /// committing to blocks that could be reorged away by Commonware
+    /// consensus, which can have >1 notarized-but-not-finalized block at a
+    /// time.
     ///
     /// Callers should retry on error (see [`Self::spawn`]).
     pub async fn run(mut self) -> eyre::Result<()> {
@@ -511,15 +514,22 @@ impl L1Subscriber {
         info!(portal = %self.config.portal_address, "Listening for L1 blocks");
         let mut stream = self.l1_block_stream(&provider).await?;
 
-        // Finalization buffer: holds live blocks that have not yet been
-        // finalized on L1. Blocks are flushed to the deposit queue once the
-        // L1 finalized block number reaches or exceeds their height.
-        let mut live_buffer: Vec<BufferedLiveBlock> = Vec::new();
+        // Subscribe to L1 consensus events for finalization notifications.
+        let ws_url = self.consensus_ws_url()?;
+        let ws_client = WsClientBuilder::default()
+            .build(&ws_url)
+            .await
+            .map_err(|e| eyre::eyre!("Failed to connect consensus WS at {ws_url}: {e}"))?;
+        let mut consensus_sub = ws_client
+            .subscribe_events()
+            .await
+            .map_err(|e| eyre::eyre!("Failed to subscribe to consensus events: {e}"))?;
+        info!("Subscribed to L1 consensus events for finalization");
 
-        // Poll finalization on a timer so we flush even when no new blocks
-        // arrive (e.g. finalization advancing without new views).
-        let mut finalization_poll = tokio::time::interval(std::time::Duration::from_millis(500));
-        finalization_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        // Finalization buffer: holds live blocks that have not yet been
+        // finalized on L1. Blocks are flushed to the deposit queue once an
+        // L1 finalization event reaches or exceeds their height.
+        let mut live_buffer: Vec<BufferedLiveBlock> = Vec::new();
 
         loop {
             tokio::select! {
@@ -559,7 +569,7 @@ impl L1Subscriber {
                         } else if block_number > tail_number + 1 {
                             // Gap in the live stream — drop the entire buffer.
                             // Finalized blocks will be recovered via backfill on
-                            // the next finalization poll.
+                            // the next finalization event.
                             warn!(
                                 tail_number,
                                 new_block = block_number,
@@ -581,17 +591,18 @@ impl L1Subscriber {
                     self.subscriber_metrics
                         .live_buffer_size
                         .set(live_buffer.len() as f64);
-
-                    // Opportunistically flush finalized blocks.
-                    if let Err(e) = self.flush_finalized(&provider, &mut live_buffer).await {
-                        warn!(error = %e, "Failed to query L1 finalized block");
-                    }
                 }
-                _ = finalization_poll.tick() => {
-                    if !live_buffer.is_empty()
-                        && let Err(e) = self.flush_finalized(&provider, &mut live_buffer).await
-                    {
-                        warn!(error = %e, "Failed to query L1 finalized block (timer)");
+                event = consensus_sub.next() => {
+                    let Some(event) = event else {
+                        eyre::bail!("Consensus event subscription ended");
+                    };
+                    let event = event.map_err(|e| eyre::eyre!("Consensus subscription error: {e}"))?;
+                    if let ConsensusEvent::Finalized { block, .. } = event {
+                        let finalized_number = block.block.inner.number;
+                        self.subscriber_metrics
+                            .latest_l1_finalized_block
+                            .set(finalized_number as f64);
+                        self.flush_finalized(&provider, &mut live_buffer, finalized_number).await?;
                     }
                 }
             }
@@ -601,21 +612,34 @@ impl L1Subscriber {
         Ok(())
     }
 
-    /// Flush all buffered live blocks that are at or below the current L1
+    /// Derive the WebSocket URL for the consensus RPC from the configured
+    /// L1 RPC URL. Replaces the scheme with `ws://` or `wss://` as needed.
+    fn consensus_ws_url(&self) -> eyre::Result<String> {
+        let url: url::Url = self.config.l1_rpc_url.parse()?;
+        let ws_scheme = match url.scheme() {
+            "ws" | "wss" => url.scheme().to_owned(),
+            "http" => "ws".to_owned(),
+            "https" => "wss".to_owned(),
+            other => eyre::bail!("Unsupported L1 RPC scheme: {other}"),
+        };
+        let mut ws_url = url;
+        ws_url
+            .set_scheme(&ws_scheme)
+            .map_err(|_| eyre::eyre!("Failed to set WS scheme"))?;
+        Ok(ws_url.to_string())
+    }
+
+    /// Flush all buffered live blocks that are at or below the given
     /// finalized block number.
     async fn flush_finalized(
         &mut self,
         l1_provider: &DynProvider<TempoNetwork>,
         live_buffer: &mut Vec<BufferedLiveBlock>,
+        finalized_number: u64,
     ) -> eyre::Result<()> {
-        let finalized = Self::query_finalized_block_number(l1_provider).await?;
-        self.subscriber_metrics
-            .latest_l1_finalized_block
-            .set(finalized as f64);
-
         let flush_count = live_buffer
             .iter()
-            .take_while(|b| b.header.number() <= finalized)
+            .take_while(|b| b.header.number() <= finalized_number)
             .count();
 
         if flush_count == 0 {
