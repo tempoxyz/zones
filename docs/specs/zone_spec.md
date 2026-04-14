@@ -1004,7 +1004,9 @@ pub struct L1StateRead {
 
 `ZoneStateWitness` uses conventional per-object Merkle Patricia Trie proofs. `accounts` maps each zone account touched during the batch to an `AccountWitness`. Within an `AccountWitness`, `account_proof` is the ordered list of RLP-encoded trie nodes needed to prove that account's existence (or emptiness) against the `ZoneStateWitness.state_root`. `storage_proofs` applies the same idea one level deeper: for each accessed storage slot, the witness includes the ordered list of RLP-encoded storage-trie nodes proving that slot's value under the account's storage root. In other words, `HashMap<U256, Vec<Vec<u8>>>` means "for each storage slot, give me the sequence of trie nodes needed to prove that slot."
 
-To verify a `ZoneStateWitness`, the prover first checks that the initial execution state root matches `ZoneStateWitness.state_root` and is consistent with `prev_block_header.state_root`. Then, whenever execution touches an account, it replays `account_proof` from the state root using `keccak256(address)` as the trie key, decodes the resulting account leaf, and checks that the decoded nonce, balance, code hash, and storage root agree with the fields in `AccountWitness`. Whenever execution touches a storage slot, it starts from that decoded storage root and replays the corresponding `storage_proofs[slot]` using `keccak256(slot)` as the storage-trie key, checking that the terminal leaf matches `storage[slot]`. Missing account or storage proofs are errors; they must not silently default to zero.
+All of these proofs are relative to the initial zone state at the start of the batch, not to the later mutated state after some zone blocks have already executed. `ZoneStateWitness` is therefore a bootstrap witness: it proves the starting contents of the accounts and storage slots that execution may touch, and the prover materializes that verified data into its in-memory execution state before replaying any blocks.
+
+To verify a `ZoneStateWitness`, the prover first checks that the initial execution state root matches `ZoneStateWitness.state_root` and is consistent with `prev_block_header.state_root`. It then replays each `account_proof` from the state root using `keccak256(address)` as the trie key, decodes the resulting account leaf, and checks that the decoded nonce, balance, code hash, and storage root agree with the fields in `AccountWitness`. For each witnessed storage slot, it starts from that decoded storage root and replays the corresponding `storage_proofs[slot]` using `keccak256(slot)` as the storage-trie key, checking that the terminal leaf matches `storage[slot]`. Once this initialization step succeeds, block execution reads and writes the materialized account / storage values directly; it does not re-verify Merkle proofs on every in-block access. Missing account or storage proofs are errors; they must not silently default to zero.
 
 ### Batch Output
 
@@ -1019,7 +1021,7 @@ The state transition function produces:
 
 ### Block Execution
 
-For each block in the batch, the prover:
+After the initial `ZoneStateWitness` has been verified and loaded into the execution state, the prover executes each block in the batch:
 
 1. Validates `parent_hash` matches the previous block's hash, `number` increments by one, `timestamp` is non-decreasing, and `beneficiary` equals the registered sequencer.
 2. Executes `advanceTempo` if present (start of block): finalizes the Tempo header, processes deposits, verifies encrypted deposit decryptions.
