@@ -1,9 +1,8 @@
-<!-- TODO: add logo -->
-<!-- <p align="center"><a href="https://tempo.xyz/zones"><img src="assets/logo.png" alt="Tempo Zones" width="400"></a></p> -->
-
-<h1 align="center">Tempo Zones</h1>
-
----
+<p align="center">
+  <a href="https://tempo.xyz/zones">
+    <img src="assets/header.svg" alt="Tempo Zones" width="100%">
+  </a>
+</p>
 
 Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo), with native support for confidential balances and transactions. Zones inherit compliance from Tempo L1 and support interoperability with Tempo for moving assets in and out of zones.
 
