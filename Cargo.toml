@@ -138,7 +138,7 @@ revm = { version = "36.0.0", features = ["optional_fee_charge"] }
 alloy = { version = "1.6.1", default-features = false }
 alloy-consensus = { version = "1.6.1", default-features = false }
 alloy-contract = { version = "1.6.1", default-features = false }
-alloy-eips = { version = "1.6.1", default-features = false }
+alloy-eips = { version = "1.8.3", default-features = false }
 alloy-evm = "0.29.2"
 alloy-network = { version = "1.6.1", default-features = false }
 alloy-primitives = { version = "1.5.7", default-features = false }
