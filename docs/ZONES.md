@@ -489,8 +489,8 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | TipFeeManager | `0xfeec…0000` | **Present** — the precompile is still registered, but its liquidity pools are not used by transactions. The zone executor overrides `validatorTokens` to match each transaction's fee token, so the FeeAMM swap path is bypassed and fees are collected directly in the user's token. |
 | StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge. |
 | NonceManager | `0x4E4F…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
-| ValidatorConfig (legacy) | `0xCCCC…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
-| ValidatorConfigV2 | `0xCCCC…0001` | **Unchanged** — same implementation as L1, runs locally on zone state. |
+| ValidatorConfig (legacy) | `0xCCCC…0000` | **Not registered** — zones do not run validators, so the precompile is not loaded. |
+| ValidatorConfigV2 | `0xCCCC…0001` | **Not registered** — zones do not run validators, so the precompile is not loaded. |
 | AccountKeychain | `0xAAAA…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
 | AddressRegistry | `0xFDC0…0000` | **Not registered** — the address has no zone precompile implementation. |
 | SignatureVerifier | `0x5165…0000` | **Not registered** — the address has no zone precompile implementation. |
@@ -500,7 +500,7 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | Precompile | Address | Description |
 |------------|---------|-------------|
 | TempoStateReader | `0x1c00…0004` | Reads L1 contract storage from zone contracts via the L1 state cache. |
-| ZoneTxContext | `0x1c00…0005` | Provides zone-specific transaction context (e.g. the current L1 block). |
+| ZoneTxContext | `0x1c00…0005` | Exposes the hash of the currently executing zone transaction (`currentTxHash`), used by ZoneOutbox for authenticated withdrawals. |
 | ChaumPedersenVerify | `0x1c00…0100` | Verifies DLOG equality proofs for ECDH key exchange (encrypted deposits). |
 | AesGcmDecrypt | `0x1c00…0101` | AES-256-GCM authenticated decryption (encrypted deposit payloads). |
 
