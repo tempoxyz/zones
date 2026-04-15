@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://tempo.xyz/zones">
-    <img src="assets/header.svg" alt="Tempo Zones" width="100%">
+    <img src="assets/header.png" alt="Tempo Zones" width="100%">
   </a>
 </p>
 
