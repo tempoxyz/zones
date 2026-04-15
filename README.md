@@ -35,7 +35,7 @@ You can get started today by [deploying a zone](#getting-started) on Tempo testn
 Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/getting-started/installation), [`just`](https://github.com/casey/just#packages), [`jq`](https://jqlang.github.io/jq/download/)
 
 
-## Deploying a Zone
+### Deploying a Zone
 
 ```bash
 # Deploy and start a zone on Moderato testnet
@@ -50,7 +50,7 @@ The `deploy-zone` command generates a sequencer keypair, funds it on L1, deploys
 just zone-up my-zone
 ```
 
-## Depositing into a Zone
+### Depositing into a Zone
 
 ```bash
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
@@ -67,7 +67,7 @@ just send-deposit-encrypted 1000000                       # to your own address
 just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
 ```
 
-## Withdrawing from Zone to Tempo
+### Withdrawing from Zone to Tempo
 
 ```bash
 
@@ -79,7 +79,7 @@ just send-withdrawal 1000000 <recipient-address>  # withdraw to a specific addre
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
 
 
-## Querying the Private RPC
+### Querying the Private RPC
 
 Zone balances are private by default. Every RPC request must include a signed authorization token that proves you control the querying account.
 
@@ -98,6 +98,7 @@ just check-balance-private my-zone <token-address>
 
 See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command references.
 
+<br> 
 
 ## License
 
