@@ -2,6 +2,8 @@
 > This repository is actively under development and subject to rapid iteration.
 > APIs, interfaces, and behavior may change without notice. Not recommended for production use yet.
 
+<br>
+
 <p align="center">
   <a href="https://tempo.xyz/zones">
     <img src="assets/header.png" alt="Tempo Zones" width="100%">
@@ -12,6 +14,7 @@ Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/te
 
 You can get started today by [deploying a zone](#getting-started) on Tempo testnet, reading the [full zone documentation](docs/ZONES.md), or exploring the [Zone specs](https://docs.tempo.xyz/protocol).
 
+<br>
 
 ## What Makes Zones Interesting
 
