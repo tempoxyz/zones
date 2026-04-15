@@ -4,7 +4,7 @@
   </a>
 </p>
 
-> [!NOTE]
+> [!WARNING]
 > This repository is actively under development and subject to rapid iteration.
 > APIs, interfaces, and behavior may change without notice. Not recommended for production use yet.
 
