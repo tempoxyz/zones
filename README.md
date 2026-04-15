@@ -28,6 +28,7 @@ You can get started today by [deploying a zone](#getting-started) on Tempo testn
 
 - **Fast withdrawals.** The zone processes transactions every 250ms and submits batches of withdrawals to Tempo, where blocks are produced every ~500ms. Once batches are accepted and the attached proof is validated, withdrawals are processed and funds are released from escrow.
 
+<br>
 
 ## Getting Started
 
