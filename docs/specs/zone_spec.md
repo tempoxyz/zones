@@ -1058,6 +1058,34 @@ interface IZoneFactory {
 
 ```solidity
 interface IZonePortal {
+    // Events
+    event DepositMade(
+        bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
+        address token, address to, uint128 netAmount, uint128 fee, bytes32 memo
+    );
+    event EncryptedDepositMade(
+        bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
+        address token, uint128 netAmount, uint128 fee, uint256 keyIndex,
+        bytes32 ephemeralPubkeyX, uint8 ephemeralPubkeyYParity,
+        bytes ciphertext, bytes12 nonce, bytes16 tag
+    );
+    event BatchSubmitted(
+        uint64 indexed withdrawalBatchIndex, bytes32 nextProcessedDepositQueueHash,
+        bytes32 nextBlockHash, bytes32 withdrawalQueueHash
+    );
+    event WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess);
+    event BounceBack(
+        bytes32 indexed newCurrentDepositQueueHash, address indexed fallbackRecipient,
+        address token, uint128 amount
+    );
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
+    event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+    event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
+    event ZoneGasRateUpdated(uint128 zoneGasRate);
+    event TokenEnabled(address indexed token, string name, string symbol, string currency);
+    event DepositsPaused(address indexed token);
+    event DepositsResumed(address indexed token);
+
     // Token management
     function enableToken(address token) external;
     function pauseDeposits(address token) external;
@@ -1134,6 +1162,8 @@ Address: `0x1c00000000000000000000000000000000000000`
 
 ```solidity
 interface ITempoState {
+    event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
+
     function tempoBlockHash() external view returns (bytes32);
     function tempoBlockNumber() external view returns (uint64);
     function tempoStateRoot() external view returns (bytes32);
@@ -1151,6 +1181,23 @@ Address: `0x1c00000000000000000000000000000000000001`
 
 ```solidity
 interface IZoneInbox {
+    event TempoAdvanced(
+        bytes32 indexed tempoBlockHash, uint64 indexed tempoBlockNumber,
+        uint256 depositsProcessed, bytes32 newProcessedDepositQueueHash
+    );
+    event DepositProcessed(
+        bytes32 indexed depositHash, address indexed sender, address indexed to,
+        address token, uint128 amount, bytes32 memo
+    );
+    event EncryptedDepositProcessed(
+        bytes32 indexed depositHash, address indexed sender, address indexed to,
+        address token, uint128 amount, bytes32 memo
+    );
+    event EncryptedDepositFailed(
+        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
+    );
+    event TokenEnabled(address indexed token, string name, string symbol, string currency);
+
     function processedDepositQueueHash() external view returns (bytes32);
     function advanceTempo(
         bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions,
@@ -1167,6 +1214,15 @@ Address: `0x1c00000000000000000000000000000000000002`
 
 ```solidity
 interface IZoneOutbox {
+    event WithdrawalRequested(
+        uint64 indexed withdrawalIndex, address indexed sender, address token, address to,
+        uint128 amount, uint128 fee, bytes32 memo, uint64 gasLimit,
+        address fallbackRecipient, bytes data, bytes revealTo
+    );
+    event TempoGasRateUpdated(uint128 tempoGasRate);
+    event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
+    event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
+
     function tempoGasRate() external view returns (uint128);
     function lastBatch() external view returns (LastBatch memory);
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
