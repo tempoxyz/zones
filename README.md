@@ -13,7 +13,7 @@
 > This repository is actively under development and subject to rapid iteration.
 > APIs, interfaces, and behavior may change without notice. Not recommended for production use yet.
 
-Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo), with native support for confidential balances and transactions. Zones inherit compliance from Tempo L1 and support interoperability with Tempo for moving assets in and out of zones.
+Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo) *(currently available in testnet only),* with native support for confidential balances and transactions. Zones inherit compliance via TIP403 policies from Tempo and support interoperability with Tempo for moving assets in and out of zones.
 
 You can get started today by [deploying a zone](#getting-started) on Tempo testnet, reading the [full zone documentation](docs/ZONES.md), or exploring the [Zone spec](docs/specs/zone_spec.md).
 
@@ -23,11 +23,11 @@ You can get started today by [deploying a zone](#getting-started) on Tempo testn
 
 - **Private balances and transactions.** State access requires account authentication at the RPC layer. This ensures that only the authorized account holder can access balances and transaction history. The zone operator maintains full visibility into state for compliance.
 
-- **Encrypted deposits and withdrawals.** When depositing into a zone, users can encrypt the recipient to not reveal who receives funds inside the zone. Encrypted withdrawals are also possible, allowing the sender to be replaced with a commitment, preserving recipient verifiability without exposing the sender when withdrawing to Tempo.
+- **Encrypted deposits and withdrawals.** When depositing into a zone, users can encrypt the recipient to not reveal who receives funds inside the zone. Encrypted withdrawals are also possible, allowing the sender to be replaced with a commitment, preserving recipient verifiability without exposing the sender when withdrawing to Tempo mainnet.
 
 - **Zone to zone transfers.** Zones interoperate with Tempo via withdrawals with optional calldata. Withdrawal calldata can execute on Tempo and deposit into another zone, enabling flows like zone to zone transfers or executing a swap between sending amounts to another zone.
 
-- **Compliance inherited from Tempo.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist) are mirrored from Tempo and enforced on zones. Issuers set the policy once on Tempo and the zone picks it up automatically. If an issuer freezes an address or updates a blacklist on Tempo, the zone inherits the change in the next block.
+- **Compliance inherited from Tempo.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist) are mirrored from Tempo and enforced on zones. Issuers set the policy once on Tempo and the zone picks it up automatically. If an issuer freezes an address or updates a blacklist on Tempo, the zone inherits the change in the next block in the zone.
 
 - **Fast withdrawals.** The zone processes transactions every 250ms and submits batches of withdrawals to Tempo, where blocks are produced every ~500ms. Once batches are accepted and the attached proof is validated, withdrawals are processed and funds are released from escrow.
 
