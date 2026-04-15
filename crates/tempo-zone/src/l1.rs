@@ -1196,7 +1196,7 @@ impl L1BlockDeposits {
                         // Check TIP-403 policy via the provider (cache-first, RPC fallback).
                         // Errors are propagated so the engine retries rather than allowing
                         // unauthorized deposits through.
-                        let authorized = policy_provider
+                        let recipient_authorized = policy_provider
                             .is_authorized_async(
                                 d.token,
                                 dec.to,
@@ -1205,7 +1205,7 @@ impl L1BlockDeposits {
                             )
                             .await?;
 
-                        let recipient = if authorized {
+                        let recipient = if recipient_authorized {
                             debug!(
                                 target: "zone::engine",
                                 recipient = %dec.to,
@@ -1214,12 +1214,38 @@ impl L1BlockDeposits {
                             );
                             dec.to
                         } else {
+                            // Best-effort check whether the sender is also
+                            // blocked. The zone precompile skips TIP-403 on
+                            // deposit mints so this won't cause a lockup; we
+                            // only log it for observability.
+                            let sender_blocked = match policy_provider
+                                .is_authorized_async(
+                                    d.token,
+                                    d.sender,
+                                    l1_block_number,
+                                    crate::l1_state::AuthRole::MintRecipient,
+                                )
+                                .await
+                            {
+                                Ok(authorized) => !authorized,
+                                Err(error) => {
+                                    warn!(
+                                        target: "zone::engine",
+                                        sender = %d.sender,
+                                        %error,
+                                        "Failed to check sender TIP-403 status, continuing"
+                                    );
+                                    false
+                                }
+                            };
+
                             warn!(
                                 target: "zone::engine",
                                 sender = %d.sender,
                                 recipient = %dec.to,
                                 token = %d.token,
                                 amount = %d.amount,
+                                sender_blocked,
                                 "Encrypted deposit recipient unauthorized, redirecting to sender"
                             );
                             d.sender
