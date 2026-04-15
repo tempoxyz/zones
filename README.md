@@ -1,6 +1,3 @@
-> [!NOTE]
-> This repository is actively under development and subject to rapid iteration.
-> APIs, interfaces, and behavior may change without notice. Not recommended for production use yet.
 
 <br>
 
@@ -9,6 +6,12 @@
     <img src="assets/header.png" alt="Tempo Zones" width="100%">
   </a>
 </p>
+
+# Zones
+
+> [!NOTE]
+> This repository is actively under development and subject to rapid iteration.
+> APIs, interfaces, and behavior may change without notice. Not recommended for production use yet.
 
 Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo), with native support for confidential balances and transactions. Zones inherit compliance from Tempo L1 and support interoperability with Tempo for moving assets in and out of zones.
 
