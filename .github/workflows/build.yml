@@ -12,6 +12,9 @@ on:
           - "maxperf"
           - "profiling"
 
+permissions:
+  contents: read
+
 concurrency:
   group: build-${{ github.head_ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -30,6 +33,8 @@ jobs:
         binary: [tempo, tempo-bench, tempo-sidecar]
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@5d458579430fc14a04a08a1e7d3694f545e91ce6 # stable
       - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
