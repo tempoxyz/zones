@@ -15,7 +15,7 @@
 
 Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo) *(currently available in testnet only),* with native support for confidential balances and transactions. Zones inherit compliance via TIP403 policies from Tempo and support interoperability with Tempo for moving assets in and out of zones.
 
-You can get started today by [deploying a zone](#getting-started) on Tempo testnet, reading the [full zone documentation](docs/ZONES.md), or exploring the [Zone spec](docs/specs/zone_spec.md).
+You can get started today by [deploying a zone](#getting-started) on Tempo testnet, reading the [full zone documentation](https://tempo.xyz/blog/introducing-tempo-zones), or exploring the [Zone spec](docs/specs/zone_spec.md).
 
 <br>
 
