@@ -657,6 +657,8 @@ where
         // this store is effectively a noop
         let blob_store = InMemoryBlobStore::default();
         let tempo_evm_config = TempoEvmConfig::new(ctx.chain_spec());
+        let additional_tasks = ctx.config().txpool.additional_validation_tasks;
+        let task_executor = ctx.task_executor().clone();
         let mut validator = TransactionValidationTaskExecutor::eth_builder(
             ctx.provider().clone(),
             tempo_evm_config,
@@ -668,25 +670,22 @@ where
         .set_block_gas_limit(ctx.chain_spec().inner.genesis().gas_limit)
         .disable_balance_check()
         .with_minimum_priority_fee(ctx.config().txpool.minimum_priority_fee)
-        .with_additional_tasks(ctx.config().txpool.additional_validation_tasks)
         .with_custom_tx_type(TempoTxType::AA as u8)
         .no_eip4844()
-        .build_with_tasks::<TempoPooledTransaction, _>(
-            ctx.task_executor().clone(),
-            blob_store.clone(),
-        );
+        .build::<TempoPooledTransaction, _>(blob_store.clone());
 
-        Arc::get_mut(&mut validator.validator)
-            .expect("still unique")
-            .set_additional_stateless_validation(|_origin, tx| {
-                use alloy_consensus::Transaction;
-                if tx.is_create() {
-                    return Err(InvalidPoolTransactionError::Consensus(
-                        reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
-                    ));
-                }
-                Ok(())
-            });
+        validator.set_additional_stateless_validation(|_origin, tx| {
+            use alloy_consensus::Transaction;
+            if tx.is_create() {
+                return Err(InvalidPoolTransactionError::Consensus(
+                    reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                ));
+            }
+            Ok(())
+        });
+
+        let validator =
+            TransactionValidationTaskExecutor::spawn(validator, &task_executor, additional_tasks);
 
         let aa_2d_config = AA2dPoolConfig {
             price_bump_config: pool_config.price_bumps,

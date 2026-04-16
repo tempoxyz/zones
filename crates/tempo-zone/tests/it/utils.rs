@@ -2766,6 +2766,7 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
         retry_connection_interval: Duration::from_millis(100),
         zone_id: 0,
         chain_id,
+        max_auth_token_validity: zone::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
         zone_portal: Address::ZERO,
         sequencer: sequencer_address,
     };
@@ -2831,6 +2832,7 @@ async fn start_zone_with_private_rpc_l1_inner(
         retry_connection_interval: Duration::from_millis(100),
         zone_id: 1,
         chain_id,
+        max_auth_token_validity: zone::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
         zone_portal: portal_address,
         sequencer: l1.dev_address(),
     };

@@ -4,8 +4,17 @@
 //! [`TempoStateReader`](crate::l1_state::TempoStateReader) precompile at
 //! [`TEMPO_STATE_READER_ADDRESS`](crate::abi::TEMPO_STATE_READER_ADDRESS).
 
-use std::sync::Arc;
-
+use crate::{
+    abi::{TEMPO_STATE_READER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS},
+    executor::ZoneBlockExecutor,
+    l1_state::{L1StateProvider, PolicyProvider, SharedL1StateCache, TempoStateReader},
+    precompiles::{
+        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
+        ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
+        ZoneTip403ProxyRegistry, ZoneTokenFactory,
+    },
+    tx_context::ZoneTxContext,
+};
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
     block::{BlockExecutorFactory, BlockExecutorFor},
@@ -19,6 +28,7 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
+use std::sync::Arc;
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::TempoChainSpec;
 use tempo_evm::{
@@ -27,20 +37,12 @@ use tempo_evm::{
     evm::{TempoEvm, TempoEvmFactory},
 };
 use tempo_payload_types::TempoExecutionData;
-use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
-
-use crate::executor::ZoneBlockExecutor;
-
-use crate::{
-    abi::{TEMPO_STATE_READER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS},
-    l1_state::{L1StateProvider, PolicyProvider, SharedL1StateCache, TempoStateReader},
-    precompiles::{
-        AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
-        ZoneTip403ProxyRegistry, ZoneTokenFactory,
-    },
-    tx_context::ZoneTxContext,
+use tempo_precompiles::{
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
+    TIP_FEE_MANAGER_ADDRESS, account_keychain::AccountKeychain, nonce::NonceManager,
+    tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
 };
+use tempo_primitives::{Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
@@ -103,21 +105,12 @@ impl ZoneEvmFactory {
         // one, it still applies privacy, fixed-gas, and bridge-auth rules.
         //
         // This replaces the upstream `extend_tempo_precompiles` lookup, so we
-        // must also handle the non-TIP-20 Tempo precompiles that are only
-        // registered via that lookup (FeeManager, StablecoinDEX, etc.).
+        // must also handle the non-TIP-20 Tempo precompiles that are zone-relevant
+        // (FeeManager, NonceManager, AccountKeychain).
         // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
         // static map via `apply_precompile` and take priority over this.
         let zone_cfg = cfg.clone();
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
-            use tempo_precompiles::{
-                ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
-                TIP_FEE_MANAGER_ADDRESS, VALIDATOR_CONFIG_ADDRESS, VALIDATOR_CONFIG_V2_ADDRESS,
-                account_keychain::AccountKeychain, nonce::NonceManager,
-                stablecoin_dex::StablecoinDEX, tip_fee_manager::TipFeeManager,
-                tip20::is_tip20_prefix, validator_config::ValidatorConfig,
-                validator_config_v2::ValidatorConfigV2,
-            };
-
             if is_tip20_prefix(*address) {
                 Some(ZoneTip20Token::create(
                     *address,
@@ -128,15 +121,11 @@ impl ZoneEvmFactory {
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
                 Some(TipFeeManager::create_precompile(&zone_cfg))
             } else if *address == STABLECOIN_DEX_ADDRESS {
-                Some(StablecoinDEX::create_precompile(&zone_cfg))
+                None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
                 Some(NonceManager::create_precompile(&zone_cfg))
-            } else if *address == VALIDATOR_CONFIG_ADDRESS {
-                Some(ValidatorConfig::create_precompile(&zone_cfg))
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
                 Some(AccountKeychain::create_precompile(&zone_cfg))
-            } else if *address == VALIDATOR_CONFIG_V2_ADDRESS {
-                Some(ValidatorConfigV2::create_precompile(&zone_cfg))
             } else {
                 None
             }

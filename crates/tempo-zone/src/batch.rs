@@ -57,6 +57,12 @@ const EIP2935_EFFECTIVE_WINDOW: u64 = EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MA
 /// Maximum number of pending withdrawal queue slots in the portal ring buffer.
 const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
 
+/// Maximum zone-block span for a single `eth_getLogs` request during catch-up.
+///
+/// Large backlog scans can exceed the zone node's RPC response size limit if we
+/// query the entire unsent range in one request.
+pub(crate) const LOG_QUERY_BLOCK_CHUNK: u64 = 5_000;
+
 /// Data required to submit a single batch to the ZonePortal on L1.
 ///
 /// Produced by the zone block builder and sent to [`BatchSubmitter`] via channel.
@@ -806,6 +812,9 @@ pub(crate) async fn fetch_slot_withdrawals(
         .WithdrawalRequested_filter()
         .from_block(from)
         .to_block(to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .concurrent(2)
         .query()
         .await?
         .into_iter()
@@ -827,6 +836,9 @@ pub(crate) async fn fetch_slot_withdrawals(
         .BatchFinalized_filter()
         .from_block(from)
         .to_block(to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .concurrent(2)
         .query()
         .await?
         .into_iter()
@@ -911,6 +923,20 @@ pub(crate) async fn fetch_slot_withdrawals(
     }
 
     Ok(withdrawals)
+}
+
+/// Lazily split an inclusive block range into bounded query windows.
+pub(crate) fn log_query_ranges(from: u64, to: u64) -> impl Iterator<Item = (u64, u64)> {
+    std::iter::successors(Some(from), move |&start| {
+        let end = start.saturating_add(LOG_QUERY_BLOCK_CHUNK - 1).min(to);
+        if end >= to { None } else { end.checked_add(1) }
+    })
+    .map(move |start| {
+        (
+            start,
+            start.saturating_add(LOG_QUERY_BLOCK_CHUNK - 1).min(to),
+        )
+    })
 }
 
 /// Classification of the EIP-2935 gap, returned by
@@ -1058,6 +1084,23 @@ mod tests {
         let withdrawals = vec![w0, w1, w2];
         let hash = abi::Withdrawal::queue_hash(&withdrawals[2..]);
         assert_eq!(find_processed_offset(&withdrawals, hash), Some(2));
+    }
+
+    #[test]
+    fn log_query_ranges_chunk_large_ranges() {
+        let end = 100 + (LOG_QUERY_BLOCK_CHUNK * 2) + 234;
+        let ranges: Vec<_> = log_query_ranges(100, end).collect();
+
+        assert_eq!(ranges.len(), 3);
+        assert_eq!(ranges[0], (100, 100 + LOG_QUERY_BLOCK_CHUNK - 1));
+        assert_eq!(
+            ranges[1],
+            (
+                100 + LOG_QUERY_BLOCK_CHUNK,
+                100 + (LOG_QUERY_BLOCK_CHUNK * 2) - 1
+            )
+        );
+        assert_eq!(ranges[2], (100 + (LOG_QUERY_BLOCK_CHUNK * 2), end));
     }
 
     fn test_batch_event(withdrawal_queue_hash: B256) -> abi::ZonePortal::BatchSubmitted {

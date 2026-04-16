@@ -27,8 +27,11 @@ pub(crate) struct WithdrawalProcessorMetrics {
     /// Number of withdrawals confirmed on L1.
     pub(crate) withdrawals_confirmed_total: Counter,
 
-    /// Number of withdrawals that failed to send or confirm.
+    /// Number of withdrawals that failed to send, confirm, or reverted after inclusion.
     pub(crate) withdrawals_failed_total: Counter,
+
+    /// Number of `processWithdrawal` transactions that were included on L1 but reverted.
+    pub(crate) withdrawals_reverted_total: Counter,
 
     /// Time spent processing a withdrawal queue slot.
     pub(crate) slot_processing_duration_seconds: Histogram,
@@ -111,4 +114,7 @@ pub(crate) struct ZoneMonitorMetrics {
 
     /// Number of times local monitor state was resynced from the portal.
     pub resync_from_portal_total: Counter,
+
+    /// Failed attempts to rebuild the in-memory withdrawal store from chain state.
+    pub withdrawal_store_restore_failure_total: Counter,
 }

@@ -13,7 +13,6 @@ workspace = true
 [dependencies]
 # tempo
 tempo-chainspec.workspace = true
-tempo-consensus.workspace = true
 tempo-evm = { workspace = true, features = ["rpc", "engine"] }
 tempo-revm.workspace = true
 tempo-node.workspace = true
