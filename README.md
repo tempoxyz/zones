@@ -2,7 +2,7 @@
 <br>
 
 <p align="center">
-  <a href="https://tempo.xyz/zones">
+  <a href="https://tempo.xyz/blog/introducing-tempo-zones">
     <img src="assets/header.png" alt="Tempo Zones" width="100%">
   </a>
 </p>
