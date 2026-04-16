@@ -2,7 +2,7 @@
 <br>
 
 <p align="center">
-  <a href="https://tempo.xyz/zones">
+  <a href="https://docs.tempo.xyz/guide/private-zones">
     <img src="assets/header.png" alt="Tempo Zones" width="100%">
   </a>
 </p>
