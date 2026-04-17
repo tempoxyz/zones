@@ -114,6 +114,12 @@ struct ZoneArgs {
         default_value_t = 8544
     )]
     pub private_rpc_port: u16,
+
+    /// Optional HTTP URL for the prover `/prove-batch` endpoint.
+    ///
+    /// When unset, the sequencer uses the mock prover.
+    #[arg(long = "prover.url", env = "PROVER_URL")]
+    pub prover_url: Option<String>,
 }
 
 fn prepend_log_filter(filter: &mut String, directives: &str) {
@@ -253,6 +259,7 @@ fn main() {
                 zone_rpc_url,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
+                prover_url: args.prover_url,
             };
 
             let seq_handle = zone::spawn_zone_sequencer(sequencer_config, sequencer_signer).await;

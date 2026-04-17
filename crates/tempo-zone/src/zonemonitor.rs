@@ -40,6 +40,7 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
     batch::{AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_slot_withdrawals},
+    prover::Prover,
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -129,6 +130,7 @@ impl ZoneMonitor {
     pub async fn new(
         config: ZoneMonitorConfig,
         l1_provider: DynProvider<TempoNetwork>,
+        prover: Arc<dyn Prover>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
     ) -> Result<Self> {
@@ -154,6 +156,7 @@ impl ZoneMonitor {
             config,
             provider,
             l1_provider,
+            prover,
             withdrawal_store,
             withdrawal_notify,
         )
@@ -164,6 +167,7 @@ impl ZoneMonitor {
         config: ZoneMonitorConfig,
         provider: DynProvider<TempoNetwork>,
         l1_provider: DynProvider<TempoNetwork>,
+        prover: Arc<dyn Prover>,
         withdrawal_store: SharedWithdrawalStore,
         withdrawal_notify: Arc<Notify>,
     ) -> Result<Self> {
@@ -183,6 +187,7 @@ impl ZoneMonitor {
             config.portal_address,
             l1_provider,
             genesis_tempo_block_number,
+            prover,
         );
 
         let (prev_zone_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
@@ -796,6 +801,7 @@ impl ZoneMonitor {
 pub fn spawn_zone_monitor(
     config: ZoneMonitorConfig,
     l1_provider: DynProvider<TempoNetwork>,
+    prover: Arc<dyn Prover>,
     withdrawal_store: SharedWithdrawalStore,
     withdrawal_notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
@@ -804,6 +810,7 @@ pub fn spawn_zone_monitor(
             match ZoneMonitor::new(
                 config.clone(),
                 l1_provider.clone(),
+                prover.clone(),
                 withdrawal_store.clone(),
                 withdrawal_notify.clone(),
             )
@@ -849,6 +856,8 @@ mod tests {
     use alloy_transport::mock::Asserter;
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::TempoHeader;
+
+    use crate::prover::MockProver;
 
     fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
@@ -904,7 +913,12 @@ mod tests {
             inbox: ZoneInbox::new(Address::repeat_byte(0x33), zone_provider.clone()),
             tempo_state: TempoState::new(Address::repeat_byte(0x44), zone_provider),
             withdrawal_store: SharedWithdrawalStore::new(),
-            batch_submitter: BatchSubmitter::new(portal_address, l1_provider, 0),
+            batch_submitter: BatchSubmitter::new(
+                portal_address,
+                l1_provider,
+                0,
+                Arc::new(MockProver),
+            ),
             withdrawal_notify: Arc::new(Notify::new()),
             last_submitted_zone_block: 10,
             prev_processed_deposit_hash: B256::repeat_byte(0xaa),
@@ -936,6 +950,7 @@ mod tests {
             config,
             mock_provider(zone.clone()),
             mock_provider(l1.clone()),
+            Arc::new(MockProver),
             SharedWithdrawalStore::new(),
             Arc::new(Notify::new()),
         )

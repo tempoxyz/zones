@@ -23,6 +23,7 @@ tempo-transaction-pool.workspace = true
 tempo-alloy.workspace = true
 tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
+aws-nitro-prover.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-rpc.workspace = true
@@ -77,6 +78,7 @@ eyre.workspace = true
 serde = { workspace = true, features = ["derive"] }
 futures.workspace = true
 parking_lot.workspace = true
+reqwest.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

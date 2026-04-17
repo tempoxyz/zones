@@ -20,6 +20,7 @@ mod node;
 pub mod nonce_keys;
 pub mod payload;
 pub mod precompiles;
+pub mod prover;
 pub mod rpc;
 mod tx_context;
 pub mod withdrawals;
@@ -34,6 +35,7 @@ pub use l1::{
 pub use l1_state::{PolicyProvider, SharedL1StateCache, SharedPolicyCache};
 pub use node::{ZoneExecutorBuilder, ZoneNode};
 pub use payload::{ZonePayloadAttributes, ZonePayloadTypes};
+pub use prover::{MockProver, NitroProver, ProveBatchRequest, ProveBatchResponse, Prover};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
 
@@ -45,6 +47,7 @@ use alloy_rpc_client::ConnectionConfig;
 use alloy_signer_local::PrivateKeySigner;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tokio::sync::Notify;
+use tracing::info;
 
 /// Configuration for all zone sequencer background tasks.
 #[derive(Debug, Clone)]
@@ -69,6 +72,10 @@ pub struct ZoneSequencerConfig {
     pub zone_poll_interval: Duration,
     /// Maximum time to accumulate zone blocks before submitting a batch to L1.
     pub batch_interval: Duration,
+    /// Optional HTTP URL for the prover `/prove-batch` endpoint.
+    ///
+    /// When unset, the sequencer uses [`MockProver`].
+    pub prover_url: Option<String>,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -89,9 +96,9 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 ///
 /// This is the top-level POC entrypoint that starts:
 /// - **Zone monitor** — polls the Zone L2 for new blocks, extracts withdrawal events into the
-///   shared store, builds [`BatchData`], and submits each batch **synchronously** to the
-///   ZonePortal on Tempo L1 (with empty proof bytes). Local state only advances on
-///   successful submission.
+///   shared store, builds [`BatchData`], obtains verifier payloads from the configured prover,
+///   and submits each batch **synchronously** to the ZonePortal on Tempo L1. Local state only
+///   advances on successful submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawal` for each pending withdrawal.
 ///
@@ -139,6 +146,18 @@ pub async fn spawn_zone_sequencer(
         batch_interval: config.batch_interval,
         portal_address: config.portal_address,
     };
+    let prover: Arc<dyn Prover> = match config.prover_url {
+        Some(prover_url) => {
+            info!(%prover_url, "Using Nitro prover");
+            Arc::new(NitroProver::new(
+                prover_url.parse().expect("valid prover URL"),
+            ))
+        }
+        None => {
+            info!("Using mock prover");
+            Arc::new(MockProver)
+        }
+    };
 
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
         withdrawal_config,
@@ -149,6 +168,7 @@ pub async fn spawn_zone_sequencer(
     let monitor_handle = spawn_zone_monitor(
         monitor_config,
         l1_provider,
+        prover,
         withdrawal_store,
         withdrawal_notify,
     );

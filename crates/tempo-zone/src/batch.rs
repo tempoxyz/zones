@@ -9,9 +9,9 @@
 //!
 //! # POC limitations
 //!
-//! Proof validation is currently **skipped**: both `verifierConfig` and `proof`
-//! are submitted as empty bytes. The L1 verifier contract must be configured to
-//! accept empty proofs for this to work.
+//! Proof generation is configurable per sequencer. The default development path
+//! uses a mock prover that returns empty `verifierConfig` and `proof` bytes,
+//! while Nitro deployments can forward batches to an external prover service.
 //!
 //! # Anchor modes
 //!
@@ -26,9 +26,12 @@
 //! [`EIP2935_HISTORY_WINDOW`] (e.g. due to timing) by falling back to ancestry
 //! mode — a recent anchor block plus a parent-hash header chain.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
-use crate::abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal};
+use crate::{
+    abi::{self, BlockTransition, DepositQueueTransition, ZoneOutbox, ZonePortal},
+    prover::{ProveBatchRequest, Prover},
+};
 use alloy_consensus::Transaction;
 use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256};
@@ -93,6 +96,8 @@ pub struct BatchSubmitter {
     /// The portal's `genesisTempoBlockNumber` — batches with a
     /// `tempo_block_number` below this value will be rejected on-chain.
     genesis_tempo_block_number: u64,
+    /// Prover used to produce verifier payloads for each batch.
+    prover: Arc<dyn Prover>,
     /// Concurrency for pipelined L1 header fetching in ancestry mode.
     l1_fetch_concurrency: usize,
 }
@@ -105,6 +110,7 @@ impl BatchSubmitter {
         portal_address: Address,
         l1_provider: DynProvider<TempoNetwork>,
         genesis_tempo_block_number: u64,
+        prover: Arc<dyn Prover>,
     ) -> Self {
         let portal = ZonePortal::new(portal_address, l1_provider.clone());
         Self {
@@ -112,6 +118,7 @@ impl BatchSubmitter {
             l1_provider,
             portal,
             genesis_tempo_block_number,
+            prover,
             l1_fetch_concurrency: 16,
         }
     }
@@ -130,9 +137,7 @@ impl BatchSubmitter {
     /// [`EIP2935_HISTORY_WINDOW`] — use [`classify_anchor_gap`](Self::classify_anchor_gap)
     /// first and split via stepping if the gap is too large.
     ///
-    /// `verifierConfig` and `proof` are set to empty bytes — the verifier
-    /// contract must be configured to accept empty proofs.
-    // TODO: pass real proof bytes once proof generation is implemented.
+    /// `verifierConfig` and `proof` are supplied by the configured prover.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
         tempo_block = batch.tempo_block_number,
@@ -165,6 +170,14 @@ impl BatchSubmitter {
 
         let anchor_mode = self.resolve_anchor_mode(batch.tempo_block_number).await?;
         let recent_tempo_block_number = anchor_mode.recent_block_number();
+        let prove_response = self
+            .prover
+            .prove_batch(ProveBatchRequest {
+                batch: batch.clone(),
+                recent_tempo_block_number,
+                ancestry_headers: anchor_mode.ancestry_headers(),
+            })
+            .await?;
         let (current_l1_block, portal_block_hash) = tokio::join!(
             self.l1_provider.get_block_number(),
             self.read_portal_block_hash(),
@@ -175,6 +188,8 @@ impl BatchSubmitter {
         info!(
             ?anchor_mode,
             recent_tempo_block_number,
+            verifier_config_len = prove_response.verifier_config.len(),
+            proof_len = prove_response.proof.len(),
             current_l1_block,
             portal_block_hash = %portal_block_hash,
             batch_prev_block_hash = %batch.prev_block_hash,
@@ -200,8 +215,8 @@ impl BatchSubmitter {
                 block_transition,
                 deposit_transition,
                 batch.withdrawal_queue_hash,
-                Bytes::new(),
-                Bytes::new(),
+                prove_response.verifier_config,
+                prove_response.proof,
             )
             .nonce_key(SUBMIT_BATCH_NONCE_KEY)
             .send()
@@ -929,8 +944,7 @@ pub(crate) enum AnchorGapKind {
 /// Stepping is handled at a higher level by [`AnchorGapKind`] — by the time
 /// `submit_batch` is called, the gap must already be within
 /// [`EIP2935_HISTORY_WINDOW`].
-#[derive(Debug)]
-#[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
+#[derive(Debug, Clone)]
 enum AnchorMode {
     /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
     /// reads its hash directly. No extra proof data required.
@@ -956,6 +970,16 @@ impl AnchorMode {
         match self {
             Self::Direct => 0,
             Self::Ancestry { anchor_block, .. } => *anchor_block,
+        }
+    }
+
+    /// Returns ancestry headers for prover consumption.
+    fn ancestry_headers(&self) -> Vec<Bytes> {
+        match self {
+            Self::Direct => Vec::new(),
+            Self::Ancestry {
+                ancestry_headers, ..
+            } => ancestry_headers.clone(),
         }
     }
 }

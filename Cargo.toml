@@ -7,6 +7,7 @@ publish = false
 
 [workspace]
 members = [
+  "bin/aws-nitro-prover",
   "bin/tempo-zone",
   "crates/precompiles",
   "crates/primitives",
@@ -97,6 +98,7 @@ tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "e331e2f488a368e
 tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "e331e2f488a368ea9ca76c422e12fedbfb6eb3b4", default-features = false }
 
 # zones
+aws-nitro-prover = { path = "bin/aws-nitro-prover" }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
 zone-rpc = { path = "crates/rpc" }
