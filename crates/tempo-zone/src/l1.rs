@@ -427,11 +427,14 @@ impl L1Subscriber {
             let (events, policy_events) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
-            self.apply_policy_events(block_number, &policy_events);
-
             let sealed = SealedHeader::seal_slow(header);
-            self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
-            self.apply_portal_state_events(block_number, &events);
+            self.apply_confirmed_block_state(
+                block_number,
+                sealed.hash(),
+                sealed.parent_hash(),
+                &events,
+                &policy_events,
+            );
             self.deposit_queue
                 .enqueue_sealed(sealed, events, policy_events);
             enqueued += 1;
@@ -516,14 +519,18 @@ impl L1Subscriber {
             // If we have a buffered tip, check if the new block confirms it.
             if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
                 if sealed.parent_hash() == tip_header.hash() {
-                    // Confirmed — apply policy events, update L1 state anchor,
-                    // and flush to the queue.
+                    // Confirmed — detect any parent-chain reorg before applying
+                    // the canonical block's state so a reset does not erase it.
                     let tip_number = tip_header.number();
                     let tip_hash = tip_header.hash();
                     let tip_parent = tip_header.parent_hash();
-                    self.apply_policy_events(tip_number, &tip_policy_events);
-                    self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
-                    self.apply_portal_state_events(tip_number, &tip_events);
+                    self.apply_confirmed_block_state(
+                        tip_number,
+                        tip_hash,
+                        tip_parent,
+                        &tip_events,
+                        &tip_policy_events,
+                    );
                     match self
                         .deposit_queue
                         .try_enqueue(tip_header, tip_events, tip_policy_events)
@@ -546,7 +553,8 @@ impl L1Subscriber {
                         }
                     }
                 } else {
-                    // Reorg — discard the buffered tip and clear L1 state cache.
+                    // Reorg — discard the buffered tip and clear both caches so
+                    // subsequent backfill replays canonical state.
                     self.subscriber_metrics.reorgs_detected.increment(1);
                     warn!(
                         discarded_block = tip_header.number(),
@@ -555,7 +563,7 @@ impl L1Subscriber {
                         new_parent = %sealed.parent_hash(),
                         "Discarding unconfirmed L1 block (reorg)"
                     );
-                    self.config.l1_state_cache.write().clear();
+                    self.clear_reorg_caches();
                 }
             }
 
@@ -665,9 +673,10 @@ impl L1Subscriber {
         }
     }
 
-    /// Write decoded policy events into the shared cache and advance its L1 block
-    /// cursor. The cursor is always updated — even for blocks with no policy events —
-    /// so that cache-miss fallback queries target the correct L1 height.
+    /// Write decoded policy events for a confirmed block into the shared cache.
+    ///
+    /// The engine remains the sole owner of `last_l1_block`; the subscriber only
+    /// materializes decoded policy changes here.
     fn apply_policy_events(&self, block_number: u64, policy_events: &[PolicyEvent]) {
         let mut cache = self.config.policy_cache.write();
         cache.apply_events(block_number, policy_events);
@@ -700,23 +709,55 @@ impl L1Subscriber {
         );
     }
 
+    /// Apply the state carried by a confirmed L1 block.
+    ///
+    /// Reorg detection runs before policy and portal events are written so a
+    /// cache reset cannot erase the canonical block we are about to ingest.
+    fn apply_confirmed_block_state(
+        &self,
+        block_number: u64,
+        hash: B256,
+        parent_hash: B256,
+        portal_events: &L1PortalEvents,
+        policy_events: &[PolicyEvent],
+    ) {
+        self.update_l1_state_anchor(block_number, hash, parent_hash);
+        self.apply_policy_events(block_number, policy_events);
+        self.apply_portal_state_events(block_number, portal_events);
+    }
+
+    fn clear_reorg_caches(&self) {
+        self.config.l1_state_cache.write().clear();
+
+        let mut cache = self.config.policy_cache.write();
+        cache.clear();
+        self.tip403_metrics
+            .cached_policies
+            .set(cache.policies().len() as f64);
+        self.tip403_metrics
+            .cached_token_policies
+            .set(cache.num_token_policies() as f64);
+    }
+
     /// Update the L1 state cache anchor. Detects reorgs by comparing
-    /// `parent_hash` against the current anchor and clears the cache when they
-    /// diverge.
+    /// `parent_hash` against the current anchor and clears both shared caches
+    /// when they diverge.
     fn update_l1_state_anchor(&self, number: u64, hash: B256, parent_hash: B256) {
-        let mut guard = self.config.l1_state_cache.write();
-        let anchor = guard.anchor();
+        let anchor = self.config.l1_state_cache.read().anchor();
         if anchor.hash != B256::ZERO && parent_hash != anchor.hash {
             self.subscriber_metrics.reorgs_detected.increment(1);
             warn!(
                 old_anchor = %anchor.hash,
                 new_parent = %parent_hash,
                 block_number = number,
-                "Reorg detected, clearing L1 state cache"
+                "Reorg detected, clearing L1 state and policy caches"
             );
-            guard.clear();
+            self.clear_reorg_caches();
         }
-        guard.update_anchor(NumHash { number, hash });
+        self.config
+            .l1_state_cache
+            .write()
+            .update_anchor(NumHash { number, hash });
     }
 }
 
@@ -1870,6 +1911,118 @@ mod tests {
 
     fn header_hash(header: &TempoHeader) -> B256 {
         keccak256(alloy_rlp::encode(header))
+    }
+
+    #[test]
+    fn reorg_clears_policy_cache_and_keeps_replacement_block_state() {
+        use crate::l1_state::tip403::AuthRole;
+        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
+
+        let subscriber =
+            test_subscriber(Arc::new(SequenceLocalTempoStateReader::new([0])), Some(0));
+        let token = address!("0x0000000000000000000000000000000000000011");
+        let user = address!("0x0000000000000000000000000000000000000022");
+        let empty_events = L1PortalEvents::default();
+
+        let old_header = make_test_header(10);
+        subscriber.apply_confirmed_block_state(
+            10,
+            header_hash(&old_header),
+            old_header.inner.parent_hash,
+            &empty_events,
+            &[
+                PolicyEvent::TokenPolicyChanged {
+                    token,
+                    policy_id: 2,
+                },
+                PolicyEvent::PolicyCreated {
+                    policy_id: 2,
+                    policy_type: PolicyType::WHITELIST,
+                },
+                PolicyEvent::MembershipChanged {
+                    policy_id: 2,
+                    account: user,
+                    in_set: true,
+                },
+            ],
+        );
+        subscriber.config.policy_cache.advance(10);
+
+        let replacement_parent = B256::with_last_byte(0x44);
+        let replacement_header = make_chained_header(11, replacement_parent);
+        subscriber.apply_confirmed_block_state(
+            11,
+            header_hash(&replacement_header),
+            replacement_parent,
+            &empty_events,
+            &[
+                PolicyEvent::TokenPolicyChanged {
+                    token,
+                    policy_id: 3,
+                },
+                PolicyEvent::PolicyCreated {
+                    policy_id: 3,
+                    policy_type: PolicyType::WHITELIST,
+                },
+                PolicyEvent::MembershipChanged {
+                    policy_id: 3,
+                    account: user,
+                    in_set: false,
+                },
+            ],
+        );
+
+        let cache = subscriber.config.policy_cache.read();
+        assert!(
+            cache.policies().get(&2).is_none(),
+            "stale policy survived reorg"
+        );
+        assert_eq!(cache.num_token_policies(), 1);
+        assert_eq!(
+            cache.is_authorized(token, user, 11, AuthRole::Transfer),
+            Some(false)
+        );
+        drop(cache);
+
+        let anchor = subscriber.config.l1_state_cache.read().anchor();
+        assert_eq!(anchor.number, 11);
+        assert_eq!(anchor.hash, header_hash(&replacement_header));
+    }
+
+    #[test]
+    fn update_l1_state_anchor_reorg_clears_policy_cache() {
+        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
+
+        let subscriber =
+            test_subscriber(Arc::new(SequenceLocalTempoStateReader::new([0])), Some(0));
+        let token = address!("0x0000000000000000000000000000000000000033");
+        let user = address!("0x0000000000000000000000000000000000000044");
+
+        let old_header = make_test_header(5);
+        let old_hash = header_hash(&old_header);
+        subscriber.update_l1_state_anchor(5, old_hash, old_header.inner.parent_hash);
+        {
+            let mut cache = subscriber.config.policy_cache.write();
+            cache.set_last_l1_block(5);
+            cache.set_token_policy(token, 5, 9);
+            cache.set_policy_type(9, PolicyType::WHITELIST);
+            cache.set_member(9, user, 5, true);
+        }
+
+        let reorg_parent = B256::with_last_byte(0x99);
+        let reorg_header = make_chained_header(6, reorg_parent);
+        let reorg_hash = header_hash(&reorg_header);
+        subscriber.update_l1_state_anchor(6, reorg_hash, reorg_parent);
+
+        let cache = subscriber.config.policy_cache.read();
+        assert!(cache.policies().is_empty());
+        assert_eq!(cache.num_token_policies(), 0);
+        assert_eq!(cache.last_l1_block(), 5);
+        drop(cache);
+
+        let anchor = subscriber.config.l1_state_cache.read().anchor();
+        assert_eq!(anchor.number, 6);
+        assert_eq!(anchor.hash, reorg_hash);
     }
 
     /// Confirm the front of the queue, panicking if it fails.
