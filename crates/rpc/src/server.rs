@@ -217,9 +217,16 @@ pub(crate) async fn authenticate_token(
     api: &dyn ZoneRpcApi,
 ) -> Result<AuthContext, AuthenticateError> {
     let token = auth::parse_auth_header(token_value)?;
+    let max_auth_token_validity = config
+        .max_auth_token_validity
+        .min(auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY);
 
     // Validate token fields against server config
-    token.validate(config.zone_id, config.chain_id)?;
+    token.validate_with_max_auth_token_validity(
+        config.zone_id,
+        config.chain_id,
+        max_auth_token_validity,
+    )?;
 
     let signature =
         TempoSignature::from_bytes(&token.signature).map_err(|_| AuthError::InvalidSignature)?;
@@ -390,9 +397,64 @@ mod tests {
             retry_connection_interval: std::time::Duration::from_millis(100),
             zone_id: ZONE_ID,
             chain_id: CHAIN_ID,
+            max_auth_token_validity: crate::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
             zone_portal: PORTAL,
             sequencer: Address::ZERO,
         }
+    }
+
+    #[tokio::test]
+    async fn configured_auth_token_validity_limit_is_enforced() {
+        let mut config = test_config();
+        config.max_auth_token_validity = std::time::Duration::from_secs(60);
+
+        let now = now_secs();
+        let (fields, _digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let mut blob = vec![0u8; 65];
+        blob.extend_from_slice(&fields);
+        let token = alloy_primitives::hex::encode(blob);
+        let api = TestApi {
+            key_infos: Mutex::new(HashMap::new()),
+        };
+
+        let err = authenticate_token(&token, &config, &api)
+            .await
+            .expect_err("token window should exceed configured maximum");
+        assert!(matches!(
+            err,
+            AuthenticateError::Invalid(crate::auth::AuthError::WindowTooLarge)
+        ));
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn protocol_max_auth_token_validity_is_enforced_even_if_configured_higher() {
+        let mut config = test_config();
+        config.max_auth_token_validity =
+            crate::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY + std::time::Duration::from_secs(60);
+
+        let now = now_secs();
+        let (fields, _digest) = build_token_fields(
+            ZONE_ID,
+            CHAIN_ID,
+            now,
+            now + crate::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY.as_secs() + 1,
+        );
+        let mut blob = vec![0u8; 65];
+        blob.extend_from_slice(&fields);
+        let token = alloy_primitives::hex::encode(blob);
+        let api = TestApi {
+            key_infos: Mutex::new(HashMap::new()),
+        };
+
+        let err = authenticate_token(&token, &config, &api)
+            .await
+            .expect_err("token window should exceed protocol maximum");
+        assert!(matches!(
+            err,
+            AuthenticateError::Invalid(crate::auth::AuthError::WindowTooLarge)
+        ));
+        assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]
