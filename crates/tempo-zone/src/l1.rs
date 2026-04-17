@@ -427,10 +427,9 @@ impl L1Subscriber {
             let (events, policy_events) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
-            self.apply_policy_events(block_number, &policy_events);
-
             let sealed = SealedHeader::seal_slow(header);
             self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
+            self.apply_policy_events(block_number, &policy_events);
             self.apply_portal_state_events(block_number, &events);
             self.deposit_queue
                 .enqueue_sealed(sealed, events, policy_events);
@@ -516,13 +515,13 @@ impl L1Subscriber {
             // If we have a buffered tip, check if the new block confirms it.
             if let Some((tip_header, tip_events, tip_policy_events)) = unconfirmed_tip.take() {
                 if sealed.parent_hash() == tip_header.hash() {
-                    // Confirmed — apply policy events, update L1 state anchor,
-                    // and flush to the queue.
+                    // Confirmed — update the L1 state anchor, apply events, and
+                    // flush to the queue.
                     let tip_number = tip_header.number();
                     let tip_hash = tip_header.hash();
                     let tip_parent = tip_header.parent_hash();
-                    self.apply_policy_events(tip_number, &tip_policy_events);
                     self.update_l1_state_anchor(tip_number, tip_hash, tip_parent);
+                    self.apply_policy_events(tip_number, &tip_policy_events);
                     self.apply_portal_state_events(tip_number, &tip_events);
                     match self
                         .deposit_queue
@@ -546,7 +545,8 @@ impl L1Subscriber {
                         }
                     }
                 } else {
-                    // Reorg — discard the buffered tip and clear L1 state cache.
+                    // Reorg — discard the buffered tip and clear L1 state and
+                    // policy caches.
                     self.subscriber_metrics.reorgs_detected.increment(1);
                     warn!(
                         discarded_block = tip_header.number(),
@@ -556,6 +556,7 @@ impl L1Subscriber {
                         "Discarding unconfirmed L1 block (reorg)"
                     );
                     self.config.l1_state_cache.write().clear();
+                    self.config.policy_cache.write().clear();
                 }
             }
 
@@ -715,6 +716,7 @@ impl L1Subscriber {
                 "Reorg detected, clearing L1 state cache"
             );
             guard.clear();
+            self.config.policy_cache.write().clear();
         }
         guard.update_anchor(NumHash { number, hash });
     }
@@ -1870,6 +1872,57 @@ mod tests {
 
     fn header_hash(header: &TempoHeader) -> B256 {
         keccak256(alloy_rlp::encode(header))
+    }
+
+    #[test]
+    fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
+        use crate::l1_state::tip403::AuthRole;
+        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
+
+        let subscriber =
+            test_subscriber(Arc::new(SequenceLocalTempoStateReader::new([0])), Some(0));
+        let token = address!("0x0000000000000000000000000000000000000011");
+        let user = address!("0x0000000000000000000000000000000000000022");
+
+        let old_header = make_test_header(10);
+        let old_hash = header_hash(&old_header);
+        subscriber.update_l1_state_anchor(10, old_hash, old_header.inner.parent_hash);
+        {
+            let mut cache = subscriber.config.policy_cache.write();
+            cache.set_token_policy(token, 10, 2);
+            cache.set_policy_type(2, PolicyType::WHITELIST);
+            cache.set_member(2, user, 10, true);
+            cache.advance(10);
+        }
+
+        let replacement_parent = B256::with_last_byte(0x44);
+        let replacement_header = make_chained_header(11, replacement_parent);
+        subscriber.update_l1_state_anchor(11, header_hash(&replacement_header), replacement_parent);
+        subscriber.apply_policy_events(
+            11,
+            &[
+                PolicyEvent::TokenPolicyChanged {
+                    token,
+                    policy_id: 3,
+                },
+                PolicyEvent::PolicyCreated {
+                    policy_id: 3,
+                    policy_type: PolicyType::WHITELIST,
+                },
+                PolicyEvent::MembershipChanged {
+                    policy_id: 3,
+                    account: user,
+                    in_set: false,
+                },
+            ],
+        );
+
+        let cache = subscriber.config.policy_cache.read();
+        assert!(cache.policies().get(&2).is_none());
+        assert_eq!(
+            cache.is_authorized(token, user, 11, AuthRole::Transfer),
+            Some(false)
+        );
     }
 
     /// Confirm the front of the queue, panicking if it fails.
