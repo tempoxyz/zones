@@ -84,6 +84,8 @@ macro_rules! define_abi {
             struct DepositQueueTransition {
                 bytes32 prevProcessedHash;
                 bytes32 nextProcessedHash;
+                uint64 prevDepositNumber;
+                uint64 nextDepositNumber;
             }
 
             #[derive(Debug)]
@@ -120,7 +122,8 @@ macro_rules! define_abi {
                     address to,
                     uint128 netAmount,
                     uint128 fee,
-                    bytes32 memo
+                    bytes32 memo,
+                    uint64 depositNumber
                 );
 
                 #[derive(Debug)]
@@ -135,7 +138,8 @@ macro_rules! define_abi {
                     uint8 ephemeralPubkeyYParity,
                     bytes ciphertext,
                     bytes12 nonce,
-                    bytes16 tag
+                    bytes16 tag,
+                    uint64 depositNumber
                 );
 
                 /// Event emitted when a new TIP-20 token is enabled for bridging.
@@ -148,7 +152,8 @@ macro_rules! define_abi {
                     uint64 indexed withdrawalBatchIndex,
                     bytes32 nextProcessedDepositQueueHash,
                     bytes32 nextBlockHash,
-                    bytes32 withdrawalQueueHash
+                    bytes32 withdrawalQueueHash,
+                    uint64 lastProcessedDepositNumber
                 );
 
                 #[derive(Debug)]
@@ -159,7 +164,8 @@ macro_rules! define_abi {
                     bytes32 indexed newCurrentDepositQueueHash,
                     address indexed fallbackRecipient,
                     address token,
-                    uint128 amount
+                    uint128 amount,
+                    uint64 depositNumber
                 );
 
                 #[derive(Debug)]
@@ -201,6 +207,8 @@ macro_rules! define_abi {
                 function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
                 function genesisTempoBlockNumber() external view returns (uint64);
                 function calculateDepositFee() external view returns (uint128 fee);
+                function depositCount() external view returns (uint64);
+                function lastProcessedDepositNumber() external view returns (uint64);
 
                 // -- State-changing functions --
 
@@ -448,7 +456,8 @@ macro_rules! define_abi {
                     bytes32 indexed tempoBlockHash,
                     uint64 indexed tempoBlockNumber,
                     uint256 depositsProcessed,
-                    bytes32 newProcessedDepositQueueHash
+                    bytes32 newProcessedDepositQueueHash,
+                    uint64 lastProcessedDepositNumber
                 );
 
                 #[derive(Debug)]
@@ -489,6 +498,7 @@ macro_rules! define_abi {
                 error ExtraDecryptionData();
                 error InvalidSharedSecretProof();
                 function processedDepositQueueHash() external view returns (bytes32);
+                function processedDepositNumber() external view returns (uint64);
                 function tempoPortal() external view returns (address);
                 function tempoState() external view returns (address);
                 function config() external view returns (address);
