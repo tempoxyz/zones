@@ -444,13 +444,36 @@ interface IZoneFactory {
     error InsufficientGas();
     error ZoneIdOverflow();
 
+    /// @notice Returns whether a verifier contract is approved for zone creation.
+    /// @param verifier The verifier contract address to check.
+    /// @return valid True if `verifier` can be passed to `createZone`.
     function isValidVerifier(address verifier) external view returns (bool);
+
+    /// @notice Creates a new zone and deploys its portal and messenger contracts.
+    /// @param params The initial token, sequencer, verifier, and genesis parameters for the zone.
+    /// @return zoneId The newly assigned zone ID.
+    /// @return portal The deployed portal address for the new zone.
     function createZone(CreateZoneParams calldata params)
         external
         returns (uint32 zoneId, address portal);
+
+    /// @notice Returns the number of zones created so far.
+    /// @return count The total number of created zones, excluding reserved zone ID 0.
     function zoneCount() external view returns (uint32);
+
+    /// @notice Returns the stored metadata for a zone.
+    /// @param zoneId The zone ID to query.
+    /// @return info The zone metadata recorded for `zoneId`.
     function zones(uint32 zoneId) external view returns (ZoneInfo memory);
+
+    /// @notice Returns whether an address is a portal deployed by this factory.
+    /// @param portal The portal address to check.
+    /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
+
+    /// @notice Returns whether an address is a messenger deployed by this factory.
+    /// @param messenger The messenger address to check.
+    /// @return isMessenger True if `messenger` was created by this factory.
     function isZoneMessenger(address messenger) external view returns (bool);
 
 }
