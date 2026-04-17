@@ -31,6 +31,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256};
 use alloy_provider::DynProvider;
 use parking_lot::Mutex;
@@ -44,6 +45,8 @@ use crate::{
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
+
+const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Shared handle to the withdrawal store.
 #[derive(Clone)]
@@ -109,6 +112,11 @@ impl WithdrawalStore {
         self.batches.insert(batch_index, withdrawals);
     }
 
+    /// Replace the entire store with an authoritative set of pending batches.
+    pub(crate) fn replace_batches(&mut self, batches: BTreeMap<u64, Vec<abi::Withdrawal>>) {
+        self.batches = batches;
+    }
+
     /// Get all withdrawals for a batch.
     pub fn get_batch(&self, batch_index: u64) -> Option<&Vec<abi::Withdrawal>> {
         self.batches.get(&batch_index)
@@ -125,6 +133,32 @@ impl WithdrawalStore {
 
     pub fn batch_count(&self) -> usize {
         self.batches.len()
+    }
+
+    /// Return the smallest and largest portal slot indices currently present.
+    fn slot_range(&self) -> Option<(u64, u64)> {
+        let first = *self.batches.keys().next()?;
+        let last = *self.batches.keys().next_back()?;
+        Some((first, last))
+    }
+
+    /// Return a compact summary of the store as `(batch_count, first_slot, last_slot)`.
+    pub(crate) fn summary(&self) -> (usize, Option<u64>, Option<u64>) {
+        let (first_slot, last_slot) = self
+            .slot_range()
+            .map_or((None, None), |(first, last)| (Some(first), Some(last)));
+        (self.batch_count(), first_slot, last_slot)
+    }
+
+    /// Return the nearest populated slots before and after `slot`, if any exist.
+    fn neighboring_slots(&self, slot: u64) -> (Option<u64>, Option<u64>) {
+        let prev = self.batches.range(..slot).next_back().map(|(&idx, _)| idx);
+        let next = self
+            .batches
+            .range(slot.saturating_add(1)..)
+            .next()
+            .map(|(&idx, _)| idx);
+        (prev, next)
     }
 }
 
@@ -155,6 +189,15 @@ pub fn compute_remaining_queue(withdrawals: &[abi::Withdrawal], processed_count:
 //  Withdrawal processor
 // ---------------------------------------------------------------------------
 
+struct StoreSnapshot {
+    batch_count: usize,
+    first_slot: Option<u64>,
+    last_slot: Option<u64>,
+    prev_slot: Option<u64>,
+    next_slot: Option<u64>,
+    withdrawals: Option<Vec<abi::Withdrawal>>,
+}
+
 /// Background task that processes withdrawals from the ZonePortal queue on Tempo L1.
 ///
 /// The processor waits for a [`Notify`] signal from the batch submitter (indicating a batch
@@ -173,6 +216,7 @@ pub struct WithdrawalProcessor {
     portal: ZonePortal::ZonePortalInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
+    repair_notify: Arc<Notify>,
     metrics: WithdrawalProcessorMetrics,
 }
 
@@ -185,6 +229,7 @@ impl WithdrawalProcessor {
         provider: DynProvider<TempoNetwork>,
         store: SharedWithdrawalStore,
         notify: Arc<Notify>,
+        repair_notify: Arc<Notify>,
     ) -> Self {
         let portal = ZonePortal::new(config.portal_address, provider);
 
@@ -193,7 +238,27 @@ impl WithdrawalProcessor {
             portal,
             store,
             notify,
+            repair_notify,
             metrics: WithdrawalProcessorMetrics::default(),
+        }
+    }
+
+    /// Read the current store contents relevant to `slot` under a single lock.
+    ///
+    /// This keeps the diagnostic fields used in missing-slot logs consistent
+    /// with each other and with the batch lookup result.
+    fn capture_store_snapshot(&self, slot: u64) -> StoreSnapshot {
+        let store = self.store.lock();
+        let (batch_count, first_slot, last_slot) = store.summary();
+        let (prev_slot, next_slot) = store.neighboring_slots(slot);
+
+        StoreSnapshot {
+            batch_count,
+            first_slot,
+            last_slot,
+            prev_slot,
+            next_slot,
+            withdrawals: store.get_batch(slot).cloned(),
         }
     }
 
@@ -224,12 +289,21 @@ impl WithdrawalProcessor {
     /// Process the current head slot of the portal's withdrawal queue on Tempo L1.
     #[instrument(skip_all)]
     async fn process_queue(&mut self) -> eyre::Result<()> {
-        let head: alloy_primitives::U256 = self.portal.withdrawalQueueHead().call().await?;
-        let tail: alloy_primitives::U256 = self.portal.withdrawalQueueTail().call().await?;
+        let head_call = self.portal.withdrawalQueueHead();
+        let tail_call = self.portal.withdrawalQueueTail();
+        let (head, tail): (alloy_primitives::U256, alloy_primitives::U256) =
+            tokio::try_join!(head_call.call(), tail_call.call())?;
 
         let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
         let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
-        let store_batch_count = self.store.lock().batch_count();
+        let StoreSnapshot {
+            batch_count: store_batch_count,
+            first_slot: store_first_slot,
+            last_slot: store_last_slot,
+            prev_slot: prev_store_slot,
+            next_slot: next_store_slot,
+            withdrawals,
+        } = self.capture_store_snapshot(head_val);
         self.record_queue_metrics(head_val, tail_val, store_batch_count);
 
         if head_val == tail_val {
@@ -245,18 +319,20 @@ impl WithdrawalProcessor {
             "Withdrawal queue has pending slots"
         );
 
-        let withdrawals = {
-            let store = self.store.lock();
-            store.get_batch(head_val).cloned()
-        };
-
         let withdrawals = match withdrawals {
             Some(w) if !w.is_empty() => w,
             _ => {
+                self.repair_notify.notify_one();
                 warn!(
                     slot = head_val,
-                    store_batches = self.store.lock().batch_count(),
-                    "No withdrawal data in store for current head slot, waiting for data"
+                    tail = tail_val,
+                    pending_slots,
+                    store_batches = store_batch_count,
+                    store_first_slot,
+                    store_last_slot,
+                    prev_store_slot,
+                    next_store_slot,
+                    "No withdrawal data in store for current head slot"
                 );
                 return Ok(());
             }
@@ -268,6 +344,7 @@ impl WithdrawalProcessor {
             "Processing withdrawal batch"
         );
         let slot_started_at = Instant::now();
+        let slot_queue_hash = abi::Withdrawal::queue_hash(&withdrawals);
 
         for (i, withdrawal) in withdrawals.iter().enumerate() {
             self.metrics.withdrawals_processed_total.increment(1);
@@ -325,12 +402,32 @@ impl WithdrawalProcessor {
                 Ok(pending) => {
                     let tx_hash = *pending.tx_hash();
                     match pending
-                        .with_required_confirmations(1)
-                        .with_timeout(Some(std::time::Duration::from_secs(30)))
-                        .watch()
+                        .with_timeout(Some(PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT))
+                        .get_receipt()
                         .await
                     {
-                        Ok(_) => {
+                        Ok(receipt) => {
+                            if !receipt.status() {
+                                self.metrics.withdrawals_failed_total.increment(1);
+                                self.metrics.withdrawals_reverted_total.increment(1);
+                                self.record_slot_duration(slot_started_at.elapsed());
+                                self.repair_notify.notify_one();
+
+                                error!(
+                                    slot = head_val,
+                                    index = i,
+                                    %tx_hash,
+                                    to = %withdrawal.to,
+                                    amount = %withdrawal.amount,
+                                    queue_head = head_val,
+                                    queue_tail = tail_val,
+                                    expected_slot_queue_hash = %slot_queue_hash,
+                                    expected_remaining_queue = %remaining_queue,
+                                    "processWithdrawal tx was included but reverted; keeping batch in store and requesting repair"
+                                );
+                                return Ok(());
+                            }
+
                             self.metrics.withdrawals_confirmed_total.increment(1);
                             info!(
                                 slot = head_val,
@@ -349,6 +446,8 @@ impl WithdrawalProcessor {
                                 slot = head_val,
                                 index = i,
                                 %tx_hash,
+                                expected_slot_queue_hash = %slot_queue_hash,
+                                expected_remaining_queue = %remaining_queue,
                                 to = %withdrawal.to,
                                 amount = %withdrawal.amount,
                                 error = %e,
@@ -364,6 +463,8 @@ impl WithdrawalProcessor {
                     error!(
                         slot = head_val,
                         index = i,
+                        expected_slot_queue_hash = %slot_queue_hash,
+                        expected_remaining_queue = %remaining_queue,
                         to = %withdrawal.to,
                         amount = %withdrawal.amount,
                         error = %e,
@@ -413,9 +514,11 @@ pub fn spawn_withdrawal_processor(
     provider: DynProvider<TempoNetwork>,
     store: SharedWithdrawalStore,
     notify: Arc<Notify>,
+    repair_notify: Arc<Notify>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut processor = WithdrawalProcessor::new(config, provider, store, notify);
+        let mut processor =
+            WithdrawalProcessor::new(config, provider, store, notify, repair_notify);
         loop {
             if let Err(e) = processor.run().await {
                 error!(error = %e, "Withdrawal processor failed, restarting in 5s");
@@ -429,8 +532,22 @@ pub fn spawn_withdrawal_processor(
 mod tests {
     use super::*;
     use crate::abi::EMPTY_SENTINEL;
-    use alloy_primitives::{address, keccak256};
+    use alloy_primitives::{Bytes, U256, address, keccak256};
+    use alloy_provider::{Provider, ProviderBuilder};
     use alloy_sol_types::SolValue;
+    use alloy_transport::mock::Asserter;
+    use tempo_alloy::TempoNetwork;
+    use tokio::time::timeout;
+
+    fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
+        ProviderBuilder::new_with_network::<TempoNetwork>()
+            .connect_mocked_client(asserter)
+            .erased()
+    }
+
+    fn abi_encode_u64(value: u64) -> Bytes {
+        Bytes::copy_from_slice(&U256::from(value).to_be_bytes::<32>())
+    }
 
     fn test_withdrawal(to: Address, amount: u128) -> abi::Withdrawal {
         abi::Withdrawal {
@@ -586,5 +703,55 @@ mod tests {
 
         store.add_batch(1, vec![test_withdrawal(addr, 999)]);
         assert_eq!(store.batch_count(), 2);
+    }
+
+    #[test]
+    fn store_replace_batches_reconciles_authoritative_view() {
+        let mut store = WithdrawalStore::new();
+        let addr = address!("0x0000000000000000000000000000000000000042");
+
+        store.add_batch(0, vec![test_withdrawal(addr, 100)]);
+        store.add_batch(9, vec![test_withdrawal(addr, 900)]);
+
+        let mut reconciled = BTreeMap::new();
+        reconciled.insert(5, vec![test_withdrawal(addr, 500)]);
+        reconciled.insert(6, vec![test_withdrawal(addr, 600)]);
+
+        store.replace_batches(reconciled);
+
+        assert!(!store.has_batch(0));
+        assert!(!store.has_batch(9));
+        assert!(store.has_batch(5));
+        assert!(store.has_batch(6));
+        assert_eq!(store.batch_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn process_queue_requests_monitor_resync_when_head_slot_missing() {
+        let l1 = Asserter::new();
+        l1.push_success(&abi_encode_u64(51));
+        l1.push_success(&abi_encode_u64(71));
+
+        let config = WithdrawalProcessorConfig {
+            portal_address: address!("0x7069DeC4E64Fd07334A0933eDe836C17259c9B23"),
+            l1_rpc_url: "http://unused.test".to_string(),
+            fallback_poll_interval: Duration::from_secs(1),
+        };
+        let notify = Arc::new(Notify::new());
+        let repair_notify = Arc::new(Notify::new());
+        let mut processor = WithdrawalProcessor::new(
+            config,
+            mock_provider(l1.clone()),
+            SharedWithdrawalStore::new(),
+            notify,
+            repair_notify.clone(),
+        );
+
+        processor.process_queue().await.unwrap();
+
+        timeout(Duration::from_millis(50), repair_notify.notified())
+            .await
+            .expect("missing head slot should request a monitor resync");
+        assert!(l1.read_q().is_empty());
     }
 }

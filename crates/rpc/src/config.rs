@@ -18,6 +18,11 @@ pub struct PrivateRpcConfig {
     pub zone_id: u32,
     /// The zone's chain ID.
     pub chain_id: u64,
+    /// Maximum authorization token validity window this server accepts.
+    ///
+    /// This may be configured lower than the protocol default to tighten local
+    /// policy, but it must not exceed the protocol maximum.
+    pub max_auth_token_validity: Duration,
     /// The ZonePortal contract address on L1 (used for querying deposits, not for auth tokens).
     pub zone_portal: Address,
     /// The sequencer address — callers matching this get unredacted responses.

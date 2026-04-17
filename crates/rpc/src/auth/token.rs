@@ -1,5 +1,5 @@
 use alloy_primitives::{Address, B256, hex, keccak256};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::error::AuthError;
 
@@ -20,6 +20,13 @@ const TOKEN_FIELDS_LEN: usize = 1 + 4 + 8 + 8 + 8; // 29 bytes
 
 /// HTTP header name for the authorization token.
 pub const X_AUTHORIZATION_TOKEN: &str = "x-authorization-token";
+
+/// Protocol default maximum validity window for authorization tokens.
+pub const DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS: u64 = 2_592_000;
+
+/// Protocol default maximum validity window for authorization tokens.
+pub const DEFAULT_MAX_AUTH_TOKEN_VALIDITY: Duration =
+    Duration::from_secs(DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS);
 
 /// The authenticated caller context extracted from a valid authorization token.
 #[derive(Debug, Clone)]
@@ -101,6 +108,21 @@ impl AuthorizationToken {
     ///
     /// A `zone_id` of `0` is unscoped and accepted for any zone.
     pub fn validate(&self, expected_zone_id: u32, expected_chain_id: u64) -> Result<(), AuthError> {
+        self.validate_with_max_auth_token_validity(
+            expected_zone_id,
+            expected_chain_id,
+            DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
+        )
+    }
+
+    /// Validate token fields against the server's zone configuration and
+    /// a caller-provided maximum validity window.
+    pub fn validate_with_max_auth_token_validity(
+        &self,
+        expected_zone_id: u32,
+        expected_chain_id: u64,
+        max_auth_token_validity: Duration,
+    ) -> Result<(), AuthError> {
         if self.version != 0 {
             return Err(AuthError::UnsupportedVersion(self.version));
         }
@@ -110,7 +132,7 @@ impl AuthorizationToken {
         if self.chain_id != expected_chain_id {
             return Err(AuthError::ChainIdMismatch);
         }
-        if self.expires_at.saturating_sub(self.issued_at) > 2_592_000 {
+        if self.expires_at.saturating_sub(self.issued_at) > max_auth_token_validity.as_secs() {
             return Err(AuthError::WindowTooLarge);
         }
 

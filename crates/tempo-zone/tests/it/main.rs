@@ -5,6 +5,7 @@ mod deposit;
 mod e2e;
 mod enable_token;
 mod l1_e2e;
+mod precompiles;
 mod private_rpc;
 mod private_rpc_e2e;
 mod restart_e2e;

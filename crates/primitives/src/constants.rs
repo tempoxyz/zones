@@ -83,14 +83,67 @@ pub const ZONE_OUTBOX_LAST_BATCH_INDEX_SLOT: U256 = {
     U256::from_le_bytes(le)
 };
 
-/// Base offset for deriving zone chain IDs: `4217000000 + zone_id`.
+/// Base offset for deriving **mainnet** zone chain IDs.
 ///
 /// Each zone gets a unique EIP-155 chain ID derived from its on-chain zone ID
-/// assigned by the `ZoneFactory` contract. The prefix `4217` comes from the
-/// Tempo L1 chain ID.
-pub const ZONE_CHAIN_ID_BASE: u64 = 4_217_000_000;
+/// assigned by the `ZoneFactory` contract:
+///
+/// ```text
+/// chain_id = ZONE_CHAIN_ID_BASE + (zone_id % ZONE_CHAIN_ID_RANGE)
+/// ```
+///
+/// # Range safety
+///
+/// EIP-2294 and ENSIP-11 reserve bit 31 (`0x8000_0000`) for coin-type flags,
+/// making chain IDs ≥ 2^31 (2,147,483,647) unsafe in parts of the ecosystem
+/// (ENS multi-chain address resolution, some JavaScript tooling that uses
+/// 32-bit integers, etc.).
+///
+/// The ranges are chosen so that both mainnet and testnet zones stay well below
+/// that limit while remaining non-overlapping:
+///
+/// | Network  | Base            | Range size        | Chain ID span                         |
+/// |----------|-----------------|-------------------|---------------------------------------|
+/// | Mainnet  | `421_700_000`   | `1_002_610_000`   | `421_700_000 ..  1_424_310_000`       |
+/// | Testnet  | `1_424_310_000` | `723_173_648`     | `1_424_310_000 .. 2_147_483_648`      |
+///
+/// Zone IDs wrap around via modular arithmetic so that chain IDs never leave
+/// their designated range, even with arbitrarily large zone IDs. Because
+/// wrapping can reuse a chain ID that was previously assigned to a different
+/// zone, it is the responsibility of the sequencer to ensure — after deploying
+/// a zone — that the derived chain ID does not correspond to any active chain,
+/// including any zone that has previously used that chain ID.
+pub const ZONE_CHAIN_ID_BASE: u64 = 421_700_000;
 
-/// Derives the EIP-155 chain ID for a zone from its on-chain zone ID.
+/// Number of distinct mainnet zone chain IDs before wrapping.
+///
+/// Equal to `ZONE_CHAIN_ID_BASE_TESTNET - ZONE_CHAIN_ID_BASE`, keeping the
+/// mainnet range strictly below the testnet range.
+pub const ZONE_CHAIN_ID_RANGE: u64 = 1_002_610_000;
+
+/// Base offset for deriving **testnet** (Moderato) zone chain IDs.
+///
+/// See [`ZONE_CHAIN_ID_BASE`] for range-safety rationale.
+pub const ZONE_CHAIN_ID_BASE_TESTNET: u64 = 1_424_310_000;
+
+/// Number of distinct testnet zone chain IDs before wrapping.
+///
+/// Equal to `2^31 - ZONE_CHAIN_ID_BASE_TESTNET`, keeping the testnet range
+/// strictly below the EIP-2294 safe ceiling.
+pub const ZONE_CHAIN_ID_RANGE_TESTNET: u64 = 723_173_648;
+
+/// Derives the EIP-155 chain ID for a **mainnet** zone from its on-chain zone ID.
+///
+/// Wraps via modulo so the result always falls in
+/// `[ZONE_CHAIN_ID_BASE, ZONE_CHAIN_ID_BASE + ZONE_CHAIN_ID_RANGE)`.
 pub const fn zone_chain_id(zone_id: u32) -> u64 {
-    ZONE_CHAIN_ID_BASE + zone_id as u64
+    ZONE_CHAIN_ID_BASE + (zone_id as u64 % ZONE_CHAIN_ID_RANGE)
+}
+
+/// Derives the EIP-155 chain ID for a **testnet** zone from its on-chain zone ID.
+///
+/// Wraps via modulo so the result always falls in
+/// `[ZONE_CHAIN_ID_BASE_TESTNET, ZONE_CHAIN_ID_BASE_TESTNET + ZONE_CHAIN_ID_RANGE_TESTNET)`.
+pub const fn zone_chain_id_testnet(zone_id: u32) -> u64 {
+    ZONE_CHAIN_ID_BASE_TESTNET + (zone_id as u64 % ZONE_CHAIN_ID_RANGE_TESTNET)
 }
