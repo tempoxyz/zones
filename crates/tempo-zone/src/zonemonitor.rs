@@ -197,9 +197,14 @@ impl ZoneMonitor {
             genesis_tempo_block_number,
         );
 
-        let (prev_zone_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
+        let (
+            prev_zone_block_hash,
+            portal_withdrawal_queue_tail,
+            portal_last_processed_deposit_number,
+        ) = tokio::try_join!(
             batch_submitter.read_portal_block_hash(),
             batch_submitter.read_portal_withdrawal_queue_tail(),
+            batch_submitter.read_portal_last_processed_deposit_number(),
         )
         .wrap_err("failed to read portal state during zone monitor startup")?;
 
@@ -211,8 +216,12 @@ impl ZoneMonitor {
             B256::ZERO,
         )
         .await;
-        let prev_processed_deposit_number =
-            Self::read_processed_deposit_number_at_block(&inbox, last_submitted_zone_block).await;
+        let prev_processed_deposit_number = Self::read_processed_deposit_number_at_block(
+            &inbox,
+            last_submitted_zone_block,
+            portal_last_processed_deposit_number,
+        )
+        .await;
 
         info!(
             last_submitted_zone_block,
@@ -780,8 +789,10 @@ impl ZoneMonitor {
         match tokio::try_join!(
             self.batch_submitter.read_portal_block_hash(),
             self.batch_submitter.read_portal_withdrawal_queue_tail(),
+            self.batch_submitter
+                .read_portal_last_processed_deposit_number(),
         ) {
-            Ok((portal_hash, portal_tail)) => {
+            Ok((portal_hash, portal_tail, portal_last_processed_deposit_number)) => {
                 let last_submitted_zone_block =
                     Self::resolve_zone_block_number(&self.provider, portal_hash).await;
                 let deposit_hash = Self::read_processed_deposit_hash_at_block(
@@ -793,6 +804,7 @@ impl ZoneMonitor {
                 let deposit_number = Self::read_processed_deposit_number_at_block(
                     &self.inbox,
                     last_submitted_zone_block,
+                    portal_last_processed_deposit_number,
                 )
                 .await;
 
@@ -903,6 +915,7 @@ impl ZoneMonitor {
     async fn read_processed_deposit_number_at_block(
         inbox: &ZoneInbox::ZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
         zone_block_number: u64,
+        fallback: u64,
     ) -> u64 {
         if zone_block_number == 0 {
             return 0;
@@ -918,10 +931,11 @@ impl ZoneMonitor {
             Err(e) => {
                 warn!(
                     zone_block_number,
+                    fallback,
                     error = %e,
                     "Failed to read processedDepositNumber at portal-confirmed zone block"
                 );
-                0
+                fallback
             }
         }
     }

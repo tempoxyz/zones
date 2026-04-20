@@ -488,6 +488,14 @@ impl BatchSubmitter {
         Ok(head)
     }
 
+    /// Read the current `lastProcessedDepositNumber` from the ZonePortal on L1.
+    ///
+    /// Used as the source of truth when the monitor needs to reconstruct its
+    /// local deposit-transition anchor after a restart or resync.
+    pub async fn read_portal_last_processed_deposit_number(&self) -> Result<u64> {
+        Ok(self.portal.lastProcessedDepositNumber().call().await?)
+    }
+
     /// Check if the withdrawal queue has capacity for another batch.
     ///
     /// The portal uses a ring buffer with 100 slots. Returns an error if the
