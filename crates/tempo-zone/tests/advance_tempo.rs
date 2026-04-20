@@ -23,7 +23,7 @@ const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
 sol! {
-    function advanceTempo(bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions);
+    function advanceTempo(bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions, EnabledToken[] calldata enabledTokens);
     function config() external view returns (address);
     function tempoBlockHash() external view returns (bytes32);
 
@@ -39,6 +39,12 @@ sol! {
         bytes32 sharedSecret;
         uint8 sharedSecretYParity;
         ChaumPedersenProof cpProof;
+    }
+    struct EnabledToken {
+        address token;
+        string name;
+        string symbol;
+        string currency;
     }
 }
 
@@ -368,6 +374,7 @@ fn advance_tempo_repro() {
         header: Bytes::from(next_header_rlp),
         deposits: vec![],
         decryptions: vec![],
+        enabledTokens: vec![],
     }
     .abi_encode();
 

@@ -310,7 +310,12 @@ contract ZoneIntegrationTest is BaseTest {
             BlockTransition({
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
             }),
-            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: d1 }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: d1,
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
             bytes32(0),
             "",
             ""
@@ -406,7 +411,10 @@ contract ZoneIntegrationTest is BaseTest {
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("state")
             }),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: depositHash,
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
                 }),
             withdrawalHash,
             "",
@@ -473,7 +481,10 @@ contract ZoneIntegrationTest is BaseTest {
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
             }),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: depositHash,
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
                 }),
             wHash1,
             "",
@@ -498,7 +509,10 @@ contract ZoneIntegrationTest is BaseTest {
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s2")
             }),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: depositHash,
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
                 }),
             wHash2,
             "",
@@ -523,7 +537,10 @@ contract ZoneIntegrationTest is BaseTest {
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s3")
             }),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0), nextProcessedHash: depositHash
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: depositHash,
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
                 }),
             wHash3,
             "",
@@ -619,7 +636,12 @@ contract ZoneIntegrationTest is BaseTest {
             BlockTransition({
                 prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
             }),
-            DepositQueueTransition({ prevProcessedHash: bytes32(0), nextProcessedHash: d2 }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: d2,
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
             wHash,
             "",
             ""
