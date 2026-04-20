@@ -34,6 +34,7 @@
     - [Zone-to-Zone Transfers](#zone-to-zone-transfers)
   - [Zone Execution](#zone-execution)
     - [Fee Accounting](#fee-accounting)
+    - [EIP-712 Typed Transactions](#eip-712-typed-transactions)
     - [Block Structure](#block-structure)
     - [Block Header Format](#block-header-format)
     - [Privacy Modifications](#privacy-modifications)
@@ -522,6 +523,138 @@ Sequencer encryption keys are already published (used for encrypted deposits), s
 
 Zone transactions specify which enabled TIP-20 token to use for gas fees via a `feeToken` field. The sequencer accepts all enabled tokens as gas. Transactions use Tempo transaction semantics for fee payer, max fee per gas, and gas limit.
 
+### EIP-712 Typed Transactions
+
+Zones accept an additional transaction format whose signing payload is an [EIP-712](https://eips.ethereum.org/EIPS/eip-712) typed message. This lets wallets that understand `eth_signTypedData_v4` but have no native support for Tempo or zone transaction envelopes (hardware wallets, WalletConnect-only dapps, legacy signer SDKs) author zone transactions. The wallet signs structured data; a client-side helper wraps the signature into the zone transaction envelope. No changes are required on the wallet.
+
+The format is an alternate signing scheme layered onto the existing Tempo transaction envelope. The wire-level fields (`chainId`, `nonce`, `feeToken`, `maxFeePerGas`, `maxPriorityFeePerGas`, `gasLimit`, `to`, `value`, `data`) are unchanged. Only the digest the signature commits to changes: instead of the Tempo-native transaction hash, the signer signs the EIP-712 digest derived from the same fields.
+
+#### Signature Type
+
+A new signature type is added, extending the table in [Signature Types](#signature-types):
+
+| Type | Detection | Authentication |
+|------|-----------|----------------|
+| EIP-712 | Prefix `0x05`, 66 bytes | `ecrecover` over the EIP-712 digest |
+
+Wire format of the signature field:
+
+```
+0x05 || r (32 bytes) || s (32 bytes) || v (1 byte)
+```
+
+`v` is the ECDSA parity byte (`27` or `28`), matching the output of `eth_signTypedData_v4`. The recovered address is the transaction sender when the transaction is signed by a root account, or the access key when wrapped by a Keychain V2 envelope (see [Access Key Signing](#access-key-signing) below). This type is accepted for zone transactions only; [authorization tokens](#authorization-tokens) retain the native token signing scheme.
+
+#### Domain Separator
+
+```
+EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)
+```
+
+| Field | Value |
+|-------|-------|
+| `name` | `"TempoZone"` |
+| `version` | `"1"` |
+| `chainId` | Zone chain ID (`421700000 + zoneId`) |
+| `verifyingContract` | The zone's `ZonePortal` address on Tempo |
+
+The `chainId` encodes the zone identity, so a signature produced for one zone cannot be replayed on another. `verifyingContract` binds the signature to the portal of that specific zone and gives wallets a stable address to display alongside the prompt. The `version` field exists so the domain can be rotated in a future hard fork without invalidating the type string.
+
+#### Typed Struct
+
+```
+ZoneTransaction(
+    uint256 chainId,
+    uint64 nonce,
+    address feeToken,
+    uint256 maxFeePerGas,
+    uint256 maxPriorityFeePerGas,
+    uint64 gasLimit,
+    address to,
+    uint256 value,
+    bytes data
+)
+```
+
+Every field is present in the on-wire envelope, and every envelope field is present in the struct. The mapping is bijective: there is no field the wallet signs over that the node does not enforce, and no envelope field the node uses that the wallet did not sign. Extending the struct is a breaking change gated by the domain `version`.
+
+A second struct covers the case where an access key registered in the zone's `AccountKeychain` (see [Signature Types](#signature-types)) signs on behalf of a root account. The struct mirrors `ZoneTransaction` and prepends a `userAddress` field so the wallet displays which root account the access key is acting for:
+
+```
+AccessKeyZoneTransaction(
+    address userAddress,
+    uint256 chainId,
+    uint64 nonce,
+    address feeToken,
+    uint256 maxFeePerGas,
+    uint256 maxPriorityFeePerGas,
+    uint64 gasLimit,
+    address to,
+    uint256 value,
+    bytes data
+)
+```
+
+Fee payer delegation (separate payer signature) and EIP-7702-style authorization lists are not supported under this type. The recovered signer pays its own fees (or, for access keys, the root account does) and cannot piggyback third-party authorizations. Applications that need either feature must use the native Tempo transaction signing scheme.
+
+#### Digest and Sender Recovery
+
+The zone node, verifier, and prover all compute the same digest when validating a transaction with signature type `0x05`:
+
+```
+domainSeparator = keccak256(abi.encode(
+    keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+    keccak256("TempoZone"),
+    keccak256("1"),
+    chainId,
+    portalAddress
+))
+
+structHash = keccak256(abi.encode(
+    keccak256("ZoneTransaction(uint256 chainId,uint64 nonce,address feeToken,uint256 maxFeePerGas,uint256 maxPriorityFeePerGas,uint64 gasLimit,address to,uint256 value,bytes data)"),
+    chainId,
+    nonce,
+    feeToken,
+    maxFeePerGas,
+    maxPriorityFeePerGas,
+    gasLimit,
+    to,
+    value,
+    keccak256(data)
+))
+
+digest = keccak256(0x19 || 0x01 || domainSeparator || structHash)
+sender = ecrecover(digest, v, r, s)
+```
+
+`chainId` in the struct must match `chainId` in the domain and both must match the zone's configured chain ID, otherwise the transaction is rejected before execution. `feeToken` must reference an enabled TIP-20 token. `nonce` is consumed from the sender's account nonce using the same rules as native transactions, preventing replay of the same signed struct.
+
+Because the digest is derived purely from the envelope fields, the prover recomputes it deterministically and does not need any auxiliary witness beyond the transaction itself.
+
+#### Access Key Signing
+
+Access keys registered in the `AccountKeychain` with signature type `Secp256k1` can sign zone transactions under the EIP-712 scheme without being re-registered. The on-chain key record is identical in both cases; the key type describes the curve, not the digest. The access key flow reuses the existing Keychain V2 (`0x04`) wrapper:
+
+```
+0x04 || innerSignature || user_address (20 bytes)
+```
+
+where `innerSignature` is a `0x05`-prefixed EIP-712 signature. The node unwraps the Keychain V2 envelope, computes the EIP-712 digest over the `AccessKeyZoneTransaction` struct with `userAddress = user_address`, recovers the access key via `ecrecover(digest, v, r, s)`, and checks that the access key is authorized for `user_address` in the `AccountKeychain` (not revoked, not expired, within spending limits for `feeToken` if `enforceLimits` is set). The transaction executes as if sent by `user_address`; fees are paid from the root account.
+
+Keychain V1 (`0x03`) does not bind `user_address` into the inner signing hash. An EIP-712 wallet cannot see `user_address` (it is not part of the typed data), so wrapping a `0x05` signature in a `0x03` envelope would let a malicious client bind the signature to an arbitrary root account. Keychain V1 is therefore rejected when the inner signature is EIP-712. Keychain V2 must be used, and the struct must be `AccessKeyZoneTransaction`, not `ZoneTransaction`. Access keys of type `P256` or `WebAuthn` continue to use their native signing schemes, which already expose the root account to the signer; EIP-712 offers no additional UX benefit for those curves.
+
+This composition extends the Keychain session-key pattern to any wallet that can produce `eth_signTypedData_v4` signatures. A dapp can register a hardware wallet or WalletConnect-only wallet as a scoped access key for the user's root account, and the access key can then sign zone transactions directly.
+
+#### Use Cases and Wallet UX
+
+A client-side helper constructs the typed data, asks the wallet for `eth_signTypedData_v4`, prepends `0x05` to the returned 65-byte signature (and wraps in a Keychain V2 envelope if signing as an access key), assembles the transaction envelope, and submits it via `eth_sendRawTransaction`. The wallet prompt shows the `TempoZone` domain, the portal address, and the decoded struct fields, including `userAddress` for access-key signatures. No changes to wallet firmware, RPC provider, or transaction library are required.
+
+Typical integrations:
+
+- Hardware wallets and air-gapped signers, used either as root keys or as scoped access keys, that support blind or clear-signed EIP-712 but not custom transaction types.
+- Dapps that authenticate via WalletConnect where only `eth_signTypedData_v4` is exposed to the relay, typically via a session access key registered to the user's root account.
+- SDKs targeting Ethereum-compatible chains that predate zone support.
+
 ### Block Structure
 
 Each zone block contains system transactions and user transactions in a fixed order:
@@ -651,6 +784,7 @@ Authorization token signatures follow the same format as Tempo transaction signa
 | WebAuthn | Prefix `0x02`, variable length | P256 key via WebAuthn assertion |
 | Keychain V1 | Prefix `0x03` | Wraps inner sig + `user_address`, authenticates as root account |
 | Keychain V2 | Prefix `0x04` | Same as V1 but binds `user_address` into signing hash |
+| EIP-712 | Prefix `0x05`, 66 bytes | `ecrecover` over an EIP-712 digest; accepted for zone transactions only, not authorization tokens. See [EIP-712 Typed Transactions](#eip-712-typed-transactions) |
 
 Keychain keys allow session keys and scoped access keys to authenticate to the RPC with the same permissions as the root account. The zone has its own independent `AccountKeychain` instance, not mirrored from Tempo. Users must register keychain keys on the zone directly.
 
