@@ -74,6 +74,16 @@ contract ZonePortal is IZonePortal {
     /// @notice Current deposit queue hash (where new deposits land)
     bytes32 public currentDepositQueueHash;
 
+    /// @notice Total number of deposits enqueued (monotonic counter, 1-indexed).
+    /// @dev Each deposit(), depositEncrypted(), and withdrawal bounce-back increments this.
+    ///      The deposit number is emitted in deposit events so users can track their position.
+    uint64 public depositCount;
+
+    /// @notice Last deposit number confirmed as processed by a batch proof.
+    /// @dev Updated in submitBatch(). A deposit with number N is confirmed once
+    ///      lastProcessedDepositNumber >= N.
+    uint64 public lastProcessedDepositNumber;
+
     /// @notice Last Tempo block number the zone has synced to
     uint64 public lastSyncedTempoBlockNumber;
 
@@ -524,6 +534,7 @@ contract ZonePortal is IZonePortal {
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
+        uint64 thisDeposit = ++depositCount;
 
         emit DepositMade(
             newCurrentDepositQueueHash,
@@ -533,7 +544,8 @@ contract ZonePortal is IZonePortal {
             netAmount,
             fee,
             memo,
-            bouncebackRecipient
+            bouncebackRecipient,
+            thisDeposit
         );
     }
 
@@ -613,6 +625,7 @@ contract ZonePortal is IZonePortal {
         newCurrentDepositQueueHash =
             DepositQueueLib.enqueueEncrypted(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
+        uint64 thisDeposit = ++depositCount;
 
         emit EncryptedDepositMade(
             newCurrentDepositQueueHash,
@@ -625,7 +638,8 @@ contract ZonePortal is IZonePortal {
             encrypted.ephemeralPubkeyYParity,
             encrypted.ciphertext,
             encrypted.nonce,
-            encrypted.tag
+            encrypted.tag,
+            thisDeposit
         );
     }
 
@@ -717,8 +731,11 @@ contract ZonePortal is IZonePortal {
         bytes32 newCurrentDepositQueueHash =
             DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
+        uint64 thisDeposit = ++depositCount;
 
-        emit WithdrawalBounceBack(newCurrentDepositQueueHash, fallbackRecipient, _token, amount);
+        emit WithdrawalBounceBack(
+            newCurrentDepositQueueHash, fallbackRecipient, _token, amount, thisDeposit
+        );
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -788,6 +805,7 @@ contract ZonePortal is IZonePortal {
         withdrawalBatchIndex++;
         blockHash = blockTransition.nextBlockHash;
         lastSyncedTempoBlockNumber = tempoBlockNumber;
+        lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
 
         _withdrawalQueue.enqueue(withdrawalQueueHash);
 
@@ -796,7 +814,8 @@ contract ZonePortal is IZonePortal {
             withdrawalBatchIndex,
             depositQueueTransition.nextProcessedHash,
             blockHash,
-            withdrawalQueueHash
+            withdrawalQueueHash,
+            lastProcessedDepositNumber
         );
     }
 

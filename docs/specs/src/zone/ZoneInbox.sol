@@ -50,6 +50,9 @@ contract ZoneInbox is IZoneInbox {
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
 
+    /// @notice Last processed deposit number (mirrors lastProcessedDepositNumber on L1)
+    uint64 public processedDepositNumber;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -359,12 +362,14 @@ contract ZoneInbox is IZoneInbox {
 
         // Step 4: Update state
         processedDepositQueueHash = currentHash;
+        processedDepositNumber += uint64(deposits.length);
 
         emit TempoAdvanced(
             _tempoState.tempoBlockHash(),
             _tempoState.tempoBlockNumber(),
             deposits.length,
-            currentHash
+            currentHash,
+            processedDepositNumber
         );
     }
 

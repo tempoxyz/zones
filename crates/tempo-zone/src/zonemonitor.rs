@@ -112,6 +112,9 @@ pub struct ZoneMonitor {
     /// Deposit queue hash from the previous block, used to construct the
     /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
     prev_processed_deposit_hash: B256,
+    /// Deposit counter from the previous batch, used to construct the
+    /// [`DepositQueueTransition`](crate::abi::DepositQueueTransition) for each batch.
+    prev_processed_deposit_number: u64,
     /// Previous zone block hash, used as `prev_block_hash` in [`BatchData`].
     /// Initialized from the portal's on-chain `blockHash()` at startup.
     prev_zone_block_hash: B256,
@@ -208,11 +211,14 @@ impl ZoneMonitor {
             B256::ZERO,
         )
         .await;
+        let prev_processed_deposit_number =
+            Self::read_processed_deposit_number_at_block(&inbox, last_submitted_zone_block).await;
 
         info!(
             last_submitted_zone_block,
             %prev_zone_block_hash,
             %prev_processed_deposit_hash,
+            prev_processed_deposit_number,
             portal_withdrawal_queue_tail,
             "Initialized from portal state"
         );
@@ -238,6 +244,7 @@ impl ZoneMonitor {
             repair_notify,
             last_submitted_zone_block,
             prev_processed_deposit_hash,
+            prev_processed_deposit_number,
             prev_zone_block_hash,
             portal_withdrawal_queue_tail,
             latest_observed_zone_block: last_submitted_zone_block,
@@ -486,6 +493,8 @@ impl ZoneMonitor {
             next_block_hash: end_state.block_hash,
             prev_processed_deposit_hash: self.prev_processed_deposit_hash,
             next_processed_deposit_hash: end_state.processed_deposit_hash,
+            prev_deposit_number: self.prev_processed_deposit_number,
+            next_deposit_number: end_state.processed_deposit_number,
             withdrawal_queue_hash,
         };
 
@@ -560,6 +569,8 @@ impl ZoneMonitor {
                 next_block_hash: step_state.block_hash,
                 prev_processed_deposit_hash: self.prev_processed_deposit_hash,
                 next_processed_deposit_hash: step_state.processed_deposit_hash,
+                prev_deposit_number: self.prev_processed_deposit_number,
+                next_deposit_number: step_state.processed_deposit_number,
                 withdrawal_queue_hash,
             };
 
@@ -586,14 +597,19 @@ impl ZoneMonitor {
     async fn fetch_block_snapshot(&self, to: u64) -> Result<ZoneBlockSnapshot> {
         let tempo_call = self.tempo_state.tempoBlockNumber().block(to.into());
         let deposit_call = self.inbox.processedDepositQueueHash().block(to.into());
+        let deposit_number_call = self.inbox.processedDepositNumber().block(to.into());
         let block_fut = async {
             self.provider
                 .get_block_by_number(to.into())
                 .await
                 .map_err(Into::into)
         };
-        let (tempo_block_number, processed_deposit_hash, block) =
-            tokio::try_join!(tempo_call.call(), deposit_call.call(), block_fut,)?;
+        let (tempo_block_number, processed_deposit_hash, processed_deposit_number, block) = tokio::try_join!(
+            tempo_call.call(),
+            deposit_call.call(),
+            deposit_number_call.call(),
+            block_fut,
+        )?;
 
         let block_hash = block
             .ok_or_else(|| eyre::eyre!("zone block {to} not found"))?
@@ -603,6 +619,7 @@ impl ZoneMonitor {
         Ok(ZoneBlockSnapshot {
             tempo_block_number,
             processed_deposit_hash,
+            processed_deposit_number,
             block_hash,
         })
     }
@@ -673,6 +690,7 @@ impl ZoneMonitor {
                     // Only advance local state on success.
                     self.prev_zone_block_hash = batch_data.next_block_hash;
                     self.prev_processed_deposit_hash = batch_data.next_processed_deposit_hash;
+                    self.prev_processed_deposit_number = batch_data.next_deposit_number;
                     self.last_submitted_zone_block = last_zone_block;
                     self.metrics
                         .latest_zone_block_submitted_to_l1
@@ -772,6 +790,11 @@ impl ZoneMonitor {
                     self.prev_processed_deposit_hash,
                 )
                 .await;
+                let deposit_number = Self::read_processed_deposit_number_at_block(
+                    &self.inbox,
+                    last_submitted_zone_block,
+                )
+                .await;
 
                 warn!(
                     old_prev_block_hash = %old_hash,
@@ -784,12 +807,14 @@ impl ZoneMonitor {
                     store_first_slot_before_resync,
                     store_last_slot_before_resync,
                     %deposit_hash,
+                    deposit_number,
                     "Resynced from portal and zone state"
                 );
                 self.prev_zone_block_hash = portal_hash;
                 self.portal_withdrawal_queue_tail = portal_tail;
                 self.last_submitted_zone_block = last_submitted_zone_block;
                 self.prev_processed_deposit_hash = deposit_hash;
+                self.prev_processed_deposit_number = deposit_number;
                 self.metrics
                     .latest_zone_block_submitted_to_l1
                     .set(last_submitted_zone_block as f64);
@@ -871,6 +896,32 @@ impl ZoneMonitor {
                     "Failed to read processedDepositQueueHash at portal-confirmed zone block"
                 );
                 fallback
+            }
+        }
+    }
+
+    async fn read_processed_deposit_number_at_block(
+        inbox: &ZoneInbox::ZoneInboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+        zone_block_number: u64,
+    ) -> u64 {
+        if zone_block_number == 0 {
+            return 0;
+        }
+
+        match inbox
+            .processedDepositNumber()
+            .block(zone_block_number.into())
+            .call()
+            .await
+        {
+            Ok(n) => n,
+            Err(e) => {
+                warn!(
+                    zone_block_number,
+                    error = %e,
+                    "Failed to read processedDepositNumber at portal-confirmed zone block"
+                );
+                0
             }
         }
     }
@@ -1016,6 +1067,7 @@ mod tests {
             repair_notify: Arc::new(Notify::new()),
             last_submitted_zone_block: 10,
             prev_processed_deposit_hash: B256::repeat_byte(0xaa),
+            prev_processed_deposit_number: 0,
             prev_zone_block_hash: B256::repeat_byte(0xbb),
             portal_withdrawal_queue_tail: 3,
             latest_observed_zone_block: 50,
@@ -1205,6 +1257,8 @@ mod tests {
             next_block_hash: B256::repeat_byte(0x55),
             prev_processed_deposit_hash: B256::repeat_byte(0x77),
             next_processed_deposit_hash: B256::repeat_byte(0x66),
+            prev_deposit_number: 0,
+            next_deposit_number: 0,
             withdrawal_queue_hash: B256::ZERO,
         };
 
