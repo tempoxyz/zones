@@ -403,6 +403,38 @@ impl ZoneTestNode {
         .await
     }
 
+    /// Start a zone node connected to a real L1, anchoring genesis to the
+    /// portal's on-chain `genesisTempoBlockNumber`.
+    ///
+    /// Unlike [`start_from_l1`], this preserves the full replay gap between the
+    /// portal genesis and the current L1 tip, which is useful for long-downtime
+    /// catch-up tests.
+    pub(crate) async fn start_from_l1_portal_genesis(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+    ) -> eyre::Result<Self> {
+        let l1_provider =
+            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
+        let portal = zone::abi::ZonePortal::new(portal_address, &l1_provider);
+        let genesis_block_number = portal.genesisTempoBlockNumber().call().await?;
+        let (genesis, genesis_block_number) =
+            build_l1_anchored_genesis_at_block(l1_http_url, portal_address, genesis_block_number)
+                .await?;
+
+        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        Self::launch_with_genesis(
+            l1_ws_url.to_string(),
+            portal_address,
+            Some(genesis_block_number),
+            next_unique_chain_id(),
+            Some(genesis),
+            Address::ZERO,
+            throwaway_key,
+        )
+        .await
+    }
+
     /// Start a zone node connected to a real L1, with a sequencer key for ECIES decryption.
     ///
     /// Same as [`start_from_l1`] but passes the sequencer key through to `ZoneNode::new`
@@ -1542,8 +1574,6 @@ async fn build_l1_anchored_genesis(
     l1_http_url: &url::Url,
     portal_address: Address,
 ) -> eyre::Result<(Genesis, u64)> {
-    use alloy_primitives::address;
-
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
 
@@ -1552,6 +1582,32 @@ async fn build_l1_anchored_genesis(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
+    build_l1_anchored_genesis_from_header(l1_header, portal_address)
+}
+
+/// Build a zone test genesis anchored to a specific L1 block number.
+async fn build_l1_anchored_genesis_at_block(
+    l1_http_url: &url::Url,
+    portal_address: Address,
+    block_number: u64,
+) -> eyre::Result<(Genesis, u64)> {
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
+
+    let block = l1_provider
+        .get_block_by_number(block_number.into())
+        .await?
+        .ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
+    let l1_header: &TempoHeader = block.header.as_ref();
+    build_l1_anchored_genesis_from_header(l1_header, portal_address)
+}
+
+fn build_l1_anchored_genesis_from_header(
+    l1_header: &TempoHeader,
+    portal_address: Address,
+) -> eyre::Result<(Genesis, u64)> {
+    use alloy_primitives::address;
+
     let genesis_block_number = l1_header.inner.number;
 
     let mut rlp_buf = Vec::new();
