@@ -16,7 +16,7 @@ use aes_gcm::{
 use alloy_evm::precompiles::{DynPrecompile, Precompile, PrecompileInput};
 use alloy_primitives::{Address, Bytes, address};
 use alloy_sol_types::SolCall;
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::{debug, warn};
 
 /// AES-256-GCM Decrypt precompile address on Zone L2.
@@ -57,19 +57,21 @@ impl Precompile for AesGcmDecrypt {
     fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
         let data = input.data;
         if data.len() < 4 {
-            return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+            return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
         }
 
         let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
         if selector != decryptCall::SELECTOR {
             warn!(target: "zone::precompile", ?selector, "AesGcmDecrypt: unknown selector");
-            return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+            return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
         }
 
         debug!(target: "zone::precompile", "AesGcmDecrypt: decrypt");
 
-        let call = decryptCall::abi_decode(data)
-            .map_err(|_| PrecompileError::other("ABI decode failed"))?;
+        let call = match decryptCall::abi_decode(data) {
+            Ok(call) => call,
+            Err(_) => return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir)),
+        };
 
         let gas = AES_GCM_BASE_GAS + AES_GCM_PER_BYTE_GAS * call.ciphertext.len() as u64;
 
@@ -86,7 +88,7 @@ impl Precompile for AesGcmDecrypt {
             valid,
         };
         let encoded = decryptCall::abi_encode_returns(&ret);
-        Ok(PrecompileOutput::new(gas, encoded.into()))
+        Ok(PrecompileOutput::new(gas, encoded.into(), input.reservoir))
     }
 }
 

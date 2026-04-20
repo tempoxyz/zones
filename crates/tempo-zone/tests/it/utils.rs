@@ -2661,7 +2661,7 @@ impl PrivateRpcTestCtx {
             .connect_http(self.zone.http_url().clone());
         let keychain = IAccountKeychainInstance::new(ACCOUNT_KEYCHAIN_ADDRESS, &provider);
         let pending = keychain
-            .authorizeKey(key_id, signature_type, expiry, false, vec![])
+            .authorizeKey_0(key_id, signature_type, expiry, false, vec![])
             .send()
             .await?;
         self.fixture.inject_empty_block(self.zone.deposit_queue());

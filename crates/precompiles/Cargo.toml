@@ -20,14 +20,14 @@ tempo-contracts = { workspace = true, default-features = false }
 tempo-precompiles = { workspace = true, default-features = false }
 tempo-precompiles-macros.workspace = true
 
-# alloy (direct versions for no_std — workspace versions have default-features = true)
-alloy = { version = "1.6.1", default-features = false }
-alloy-evm = { version = "0.29.2", default-features = false }
-alloy-primitives = { version = "1.5.7", default-features = false }
-alloy-sol-types = { version = "1.5.7", default-features = false }
+# alloy
+alloy = { workspace = true, default-features = false }
+alloy-evm = { workspace = true, default-features = false }
+alloy-primitives = { workspace = true, default-features = false }
+alloy-sol-types = { workspace = true, default-features = false }
 
 # revm
-revm = { version = "36.0.0", default-features = false }
+revm = { workspace = true, default-features = false }
 
 # crypto
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
