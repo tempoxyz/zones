@@ -20,7 +20,7 @@ use k256::{
         sec1::{FromEncodedPoint, ToEncodedPoint},
     },
 };
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::{debug, warn};
 
 /// Chaum-Pedersen Verify precompile address on Zone L2.
@@ -73,19 +73,21 @@ impl Precompile for ChaumPedersenVerify {
     fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
         let data = input.data;
         if data.len() < 4 {
-            return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+            return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
         }
 
         let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
         if selector != verifyProofCall::SELECTOR {
             warn!(target: "zone::precompile", ?selector, "ChaumPedersenVerify: unknown selector");
-            return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+            return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
         }
 
         debug!(target: "zone::precompile", "ChaumPedersenVerify: verifyProof");
 
-        let call = verifyProofCall::abi_decode(data)
-            .map_err(|_| PrecompileError::other("ABI decode failed"))?;
+        let call = match verifyProofCall::abi_decode(data) {
+            Ok(call) => call,
+            Err(_) => return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir)),
+        };
 
         let valid = verify_chaum_pedersen(
             &call.ephemeralPubX.0,
@@ -99,7 +101,11 @@ impl Precompile for ChaumPedersenVerify {
         );
 
         let encoded = verifyProofCall::abi_encode_returns(&valid);
-        Ok(PrecompileOutput::new(CP_VERIFY_GAS, encoded.into()))
+        Ok(PrecompileOutput::new(
+            CP_VERIFY_GAS,
+            encoded.into(),
+            input.reservoir,
+        ))
     }
 }
 

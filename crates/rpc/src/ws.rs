@@ -273,7 +273,7 @@ async fn handle_subscribe(
             let filter = match params.unwrap_or_default() {
                 SubscriptionParams::None => Filter::default(),
                 SubscriptionParams::Logs(filter) => *filter,
-                SubscriptionParams::Bool(_) => {
+                SubscriptionParams::Bool(_) | SubscriptionParams::TransactionReceipts(_) => {
                     return WsDispatchResult::response_only(JsonRpcResponse::error(
                         req.id.clone(),
                         JsonRpcError::invalid_params("eth_subscribe(logs) expects a filter object"),
@@ -295,7 +295,7 @@ async fn handle_subscribe(
             let full = match params.unwrap_or(SubscriptionParams::None) {
                 SubscriptionParams::None | SubscriptionParams::Bool(false) => false,
                 SubscriptionParams::Bool(true) => true,
-                SubscriptionParams::Logs(_) => {
+                SubscriptionParams::Logs(_) | SubscriptionParams::TransactionReceipts(_) => {
                     return WsDispatchResult::response_only(JsonRpcResponse::error(
                         req.id.clone(),
                         JsonRpcError::invalid_params(
@@ -320,6 +320,12 @@ async fn handle_subscribe(
             }
         }
         SubscriptionKind::Syncing => {
+            return WsDispatchResult::response_only(JsonRpcResponse::error(
+                req.id.clone(),
+                JsonRpcError::method_disabled(),
+            ));
+        }
+        SubscriptionKind::TransactionReceipts => {
             return WsDispatchResult::response_only(JsonRpcResponse::error(
                 req.id.clone(),
                 JsonRpcError::method_disabled(),

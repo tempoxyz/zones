@@ -93,8 +93,8 @@ pub fn compute_ecdh_proof(
     Some(EcdhProofResult {
         shared_secret: B256::from(shared_secret_x),
         shared_secret_y_parity,
-        cp_proof_s: B256::from(s.to_repr().as_ref()),
-        cp_proof_c: B256::from(c.to_repr().as_ref()),
+        cp_proof_s: B256::from_slice(s.to_repr().as_ref()),
+        cp_proof_c: B256::from_slice(c.to_repr().as_ref()),
     })
 }
 

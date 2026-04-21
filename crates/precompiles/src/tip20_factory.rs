@@ -14,11 +14,9 @@
 //! Only [`ZONE_INBOX_ADDRESS`] may call this precompile; all other callers are
 //! reverted with `OnlyZoneInbox()`.
 
-use alloc::format;
-
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError};
-use revm::precompile::{PrecompileError, PrecompileOutput, PrecompileResult};
+use revm::precompile::PrecompileResult;
 use tempo_precompiles::{
     PATH_USD_ADDRESS, Precompile as TempoPrecompile, TIP20_FACTORY_ADDRESS,
     tip20::{ISSUER_ROLE, TIP20Token},
@@ -98,15 +96,17 @@ impl ZoneTokenFactory {
             PrecompileId::Custom("ZoneTokenFactory".into()),
             move |input| {
                 if !input.is_direct_call() {
-                    return Ok(PrecompileOutput::new_reverted(
+                    return Ok(PrecompileOutput::revert(
                         0,
                         SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
+                        input.reservoir,
                     ));
                 }
 
                 let mut storage = EvmPrecompileStorageProvider::new(
                     input.internals,
                     input.gas,
+                    input.reservoir,
                     spec,
                     input.is_static,
                     gas_params.clone(),
@@ -120,19 +120,21 @@ impl ZoneTokenFactory {
 
 impl TempoPrecompile for ZoneTokenFactory {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
+        let storage = tempo_precompiles::storage::StorageCtx;
+
         if msg_sender != ZONE_INBOX_ADDRESS {
-            return Ok(PrecompileOutput::new_reverted(
-                0,
-                OnlyZoneInbox {}.abi_encode().into(),
-            ));
+            return Ok(storage.revert_output(OnlyZoneInbox {}.abi_encode().into()));
         }
 
-        let call = enableTokenCall::abi_decode(calldata)
-            .map_err(|_| PrecompileError::other("ABI decode failed"))?;
+        let call = match enableTokenCall::abi_decode(calldata) {
+            Ok(call) => call,
+            Err(_) => return Ok(storage.revert_output(Bytes::new())),
+        };
 
-        self.enable_token(call)
-            .map_err(|e| PrecompileError::other(format!("{e}")))?;
+        if let Err(err) = self.enable_token(call) {
+            return storage.error_result(err);
+        }
 
-        Ok(PrecompileOutput::new(0, Bytes::new()))
+        Ok(storage.success_output(Bytes::new()))
     }
 }
