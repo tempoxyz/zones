@@ -33,7 +33,7 @@ revm = { workspace = true, default-features = false }
 aes-gcm = { version = "0.10.3", default-features = false, features = ["aes", "alloc"] }
 k256 = { version = "0.13.4", default-features = false, features = ["arithmetic", "ecdh"] }
 sha2 = { version = "0.10.9", default-features = false }
-rand = { version = "0.8.5", default-features = false }
+rand = { version = "0.9.4", default-features = false }
 
 # misc
 tracing = { version = "0.1.41", default-features = false }
