@@ -184,5 +184,5 @@ thiserror = "2"
 tokio = { version = "1.45.1", features = ["full"] }
 axum = "0.8"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 tracing = "0.1.41"
