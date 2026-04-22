@@ -41,7 +41,7 @@ jobs:
       - uses: taiki-e/install-action@c802b5ed6fc0b87c8c603a600ac1d864e6dc1cbe # just
       - name: Build
         run: just build ${{ matrix.binary }} "--profile ${{ inputs.profile || 'dev' }}"
-      - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         id: binary_upload
         with:
           if-no-files-found: "error"
