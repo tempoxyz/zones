@@ -176,7 +176,7 @@ parking_lot = "0.12.4"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
 rand = "0.8.5"
 sha2 = "0.10.9"
-rayon = "1.10"
+rayon = "1.12"
 secp256k1 = { version = "0.30.0", features = ["recovery", "global-context"] }
 serde = { version = "1.0.219", default-features = false, features = ["derive", "alloc"] }
 serde_json = "1.0.142"
