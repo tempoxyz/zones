@@ -371,13 +371,13 @@ where
         self.policy_cache.set_last_l1_block(tempo_block_number);
         info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
 
+        // Save values needed after ctx/self fields are consumed.
         let l1_url = self.l1_config.l1_rpc_url.clone();
         let portal_address = self.l1_config.portal_address;
         let retry_connection_interval = self.l1_config.retry_connection_interval;
         let sequencer_addons_config = self.sequencer_addons_config.take();
         let sequencer_addr = self.fee_recipient;
 
-        // Connect L1 provider upfront so startup failures are immediately visible.
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &l1_url,
@@ -386,38 +386,92 @@ where
             .await?
             .erased();
 
-        // Resolve enabled tokens — use pre-configured list if available, otherwise
-        // query L1 via RPC as a fallback.
+        self.resolve_and_seed_tokens(portal_address, &l1_provider)
+            .await?;
+        self.spawn_l1_subscriber(&ctx);
+        self.spawn_policy_tasks(&l1_provider, &ctx);
+        self.spawn_zone_engine(l1_provider, &ctx)?;
+
+        let task_executor = ctx.node.task_executor().clone();
+        let chain_id = ctx
+            .node
+            .provider()
+            .chain_spec()
+            .inner
+            .genesis()
+            .config
+            .chain_id;
+        let handle = self.inner.launch_add_ons(ctx).await?;
+
+        if let Some(config) = sequencer_addons_config {
+            Self::launch_sequencer(
+                config,
+                &handle,
+                &task_executor,
+                l1_url,
+                portal_address,
+                retry_connection_interval,
+                sequencer_addr,
+                chain_id,
+            )
+            .await?;
+        }
+
+        Ok(handle)
+    }
+}
+
+/// Helper methods for [`ZoneAddOns::launch_add_ons`].
+impl<N> ZoneAddOns<N>
+where
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: reth_transaction_pool::TransactionPool<
+            Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
+        >,
+    ZoneEthApiBuilder:
+        EthApiBuilder<N, EthApi: reth_rpc_eth_api::EthApiTypes<NetworkTypes = TempoNetwork>>,
+{
+    /// Resolve enabled tokens and seed the policy cache.
+    async fn resolve_and_seed_tokens(
+        &mut self,
+        portal_address: alloy_primitives::Address,
+        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+    ) -> eyre::Result<()> {
         let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
-            let tokens = crate::abi::ZonePortal::new(portal_address, &l1_provider)
+            let tokens = crate::abi::ZonePortal::new(portal_address, l1_provider)
                 .enabled_tokens()
                 .await?;
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Discovered enabled tokens from L1");
             tokens
         };
 
-        // Seed the policy cache with current transferPolicyId for each tracked token
-        // before spawning the subscriber, so errors propagate to the caller.
         self.policy_cache
-            .seed_token_policies(portal_address, &tracked_tokens, &l1_provider)
+            .seed_token_policies(portal_address, &tracked_tokens, l1_provider)
             .await?;
         info!(target: "reth::cli", "Seeded token policies from L1");
+        Ok(())
+    }
 
-        // Spawn unified L1 subscriber (deposits + policy events + L1 state anchor).
+    /// Spawn the unified L1 subscriber (deposits + policy events + L1 state anchor).
+    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
         L1Subscriber::spawn(
-            self.l1_config,
+            self.l1_config.clone(),
             ctx.node.provider().clone(),
             self.deposit_queue.clone(),
             ctx.node.task_executor().clone(),
         );
-        info!(target: "reth::cli", "Unified L1 subscriber started (deposits + policy events + L1 state anchor)");
+        info!(target: "reth::cli", "Unified L1 subscriber started");
+    }
 
-        // Spawn policy resolution task for pre-fetching authorization data from L1.
-        // The pool prefetch task feeds it with sender/recipient addresses from
-        // incoming transactions so the cache is warm by the time we build blocks.
+    /// Spawn TIP-403 policy resolution and pool prefetch tasks.
+    fn spawn_policy_tasks(
+        &self,
+        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+        ctx: &AddOnsContext<'_, N>,
+    ) {
         let policy_task_handle = crate::l1_state::spawn_policy_resolution_task(
             self.policy_cache.clone(),
             l1_provider.clone(),
@@ -431,10 +485,16 @@ where
             ctx.node.task_executor().clone(),
         );
         info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");
+    }
 
-        // Build and spawn the ZoneEngine — L1-event-driven block production
+    /// Build and spawn the [`ZoneEngine`] for L1-event-driven block production.
+    fn spawn_zone_engine(
+        &mut self,
+        l1_provider: alloy_provider::DynProvider<TempoNetwork>,
+        ctx: &AddOnsContext<'_, N>,
+    ) -> eyre::Result<()> {
         let policy_provider = crate::l1_state::PolicyProvider::new(
-            self.policy_cache,
+            self.policy_cache.clone(),
             l1_provider,
             tokio::runtime::Handle::current(),
         );
@@ -446,115 +506,112 @@ where
             provider.chain_spec(),
             ctx.beacon_engine_handle.clone(),
             ctx.node.payload_builder_handle().clone(),
-            self.deposit_queue,
+            self.deposit_queue.clone(),
             last_header,
             self.fee_recipient,
-            self.sequencer_key,
+            self.sequencer_key.clone(),
             self.portal_address,
             policy_provider,
         );
-        let task_executor = ctx.node.task_executor().clone();
-        let chain_id = provider.chain_spec().inner.genesis().config.chain_id;
-        task_executor.spawn_critical_task("zone-engine", engine.run());
-        info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
+        ctx.node
+            .task_executor()
+            .spawn_critical_task("zone-engine", engine.run());
+        info!(target: "reth::cli", "ZoneEngine spawned");
+        Ok(())
+    }
 
-        let handle = self.inner.launch_add_ons(ctx).await?;
-
-        // Launch sequencer add-ons (private RPC + background tasks) if configured.
-        if let Some(config) = sequencer_addons_config {
-            // Verify the chain ID matches the deterministic derivation from the zone ID.
-            // Skip when zone_id is 0 (local testing default).
-            if config.zone_id != 0 {
-                let expected_chain_id = zone_primitives::constants::zone_chain_id(config.zone_id);
-                if chain_id != expected_chain_id {
-                    eyre::bail!(
-                        "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
-                        config.zone_id,
-                        expected_chain_id,
-                        chain_id,
-                    );
-                }
+    /// Launch sequencer add-ons: chain ID validation, private RPC, background tasks,
+    /// and engine shutdown hook.
+    async fn launch_sequencer(
+        config: ZoneSequencerAddOnsConfig,
+        handle: &<Self as NodeAddOns<N>>::Handle,
+        task_executor: &reth_tasks::TaskExecutor,
+        l1_rpc_url: String,
+        portal_address: alloy_primitives::Address,
+        retry_connection_interval: std::time::Duration,
+        sequencer_addr: alloy_primitives::Address,
+        chain_id: u64,
+    ) -> eyre::Result<()> {
+        if config.zone_id != 0 {
+            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
+            if chain_id != expected {
+                eyre::bail!(
+                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
+                    config.zone_id,
+                    expected,
+                    chain_id,
+                );
             }
-
-            // Launch the private zone RPC server.
-            let eth_handlers = handle.eth_handlers().clone();
-            let zone_rpc_url = handle
-                .rpc_server_handles
-                .rpc
-                .http_url()
-                .expect("HTTP RPC server must be enabled for sequencer mode");
-            let private_rpc_config = zone_rpc::PrivateRpcConfig {
-                listen_addr: ([0, 0, 0, 0], config.private_rpc_port).into(),
-                l1_rpc_url: l1_url.clone(),
-                zone_rpc_url: zone_rpc_url.clone(),
-                retry_connection_interval,
-                zone_id: config.zone_id,
-                chain_id,
-                max_auth_token_validity: config.max_auth_token_validity,
-                zone_portal: portal_address,
-                sequencer: sequencer_addr,
-            };
-            let api: Arc<dyn crate::rpc::ZoneRpcApi> = Arc::new(
-                crate::rpc::TempoZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?,
-            );
-            let local_addr = crate::rpc::start_private_rpc(private_rpc_config, api).await?;
-            info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
-
-            // Spawn sequencer background tasks.
-            info!(
-                target: "reth::cli",
-                %sequencer_addr,
-                "Starting sequencer background tasks"
-            );
-
-            let sequencer_config = crate::ZoneSequencerConfig {
-                portal_address,
-                l1_rpc_url: l1_url,
-                retry_connection_interval,
-                withdrawal_poll_interval: config.withdrawal_poll_interval,
-                outbox_address: crate::abi::ZONE_OUTBOX_ADDRESS,
-                inbox_address: crate::abi::ZONE_INBOX_ADDRESS,
-                tempo_state_address: crate::abi::TEMPO_STATE_ADDRESS,
-                zone_rpc_url,
-                zone_poll_interval: config.zone_poll_interval,
-                batch_interval: config.batch_interval,
-            };
-
-            let seq_handle =
-                crate::spawn_zone_sequencer(sequencer_config, config.sequencer_signer).await;
-
-            info!(
-                target: "reth::cli",
-                "Sequencer tasks spawned: zone monitor (with batch submission), withdrawal processor"
-            );
-
-            // Spawn as critical tasks — node shuts down if either exits.
-            task_executor.spawn_critical_task("zone-monitor", async move {
-                tokio::select! {
-                    res = seq_handle.withdrawal_handle => {
-                        tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
-                    }
-                    res = seq_handle.monitor_handle => {
-                        tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
-                    }
-                }
-            });
-
-            // Ensure all unpersisted blocks are flushed when the node exits.
-            let engine_shutdown = handle.engine_shutdown.clone();
-            task_executor.spawn_critical_with_graceful_shutdown_signal(
-                "zone-engine-shutdown",
-                |shutdown| async move {
-                    let _guard = shutdown.await;
-                    info!(target: "reth::cli", "Shutdown signal received — flushing engine state");
-                    if let Some(done) = engine_shutdown.shutdown() {
-                        let _ = done.await;
-                    }
-                },
-            );
         }
 
-        Ok(handle)
+        // Private RPC server.
+        let eth_handlers = handle.eth_handlers().clone();
+        let zone_rpc_url = handle
+            .rpc_server_handles
+            .rpc
+            .http_url()
+            .expect("HTTP RPC server must be enabled for sequencer mode");
+        let private_rpc_config = zone_rpc::PrivateRpcConfig {
+            listen_addr: ([0, 0, 0, 0], config.private_rpc_port).into(),
+            l1_rpc_url: l1_rpc_url.clone(),
+            zone_rpc_url: zone_rpc_url.clone(),
+            retry_connection_interval,
+            zone_id: config.zone_id,
+            chain_id,
+            max_auth_token_validity: config.max_auth_token_validity,
+            zone_portal: portal_address,
+            sequencer: sequencer_addr,
+        };
+        let api: Arc<dyn crate::rpc::ZoneRpcApi> = Arc::new(
+            crate::rpc::TempoZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?,
+        );
+        let local_addr = crate::rpc::start_private_rpc(private_rpc_config, api).await?;
+        info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
+
+        // Sequencer background tasks.
+        info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
+        let sequencer_config = crate::ZoneSequencerConfig {
+            portal_address,
+            l1_rpc_url,
+            retry_connection_interval,
+            withdrawal_poll_interval: config.withdrawal_poll_interval,
+            outbox_address: crate::abi::ZONE_OUTBOX_ADDRESS,
+            inbox_address: crate::abi::ZONE_INBOX_ADDRESS,
+            tempo_state_address: crate::abi::TEMPO_STATE_ADDRESS,
+            zone_rpc_url,
+            zone_poll_interval: config.zone_poll_interval,
+            batch_interval: config.batch_interval,
+        };
+        let seq_handle =
+            crate::spawn_zone_sequencer(sequencer_config, config.sequencer_signer).await;
+        info!(target: "reth::cli", "Sequencer tasks spawned");
+
+        // Critical task — node shuts down if either exits.
+        task_executor.spawn_critical_task("zone-monitor", async move {
+            tokio::select! {
+                res = seq_handle.withdrawal_handle => {
+                    tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
+                }
+                res = seq_handle.monitor_handle => {
+                    tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
+                }
+            }
+        });
+
+        // Flush unpersisted blocks on shutdown.
+        let engine_shutdown = handle.engine_shutdown.clone();
+        task_executor.spawn_critical_with_graceful_shutdown_signal(
+            "zone-engine-shutdown",
+            |shutdown| async move {
+                let _guard = shutdown.await;
+                info!(target: "reth::cli", "Shutdown signal received — flushing engine state");
+                if let Some(done) = engine_shutdown.shutdown() {
+                    let _ = done.await;
+                }
+            },
+        );
+
+        Ok(())
     }
 }
 
