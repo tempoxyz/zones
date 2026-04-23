@@ -61,6 +61,9 @@ use crate::{
 
 use crate::builder::ZonePayloadFactory;
 
+/// Network primitives for Zone.
+type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
+
 /// Configuration for the sequencer background tasks.
 ///
 /// When provided via [`ZoneNode::with_sequencer`], the batch submission
@@ -78,9 +81,6 @@ pub struct ZoneSequencerAddOnsConfig {
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: std::time::Duration,
 }
-
-/// Network primitives for Zone.
-type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 
 /// Configuration for the private RPC server.
 ///
