@@ -1,0 +1,3 @@
+[submodule "specs/ref-impls/lib/tempo-std"]
+	path = specs/ref-impls/lib/tempo-std
+	url = https://github.com/tempoxyz/tempo-std

@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IERC20 } from "../interfaces/IERC20.sol";
-import { IStablecoinDEX } from "../interfaces/IStablecoinDEX.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
+import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
 import {
     EncryptedDepositPayload,
     IWithdrawalReceiver,
@@ -90,7 +90,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 
             uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
 
-            IERC20(tokenOut).approve(targetPortal, amountOut);
+            ITIP20(tokenOut).approve(targetPortal, amountOut);
             IZonePortal(targetPortal).depositEncrypted(tokenOut, amountOut, keyIndex, encrypted);
         } else {
             (, // skip isEncrypted
@@ -105,7 +105,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
 
             uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
 
-            IERC20(tokenOut).approve(targetPortal, amountOut);
+            ITIP20(tokenOut).approve(targetPortal, amountOut);
             IZonePortal(targetPortal).deposit(tokenOut, recipient, amountOut, memo);
         }
 
@@ -139,7 +139,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             return amountIn;
         }
 
-        IERC20(tokenIn).approve(address(stablecoinDEX), amountIn);
+        ITIP20(tokenIn).approve(address(stablecoinDEX), amountIn);
         amountOut = stablecoinDEX.swapExactAmountIn(tokenIn, tokenOut, amountIn, minAmountOut);
     }
 

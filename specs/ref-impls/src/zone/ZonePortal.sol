@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { TIP403Registry } from "../TIP403Registry.sol";
-import { ITIP20 } from "../interfaces/ITIP20.sol";
-
-import { TempoUtilities } from "../TempoUtilities.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
+import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
+import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { getBlockHash } from "./BlockHashHistory.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "./EncryptedDeposit.sol";
@@ -37,8 +37,8 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice TIP-403 registry for transfer policy authorization checks
-    TIP403Registry internal constant TIP403_REGISTRY =
-        TIP403Registry(0x403c000000000000000000000000000000000000);
+    ITIP403Registry internal constant TIP403_REGISTRY =
+        ITIP403Registry(StdPrecompiles.TIP403_REGISTRY_ADDRESS);
 
     /// @notice Fixed gas value for deposit fee calculation
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
@@ -218,7 +218,9 @@ contract ZonePortal is IZonePortal {
     ///      Validates the token is a TIP-20 and grants messenger max approval.
     function enableToken(address _token) external onlySequencer {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
-        if (!TempoUtilities.isTIP20(_token)) revert TokenNotEnabled();
+        if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(_token)) {
+            revert TokenNotEnabled();
+        }
         _enableTokenInternal(_token);
     }
 

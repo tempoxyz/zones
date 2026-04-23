@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { TIP20 } from "../../src/TIP20.sol";
-import { IERC20 } from "../../src/interfaces/IERC20.sol";
-import { IStablecoinDEX } from "../../src/interfaces/IStablecoinDEX.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
+import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
 import {
     EncryptedDepositPayload,
     IWithdrawalReceiver,
@@ -39,9 +38,9 @@ contract MockStablecoinDEXForRouter {
         if (shouldRevert || nextAmountOut < minAmountOut) {
             revert IStablecoinDEX.InsufficientOutput();
         }
-        IERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
+        ITIP20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
         amountOut = nextAmountOut;
-        TIP20(tokenOut).mint(msg.sender, amountOut);
+        ITIP20(tokenOut).mint(msg.sender, amountOut);
     }
 
 }
@@ -101,7 +100,7 @@ contract MockZonePortalForRouter {
         external
         returns (bytes32)
     {
-        IERC20(_token).transferFrom(msg.sender, address(this), amount);
+        ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastDepositRecipient = to;
         lastDepositAmount = amount;
         lastDepositMemo = memo;
@@ -118,7 +117,7 @@ contract MockZonePortalForRouter {
         external
         returns (bytes32)
     {
-        IERC20(_token).transferFrom(msg.sender, address(this), amount);
+        ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastEncryptedAmount = amount;
         lastEncryptedKeyIndex = keyIndex;
         encryptedDepositCalled = true;

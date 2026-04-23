@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITIP20 } from "../interfaces/ITIP20.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { IWithdrawalReceiver, IZoneMessenger } from "./IZone.sol";
 
 /// @title ZoneMessenger

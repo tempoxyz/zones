@@ -87,7 +87,7 @@ pub(crate) struct CreateZone {
     gas_limit: u64,
 
     /// Path to the Foundry compiled output directory containing zone contract artifacts.
-    #[arg(long, default_value = "docs/specs/out")]
+    #[arg(long, default_value = "specs/ref-impls/out")]
     specs_out: PathBuf,
 }
 

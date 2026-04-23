@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { TIP20 } from "../../src/TIP20.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { IZoneFactory, ZoneInfo, ZoneParams } from "../../src/zone/IZone.sol";
 import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
