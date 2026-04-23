@@ -1061,26 +1061,23 @@ interface IZonePortal {
     // Events
     event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
-        address token, address to, uint128 netAmount, uint128 fee, bytes32 memo,
-        address bouncebackRecipient, uint64 depositNumber
+        address token, address to, uint128 netAmount, uint128 fee, bytes32 memo
     );
     event EncryptedDepositMade(
         bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
         address token, uint128 netAmount, uint128 fee, uint256 keyIndex,
         bytes32 ephemeralPubkeyX, uint8 ephemeralPubkeyYParity,
-        bytes ciphertext, bytes12 nonce, bytes16 tag, uint64 depositNumber
+        bytes ciphertext, bytes12 nonce, bytes16 tag
     );
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex, bytes32 nextProcessedDepositQueueHash,
-        bytes32 nextBlockHash, bytes32 withdrawalQueueHash,
-        uint64 lastProcessedDepositNumber
+        bytes32 nextBlockHash, bytes32 withdrawalQueueHash
     );
     event WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess);
-    event WithdrawalBounceBack(
+    event BounceBack(
         bytes32 indexed newCurrentDepositQueueHash, address indexed fallbackRecipient,
-        address token, uint128 amount, uint64 depositNumber
+        address token, uint128 amount
     );
-    event DepositBounceBack(address indexed bouncebackRecipient, address token, uint128 amount);
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
     event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
@@ -1099,16 +1096,11 @@ interface IZonePortal {
     function enabledTokenAt(uint256 index) external view returns (address);
 
     // Deposits
-    function deposit(
-        address token, address to, uint128 amount, bytes32 memo, address bouncebackRecipient
-    ) external returns (bytes32 newCurrentDepositQueueHash);
-    function depositEncrypted(
-        address token, uint128 amount, uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted, address bouncebackRecipient
-    ) external returns (bytes32 newCurrentDepositQueueHash);
+    function deposit(address token, address to, uint128 amount, bytes32 memo)
+        external returns (bytes32 newCurrentDepositQueueHash);
+    function depositEncrypted(address token, uint128 amount, uint256 keyIndex, EncryptedDepositPayload calldata encrypted)
+        external returns (bytes32 newCurrentDepositQueueHash);
     function calculateDepositFee() external view returns (uint128 fee);
-    function depositCount() external view returns (uint64);
-    function lastProcessedDepositNumber() external view returns (uint64);
 
     // Batch submission
     function submitBatch(
