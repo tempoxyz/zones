@@ -64,25 +64,29 @@ use crate::builder::ZonePayloadFactory;
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 
-/// Configuration for zone add-ons launched after the node starts.
+/// Configuration for the private RPC server.
 ///
-/// When provided via [`ZoneNode::with_sequencer_addons`], the private RPC
-/// server is always launched and the sequencer background tasks (batch
-/// submission, withdrawal processing) are optionally spawned based on
-/// [`enable_sequencer`](Self::enable_sequencer).
+/// Always launched when provided via [`ZoneNode::with_private_rpc`].
+#[derive(Debug, Clone)]
+pub struct ZonePrivateRpcConfig {
+    /// Port for the private zone RPC server (0 for OS-assigned).
+    pub private_rpc_port: u16,
+    /// Zone ID for chain ID validation and private RPC auth.
+    pub zone_id: u32,
+    /// Maximum auth token validity for the private RPC.
+    pub max_auth_token_validity: std::time::Duration,
+}
+
+/// Configuration for the sequencer background tasks.
+///
+/// When provided via [`ZoneNode::with_sequencer`], the batch submission
+/// and withdrawal processing tasks are spawned during node launch.
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
     /// Sequencer private key signer for signing L1 transactions.
     pub sequencer_signer: alloy_signer_local::PrivateKeySigner,
-    /// Zone ID for chain ID validation and private RPC auth.
+    /// Zone ID for chain ID validation.
     pub zone_id: u32,
-    /// Port for the private zone RPC server (0 for OS-assigned).
-    pub private_rpc_port: u16,
-    /// Maximum auth token validity for the private RPC.
-    pub max_auth_token_validity: std::time::Duration,
-    /// Whether to launch the sequencer background tasks (batch submission,
-    /// withdrawal processing). When `false`, only the private RPC is started.
-    pub enable_sequencer: bool,
     /// How often the zone monitor polls for new L2 blocks.
     pub zone_poll_interval: std::time::Duration,
     /// Maximum time to accumulate zone blocks before batch submission.
@@ -117,9 +121,10 @@ pub struct ZoneNode {
     /// Optional pre-configured list of enabled token addresses. When set, the
     /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
-    /// Optional sequencer add-ons config. When set, the private RPC server
-    /// is always launched and sequencer tasks are optionally spawned.
-    sequencer_addons_config: Option<ZoneSequencerAddOnsConfig>,
+    /// Optional private RPC config. Always launched when set.
+    private_rpc_config: Option<ZonePrivateRpcConfig>,
+    /// Optional sequencer config. When set, sequencer tasks are spawned.
+    sequencer_config: Option<ZoneSequencerAddOnsConfig>,
 }
 
 impl ZoneNode {
@@ -173,17 +178,21 @@ impl ZoneNode {
             sequencer_key,
             portal_address,
             initial_tokens: None,
-            sequencer_addons_config: None,
+            private_rpc_config: None,
+            sequencer_config: None,
         }
     }
 
-    /// Set the sequencer add-ons configuration.
-    ///
-    /// When set, the private RPC server is always launched and sequencer
-    /// background tasks are optionally spawned based on
-    /// [`enable_sequencer`](ZoneSequencerAddOnsConfig::enable_sequencer).
-    pub fn with_sequencer_addons(mut self, config: ZoneSequencerAddOnsConfig) -> Self {
-        self.sequencer_addons_config = Some(config);
+    /// Set the private RPC configuration. Always launched when set.
+    pub fn with_private_rpc(mut self, config: ZonePrivateRpcConfig) -> Self {
+        self.private_rpc_config = Some(config);
+        self
+    }
+
+    /// Set the sequencer configuration. When set, batch submission and
+    /// withdrawal processing tasks are spawned during node launch.
+    pub fn with_sequencer(mut self, config: ZoneSequencerAddOnsConfig) -> Self {
+        self.sequencer_config = Some(config);
         self
     }
 
@@ -302,8 +311,10 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     portal_address: alloy_primitives::Address,
     /// Optional pre-configured list of enabled token addresses.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
-    /// Optional sequencer add-ons config (private RPC + sequencer tasks).
-    sequencer_addons_config: Option<ZoneSequencerAddOnsConfig>,
+    /// Optional private RPC config.
+    private_rpc_config: Option<ZonePrivateRpcConfig>,
+    /// Optional sequencer config.
+    sequencer_config: Option<ZoneSequencerAddOnsConfig>,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
@@ -327,7 +338,8 @@ where
         sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
         initial_tokens: Option<Vec<alloy_primitives::Address>>,
-        sequencer_addons_config: Option<ZoneSequencerAddOnsConfig>,
+        private_rpc_config: Option<ZonePrivateRpcConfig>,
+        sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -344,7 +356,8 @@ where
             sequencer_key,
             portal_address,
             initial_tokens,
-            sequencer_addons_config,
+            private_rpc_config,
+            sequencer_config,
         }
     }
 }
@@ -398,10 +411,9 @@ where
             .chain_id;
         let handle = self.inner.launch_add_ons(ctx).await?;
 
-        if let Some(config) = self.sequencer_addons_config.take() {
-            // Private RPC always launches with sequencer add-ons
+        if let Some(config) = self.private_rpc_config.take() {
             Self::launch_private_rpc(
-                &config,
+                config,
                 &handle,
                 self.l1_config.l1_rpc_url.clone(),
                 self.l1_config.retry_connection_interval,
@@ -410,20 +422,20 @@ where
                 chain_id,
             )
             .await?;
+        }
 
-            if config.enable_sequencer {
-                Self::launch_sequencer_tasks(
-                    config,
-                    &handle,
-                    &task_executor,
-                    self.l1_config.l1_rpc_url,
-                    self.l1_config.portal_address,
-                    self.l1_config.retry_connection_interval,
-                    self.fee_recipient,
-                    chain_id,
-                )
-                .await?;
-            }
+        if let Some(config) = self.sequencer_config.take() {
+            Self::launch_sequencer_tasks(
+                config,
+                &handle,
+                &task_executor,
+                self.l1_config.l1_rpc_url,
+                self.l1_config.portal_address,
+                self.l1_config.retry_connection_interval,
+                self.fee_recipient,
+                chain_id,
+            )
+            .await?;
         }
 
         Ok(handle)
@@ -531,7 +543,7 @@ where
 
     /// Launch the private RPC server.
     async fn launch_private_rpc(
-        config: &ZoneSequencerAddOnsConfig,
+        config: ZonePrivateRpcConfig,
         handle: &<Self as NodeAddOns<N>>::Handle,
         l1_rpc_url: String,
         retry_connection_interval: std::time::Duration,
@@ -716,7 +728,8 @@ where
             self.sequencer_key.clone(),
             self.portal_address,
             self.initial_tokens.clone(),
-            self.sequencer_addons_config.clone(),
+            self.private_rpc_config.clone(),
+            self.sequencer_config.clone(),
         )
     }
 }
