@@ -495,8 +495,6 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
             sharedSecretYParity: 0x02,
-            to: recipient,
-            memo: memo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
 
@@ -548,8 +546,6 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
             sharedSecretYParity: 0x02,
-            to: address(0x500),
-            memo: bytes32("memo"),
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
 
@@ -595,8 +591,6 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xabcd)),
             sharedSecretYParity: 0x02,
-            to: recipient,
-            memo: encMemo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
 
@@ -653,8 +647,6 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(1)),
             sharedSecretYParity: 0x02,
-            to: address(0x500),
-            memo: bytes32("memo"),
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
 
@@ -781,8 +773,6 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xbad)),
             sharedSecretYParity: 0x02,
-            to: address(0x500),
-            memo: bytes32("memo"),
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
 
@@ -798,9 +788,7 @@ contract ZoneInboxTest is Test {
     /// @notice Helper: set up an encrypted deposit flow where AES-GCM returns a specific plaintext
     function _setupEncryptedDepositWithPlaintext(
         bytes memory mockPlaintext,
-        bool aesValid,
-        address recipient,
-        bytes32 memo
+        bool aesValid
     )
         internal
         returns (QueuedDeposit[] memory deposits, DecryptionData[] memory decs)
@@ -844,8 +832,6 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
             sharedSecretYParity: 0x02,
-            to: recipient,
-            memo: memo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
     }
@@ -865,7 +851,7 @@ contract ZoneInboxTest is Test {
         }
 
         (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
-            _setupEncryptedDepositWithPlaintext(shortPlaintext, true, recipient, memo);
+            _setupEncryptedDepositWithPlaintext(shortPlaintext, true);
 
         vm.prank(sequencer);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
@@ -888,7 +874,7 @@ contract ZoneInboxTest is Test {
         }
 
         (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
-            _setupEncryptedDepositWithPlaintext(longPlaintext, true, recipient, memo);
+            _setupEncryptedDepositWithPlaintext(longPlaintext, true);
 
         vm.prank(sequencer);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
@@ -906,7 +892,7 @@ contract ZoneInboxTest is Test {
         bytes memory emptyPlaintext = new bytes(0);
 
         (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
-            _setupEncryptedDepositWithPlaintext(emptyPlaintext, true, recipient, memo);
+            _setupEncryptedDepositWithPlaintext(emptyPlaintext, true);
 
         vm.prank(sequencer);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
@@ -925,7 +911,7 @@ contract ZoneInboxTest is Test {
         bytes memory correctPlaintext = EncryptedDepositLib.encodePlaintext(recipient, memo);
 
         (QueuedDeposit[] memory deposits, DecryptionData[] memory decs) =
-            _setupEncryptedDepositWithPlaintext(correctPlaintext, true, recipient, memo);
+            _setupEncryptedDepositWithPlaintext(correctPlaintext, true);
 
         vm.prank(sequencer);
         inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));

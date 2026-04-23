@@ -260,13 +260,14 @@ contract ZoneInbox is IZoneInbox {
                         ed.encrypted.tag
                     );
 
-                // Step 4: Verify decrypted plaintext matches claimed (to, memo)
+                // Step 4: Decode the decrypted (to, memo) from the plaintext
                 // Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
                 // Must be exactly ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE (64) bytes
+                address decryptedTo;
+                bytes32 decryptedMemo;
                 if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
-                    (address decryptedTo, bytes32 decryptedMemo) =
+                    (decryptedTo, decryptedMemo) =
                         EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
-                    valid = (decryptedTo == dec.to && decryptedMemo == dec.memo);
                 } else {
                     valid = false;
                 }
@@ -280,11 +281,17 @@ contract ZoneInbox is IZoneInbox {
                     IZoneToken(ed.token).mint(ed.sender, ed.amount);
                     emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                 } else {
-                    // Decryption succeeded - mint the correct zone-side TIP-20 to the decrypted recipient
-                    IZoneToken(ed.token).mint(dec.to, ed.amount);
-                    emit EncryptedDepositProcessed(
-                        currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
-                    );
+                    // Decryption succeeded — try minting to the decrypted recipient.
+                    // If the mint fails (e.g. recipient is blacklisted by TIP-403
+                    // policy), fall back to crediting the depositor instead.
+                    try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
+                        emit EncryptedDepositProcessed(
+                            currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo
+                        );
+                    } catch {
+                        IZoneToken(ed.token).mint(ed.sender, ed.amount);
+                        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+                    }
                 }
             }
         }
