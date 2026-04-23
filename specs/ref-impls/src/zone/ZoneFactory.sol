@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { TempoUtilities } from "../TempoUtilities.sol";
 import { IZoneFactory, ZoneInfo } from "./IZone.sol";
 import { Verifier } from "./Verifier.sol";
 import { ZoneMessenger } from "./ZoneMessenger.sol";
 import { ZonePortal } from "./ZonePortal.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
+import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
 
 /// @title ZoneFactory
 /// @notice Creates zones and registers parameters
@@ -53,7 +54,9 @@ contract ZoneFactory is IZoneFactory {
         returns (uint32 zoneId, address portal)
     {
         // Validate initial token is a TIP-20
-        if (!TempoUtilities.isTIP20(params.initialToken)) revert InvalidToken();
+        if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(params.initialToken)) {
+            revert InvalidToken();
+        }
         if (params.sequencer == address(0)) revert InvalidSequencer();
         if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
         if (gasleft() < ZONE_CREATION_GAS) revert InsufficientGas();

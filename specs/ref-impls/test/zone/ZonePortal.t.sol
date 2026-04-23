@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { TIP20 } from "../../src/TIP20.sol";
-import { ITIP20 } from "../../src/interfaces/ITIP20.sol";
-import { ITIP403Registry } from "../../src/interfaces/ITIP403Registry.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
+import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
 import { BLOCKHASH_HISTORY_WINDOW } from "../../src/zone/BlockHashHistory.sol";
 import {
@@ -743,7 +742,7 @@ contract ZonePortalTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             "callback_data"
         );
@@ -800,7 +799,7 @@ contract ZonePortalTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             ""
         );
@@ -856,7 +855,7 @@ contract ZonePortalTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             ""
         );
@@ -1554,7 +1553,7 @@ contract ZonePortalTest is BaseTest {
             address(successfulReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             "test"
         );

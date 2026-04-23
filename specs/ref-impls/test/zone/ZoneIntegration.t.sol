@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { TIP20 } from "../../src/TIP20.sol";
 import {
     BlockTransition,
     DecryptionData,
@@ -25,6 +24,7 @@ import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockZoneToken } from "./mocks/MockZoneToken.sol";
@@ -393,7 +393,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(receiver),
             2000e6,
             bytes32("payment"),
-            100_000,
+            5_000_000,
             alice,
             "callback"
         );
@@ -423,7 +423,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Process withdrawal
         Withdrawal memory w = _withdrawal(
-            1, alice, address(receiver), 2000e6, bytes32("payment"), 100_000, alice, "callback"
+            1, alice, address(receiver), 2000e6, bytes32("payment"), 5_000_000, alice, "callback"
         );
         l1Portal.processWithdrawal(w, bytes32(0));
 

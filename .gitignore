@@ -24,10 +24,10 @@ generated/
 docs/dist
 docs/node_modules
 docs/.vocs-cache/
-docs/specs/cache/
-docs/specs/out/
-docs/specs/*.log
-docs/specs/soljson-latest.js
+specs/ref-impls/cache/
+specs/ref-impls/out/
+specs/ref-impls/*.log
+specs/ref-impls/soljson-latest.js
 docs/.vercel
 docs/_
 docs/tmp

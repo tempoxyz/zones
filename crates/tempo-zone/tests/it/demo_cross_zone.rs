@@ -27,7 +27,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///   |  ✓ Alice -= 500                  ✓ Bob += 500
 /// ```
 ///
-/// NOTE: Requires `forge build` in `docs/specs/` for ZoneFactory + SwapAndDepositRouter artifacts.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory + SwapAndDepositRouter artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cross_zone_send() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

@@ -6,12 +6,12 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - "docs/specs/**"
-      - ".github/workflows/docs-specs.yml"
+      - "specs/ref-impls/**"
+      - ".github/workflows/specs.yml"
   pull_request:
     paths-ignore:
-      - "docs/specs/**"
-      - ".github/workflows/docs-specs.yml"
+      - "specs/ref-impls/**"
+      - ".github/workflows/specs.yml"
   merge_group:
 
 concurrency:
@@ -43,8 +43,10 @@ jobs:
           tool: nextest@0.9.124
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@8789b3e21e6c11b2697f5eb56eddae542f746c10 # v1.7.0
+        with:
+          version: nightly
       - name: Build Solidity artifacts
-        working-directory: docs/specs
+        working-directory: specs/ref-impls
         run: forge build
       - name: Build and compile tests
         run: cargo nextest run --profile ci --no-run

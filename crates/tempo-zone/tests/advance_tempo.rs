@@ -63,7 +63,7 @@ fn load_artifact(name: &str) -> Vec<u8> {
 
     // Workspace root is two levels up from the crate directory
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let specs_out = manifest_dir.join("../../docs/specs/out");
+    let specs_out = manifest_dir.join("../../specs/ref-impls/out");
     let path = specs_out
         .join(format!("{name}.sol"))
         .join(format!("{name}.json"));
