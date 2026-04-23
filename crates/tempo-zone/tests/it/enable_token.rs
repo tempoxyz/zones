@@ -138,7 +138,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///    |<-- withdraw AlphaUSD -----------|  ✓ AlphaUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `docs/specs/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
