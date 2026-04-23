@@ -364,30 +364,20 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        // Read the zone's current tempoBlockNumber from local state so policy
-        // cache fallback queries start from the correct L1 height.
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
         self.policy_cache.set_last_l1_block(tempo_block_number);
         info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
 
-        // Save values needed after ctx/self fields are consumed.
-        let l1_url = self.l1_config.l1_rpc_url.clone();
-        let portal_address = self.l1_config.portal_address;
-        let retry_connection_interval = self.l1_config.retry_connection_interval;
-        let sequencer_addons_config = self.sequencer_addons_config.take();
-        let sequencer_addr = self.fee_recipient;
-
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
-                &l1_url,
-                crate::rpc_connection_config(retry_connection_interval),
+                &self.l1_config.l1_rpc_url,
+                crate::rpc_connection_config(self.l1_config.retry_connection_interval),
             )
             .await?
             .erased();
 
-        self.resolve_and_seed_tokens(portal_address, &l1_provider)
-            .await?;
+        self.resolve_and_seed_tokens(&l1_provider).await?;
         self.spawn_l1_subscriber(&ctx);
         self.spawn_policy_tasks(&l1_provider, &ctx);
         self.spawn_zone_engine(l1_provider, &ctx)?;
@@ -403,15 +393,15 @@ where
             .chain_id;
         let handle = self.inner.launch_add_ons(ctx).await?;
 
-        if let Some(config) = sequencer_addons_config {
+        if let Some(config) = self.sequencer_addons_config.take() {
             Self::launch_sequencer(
                 config,
                 &handle,
                 &task_executor,
-                l1_url,
-                portal_address,
-                retry_connection_interval,
-                sequencer_addr,
+                self.l1_config.l1_rpc_url,
+                self.l1_config.portal_address,
+                self.l1_config.retry_connection_interval,
+                self.fee_recipient,
                 chain_id,
             )
             .await?;
@@ -434,14 +424,14 @@ where
     /// Resolve enabled tokens and seed the policy cache.
     async fn resolve_and_seed_tokens(
         &mut self,
-        portal_address: alloy_primitives::Address,
         l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
     ) -> eyre::Result<()> {
+        let portal = self.portal_address;
         let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
-            let tokens = crate::abi::ZonePortal::new(portal_address, l1_provider)
+            let tokens = crate::abi::ZonePortal::new(portal, l1_provider)
                 .enabled_tokens()
                 .await?;
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Discovered enabled tokens from L1");
@@ -449,7 +439,7 @@ where
         };
 
         self.policy_cache
-            .seed_token_policies(portal_address, &tracked_tokens, l1_provider)
+            .seed_token_policies(portal, &tracked_tokens, l1_provider)
             .await?;
         info!(target: "reth::cli", "Seeded token policies from L1");
         Ok(())
