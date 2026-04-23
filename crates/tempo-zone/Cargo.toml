@@ -67,8 +67,13 @@ alloy-transport.workspace = true
 revm.workspace = true
 
 # misc
+clap = { workspace = true, optional = true }
+const-hex = { workspace = true, optional = true }
 metrics.workspace = true
 k256.workspace = true
+reth-consensus = { workspace = true, optional = true }
+reth-ethereum = { workspace = true, features = ["node", "cli"], optional = true }
+reth-tracing = { workspace = true, optional = true }
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 either.workspace = true
@@ -117,6 +122,15 @@ tokio-tungstenite.workspace = true
 
 [features]
 default = []
+cli = [
+	"dep:clap",
+	"dep:const-hex",
+	"dep:reth-consensus",
+	"dep:reth-ethereum",
+	"dep:reth-tracing",
+	"tempo-chainspec/cli",
+]
+jemalloc = ["reth-ethereum?/jemalloc"]
 test-utils = [
 	"reth-chainspec/test-utils",
 	"reth-ethereum/test-utils",
