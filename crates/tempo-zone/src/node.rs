@@ -80,7 +80,7 @@ pub struct ZoneSequencerAddOnsConfig {
 /// Configuration for the private RPC server.
 ///
 /// Always launched when provided via [`ZoneNode::with_private_rpc`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ZonePrivateRpcConfig {
     /// Port for the private zone RPC server (0 for OS-assigned).
     pub private_rpc_port: u16,
@@ -116,8 +116,8 @@ pub struct ZoneNode {
     /// Optional pre-configured list of enabled token addresses. When set, the
     /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
-    /// Optional private RPC config. Always launched when set.
-    private_rpc_config: Option<ZonePrivateRpcConfig>,
+    /// Private RPC config.
+    private_rpc_config: ZonePrivateRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
 }
@@ -173,14 +173,14 @@ impl ZoneNode {
             sequencer_key,
             portal_address,
             initial_tokens: None,
-            private_rpc_config: None,
+            private_rpc_config: ZonePrivateRpcConfig::default(),
             sequencer_config: None,
         }
     }
 
-    /// Set the private RPC configuration. Always launched when set.
+    /// Set the private RPC configuration.
     pub fn with_private_rpc(mut self, config: ZonePrivateRpcConfig) -> Self {
-        self.private_rpc_config = Some(config);
+        self.private_rpc_config = config;
         self
     }
 
@@ -306,8 +306,8 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     portal_address: alloy_primitives::Address,
     /// Optional pre-configured list of enabled token addresses.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
-    /// Optional private RPC config.
-    private_rpc_config: Option<ZonePrivateRpcConfig>,
+    /// Private RPC config.
+    private_rpc_config: ZonePrivateRpcConfig,
     /// Optional sequencer config.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
 }
@@ -333,7 +333,7 @@ where
         sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
         initial_tokens: Option<Vec<alloy_primitives::Address>>,
-        private_rpc_config: Option<ZonePrivateRpcConfig>,
+        private_rpc_config: ZonePrivateRpcConfig,
         sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     ) -> Self {
         Self {
@@ -406,18 +406,16 @@ where
             .chain_id;
         let handle = self.inner.launch_add_ons(ctx).await?;
 
-        if let Some(config) = self.private_rpc_config.take() {
-            Self::launch_private_rpc(
-                config,
-                &handle,
-                self.l1_config.l1_rpc_url.clone(),
-                self.l1_config.retry_connection_interval,
-                self.l1_config.portal_address,
-                self.fee_recipient,
-                chain_id,
-            )
-            .await?;
-        }
+        Self::launch_private_rpc(
+            self.private_rpc_config,
+            &handle,
+            self.l1_config.l1_rpc_url.clone(),
+            self.l1_config.retry_connection_interval,
+            self.l1_config.portal_address,
+            self.fee_recipient,
+            chain_id,
+        )
+        .await?;
 
         if let Some(config) = self.sequencer_config.take() {
             Self::launch_sequencer_tasks(

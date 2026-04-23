@@ -94,7 +94,9 @@ impl ZoneCli {
                     zone_id: args.zone_id,
                     zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                     batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
-                    withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
+                    withdrawal_poll_interval: Duration::from_secs(
+                        args.withdrawal_poll_interval_secs,
+                    ),
                 });
             }
 
