@@ -230,6 +230,7 @@ impl ZoneEngine {
                     .chain_spec
                     .is_cancun_active_at_timestamp(timestamp_secs)
                     .then_some(B256::ZERO),
+                slot_number: None,
             },
             timestamp_millis_part,
             l1_block,

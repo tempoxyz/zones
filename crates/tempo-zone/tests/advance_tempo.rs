@@ -23,7 +23,7 @@ const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
 
 sol! {
-    function advanceTempo(bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions);
+    function advanceTempo(bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions, EnabledToken[] calldata enabledTokens);
     function config() external view returns (address);
     function tempoBlockHash() external view returns (bytes32);
 
@@ -42,6 +42,12 @@ sol! {
         bytes32 memo;
         ChaumPedersenProof cpProof;
     }
+    struct EnabledToken {
+        address token;
+        string name;
+        string symbol;
+        string currency;
+    }
 }
 
 /// Load a Foundry artifact's creation bytecode from the specs output directory.
@@ -57,7 +63,7 @@ fn load_artifact(name: &str) -> Vec<u8> {
 
     // Workspace root is two levels up from the crate directory
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let specs_out = manifest_dir.join("../../docs/specs/out");
+    let specs_out = manifest_dir.join("../../specs/ref-impls/out");
     let path = specs_out
         .join(format!("{name}.sol"))
         .join(format!("{name}.json"));
@@ -257,7 +263,7 @@ fn advance_tempo_repro() {
     match &config_result {
         Ok(result) => {
             println!("config() result: {:?}", result.result);
-            let gas_used = result.result.gas_used();
+            let gas_used = result.result.tx_gas_used();
             match &result.result {
                 ExecutionResult::Success { output, .. } => {
                     if let Output::Call(data) = output {
@@ -285,7 +291,7 @@ fn advance_tempo_repro() {
         evm.transact_system_call(sequencer, TEMPO_STATE_ADDRESS, Bytes::from(hash_calldata));
     match &hash_result {
         Ok(result) => {
-            let gas_used = result.result.gas_used();
+            let gas_used = result.result.tx_gas_used();
             match &result.result {
                 ExecutionResult::Success { output, .. } => {
                     if let Output::Call(data) = output {
@@ -370,6 +376,7 @@ fn advance_tempo_repro() {
         header: Bytes::from(next_header_rlp),
         deposits: vec![],
         decryptions: vec![],
+        enabledTokens: vec![],
     }
     .abi_encode();
 
@@ -386,7 +393,7 @@ fn advance_tempo_repro() {
         evm.transact_system_call(sequencer, ZONE_INBOX_ADDRESS, Bytes::from(advance_calldata));
     match &advance_result {
         Ok(result) => {
-            let gas_used = result.result.gas_used();
+            let gas_used = result.result.tx_gas_used();
             match &result.result {
                 ExecutionResult::Success { output, .. } => {
                     if let Output::Call(data) = output {

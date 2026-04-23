@@ -23,7 +23,7 @@ const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 ///   |                            |  ✓ Bob has 0.5
 /// ```
 ///
-/// NOTE: Requires `forge build` in `docs/specs/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_shield_and_send() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

@@ -1,34 +1,44 @@
-<!-- TODO: add logo -->
-<!-- <p align="center"><a href="https://tempo.xyz/zones"><img src="assets/logo.png" alt="Tempo Zones" width="400"></a></p> -->
 
-<h1 align="center">Tempo Zones</h1>
+<br>
 
----
+<p align="center">
+  <a href="https://tempo.xyz/blog/introducing-tempo-zones">
+    <img src="assets/header.png" alt="Tempo Zones" width="100%">
+  </a>
+</p>
 
-Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo), with native support for confidential balances and transactions. Zones inherit compliance from Tempo L1 and support interoperability with Tempo for moving assets in and out of zones.
+# Zones
 
-You can get started today by [deploying a zone](#getting-started) on Tempo testnet, reading the [full zone documentation](docs/ZONES.md), or exploring the [Zone specs](https://docs.tempo.xyz/protocol).
+> [!NOTE]
+> This repository is actively under development and subject to rapid iteration.
+> APIs, interfaces, and behavior may change without notice. Not recommended for production use yet.
 
+Zones are private blockchains anchored to [Tempo](https://github.com/tempoxyz/tempo) *(currently available in testnet only),* with native support for confidential balances and transactions. Zones inherit compliance via TIP403 policies from Tempo and support interoperability with Tempo for moving assets in and out of Zones.
+
+You can get started today by [deploying a Zone](#getting-started) on Tempo testnet, reading the [Zones documentation](https://docs.tempo.xyz/guide/private-zones), or exploring the [Zone spec](specs/ref-impls/zone_spec.md).
+
+<br>
 
 ## What Makes Zones Interesting
 
-- **Private balances and transactions.** State access requires account authentication at the RPC layer. This ensures that only the authorized account holder can access balances and transaction history. The zone operator maintains full visibility into state for compliance.
+- **Private balances and transactions.** State access requires account authentication at the RPC layer. This ensures that only the authorized account holder can access balances and transaction history. The Zone operator maintains full visibility into state for compliance.
 
-- **Encrypted deposits and withdrawals.** When depositing into a zone, users can encrypt the recipient to not reveal who receives funds inside the zone. Encrypted withdrawals are also possible, allowing the sender to be replaced with a commitment, preserving recipient verifiability without exposing the sender when withdrawing to Tempo mainnet.
+- **Encrypted deposits and withdrawals.** When depositing into a Zone, users can encrypt the recipient to not reveal who receives funds inside the Zone. Encrypted withdrawals are also possible, allowing the sender to be replaced with a commitment, preserving recipient verifiability without exposing the sender when withdrawing to Tempo mainnet.
 
-- **Zone to zone transfers.** Zones interoperate with Tempo Mainnet via withdrawals with optional calldata. Withdrawal calldata can execute on Tempo and deposit into another zone, enabling flows like zone to zone transfers or executing a swap between sending amounts to another zone.
+- **Zone to Zone transfers.** Zones interoperate with Tempo via withdrawals with optional calldata. Withdrawal calldata can execute on Tempo and deposit into another Zone, enabling flows like Zone to Zone transfers or executing a swap between sending amounts to another Zone.
 
-- **Compliance inherited from Tempo Mainnet.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist) are mirrored from Tempo and enforced on zones. Issuers set the policy once on Tempo and the zone picks it up automatically. If an issuer freezes an address or updates a blacklist on Tempo, the zone inherits the change in the next block.
+- **Compliance inherited from Tempo.** [TIP-403](https://docs.tempo.xyz/protocol/tip403/overview) policies (whitelist, blacklist) are mirrored from Tempo and enforced on Zones. Issuers set the policy once on Tempo and the Zone picks it up automatically. If an issuer freezes an address or updates a blacklist on Tempo, the Zone inherits the change in the next block in the Zone.
 
-- **Fast withdrawals.** The zone processes transactions every 250ms and submits batches of withdrawals to Tempo, where blocks are produced every ~500ms. Once batches are accepted and the attached proof is validated, withdrawals are processed and funds are released from escrow.
+- **Fast withdrawals.** The Zone processes transactions every 250ms and submits batches of withdrawals to Tempo, where blocks are produced every ~500ms. Once batches are accepted and the attached proof is validated, withdrawals are processed and funds are released from escrow.
 
+<br>
 
 ## Getting Started
 
 Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/getting-started/installation), [`just`](https://github.com/casey/just#packages), [`jq`](https://jqlang.github.io/jq/download/)
 
 
-## Deploying a Zone
+### Deploying a Zone
 
 ```bash
 # Deploy and start a zone on Moderato testnet
@@ -43,7 +53,7 @@ The `deploy-zone` command generates a sequencer keypair, funds it on L1, deploys
 just zone-up my-zone
 ```
 
-## Depositing into a Zone
+### Depositing into a Zone
 
 ```bash
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
@@ -60,7 +70,7 @@ just send-deposit-encrypted 1000000                       # to your own address
 just send-deposit-encrypted 1000000 <recipient-address>   # to a specific address
 ```
 
-## Withdrawing from Zone to Tempo
+### Withdrawing from Zone to Tempo
 
 ```bash
 
@@ -72,7 +82,7 @@ just send-withdrawal 1000000 <recipient-address>  # withdraw to a specific addre
 The sequencer includes the withdrawal in the next batch submission to L1 and processes it automatically.
 
 
-## Querying the Private RPC
+### Querying the Private RPC
 
 Zone balances are private by default. Every RPC request must include a signed authorization token that proves you control the querying account.
 
@@ -91,6 +101,7 @@ just check-balance-private my-zone <token-address>
 
 See [docs/ZONES.md](docs/ZONES.md) for the full guide on deposits, withdrawals, private RPC, router demos, TIP-403 policy flows, and command references.
 
+<br> 
 
 ## License
 

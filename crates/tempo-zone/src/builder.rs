@@ -38,7 +38,6 @@ use reth_transaction_pool::{
 };
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
-use tempo_consensus::TEMPO_SHARED_GAS_DIVISOR;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::TempoBuiltPayload;
 use tempo_primitives::{
@@ -50,7 +49,7 @@ use tracing::{error, info, warn};
 
 use super::node::ZoneNode;
 
-use alloy_evm::block::BlockExecutor;
+use alloy_evm::block::{BlockExecutor, TxResult};
 
 #[derive(Clone)]
 struct RequestedWithdrawalContext {
@@ -112,6 +111,7 @@ where
             config,
             cancel,
             best_payload: _,
+            ..
         } = args;
         let PayloadConfig {
             parent_header,
@@ -197,8 +197,6 @@ where
         let chain_spec = self.provider.chain_spec();
 
         let block_gas_limit = parent_header.gas_limit();
-        let shared_gas_limit = block_gas_limit / TEMPO_SHARED_GAS_DIVISOR;
-        let general_gas_limit = 0;
 
         let mut cumulative_gas_used = 0u64;
         let total_fees = U256::ZERO;
@@ -218,10 +216,14 @@ where
                         parent_beacon_block_root: attributes.parent_beacon_block_root(),
                         withdrawals: attributes.withdrawals().cloned().map(Withdrawals::new),
                         extra_data: attributes.extra_data(),
+                        slot_number: attributes.slot_number(),
                     },
-                    general_gas_limit,
-                    shared_gas_limit,
+                    // Zones don't use L1 gas sections. These fields are required
+                    // by TempoNextBlockEnvAttributes but ignored by the zone executor.
+                    general_gas_limit: 0,
+                    shared_gas_limit: block_gas_limit,
                     timestamp_millis_part: attributes.timestamp_millis_part(),
+                    consensus_context: None,
                     subblock_fee_recipients: Default::default(),
                 },
             )
@@ -237,13 +239,14 @@ where
             let advance_tx = build_advance_tempo_tx(prepared);
             let mut reverted = false;
             match builder.execute_transaction_with_result_closure(advance_tx, |result| {
-                if !result.is_success() {
-                    let revert_data = result.output().cloned().unwrap_or_default();
+                let evm_result = result.result();
+                if !evm_result.result.is_success() {
+                    let revert_data = evm_result.result.output().cloned().unwrap_or_default();
                     error!(
                         target: "zone::payload",
                         l1_block = prepared.header.inner.number,
                         deposits = total_deposits,
-                        is_halt = result.is_halt(),
+                        is_halt = evm_result.result.is_halt(),
                         revert_data = %revert_data,
                         "advanceTempo system tx reverted on-chain"
                     );
@@ -289,7 +292,7 @@ where
                 );
                 continue;
             }
-            let gas_limit_left = block_gas_limit.saturating_sub(shared_gas_limit);
+            let gas_limit_left = block_gas_limit;
             if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
                 best_txs.mark_invalid(
                     &pool_tx,
@@ -378,12 +381,13 @@ where
         );
         let mut finalize_reverted = false;
         match builder.execute_transaction_with_result_closure(finalize_tx, |result| {
-            if !result.is_success() {
-                let revert_data = result.output().cloned().unwrap_or_default();
+            let evm_result = result.result();
+            if !evm_result.result.is_success() {
+                let revert_data = evm_result.result.output().cloned().unwrap_or_default();
                 error!(
                     target: "zone::payload",
                     block_number,
-                    is_halt = result.is_halt(),
+                    is_halt = evm_result.result.is_halt(),
                     revert_data = %revert_data,
                     "finalizeWithdrawalBatch system tx reverted on-chain"
                 );
@@ -407,7 +411,7 @@ where
             hashed_state,
             trie_updates,
             block,
-        } = builder.finish(&state_provider)?;
+        } = builder.finish(&*state_provider, None)?;
 
         let requests = chain_spec
             .is_prague_active_at_timestamp(attributes.timestamp())
@@ -428,7 +432,7 @@ where
             "Built zone payload"
         );
 
-        let eth_payload = EthBuiltPayload::new(sealed_block, total_fees, requests);
+        let eth_payload = EthBuiltPayload::new(sealed_block, total_fees, requests, None);
 
         let execution_output = BlockExecutionOutput {
             result: execution_result,
@@ -464,6 +468,8 @@ where
     ) -> Result<Self::BuiltPayload, PayloadBuilderError> {
         self.try_build(BuildArguments::new(
             Default::default(),
+            None,
+            None,
             config,
             Default::default(),
             Default::default(),

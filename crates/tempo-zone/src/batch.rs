@@ -78,6 +78,10 @@ pub struct BatchData {
     pub prev_processed_deposit_hash: B256,
     /// Deposit queue: where the zone processed up to.
     pub next_processed_deposit_hash: B256,
+    /// Deposit counter at the start of processing.
+    pub prev_deposit_number: u64,
+    /// Deposit counter after processing.
+    pub next_deposit_number: u64,
     /// Withdrawal queue hash for this batch (`B256::ZERO` if no withdrawals).
     pub withdrawal_queue_hash: B256,
 }
@@ -167,6 +171,8 @@ impl BatchSubmitter {
         let deposit_transition = DepositQueueTransition {
             prevProcessedHash: batch.prev_processed_deposit_hash,
             nextProcessedHash: batch.next_processed_deposit_hash,
+            prevDepositNumber: batch.prev_deposit_number,
+            nextDepositNumber: batch.next_deposit_number,
         };
 
         let anchor_mode = self.resolve_anchor_mode(batch.tempo_block_number).await?;
@@ -309,14 +315,6 @@ impl BatchSubmitter {
             return Ok(AnchorMode::Direct);
         }
 
-        if gap > EIP2935_HISTORY_WINDOW {
-            return Err(eyre::eyre!(
-                "tempo_block_number ({tempo_block_number}) is outside the EIP-2935 history \
-                 window (gap={gap}, max={EIP2935_HISTORY_WINDOW}) — must split via stepping"
-            ));
-        }
-
-        // Within ancestry range — collect L1 headers as proof chain.
         let anchor_block = current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN);
         let ancestry_headers = self
             .fetch_ancestry_headers(tempo_block_number, anchor_block)
@@ -1003,6 +1001,8 @@ pub(crate) struct ZoneBlockSnapshot {
     pub tempo_block_number: u64,
     /// Cumulative hash of all deposits processed by the zone up to this block.
     pub processed_deposit_hash: B256,
+    /// Total number of deposits processed by the zone up to this block.
+    pub processed_deposit_number: u64,
     /// Zone L2 block hash.
     pub block_hash: B256,
 }
@@ -1103,6 +1103,7 @@ mod tests {
             nextProcessedDepositQueueHash: B256::ZERO,
             nextBlockHash: B256::ZERO,
             withdrawalQueueHash: withdrawal_queue_hash,
+            lastProcessedDepositNumber: 0,
         }
     }
 

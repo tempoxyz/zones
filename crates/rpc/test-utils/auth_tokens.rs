@@ -39,7 +39,7 @@ pub(crate) fn sign_p256_signature(
     Ok(TempoSignature::Primitive(PrimitiveSignature::P256(
         tempo_primitives::transaction::tt_signature::P256SignatureWithPreHash {
             r: B256::from_slice(&sig_bytes[0..32]),
-            s: normalize_p256_s(&sig_bytes[32..64]),
+            s: normalize_p256_s(&sig_bytes[32..64]).map_err(|err| eyre::eyre!(err))?,
             pub_key_x,
             pub_key_y,
             pre_hash: true,
@@ -73,7 +73,7 @@ pub(crate) fn sign_webauthn_signature(
         WebAuthnSignature {
             webauthn_data: Bytes::from(webauthn_data),
             r: B256::from_slice(&sig_bytes[0..32]),
-            s: normalize_p256_s(&sig_bytes[32..64]),
+            s: normalize_p256_s(&sig_bytes[32..64]).map_err(|err| eyre::eyre!(err))?,
             pub_key_x,
             pub_key_y,
         },

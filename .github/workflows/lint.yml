@@ -6,12 +6,12 @@ on:
   push:
     branches: [main]
     paths-ignore:
-      - "docs/specs/**"
-      - ".github/workflows/docs-specs.yml"
+      - "specs/ref-impls/**"
+      - ".github/workflows/specs.yml"
   pull_request:
     paths-ignore:
-      - "docs/specs/**"
-      - ".github/workflows/docs-specs.yml"
+      - "specs/ref-impls/**"
+      - ".github/workflows/specs.yml"
   merge_group:
 
 concurrency:
@@ -31,7 +31,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
           submodules: recursive
@@ -41,12 +41,14 @@ jobs:
           # which breaks shellexpand 3.1.1 method resolution.
           toolchain: nightly-2026-02-21
           components: clippy
-      - uses: rui314/setup-mold@725a8794d15fc7563f59595bd9556495c0564878 # v1
+      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
       - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@v1
+        uses: foundry-rs/foundry-toolchain@8789b3e21e6c11b2697f5eb56eddae542f746c10 # v1.7.0
+        with:
+          version: nightly
       - name: Build Solidity artifacts
-        working-directory: docs/specs
+        working-directory: specs/ref-impls
         run: forge build
       - name: Run clippy
         run: cargo clippy --all-targets --all-features --locked
@@ -60,7 +62,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
@@ -75,10 +77,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
-      - uses: crate-ci/typos@3a4d65230db538caabac6e156599c8ba8380ff07 # v1.43.1
+      - uses: crate-ci/typos@cf5f1c29a8ac336af8568821ec41919923b05a83 # v1.45.1
 
   lint-success:
     name: lint success
