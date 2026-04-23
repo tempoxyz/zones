@@ -70,13 +70,10 @@ use tempo_transaction_pool::{
 };
 use tracing::{debug, info};
 
-/// Network primitives for Zone.
+/// Network primitives for Zone Nodes
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 
-/// Configuration for the sequencer background tasks.
-///
-/// When provided via [`ZoneNode::with_sequencer`], the batch submission
-/// and withdrawal processing tasks are spawned during node launch.
+/// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
     /// Sequencer private key signer for signing L1 transactions.
@@ -91,22 +88,18 @@ pub struct ZoneSequencerAddOnsConfig {
     pub withdrawal_poll_interval: Duration,
 }
 
-/// Configuration for the private RPC server.
-///
-/// Always launched when provided via [`ZoneNode::with_private_rpc`].
+/// Configuration for the Zone private RPC server extension.
 #[derive(Debug, Clone, Default)]
 pub struct ZonePrivateRpcConfig {
-    /// Port for the private zone RPC server (0 for OS-assigned).
+    /// Port for RPC traffic.
     pub private_rpc_port: u16,
     /// Zone ID for chain ID validation and private RPC auth.
     pub zone_id: u32,
-    /// Maximum auth token validity for the private RPC.
+    /// Max duration for private RPC auth.
     pub max_auth_token_validity: Duration,
 }
 
 /// Tempo Zone node type configuration.
-///
-/// Uses Tempo primitives, EVM, and pool, but with noop consensus/network/payload.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZoneNode {
