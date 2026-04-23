@@ -61,22 +61,6 @@ use crate::{
 
 use crate::builder::ZonePayloadFactory;
 
-/// Network primitives for Zone.
-type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
-
-/// Configuration for the private RPC server.
-///
-/// Always launched when provided via [`ZoneNode::with_private_rpc`].
-#[derive(Debug, Clone)]
-pub struct ZonePrivateRpcConfig {
-    /// Port for the private zone RPC server (0 for OS-assigned).
-    pub private_rpc_port: u16,
-    /// Zone ID for chain ID validation and private RPC auth.
-    pub zone_id: u32,
-    /// Maximum auth token validity for the private RPC.
-    pub max_auth_token_validity: std::time::Duration,
-}
-
 /// Configuration for the sequencer background tasks.
 ///
 /// When provided via [`ZoneNode::with_sequencer`], the batch submission
@@ -93,6 +77,22 @@ pub struct ZoneSequencerAddOnsConfig {
     pub batch_interval: std::time::Duration,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: std::time::Duration,
+}
+
+/// Network primitives for Zone.
+type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
+
+/// Configuration for the private RPC server.
+///
+/// Always launched when provided via [`ZoneNode::with_private_rpc`].
+#[derive(Debug, Clone)]
+pub struct ZonePrivateRpcConfig {
+    /// Port for the private zone RPC server (0 for OS-assigned).
+    pub private_rpc_port: u16,
+    /// Zone ID for chain ID validation and private RPC auth.
+    pub zone_id: u32,
+    /// Maximum auth token validity for the private RPC.
+    pub max_auth_token_validity: std::time::Duration,
 }
 
 /// Tempo Zone node type configuration.
