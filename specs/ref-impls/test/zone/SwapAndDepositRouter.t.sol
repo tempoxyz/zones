@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
-import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
 import {
     EncryptedDepositPayload,
     IWithdrawalReceiver,
@@ -12,6 +10,8 @@ import {
 } from "../../src/zone/IZone.sol";
 import { SwapAndDepositRouter } from "../../src/zone/SwapAndDepositRouter.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { IStablecoinDEX } from "tempo-std/interfaces/IStablecoinDEX.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 contract MockStablecoinDEXForRouter {
 

@@ -1,10 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
-import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
-import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
-import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { getBlockHash } from "./BlockHashHistory.sol";
 import { DepositQueueLib } from "./DepositQueueLib.sol";
 import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "./EncryptedDeposit.sol";
@@ -25,6 +21,10 @@ import {
     Withdrawal
 } from "./IZone.sol";
 import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
+import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
+import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows zone tokens on Tempo and manages deposits/withdrawals

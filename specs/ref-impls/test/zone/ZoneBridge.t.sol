@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { EncryptedDepositLib } from "../../src/zone/EncryptedDeposit.sol";
 import {
     AES_GCM_DECRYPT,
@@ -38,6 +37,7 @@ import { BaseTest } from "../BaseTest.t.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockZoneToken } from "./mocks/MockZoneToken.sol";
 import { Vm } from "forge-std/Vm.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 /// @notice Mock withdrawal receiver for callback tests
 contract MockWithdrawalReceiver is IWithdrawalReceiver {

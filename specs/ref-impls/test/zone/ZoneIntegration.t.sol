@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import {
     BlockTransition,
     DecryptionData,
@@ -25,6 +24,7 @@ import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockZoneToken } from "./mocks/MockZoneToken.sol";

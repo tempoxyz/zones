@@ -1,12 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
-import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { IZoneFactory, ZoneInfo } from "./IZone.sol";
 import { Verifier } from "./Verifier.sol";
 import { ZoneMessenger } from "./ZoneMessenger.sol";
 import { ZonePortal } from "./ZonePortal.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
+import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
 
 /// @title ZoneFactory
 /// @notice Creates zones and registers parameters
