@@ -4,10 +4,16 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use crate::{
+    ZoneEngine,
+    builder::ZonePayloadFactory,
+    evm::ZoneEvmConfig,
     ext::TempoStateExt,
+    l1::L1Subscriber,
+    l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache},
     payload::{ZonePayloadAttributes, ZonePayloadTypes},
 };
 use alloy_primitives::U256;
+use alloy_provider::Provider as _;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
@@ -49,17 +55,6 @@ use tempo_transaction_pool::{
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tracing::{debug, info};
-
-use alloy_provider::Provider as _;
-
-use crate::{
-    ZoneEngine,
-    evm::ZoneEvmConfig,
-    l1::L1Subscriber,
-    l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache},
-};
-
-use crate::builder::ZonePayloadFactory;
 
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
