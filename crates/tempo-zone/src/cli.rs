@@ -9,7 +9,7 @@ use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 
 use crate::{
-    ZoneNode, ZoneSequencerAddOnsConfig, evm::ZoneEvmConfig,
+    ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig, evm::ZoneEvmConfig,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 
@@ -80,13 +80,16 @@ impl ZoneCli {
                 args.l1_fetch_concurrency,
                 retry_interval,
             )
-            .with_sequencer_addons(ZoneSequencerAddOnsConfig {
-                sequencer_signer,
+            .with_private_rpc(ZonePrivateRpcConfig {
                 private_rpc_port: args.private_rpc_port,
                 zone_id: args.zone_id,
                 max_auth_token_validity: Duration::from_secs(
                     args.private_rpc_max_auth_token_validity_secs,
                 ),
+            })
+            .with_sequencer_addons(ZoneSequencerAddOnsConfig {
+                sequencer_signer,
+                zone_id: args.zone_id,
                 zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                 batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
                 withdrawal_poll_interval: Duration::from_secs(args.withdrawal_poll_interval_secs),
