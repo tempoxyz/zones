@@ -2,8 +2,9 @@
 
 use std::{sync::Arc, time::Duration};
 
+use alloy_primitives::Address;
 use alloy_signer_local::PrivateKeySigner;
-use clap::Parser;
+use clap::{Args, Parser};
 use k256::SecretKey;
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
@@ -97,7 +98,7 @@ impl ZoneCli {
 }
 
 /// Tempo Zone CLI arguments.
-#[derive(Debug, Clone, clap::Args)]
+#[derive(Debug, Clone, Args)]
 pub struct ZoneArgs {
     /// L1 WebSocket RPC URL for subscribing to deposit events and chain notifications.
     #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
@@ -105,7 +106,7 @@ pub struct ZoneArgs {
 
     /// ZonePortal contract address on L1.
     #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
-    pub portal_address: alloy_primitives::Address,
+    pub portal_address: Address,
 
     /// Block building interval in milliseconds.
     #[arg(
