@@ -34,7 +34,7 @@ pub use l1::{
     L1PortalEvents, L1SequencerEvent, L1Subscriber, L1SubscriberConfig,
 };
 pub use l1_state::{PolicyProvider, SharedL1StateCache, SharedPolicyCache};
-pub use node::{ZoneExecutorBuilder, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig};
+pub use node::{ZoneExecutorBuilder, ZoneNode, ZoneSequencerAddOnsConfig};
 pub use payload::{ZonePayloadAttributes, ZonePayloadTypes};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};
