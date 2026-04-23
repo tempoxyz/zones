@@ -10782,22 +10782,9 @@ dependencies = [
 name = "tempo-zone"
 version = "0.1.0"
 dependencies = [
- "alloy-primitives",
- "alloy-signer-local",
- "clap",
- "const-hex",
- "eyre",
- "k256",
  "reth-cli-util",
- "reth-consensus",
- "reth-ethereum",
- "reth-tracing",
  "rustls",
- "tempo-chainspec",
- "tokio",
- "tracing",
  "zone",
- "zone-primitives",
 ]
 
 [[package]]
@@ -12737,6 +12724,7 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "base64 0.22.1",
+ "clap",
  "const-hex",
  "derive_more",
  "either",
@@ -12750,6 +12738,7 @@ dependencies = [
  "reqwest 0.13.2",
  "reth-basic-payload-builder",
  "reth-chainspec",
+ "reth-consensus",
  "reth-errors",
  "reth-eth-wire-types",
  "reth-ethereum",
