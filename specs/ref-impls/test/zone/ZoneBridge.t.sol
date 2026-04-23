@@ -550,7 +550,7 @@ contract ZoneBridgeTest is BaseTest {
             address(withdrawalReceiver), // to: receiver contract
             500e6,
             bytes32(0), // memo
-            100_000, // gasLimit for callback
+            5_000_000, // gasLimit for callback
             alice, // fallbackRecipient on zone
             "callback_data"
         );
@@ -563,7 +563,7 @@ contract ZoneBridgeTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             "callback_data"
         );
@@ -577,7 +577,7 @@ contract ZoneBridgeTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             "callback_data"
         );
@@ -610,7 +610,7 @@ contract ZoneBridgeTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0), // memo
-            100_000,
+            5_000_000,
             alice, // fallback recipient
             ""
         );
@@ -618,7 +618,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Sequencer observes and submits
         _sequencerObserveWithdrawal(
-            0, alice, address(withdrawalReceiver), 500e6, bytes32(0), 100_000, alice, ""
+            0, alice, address(withdrawalReceiver), 500e6, bytes32(0), 5_000_000, alice, ""
         );
         l2BlockHash = keccak256(abi.encode(l2BlockHash, "failing_callback"));
         _sequencerSubmitBatch(processedHash);
@@ -627,7 +627,7 @@ contract ZoneBridgeTest is BaseTest {
 
         // Process withdrawal - callback will fail, triggering bounce-back
         Withdrawal memory w = _withdrawal(
-            1, alice, address(withdrawalReceiver), 500e6, bytes32(0), 100_000, alice, ""
+            1, alice, address(withdrawalReceiver), 500e6, bytes32(0), 5_000_000, alice, ""
         );
         l1Portal.processWithdrawal(w, bytes32(0));
 
@@ -746,7 +746,7 @@ contract ZoneBridgeTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0), // memo
-            100_000, // gasLimit > 0
+            5_000_000, // gasLimit > 0
             address(0), // invalid fallback
             ""
         );

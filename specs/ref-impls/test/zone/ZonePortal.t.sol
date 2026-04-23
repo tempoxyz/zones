@@ -742,7 +742,7 @@ contract ZonePortalTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             "callback_data"
         );
@@ -799,7 +799,7 @@ contract ZonePortalTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             ""
         );
@@ -855,7 +855,7 @@ contract ZonePortalTest is BaseTest {
             address(withdrawalReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             ""
         );
@@ -1553,7 +1553,7 @@ contract ZonePortalTest is BaseTest {
             address(successfulReceiver),
             500e6,
             bytes32(0),
-            100_000,
+            5_000_000,
             alice,
             "test"
         );

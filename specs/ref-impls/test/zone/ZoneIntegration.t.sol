@@ -393,7 +393,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(receiver),
             2000e6,
             bytes32("payment"),
-            100_000,
+            5_000_000,
             alice,
             "callback"
         );
@@ -423,7 +423,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Process withdrawal
         Withdrawal memory w = _withdrawal(
-            1, alice, address(receiver), 2000e6, bytes32("payment"), 100_000, alice, "callback"
+            1, alice, address(receiver), 2000e6, bytes32("payment"), 5_000_000, alice, "callback"
         );
         l1Portal.processWithdrawal(w, bytes32(0));
 
