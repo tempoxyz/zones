@@ -5,9 +5,9 @@
 #![allow(clippy::too_many_arguments)]
 use eyre as _;
 
+pub mod abi;
 #[cfg(feature = "cli")]
 pub mod cli;
-pub mod abi;
 pub mod ext;
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub mod batch;
