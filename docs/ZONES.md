@@ -474,6 +474,36 @@ graph TB
     Tasks -- "submitBatch / processWithdrawal" --> Portal
 ```
 
+### Precompiles
+
+Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precompile depending on whether it is relevant in the zone context. The zone also adds new precompiles for L1 state access, privacy, and zone-specific transaction context.
+
+#### Tempo L1 Precompiles on Zones
+
+| Precompile | Address | Zone Behavior |
+|------------|---------|---------------|
+| Standard EVM (ecrecover, SHA-256, etc.) | `0x01`–`0x0a`, `0x0100` on T1C+ | **Unchanged** — standard Ethereum precompiles inherited from Tempo's active hardfork (Prague pre-T1C, Osaka at T1C+) are available as-is. |
+| TIP-20 tokens | `0x20C0…` prefix | **Replaced** — routed through `ZoneTip20Token`, which adds privacy (caller-scoped reads), fixed gas for transfers, bridge-auth for mint/burn, and TIP-403 policy enforcement via the L1-synced cache. |
+| TIP20Factory | `0x20FC…0000` | **Replaced** — `ZoneTokenFactory` exposes only `enableToken(address, name, symbol, currency)`, called by ZoneInbox during `advanceTempo` to initialize bridged tokens. |
+| TIP403Registry | `0x403C…0000` | **Replaced** — read-only `ZoneTip403ProxyRegistry` serves authorization queries from a cache-first, L1-RPC-fallback provider. Mutating calls (`createPolicy`, `modifyPolicyWhitelist`, etc.) revert — policy state is managed on L1. |
+| TipFeeManager | `0xfeec…0000` | **Present** — the precompile is still registered, but its liquidity pools are not used by transactions. The zone executor overrides `validatorTokens` to match each transaction's fee token, so the FeeAMM swap path is bypassed and fees are collected directly in the user's token. |
+| StablecoinDEX | `0xdec0…0000` | **Disabled** — not registered on zones, so the address behaves like an empty account. Users on zones can trade on the StablecoinDEX on Tempo via the bridge. |
+| NonceManager | `0x4E4F…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
+| ValidatorConfig (legacy) | `0xCCCC…0000` | **Not registered** — zones do not run validators, so the precompile is not loaded. |
+| ValidatorConfigV2 | `0xCCCC…0001` | **Not registered** — zones do not run validators, so the precompile is not loaded. |
+| AccountKeychain | `0xAAAA…0000` | **Unchanged** — same implementation as L1, runs locally on zone state. |
+| AddressRegistry | `0xFDC0…0000` | **Not registered** — the address has no zone precompile implementation. |
+| SignatureVerifier | `0x5165…0000` | **Not registered** — the address has no zone precompile implementation. |
+
+#### Zone-Only Precompiles
+
+| Precompile | Address | Description |
+|------------|---------|-------------|
+| TempoStateReader | `0x1c00…0004` | Reads L1 contract storage from zone contracts via the L1 state cache. |
+| ZoneTxContext | `0x1c00…0005` | Exposes the hash of the currently executing zone transaction (`currentTxHash`), used by ZoneOutbox for authenticated withdrawals. |
+| ChaumPedersenVerify | `0x1c00…0100` | Verifies DLOG equality proofs for ECDH key exchange (encrypted deposits). |
+| AesGcmDecrypt | `0x1c00…0101` | AES-256-GCM authenticated decryption (encrypted deposit payloads). |
+
 ## Configuration
 
 ### Key Addresses

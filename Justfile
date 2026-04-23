@@ -138,7 +138,7 @@ create-zone name token="":
     OUTPUT="generated/{{name}}"
     mkdir -p "$OUTPUT"
     echo "Building Solidity specs..."
-    (cd docs/specs && forge build --skip test) || true
+    (cd specs/ref-impls && forge build --skip test) || true
     echo "Building xtask..."
     cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
@@ -166,7 +166,7 @@ deploy-router name dex="0xDEc0000000000000000000000000000000000000":
         exit 1
     fi
     echo "Building Solidity specs..."
-    (cd docs/specs && forge build --skip test) || true
+    (cd specs/ref-impls && forge build --skip test) || true
     cargo run -p tempo-xtask -- deploy-router \
         --zone-dir "$ZONE_DIR" \
         --l1-rpc-url "$HTTP_RPC" \
@@ -676,7 +676,7 @@ deploy-zone name token="":
 
     # Step 3: Build Solidity specs
     echo "Step 3: Building Solidity specs..."
-    (cd docs/specs && forge build --skip test) || true
+    (cd specs/ref-impls && forge build --skip test) || true
     echo ""
 
     # Step 4: Create zone on L1 and generate genesis
@@ -790,9 +790,9 @@ docs-check:
 [group('docs')]
 [doc('Run Solidity specs tests')]
 docs-specs-test:
-    cd docs/specs && forge test -vvv
+    cd specs/ref-impls && forge test -vvv
 
 [group('docs')]
 [doc('Build Solidity specs')]
 docs-specs-build:
-    cd docs/specs && forge build --sizes
+    cd specs/ref-impls && forge build --sizes

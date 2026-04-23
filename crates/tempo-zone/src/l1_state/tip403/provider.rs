@@ -652,7 +652,9 @@ impl PolicyCheck for PolicyProvider {
 
     fn policy_exists(&self, policy_id: u64) -> Result<bool, PrecompileError> {
         self.policy_exists_sync(policy_id).map_err(|e| {
-            PrecompileError::other(format!("policyExists failed for policy {policy_id}: {e}"))
+            zone_precompiles::zone_rpc_error(format!(
+                "policyExists failed for policy {policy_id}: {e}"
+            ))
         })
     }
 

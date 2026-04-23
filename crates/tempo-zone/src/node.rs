@@ -4,10 +4,16 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use crate::{
+    ZoneEngine,
+    builder::ZonePayloadFactory,
+    evm::ZoneEvmConfig,
     ext::TempoStateExt,
+    l1::L1Subscriber,
+    l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache},
     payload::{ZonePayloadAttributes, ZonePayloadTypes},
 };
 use alloy_primitives::U256;
+use alloy_provider::Provider as _;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
     AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
@@ -28,7 +34,7 @@ use reth_node_builder::{
 use reth_provider::ChainSpecProvider;
 use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
-use reth_rpc_eth_api::RpcConverter;
+use reth_rpc_eth_api::{EthApiTypes, RpcConverter};
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::{
     TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
@@ -50,19 +56,39 @@ use tempo_transaction_pool::{
 };
 use tracing::{debug, info};
 
-use alloy_provider::Provider as _;
-
-use crate::{
-    ZoneEngine,
-    evm::ZoneEvmConfig,
-    l1::L1Subscriber,
-    l1_state::{L1StateProvider, L1StateProviderConfig, SharedL1StateCache},
-};
-
-use crate::builder::ZonePayloadFactory;
-
 /// Network primitives for Zone.
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
+
+/// Configuration for the sequencer background tasks.
+///
+/// When provided via [`ZoneNode::with_sequencer`], the batch submission
+/// and withdrawal processing tasks are spawned during node launch.
+#[derive(Debug, Clone)]
+pub struct ZoneSequencerAddOnsConfig {
+    /// Sequencer private key signer for signing L1 transactions.
+    pub sequencer_signer: alloy_signer_local::PrivateKeySigner,
+    /// Zone ID for chain ID validation.
+    pub zone_id: u32,
+    /// How often the zone monitor polls for new L2 blocks.
+    pub zone_poll_interval: std::time::Duration,
+    /// Maximum time to accumulate zone blocks before batch submission.
+    pub batch_interval: std::time::Duration,
+    /// How often the withdrawal processor polls the L1 queue.
+    pub withdrawal_poll_interval: std::time::Duration,
+}
+
+/// Configuration for the private RPC server.
+///
+/// Always launched when provided via [`ZoneNode::with_private_rpc`].
+#[derive(Debug, Clone, Default)]
+pub struct ZonePrivateRpcConfig {
+    /// Port for the private zone RPC server (0 for OS-assigned).
+    pub private_rpc_port: u16,
+    /// Zone ID for chain ID validation and private RPC auth.
+    pub zone_id: u32,
+    /// Maximum auth token validity for the private RPC.
+    pub max_auth_token_validity: std::time::Duration,
+}
 
 /// Tempo Zone node type configuration.
 ///
@@ -90,6 +116,10 @@ pub struct ZoneNode {
     /// Optional pre-configured list of enabled token addresses. When set, the
     /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
+    /// Private RPC config.
+    private_rpc_config: ZonePrivateRpcConfig,
+    /// Optional sequencer config. When set, sequencer tasks are spawned.
+    sequencer_config: Option<ZoneSequencerAddOnsConfig>,
 }
 
 impl ZoneNode {
@@ -143,7 +173,22 @@ impl ZoneNode {
             sequencer_key,
             portal_address,
             initial_tokens: None,
+            private_rpc_config: ZonePrivateRpcConfig::default(),
+            sequencer_config: None,
         }
+    }
+
+    /// Set the private RPC configuration.
+    pub fn with_private_rpc(mut self, config: ZonePrivateRpcConfig) -> Self {
+        self.private_rpc_config = config;
+        self
+    }
+
+    /// Set the sequencer configuration. When set, batch submission and
+    /// withdrawal processing tasks are spawned during node launch.
+    pub fn with_sequencer(mut self, config: ZoneSequencerAddOnsConfig) -> Self {
+        self.sequencer_config = Some(config);
+        self
     }
 
     /// Set the initial list of enabled token addresses.
@@ -261,6 +306,10 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     portal_address: alloy_primitives::Address,
     /// Optional pre-configured list of enabled token addresses.
     initial_tokens: Option<Vec<alloy_primitives::Address>>,
+    /// Private RPC config.
+    private_rpc_config: ZonePrivateRpcConfig,
+    /// Optional sequencer config.
+    sequencer_config: Option<ZoneSequencerAddOnsConfig>,
 }
 
 impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
@@ -284,6 +333,8 @@ where
         sequencer_key: k256::SecretKey,
         portal_address: alloy_primitives::Address,
         initial_tokens: Option<Vec<alloy_primitives::Address>>,
+        private_rpc_config: ZonePrivateRpcConfig,
+        sequencer_config: Option<ZoneSequencerAddOnsConfig>,
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
@@ -300,6 +351,8 @@ where
             sequencer_key,
             portal_address,
             initial_tokens,
+            private_rpc_config,
+            sequencer_config,
         }
     }
 }
@@ -310,7 +363,8 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    ZoneEthApiBuilder: EthApiBuilder<N>,
+    ZoneEthApiBuilder:
+        EthApiBuilder<N, EthApi: reth_rpc_eth_api::EthApiTypes<NetworkTypes = TempoNetwork>>,
 {
     type Handle = <RpcAddOns<
         N,
@@ -322,57 +376,116 @@ where
     > as NodeAddOns<N>>::Handle;
 
     async fn launch_add_ons(mut self, ctx: AddOnsContext<'_, N>) -> eyre::Result<Self::Handle> {
-        // Read the zone's current tempoBlockNumber from local state so policy
-        // cache fallback queries start from the correct L1 height.
         let sp = ctx.node.provider().latest()?;
         let tempo_block_number = sp.tempo_block_number()?;
         self.policy_cache.set_last_l1_block(tempo_block_number);
         info!(target: "reth::cli", tempo_block_number, "Read local tempoBlockNumber for L1 subscriber");
 
-        let l1_url = self.l1_config.l1_rpc_url.clone();
-        let portal_address = self.l1_config.portal_address;
-
-        // Connect L1 provider upfront so startup failures are immediately visible.
         let l1_provider = alloy_provider::ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
-                &l1_url,
+                &self.l1_config.l1_rpc_url,
                 crate::rpc_connection_config(self.l1_config.retry_connection_interval),
             )
             .await?
             .erased();
 
-        // Resolve enabled tokens — use pre-configured list if available, otherwise
-        // query L1 via RPC as a fallback.
+        self.resolve_and_seed_tokens(&l1_provider).await?;
+        self.spawn_l1_subscriber(&ctx);
+        self.spawn_policy_tasks(&l1_provider, &ctx);
+        self.spawn_zone_engine(l1_provider, &ctx)?;
+
+        let task_executor = ctx.node.task_executor().clone();
+
+        let chain_id = ctx
+            .node
+            .provider()
+            .chain_spec()
+            .inner
+            .genesis()
+            .config
+            .chain_id;
+        let handle = self.inner.launch_add_ons(ctx).await?;
+
+        Self::launch_private_rpc(
+            self.private_rpc_config,
+            &handle,
+            self.l1_config.l1_rpc_url.clone(),
+            self.l1_config.retry_connection_interval,
+            self.l1_config.portal_address,
+            self.fee_recipient,
+            chain_id,
+        )
+        .await?;
+
+        if let Some(config) = self.sequencer_config.take() {
+            Self::launch_sequencer_tasks(
+                config,
+                &handle,
+                &task_executor,
+                self.l1_config.l1_rpc_url,
+                self.l1_config.portal_address,
+                self.l1_config.retry_connection_interval,
+                self.fee_recipient,
+                chain_id,
+            )
+            .await?;
+        }
+
+        Ok(handle)
+    }
+}
+
+/// Helper methods for [`ZoneAddOns::launch_add_ons`].
+impl<N> ZoneAddOns<N>
+where
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: reth_transaction_pool::TransactionPool<
+            Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
+        >,
+    ZoneEthApiBuilder:
+        EthApiBuilder<N, EthApi: reth_rpc_eth_api::EthApiTypes<NetworkTypes = TempoNetwork>>,
+{
+    /// Resolve enabled tokens and seed the policy cache.
+    async fn resolve_and_seed_tokens(
+        &mut self,
+        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+    ) -> eyre::Result<()> {
+        let portal = self.portal_address;
         let tracked_tokens = if let Some(tokens) = self.initial_tokens.take() {
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
-            let tokens = crate::abi::ZonePortal::new(portal_address, &l1_provider)
+            let tokens = crate::abi::ZonePortal::new(portal, l1_provider)
                 .enabled_tokens()
                 .await?;
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Discovered enabled tokens from L1");
             tokens
         };
 
-        // Seed the policy cache with current transferPolicyId for each tracked token
-        // before spawning the subscriber, so errors propagate to the caller.
         self.policy_cache
-            .seed_token_policies(portal_address, &tracked_tokens, &l1_provider)
+            .seed_token_policies(portal, &tracked_tokens, l1_provider)
             .await?;
         info!(target: "reth::cli", "Seeded token policies from L1");
+        Ok(())
+    }
 
-        // Spawn unified L1 subscriber (deposits + policy events + L1 state anchor).
+    /// Spawn the unified L1 subscriber (deposits + policy events + L1 state anchor).
+    fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
         L1Subscriber::spawn(
-            self.l1_config,
+            self.l1_config.clone(),
             ctx.node.provider().clone(),
             self.deposit_queue.clone(),
             ctx.node.task_executor().clone(),
         );
-        info!(target: "reth::cli", "Unified L1 subscriber started (deposits + policy events + L1 state anchor)");
+        info!(target: "reth::cli", "Unified L1 subscriber started");
+    }
 
-        // Spawn policy resolution task for pre-fetching authorization data from L1.
-        // The pool prefetch task feeds it with sender/recipient addresses from
-        // incoming transactions so the cache is warm by the time we build blocks.
+    /// Spawn TIP-403 policy resolution and pool prefetch tasks.
+    fn spawn_policy_tasks(
+        &self,
+        l1_provider: &alloy_provider::DynProvider<TempoNetwork>,
+        ctx: &AddOnsContext<'_, N>,
+    ) {
         let policy_task_handle = crate::l1_state::spawn_policy_resolution_task(
             self.policy_cache.clone(),
             l1_provider.clone(),
@@ -386,10 +499,16 @@ where
             ctx.node.task_executor().clone(),
         );
         info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");
+    }
 
-        // Build and spawn the ZoneEngine — L1-event-driven block production
+    /// Build and spawn the [`ZoneEngine`] for L1-event-driven block production.
+    fn spawn_zone_engine(
+        &mut self,
+        l1_provider: alloy_provider::DynProvider<TempoNetwork>,
+        ctx: &AddOnsContext<'_, N>,
+    ) -> eyre::Result<()> {
         let policy_provider = crate::l1_state::PolicyProvider::new(
-            self.policy_cache,
+            self.policy_cache.clone(),
             l1_provider,
             tokio::runtime::Handle::current(),
         );
@@ -401,19 +520,141 @@ where
             provider.chain_spec(),
             ctx.beacon_engine_handle.clone(),
             ctx.node.payload_builder_handle().clone(),
-            self.deposit_queue,
+            self.deposit_queue.clone(),
             last_header,
             self.fee_recipient,
-            self.sequencer_key,
+            self.sequencer_key.clone(),
             self.portal_address,
             policy_provider,
         );
         ctx.node
             .task_executor()
             .spawn_critical_task("zone-engine", engine.run());
-        info!(target: "reth::cli", "ZoneEngine spawned — L1-driven block production active");
+        info!(target: "reth::cli", "ZoneEngine spawned");
+        Ok(())
+    }
 
-        self.inner.launch_add_ons(ctx).await
+    /// Launch the private RPC server.
+    async fn launch_private_rpc(
+        config: ZonePrivateRpcConfig,
+        handle: &<Self as NodeAddOns<N>>::Handle,
+        l1_rpc_url: String,
+        retry_connection_interval: std::time::Duration,
+        portal_address: alloy_primitives::Address,
+        sequencer_addr: alloy_primitives::Address,
+        chain_id: u64,
+    ) -> eyre::Result<()> {
+        if config.zone_id != 0 {
+            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
+            if chain_id != expected {
+                eyre::bail!(
+                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
+                    config.zone_id,
+                    expected,
+                    chain_id,
+                );
+            }
+        }
+
+        let eth_handlers = handle.eth_handlers().clone();
+        let zone_rpc_url = handle
+            .rpc_server_handles
+            .rpc
+            .http_url()
+            .expect("HTTP RPC server must be enabled for private RPC");
+        let private_rpc_config = zone_rpc::PrivateRpcConfig {
+            listen_addr: ([0, 0, 0, 0], config.private_rpc_port).into(),
+            l1_rpc_url,
+            zone_rpc_url,
+            retry_connection_interval,
+            zone_id: config.zone_id,
+            chain_id,
+            max_auth_token_validity: config.max_auth_token_validity,
+            zone_portal: portal_address,
+            sequencer: sequencer_addr,
+        };
+        let api: Arc<dyn crate::rpc::ZoneRpcApi> = Arc::new(
+            crate::rpc::TempoZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?,
+        );
+        let local_addr = crate::rpc::start_private_rpc(private_rpc_config, api).await?;
+        info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
+
+        Ok(())
+    }
+
+    /// Launch sequencer background tasks: batch submission, withdrawal processing,
+    /// and engine shutdown hook.
+    async fn launch_sequencer_tasks(
+        config: ZoneSequencerAddOnsConfig,
+        handle: &<Self as NodeAddOns<N>>::Handle,
+        task_executor: &reth_tasks::TaskExecutor,
+        l1_rpc_url: String,
+        portal_address: alloy_primitives::Address,
+        retry_connection_interval: std::time::Duration,
+        sequencer_addr: alloy_primitives::Address,
+        chain_id: u64,
+    ) -> eyre::Result<()> {
+        if config.zone_id != 0 {
+            let expected = zone_primitives::constants::zone_chain_id(config.zone_id);
+            if chain_id != expected {
+                eyre::bail!(
+                    "chain ID mismatch: zone.id={} requires chain_id={}, but genesis has {}",
+                    config.zone_id,
+                    expected,
+                    chain_id,
+                );
+            }
+        }
+
+        let zone_rpc_url = handle
+            .rpc_server_handles
+            .rpc
+            .http_url()
+            .expect("HTTP RPC server must be enabled for sequencer mode");
+
+        info!(target: "reth::cli", %sequencer_addr, "Starting sequencer background tasks");
+        let sequencer_config = crate::ZoneSequencerConfig {
+            portal_address,
+            l1_rpc_url,
+            retry_connection_interval,
+            withdrawal_poll_interval: config.withdrawal_poll_interval,
+            outbox_address: crate::abi::ZONE_OUTBOX_ADDRESS,
+            inbox_address: crate::abi::ZONE_INBOX_ADDRESS,
+            tempo_state_address: crate::abi::TEMPO_STATE_ADDRESS,
+            zone_rpc_url,
+            zone_poll_interval: config.zone_poll_interval,
+            batch_interval: config.batch_interval,
+        };
+        let seq_handle =
+            crate::spawn_zone_sequencer(sequencer_config, config.sequencer_signer).await;
+        info!(target: "reth::cli", "Sequencer tasks spawned");
+
+        // Critical task — node shuts down if either exits.
+        task_executor.spawn_critical_task("zone-monitor", async move {
+            tokio::select! {
+                res = seq_handle.withdrawal_handle => {
+                    tracing::error!(target: "reth::cli", ?res, "Withdrawal processor task exited");
+                }
+                res = seq_handle.monitor_handle => {
+                    tracing::error!(target: "reth::cli", ?res, "Zone monitor task exited");
+                }
+            }
+        });
+
+        // Flush unpersisted blocks on shutdown.
+        let engine_shutdown = handle.engine_shutdown.clone();
+        task_executor.spawn_critical_with_graceful_shutdown_signal(
+            "zone-engine-shutdown",
+            |shutdown| async move {
+                let _guard = shutdown.await;
+                info!(target: "reth::cli", "Shutdown signal received — flushing engine state");
+                if let Some(done) = engine_shutdown.shutdown() {
+                    let _ = done.await;
+                }
+            },
+        );
+
+        Ok(())
     }
 }
 
@@ -423,7 +664,8 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    ZoneEthApiBuilder: EthApiBuilder<N>,
+    ZoneEthApiBuilder:
+        EthApiBuilder<N, EthApi: reth_rpc_eth_api::EthApiTypes<NetworkTypes = TempoNetwork>>,
 {
     type EthApi = <ZoneEthApiBuilder as EthApiBuilder<N>>::EthApi;
 
@@ -438,7 +680,7 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    ZoneEthApiBuilder: EthApiBuilder<N>,
+    ZoneEthApiBuilder: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
 {
     type ValidatorBuilder = BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>;
 
@@ -479,6 +721,8 @@ where
             self.sequencer_key.clone(),
             self.portal_address,
             self.initial_tokens.clone(),
+            self.private_rpc_config.clone(),
+            self.sequencer_config.clone(),
         )
     }
 }

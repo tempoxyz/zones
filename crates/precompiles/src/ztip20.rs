@@ -15,7 +15,9 @@ use alloc::sync::Arc;
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError, SolInterface};
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{
+    PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
+};
 use tempo_precompiles::{
     DelegateCallNotAllowed, Precompile as TempoPrecompile,
     storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
@@ -45,7 +47,7 @@ macro_rules! decode_or_revert {
         match <$call_ty>::abi_decode_raw($args) {
             Ok(c) => c,
             Err(_) => {
-                return Some(Ok(PrecompileOutput::new_reverted(0, Bytes::new())));
+                return Some(Ok(StorageCtx::default().revert_output(Bytes::new())));
             }
         }
     };
@@ -105,7 +107,6 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         match result {
             Ok(mut output) => {
                 output.gas_used = FIXED_TRANSFER_GAS;
-                output.gas_refunded = 0;
                 Ok(output)
             }
             Err(err) => Err(err),
@@ -313,20 +314,21 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
     }
 
     fn unauthorized_output() -> PrecompileOutput {
-        PrecompileOutput::new_reverted(0, Unauthorized {}.abi_encode().into())
+        StorageCtx::default().revert_output(Unauthorized {}.abi_encode().into())
     }
 
     fn roles_unauthorized_output() -> PrecompileOutput {
-        PrecompileOutput::new_reverted(0, RolesAuthError::unauthorized().selector().into())
+        StorageCtx::default().revert_output(RolesAuthError::unauthorized().selector().into())
     }
 
     /// Build a reverted output with the `policyForbids()` error selector.
     fn policy_forbids_output() -> PrecompileOutput {
-        PrecompileOutput::new_reverted(
+        PrecompileOutput::revert(
             AUTH_CHECK_GAS,
             tempo_contracts::precompiles::TIP20Error::policy_forbids()
                 .selector()
                 .into(),
+            StorageCtx::default().reservoir(),
         )
     }
 }
@@ -357,21 +359,26 @@ where
             PrecompileId::Custom("ZoneTip20Token".into()),
             move |input| {
                 if !input.is_direct_call() {
-                    return Ok(PrecompileOutput::new_reverted(
+                    return Ok(PrecompileOutput::revert(
                         0,
                         SolError::abi_encode(&DelegateCallNotAllowed {}).into(),
+                        input.reservoir,
                     ));
                 }
 
                 let selector = Self::selector(input.data);
                 let is_fixed_gas = selector.is_some_and(Self::is_fixed_gas_selector);
                 if is_fixed_gas && input.gas < FIXED_TRANSFER_GAS {
-                    return Err(PrecompileError::OutOfGas);
+                    return Ok(PrecompileOutput::halt(
+                        PrecompileHalt::OutOfGas,
+                        input.reservoir,
+                    ));
                 }
 
                 let mut storage = EvmPrecompileStorageProvider::new(
                     input.internals,
                     if is_fixed_gas { u64::MAX } else { input.gas },
+                    input.reservoir,
                     spec,
                     input.is_static,
                     gas_params.clone(),
@@ -406,18 +413,16 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy::{
-        primitives::{Address, U256, address},
-        sol_types::SolCall,
-    };
+    use alloy::primitives::{Address, U256, address};
     use alloy_evm::{
         EvmInternals,
         precompiles::{Precompile as AlloyEvmPrecompile, PrecompileInput},
     };
+    use alloy_sol_types::SolCall;
     use revm::{
         Context,
         database::{CacheDB, EmptyDB},
-        precompile::PrecompileResult,
+        precompile::{PrecompileHalt, PrecompileResult},
     };
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_precompiles::{
@@ -475,7 +480,7 @@ mod tests {
 
         fn resolve_transfer_policy_id(&self, _token: Address) -> Result<u64, PrecompileError> {
             if self.fail_policy_id_resolution {
-                return Err(PrecompileError::other("RPC unavailable"));
+                return Err(PrecompileError::Fatal("RPC unavailable".into()));
             }
             Ok(self.policy_id)
         }
@@ -616,7 +621,7 @@ mod tests {
             let gas_params = ctx.cfg.gas_params.clone();
             let internals = EvmInternals::from_context(ctx);
             let mut storage =
-                EvmPrecompileStorageProvider::new(internals, gas_limit, spec, false, gas_params);
+                EvmPrecompileStorageProvider::new(internals, gas_limit, 0, spec, false, gas_params);
             f(&mut storage)
         }
 
@@ -634,6 +639,7 @@ mod tests {
                     caller,
                     internals: EvmInternals::from_context(&mut self.ctx),
                     gas,
+                    reservoir: 0,
                     value: U256::ZERO,
                     is_static,
                     target_address: self.token,
@@ -683,7 +689,7 @@ mod tests {
         );
 
         let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.reverted);
+        assert!(outsider.is_revert());
         assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
 
         Ok(())
@@ -718,7 +724,7 @@ mod tests {
         );
 
         let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.reverted);
+        assert!(outsider.is_revert());
         assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
 
         Ok(())
@@ -738,7 +744,7 @@ mod tests {
             FIXED_TRANSFER_GAS,
             true,
         )?;
-        assert!(private_balance.reverted);
+        assert!(private_balance.is_revert());
         assert_eq!(
             private_balance.bytes,
             Bytes::from(Unauthorized {}.abi_encode())
@@ -755,7 +761,7 @@ mod tests {
             FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert!(!transfer.reverted);
+        assert!(transfer.is_success());
         assert_eq!(transfer.gas_used, FIXED_TRANSFER_GAS);
         assert_eq!(harness.balance_of(harness.bob)?, U256::from(12_345u64));
 
@@ -777,7 +783,7 @@ mod tests {
             100_000,
             false,
         )?;
-        assert!(!inbox_mint.reverted);
+        assert!(inbox_mint.is_success());
         assert_eq!(harness.balance_of(harness.bob)?, U256::from(50_000u64));
 
         let outbox_burn = harness.call(
@@ -790,7 +796,7 @@ mod tests {
             100_000,
             false,
         )?;
-        assert!(!outbox_burn.reverted);
+        assert!(outbox_burn.is_success());
         assert_eq!(harness.balance_of(ZONE_OUTBOX_ADDRESS)?, U256::ZERO);
 
         let crossed_mint = harness.call(
@@ -804,7 +810,7 @@ mod tests {
             100_000,
             false,
         )?;
-        assert!(crossed_mint.reverted);
+        assert!(crossed_mint.is_revert());
         assert_eq!(
             crossed_mint.bytes,
             Bytes::from(RolesAuthError::unauthorized().selector().to_vec())
@@ -820,7 +826,7 @@ mod tests {
             100_000,
             false,
         )?;
-        assert!(crossed_burn.reverted);
+        assert!(crossed_burn.is_revert());
         assert_eq!(
             crossed_burn.bytes,
             Bytes::from(RolesAuthError::unauthorized().selector().to_vec())
@@ -837,7 +843,7 @@ mod tests {
             100_000,
             false,
         )?;
-        assert!(!issuer_mint.reverted);
+        assert!(issuer_mint.is_success());
 
         let issuer_burn = harness.call(
             harness.issuer,
@@ -849,7 +855,7 @@ mod tests {
             100_000,
             false,
         )?;
-        assert!(!issuer_burn.reverted);
+        assert!(issuer_burn.is_success());
 
         Ok(())
     }
@@ -870,7 +876,7 @@ mod tests {
             false,
         )?;
         assert_eq!(approve.gas_used, FIXED_TRANSFER_GAS);
-        assert_eq!(approve.gas_refunded, 0);
+        assert_eq!(approve.state_gas_used, 0);
 
         let approve_update = harness.call(
             harness.alice,
@@ -884,7 +890,7 @@ mod tests {
             false,
         )?;
         assert_eq!(approve_update.gas_used, FIXED_TRANSFER_GAS);
-        assert_eq!(approve_update.gas_refunded, 0);
+        assert_eq!(approve_update.state_gas_used, 0);
 
         let transfer_new = harness.call(
             harness.alice,
@@ -898,7 +904,7 @@ mod tests {
             false,
         )?;
         assert_eq!(transfer_new.gas_used, FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_new.gas_refunded, 0);
+        assert_eq!(transfer_new.state_gas_used, 0);
 
         let transfer_existing = harness.call(
             harness.alice,
@@ -912,7 +918,7 @@ mod tests {
             false,
         )?;
         assert_eq!(transfer_existing.gas_used, FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_existing.gas_refunded, 0);
+        assert_eq!(transfer_existing.state_gas_used, 0);
 
         let transfer_with_memo = harness.call(
             harness.alice,
@@ -927,7 +933,7 @@ mod tests {
             false,
         )?;
         assert_eq!(transfer_with_memo.gas_used, FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_with_memo.gas_refunded, 0);
+        assert_eq!(transfer_with_memo.state_gas_used, 0);
 
         let transfer_from = harness.call(
             harness.spender,
@@ -942,7 +948,7 @@ mod tests {
             false,
         )?;
         assert_eq!(transfer_from.gas_used, FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_from.gas_refunded, 0);
+        assert_eq!(transfer_from.state_gas_used, 0);
 
         let transfer_from_with_memo = harness.call(
             harness.spender,
@@ -958,7 +964,7 @@ mod tests {
             false,
         )?;
         assert_eq!(transfer_from_with_memo.gas_used, FIXED_TRANSFER_GAS);
-        assert_eq!(transfer_from_with_memo.gas_refunded, 0);
+        assert_eq!(transfer_from_with_memo.state_gas_used, 0);
 
         Ok(())
     }
@@ -1003,10 +1009,11 @@ mod tests {
             .abi_encode()
             .into(),
         ] {
-            assert!(matches!(
-                harness.call(harness.alice, calldata, FIXED_TRANSFER_GAS - 1, false),
-                Err(PrecompileError::OutOfGas)
-            ));
+            let output = harness
+                .call(harness.alice, calldata, FIXED_TRANSFER_GAS - 1, false)
+                .expect("out of gas is returned as a halted precompile output");
+            assert!(output.is_halt());
+            assert_eq!(output.halt_reason(), Some(&PrecompileHalt::OutOfGas));
         }
 
         Ok(())
@@ -1027,7 +1034,7 @@ mod tests {
             FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert!(!approve.reverted);
+        assert!(approve.is_success());
         assert_eq!(
             harness.allowance(harness.alice, harness.spender)?,
             U256::from(123_456u64)
@@ -1044,7 +1051,7 @@ mod tests {
             FIXED_TRANSFER_GAS,
             false,
         )?;
-        assert!(!transfer.reverted);
+        assert!(transfer.is_success());
         assert_eq!(harness.balance_of(harness.bob)?, U256::from(7_654u64));
 
         Ok(())
@@ -1061,15 +1068,15 @@ mod tests {
 
         // Owner can query their own reward info
         let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
-        assert!(!owner.reverted);
+        assert!(owner.is_success());
 
         // Sequencer can query anyone's reward info
         let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
-        assert!(!sequencer.reverted);
+        assert!(sequencer.is_success());
 
         // Outsider is rejected
         let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.reverted);
+        assert!(outsider.is_revert());
         assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
 
         Ok(())
@@ -1086,15 +1093,15 @@ mod tests {
 
         // Owner can query their own pending rewards
         let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
-        assert!(!owner.reverted);
+        assert!(owner.is_success());
 
         // Sequencer can query anyone's pending rewards
         let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
-        assert!(!sequencer.reverted);
+        assert!(sequencer.is_success());
 
         // Outsider is rejected
         let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.reverted);
+        assert!(outsider.is_revert());
         assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
 
         Ok(())
@@ -1152,15 +1159,15 @@ mod tests {
 
         // Owner can query their own roles
         let owner = harness.call(harness.alice, calldata.clone(), 100_000, true)?;
-        assert!(!owner.reverted);
+        assert!(owner.is_success());
 
         // Sequencer can query anyone's roles
         let sequencer = harness.call(harness.sequencer, calldata.clone(), 100_000, true)?;
-        assert!(!sequencer.reverted);
+        assert!(sequencer.is_success());
 
         // Outsider is rejected
         let outsider = harness.call(harness.bob, calldata, 100_000, true)?;
-        assert!(outsider.reverted);
+        assert!(outsider.is_revert());
         assert_eq!(outsider.bytes, Bytes::from(Unauthorized {}.abi_encode()));
 
         Ok(())

@@ -1,0 +1,100 @@
+name: Specs
+
+on:
+  push:
+    branches: [main, dr/validium]
+    paths:
+      - "specs/ref-impls/src/**"
+      - "specs/ref-impls/test/**"
+      - "specs/ref-impls/foundry.toml"
+      - "crates/tempo-zone/**"
+      - ".github/workflows/specs.yml"
+  merge_group:
+  pull_request:
+    branches: [main, dr/validium]
+    paths:
+      - "specs/ref-impls/src/**"
+      - "specs/ref-impls/test/**"
+      - "specs/ref-impls/foundry.toml"
+      - "crates/tempo-zone/**"
+      - ".github/workflows/specs.yml"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  build:
+    name: Forge Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@8789b3e21e6c11b2697f5eb56eddae542f746c10 # v1.7.0
+        with:
+          version: nightly
+
+      - name: Show Forge version
+        run: forge --version
+
+      - name: Run Forge build
+        working-directory: specs/ref-impls
+        run: forge build --sizes
+
+  lint:
+    name: Forge Fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@8789b3e21e6c11b2697f5eb56eddae542f746c10 # v1.7.0
+        with:
+          version: nightly
+
+      - name: Run Forge fmt check (zone-only)
+        working-directory: specs/ref-impls
+        run: forge fmt --check src/zone test/zone
+
+  test:
+    name: Forge Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@8789b3e21e6c11b2697f5eb56eddae542f746c10 # v1.7.0
+        with:
+          version: nightly
+
+      - name: Run Forge tests (zone-only)
+        working-directory: specs/ref-impls
+        run: forge test -vvv --match-path "test/zone/**"
+
+  specs-success:
+    name: specs success
+    runs-on: ubuntu-latest
+    if: always()
+    needs:
+      - build
+      - lint
+      - test
+    timeout-minutes: 5
+    steps:
+      - name: Decide whether the needed jobs succeeded or failed
+        uses: re-actors/alls-green@release/v1
+        with:
+          jobs: ${{ toJSON(needs) }}

@@ -6,6 +6,8 @@
 use eyre as _;
 
 pub mod abi;
+#[cfg(feature = "cli")]
+pub mod cli;
 pub mod ext;
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub mod batch;
@@ -32,7 +34,7 @@ pub use l1::{
     L1PortalEvents, L1SequencerEvent, L1Subscriber, L1SubscriberConfig,
 };
 pub use l1_state::{PolicyProvider, SharedL1StateCache, SharedPolicyCache};
-pub use node::{ZoneExecutorBuilder, ZoneNode};
+pub use node::{ZoneExecutorBuilder, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig};
 pub use payload::{ZonePayloadAttributes, ZonePayloadTypes};
 pub use withdrawals::{SharedWithdrawalStore, WithdrawalProcessorConfig, WithdrawalStore};
 pub use zonemonitor::{ZoneMonitorConfig, spawn_zone_monitor};

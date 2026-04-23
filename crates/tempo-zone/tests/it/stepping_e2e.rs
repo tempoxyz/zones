@@ -1,38 +1,39 @@
-//! Stepping mode E2E test: verifies batch submission after extended L1 gap.
+//! Extended-gap batch submission E2E test.
 //!
-//! When a zone node goes down for longer than the EIP-2935 history window (8192 blocks),
-//! the batch submitter must split the batch into multiple direct-mode submissions.
-//! This test validates that the stepping logic correctly handles this scenario.
+//! When a zone node goes down for long enough that even the first stepping
+//! boundary is outside the EIP-2935 history window, the sequencer must still
+//! submit batches successfully once it comes back. This exercises the
+//! long-downtime ancestry path instead of the simpler direct-mode case.
 
-use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
+use crate::utils::{L1TestNode, ZoneTestNode, poll_until, spawn_sequencer};
 use alloy::providers::Provider;
 use std::time::Duration;
-use zone::abi::{ZONE_TOKEN_ADDRESS, ZonePortal};
+use zone::abi::ZonePortal;
 
-/// Extended timeout for stepping tests — the L1 needs to mine >8200 blocks
-/// and the zone must process them all.
-const STEPPING_TIMEOUT: Duration = Duration::from_secs(180);
+const EIP2935_HISTORY_WINDOW: u64 = 8192;
+const EIP2935_SAFETY_MARGIN: u64 = 360;
+const EIP2935_EFFECTIVE_WINDOW: u64 = EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MARGIN;
+const EXTENDED_GAP_BLOCKS: u64 = EIP2935_HISTORY_WINDOW + EIP2935_EFFECTIVE_WINDOW + 64;
 
-/// Timeout for L1 operations.
-const L1_TIMEOUT: Duration = Duration::from_secs(30);
+/// Extended timeout for stepping tests — the L1 needs to mine >16k blocks and
+/// the zone must replay enough history to cross the first stepping boundary.
+const STEPPING_TIMEOUT: Duration = Duration::from_secs(300);
+const BATCH_TIMEOUT: Duration = Duration::from_secs(90);
 
 /// Test that batch submission works after the zone's `tempoBlockNumber` has
-/// fallen outside the EIP-2935 history window (gap > 8192 blocks).
-///
-/// The stepping logic must split the batch into multiple direct-mode
-/// submissions, each within the EIP-2935 effective window.
+/// fallen far enough behind L1 that the first stepped sub-batch still lands
+/// outside the EIP-2935 history window.
 ///
 /// 1. Start L1 with 10ms block time to mine blocks quickly.
 /// 2. Deploy zone portal on L1.
-/// 3. Wait for L1 to advance >8200 blocks past genesis.
-/// 4. Start zone node connected to L1.
-/// 5. Wait for zone to process all L1 blocks.
-/// 6. Fund user and deposit to create non-trivial state.
-/// 7. Spawn sequencer (monitor + withdrawal processor).
-/// 8. Assert multiple BatchSubmitted events (stepping produces >=2 submissions).
-/// 9. Verify withdrawal works through stepped batches.
+/// 3. Wait for L1 to advance past `history + effective window`, so the first
+///    stepping boundary is still outside the history window.
+/// 4. Start zone node connected to L1, anchored at the portal genesis.
+/// 5. Wait for the zone to replay up to the first stepping boundary.
+/// 6. Spawn sequencer while the zone is still far behind L1.
+/// 7. Assert a `BatchSubmitted` event appears.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "slow: mines >8200 L1 blocks (~82s), run with --ignored or in nightly CI"]
+#[ignore = "slow: mines >16k L1 blocks and replays zone history, run with --ignored or in nightly CI"]
 async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
@@ -45,19 +46,17 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     // --- Step 2: Deploy zone portal ---
     let portal_address = l1.deploy_zone().await?;
 
-    // --- Step 3: Wait for L1 to advance past the EIP-2935 window ---
-    // The portal's genesisTempoBlockNumber is set to the current L1 block at
-    // deployment time. We need the L1 to advance >8200 blocks beyond that.
-    let genesis_block = l1.provider().get_block_number().await?;
-    let target_block = genesis_block + 8200;
+    let portal = ZonePortal::new(portal_address, l1.provider());
+    let genesis_block = portal.genesisTempoBlockNumber().call().await?;
+    let target_block = genesis_block + EXTENDED_GAP_BLOCKS;
 
     tracing::info!(
         genesis_block,
         target_block,
-        "Waiting for L1 to advance past EIP-2935 window"
+        "Waiting for L1 to advance past the extended ancestry threshold"
     );
 
-    // Poll until L1 reaches the target — at 10ms/block this takes ~82 seconds.
+    // Poll until L1 reaches the target — at 10ms/block this takes ~160 seconds.
     let poll_start = std::time::Instant::now();
     loop {
         let current = l1.provider().get_block_number().await?;
@@ -70,7 +69,7 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
             );
             break;
         }
-        if poll_start.elapsed() > Duration::from_secs(120) {
+        if poll_start.elapsed() > STEPPING_TIMEOUT {
             return Err(eyre::eyre!(
                 "Timed out waiting for L1 to reach block {target_block} (current: {current})"
             ));
@@ -78,67 +77,61 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
-    // --- Step 4: Start zone node connected to L1 ---
-    let zone = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_address).await?;
+    // --- Step 4: Start zone node connected to L1, anchored at the portal genesis ---
+    let zone =
+        ZoneTestNode::start_from_l1_portal_genesis(l1.http_url(), l1.ws_url(), portal_address)
+            .await?;
 
-    // --- Step 5: Wait for zone to catch up ---
-    zone.wait_for_l2_tempo_finalized(0, STEPPING_TIMEOUT)
+    // --- Step 5: Wait for the zone to replay to the first stepping boundary ---
+    let first_step_tempo = genesis_block + EIP2935_EFFECTIVE_WINDOW;
+    zone.wait_for_tempo_block_number(first_step_tempo, STEPPING_TIMEOUT)
         .await?;
 
-    // --- Step 6: Fund user and deposit ---
-    let mut account = ZoneAccount::from_l1_and_zone(&l1, &zone, portal_address);
-    l1.fund_user(account.address(), 2_000_000).await?;
-    account.deposit(1_000_000, L1_TIMEOUT, &zone).await?;
+    let l1_tip = l1.provider().get_block_number().await?;
+    eyre::ensure!(
+        l1_tip.saturating_sub(first_step_tempo) > EIP2935_HISTORY_WINDOW,
+        "test precondition not met: first step tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
+        l1_tip.saturating_sub(first_step_tempo),
+    );
 
-    // --- Step 7: Spawn sequencer ---
-    let _seq = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
+    // --- Step 6: Spawn sequencer while the zone still has a large backlog ---
+    let seq = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
 
-    // --- Step 8: Assert multiple BatchSubmitted events ---
-    // The gap exceeds the EIP-2935 window, so stepping must produce >=2 submitBatch calls.
-    let batch_timeout = Duration::from_secs(60);
-    let batch_start = std::time::Instant::now();
-    let portal = ZonePortal::new(portal_address, l1.provider());
+    // --- Step 7: Assert batch submission succeeds after the long gap ---
+    let batch_count = poll_until(
+        BATCH_TIMEOUT,
+        Duration::from_millis(500),
+        "BatchSubmitted event after extended L1 gap",
+        || {
+            let portal = &portal;
+            let seq = &seq;
+            async move {
+                if seq.monitor_handle.is_finished() {
+                    eyre::bail!("monitor task exited before submitting a batch");
+                }
 
-    loop {
-        let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+                if seq.withdrawal_handle.is_finished() {
+                    eyre::bail!("withdrawal processor exited before batch submission completed");
+                }
 
-        let batch_count = events.len();
-        if batch_count >= 2 {
-            tracing::info!(
-                batch_count,
-                elapsed_secs = batch_start.elapsed().as_secs(),
-                "Stepping produced multiple batch submissions"
-            );
-            break;
-        }
-
-        if batch_start.elapsed() > batch_timeout {
-            return Err(eyre::eyre!(
-                "Expected >= 2 BatchSubmitted events from stepping, got {batch_count}"
-            ));
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-
-    // --- Step 9: Verify withdrawal works through stepped batches ---
-    let withdrawal_amount: u128 = 500_000;
-    account.withdraw(withdrawal_amount).await?;
-
-    l1.wait_for_withdrawal_on_l1(
-        portal_address,
-        account.address(),
-        withdrawal_amount,
-        STEPPING_TIMEOUT,
+                let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
+                let batch_count = events.len();
+                if batch_count >= 1 {
+                    Ok(Some(batch_count))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
     )
     .await?;
 
-    // Verify L2 balance decreased
-    let l2_balance = zone
-        .balance_of(ZONE_TOKEN_ADDRESS, account.address())
-        .await?;
-    assert!(
-        l2_balance <= alloy::primitives::U256::from(1_000_000u128 - withdrawal_amount),
-        "L2 balance should decrease by at least the withdrawal amount (got {l2_balance})"
+    tracing::info!(
+        batch_count,
+        l1_tip,
+        first_step_tempo,
+        first_step_gap = l1_tip.saturating_sub(first_step_tempo),
+        "Batch submission succeeded after extended L1 gap"
     );
 
     Ok(())

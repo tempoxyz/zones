@@ -96,14 +96,15 @@ pub(crate) const ZONE_TEST_TOKEN_SALT: B256 = B256::new([
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
 ]);
 
-/// Read a Foundry artifact from `docs/specs/out` and return its deployment bytecode.
+/// Read a Foundry artifact from `specs/ref-impls/out` and return its deployment bytecode.
 ///
-/// Requires `forge build` to have been run in `docs/specs`.
+/// Requires `forge build` to have been run in `specs/ref-impls`.
 fn forge_bytecode(contract: &str) -> eyre::Result<alloy_primitives::Bytes> {
-    let specs_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/specs/out");
+    let specs_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../specs/ref-impls/out");
     let path = specs_dir.join(format!("{contract}.sol/{contract}.json"));
     let json = std::fs::read_to_string(&path).wrap_err_with(|| {
-        format!("{contract} artifact not found – run `forge build` in docs/specs")
+        format!("{contract} artifact not found – run `forge build` in specs/ref-impls")
     })?;
     let artifact: serde_json::Value = serde_json::from_str(&json)?;
     let hex_str = artifact["bytecode"]["object"]
@@ -389,6 +390,38 @@ impl ZoneTestNode {
     ) -> eyre::Result<Self> {
         let (genesis, genesis_block_number) =
             build_l1_anchored_genesis(l1_http_url, portal_address).await?;
+
+        let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        Self::launch_with_genesis(
+            l1_ws_url.to_string(),
+            portal_address,
+            Some(genesis_block_number),
+            next_unique_chain_id(),
+            Some(genesis),
+            Address::ZERO,
+            throwaway_key,
+        )
+        .await
+    }
+
+    /// Start a zone node connected to a real L1, anchoring genesis to the
+    /// portal's on-chain `genesisTempoBlockNumber`.
+    ///
+    /// Unlike [`start_from_l1`], this preserves the full replay gap between the
+    /// portal genesis and the current L1 tip, which is useful for long-downtime
+    /// catch-up tests.
+    pub(crate) async fn start_from_l1_portal_genesis(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+    ) -> eyre::Result<Self> {
+        let l1_provider =
+            ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
+        let portal = zone::abi::ZonePortal::new(portal_address, &l1_provider);
+        let genesis_block_number = portal.genesisTempoBlockNumber().call().await?;
+        let (genesis, genesis_block_number) =
+            build_l1_anchored_genesis_at_block(l1_http_url, portal_address, genesis_block_number)
+                .await?;
 
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
         Self::launch_with_genesis(
@@ -1542,8 +1575,6 @@ async fn build_l1_anchored_genesis(
     l1_http_url: &url::Url,
     portal_address: Address,
 ) -> eyre::Result<(Genesis, u64)> {
-    use alloy_primitives::address;
-
     let l1_provider =
         ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
 
@@ -1552,6 +1583,32 @@ async fn build_l1_anchored_genesis(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 latest block not found"))?;
     let l1_header: &TempoHeader = block.header.as_ref();
+    build_l1_anchored_genesis_from_header(l1_header, portal_address)
+}
+
+/// Build a zone test genesis anchored to a specific L1 block number.
+async fn build_l1_anchored_genesis_at_block(
+    l1_http_url: &url::Url,
+    portal_address: Address,
+    block_number: u64,
+) -> eyre::Result<(Genesis, u64)> {
+    let l1_provider =
+        ProviderBuilder::new_with_network::<TempoNetwork>().connect_http(l1_http_url.clone());
+
+    let block = l1_provider
+        .get_block_by_number(block_number.into())
+        .await?
+        .ok_or_else(|| eyre::eyre!("L1 block {block_number} not found"))?;
+    let l1_header: &TempoHeader = block.header.as_ref();
+    build_l1_anchored_genesis_from_header(l1_header, portal_address)
+}
+
+fn build_l1_anchored_genesis_from_header(
+    l1_header: &TempoHeader,
+    portal_address: Address,
+) -> eyre::Result<(Genesis, u64)> {
+    use alloy_primitives::address;
+
     let genesis_block_number = l1_header.inner.number;
 
     let mut rlp_buf = Vec::new();
@@ -2668,7 +2725,7 @@ impl PrivateRpcTestCtx {
             .connect_http(self.zone.http_url().clone());
         let keychain = IAccountKeychainInstance::new(ACCOUNT_KEYCHAIN_ADDRESS, &provider);
         let pending = keychain
-            .authorizeKey(key_id, signature_type, expiry, false, vec![])
+            .authorizeKey_0(key_id, signature_type, expiry, false, vec![])
             .send()
             .await?;
         self.fixture.inject_empty_block(self.zone.deposit_queue());

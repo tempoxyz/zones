@@ -13,7 +13,7 @@ use alloy::{
 };
 use alloy_eips::Encodable2718;
 use eyre::{Context as _, eyre};
-use std::{collections::BTreeMap, time::Instant};
+use std::{collections::BTreeMap, num::NonZeroU64, time::Instant};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_primitives::{
@@ -209,7 +209,9 @@ impl SpamDeposits {
                     }],
                     nonce_key,
                     nonce: 0,
-                    valid_after: Some(target_ts),
+                    valid_after: Some(
+                        NonZeroU64::new(target_ts).expect("target timestamp is always non-zero"),
+                    ),
                     ..Default::default()
                 };
 

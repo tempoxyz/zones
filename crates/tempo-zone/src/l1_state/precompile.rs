@@ -27,7 +27,7 @@
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::Bytes;
 use alloy_sol_types::{SolCall, SolError};
-use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
+use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::{debug, error, warn};
 
 use super::provider::L1StateProvider;
@@ -80,29 +80,30 @@ impl TempoStateReader {
             move |input| {
                 if !input.is_direct_call() {
                     warn!(target: "zone::precompile", "TempoStateReader called via DELEGATECALL — rejecting");
-                    return Ok(PrecompileOutput::new_reverted(
+                    return Ok(PrecompileOutput::revert(
                         0,
                         DelegateCallNotAllowed {}.abi_encode().into(),
+                        input.reservoir,
                     ));
                 }
 
                 let data = input.data;
                 if data.len() < 4 {
                     warn!(target: "zone::precompile", data_len = data.len(), "TempoStateReader called with insufficient data");
-                    return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                    return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
                 }
 
                 let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
 
                 let result = if selector == readStorageAtCall::SELECTOR {
                     debug!(target: "zone::precompile", "TempoStateReader: readStorageAt");
-                    Self::handle_single_slot(&provider, data)
+                    Self::handle_single_slot(&provider, data, input.reservoir)
                 } else if selector == readStorageBatchAtCall::SELECTOR {
                     debug!(target: "zone::precompile", "TempoStateReader: readStorageBatchAt");
-                    Self::handle_multi_slot(&provider, data)
+                    Self::handle_multi_slot(&provider, data, input.reservoir)
                 } else {
                     warn!(target: "zone::precompile", selector = ?selector, "TempoStateReader: unknown selector");
-                    Ok(PrecompileOutput::new_reverted(0, Bytes::new()))
+                    Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir))
                 };
 
                 match &result {
@@ -125,9 +126,15 @@ impl TempoStateReader {
     /// Decodes the ABI calldata, performs a synchronous lookup via the provider at the specified
     /// L1 block number (cache first, then RPC fallback), and returns the ABI-encoded `bytes32`
     /// value. Returns a hard [`PrecompileError`] if both the cache and RPC fallback fail.
-    fn handle_single_slot(provider: &L1StateProvider, data: &[u8]) -> PrecompileResult {
-        let call = readStorageAtCall::abi_decode(data)
-            .map_err(|_| PrecompileError::other("ABI decode failed"))?;
+    fn handle_single_slot(
+        provider: &L1StateProvider,
+        data: &[u8],
+        reservoir: u64,
+    ) -> PrecompileResult {
+        let call = match readStorageAtCall::abi_decode(data) {
+            Ok(call) => call,
+            Err(_) => return Ok(PrecompileOutput::revert(0, Bytes::new(), reservoir)),
+        };
 
         let gas = BASE_GAS + PER_SLOT_GAS;
 
@@ -141,7 +148,7 @@ impl TempoStateReader {
             })?;
 
         let encoded = readStorageAtCall::abi_encode_returns(&value);
-        Ok(PrecompileOutput::new(gas, encoded.into()))
+        Ok(PrecompileOutput::new(gas, encoded.into(), reservoir))
     }
 
     /// Handle a `readStorageBatchAt(address, bytes32[], uint64)` call.
@@ -150,9 +157,15 @@ impl TempoStateReader {
     /// L1 block number (cache first, then RPC fallback), and returns the ABI-encoded `bytes32[]`
     /// result. If **any** slot fails both cache and RPC lookup, the entire call fails with a
     /// hard [`PrecompileError`].
-    fn handle_multi_slot(provider: &L1StateProvider, data: &[u8]) -> PrecompileResult {
-        let call = readStorageBatchAtCall::abi_decode(data)
-            .map_err(|_| PrecompileError::other("ABI decode failed"))?;
+    fn handle_multi_slot(
+        provider: &L1StateProvider,
+        data: &[u8],
+        reservoir: u64,
+    ) -> PrecompileResult {
+        let call = match readStorageBatchAtCall::abi_decode(data) {
+            Ok(call) => call,
+            Err(_) => return Ok(PrecompileOutput::revert(0, Bytes::new(), reservoir)),
+        };
 
         let num_slots = call.slots.len() as u64;
         let gas = BASE_GAS + PER_SLOT_GAS * num_slots;
@@ -171,6 +184,6 @@ impl TempoStateReader {
         }
 
         let encoded = readStorageBatchAtCall::abi_encode_returns(&results);
-        Ok(PrecompileOutput::new(gas, encoded.into()))
+        Ok(PrecompileOutput::new(gas, encoded.into(), reservoir))
     }
 }
