@@ -75,8 +75,10 @@ impl ZoneCli {
             });
 
             if args.enable_sequencer {
-                let sequencer_signer: PrivateKeySigner =
-                    args.sequencer_key.parse().expect("invalid sequencer private key");
+                let sequencer_signer: PrivateKeySigner = args
+                    .sequencer_key
+                    .parse()
+                    .expect("invalid sequencer private key");
                 node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                     sequencer_signer,
                     zone_id: args.zone_id,

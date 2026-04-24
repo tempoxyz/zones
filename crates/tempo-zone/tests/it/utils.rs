@@ -369,13 +369,7 @@ impl ZoneTestNode {
 
     /// Start a zone node pointing at a real L1 WebSocket URL.
     pub(crate) async fn start(l1_ws_url: String, portal_address: Address) -> eyre::Result<Self> {
-        Self::launch(
-            l1_ws_url,
-            portal_address,
-            None,
-            next_unique_chain_id(),
-        )
-        .await
+        Self::launch(l1_ws_url, portal_address, None, next_unique_chain_id()).await
     }
 
     /// Start a zone node connected to a real L1, generating genesis from the L1's
@@ -480,13 +474,7 @@ impl ZoneTestNode {
     /// Useful for running multiple zone nodes in a single test — each needs
     /// a unique chain ID to avoid datadir collisions.
     pub(crate) async fn start_local_with_chain_id(chain_id: u64) -> eyre::Result<Self> {
-        Self::launch(
-            DUMMY_L1_URL.to_string(),
-            Address::ZERO,
-            None,
-            chain_id,
-        )
-        .await
+        Self::launch(DUMMY_L1_URL.to_string(), Address::ZERO, None, chain_id).await
     }
 
     async fn launch(
