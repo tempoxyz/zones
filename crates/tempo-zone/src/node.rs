@@ -426,7 +426,7 @@ where
         Ok(())
     }
 
-    /// Spawn the L1 subscriber.
+    /// Spawn the L1 subscriber. Listens for new blocks and depsoit events.
     fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
         L1Subscriber::spawn(
             self.l1_config.clone(),
