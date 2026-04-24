@@ -374,7 +374,6 @@ impl ZoneTestNode {
             portal_address,
             None,
             next_unique_chain_id(),
-            Address::ZERO,
         )
         .await
     }
@@ -392,14 +391,14 @@ impl ZoneTestNode {
             build_l1_anchored_genesis(l1_http_url, portal_address).await?;
 
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
         Self::launch_with_genesis(
             l1_ws_url.to_string(),
             portal_address,
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
-            Address::ZERO,
-            throwaway_key,
+            signer,
         )
         .await
     }
@@ -424,27 +423,27 @@ impl ZoneTestNode {
                 .await?;
 
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
         Self::launch_with_genesis(
             l1_ws_url.to_string(),
             portal_address,
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
-            Address::ZERO,
-            throwaway_key,
+            signer,
         )
         .await
     }
 
     /// Start a zone node connected to a real L1, with a sequencer key for ECIES decryption.
     ///
-    /// Same as [`start_from_l1`] but passes the sequencer key through to `ZoneNode::new`
+    /// Same as [`start_from_l1`] but passes the sequencer signer through
     /// so the payload builder can decrypt encrypted deposits.
-    pub(crate) async fn start_from_l1_with_sequencer_key(
+    pub(crate) async fn start_from_l1_with_sequencer_signer(
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,
         portal_address: Address,
-        sequencer_key: k256::SecretKey,
+        sequencer_signer: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<Self> {
         let (genesis, genesis_block_number) =
             build_l1_anchored_genesis(l1_http_url, portal_address).await?;
@@ -455,8 +454,7 @@ impl ZoneTestNode {
             Some(genesis_block_number),
             next_unique_chain_id(),
             Some(genesis),
-            Address::ZERO,
-            sequencer_key,
+            sequencer_signer,
         )
         .await
     }
@@ -473,7 +471,6 @@ impl ZoneTestNode {
             Address::ZERO,
             None,
             next_unique_chain_id(),
-            Address::ZERO,
         )
         .await
     }
@@ -488,7 +485,6 @@ impl ZoneTestNode {
             Address::ZERO,
             None,
             chain_id,
-            Address::ZERO,
         )
         .await
     }
@@ -498,18 +494,17 @@ impl ZoneTestNode {
         portal_address: Address,
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
-        sequencer: Address,
     ) -> eyre::Result<Self> {
-        // Generate a throwaway key for tests that don't use encrypted deposits.
+        // Generate a throwaway signer for tests that don't use encrypted deposits.
         let throwaway_key = k256::SecretKey::from_slice(&[0x01; 32]).expect("valid throwaway key");
+        let signer = alloy_signer_local::PrivateKeySigner::from_signing_key(throwaway_key.into());
         Self::launch_with_genesis(
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
             chain_id,
             None,
-            sequencer,
-            throwaway_key,
+            signer,
         )
         .await
     }
@@ -520,8 +515,7 @@ impl ZoneTestNode {
         genesis_tempo_block_number: Option<u64>,
         chain_id: u64,
         custom_genesis: Option<Genesis>,
-        sequencer: Address,
-        sequencer_key: k256::SecretKey,
+        sequencer_signer: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -537,12 +531,17 @@ impl ZoneTestNode {
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
-            sequencer,
-            sequencer_key,
             4,
             std::time::Duration::from_millis(100),
         )
-        .with_initial_tokens(vec![]);
+        .with_initial_tokens(vec![])
+        .with_sequencer(zone::ZoneSequencerAddOnsConfig {
+            sequencer_signer,
+            zone_id: 0,
+            zone_poll_interval: std::time::Duration::from_secs(1),
+            batch_interval: std::time::Duration::from_secs(60),
+            withdrawal_poll_interval: std::time::Duration::from_secs(5),
+        });
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
         // The ZoneEngine is the sole block producer; it advances the chain when L1
@@ -2809,7 +2808,6 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
         Address::ZERO,
         None,
         next_unique_chain_id(),
-        sequencer_address,
     )
     .await?;
     let fixture = L1Fixture::new();
@@ -2865,11 +2863,11 @@ async fn start_zone_with_private_rpc_l1_inner(
     let portal_address = l1.deploy_zone().await?;
 
     let zone = if let Some(key) = encryption_key.clone() {
-        ZoneTestNode::start_from_l1_with_sequencer_key(
+        ZoneTestNode::start_from_l1_with_sequencer_signer(
             l1.http_url(),
             l1.ws_url(),
             portal_address,
-            key,
+            alloy_signer_local::PrivateKeySigner::from_signing_key(key.into()),
         )
         .await?
     } else {

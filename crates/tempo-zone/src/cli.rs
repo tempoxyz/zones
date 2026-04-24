@@ -59,14 +59,10 @@ impl ZoneCli {
             builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
             builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
-            let sequencer_signer = args.sequencer_key.parse::<PrivateKeySigner>()?;
-
             let mut node = ZoneNode::new(
                 args.l1_rpc_url,
                 args.portal_address,
                 args.l1_genesis_block_number,
-                sequencer_signer.address(),
-                sequencer_signer.credential().into(),
                 args.l1_fetch_concurrency,
                 Duration::from_millis(args.l1_retry_connection_interval_ms),
             )
@@ -79,6 +75,8 @@ impl ZoneCli {
             });
 
             if args.enable_sequencer {
+                let sequencer_signer: PrivateKeySigner =
+                    args.sequencer_key.parse().expect("invalid sequencer private key");
                 node = node.with_sequencer(ZoneSequencerAddOnsConfig {
                     sequencer_signer,
                     zone_id: args.zone_id,
