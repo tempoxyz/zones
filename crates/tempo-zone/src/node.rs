@@ -256,7 +256,7 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     deposit_queue: DepositQueue,
     /// Configuration for the L1 event subscriber
     l1_config: L1SubscriberConfig,
-    /// Reciever address for zone block fees
+    /// Receiver address for zone block fees
     fee_recipient: Address,
     /// TIP-403 policy cache
     policy_cache: SharedPolicyCache,
@@ -426,7 +426,7 @@ where
         Ok(())
     }
 
-    /// Spawn the L1 subscriber. Listens for new blocks and depsoit events.
+    /// Spawn the L1 subscriber. Listens for new blocks and deposit events.
     fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
         L1Subscriber::spawn(
             self.l1_config.clone(),
