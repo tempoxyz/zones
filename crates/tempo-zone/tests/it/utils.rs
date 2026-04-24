@@ -2249,6 +2249,24 @@ pub(crate) async fn spawn_sequencer(
     portal_address: Address,
     sequencer_signer: alloy_signer_local::PrivateKeySigner,
 ) -> zone::ZoneSequencerHandle {
+    spawn_sequencer_with_anchor_config(
+        l1,
+        zone,
+        portal_address,
+        sequencer_signer,
+        zone::BatchAnchorConfig::default(),
+    )
+    .await
+}
+
+/// Spawn the zone sequencer background tasks with custom EIP-2935 anchor limits.
+pub(crate) async fn spawn_sequencer_with_anchor_config(
+    l1: &L1TestNode,
+    zone: &ZoneTestNode,
+    portal_address: Address,
+    sequencer_signer: alloy_signer_local::PrivateKeySigner,
+    batch_anchor_config: zone::BatchAnchorConfig,
+) -> zone::ZoneSequencerHandle {
     use zone::abi::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
     let config = zone::ZoneSequencerConfig {
@@ -2262,6 +2280,7 @@ pub(crate) async fn spawn_sequencer(
         zone_rpc_url: zone.http_url().to_string(),
         zone_poll_interval: Duration::from_millis(500),
         batch_interval: Duration::from_millis(500),
+        batch_anchor_config,
     };
 
     zone::spawn_zone_sequencer(config, sequencer_signer).await

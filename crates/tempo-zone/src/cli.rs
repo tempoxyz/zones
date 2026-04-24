@@ -11,8 +11,8 @@ use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 
 use crate::{
-    ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig, evm::ZoneEvmConfig,
-    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    BatchAnchorConfig, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig,
+    evm::ZoneEvmConfig, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 
 const MAX_LOGS_PER_RESPONSE: u64 = 1_000_000;
@@ -84,6 +84,7 @@ impl ZoneCli {
                     zone_id: args.zone_id,
                     zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
                     batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
+                    batch_anchor_config: BatchAnchorConfig::default(),
                     withdrawal_poll_interval: Duration::from_secs(
                         args.withdrawal_poll_interval_secs,
                     ),

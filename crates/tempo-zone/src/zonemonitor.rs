@@ -40,8 +40,8 @@ use alloy_sol_types::{ContractError, SolInterface as _};
 use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
     batch::{
-        AnchorGapKind, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_slot_withdrawals,
-        log_query_ranges,
+        AnchorGapKind, BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot,
+        fetch_slot_withdrawals, log_query_ranges,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -73,6 +73,8 @@ pub struct ZoneMonitorConfig {
     pub batch_interval: Duration,
     /// ZonePortal contract address on Tempo L1.
     pub portal_address: Address,
+    /// EIP-2935 history and safety-margin limits used by the batch submitter.
+    pub batch_anchor_config: BatchAnchorConfig,
 }
 
 /// Monitors the Zone L2 chain for new blocks, aggregates them into batches, and
@@ -191,10 +193,11 @@ impl ZoneMonitor {
                 .await
                 .wrap_err("failed to read genesisTempoBlockNumber during zone monitor startup")?;
 
-        let batch_submitter = BatchSubmitter::new(
+        let batch_submitter = BatchSubmitter::with_anchor_config(
             config.portal_address,
             l1_provider,
             genesis_tempo_block_number,
+            config.batch_anchor_config,
         );
 
         let (prev_zone_block_hash, portal_withdrawal_queue_tail) = tokio::try_join!(
@@ -428,10 +431,10 @@ impl ZoneMonitor {
     ///
     /// ## Stepping mode
     ///
-    /// When the zone's `tempoBlockNumber` has fallen far outside the EIP-2935 window
-    /// (gap > 8192 blocks), a single submission would fail. The monitor splits the
-    /// range into multiple direct-mode submissions at intermediate zone blocks whose
-    /// `tempoBlockNumber` falls within the window relative to the current L1 tip.
+    /// When the zone's `tempoBlockNumber` has fallen outside the configured
+    /// direct-submission window, the monitor splits the range into multiple
+    /// submissions at intermediate zone blocks whose `tempoBlockNumber` reduces
+    /// the gap toward the current L1 tip.
     ///
     /// ## Withdrawal handling
     ///
@@ -504,8 +507,8 @@ impl ZoneMonitor {
         Ok(())
     }
 
-    /// Process a block range using stepping mode: split into multiple direct-mode
-    /// sub-range submissions.
+    /// Process a block range using stepping mode: split into multiple sub-range
+    /// submissions.
     async fn process_block_range_stepping(
         &mut self,
         from: u64,
@@ -527,6 +530,7 @@ impl ZoneMonitor {
             current_l1_block,
             step_size,
             to,
+            self.batch_submitter.anchor_config().safety_margin(),
         );
 
         if step_points.is_empty() {
@@ -1050,6 +1054,7 @@ mod tests {
             poll_interval: Duration::from_secs(1),
             batch_interval: Duration::from_secs(1),
             portal_address,
+            batch_anchor_config: BatchAnchorConfig::default(),
         };
         let zone_provider = mock_provider(zone);
         let l1_provider = mock_provider(l1);
@@ -1088,6 +1093,7 @@ mod tests {
             poll_interval: Duration::from_secs(1),
             batch_interval: Duration::from_secs(1),
             portal_address,
+            batch_anchor_config: BatchAnchorConfig::default(),
         };
 
         l1.push_failure_msg("boom");

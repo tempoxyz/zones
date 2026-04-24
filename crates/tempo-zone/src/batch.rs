@@ -9,22 +9,22 @@
 //!
 //! # POC limitations
 //!
-//! Proof validation is currently **skipped**: both `verifierConfig` and `proof`
-//! are submitted as empty bytes. The L1 verifier contract must be configured to
-//! accept empty proofs for this to work.
+//! Proof validation is currently **skipped** by the stub verifier. Both direct
+//! and ancestry submissions use empty proof bytes until real proof generation is
+//! implemented.
 //!
 //! # Anchor modes
 //!
 //! | Gap | Mode | Description |
 //! |-----|------|-------------|
-//! | < [`EIP2935_EFFECTIVE_WINDOW`] | Direct | Portal reads hash from EIP-2935. |
-//! | ≥ [`EIP2935_EFFECTIVE_WINDOW`] | Stepping | Split into multiple direct-mode submissions. |
+//! | < configured effective window | Direct | Portal reads hash from EIP-2935. |
+//! | ≥ configured effective window | Stepping | Split into smaller submissions; each submission may still use ancestry if needed. |
 //!
 //! [`AnchorGapKind`] classifies the gap in the zone monitor before
 //! `submit_batch` is called. Inside `submit_batch`, [`AnchorMode`] handles
-//! the rare case where the gap lands between [`EIP2935_EFFECTIVE_WINDOW`] and
-//! [`EIP2935_HISTORY_WINDOW`] (e.g. due to timing) by falling back to ancestry
-//! mode — a recent anchor block plus a parent-hash header chain.
+//! submissions whose `tempoBlockNumber` is still outside the configured direct
+//! window by falling back to ancestry mode — a recent anchor block plus a
+//! locally validated parent-hash header chain.
 
 use std::collections::BTreeMap;
 
@@ -43,16 +43,71 @@ use tracing::{info, instrument, warn};
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
 /// EIP-2935 stores the last 8192 block hashes (~68 min at 500ms block time).
-const EIP2935_HISTORY_WINDOW: u64 = 8192;
+const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192;
 
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
-const EIP2935_SAFETY_MARGIN: u64 = 360;
+const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
-/// Effective EIP-2935 window after subtracting the safety margin. Batches with
-/// a gap below this threshold use direct mode; gaps at or above it require
-/// stepping (splitting into multiple direct-mode submissions).
-const EIP2935_EFFECTIVE_WINDOW: u64 = EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MARGIN;
+/// EIP-2935 anchor limits used by the batch submitter.
+///
+/// Production uses the real 8192-block EIP-2935 history window with a safety
+/// margin. This type exists primarily so tests can shrink that otherwise large
+/// window and exercise stepping/ancestry behavior without mining thousands of
+/// L1 blocks. Production code should normally use [`Default`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatchAnchorConfig {
+    /// Total L1 block-hash history window to treat as available for EIP-2935
+    /// anchoring.
+    history_window: u64,
+    /// Number of most-recent L1 blocks to avoid when choosing an anchor, reducing
+    /// the chance that an anchor ages out before the on-chain transaction lands.
+    safety_margin: u64,
+}
+
+impl BatchAnchorConfig {
+    /// Build an anchor config with explicit limits.
+    pub fn new(history_window: u64, safety_margin: u64) -> Result<Self> {
+        if history_window == 0 {
+            return Err(eyre::eyre!("EIP-2935 history window must be non-zero"));
+        }
+
+        if safety_margin >= history_window {
+            return Err(eyre::eyre!(
+                "EIP-2935 safety margin ({safety_margin}) must be smaller than history window ({history_window})"
+            ));
+        }
+
+        Ok(Self {
+            history_window,
+            safety_margin,
+        })
+    }
+
+    /// Configured history window in L1 blocks.
+    pub const fn history_window(self) -> u64 {
+        self.history_window
+    }
+
+    /// Configured safety margin in L1 blocks.
+    pub const fn safety_margin(self) -> u64 {
+        self.safety_margin
+    }
+
+    /// Effective direct-submission window after subtracting the safety margin.
+    pub const fn effective_window(self) -> u64 {
+        self.history_window - self.safety_margin
+    }
+}
+
+impl Default for BatchAnchorConfig {
+    fn default() -> Self {
+        Self {
+            history_window: DEFAULT_EIP2935_HISTORY_WINDOW,
+            safety_margin: DEFAULT_EIP2935_SAFETY_MARGIN,
+        }
+    }
+}
 
 /// Maximum number of pending withdrawal queue slots in the portal ring buffer.
 const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
@@ -105,6 +160,8 @@ pub struct BatchSubmitter {
     genesis_tempo_block_number: u64,
     /// Concurrency for pipelined L1 header fetching in ancestry mode.
     l1_fetch_concurrency: usize,
+    /// EIP-2935 history and safety-margin limits used for anchor decisions.
+    anchor_config: BatchAnchorConfig,
 }
 
 impl BatchSubmitter {
@@ -116,6 +173,21 @@ impl BatchSubmitter {
         l1_provider: DynProvider<TempoNetwork>,
         genesis_tempo_block_number: u64,
     ) -> Self {
+        Self::with_anchor_config(
+            portal_address,
+            l1_provider,
+            genesis_tempo_block_number,
+            BatchAnchorConfig::default(),
+        )
+    }
+
+    /// Create a new batch submitter with custom EIP-2935 anchor limits.
+    pub fn with_anchor_config(
+        portal_address: Address,
+        l1_provider: DynProvider<TempoNetwork>,
+        genesis_tempo_block_number: u64,
+        anchor_config: BatchAnchorConfig,
+    ) -> Self {
         let portal = ZonePortal::new(portal_address, l1_provider.clone());
         Self {
             portal_address,
@@ -123,6 +195,7 @@ impl BatchSubmitter {
             portal,
             genesis_tempo_block_number,
             l1_fetch_concurrency: 16,
+            anchor_config,
         }
     }
 
@@ -130,18 +203,18 @@ impl BatchSubmitter {
     ///
     /// Resolves the anchor mode based on how old `tempo_block_number` is:
     ///
-    /// - **Direct** — `tempo_block_number` is within [`EIP2935_EFFECTIVE_WINDOW`],
+    /// - **Direct** — `tempo_block_number` is within the configured effective window,
     ///   the portal reads its hash directly from EIP-2935.
-    /// - **Ancestry** — `tempo_block_number` is outside the effective window but
-    ///   still within [`EIP2935_HISTORY_WINDOW`]. A recent anchor block is used
-    ///   and ancestry headers are collected (for future prover integration).
+    /// - **Ancestry** — `tempo_block_number` is outside the effective window. A
+    ///   recent anchor block is used and ancestry headers are collected (for
+    ///   future prover integration).
     ///
-    /// The caller must ensure `tempo_block_number` is within the
-    /// [`EIP2935_HISTORY_WINDOW`] — use [`classify_anchor_gap`](Self::classify_anchor_gap)
-    /// first and split via stepping if the gap is too large.
+    /// Callers should use [`classify_anchor_gap`](Self::classify_anchor_gap)
+    /// first so large gaps can be split into stepping submissions before this
+    /// method performs ancestry header fetching.
     ///
-    /// `verifierConfig` and `proof` are set to empty bytes — the verifier
-    /// contract must be configured to accept empty proofs.
+    /// `verifierConfig` and `proof` are empty until real proof generation is
+    /// implemented.
     // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
@@ -212,6 +285,7 @@ impl BatchSubmitter {
                 block_transition,
                 deposit_transition,
                 batch.withdrawal_queue_hash,
+                // verifierConfig and proof stay empty until real proof generation is wired in.
                 Bytes::new(),
                 Bytes::new(),
             )
@@ -280,25 +354,23 @@ impl BatchSubmitter {
 
         let gap = current_l1_block.saturating_sub(tempo_block_number);
 
-        if gap < EIP2935_EFFECTIVE_WINDOW {
+        let effective_window = self.anchor_config.effective_window();
+        if gap < effective_window {
             Ok(AnchorGapKind::Direct)
         } else {
             Ok(AnchorGapKind::Ancestry {
-                step_size: EIP2935_EFFECTIVE_WINDOW,
+                step_size: effective_window,
             })
         }
     }
 
     /// Resolve the anchor mode for the given `tempo_block_number`.
     ///
-    /// - **Direct** (gap < [`EIP2935_EFFECTIVE_WINDOW`]): the portal reads the
+    /// - **Direct** (gap < configured effective window): the portal reads the
     ///   hash directly from EIP-2935.
-    /// - **Ancestry** (gap within [`EIP2935_HISTORY_WINDOW`]): a recent L1 block
-    ///   within the window is used as anchor. Ancestry headers are collected
-    ///   and validated for future prover integration.
-    ///
-    /// Returns an error if the gap exceeds [`EIP2935_HISTORY_WINDOW`] — the
-    /// caller must split via stepping before calling this.
+    /// - **Ancestry** (gap ≥ configured effective window): a recent L1 block
+    ///   behind the configured safety margin is used as anchor. Ancestry headers
+    ///   are collected and validated for future prover integration.
     async fn resolve_anchor_mode(&self, tempo_block_number: u64) -> Result<AnchorMode> {
         let current_l1_block = self.l1_provider.get_block_number().await?;
 
@@ -311,11 +383,11 @@ impl BatchSubmitter {
 
         let gap = current_l1_block.saturating_sub(tempo_block_number);
 
-        if gap < EIP2935_EFFECTIVE_WINDOW {
+        if gap < self.anchor_config.effective_window() {
             return Ok(AnchorMode::Direct);
         }
 
-        let anchor_block = current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN);
+        let anchor_block = current_l1_block.saturating_sub(self.anchor_config.safety_margin());
         let ancestry_headers = self
             .fetch_ancestry_headers(tempo_block_number, anchor_block)
             .await?;
@@ -420,11 +492,16 @@ impl BatchSubmitter {
         current_l1_block: u64,
         step_size: u64,
         max_zone_block: u64,
+        safety_margin: u64,
     ) -> Vec<StepPoint> {
         let mut step_points = Vec::new();
+        if step_size == 0 {
+            return step_points;
+        }
+
         let mut target = from_tempo + step_size;
 
-        while target < current_l1_block.saturating_sub(EIP2935_SAFETY_MARGIN) {
+        while target < current_l1_block.saturating_sub(safety_margin) {
             let zone_block = from_zone_block + (target - from_tempo);
             if zone_block > max_zone_block {
                 break;
@@ -442,6 +519,11 @@ impl BatchSubmitter {
     /// Returns a reference to the L1 provider.
     pub(crate) fn l1_provider(&self) -> &DynProvider<TempoNetwork> {
         &self.l1_provider
+    }
+
+    /// Return the configured EIP-2935 anchor limits.
+    pub(crate) const fn anchor_config(&self) -> BatchAnchorConfig {
+        self.anchor_config
     }
 
     /// Read the portal's `genesisTempoBlockNumber` from L1.
@@ -933,14 +1015,14 @@ pub(crate) fn log_query_ranges(from: u64, to: u64) -> impl Iterator<Item = (u64,
 
 /// Classification of the EIP-2935 gap, returned by
 /// [`BatchSubmitter::classify_anchor_gap`].
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) enum AnchorGapKind {
-    /// Gap < [`EIP2935_EFFECTIVE_WINDOW`] — the portal can read the block hash
+    /// Gap < configured effective window — the portal can read the block hash
     /// directly from EIP-2935. No extra proof data needed.
     Direct,
-    /// Gap ≥ [`EIP2935_EFFECTIVE_WINDOW`] — `tempo_block_number` is too old
-    /// for a direct EIP-2935 lookup. The batch must be split into multiple
-    /// direct-mode sub-range submissions (stepping).
+    /// Gap ≥ configured effective window — `tempo_block_number` is too old
+    /// for a direct EIP-2935 lookup. The batch must be split into smaller
+    /// sub-range submissions (stepping).
     Ancestry {
         /// Each sub-batch covers at most this many L1 blocks.
         step_size: u64,
@@ -950,18 +1032,17 @@ pub(crate) enum AnchorGapKind {
 /// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
 ///
 /// Resolved by [`BatchSubmitter::resolve_anchor_mode`] inside `submit_batch`.
-/// Stepping is handled at a higher level by [`AnchorGapKind`] — by the time
-/// `submit_batch` is called, the gap must already be within
-/// [`EIP2935_HISTORY_WINDOW`].
+/// Stepping is handled at a higher level by [`AnchorGapKind`]. `submit_batch`
+/// can still use ancestry mode when the original `tempoBlockNumber` has fallen
+/// outside the configured direct-submission window.
 #[derive(Debug)]
 #[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
 enum AnchorMode {
     /// `tempoBlockNumber` is within the effective EIP-2935 window — the portal
     /// reads its hash directly. No extra proof data required.
     Direct,
-    /// `tempoBlockNumber` is outside the effective window but within the full
-    /// history window. A recent L1 block is used as anchor, and the collected
-    /// headers prove the parent-hash chain.
+    /// `tempoBlockNumber` is outside the effective window. A recent L1 block is
+    /// used as anchor, and the collected headers prove the parent-hash chain.
     Ancestry {
         /// Recent L1 block number within the EIP-2935 window, used as the
         /// on-chain anchor for hash verification.
@@ -986,7 +1067,7 @@ impl AnchorMode {
 
 /// A step split point for stepping mode: identifies a zone L2 block at which
 /// to cut an intermediate batch submission.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub(crate) struct StepPoint {
     /// Zone L2 block number at which to cut the intermediate batch.
@@ -1026,6 +1107,51 @@ mod tests {
             callbackData: Default::default(),
             encryptedSender: Default::default(),
         }
+    }
+
+    #[test]
+    fn batch_anchor_config_validates_effective_window() {
+        let config = BatchAnchorConfig::new(10, 4).unwrap();
+        assert_eq!(config.history_window(), 10);
+        assert_eq!(config.safety_margin(), 4);
+        assert_eq!(config.effective_window(), 6);
+
+        assert!(BatchAnchorConfig::new(0, 0).is_err());
+        assert!(BatchAnchorConfig::new(10, 10).is_err());
+        assert!(BatchAnchorConfig::new(10, 11).is_err());
+    }
+
+    #[test]
+    fn compute_step_points_respects_custom_safety_margin() {
+        let config = BatchAnchorConfig::new(10, 4).unwrap();
+        let points = BatchSubmitter::compute_step_points(
+            1,
+            100,
+            119,
+            config.effective_window(),
+            20,
+            config.safety_margin(),
+        );
+
+        assert_eq!(
+            points,
+            vec![
+                StepPoint {
+                    zone_block: 7,
+                    target_tempo_block: 106,
+                },
+                StepPoint {
+                    zone_block: 13,
+                    target_tempo_block: 112,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn compute_step_points_handles_zero_step_size() {
+        let points = BatchSubmitter::compute_step_points(1, 100, 119, 0, 20, 4);
+        assert!(points.is_empty());
     }
 
     #[test]

@@ -4,7 +4,8 @@
 //! It reuses Tempo's EVM, primitives, and pool, but with noop consensus/network/payload.
 
 use crate::{
-    DepositQueue, L1SubscriberConfig, SharedPolicyCache, ZoneEngine, ZoneSequencerConfig,
+    BatchAnchorConfig, DepositQueue, L1SubscriberConfig, SharedPolicyCache, ZoneEngine,
+    ZoneSequencerConfig,
     abi::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal},
     builder::ZonePayloadFactory,
     evm::ZoneEvmConfig,
@@ -84,6 +85,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub zone_poll_interval: Duration,
     /// Maximum time to accumulate zone blocks before batch submission.
     pub batch_interval: Duration,
+    /// EIP-2935 history and safety-margin limits used by the batch submitter.
+    pub batch_anchor_config: BatchAnchorConfig,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
 }
@@ -580,6 +583,7 @@ where
             zone_rpc_url,
             zone_poll_interval: config.zone_poll_interval,
             batch_interval: config.batch_interval,
+            batch_anchor_config: config.batch_anchor_config,
         };
         let seq_handle = spawn_zone_sequencer(sequencer_config, config.sequencer_signer).await;
         info!(target: "reth::cli", "Sequencer tasks spawned");
