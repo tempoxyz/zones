@@ -68,11 +68,13 @@ revm.workspace = true
 
 # misc
 clap = { workspace = true, optional = true }
-const-hex = { workspace = true, optional = true }
 metrics.workspace = true
 k256.workspace = true
 reth-consensus = { workspace = true, optional = true }
-reth-ethereum = { workspace = true, features = ["node", "cli"], optional = true }
+reth-ethereum = { workspace = true, features = [
+  "node",
+  "cli",
+], optional = true }
 reth-tracing = { workspace = true, optional = true }
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
@@ -86,13 +88,13 @@ tracing.workspace = true
 
 [dev-dependencies]
 alloy = { workspace = true, features = [
-    "full",
-    "genesis",
-    "providers",
-    "signers",
-    "signer-local",
-    "signer-mnemonic-all-languages",
-    "rpc-types",
+  "full",
+  "genesis",
+  "providers",
+  "signers",
+  "signer-local",
+  "signer-mnemonic-all-languages",
+  "rpc-types",
 ] }
 alloy-contract.workspace = true
 alloy-primitives.workspace = true
@@ -123,24 +125,23 @@ tokio-tungstenite.workspace = true
 [features]
 default = []
 cli = [
-	"dep:clap",
-	"dep:const-hex",
-	"dep:reth-consensus",
-	"dep:reth-ethereum",
-	"dep:reth-tracing",
-	"tempo-chainspec/cli",
+  "dep:clap",
+  "dep:reth-consensus",
+  "dep:reth-ethereum",
+  "dep:reth-tracing",
+  "tempo-chainspec/cli",
 ]
 jemalloc = ["reth-ethereum?/jemalloc"]
 test-utils = [
-	"reth-chainspec/test-utils",
-	"reth-ethereum/test-utils",
-	"reth-evm/test-utils",
-	"reth-node-builder/test-utils",
-	"reth-payload-builder/test-utils",
-	"reth-primitives-traits/test-utils",
-	"reth-provider/test-utils",
-	"reth-revm/test-utils",
-	"reth-transaction-pool/test-utils",
-	"tempo-precompiles/test-utils",
-	"tempo-transaction-pool/test-utils"
+  "reth-chainspec/test-utils",
+  "reth-ethereum/test-utils",
+  "reth-evm/test-utils",
+  "reth-node-builder/test-utils",
+  "reth-payload-builder/test-utils",
+  "reth-primitives-traits/test-utils",
+  "reth-provider/test-utils",
+  "reth-revm/test-utils",
+  "reth-transaction-pool/test-utils",
+  "tempo-precompiles/test-utils",
+  "tempo-transaction-pool/test-utils",
 ]
