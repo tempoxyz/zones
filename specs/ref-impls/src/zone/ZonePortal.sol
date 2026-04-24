@@ -576,6 +576,20 @@ contract ZonePortal is IZonePortal {
         if (!cfg.enabled) revert TokenNotEnabled();
         if (!cfg.depositsActive) revert DepositsNotActive();
 
+        // Encrypted deposits cannot opt out of bounce-back: a ciphertext that fails
+        // onchain decryption verification has no well-defined recipient on the zone,
+        // so without a refund target the deposit queue would stall on that entry.
+        if (bouncebackRecipient == address(0)) revert MissingBouncebackRecipient();
+
+        // Validate bouncebackRecipient against the token's TIP-403 policy at deposit
+        // time so that bounceback transfers on L1 are guaranteed to succeed for this
+        // recipient even if the recipient is later blacklisted (portal has a TIP-403
+        // bypass on the bounceback path).
+        uint64 policyId = ITIP20(_token).transferPolicyId();
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+            revert DepositPolicyForbids();
+        }
+
         // Validate ephemeral public key is a valid secp256k1 point
         // Prevents griefing: invalid points make Chaum-Pedersen proofs impossible,
         // which would block chain progress on the zone side.

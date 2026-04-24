@@ -582,6 +582,7 @@ interface IZonePortal {
     error InvalidProofOfPossession();
     error DepositPolicyForbids();
     error DepositTooSmall();
+    error MissingBouncebackRecipient();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();

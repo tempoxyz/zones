@@ -297,46 +297,26 @@ contract ZoneInbox is IZoneInbox {
                 // Advance the hash chain with type discriminator
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
+                // ZonePortal.depositEncrypted reverts if ed.bouncebackRecipient == address(0),
+                // so every encrypted deposit that reaches the zone has a non-zero refund target.
                 if (!valid) {
-                    // Decryption failed: try crediting the depositor's address on the zone.
-                    if (ed.bouncebackRecipient != address(0)) {
-                        try IZoneToken(ed.token).mint(ed.sender, ed.amount) {
-                            emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
-                        } catch {
-                            outbox.enqueueDepositBounceBack(
-                                ed.token, ed.amount, ed.bouncebackRecipient
-                            );
-                            emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
-                        }
-                    } else {
-                        IZoneToken(ed.token).mint(ed.sender, ed.amount);
-                        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
-                    }
+                    // Invalid encryption: no well-defined recipient on the zone,
+                    // so skip the zone-side mint entirely and bounce back immediately.
+                    outbox.enqueueDepositBounceBack(
+                        ed.token, ed.amount, ed.bouncebackRecipient
+                    );
+                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                 } else {
-                    // Decryption succeeded: try minting to the decrypted recipient
-                    if (ed.bouncebackRecipient != address(0)) {
-                        try IZoneToken(ed.token).mint(dec.to, ed.amount) {
-                            emit EncryptedDepositProcessed(
-                                currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
-                            );
-                        } catch {
-                            outbox.enqueueDepositBounceBack(
-                                ed.token, ed.amount, ed.bouncebackRecipient
-                            );
-                            emit DepositFailed(
-                                currentHash,
-                                ed.sender,
-                                dec.to,
-                                ed.token,
-                                ed.amount,
-                                ed.bouncebackRecipient
-                            );
-                        }
-                    } else {
-                        IZoneToken(ed.token).mint(dec.to, ed.amount);
+                    // Valid decryption: mint to the decrypted recipient, bounce back on revert.
+                    try IZoneToken(ed.token).mint(dec.to, ed.amount) {
                         emit EncryptedDepositProcessed(
                             currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
                         );
+                    } catch {
+                        outbox.enqueueDepositBounceBack(
+                            ed.token, ed.amount, ed.bouncebackRecipient
+                        );
+                        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                     }
                 }
             }
