@@ -2825,7 +2825,6 @@ pub(crate) async fn start_zone_with_private_rpc() -> eyre::Result<PrivateRpcTest
         chain_id,
         max_auth_token_validity: zone::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
         zone_portal: Address::ZERO,
-        sequencer: sequencer_address,
     };
 
     let private_rpc_url = start_private_rpc_url(&zone, config.clone()).await?;
@@ -2891,7 +2890,6 @@ async fn start_zone_with_private_rpc_l1_inner(
         chain_id,
         max_auth_token_validity: zone::rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
         zone_portal: portal_address,
-        sequencer: l1.dev_address(),
     };
 
     let private_rpc_url = start_private_rpc_url(&zone, config.clone()).await?;

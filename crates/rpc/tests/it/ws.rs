@@ -241,7 +241,6 @@ impl ZoneRpcApi for MockZoneRpcApi {
             zone_rpc::types::to_raw(&serde_json::json!({
                 "zoneId": "0x1",
                 "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
-                "sequencer": format!("{:#x}", Address::repeat_byte(0x22)),
                 "chainId": "0x2a",
             }))
         })
@@ -287,7 +286,6 @@ impl TestContext {
             chain_id: CHAIN_ID,
             max_auth_token_validity: zone_rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
             zone_portal: Address::ZERO,
-            sequencer: signer.address(),
         };
         let addr = start_private_rpc(config, Arc::new(api)).await.unwrap();
         Self { addr, signer }

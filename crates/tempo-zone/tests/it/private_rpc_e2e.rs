@@ -620,7 +620,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
             "eth_call",
             serde_json::json!([
                 {
-                    "from": format!("{:#x}", ctx.config.sequencer),
+                    "from": format!("{:#x}", ctx.sequencer_signer.address()),
                     "to": format!("{PATH_USD_ADDRESS:#x}"),
                     "data": format!("0x{}", hex::encode(balance_call.abi_encode())),
                 },
@@ -644,7 +644,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
             "eth_call",
             serde_json::json!([
                 {
-                    "from": format!("{:#x}", ctx.config.sequencer),
+                    "from": format!("{:#x}", ctx.sequencer_signer.address()),
                     "to": format!("{PATH_USD_ADDRESS:#x}"),
                     "data": format!("0x{}", hex::encode(allowance_call.abi_encode())),
                 },
@@ -727,7 +727,7 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
                 method,
                 json!([
                     {
-                        "from": format!("{:#x}", ctx.config.sequencer),
+                        "from": format!("{:#x}", ctx.sequencer_signer.address()),
                         "to": simulation_target.clone(),
                         "data": "0x"
                     },
@@ -867,7 +867,7 @@ async fn test_method_tiers() -> eyre::Result<()> {
     let resp = ctx
         .call_as_sequencer(
             "eth_getCode",
-            serde_json::json!([format!("{:#x}", ctx.config.sequencer), "latest"]),
+            serde_json::json!([format!("{:#x}", ctx.sequencer_signer.address()), "latest"]),
         )
         .await?;
     if let Some(error) = resp.get("error") {
@@ -1173,10 +1173,6 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
             .map(|token| token.as_str().unwrap())
             .collect::<Vec<_>>(),
         vec!["0x20c0000000000000000000000000000000000000"],
-    );
-    assert_eq!(
-        zone_info["result"]["sequencer"].as_str().unwrap(),
-        format!("{:#x}", ctx.config.sequencer),
     );
     assert_eq!(
         zone_info["result"]["chainId"].as_str().unwrap(),

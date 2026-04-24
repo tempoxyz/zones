@@ -354,19 +354,18 @@ where
             .chain_id;
         let handle = self.inner.launch_add_ons(ctx).await?;
 
+        Self::launch_private_rpc(
+            self.private_rpc_config,
+            &handle,
+            self.l1_config.l1_rpc_url.clone(),
+            self.l1_config.retry_connection_interval,
+            self.l1_config.portal_address,
+            chain_id,
+        )
+        .await?;
+
         if let Some(config) = self.sequencer_config.take() {
             let sequencer_addr = config.sequencer_signer.address();
-
-            Self::launch_private_rpc(
-                self.private_rpc_config,
-                &handle,
-                self.l1_config.l1_rpc_url.clone(),
-                self.l1_config.retry_connection_interval,
-                self.l1_config.portal_address,
-                sequencer_addr,
-                chain_id,
-            )
-            .await?;
 
             Self::launch_sequencer_tasks(
                 config,
@@ -491,7 +490,6 @@ where
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         portal_address: Address,
-        sequencer_addr: Address,
         chain_id: u64,
     ) -> eyre::Result<()> {
         if config.zone_id != 0 {
@@ -521,7 +519,6 @@ where
             chain_id,
             max_auth_token_validity: config.max_auth_token_validity,
             zone_portal: portal_address,
-            sequencer: sequencer_addr,
         };
         let api: Arc<dyn ZoneRpcApi> =
             Arc::new(TempoZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?);
