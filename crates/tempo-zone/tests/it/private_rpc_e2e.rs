@@ -22,10 +22,7 @@ use futures::{SinkExt, StreamExt};
 use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
 use serde_json::{Value, json};
-use std::{
-    collections::HashSet,
-    time::Duration,
-};
+use std::{collections::HashSet, time::Duration};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{
     ITIP20 as ContractTip20,
@@ -721,7 +718,6 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
             user_override_resp["error"]["message"].as_str().unwrap(),
             "state overrides not allowed",
         );
-
     }
 
     let fill_resp = ctx
@@ -763,9 +759,7 @@ async fn test_block_access_control() -> eyre::Result<()> {
             &user_signer,
         )
         .await?;
-    let error = resp
-        .get("error")
-        .expect("full=true should be rejected");
+    let error = resp.get("error").expect("full=true should be rejected");
     assert_eq!(
         error["code"].as_i64().unwrap(),
         -32005,
@@ -848,7 +842,11 @@ async fn test_method_tiers() -> eyre::Result<()> {
 
     // Unknown method → -32601
     let resp = ctx
-        .call_as_user("eth_someNonexistentMethod", serde_json::json!([]), &user_signer)
+        .call_as_user(
+            "eth_someNonexistentMethod",
+            serde_json::json!([]),
+            &user_signer,
+        )
         .await?;
     let error = resp
         .get("error")
