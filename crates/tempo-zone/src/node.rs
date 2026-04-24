@@ -190,27 +190,23 @@ impl ZoneNode {
     }
 
     /// Set the initial list of enabled token addresses.
-    ///
-    /// When set, the startup L1 RPC query for enabled tokens is skipped —
-    /// useful for tests or environments where no L1 node is available at launch.
+    /// When set, the startup L1 RPC query for enabled tokens is skipped.
     pub fn with_initial_tokens(mut self, tokens: Vec<Address>) -> Self {
         self.initial_tokens = Some(tokens);
         self
     }
 
-    /// Returns a clone of the deposit queue handle for external use (e.g. sequencer tasks).
+    /// Returns the current deposit queue
     pub fn deposit_queue(&self) -> DepositQueue {
         self.deposit_queue.clone()
     }
 
-    /// Returns a clone of the shared L1 state cache handle.
-    ///
-    /// Allows pre-populating the cache for testing scenarios where no real L1 is available.
+    /// Returns the current l1 state cache
     pub fn l1_state_cache(&self) -> SharedL1StateCache {
         self.l1_state_cache.clone()
     }
 
-    /// Returns a clone of the shared policy cache handle.
+    /// Returns the current TIP-403 policy cache
     pub fn policy_cache(&self) -> SharedPolicyCache {
         self.policy_cache.clone()
     }
@@ -246,40 +242,7 @@ impl NodeTypes for ZoneNode {
     type Payload = ZonePayloadTypes;
 }
 
-/// Zone node add-ons — spawns all background tasks and wires the block production pipeline.
-///
-/// [`launch_add_ons`](NodeAddOns::launch_add_ons) is the central wiring point for the zone
-/// sequencer. It spawns the following tasks:
-///
-/// ## Spawned tasks
-///
-/// - **[`L1Subscriber`](crate::L1Subscriber)** *(critical)* — unified subscriber that
-///   connects to L1 via WebSocket, extracts both deposit/token events and TIP-403 policy
-///   events from each block's receipts, applies policy events to the
-///   [`SharedPolicyCache`](SharedPolicyCache), and enqueues deposit blocks into the
-///   [`DepositQueue`](DepositQueue).
-///
-/// - **[`PolicyResolutionTask`](crate::l1_state::PolicyResolutionTask)** *(critical)* —
-///   receives pre-fetch requests via a channel and resolves them concurrently against L1
-///   RPC, populating the [`SharedPolicyCache`](SharedPolicyCache) so the engine
-///   hits the cache at block-building time.
-///
-/// - **Pool prefetch task** *(background)* — watches incoming pool transactions, extracts
-///   sender/recipient/fee-payer addresses, and submits them to the
-///   [`PolicyResolutionTask`](crate::l1_state::PolicyResolutionTask) for pre-fetching.
-///
-/// - **[`ZoneEngine`](crate::ZoneEngine)** *(critical)* — drives L1-event-driven block
-///   production. Peeks the [`DepositQueue`](DepositQueue), calls
-///   [`prepare_l1_block`](crate::ZoneEngine::prepare_l1_block) (ECIES decryption +
-///   TIP-403 policy checks via [`PolicyProvider`](crate::PolicyProvider)), then triggers
-///   payload building via FCU and submits via `newPayload`.
-///
-/// ## Shared state
-///
-/// The [`SharedPolicyCache`](SharedPolicyCache) connects all policy-aware
-/// components: the unified subscriber writes L1 events, the resolution task pre-fetches
-/// on cache miss, and the engine's [`PolicyProvider`](crate::PolicyProvider) reads
-/// during block preparation (cache-first, L1 RPC fallback).
+/// Addons for Tempo Zone nodes.
 pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> {
     inner: RpcAddOns<
         N,
@@ -291,22 +254,21 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     >,
     /// Queue of L1 deposit messages to be included in the next zone block.
     deposit_queue: DepositQueue,
-    /// Configuration for the L1 event subscriber (RPC endpoint, poll interval, etc.).
+    /// Configuration for the L1 event subscriber
     l1_config: L1SubscriberConfig,
-    /// Address that receives zone block fees (the sequencer's fee vault).
+    /// Reciever address for zone block fees
     fee_recipient: Address,
-    /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](crate::l1::L1Subscriber)
-    /// and read by the precompile during block building.
+    /// TIP-403 policy cache
     policy_cache: SharedPolicyCache,
     /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
     sequencer_key: SecretKey,
-    /// ZonePortal address on L1 — used as context in HKDF key derivation.
+    /// ZonePortal address on L1.
     portal_address: Address,
-    /// Optional pre-configured list of enabled token addresses.
+    /// Pre-configured list of initial tokens.
     initial_tokens: Option<Vec<Address>>,
-    /// Private RPC config.
+    /// Private RPC configuration.
     private_rpc_config: ZonePrivateRpcConfig,
-    /// Optional sequencer config.
+    /// Sequencer configuration.
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
 }
 
@@ -322,7 +284,7 @@ impl<N> ZoneAddOns<NodeAdapter<N>>
 where
     N: FullNodeTypes<Types = ZoneNode>,
 {
-    /// Creates a new instance.
+    /// Creates a new ZoneAddOns instance.
     pub fn new(
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
@@ -432,7 +394,6 @@ where
     }
 }
 
-/// Helper methods for [`ZoneAddOns::launch_add_ons`].
 impl<N> ZoneAddOns<N>
 where
     N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
@@ -465,7 +426,7 @@ where
         Ok(())
     }
 
-    /// Spawn the unified L1 subscriber (deposits + policy events + L1 state anchor).
+    /// Spawn the L1 subscriber.
     fn spawn_l1_subscriber(&mut self, ctx: &AddOnsContext<'_, N>) {
         L1Subscriber::spawn(
             self.l1_config.clone(),
@@ -485,8 +446,8 @@ where
         let policy_task_handle = spawn_policy_resolution_task(
             self.policy_cache.clone(),
             l1_provider.clone(),
-            16,  // max concurrent RPC resolutions
-            256, // channel capacity
+            16,
+            256,
             ctx.node.task_executor().clone(),
         );
         spawn_pool_prefetch_task(
@@ -497,7 +458,7 @@ where
         info!(target: "reth::cli", "TIP-403 policy prefetch tasks started");
     }
 
-    /// Build and spawn the [`ZoneEngine`] for L1-event-driven block production.
+    /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
     fn spawn_zone_engine(
         &mut self,
         l1_provider: alloy_provider::DynProvider<TempoNetwork>,
@@ -756,16 +717,7 @@ impl PayloadAttributesBuilder<ZonePayloadAttributes, TempoHeader> for ZonePayloa
     }
 }
 
-/// Executor builder for Zone — constructs the [`ZoneEvmConfig`] used during block execution.
-///
-/// Called once during node startup by the reth component builder. It:
-///
-/// 1. Creates the [`L1StateProvider`] (cache-first, RPC-fallback reader for L1 contract
-///    storage) and connects it to the [`SharedL1StateCache`].
-/// 2. Creates a [`PolicyProvider`](crate::PolicyProvider) for the TIP-403 proxy precompile,
-///    giving the EVM synchronous access to policy authorization checks during execution.
-/// 3. Returns a [`ZoneEvmConfig`] with the TempoStateReader and TIP-403 proxy precompiles
-///    wired in.
+/// Builder that constructs the [`ZoneEvmConfig`] used during block execution.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZoneExecutorBuilder {
@@ -956,7 +908,7 @@ where
     }
 }
 
-/// EthApi builder for Zone - uses Tempo RPC types.
+/// EthApi builder for Zone
 #[derive(Debug, Default, Clone)]
 pub struct ZoneEthApiBuilder;
 
