@@ -234,16 +234,19 @@ The portal maintains a `TokenConfig` per token with an `enabled` flag and a conf
 
 ### Gas Rate Configuration
 
-The sequencer configures two gas rates that determine fees for deposits and withdrawals:
+The sequencer configures gas rates that determine fees for deposits, withdrawals, and bounce-backs. Each rate is the price (in token units) of one gas unit on the chain where the work runs:
 
 | Rate | Set via | Used for |
 |------|---------|----------|
-| `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` and bounce-back fees: `FIXED_BOUNCEBACK_GAS (250,000) * zoneGasRate` |
-| `tempoGasRate` | `ZoneOutbox.setTempoGasRate()` | Withdrawal fees: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
+| `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` |
+| `tempoGasRate` (portal) | `ZonePortal.setTempoGasRate()` | Deposit bounce-back fees: `FIXED_BOUNCEBACK_GAS (250,000) * tempoGasRate` |
+| `tempoGasRate` (outbox) | `ZoneOutbox.setTempoGasRate()` | Withdrawal fees: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
 
-Both rates are denominated in token units per gas unit. A single uniform `zoneGasRate` applies to all tokens. Fees are paid in the same token being deposited or withdrawn.
+`zoneGasRate` is read on Tempo (the portal is the source of truth for zone-side gas pricing seen by users when depositing). The portal's `tempoGasRate` is also read on Tempo at deposit time, where it prices the Tempo-side bounce-back transfer that may eventually run there. The outbox's `tempoGasRate` is read on the zone at withdrawal-request time, where it prices the Tempo-side withdrawal that the sequencer will eventually process. The two `tempoGasRate` settings are stored independently on different chains and are not automatically synchronized; the sequencer is responsible for keeping them aligned with their respective Tempo gas-cost models. They may legitimately diverge — for example, the deposit-bounce-back rate captures the worst-case new-account creation cost, while the withdrawal rate is dominated by callback gas — and the sequencer chooses each independently.
 
-The sequencer takes the risk on Tempo gas price fluctuations for withdrawals. If actual gas costs on Tempo exceed the fee collected, the sequencer covers the difference. If costs are lower, the sequencer keeps the surplus.
+All rates are denominated in token units per gas unit. A single uniform set of rates applies to all tokens. Fees are paid in the same token being deposited or withdrawn.
+
+The sequencer takes the risk on gas-price fluctuations for both `tempoGasRate` values. If actual gas costs on Tempo exceed the fee collected, the sequencer covers the difference; if costs are lower, the sequencer keeps the surplus.
 
 ### Encryption Key Management
 
@@ -274,7 +277,7 @@ A user deposits by calling `deposit(token, to, amount, memo, bouncebackRecipient
 
 1. Validates the token is enabled and deposits are active.
 2. Requires `bouncebackRecipient != address(0)` (reverts otherwise) and validates `bouncebackRecipient` against the token's TIP-403 policy. Every deposit must carry a usable refund target: a `bouncebackRecipient` of zero would leave a failed deposit with no recovery path and stall the deposit queue. Validating the recipient against the policy at deposit time ensures the later bounce-back transfer on Tempo is guaranteed to be accepted by the policy (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)).
-3. Snapshots the deposit fee and bounce-back fee at the current `zoneGasRate` (see [Deposit Fees](#deposit-fees)), and requires `amount >= depositFee + bouncebackFee` (reverts `DepositTooSmall` otherwise). The bounce-back fee covers the worst-case Tempo gas of paying out a refund (including new-account creation for `bouncebackRecipient`).
+3. Snapshots the deposit fee at the current `zoneGasRate` and the bounce-back fee at the current portal-side `tempoGasRate` (see [Deposit Fees](#deposit-fees)), and requires `amount >= depositFee + bouncebackFee` (reverts `DepositTooSmall` otherwise). The bounce-back fee covers the worst-case Tempo gas of paying out a refund (including new-account creation for `bouncebackRecipient`), so it is priced in Tempo gas, not zone gas.
 4. Transfers `amount` from the user into the portal.
 5. Pays the `depositFee` to the sequencer immediately. The `bouncebackFee` is reserved on the queued entry; it is only consumed if the deposit later bounces back.
 6. Appends the deposit to the deposit queue hash chain with the net amount (`amount - depositFee`), `bouncebackRecipient`, and the snapshotted `bouncebackFee`.
@@ -301,21 +304,23 @@ sequenceDiagram
 
 ### Deposit Fees
 
-Every deposit is associated with two separate fees, both paid in the same token being deposited and both denominated by the current `zoneGasRate`:
+Every deposit is associated with two separate fees, both paid in the same token being deposited but priced at different gas rates because the work they cover runs on different chains:
 
 ```
-depositFee   = FIXED_DEPOSIT_GAS    * zoneGasRate   (= 100,000 * zoneGasRate)
-bouncebackFee = FIXED_BOUNCEBACK_GAS * zoneGasRate   (= 250,000 * zoneGasRate)
+depositFee    = FIXED_DEPOSIT_GAS    * zoneGasRate    (= 100,000 * zoneGasRate)
+bouncebackFee = FIXED_BOUNCEBACK_GAS * tempoGasRate   (= 250,000 * tempoGasRate)
 ```
 
-The two are conceptually independent because their work happens on different paths:
+`zoneGasRate` and `tempoGasRate` are both portal-local sequencer-managed rates set via `ZonePortal.setZoneGasRate()` and `ZonePortal.setTempoGasRate()` respectively (see [Gas Rate Configuration](#gas-rate-configuration)). The portal's `tempoGasRate` is independent of the `tempoGasRate` stored on `ZoneOutbox` for withdrawal pricing.
 
-- The **deposit fee** covers the sequencer's cost of processing the deposit on the zone (calling `advanceTempo`, performing the mint, advancing the queue). It is charged on every deposit, success or failure, and paid to the sequencer immediately on Tempo.
-- The **bounce-back fee** covers the sequencer's worst-case Tempo-side cost of paying out a refund — primarily new-account creation for `bouncebackRecipient`, which can dominate the gas of `processWithdrawal` and is much larger than the steady-state per-deposit gas. It is charged only when a deposit actually bounces back, and is paid to the sequencer at that point.
+The two fees are conceptually independent because their work happens on different chains:
+
+- The **deposit fee** covers the sequencer's cost of processing the deposit on the zone (calling `advanceTempo`, performing the mint, advancing the queue) and is therefore priced at the zone's gas rate. It is charged on every deposit, success or failure, and paid to the sequencer immediately on Tempo.
+- The **bounce-back fee** covers the sequencer's worst-case Tempo-side cost of paying out a refund — primarily new-account creation for `bouncebackRecipient`, which can dominate the gas of `processWithdrawal` and is much larger than the steady-state per-deposit gas — and is therefore priced at Tempo's gas rate. It is charged only when a deposit actually bounces back, and is paid to the sequencer at that point.
 
 Charging only the deposit fee on the common (success) path keeps the steady-state cost of a deposit close to the cost of the actual work that ran, while still guaranteeing that the sequencer is compensated for the much more expensive failure path when it occurs. To make the bounce-back fee available without making the user pay it upfront, the portal validates that `amount >= depositFee + bouncebackFee` at deposit time (reverts `DepositTooSmall` otherwise) and snapshots `bouncebackFee` on the queued deposit. The `bouncebackFee` itself is not transferred to the sequencer at deposit time — it is part of the net amount the zone will mint to `deposit.to` if the deposit succeeds, so a successful deposit returns the bounce-back fee to the user implicitly. If the deposit instead bounces back, the snapshotted `bouncebackFee` is deducted from the queued amount when `ZonePortal.processWithdrawal` runs the bounce-back entry on Tempo (see [Tempo-side refund](#tempo-side-refund)).
 
-Snapshotting at deposit time (rather than recomputing at bounce-back time) means later edits to `zoneGasRate` cannot retroactively raise the fee on already-queued deposits, which preserves the property that a malicious sequencer cannot extract additional value from queued deposits via rejection plus a rate hike.
+Snapshotting at deposit time (rather than recomputing at bounce-back time) means later edits to either rate cannot retroactively raise the fee on already-queued deposits, which preserves the property that a malicious sequencer cannot extract additional value from queued deposits via rejection plus a rate hike.
 
 The portal-internal withdrawal-bounce-back path bypasses the user-facing `deposit()` entry point and constructs a queued deposit directly with `bouncebackRecipient = address(0)` and `bouncebackFee = 0`, since those entries are terminal and never bounce back themselves.
 
