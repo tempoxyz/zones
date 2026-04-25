@@ -129,9 +129,7 @@ contract ZoneIntegrationTest is BaseTest {
     {
         queued = new QueuedDeposit[](deposits.length);
         for (uint256 i = 0; i < deposits.length; i++) {
-            queued[i] = QueuedDeposit({
-                depositType: DepositType.Regular, depositData: abi.encode(deposits[i])
-            });
+            queued[i] = QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(deposits[i]), rejected: false });
         }
     }
 

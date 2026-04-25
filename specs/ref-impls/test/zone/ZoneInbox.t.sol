@@ -63,9 +63,7 @@ contract ZoneInboxTest is Test {
     {
         queued = new QueuedDeposit[](deposits.length);
         for (uint256 i = 0; i < deposits.length; i++) {
-            queued[i] = QueuedDeposit({
-                depositType: DepositType.Regular, depositData: abi.encode(deposits[i])
-            });
+            queued[i] = QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(deposits[i]), rejected: false });
         }
     }
 
@@ -490,7 +488,7 @@ contract ZoneInboxTest is Test {
             }),
             bouncebackRecipient: address(0)
         });
-        qd = QueuedDeposit({ depositType: DepositType.Encrypted, depositData: abi.encode(ed) });
+        qd = QueuedDeposit({ depositType: DepositType.Encrypted, depositData: abi.encode(ed), rejected: false });
     }
 
     /// @notice Set up precompile mocks for successful encrypted deposit processing
@@ -631,7 +629,7 @@ contract ZoneInboxTest is Test {
             bouncebackRecipient: address(0)
         });
         QueuedDeposit memory qdRegular =
-            QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d) });
+            QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d), rejected: false });
 
         // Build encrypted deposit
         (QueuedDeposit memory qdEnc, EncryptedDeposit memory ed) =
@@ -699,7 +697,7 @@ contract ZoneInboxTest is Test {
             bouncebackRecipient: address(0)
         });
         QueuedDeposit memory qd =
-            QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d) });
+            QueuedDeposit({ depositType: DepositType.Regular, depositData: abi.encode(d), rejected: false });
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, d, bytes32(0)));
         tempoState.setMockStorageValue(

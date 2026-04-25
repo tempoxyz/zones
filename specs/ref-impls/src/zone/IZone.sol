@@ -122,9 +122,16 @@ uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86_400;
 /// @notice A deposit entry in the unified queue (for zone-side processing)
 /// @dev Used by the sequencer when calling advanceTempo with mixed deposit types.
 ///      The depositData is ABI-encoded Deposit or EncryptedDeposit depending on type.
+///      `rejected` is the sequencer's per-deposit accept/reject decision: when true,
+///      the zone skips the zone-side mint (and, for encrypted deposits, the onchain
+///      decryption verification) and bounces back to bouncebackRecipient. The flag is
+///      sequencer-supplied off-chain data and is NOT part of the deposit queue hash
+///      chain. A `rejected = true` flag on an internal withdrawal-bounce-back deposit
+///      (bouncebackRecipient == address(0)) is silently ignored.
 struct QueuedDeposit {
     DepositType depositType;
     bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    bool rejected;
 }
 
 /// @notice Chaum-Pedersen proof for ECDH shared secret derivation
@@ -901,6 +908,19 @@ interface IZoneInbox {
         bytes32 indexed depositHash,
         address indexed sender,
         address to,
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
+    );
+
+    /// @notice Emitted when the sequencer marks a deposit as rejected via QueuedDeposit.rejected
+    /// @dev Distinguishes operator-initiated rejection from a TIP-403 / mint failure
+    ///      (DepositFailed) or an invalid-encryption / decrypted-mint failure
+    ///      (EncryptedDepositFailed). Funds are bounced back identically.
+    event DepositRejected(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        DepositType depositType,
         address token,
         uint128 amount,
         address bouncebackRecipient

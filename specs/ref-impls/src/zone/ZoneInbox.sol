@@ -217,34 +217,77 @@ contract ZoneInbox is IZoneInbox {
                 // Decode regular deposit
                 Deposit memory d = abi.decode(qd.depositData, (Deposit));
 
-                // Advance the hash chain with type discriminator
+                // Advance the hash chain with type discriminator. The sequencer's
+                // accept/reject decision (qd.rejected) is intentionally NOT part of
+                // the hash chain; the chain stays canonical to the deposit content.
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
                 // ZonePortal.deposit reverts if bouncebackRecipient == address(0),
                 // so the only Regular deposits with zero bouncebackRecipient are
                 // internal withdrawal-bounce-back deposits enqueued by
                 // ZonePortal._enqueueWithdrawalBounceBack. Those are terminal
-                // and must mint unconditionally.
+                // and must mint unconditionally; a `rejected` flag on such an entry
+                // is silently ignored to preserve the terminal-bounce invariant.
                 if (d.bouncebackRecipient != address(0)) {
-                    // User-initiated deposit: try minting, bounce back on failure.
-                    try IZoneToken(d.token).mint(d.to, d.amount) {
-                        emit DepositProcessed(
-                            currentHash, d.sender, d.to, d.token, d.amount, d.memo
-                        );
-                    } catch {
+                    if (qd.rejected) {
+                        // Sequencer rejected this deposit: skip the zone-side mint
+                        // entirely and bounce back to bouncebackRecipient on Tempo.
                         outbox.enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
-                        emit DepositFailed(
-                            currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient
+                        emit DepositRejected(
+                            currentHash,
+                            d.sender,
+                            DepositType.Regular,
+                            d.token,
+                            d.amount,
+                            d.bouncebackRecipient
                         );
+                    } else {
+                        // User-initiated deposit, accepted: try minting, bounce back on failure.
+                        try IZoneToken(d.token).mint(d.to, d.amount) {
+                            emit DepositProcessed(
+                                currentHash, d.sender, d.to, d.token, d.amount, d.memo
+                            );
+                        } catch {
+                            outbox.enqueueDepositBounceBack(
+                                d.token, d.amount, d.bouncebackRecipient
+                            );
+                            emit DepositFailed(
+                                currentHash,
+                                d.sender,
+                                d.to,
+                                d.token,
+                                d.amount,
+                                d.bouncebackRecipient
+                            );
+                        }
                     }
                 } else {
                     // Internal withdrawal-bounce-back deposit — always succeeds.
+                    // Sequencer's `rejected` flag is ignored on this terminal path.
                     IZoneToken(d.token).mint(d.to, d.amount);
                     emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
                 }
             } else {
                 // Decode encrypted deposit
                 EncryptedDeposit memory ed = abi.decode(qd.depositData, (EncryptedDeposit));
+
+                // Sequencer rejection short-circuits all cryptographic verification.
+                // Rejected encrypted deposits do not consume a DecryptionData entry —
+                // the sequencer is not required to decrypt anything they intend to
+                // bounce back. The hash chain still advances with the deposit content.
+                if (qd.rejected) {
+                    currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
+                    outbox.enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
+                    emit DepositRejected(
+                        currentHash,
+                        ed.sender,
+                        DepositType.Encrypted,
+                        ed.token,
+                        ed.amount,
+                        ed.bouncebackRecipient
+                    );
+                    continue;
+                }
 
                 // Sequencer must provide decryption for this encrypted deposit
                 if (decryptionIndex >= decryptions.length) revert MissingDecryptionData();
