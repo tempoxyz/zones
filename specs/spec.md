@@ -576,7 +576,7 @@ To make sure that all of these cases can be handled without loss of user funds, 
 
 **Validation at withdrawal request time.** `requestWithdrawal(...)` requires `fallbackRecipient != address(0)` and reverts otherwise (`InvalidFallbackRecipient`). The address must also be authorized by the token's current TIP-403 policy as a mint recipient on the zone (reverts with `WithdrawalPolicyForbids` otherwise).
 
-Checking the TIP-403 policy at request time guarantees that a later refund mint on the zone will not itself revert on policy grounds. The check uses the zone's view of the policy at the time of the request; later policy changes do not invalidate already-burned withdrawals.
+Checking the TIP-403 policy at request time guarantees that a later refund mint on the zone will not itself revert on policy grounds. The check uses the zone's view of the policy at the time of the request; later policy changes do not invalidate already-initiated withdrawals.
 
 **Triggering conditions.** When `ZonePortal.processWithdrawal` runs on Tempo and the user-facing transfer or callback fails, the portal calls `_enqueueWithdrawalBounceBack(token, amount, fallbackRecipient)`. This constructs an internal `Deposit` with `to = fallbackRecipient`, `bouncebackRecipient = address(0)` (the sentinel reserved for portal-internal bounce-backs; see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back) — **No recursive bounces**), and appends it to the deposit queue:
 
