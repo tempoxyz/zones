@@ -366,6 +366,8 @@ The sequencer provides the ECDH shared secret alongside the decrypted data. Veri
 
 If any step fails (invalid proof, GCM tag mismatch, plaintext mismatch), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `bouncebackRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `depositEncrypted` requires a non-zero `bouncebackRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue.
 
+The verification above is only performed when the sequencer accepts an encrypted deposit. If the sequencer marks the deposit as rejected via `QueuedDeposit.rejected = true` (see [Sequencer rejection](#sequencer-rejection)), all three steps are skipped and the inbox enqueues a bounce-back without invoking the cryptographic precompiles or consuming a `DecryptionData` entry.
+
 The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
 
 ```mermaid
@@ -380,15 +382,20 @@ sequenceDiagram
     T->>T: append to depositQueue
     Note over T: emit EncryptedDepositMade
     Z-->>T: observe EncryptedDepositMade
-    Z->>Z: ZoneInbox.advanceTempo()
-    Z->>Z: onchain decryption (Chaum-Pedersen + AES-GCM)
-    alt verification succeeds
-        Z->>Z: TIP20.mint(decryptedTo, amount)
-        Note over Z: if mint reverts
+    Z->>Z: ZoneInbox.advanceTempo(..., QueuedDeposit{rejected})
+    alt sequencer rejects
+        Note over Z: skip onchain decryption verification
         Z->>T: bounce back to bouncebackRecipient via withdrawal queue
-    else verification fails
-        Note over Z: no zone-side mint attempted
-        Z->>T: bounce back to bouncebackRecipient via withdrawal queue
+    else sequencer accepts
+        Z->>Z: onchain decryption (Chaum-Pedersen + AES-GCM)
+        alt verification succeeds
+            Z->>Z: TIP20.mint(decryptedTo, amount)
+            Note over Z: if mint reverts
+            Z->>T: bounce back to bouncebackRecipient via withdrawal queue
+        else verification fails
+            Note over Z: no zone-side mint attempted
+            Z->>T: bounce back to bouncebackRecipient via withdrawal queue
+        end
     end
 ```
 
@@ -406,20 +413,27 @@ The portal itself has a TIP-403 transfer bypass (see [Tempo-side refund](#tempo-
 
 The portal-internal withdrawal-bounce-back path (`_enqueueWithdrawalBounceBack`) constructs a `Deposit` directly and bypasses the user-facing entry points, so it can — and does — set `bouncebackRecipient = address(0)` as a sentinel that marks an internal one-shot deposit; see **No recursive bounces** below.
 
-**Triggering conditions.** There are two triggering sites, depending on deposit type:
+**Triggering conditions.** There are three triggering sites:
 
-- **Regular deposit.** `ZoneInbox.advanceTempo` calls `TIP20.mint(deposit.to, deposit.amount)`. If that mint reverts the deposit bounces back to the user-supplied `bouncebackRecipient`. The user-facing `deposit(...)` entry point ensures `bouncebackRecipient != address(0)`, so the queue can always advance past a failed mint.
+- **Regular deposit, mint reverts.** `ZoneInbox.advanceTempo` calls `TIP20.mint(deposit.to, deposit.amount)`. If that mint reverts the deposit bounces back to the user-supplied `bouncebackRecipient`. The user-facing `deposit(...)` entry point ensures `bouncebackRecipient != address(0)`, so the queue can always advance past a failed mint.
 - **Encrypted deposit.** Two failure modes, both of which unconditionally bounce back (no zone-side mint is attempted as a fallback):
   - **Invalid encryption.** The Chaum-Pedersen proof, AES-GCM tag, or plaintext comparison fails during [Onchain Decryption Verification](#onchain-decryption-verification). There is no well-defined recipient on the zone in this case, so the zone does not try to mint to the depositor; it bounces back immediately.
   - **Valid decryption, mint reverts.** `TIP20.mint(decryptedTo, amount)` reverts (for example, because a TIP-403 policy active on the zone forbids minting to the decrypted recipient, or a custom TIP-20 `mint` reverts for some token-specific reason). The deposit bounces back.
+- **Sequencer rejection.** The sequencer can mark any user-initiated deposit (regular or encrypted) as rejected when calling `advanceTempo` (see [Sequencer rejection](#sequencer-rejection) below). The zone treats the deposit as if it had failed: it skips the zone-side mint entirely (and, for encrypted deposits, the onchain decryption verification) and enqueues a bounce-back to `bouncebackRecipient`.
 
-Because both deposit entry points require a non-zero `bouncebackRecipient`, every user-initiated deposit has a refund target and the deposit queue never stalls on a failed mint or invalid encryption.
+Because both deposit entry points require a non-zero `bouncebackRecipient`, every user-initiated deposit has a refund target and the deposit queue never stalls on a failed mint, invalid encryption, or sequencer rejection.
 
-The portal's internal withdrawal-bounce-back deposits are the only entries with `bouncebackRecipient == address(0)`. They are introduced by `_enqueueWithdrawalBounceBack` after a withdrawal callback fails, and their zone-side mint is treated as infallible (see **No recursive bounces** below).
+The portal's internal withdrawal-bounce-back deposits are the only entries with `bouncebackRecipient == address(0)`. They are introduced by `_enqueueWithdrawalBounceBack` after a withdrawal callback fails, and their zone-side mint is treated as infallible (see **No recursive bounces** below). The sequencer cannot reject these entries: a `rejected` flag on an internal withdrawal-bounce-back deposit is silently ignored and the deposit is processed as if not rejected, preserving the terminal-bounce invariant.
 
-**Zone-side handling.** When an encrypted deposit fails (either branch) or when a regular deposit's mint reverts, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, bouncebackRecipient)`. For a regular deposit the revert is caught in a `try/catch`; for an encrypted deposit with invalid encryption no mint is attempted and the inbox enqueues the bounce-back directly. `enqueueDepositBounceBack` records a zero-fee, zero-callback, zero-`fallbackRecipient` withdrawal in the outbox's pending list, with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits `DepositFailed` (for regular deposits whose mint reverted) or `EncryptedDepositFailed` (for encrypted deposits, regardless of which failure mode) so off-chain observers can track the failure. The deposit queue hash chain advances normally; no retries are performed on the zone.
+**Zone-side handling.** When an encrypted deposit fails (either branch), when a regular deposit's mint reverts, or when the sequencer rejects a deposit, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, bouncebackRecipient)`. For a regular deposit whose mint reverted the revert is caught in a `try/catch`; for an encrypted deposit with invalid encryption no mint is attempted and the inbox enqueues the bounce-back directly; for a sequencer-rejected deposit the inbox skips processing entirely and enqueues the bounce-back without ever calling the token contract (and, for encrypted deposits, without performing onchain decryption verification). `enqueueDepositBounceBack` records a zero-fee, zero-callback, zero-`fallbackRecipient` withdrawal in the outbox's pending list, with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits one of three events so off-chain observers can distinguish the failure mode: `DepositFailed` (regular deposit whose mint reverted), `EncryptedDepositFailed` (encrypted deposit, either invalid encryption or mint revert), or `DepositRejected` (sequencer-initiated rejection, regardless of deposit type). The deposit queue hash chain advances normally; no retries are performed on the zone.
 
 **Tempo-side refund.** The bounce-back withdrawal is submitted in the next batch alongside any user-initiated withdrawals. When `ZonePortal.processWithdrawal` runs on the deposit-bounce-back entry (`gasLimit == 0`, `fee == 0`, `fallbackRecipient == address(0)`), it moves `amount` of `token` from the portal's escrow to `bouncebackRecipient` on Tempo. `bouncebackRecipient` was validated against the token's TIP-403 policy at deposit time, so that specific policy cannot cause the refund to fail. However, TIP-403 policies are mutable between deposit time and refund time, and the standard `ITIP20.transfer` does not exempt system contracts from the current policy. The guaranteed-liveness property of the refund therefore depends on [TIP-1052 (System-Contract Transfer Policy Exemption)](https://github.com/tempoxyz/tempo/blob/main/tips/tip-1052.md) activating: once TIP-1052 is live, `ZonePortal.processWithdrawal` uses `ITIP20.systemForceTransfer` on this path, which skips the TIP-403 check while preserving pause, zero-recipient, balance, and spending-limit enforcement. Until TIP-1052 activates, the refund transfer can still revert if the policy is edited to forbid `bouncebackRecipient` after the deposit; in that case the bounce-back re-enters the pending list and is retried on subsequent batches. The sequencer keeps the deposit fee that was already paid on Tempo.
+
+**Sequencer rejection.** When calling `advanceTempo`, the sequencer can mark any individual deposit as rejected by setting `QueuedDeposit.rejected = true` for that entry. A rejected deposit is processed exactly like a deposit-time failure: the zone skips the zone-side mint and enqueues a bounce-back to `bouncebackRecipient`. For encrypted deposits, rejection short-circuits the cryptographic verification — the sequencer is not required to provide a `DecryptionData` entry for a rejected encrypted deposit and the AES-GCM / Chaum-Pedersen precompiles are not invoked. The 1:1 correspondence between non-rejected encrypted deposits and `DecryptionData` entries still holds.
+
+This is intentionally a sequencer-side decision rather than a protocol invariant. The sequencer is not strictly trusted with deposits — they cannot censor a deposit silently, since refusing to call `advanceTempo` on a deposit stalls the queue and is publicly observable, and a successful `advanceTempo` proof commits to the rebuilt hash chain. Rejection gives the sequencer an in-band way to refund a deposit they choose not to process (for example, off-chain compliance signals on the depositor or memo) rather than stalling the entire queue. Because rejection always credits `bouncebackRecipient` on Tempo and is observable via `DepositRejected`, a malicious sequencer cannot use it to seize funds.
+
+The `rejected` flag is supplied by the sequencer alongside the deposit data and is **not** committed to the deposit queue hash chain — the chain remains canonical to the deposit content produced by the portal. The sequencer's accept/reject decision is recorded only via the bounce-back withdrawal and the `DepositRejected` event. A `rejected = true` flag on an internal withdrawal-bounce-back deposit (`bouncebackRecipient == address(0)`) is silently ignored, since those entries are terminal and have no refund target.
 
 **No recursive bounces.** Bounce-back paths are deliberately one-shot to prevent cycles:
 
@@ -434,6 +448,7 @@ The portal's internal withdrawal-bounce-back deposits are the only entries with 
 |-------|------------|------|
 | `DepositFailed` | `ZoneInbox` | Mint for a regular deposit reverted, funds queued for bounce-back |
 | `EncryptedDepositFailed` | `ZoneInbox` | Encrypted deposit failed — either invalid encryption, or valid decryption with a mint that reverted; funds queued for bounce-back |
+| `DepositRejected` | `ZoneInbox` | Sequencer marked the deposit (regular or encrypted) as rejected; funds queued for bounce-back without invoking the token or decryption precompiles |
 | `DepositBounceBack` | `ZonePortal` | Bounce-back withdrawal processed on Tempo, funds credited to `bouncebackRecipient` |
 | `WithdrawalBounceBack` | `ZonePortal` | Withdrawal-side bounce-back (renamed from `BounceBack` for symmetry with `DepositBounceBack`) |
 
@@ -449,11 +464,16 @@ sequenceDiagram
     T->>T: append to depositQueue
     Note over T: emit DepositMade
     Z-->>T: observe DepositMade
-    Z->>Z: ZoneInbox.advanceTempo()
-    Z->>Z: try TIP20.mint(deposit.to, amount)
-    Note over Z: if mint reverts
-    Z->>Z: ZoneOutbox.enqueueDepositBounceBack()
-    Note over Z: emit DepositFailed
+    Z->>Z: ZoneInbox.advanceTempo(..., QueuedDeposit{rejected})
+    alt sequencer rejects
+        Z->>Z: ZoneOutbox.enqueueDepositBounceBack()
+        Note over Z: emit DepositRejected
+    else sequencer accepts
+        Z->>Z: try TIP20.mint(deposit.to, amount)
+        Note over Z: if mint reverts
+        Z->>Z: ZoneOutbox.enqueueDepositBounceBack()
+        Note over Z: emit DepositFailed
+    end
     Z->>T: ZoneOutbox.finalizeWithdrawalBatch + submitBatch
     T->>T: ZonePortal.processWithdrawal (zero-fee, zero-callback)
     T->>U: TIP20.transfer(bouncebackRecipient, amount)
@@ -1275,6 +1295,22 @@ Address: `0x1c00000000000000000000000000000000000001`
 
 ```solidity
 interface IZoneInbox {
+    /// @notice A deposit queued for processing on the zone, paired with the
+    ///         sequencer's accept/reject decision.
+    /// @dev `rejected` is supplied by the sequencer per-deposit when calling
+    ///      advanceTempo. It is NOT part of the deposit queue hash chain (which
+    ///      stays canonical to the deposit content produced by the portal). A
+    ///      rejected user-initiated deposit skips the zone-side mint (and, for
+    ///      encrypted deposits, the onchain decryption verification) and bounces
+    ///      back to bouncebackRecipient on Tempo. A `rejected = true` flag on an
+    ///      internal withdrawal-bounce-back deposit (bouncebackRecipient ==
+    ///      address(0)) is silently ignored.
+    struct QueuedDeposit {
+        DepositType depositType;
+        bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+        bool rejected;
+    }
+
     event TempoAdvanced(
         bytes32 indexed tempoBlockHash, uint64 indexed tempoBlockNumber,
         uint256 depositsProcessed, bytes32 newProcessedDepositQueueHash
@@ -1289,6 +1325,18 @@ interface IZoneInbox {
     );
     event EncryptedDepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
+    );
+    /// @notice Emitted when the sequencer marks a deposit as rejected via QueuedDeposit.rejected.
+    /// @dev Distinguishes operator-initiated rejection from a TIP-403 / mint failure
+    ///      (DepositFailed) or an invalid-encryption / decrypted-mint failure
+    ///      (EncryptedDepositFailed). Funds are bounced back identically.
+    event DepositRejected(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        DepositType depositType,
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
     );
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
