@@ -239,7 +239,7 @@ The sequencer configures gas rates that determine fees for deposits, withdrawals
 | Rate | Set via | Used for |
 |------|---------|----------|
 | `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` |
-| `tempoGasRate` (portal) | `ZonePortal.setTempoGasRate()` | Deposit bounce-back fees: `FIXED_BOUNCEBACK_GAS (250,000) * tempoGasRate` |
+| `tempoGasRate` (portal) | `ZonePortal.setTempoGasRate()` | Deposit bounce-back fees: `FIXED_BOUNCEBACK_GAS (300,000) * tempoGasRate` |
 | `tempoGasRate` (outbox) | `ZoneOutbox.setTempoGasRate()` | Withdrawal fees: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
 
 `zoneGasRate` is read on Tempo (the portal is the source of truth for zone-side gas pricing seen by users when depositing). The portal's `tempoGasRate` is also read on Tempo at deposit time, where it prices the Tempo-side bounce-back transfer that may eventually run there. The outbox's `tempoGasRate` is read on the zone at withdrawal-request time, where it prices the Tempo-side withdrawal that the sequencer will eventually process. The two `tempoGasRate` settings are stored independently on different chains and are not automatically synchronized; the sequencer is responsible for keeping them aligned with their respective Tempo gas-cost models. They may legitimately diverge — for example, the deposit-bounce-back rate captures the worst-case new-account creation cost, while the withdrawal rate is dominated by callback gas — and the sequencer chooses each independently.
@@ -308,7 +308,7 @@ Every deposit is associated with two separate fees, both paid in the same token 
 
 ```
 depositFee    = FIXED_DEPOSIT_GAS    * zoneGasRate    (= 100,000 * zoneGasRate)
-bouncebackFee = FIXED_BOUNCEBACK_GAS * tempoGasRate   (= 250,000 * tempoGasRate)
+bouncebackFee = FIXED_BOUNCEBACK_GAS * tempoGasRate   (= 300,000 * tempoGasRate)
 ```
 
 `zoneGasRate` and `tempoGasRate` are both portal-local sequencer-managed rates set via `ZonePortal.setZoneGasRate()` and `ZonePortal.setTempoGasRate()` respectively (see [Gas Rate Configuration](#gas-rate-configuration)). The portal's `tempoGasRate` is independent of the `tempoGasRate` stored on `ZoneOutbox` for withdrawal pricing.
