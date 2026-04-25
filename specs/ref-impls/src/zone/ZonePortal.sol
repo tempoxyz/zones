@@ -490,6 +490,13 @@ contract ZonePortal is IZonePortal {
         if (!cfg.enabled) revert TokenNotEnabled();
         if (!cfg.depositsActive) revert DepositsNotActive();
 
+        // User-initiated deposits cannot opt out of bounce-back: a zero
+        // bouncebackRecipient would leave a failed mint with no recovery
+        // target and stall the deposit queue. address(0) is reserved as a
+        // sentinel for the portal-internal withdrawal-bounce-back path
+        // (_enqueueWithdrawalBounceBack), which bypasses this entry point.
+        if (bouncebackRecipient == address(0)) revert MissingBouncebackRecipient();
+
         // Enforce TIP-403 policy: the recipient must be authorized under the
         // token's transfer policy before accepting the deposit.
         uint64 policyId = ITIP20(_token).transferPolicyId();
@@ -501,12 +508,11 @@ contract ZonePortal is IZonePortal {
         }
 
         // Validate bouncebackRecipient against TIP-403 at deposit time so that
-        // bounceback transfers on L1 are guaranteed to succeed even if the
-        // recipient is later blacklisted (portal has a TIP-403 bypass).
-        if (bouncebackRecipient != address(0)) {
-            if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
-                revert DepositPolicyForbids();
-            }
+        // bounceback transfers on L1 are guaranteed to succeed against this
+        // specific policy even if the recipient is later blacklisted (portal
+        // has a TIP-403 bypass on the bounceback path).
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+            revert DepositPolicyForbids();
         }
 
         // Calculate deposit fee

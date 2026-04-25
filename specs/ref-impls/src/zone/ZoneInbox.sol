@@ -220,8 +220,13 @@ contract ZoneInbox is IZoneInbox {
                 // Advance the hash chain with type discriminator
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
+                // ZonePortal.deposit reverts if bouncebackRecipient == address(0),
+                // so the only Regular deposits with zero bouncebackRecipient are
+                // internal withdrawal-bounce-back deposits enqueued by
+                // ZonePortal._enqueueWithdrawalBounceBack. Those are terminal
+                // and must mint unconditionally.
                 if (d.bouncebackRecipient != address(0)) {
-                    // Normal deposit: try minting, bounce back on failure
+                    // User-initiated deposit: try minting, bounce back on failure.
                     try IZoneToken(d.token).mint(d.to, d.amount) {
                         emit DepositProcessed(
                             currentHash, d.sender, d.to, d.token, d.amount, d.memo
@@ -233,7 +238,7 @@ contract ZoneInbox is IZoneInbox {
                         );
                     }
                 } else {
-                    // Bounce-back deposit from a failed withdrawal — always succeeds
+                    // Internal withdrawal-bounce-back deposit — always succeeds.
                     IZoneToken(d.token).mint(d.to, d.amount);
                     emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
                 }
