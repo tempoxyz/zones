@@ -2,7 +2,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use clap::Parser;
+use alloy_primitives::Address;
+use alloy_signer_local::PrivateKeySigner;
+use clap::{Args, Parser};
 use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
@@ -12,6 +14,9 @@ use crate::{
     ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig, evm::ZoneEvmConfig,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
+
+const MAX_LOGS_PER_RESPONSE: u64 = 1_000_000;
+const MAX_BLOCKS_PER_FILTER: u64 = 1_000_000;
 
 const ZONE_LOG_FILTER_DIRECTIVES: &str = concat!(
     "tungstenite=warn,",
@@ -51,34 +56,19 @@ impl ZoneCli {
 
             builder.config_mut().network.discovery.disable_discovery = true;
             builder.config_mut().rpc.disable_auth_server = true;
-            builder.config_mut().rpc.rpc_max_logs_per_response = 1_000_000u64.into();
-            builder.config_mut().rpc.rpc_max_blocks_per_filter = 1_000_000u64.into();
+            builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
+            builder.config_mut().rpc.rpc_max_blocks_per_filter = MAX_BLOCKS_PER_FILTER.into();
 
-            let sequencer_signer: alloy_signer_local::PrivateKeySigner = args
-                .sequencer_key
-                .parse()
-                .expect("invalid sequencer private key");
-            let sequencer_addr = sequencer_signer.address();
-
-            let sequencer_secret_key: k256::SecretKey = {
-                let hex = args
-                    .sequencer_key
-                    .strip_prefix("0x")
-                    .unwrap_or(&args.sequencer_key);
-                let bytes = const_hex::decode(hex).expect("invalid sequencer key hex");
-                k256::SecretKey::from_slice(&bytes).expect("invalid secp256k1 secret key")
-            };
-
-            let retry_interval = Duration::from_millis(args.l1_retry_connection_interval_ms);
+            let sequencer_signer = args.sequencer_key.parse::<PrivateKeySigner>()?;
 
             let mut node = ZoneNode::new(
                 args.l1_rpc_url,
                 args.portal_address,
                 args.l1_genesis_block_number,
-                sequencer_addr,
-                sequencer_secret_key,
+                sequencer_signer.address(),
+                sequencer_signer.credential().into(),
                 args.l1_fetch_concurrency,
-                retry_interval,
+                Duration::from_millis(args.l1_retry_connection_interval_ms),
             )
             .with_private_rpc(ZonePrivateRpcConfig {
                 private_rpc_port: args.private_rpc_port,
@@ -107,7 +97,7 @@ impl ZoneCli {
 }
 
 /// Tempo Zone CLI arguments.
-#[derive(Debug, Clone, clap::Args)]
+#[derive(Debug, Clone, Args)]
 pub struct ZoneArgs {
     /// L1 WebSocket RPC URL for subscribing to deposit events and chain notifications.
     #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
@@ -115,7 +105,7 @@ pub struct ZoneArgs {
 
     /// ZonePortal contract address on L1.
     #[arg(long = "l1.portal-address", env = "L1_PORTAL_ADDRESS")]
-    pub portal_address: alloy_primitives::Address,
+    pub portal_address: Address,
 
     /// Block building interval in milliseconds.
     #[arg(
@@ -193,8 +183,8 @@ pub struct ZoneArgs {
     )]
     pub private_rpc_max_auth_token_validity_secs: u64,
 
-    /// Enable the sequencer background tasks (batch submission, withdrawal processing).
-    /// When omitted, only the private RPC server is launched.
+    /// Enable the Zone node in sequencer mode. This advances block production and submits
+    /// withdrawal batches.
     #[arg(long = "sequencer", env = "SEQUENCER")]
     pub enable_sequencer: bool,
 }
