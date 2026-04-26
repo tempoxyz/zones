@@ -211,7 +211,8 @@ contract ZonePortalTest is BaseTest {
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
             callbackData: callbackData,
-            encryptedSender: ""
+            encryptedSender: "",
+            bouncebackFee: 0
         });
     }
 
@@ -1641,7 +1642,8 @@ contract ZonePortalTest is BaseTest {
             to: bob,
             amount: 500e6,
             memo: bytes32(0),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         bytes32 expectedHash =
             keccak256(abi.encode(DepositType.Regular, expectedBounceBack, depositHashBefore));
@@ -1734,7 +1736,8 @@ contract ZonePortalTest is BaseTest {
                     to: bob,
                     amount: netAmount,
                     memo: bytes32("test"),
-                    bouncebackRecipient: address(0)
+                    bouncebackRecipient: address(0),
+            bouncebackFee: 0
                 }),
                 bytes32(0)
             )
@@ -1746,6 +1749,7 @@ contract ZonePortalTest is BaseTest {
             bob,
             netAmount,
             fee,
+            uint128(0),
             bytes32("test"),
             address(0),
             1
@@ -2100,7 +2104,8 @@ contract ZonePortalTest is BaseTest {
             amount: netAmount,
             keyIndex: 0,
             encrypted: encrypted,
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
         assertEq(hash, expectedHash);
@@ -2169,7 +2174,8 @@ contract ZonePortalTest is BaseTest {
             amount: netAmount,
             keyIndex: 0,
             encrypted: encrypted,
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
 
@@ -2180,6 +2186,7 @@ contract ZonePortalTest is BaseTest {
             address(pathUSD),
             netAmount,
             fee,
+            uint128(0),
             0,
             VALID_SECP256K1_X,
             0x02,

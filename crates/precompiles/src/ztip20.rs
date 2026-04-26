@@ -37,6 +37,15 @@ use crate::{
 
 const FIXED_TRANSFER_GAS: u64 = 100_000;
 
+/// Selector for `systemForceMint(address,uint256)` — the TIP-1052 zone-side bypass for
+/// the terminal withdrawal-bounce-back mint in `ZoneInbox`. Skips the TIP-403 mint
+/// authorization check; admitted only for `ZONE_INBOX_ADDRESS`.
+const SYSTEM_FORCE_MINT_SELECTOR: [u8; 4] = [0x6f, 0xa0, 0x7d, 0x76];
+
+/// Selector for `NotPolicyExempt()` — returned when an unlisted caller invokes
+/// `systemForceMint`. See TIP-1052 §1 (Precompile semantics).
+const NOT_POLICY_EXEMPT_SELECTOR: [u8; 4] = [0x0a, 0x4e, 0x5e, 0xa1];
+
 /// Decode ABI args or return a reverted precompile output.
 ///
 /// Unlike `.ok()?` (which silently skips the policy check on decode failure),
@@ -290,6 +299,44 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
         }
     }
 
+    /// Check the zone-side Transfer Policy Exemption List for `systemForceMint`.
+    ///
+    /// Returns `None` if `caller` is admitted (the call is allowed to proceed
+    /// with the TIP-403 mint authorization skipped). Returns `Some(revert)` with
+    /// `NotPolicyExempt()` otherwise.
+    ///
+    /// The zone-side exemption list is currently a single literal entry —
+    /// `ZONE_INBOX_ADDRESS` — which is the only contract that mints on the
+    /// terminal withdrawal-bounce-back path. See TIP-1052 §2 and the Zones
+    /// spec section "Withdrawal Failures and Bounce-Back".
+    fn enforce_system_force_mint_caller(&self, caller: Address) -> Option<PrecompileResult> {
+        if caller == ZONE_INBOX_ADDRESS {
+            None
+        } else {
+            Some(Ok(Self::not_policy_exempt_output()))
+        }
+    }
+
+    /// Rewrite a `systemForceMint(to, amount)` calldata into the equivalent
+    /// `mint(to, amount)` calldata.
+    ///
+    /// Both functions share the ABI tail `(address, uint256)`, so rewriting is
+    /// a 4-byte selector swap. The vanilla [`TIP20Token`] receives the call as
+    /// an ordinary mint, which is gated on `ISSUER_ROLE`. The `ZONE_INBOX_ADDRESS`
+    /// holds `ISSUER_ROLE` on every zone-enabled token by genesis construction,
+    /// so the rewritten call succeeds. The TIP-403 mint check that the wrapper
+    /// would normally perform in `enforce_mint` is intentionally skipped on this
+    /// path; this is the entire point of `systemForceMint`.
+    fn rewrite_system_force_mint(data: &[u8]) -> Option<alloc::vec::Vec<u8>> {
+        if data.len() < 4 + 64 {
+            return None;
+        }
+        let mut rewritten = alloc::vec::Vec::with_capacity(data.len());
+        rewritten.extend_from_slice(&ITIP20::mintCall::SELECTOR);
+        rewritten.extend_from_slice(&data[4..]);
+        Some(rewritten)
+    }
+
     /// Reject the system caller that is only allowed on the opposite bridge path.
     fn reject_crossed_burn_caller(&self, caller: Address) -> Option<PrecompileResult> {
         if caller == ZONE_INBOX_ADDRESS {
@@ -319,6 +366,10 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
 
     fn roles_unauthorized_output() -> PrecompileOutput {
         StorageCtx::default().revert_output(RolesAuthError::unauthorized().selector().into())
+    }
+
+    fn not_policy_exempt_output() -> PrecompileOutput {
+        StorageCtx::default().revert_output(NOT_POLICY_EXEMPT_SELECTOR.to_vec().into())
     }
 
     /// Build a reverted output with the `policyForbids()` error selector.
@@ -385,6 +436,22 @@ where
                 );
 
                 StorageCtx::enter(&mut storage, || {
+                    // TIP-1052 systemForceMint: gate on the zone-side exemption list and,
+                    // if admitted, rewrite to mint() calldata so the underlying TIP20Token
+                    // executes a normal mint while the wrapper skips the TIP-403 mint check.
+                    if selector == Some(SYSTEM_FORCE_MINT_SELECTOR) {
+                        if let Some(revert) = token.enforce_system_force_mint_caller(input.caller)
+                        {
+                            return revert;
+                        }
+                        let Some(rewritten) = Self::rewrite_system_force_mint(input.data) else {
+                            return Ok(StorageCtx::default().revert_output(Bytes::new()));
+                        };
+                        let mut tip20 = TIP20Token::from_address(address)
+                            .expect("TIP20 prefix already verified");
+                        return tip20.call(&rewritten, input.caller);
+                    }
+
                     if let Some(selector) = selector
                         && let Some(revert) =
                             token.precheck(selector, address, input.data, input.caller)
@@ -1143,6 +1210,48 @@ mod tests {
             result.is_ok(),
             "mint must proceed when policy resolution errors (L1 enforces policy at deposit time)"
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn system_force_mint_admits_zone_inbox_and_skips_policy_check() -> TestResult {
+        // A policy that forbids minting to anyone — `mint` would revert with PolicyForbids,
+        // but `systemForceMint` from `ZONE_INBOX_ADDRESS` must succeed regardless.
+        let mut harness = PrecompileHarness::new(MockPolicyProvider {
+            transfer_authorized: true,
+            mint_authorized: false,
+            policy_id: 1,
+            fail_policy_id_resolution: false,
+        })?;
+
+        let recipient = harness.bob;
+        let amount = U256::from(42_000u64);
+
+        let mut calldata = alloc::vec::Vec::with_capacity(4 + 64);
+        calldata.extend_from_slice(&SYSTEM_FORCE_MINT_SELECTOR);
+        calldata.extend_from_slice(
+            &ITIP20::mintCall {
+                to: recipient,
+                amount,
+            }
+            .abi_encode()[4..],
+        );
+
+        let admitted = harness.call(ZONE_INBOX_ADDRESS, calldata.clone().into(), 200_000, false)?;
+        assert!(admitted.is_success(), "ZoneInbox must be admitted");
+        assert_eq!(harness.balance_of(recipient)?, amount);
+
+        // Same call from the issuer (which has ISSUER_ROLE) must still revert with
+        // NotPolicyExempt — the exemption list, not ISSUER_ROLE, gates this selector.
+        let unlisted = harness.call(harness.issuer, calldata.clone().into(), 200_000, false)?;
+        assert!(unlisted.is_revert());
+        assert_eq!(unlisted.bytes, Bytes::from(NOT_POLICY_EXEMPT_SELECTOR.to_vec()));
+
+        // And from an arbitrary EOA.
+        let outsider = harness.call(harness.bob, calldata.into(), 200_000, false)?;
+        assert!(outsider.is_revert());
+        assert_eq!(outsider.bytes, Bytes::from(NOT_POLICY_EXEMPT_SELECTOR.to_vec()));
 
         Ok(())
     }

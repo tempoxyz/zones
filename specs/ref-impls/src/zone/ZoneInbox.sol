@@ -232,7 +232,9 @@ contract ZoneInbox is IZoneInbox {
                     if (qd.rejected) {
                         // Sequencer rejected this deposit: skip the zone-side mint
                         // entirely and bounce back to bouncebackRecipient on Tempo.
-                        outbox.enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
+                        outbox.enqueueDepositBounceBack(
+                            d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
+                        );
                         emit DepositRejected(
                             currentHash,
                             d.sender,
@@ -249,7 +251,7 @@ contract ZoneInbox is IZoneInbox {
                             );
                         } catch {
                             outbox.enqueueDepositBounceBack(
-                                d.token, d.amount, d.bouncebackRecipient
+                                d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
                             );
                             emit DepositFailed(
                                 currentHash,
@@ -262,9 +264,15 @@ contract ZoneInbox is IZoneInbox {
                         }
                     }
                 } else {
-                    // Internal withdrawal-bounce-back deposit — always succeeds.
-                    // Sequencer's `rejected` flag is ignored on this terminal path.
-                    IZoneToken(d.token).mint(d.to, d.amount);
+                    // Internal withdrawal-bounce-back deposit — terminal one-shot path.
+                    // Use systemForceMint to bypass the zone-side TIP-403 mint-recipient
+                    // check (TIP-1052). fallbackRecipient was TIP-403-validated on the
+                    // zone at requestWithdrawal time; this guarantees the refund mint
+                    // succeeds against policy drift between request time and bounce-back
+                    // processing time. Without the bypass, a policy edit would be able to
+                    // stall ZoneInbox.advanceTempo on the bounce-back entry.
+                    // The sequencer's `rejected` flag is ignored on this terminal path.
+                    IZoneToken(d.token).systemForceMint(d.to, d.amount);
                     emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
                 }
             } else {
@@ -277,7 +285,9 @@ contract ZoneInbox is IZoneInbox {
                 // bounce back. The hash chain still advances with the deposit content.
                 if (qd.rejected) {
                     currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
-                    outbox.enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
+                    outbox.enqueueDepositBounceBack(
+                        ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
+                    );
                     emit DepositRejected(
                         currentHash,
                         ed.sender,
@@ -351,7 +361,7 @@ contract ZoneInbox is IZoneInbox {
                     // Invalid encryption: no well-defined recipient on the zone,
                     // so skip the zone-side mint entirely and bounce back immediately.
                     outbox.enqueueDepositBounceBack(
-                        ed.token, ed.amount, ed.bouncebackRecipient
+                        ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
                     );
                     emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                 } else {
@@ -362,7 +372,7 @@ contract ZoneInbox is IZoneInbox {
                         );
                     } catch {
                         outbox.enqueueDepositBounceBack(
-                            ed.token, ed.amount, ed.bouncebackRecipient
+                            ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
                         );
                         emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                     }

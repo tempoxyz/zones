@@ -212,7 +212,8 @@ contract ZoneBridgeTest is BaseTest {
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
             callbackData: callbackData,
-            encryptedSender: ""
+            encryptedSender: "",
+            bouncebackFee: 0
         });
     }
 
@@ -258,7 +259,8 @@ contract ZoneBridgeTest is BaseTest {
             to: to,
             amount: amount,
             memo: memo,
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
 
         // Calculate the new hash (matches what Tempo portal computes)
@@ -868,7 +870,8 @@ contract ZoneBridgeTest is BaseTest {
             amount: netAmount,
             keyIndex: keyIndex,
             encrypted: encrypted,
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
 
         // Calculate the new hash (matches what portal computes via DepositQueueLib)
@@ -1162,7 +1165,8 @@ contract ZoneBridgeTest is BaseTest {
             to: alice,
             amount: depositAmount,
             memo: bytes32("regular"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         bytes32 prevHash = l2Inbox.processedDepositQueueHash();
         bytes32 hash1 = keccak256(abi.encode(DepositType.Regular, d1, prevHash));
@@ -1175,7 +1179,8 @@ contract ZoneBridgeTest is BaseTest {
             amount: netAmount,
             keyIndex: 0,
             encrypted: payload,
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         bytes32 hash2 = keccak256(abi.encode(DepositType.Encrypted, ed, hash1));
         assertEq(hash2, h2, "hash2 must match L1");
@@ -1187,7 +1192,8 @@ contract ZoneBridgeTest is BaseTest {
             to: carol,
             amount: depositAmount,
             memo: bytes32("carol"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         bytes32 hash3 = keccak256(abi.encode(DepositType.Regular, d3, hash2));
         assertEq(hash3, h3, "hash3 must match L1");
@@ -1291,7 +1297,8 @@ contract ZoneBridgeTest is BaseTest {
             amount: netAmount,
             keyIndex: 0,
             encrypted: payload1,
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         bytes32 hash1 = keccak256(abi.encode(DepositType.Encrypted, ed1, prevHash));
         assertEq(hash1, h1, "hash1 must match L1");
@@ -1302,7 +1309,8 @@ contract ZoneBridgeTest is BaseTest {
             amount: netAmount,
             keyIndex: 1,
             encrypted: payload2,
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         bytes32 hash2 = keccak256(abi.encode(DepositType.Encrypted, ed2, hash1));
         assertEq(hash2, h2, "hash2 must match L1");

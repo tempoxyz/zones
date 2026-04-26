@@ -167,7 +167,8 @@ contract ZoneIntegrationTest is BaseTest {
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
             callbackData: callbackData,
-            encryptedSender: ""
+            encryptedSender: "",
+            bouncebackFee: 0
         });
     }
 
@@ -222,7 +223,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 1000e6,
             memo: bytes32("alice1"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         deposits[1] = Deposit({
             token: address(l2ZoneToken),
@@ -230,7 +232,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 2000e6,
             memo: bytes32("alice2"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         deposits[2] = Deposit({
             token: address(l2ZoneToken),
@@ -238,7 +241,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: bob,
             amount: 3000e6,
             memo: bytes32("bob1"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         deposits[3] = Deposit({
             token: address(l2ZoneToken),
@@ -246,7 +250,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: charlie,
             amount: 500e6,
             memo: bytes32("charlie1"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
 
         // Set up L2 mock — hash chain uses l2ZoneToken consistently
@@ -298,7 +303,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 1000e6,
             memo: bytes32("d1"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
 
         // Deposit hash uses l2ZoneToken consistently
@@ -347,7 +353,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 2000e6,
             memo: bytes32("d2"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         batch2[1] = Deposit({
             token: address(l2ZoneToken),
@@ -355,7 +362,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 3000e6,
             memo: bytes32("d3"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
 
         // Compute L2 hash chain continuing from l2Hash1
@@ -391,7 +399,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 5000e6,
             memo: bytes32("deposit"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
@@ -468,7 +477,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 50_000e6,
             memo: bytes32("big deposit"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
@@ -614,7 +624,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 10_000e6,
             memo: bytes32("d1"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         deposits1[1] = Deposit({
             token: address(l2ZoneToken),
@@ -622,7 +633,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: bob,
             amount: 5000e6,
             memo: bytes32("d2"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
 
         l2TempoState.setMockStorageValue(
@@ -678,7 +690,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: charlie,
             amount: 7500e6,
             memo: bytes32("d3"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
 
         l2TempoState.setMockStorageValue(
@@ -729,7 +742,8 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 10_000e6,
             memo: bytes32("d1"),
-            bouncebackRecipient: address(0)
+            bouncebackRecipient: address(0),
+            bouncebackFee: 0
         });
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1

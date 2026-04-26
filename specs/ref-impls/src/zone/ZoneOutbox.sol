@@ -9,10 +9,14 @@ import {
     LastBatch,
     PendingWithdrawal,
     Withdrawal,
+    ZONE_INBOX,
     ZONE_TX_CONTEXT
 } from "./IZone.sol";
 
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
+import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
@@ -23,6 +27,11 @@ contract ZoneOutbox is IZoneOutbox {
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
+
+    /// @notice TIP-403 registry for transfer policy authorization checks
+    /// @dev On the zone, the registry reads policy state from Tempo via TempoState.
+    ITIP403Registry internal constant TIP403_REGISTRY =
+        ITIP403Registry(StdPrecompiles.TIP403_REGISTRY_ADDRESS);
 
     /// @notice Maximum size of callback data in bytes
     /// @dev Limits storage costs and hash computation overhead
@@ -96,6 +105,7 @@ contract ZoneOutbox is IZoneOutbox {
     //////////////////////////////////////////////////////////////*/
 
     error InvalidFallbackRecipient();
+    error WithdrawalPolicyForbids(address fallbackRecipient);
     error CallbackDataTooLarge();
     error GasFeeRateTooHigh();
     error TransferFailed();
@@ -220,9 +230,23 @@ contract ZoneOutbox is IZoneOutbox {
     )
         internal
     {
-        // Always require a valid fallback recipient
+        // Always require a valid fallback recipient. The zone-side bounce-back path
+        // mints to fallbackRecipient when the Tempo-side withdrawal fails; without a
+        // non-zero recipient the bounce-back would have no destination and would stall
+        // the deposit queue on the zone.
         if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
+        }
+
+        // Validate fallbackRecipient against the token's TIP-403 policy on the zone at
+        // request time. Symmetric to the deposit-side validation of bouncebackRecipient
+        // in ZonePortal.deposit: ensures the later refund mint on the zone is guaranteed
+        // against the policy seen at request time. Combined with the systemForceMint
+        // bypass on the bounce-back path (TIP-1052), policy edits between request time
+        // and bounce-back processing time cannot stall the deposit queue.
+        uint64 policyId = ITIP20(token).transferPolicyId();
+        if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, fallbackRecipient)) {
+            revert WithdrawalPolicyForbids(fallbackRecipient);
         }
 
         // Limit callback data size to prevent storage bloat and hash computation abuse
@@ -262,7 +286,8 @@ contract ZoneOutbox is IZoneOutbox {
         // Amount goes to recipient, fee goes to sequencer
         zoneToken.burn(totalBurn);
 
-        // Store withdrawal in pending array
+        // Store withdrawal in pending array (regular user withdrawals never carry a
+        // bouncebackFee — that field is only populated by enqueueDepositBounceBack)
         _pendingWithdrawals.push(
             PendingWithdrawal({
                 token: token,
@@ -275,7 +300,8 @@ contract ZoneOutbox is IZoneOutbox {
                 gasLimit: gasLimit,
                 fallbackRecipient: fallbackRecipient,
                 callbackData: data,
-                revealTo: revealTo
+                revealTo: revealTo,
+                bouncebackFee: 0
             })
         );
 
@@ -369,7 +395,8 @@ contract ZoneOutbox is IZoneOutbox {
                     gasLimit: pendingWithdrawal.gasLimit,
                     fallbackRecipient: pendingWithdrawal.fallbackRecipient,
                     callbackData: pendingWithdrawal.callbackData,
-                    encryptedSender: encryptedSender
+                    encryptedSender: encryptedSender,
+                    bouncebackFee: pendingWithdrawal.bouncebackFee
                 });
                 withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
                 delete _pendingWithdrawals[index];
@@ -403,15 +430,21 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Enqueue a bounce-back withdrawal for a failed deposit
     /// @dev Only callable by the ZoneInbox during advanceTempo. Creates a zero-fee,
     ///      zero-callback withdrawal that returns escrowed funds to the depositor's
-    ///      bouncebackRecipient on L1.
+    ///      bouncebackRecipient on L1, less the snapshotted bouncebackFee that pays
+    ///      the Tempo-side refund cost (see ZonePortal.processWithdrawal).
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient
+        address bouncebackRecipient,
+        uint128 bouncebackFee
     )
         external
     {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
+        // Only callable by the ZoneInbox during advanceTempo. The inbox runs as
+        // part of the sequencer-driven system tx, but the outbox cannot rely on
+        // the sequencer pseudo-address as msg.sender because the call comes from
+        // the inbox contract. Restrict to the well-known ZONE_INBOX address.
+        if (msg.sender != ZONE_INBOX) revert OnlySequencer();
 
         _pendingWithdrawals.push(
             PendingWithdrawal({
@@ -425,7 +458,8 @@ contract ZoneOutbox is IZoneOutbox {
                 gasLimit: 0,
                 fallbackRecipient: address(0),
                 callbackData: "",
-                revealTo: ""
+                revealTo: "",
+                bouncebackFee: bouncebackFee
             })
         );
     }
