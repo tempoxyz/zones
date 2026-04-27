@@ -279,7 +279,7 @@ Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, 
 A user deposits by calling `deposit(token, to, amount, memo, bouncebackRecipient)` on the portal. The portal:
 
 1. Validates the token is enabled and deposits are active.
-2. Requires `bouncebackRecipient != address(0)` (reverts otherwise) and validates `bouncebackRecipient` against the token's TIP-403 policy. Every deposit must carry a usable refund target: a `bouncebackRecipient` of zero would leave a failed deposit with no recovery path and stall the deposit queue. Validating the recipient against the policy at deposit time ensures the later bounce-back transfer on Tempo is guaranteed to be accepted by the policy (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)).
+2. Requires `bouncebackRecipient != address(0)` (reverts otherwise) and validates `bouncebackRecipient` against the token's TIP-403 policy.
 3. Snapshots the deposit fee at the current `zoneGasRate` and the bounce-back fee at the current portal-side `tempoGasRate` (see [Deposit Fees](#deposit-fees)), and requires `amount >= depositFee + bouncebackFee` (reverts `DepositTooSmall` otherwise). The bounce-back fee covers the worst-case Tempo gas of paying out a refund (including new-account creation for `bouncebackRecipient`), so it is priced in Tempo gas, not zone gas.
 4. Transfers `amount` from the user into the portal.
 5. Pays the `depositFee` to the sequencer immediately. The `bouncebackFee` is reserved on the queued entry; it is only consumed if the deposit later bounces back.
@@ -417,9 +417,9 @@ Regular deposits always succeed on the original design: the zone simply mints to
 
 To address this symmetrically to [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back), every deposit carries a `bouncebackRecipient`: a Tempo address that receives a refund if zone-side processing fails.
 
-**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require `bouncebackRecipient != address(0)` and revert otherwise (`MissingBouncebackRecipient`). The non-zero value must also be authorized by the token's current TIP-403 policy. There is no user-facing opt-out: every user-initiated deposit carries a usable refund target so that a failed deposit can always be recovered without stalling the deposit queue.
+**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require `bouncebackRecipient != address(0)` and revert otherwise (`MissingBouncebackRecipient`). The address must also be authorized by the token's current TIP-403 policy as a recipient.
 
-The portal itself has a TIP-403 transfer bypass (see [Tempo-side refund](#tempo-side-refund) below), but the bounce-back pays directly to `bouncebackRecipient`, so the recipient must satisfy the policy. Checking at deposit time guarantees that a later bounce-back transfer on Tempo will not itself revert on policy grounds. The check uses the portal's view of the policy at the time of deposit; later policy changes do not invalidate already-queued deposits.
+Checking the TIP-403 policy at deposit time guarantees that a later bounce-back transfer on Tempo will not itself revert on policy grounds. The check uses the portal's view of the policy at the time of deposit; later policy changes do not invalidate already-queued deposits.
 
 The portal-internal withdrawal-bounce-back path (`_enqueueWithdrawalBounceBack`) constructs a `Deposit` directly and bypasses the user-facing entry points, so it can — and does — set `bouncebackRecipient = address(0)` as a sentinel that marks an internal one-shot deposit; see **No recursive bounces** below.
 
@@ -442,8 +442,6 @@ The portal's internal withdrawal-bounce-back deposits are the only entries with 
 **Sequencer rejection.** When calling `advanceTempo`, the sequencer can mark any individual deposit as rejected by setting `QueuedDeposit.rejected = true` for that entry. A rejected deposit is processed exactly like a deposit-time failure: the zone skips the zone-side mint and enqueues a bounce-back to `bouncebackRecipient`. For encrypted deposits, rejection short-circuits the cryptographic verification — the sequencer is not required to provide a `DecryptionData` entry for a rejected encrypted deposit and the AES-GCM / Chaum-Pedersen precompiles are not invoked. The 1:1 correspondence between non-rejected encrypted deposits and `DecryptionData` entries still holds.
 
 This is intentionally a sequencer-side decision rather than a protocol invariant. The sequencer is not strictly trusted with deposits — they cannot censor a deposit silently, since refusing to call `advanceTempo` on a deposit stalls the queue and is publicly observable, and a successful `advanceTempo` proof commits to the rebuilt hash chain. Rejection gives the sequencer an in-band way to refund a deposit they choose not to process (for example, off-chain compliance signals on the depositor or memo) rather than stalling the entire queue. Because rejection always credits `bouncebackRecipient` on Tempo and is observable via `DepositRejected`, a malicious sequencer cannot use it to seize funds.
-
-The `rejected` flag is supplied by the sequencer alongside the deposit data and is **not** committed to the deposit queue hash chain — the chain remains canonical to the deposit content produced by the portal. The sequencer's accept/reject decision is recorded only via the bounce-back withdrawal and the `DepositRejected` event. A `rejected = true` flag on an internal withdrawal-bounce-back deposit (`bouncebackRecipient == address(0)`) is silently ignored, since those entries are terminal and have no refund target.
 
 **No recursive bounces.** Bounce-back paths are deliberately one-shot to prevent cycles:
 
