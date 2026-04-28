@@ -168,14 +168,68 @@ sequenceDiagram
 
 <br>
 
+## Access Control
+
+Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal): an **admin** and a **sequencer**. The roles are intentionally separated so that mission-critical governance powers can be held in a cold key (or multisig) while day-to-day block production runs from a hot operational key. The two roles MAY be held by the same address; the protocol does not enforce separation.
+
+### Roles
+
+**Admin.**
+- Holds governance powers over the zone.
+- Expected to be a cold key, multisig, or governance contract.
+- Set at zone creation via [`IZoneFactory.createZone`](#izonefactory) and rotated via two-step transfer (see [Admin Transfer](#admin-transfer)).
+- Cannot be renounced. The zero address is never a valid admin.
+
+**Sequencer.**
+- Operates the zone: collects transactions, produces blocks, advances Tempo, processes deposits and withdrawals, and submits batches with proofs.
+- Expected to be an online operational key.
+- Set at zone creation via [`IZoneFactory.createZone`](#izonefactory) and rotated via two-step transfer (see [Sequencer Transfer](#sequencer-transfer)). Either the admin or the current sequencer MAY initiate the transfer.
+- Holds the encryption private key used to decrypt [encrypted deposits](#encrypted-deposits). The admin MUST NOT hold this key.
+
+A zone MAY be deployed with `admin == sequencer`. In that case the same address holds both roles, but the protocol still treats each privileged call as belonging to its role; rotating one role does not rotate the other.
+
+### Permission Matrix
+
+The following table lists every privileged action and the role(s) authorized to invoke it. "Both" means either role may invoke independently; the protocol does not require co-signing.
+
+| Action | Contract | Authorized caller(s) |
+|---|---|---|
+| `enableToken(token)` (irreversible) | [`ZonePortal`](#izoneportal) | **admin** |
+| `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **both** |
+| `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **both** |
+| `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **both** |
+| `setTempoGasRate(rate)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **both** |
+| `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
+| `transferSequencer(newSequencer)` | [`ZonePortal`](#izoneportal) | **both** (admin or current sequencer) |
+| `acceptSequencer()` | [`ZonePortal`](#izoneportal) | **pendingSequencer** |
+| `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `acceptAdmin()` | [`ZonePortal`](#izoneportal) | **pendingAdmin** |
+| `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
+| `processWithdrawal(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
+| `finalizeWithdrawalBatch(...)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** (block beneficiary) |
+| Block production / `beneficiary` | zone | **sequencer** |
+
+Rationale notes:
+
+- **`enableToken` is admin-only** because enablement is permanent and defines what the zone is. A compromised sequencer hot key MUST NOT be able to enable arbitrary tokens.
+- **Pause/resume and gas rates are accessible to both roles** because the sequencer needs to react quickly to operational events (gas-price spikes, issuer pause requests) without involving the cold key, while the admin retains an override for governance-driven actions.
+- **Encryption key management is sequencer-only** because the proof of possession requires the encryption private key, which the admin does not hold by design.
+- **`transferSequencer` is initiable by either role** so that the admin can fire a misbehaving operator (case where admin and sequencer are different entities) and so that the current sequencer can rotate its own hot key (case of suspected hot-key compromise). In both paths, the new sequencer MUST `acceptSequencer` before the rotation takes effect.
+- **`processWithdrawal` is sequencer-only** today; whether to make it permissionless once the proof has settled is tracked separately.
+
+> **TODO (open in this revision):** behavior of in-flight encrypted deposits during admin-initiated sequencer rotation, automatic invalidation of old encryption keys on `acceptSequencer`, zone-side propagation of the admin address through `ZoneConfig`, emergency pause / kill switch, multi-signer (N-of-M) sequencer support, and migration semantics for already-deployed zones. These are intentionally left unresolved in this revision.
+
+<br>
+
 ## Zone Deployment
 
 A zone is created via `ZoneFactory.createZone(...)` on Tempo with the following parameters:
 
 | Parameter | Description |
 |-----------|-------------|
-| `initialToken` | The first TIP-20 token to enable. The sequencer can enable additional tokens later. |
-| `sequencer` | The address that will operate the zone. |
+| `initialToken` | The first TIP-20 token to enable. The admin can enable additional tokens later. |
+| `admin` | The address that holds the admin role for the zone (governance, sequencer rotation, token enablement). MUST NOT be the zero address. May be the same as `sequencer`. See [Access Control](#access-control). |
+| `sequencer` | The address that will operate the zone (block production, batch submission, withdrawal processing). |
 | `verifier` | The `IVerifier` contract used to validate batch proofs. |
 | `zoneParams` | Genesis configuration: genesis block hash, genesis Tempo block hash, and genesis Tempo block number. |
 
