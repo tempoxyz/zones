@@ -155,12 +155,21 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
                 if let Some(revert) = self.reject_crossed_mint_caller(caller) {
                     return Some(revert);
                 }
+                // Skip TIP-403 enforcement for deposit mints from ZoneInbox.
+                // The sequencer already checks the recipient, and failed-deposit
+                // refunds to the sender must always succeed to prevent zone lockup.
+                if caller == ZONE_INBOX_ADDRESS {
+                    return None;
+                }
                 let call = decode_or_revert!(ITIP20::mintCall, args);
                 self.enforce_mint(address, call.to)
             }
             ITIP20::mintWithMemoCall::SELECTOR => {
                 if let Some(revert) = self.reject_crossed_mint_caller(caller) {
                     return Some(revert);
+                }
+                if caller == ZONE_INBOX_ADDRESS {
+                    return None;
                 }
                 let call = decode_or_revert!(ITIP20::mintWithMemoCall, args);
                 self.enforce_mint(address, call.to)
@@ -1142,6 +1151,56 @@ mod tests {
         assert!(
             result.is_ok(),
             "mint must proceed when policy resolution errors (L1 enforces policy at deposit time)"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn inbox_mint_skips_tip403_for_blocked_recipient() -> TestResult {
+        // Simulates a failed encrypted deposit refund to a TIP-403 blocked sender.
+        // The zone must not enforce TIP-403 on deposit mints from ZoneInbox,
+        // otherwise the zone locks up.
+        let mut harness = PrecompileHarness::new(MockPolicyProvider {
+            mint_authorized: false,
+            transfer_authorized: false,
+            policy_id: 1,
+            fail_policy_id_resolution: false,
+        })?;
+
+        // Mint from ZoneInbox to a blocked address must succeed.
+        let inbox_mint = harness.call(
+            ZONE_INBOX_ADDRESS,
+            ITIP20::mintCall {
+                to: harness.bob,
+                amount: U256::from(99_000u64),
+            }
+            .abi_encode()
+            .into(),
+            100_000,
+            false,
+        )?;
+        assert!(
+            !inbox_mint.reverted,
+            "ZoneInbox deposit mint must not be blocked by TIP-403"
+        );
+        assert_eq!(harness.balance_of(harness.bob)?, U256::from(99_000u64));
+
+        // Mint from the issuer to the same blocked address must still be rejected.
+        let issuer_mint = harness.call(
+            harness.issuer,
+            ITIP20::mintCall {
+                to: harness.bob,
+                amount: U256::from(1_000u64),
+            }
+            .abi_encode()
+            .into(),
+            100_000,
+            false,
+        )?;
+        assert!(
+            issuer_mint.reverted,
+            "issuer mint to blocked address must still be rejected"
         );
 
         Ok(())
