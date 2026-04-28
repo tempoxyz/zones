@@ -362,7 +362,8 @@ contract WithdrawalQueueLibTest is Test {
             gasLimit: 0,
             fallbackRecipient: sender,
             callbackData: "",
-            encryptedSender: ""
+            encryptedSender: "",
+            bouncebackFee: 0
         });
     }
 

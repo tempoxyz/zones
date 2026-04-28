@@ -59,6 +59,19 @@ contract MockZoneToken is IZoneToken {
         emit Transfer(address(0), to, amount);
     }
 
+    /// @notice Mock systemForceMint — same authorization as `mint` for tests.
+    /// @dev    The real zone-side TIP-20 precompile gates this on the Transfer Policy
+    ///         Exemption List and skips the TIP-403 mint-recipient check. The mock has
+    ///         no TIP-403 enforcement, so the only difference visible to tests is the
+    ///         method name.
+    function systemForceMint(address to, uint256 amount) external returns (bool) {
+        if (!minters[msg.sender]) revert Unauthorized();
+        totalSupply += amount;
+        balanceOf[to] += amount;
+        emit Transfer(address(0), to, amount);
+        return true;
+    }
+
     function burn(uint256 amount) external {
         if (balanceOf[msg.sender] < amount) revert InsufficientBalance();
         totalSupply -= amount;

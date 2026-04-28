@@ -117,7 +117,7 @@ impl EncryptedDeposit {
 
         println!("Sending encrypted deposit of {} to {to}...", self.amount);
         let receipt = portal
-            .depositEncrypted(self.token, self.amount, key_index, payload)
+            .depositEncrypted(self.token, self.amount, key_index, payload, Address::ZERO)
             .send_sync()
             .await
             .wrap_err("failed to send depositEncrypted transaction")?;

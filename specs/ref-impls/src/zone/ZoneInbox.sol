@@ -16,6 +16,7 @@ import {
     ITempoState,
     IZoneConfig,
     IZoneInbox,
+    IZoneOutbox,
     IZoneToken,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
@@ -43,6 +44,9 @@ contract ZoneInbox is IZoneInbox {
     /// @notice The TempoState predeploy address (stored as concrete type for internal use)
     TempoState internal immutable _tempoState;
 
+    /// @notice The ZoneOutbox predeploy (for enqueuing deposit bouncebacks)
+    IZoneOutbox public immutable outbox;
+
     /// @notice Last processed deposit queue hash (validated against Tempo state)
     bytes32 public processedDepositQueueHash;
 
@@ -53,10 +57,16 @@ contract ZoneInbox is IZoneInbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config, address _tempoPortalAddr, address _tempoStateAddr) {
+    constructor(
+        address _config,
+        address _tempoPortalAddr,
+        address _tempoStateAddr,
+        address _outbox
+    ) {
         config = IZoneConfig(_config);
         tempoPortal = _tempoPortalAddr;
         _tempoState = TempoState(_tempoStateAddr);
+        outbox = IZoneOutbox(_outbox);
     }
 
     /// @notice The TempoState predeploy address
@@ -207,16 +217,87 @@ contract ZoneInbox is IZoneInbox {
                 // Decode regular deposit
                 Deposit memory d = abi.decode(qd.depositData, (Deposit));
 
-                // Advance the hash chain with type discriminator
+                // Advance the hash chain with type discriminator. The sequencer's
+                // accept/reject decision (qd.rejected) is intentionally NOT part of
+                // the hash chain; the chain stays canonical to the deposit content.
                 currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
 
-                // Mint the correct zone-side TIP-20 token to the recipient
-                IZoneToken(d.token).mint(d.to, d.amount);
-
-                emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
+                // ZonePortal.deposit reverts if bouncebackRecipient == address(0),
+                // so the only Regular deposits with zero bouncebackRecipient are
+                // internal withdrawal-bounce-back deposits enqueued by
+                // ZonePortal._enqueueWithdrawalBounceBack. Those are terminal
+                // and must mint unconditionally; a `rejected` flag on such an entry
+                // is silently ignored to preserve the terminal-bounce invariant.
+                if (d.bouncebackRecipient != address(0)) {
+                    if (qd.rejected) {
+                        // Sequencer rejected this deposit: skip the zone-side mint
+                        // entirely and bounce back to bouncebackRecipient on Tempo.
+                        outbox.enqueueDepositBounceBack(
+                            d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
+                        );
+                        emit DepositRejected(
+                            currentHash,
+                            d.sender,
+                            DepositType.Regular,
+                            d.token,
+                            d.amount,
+                            d.bouncebackRecipient
+                        );
+                    } else {
+                        // User-initiated deposit, accepted: try minting, bounce back on failure.
+                        try IZoneToken(d.token).mint(d.to, d.amount) {
+                            emit DepositProcessed(
+                                currentHash, d.sender, d.to, d.token, d.amount, d.memo
+                            );
+                        } catch {
+                            outbox.enqueueDepositBounceBack(
+                                d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
+                            );
+                            emit DepositFailed(
+                                currentHash,
+                                d.sender,
+                                d.to,
+                                d.token,
+                                d.amount,
+                                d.bouncebackRecipient
+                            );
+                        }
+                    }
+                } else {
+                    // Internal withdrawal-bounce-back deposit — terminal one-shot path.
+                    // Use systemForceMint to bypass the zone-side TIP-403 mint-recipient
+                    // check (TIP-1052). fallbackRecipient was TIP-403-validated on the
+                    // zone at requestWithdrawal time; this guarantees the refund mint
+                    // succeeds against policy drift between request time and bounce-back
+                    // processing time. Without the bypass, a policy edit would be able to
+                    // stall ZoneInbox.advanceTempo on the bounce-back entry.
+                    // The sequencer's `rejected` flag is ignored on this terminal path.
+                    IZoneToken(d.token).systemForceMint(d.to, d.amount);
+                    emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
+                }
             } else {
                 // Decode encrypted deposit
                 EncryptedDeposit memory ed = abi.decode(qd.depositData, (EncryptedDeposit));
+
+                // Sequencer rejection short-circuits all cryptographic verification.
+                // Rejected encrypted deposits do not consume a DecryptionData entry —
+                // the sequencer is not required to decrypt anything they intend to
+                // bounce back. The hash chain still advances with the deposit content.
+                if (qd.rejected) {
+                    currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
+                    outbox.enqueueDepositBounceBack(
+                        ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
+                    );
+                    emit DepositRejected(
+                        currentHash,
+                        ed.sender,
+                        DepositType.Encrypted,
+                        ed.token,
+                        ed.amount,
+                        ed.bouncebackRecipient
+                    );
+                    continue;
+                }
 
                 // Sequencer must provide decryption for this encrypted deposit
                 if (decryptionIndex >= decryptions.length) revert MissingDecryptionData();
@@ -274,17 +355,27 @@ contract ZoneInbox is IZoneInbox {
                 // Advance the hash chain with type discriminator
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
+                // ZonePortal.depositEncrypted reverts if ed.bouncebackRecipient == address(0),
+                // so every encrypted deposit that reaches the zone has a non-zero refund target.
                 if (!valid) {
-                    // Decryption failed: credit the depositor's address on the zone.
-                    // L1 funds remain escrowed in the portal.
-                    IZoneToken(ed.token).mint(ed.sender, ed.amount);
+                    // Invalid encryption: no well-defined recipient on the zone,
+                    // so skip the zone-side mint entirely and bounce back immediately.
+                    outbox.enqueueDepositBounceBack(
+                        ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
+                    );
                     emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                 } else {
-                    // Decryption succeeded - mint the correct zone-side TIP-20 to the decrypted recipient
-                    IZoneToken(ed.token).mint(dec.to, ed.amount);
-                    emit EncryptedDepositProcessed(
-                        currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
-                    );
+                    // Valid decryption: mint to the decrypted recipient, bounce back on revert.
+                    try IZoneToken(ed.token).mint(dec.to, ed.amount) {
+                        emit EncryptedDepositProcessed(
+                            currentHash, ed.sender, dec.to, ed.token, ed.amount, dec.memo
+                        );
+                    } catch {
+                        outbox.enqueueDepositBounceBack(
+                            ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
+                        );
+                        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+                    }
                 }
             }
         }
