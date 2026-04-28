@@ -6,16 +6,22 @@
 - [Specification](#specification)
   - [Terminology](#terminology)
   - [System Overview](#system-overview)
+  - [Access Control](#access-control)
+    - [Roles](#roles)
+    - [Permission Matrix](#permission-matrix)
   - [Zone Deployment](#zone-deployment)
     - [Chain ID](#chain-id)
     - [Tempo Contracts](#tempo-contracts)
     - [Zone Predeploys](#zone-predeploys)
     - [Zone Token Model](#zone-token-model)
   - [Sequencer Operations](#sequencer-operations)
-    - [Token Management](#token-management)
     - [Gas Rate Configuration](#gas-rate-configuration)
     - [Encryption Key Management](#encryption-key-management)
+  - [Admin Operations](#admin-operations)
+    - [Token Management](#token-management)
+    - [Deposit Pause Controls](#deposit-pause-controls)
     - [Sequencer Transfer](#sequencer-transfer)
+    - [Admin Transfer](#admin-transfer)
   - [Deposits](#deposits)
     - [Regular Deposits](#regular-deposits)
     - [Deposit Fees](#deposit-fees)
@@ -107,7 +113,9 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 | Zone | A private execution environment anchored to Tempo. |
 | Portal | The contract on Tempo that locks deposited tokens and finalizes withdrawals for a zone. |
 | Batch | A sequencer-produced commitment covering one or more zone blocks, submitted to Tempo with a proof. |
-| Enabled token | A TIP-20 token that the sequencer has activated for deposits and withdrawals on a zone. Enablement is permanent. |
+| Admin | The privileged governance role for a zone. Cold/mission-critical key. Controls token enablement, sequencer rotation, and admin rotation. See [Access Control](#access-control). |
+| Sequencer | The privileged operational role for a zone. Hot/online key. Sole block producer; submits batches and processes withdrawals. See [Access Control](#access-control). |
+| Enabled token | A TIP-20 token that the admin has activated for deposits and withdrawals on a zone. Enablement is permanent. |
 | TIP-20 | Tempo's fungible token standard. |
 | TIP-403 | Tempo's compliance registry. Issuers attach transfer policies (whitelists, blacklists) to TIP-20 tokens. |
 | Predeploy | A system contract deployed at a fixed address on the zone at genesis. |
@@ -116,7 +124,7 @@ This document specifies the zone protocol: deployment, sequencer operations, dep
 
 ## System Overview
 
-Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
+Each zone is operated by a **sequencer** that collects transactions, produces blocks, generates proofs, and submits batches to Tempo. A single registered address controls sequencer operations for each zone. Each zone also has a separate **admin** role that holds governance powers (enabling tokens, rotating the sequencer, rotating itself); see [Access Control](#access-control). **Users** deposit TIP-20 tokens from Tempo into the zone, transact privately, and withdraw back to Tempo.
 
 On the Tempo side, an onchain **verifier** contract validates that each batch was executed correctly. The verifier is abstracted behind a minimal interface (`IVerifier`) and is proof-agnostic. Any proving backend (ZK, TEE, or otherwise) can implement the interface. The portal does not care how the proof was produced.
 
