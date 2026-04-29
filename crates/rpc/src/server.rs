@@ -238,11 +238,8 @@ pub(crate) async fn authenticate_token(
         validate_keychain_signature(api, caller, keychain_signature, &token.digest).await?;
     }
 
-    let is_sequencer = caller == config.sequencer;
-
     Ok(AuthContext {
         caller,
-        is_sequencer,
         expires_at: token.expires_at,
     })
 }
@@ -399,7 +396,6 @@ mod tests {
             chain_id: CHAIN_ID,
             max_auth_token_validity: crate::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
             zone_portal: PORTAL,
-            sequencer: Address::ZERO,
         }
     }
 

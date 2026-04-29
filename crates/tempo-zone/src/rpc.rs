@@ -224,9 +224,6 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
         id: &FilterId,
         auth: &AuthContext,
     ) -> Result<(), JsonRpcError> {
-        if auth.is_sequencer {
-            return Ok(());
-        }
         let owner_matches = {
             let owners = self.filter_owners.lock().await;
             matches!(owners.get(id), Some(owner) if *owner == auth.caller)
@@ -441,7 +438,7 @@ where
     ) -> BoxFut<'_> {
         Box::pin(async move {
             // Silent dummy: non-caller addresses get "0x0" to avoid leaking account existence.
-            if !auth.is_sequencer && address != auth.caller {
+            if address != auth.caller {
                 return Ok(raw_zero());
             }
             let balance = EthState::balance(&self.eth.api, address, block)
@@ -459,7 +456,7 @@ where
     ) -> BoxFut<'_> {
         Box::pin(async move {
             // Silent dummy: non-caller addresses get "0x0" to avoid leaking account existence.
-            if !auth.is_sequencer && address != auth.caller {
+            if address != auth.caller {
                 return Ok(raw_zero());
             }
             let count = EthState::transaction_count(&self.eth.api, address, block)
@@ -473,7 +470,7 @@ where
         &self,
         number: BlockNumberOrTag,
         full: bool,
-        auth: AuthContext,
+        _auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
             let block = EthBlocks::rpc_block(&self.eth.api, number.into(), full)
@@ -484,15 +481,13 @@ where
                 return Ok(raw_null());
             };
 
-            if !auth.is_sequencer {
-                redact_block(&mut block);
-            }
+            redact_block(&mut block);
 
             to_raw(&block)
         })
     }
 
-    fn block_by_hash(&self, hash: B256, full: bool, auth: AuthContext) -> BoxFut<'_> {
+    fn block_by_hash(&self, hash: B256, full: bool, _auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             let block = EthBlocks::rpc_block(&self.eth.api, hash.into(), full)
                 .await
@@ -502,9 +497,7 @@ where
                 return Ok(raw_null());
             };
 
-            if !auth.is_sequencer {
-                redact_block(&mut block);
-            }
+            redact_block(&mut block);
 
             to_raw(&block)
         })
@@ -521,7 +514,7 @@ where
 
             let Some(tx) = tx else { return Ok(raw_null()) };
 
-            if !auth.is_sequencer && tx.from() != auth.caller {
+            if tx.from() != auth.caller {
                 return Ok(raw_null());
             }
 
@@ -539,13 +532,11 @@ where
                 return Ok(raw_null());
             };
 
-            if !auth.is_sequencer {
-                if receipt.from() != auth.caller {
-                    return Ok(raw_null());
-                }
-
-                receipt = zone_rpc::filter::filter_receipt_logs(receipt);
+            if receipt.from() != auth.caller {
+                return Ok(raw_null());
             }
+
+            receipt = zone_rpc::filter::filter_receipt_logs(receipt);
 
             to_raw(&receipt)
         })
@@ -559,16 +550,11 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            // Defense-in-depth: handlers.rs also rejects this for non-sequencers,
-            // but enforce here too.
-            if !auth.is_sequencer && state_override.is_some() {
+            if state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
-            if !auth.is_sequencer {
-                zone_rpc::policy::enforce_from(&mut request, &auth)?;
-            }
-
+            zone_rpc::policy::enforce_from(&mut request, &auth)?;
             zone_rpc::policy::enforce_no_contract_creation(&request)?;
 
             let result = EthCall::call(
@@ -591,15 +577,11 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            // Defense-in-depth: handlers.rs also rejects this for non-sequencers,
-            // but enforce here too.
-            if !auth.is_sequencer && state_override.is_some() {
+            if state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
-            if !auth.is_sequencer {
-                zone_rpc::policy::enforce_from(&mut request, &auth)?;
-            }
+            zone_rpc::policy::enforce_from(&mut request, &auth)?;
 
             zone_rpc::policy::enforce_no_contract_creation(&request)?;
 
@@ -617,9 +599,7 @@ where
 
     fn send_raw_transaction(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
-            }
+            zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
 
             let hash = EthTransactions::send_raw_transaction(&self.eth.api, data)
                 .await
@@ -630,17 +610,13 @@ where
 
     fn send_raw_transaction_sync(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
-            }
+            zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
 
             let mut receipt = EthTransactions::send_raw_transaction_sync(&self.eth.api, data)
                 .await
                 .map_err(internal)?;
 
-            if !auth.is_sequencer {
-                receipt = zone_rpc::filter::filter_receipt_logs(receipt);
-            }
+            receipt = zone_rpc::filter::filter_receipt_logs(receipt);
 
             to_raw(&receipt)
         })
@@ -652,10 +628,7 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                zone_rpc::policy::enforce_from(&mut request, &auth)?;
-            }
-
+            zone_rpc::policy::enforce_from(&mut request, &auth)?;
             zone_rpc::policy::enforce_no_contract_creation(&request)?;
 
             let result = EthTransactions::fill_transaction(&self.eth.api, request)
@@ -667,13 +640,6 @@ where
 
     fn get_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if auth.is_sequencer {
-                let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
-                    .await
-                    .map_err(internal)?;
-                return to_raw(&logs);
-            }
-
             zone_rpc::filter::scope_filter(&mut filter);
             let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
                 .await
@@ -685,9 +651,7 @@ where
 
     fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                zone_rpc::filter::scope_filter(&mut filter);
-            }
+            zone_rpc::filter::scope_filter(&mut filter);
             let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
                 .await
                 .map_err(internal)?;
@@ -709,10 +673,6 @@ where
                 .await
                 .map_err(map_eth_filter_error)?;
 
-            if auth.is_sequencer {
-                return to_raw(&logs);
-            }
-
             let filtered = zone_rpc::filter::filter_logs(logs, &auth.caller);
             to_raw(&filtered)
         })
@@ -727,10 +687,6 @@ where
                 .filter_changes(id)
                 .await
                 .map_err(map_eth_filter_error)?;
-
-            if auth.is_sequencer {
-                return to_raw(&changes);
-            }
 
             match changes {
                 FilterChanges::Logs(logs) => {
@@ -782,9 +738,8 @@ where
         })
     }
 
-    fn ws_subscribe_new_heads(&self, auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
+    fn ws_subscribe_new_heads(&self, _auth: AuthContext) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
-            let redact_logs_bloom = !auth.is_sequencer;
             let api = self.eth.api.clone();
             let provider = self.eth.api.provider().clone();
             let stream = provider
@@ -814,9 +769,7 @@ where
                     futures::stream::iter(headers)
                 })
                 .map(move |mut header| {
-                    if redact_logs_bloom {
-                        redact_ws_header(&mut header);
-                    }
+                    redact_ws_header(&mut header);
                     to_raw(&header)
                 });
             let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
@@ -829,9 +782,7 @@ where
             let provider = self.eth.api.provider().clone();
             let caller = auth.caller;
 
-            if !auth.is_sequencer {
-                zone_rpc::filter::scope_filter(&mut filter);
-            }
+            zone_rpc::filter::scope_filter(&mut filter);
 
             let stream = provider
                 .canonical_state_stream()
@@ -850,12 +801,6 @@ where
                     futures::stream::iter(all_logs)
                 });
 
-            if auth.is_sequencer {
-                let stream = stream.map(|log| to_raw(&log));
-                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
-                return Ok(stream);
-            }
-
             let stream = stream.filter_map(move |log| {
                 std::future::ready(
                     zone_rpc::filter::is_log_visible(&log, &caller).then(|| to_raw(&log)),
@@ -872,34 +817,6 @@ where
         auth: AuthContext,
     ) -> BoxWsSubscriptionFut<'_> {
         Box::pin(async move {
-            if auth.is_sequencer {
-                if !full {
-                    let pool = self.eth.api.pool().clone();
-                    // Sequencers can use the direct hash listener because no sender scoping is
-                    // required; non-sequencers must source full tx events to filter by sender.
-                    let stream = futures::stream::unfold(
-                        pool.pending_transactions_listener(),
-                        |mut rx| async move { rx.recv().await.map(|hash| (hash, rx)) },
-                    )
-                    .map(|hash| to_raw(&hash));
-                    let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
-                    return Ok(stream);
-                }
-
-                let api = self.eth.api.clone();
-                let pool = self.eth.api.pool().clone();
-                let stream = pool
-                    .new_pending_pool_transactions_listener()
-                    .map(move |pending_tx| {
-                        api.converter()
-                            .fill_pending(pending_tx.transaction.to_consensus())
-                            .map_err(internal)
-                            .and_then(|tx| to_raw(&tx))
-                    });
-                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
-                return Ok(stream);
-            }
-
             let caller = auth.caller;
             let pool = self.eth.api.pool().clone();
 
@@ -947,7 +864,6 @@ where
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
                 zone_tokens,
-                sequencer: self.config.sequencer,
                 chain_id: U64::from(self.config.chain_id),
             })
         })

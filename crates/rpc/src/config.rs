@@ -1,6 +1,5 @@
 //! Configuration for the private zone RPC server.
 
-use alloy_primitives::Address;
 use std::{net::SocketAddr, time::Duration};
 
 /// Configuration for the private zone RPC server.
@@ -24,7 +23,5 @@ pub struct PrivateRpcConfig {
     /// policy, but it must not exceed the protocol maximum.
     pub max_auth_token_validity: Duration,
     /// The ZonePortal contract address on L1 (used for querying deposits, not for auth tokens).
-    pub zone_portal: Address,
-    /// The sequencer address — callers matching this get unredacted responses.
-    pub sequencer: Address,
+    pub zone_portal: alloy_primitives::Address,
 }

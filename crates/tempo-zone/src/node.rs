@@ -114,10 +114,6 @@ pub struct ZoneNode {
     /// Shared TIP-403 policy cache, populated by the unified [`L1Subscriber`](crate::l1::L1Subscriber)
     /// and read by the precompile during block building.
     policy_cache: SharedPolicyCache,
-    /// Address of the zone sequencer (fee recipient, authorized block producer).
-    sequencer: Address,
-    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
-    sequencer_key: SecretKey,
     /// Address of the L1 deposit portal contract.
     portal_address: Address,
     /// Optional pre-configured list of enabled token addresses. When set, the
@@ -135,8 +131,6 @@ impl ZoneNode {
         l1_rpc_url: String,
         portal_address: Address,
         genesis_tempo_block_number: Option<u64>,
-        sequencer: Address,
-        sequencer_key: SecretKey,
         l1_fetch_concurrency: usize,
         retry_connection_interval: Duration,
     ) -> Self {
@@ -167,8 +161,6 @@ impl ZoneNode {
             l1_state_provider_config,
             l1_state_cache,
             policy_cache,
-            sequencer,
-            sequencer_key,
             portal_address,
             initial_tokens: None,
             private_rpc_config: ZonePrivateRpcConfig::default(),
@@ -256,12 +248,8 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     deposit_queue: DepositQueue,
     /// Configuration for the L1 event subscriber
     l1_config: L1SubscriberConfig,
-    /// Receiver address for zone block fees
-    fee_recipient: Address,
     /// TIP-403 policy cache
     policy_cache: SharedPolicyCache,
-    /// Sequencer's secp256k1 secret key for ECIES decryption of encrypted deposits.
-    sequencer_key: SecretKey,
     /// ZonePortal address on L1.
     portal_address: Address,
     /// Pre-configured list of initial tokens.
@@ -288,9 +276,7 @@ where
     pub fn new(
         deposit_queue: DepositQueue,
         l1_config: L1SubscriberConfig,
-        fee_recipient: Address,
         policy_cache: SharedPolicyCache,
-        sequencer_key: SecretKey,
         portal_address: Address,
         initial_tokens: Option<Vec<Address>>,
         private_rpc_config: ZonePrivateRpcConfig,
@@ -306,9 +292,7 @@ where
             ),
             deposit_queue,
             l1_config,
-            fee_recipient,
             policy_cache,
-            sequencer_key,
             portal_address,
             initial_tokens,
             private_rpc_config,
@@ -351,7 +335,12 @@ where
         self.resolve_and_seed_tokens(&l1_provider).await?;
         self.spawn_l1_subscriber(&ctx);
         self.spawn_policy_tasks(&l1_provider, &ctx);
-        self.spawn_zone_engine(l1_provider, &ctx)?;
+
+        if let Some(ref config) = self.sequencer_config {
+            let sequencer_addr = config.sequencer_signer.address();
+            let sequencer_key = SecretKey::from(config.sequencer_signer.credential());
+            self.spawn_zone_engine(l1_provider, &ctx, sequencer_addr, sequencer_key)?;
+        }
 
         let task_executor = ctx.node.task_executor().clone();
 
@@ -371,12 +360,13 @@ where
             self.l1_config.l1_rpc_url.clone(),
             self.l1_config.retry_connection_interval,
             self.l1_config.portal_address,
-            self.fee_recipient,
             chain_id,
         )
         .await?;
 
         if let Some(config) = self.sequencer_config.take() {
+            let sequencer_addr = config.sequencer_signer.address();
+
             Self::launch_sequencer_tasks(
                 config,
                 &handle,
@@ -384,7 +374,7 @@ where
                 self.l1_config.l1_rpc_url,
                 self.l1_config.portal_address,
                 self.l1_config.retry_connection_interval,
-                self.fee_recipient,
+                sequencer_addr,
                 chain_id,
             )
             .await?;
@@ -460,9 +450,11 @@ where
 
     /// Spawn the [`ZoneEngine`] for L1-event-driven block production.
     fn spawn_zone_engine(
-        &mut self,
+        &self,
         l1_provider: alloy_provider::DynProvider<TempoNetwork>,
         ctx: &AddOnsContext<'_, N>,
+        fee_recipient: Address,
+        sequencer_key: SecretKey,
     ) -> eyre::Result<()> {
         let policy_provider = PolicyProvider::new(
             self.policy_cache.clone(),
@@ -479,8 +471,8 @@ where
             ctx.node.payload_builder_handle().clone(),
             self.deposit_queue.clone(),
             last_header,
-            self.fee_recipient,
-            self.sequencer_key.clone(),
+            fee_recipient,
+            sequencer_key,
             self.portal_address,
             policy_provider,
         );
@@ -498,7 +490,6 @@ where
         l1_rpc_url: String,
         retry_connection_interval: Duration,
         portal_address: Address,
-        sequencer_addr: Address,
         chain_id: u64,
     ) -> eyre::Result<()> {
         if config.zone_id != 0 {
@@ -528,7 +519,6 @@ where
             chain_id,
             max_auth_token_validity: config.max_auth_token_validity,
             zone_portal: portal_address,
-            sequencer: sequencer_addr,
         };
         let api: Arc<dyn ZoneRpcApi> =
             Arc::new(TempoZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?);
@@ -671,9 +661,7 @@ where
         ZoneAddOns::new(
             self.deposit_queue.clone(),
             self.l1_config.clone(),
-            self.sequencer,
             self.policy_cache.clone(),
-            self.sequencer_key.clone(),
             self.portal_address,
             self.initial_tokens.clone(),
             self.private_rpc_config.clone(),
