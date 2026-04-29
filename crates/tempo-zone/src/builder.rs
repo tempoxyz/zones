@@ -600,7 +600,7 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes, Log, U256, address};
+    use alloy_primitives::{Address, B256, Bytes, Log, U256, address};
     use alloy_sol_types::{SolCall, SolEvent};
     use reth_primitives_traits::SealedHeader;
     use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxType};
@@ -671,6 +671,7 @@ mod tests {
                             to: recipient,
                             amount: 500_000,
                             memo: B256::ZERO,
+                            bouncebackRecipient: Address::ZERO,
                         }),
                     ),
                 },
@@ -689,6 +690,7 @@ mod tests {
                                 nonce: [0x05; 12].into(),
                                 tag: [0x06; 16].into(),
                             },
+                            bouncebackRecipient: Address::ZERO,
                         }),
                     ),
                 },

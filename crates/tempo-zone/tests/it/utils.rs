@@ -1975,7 +1975,13 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, recipient, amount, B256::ZERO)
+            .deposit(
+                PATH_USD_ADDRESS,
+                recipient,
+                amount,
+                B256::ZERO,
+                Address::ZERO,
+            )
             .send()
             .await?
             .get_receipt()
@@ -2030,7 +2036,7 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(token, self.address, amount, B256::ZERO)
+            .deposit(token, self.address, amount, B256::ZERO, Address::ZERO)
             .send()
             .await?
             .get_receipt()
@@ -2135,6 +2141,7 @@ impl ZoneAccount {
                     nonce: alloy_primitives::FixedBytes(enc.nonce),
                     tag: alloy_primitives::FixedBytes(enc.tag),
                 },
+                Address::ZERO,
             )
             .send()
             .await?
@@ -2613,7 +2620,7 @@ impl PrivateRpcTestCtx {
         private_rpc_call_no_auth(&self.private_rpc_url, method, params).await
     }
 
-    /// Build an auth token with custom zone_id and chain_id (for negative testing).
+    /// Build an auth token with custom zone_id, chain_id, and portal (for negative testing).
     pub(crate) fn build_bad_token(
         &self,
         signer: &alloy_signer_local::PrivateKeySigner,
@@ -3041,6 +3048,7 @@ impl L1Fixture {
             amount,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         }
     }
 
@@ -3107,6 +3115,7 @@ impl L1Fixture {
             ciphertext: vec![0u8; 64], // ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE = 64
             nonce: [0u8; 12],
             tag: [0u8; 16],
+            bounceback_recipient: Address::ZERO,
         }
     }
 
@@ -3125,6 +3134,7 @@ impl L1Fixture {
             amount,
             fee: 0,
             memo: B256::ZERO,
+            bounceback_recipient: Address::ZERO,
         }
     }
 
@@ -3186,6 +3196,7 @@ impl L1Fixture {
             ciphertext,
             nonce,
             tag,
+            bounceback_recipient: Address::ZERO,
         }
     }
 }

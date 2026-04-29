@@ -6,10 +6,12 @@ import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
+import { MockTIP403Registry } from "./mocks/MockTIP403Registry.sol";
 import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockZoneToken } from "./mocks/MockZoneToken.sol";
 import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test } from "forge-std/Test.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 
 /// @title ZoneOutboxTest
 /// @notice Tests for ZoneOutbox finalizeWithdrawalBatch() functionality and withdrawal storage
@@ -35,6 +37,11 @@ contract ZoneOutboxTest is Test {
         MockZoneTxContext mockTxContext = new MockZoneTxContext();
         vm.etch(ZONE_TX_CONTEXT, address(mockTxContext).code);
 
+        // Install permissive TIP-403 registry so withdrawal requests succeed
+        // without policy configuration in this isolated unit test setup.
+        MockTIP403Registry mockTIP403Registry = new MockTIP403Registry();
+        vm.etch(StdPrecompiles.TIP403_REGISTRY_ADDRESS, address(mockTIP403Registry).code);
+
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
         tempoState =
             new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
@@ -42,8 +49,8 @@ contract ZoneOutboxTest is Test {
         tempoState.setMockStorageValue(
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
-        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
-        outbox = new ZoneOutbox(address(config));
+        outbox = new ZoneOutbox(address(config), mockPortal, address(tempoState));
+        inbox = new ZoneInbox(address(config), mockPortal, address(tempoState), address(outbox));
 
         // Grant minter role to inbox and burner role to outbox
         zoneToken.setMinter(address(inbox), true);
@@ -84,7 +91,8 @@ contract ZoneOutboxTest is Test {
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
             callbackData: callbackData,
-            encryptedSender: ""
+            encryptedSender: "",
+            bouncebackFee: 0
         });
     }
 

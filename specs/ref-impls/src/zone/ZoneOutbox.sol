@@ -2,17 +2,22 @@
 pragma solidity ^0.8.13;
 
 import {
+    ITempoState,
     IZoneConfig,
     IZoneOutbox,
     IZoneToken,
     IZoneTxContext,
     LastBatch,
     PendingWithdrawal,
+    PORTAL_TEMPO_GAS_RATE_SLOT,
     Withdrawal,
+    ZONE_INBOX,
     ZONE_TX_CONTEXT
 } from "./IZone.sol";
 
 import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
+import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
+import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
@@ -59,10 +64,13 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Zone configuration (reads sequencer from L1)
     IZoneConfig public immutable config;
 
-    /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
-    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price changes.
-    ///      Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
-    uint128 public tempoGasRate;
+    /// @notice ZonePortal address on Tempo (set at deploy time so the outbox can
+    ///         read `tempoGasRate` from portal storage via `TempoState`).
+    address public immutable zonePortal;
+
+    /// @notice TempoState predeploy used for cross-domain reads (canonical address
+    ///         is `0x1c00...0000`, but kept as a constructor arg for test isolation).
+    ITempoState public immutable tempoState;
 
     /// @notice Next withdrawal index (monotonically increasing)
     uint64 public nextWithdrawalIndex;
@@ -111,25 +119,15 @@ contract ZoneOutbox is IZoneOutbox {
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
 
-    constructor(address _config) {
+    constructor(address _config, address _zonePortal, address _tempoState) {
         config = IZoneConfig(_config);
+        zonePortal = _zonePortal;
+        tempoState = ITempoState(_tempoState);
     }
 
     /*//////////////////////////////////////////////////////////////
                             FEE CONFIGURATION
     //////////////////////////////////////////////////////////////*/
-
-    /// @notice Set Tempo gas rate. Only callable by sequencer.
-    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
-    ///      If actual Tempo gas is higher, sequencer covers the difference.
-    ///      If actual Tempo gas is lower, sequencer keeps the surplus.
-    /// @param _tempoGasRate Zone token units per gas unit on Tempo
-    function setTempoGasRate(uint128 _tempoGasRate) external {
-        if (msg.sender != address(0) && msg.sender != config.sequencer()) revert OnlySequencer();
-        if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
-        tempoGasRate = _tempoGasRate;
-        emit TempoGasRateUpdated(_tempoGasRate);
-    }
 
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
@@ -140,12 +138,26 @@ contract ZoneOutbox is IZoneOutbox {
         emit MaxWithdrawalsPerBlockUpdated(_maxWithdrawalsPerBlock);
     }
 
+    /// @notice Read the canonical Tempo gas rate from `ZonePortal` on Tempo.
+    /// @dev    Routes through the `TempoState` predeploy, which proves the storage
+    ///         slot against the latest finalized Tempo state root. The `tempoGasRate`
+    ///         field on `ZonePortal` is a `uint128` packed at the start of its slot;
+    ///         the upper 16 bytes are zero so the cast is lossless.
+    function tempoGasRate() public view returns (uint128) {
+        bytes32 raw = tempoState.readTempoStorageSlot(zonePortal, PORTAL_TEMPO_GAS_RATE_SLOT);
+        return uint128(uint256(raw));
+    }
+
     /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate. User must estimate total gas needed.
+    /// @dev    Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate, where the rate
+    ///         is the canonical `ZonePortal.tempoGasRate` on Tempo, read at request
+    ///         time via `TempoState`. The fee is snapshotted into the queued
+    ///         withdrawal so a later sequencer-driven rate change cannot retroactively
+    ///         raise the fee on an already-initiated withdrawal.
     /// @param gasLimit Total gas limit (must cover processWithdrawal + any callback)
     /// @return fee The total fee in zone token units
     function calculateWithdrawalFee(uint64 gasLimit) public view returns (uint128 fee) {
-        fee = uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate;
+        fee = uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -220,7 +232,13 @@ contract ZoneOutbox is IZoneOutbox {
     )
         internal
     {
-        // Always require a valid fallback recipient
+        // Always require a valid fallback recipient. The zone-side bounce-back path
+        // mints to fallbackRecipient when the Tempo-side withdrawal fails; without a
+        // non-zero recipient the bounce-back would have no destination and would stall
+        // the deposit queue on the zone. We do NOT validate fallbackRecipient against
+        // the token's TIP-403 policy here — if the zone-side refund mint is rejected
+        // by the policy at execution time, the inbox routes the funds into its
+        // refund registry instead of reverting, so the deposit queue still advances.
         if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
         }
@@ -262,7 +280,8 @@ contract ZoneOutbox is IZoneOutbox {
         // Amount goes to recipient, fee goes to sequencer
         zoneToken.burn(totalBurn);
 
-        // Store withdrawal in pending array
+        // Store withdrawal in pending array (regular user withdrawals never carry a
+        // bouncebackFee — that field is only populated by enqueueDepositBounceBack)
         _pendingWithdrawals.push(
             PendingWithdrawal({
                 token: token,
@@ -275,7 +294,8 @@ contract ZoneOutbox is IZoneOutbox {
                 gasLimit: gasLimit,
                 fallbackRecipient: fallbackRecipient,
                 callbackData: data,
-                revealTo: revealTo
+                revealTo: revealTo,
+                bouncebackFee: 0
             })
         );
 
@@ -369,7 +389,8 @@ contract ZoneOutbox is IZoneOutbox {
                     gasLimit: pendingWithdrawal.gasLimit,
                     fallbackRecipient: pendingWithdrawal.fallbackRecipient,
                     callbackData: pendingWithdrawal.callbackData,
-                    encryptedSender: encryptedSender
+                    encryptedSender: encryptedSender,
+                    bouncebackFee: pendingWithdrawal.bouncebackFee
                 });
                 withdrawalQueueHash = keccak256(abi.encode(w, withdrawalQueueHash));
                 delete _pendingWithdrawals[index];
@@ -398,6 +419,43 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Emit event for observability (proof reads from state, not events)
         emit BatchFinalized(withdrawalQueueHash, currentWithdrawalBatchIndex);
+    }
+
+    /// @notice Enqueue a bounce-back withdrawal for a failed deposit
+    /// @dev Only callable by the ZoneInbox during advanceTempo. Creates a zero-fee,
+    ///      zero-callback withdrawal that returns escrowed funds to the depositor's
+    ///      bouncebackRecipient on L1, less the snapshotted bouncebackFee that pays
+    ///      the Tempo-side refund cost (see ZonePortal.processWithdrawal).
+    function enqueueDepositBounceBack(
+        address token,
+        uint128 amount,
+        address bouncebackRecipient,
+        uint128 bouncebackFee
+    )
+        external
+    {
+        // Only callable by the ZoneInbox during advanceTempo. The inbox runs as
+        // part of the sequencer-driven system tx, but the outbox cannot rely on
+        // the sequencer pseudo-address as msg.sender because the call comes from
+        // the inbox contract. Restrict to the well-known ZONE_INBOX address.
+        if (msg.sender != ZONE_INBOX) revert OnlySequencer();
+
+        _pendingWithdrawals.push(
+            PendingWithdrawal({
+                token: token,
+                sender: address(0),
+                txHash: bytes32(0),
+                to: bouncebackRecipient,
+                amount: amount,
+                fee: 0,
+                memo: bytes32(0),
+                gasLimit: 0,
+                fallbackRecipient: address(0),
+                callbackData: "",
+                revealTo: "",
+                bouncebackFee: bouncebackFee
+            })
+        );
     }
 
     /// @notice Number of pending withdrawals

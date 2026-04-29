@@ -95,7 +95,8 @@ contract MockZonePortalForRouter {
         address _token,
         address to,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address /* bouncebackRecipient */
     )
         external
         returns (bytes32)
@@ -112,7 +113,8 @@ contract MockZonePortalForRouter {
         address _token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata
+        EncryptedDepositPayload calldata,
+        address /* bouncebackRecipient */
     )
         external
         returns (bytes32)

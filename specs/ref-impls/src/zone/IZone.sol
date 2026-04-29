@@ -67,6 +67,8 @@ struct Deposit {
     address to;
     uint128 amount;
     bytes32 memo;
+    address bouncebackRecipient; // L1 address for refund if zone-side processing fails (address(0) for bounce-back deposits)
+    uint128 bouncebackFee; // Snapshot of FIXED_BOUNCEBACK_GAS * tempoGasRate at deposit time; deducted from `amount` and paid to sequencer on bounce-back, refunded implicitly on success (0 for internal withdrawal-bounce-back deposits)
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -94,6 +96,8 @@ struct EncryptedDeposit {
     uint128 amount; // Amount (public, for accounting)
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
+    address bouncebackRecipient; // L1 address for refund if zone-side processing fails
+    uint128 bouncebackFee; // Snapshot of FIXED_BOUNCEBACK_GAS * tempoGasRate at deposit time; see Deposit.bouncebackFee
 }
 
 /// @notice Historical record of an encryption key with its activation block
@@ -120,9 +124,16 @@ uint64 constant ENCRYPTION_KEY_GRACE_PERIOD = 86_400;
 /// @notice A deposit entry in the unified queue (for zone-side processing)
 /// @dev Used by the sequencer when calling advanceTempo with mixed deposit types.
 ///      The depositData is ABI-encoded Deposit or EncryptedDeposit depending on type.
+///      `rejected` is the sequencer's per-deposit accept/reject decision: when true,
+///      the zone skips the zone-side mint (and, for encrypted deposits, the onchain
+///      decryption verification) and bounces back to bouncebackRecipient. The flag is
+///      sequencer-supplied off-chain data and is NOT part of the deposit queue hash
+///      chain. A `rejected = true` flag on an internal withdrawal-bounce-back deposit
+///      (bouncebackRecipient == address(0)) is silently ignored.
 struct QueuedDeposit {
     DepositType depositType;
     bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    bool rejected;
 }
 
 /// @notice Chaum-Pedersen proof for ECDH shared secret derivation
@@ -302,6 +313,7 @@ struct Withdrawal {
     address fallbackRecipient; // zone address for bounce-back if call fails
     bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
     bytes encryptedSender; // optional encrypted (sender, txHash) reveal payload
+    uint128 bouncebackFee; // Non-zero only for deposit-bounce-back withdrawals; deducted from `amount` and paid to sequencer in ZonePortal.processWithdrawal
 }
 
 struct PendingWithdrawal {
@@ -316,6 +328,7 @@ struct PendingWithdrawal {
     address fallbackRecipient; // zone address for bounce-back if call fails
     bytes callbackData; // calldata for IWithdrawalReceiver (if gasLimit > 0)
     bytes revealTo; // optional compressed secp256k1 pubkey for sender reveal encryption
+    uint128 bouncebackFee; // Non-zero only for deposit-bounce-back withdrawals enqueued via ZoneOutbox.enqueueDepositBounceBack; carried into the Withdrawal struct so ZonePortal.processWithdrawal can deduct it
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -354,18 +367,23 @@ interface IZoneTxContext {
 //////////////////////////////////////////////////////////////*/
 
 // ZonePortal storage layout (non-immutable variables only):
-//   slot 0: sequencer (address)
-//   slot 1: pendingSequencer (address)
-//   slot 2: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
-//   slot 3: blockHash (bytes32)
-//   slot 4: currentDepositQueueHash (bytes32)
-//   slot 5: lastSyncedTempoBlockNumber (uint64)
-//   slot 6: _encryptionKeys (EncryptionKeyEntry[])
-//   slot 7: _tokenConfigs (mapping(address => TokenConfig))
-//   slot 8: _enabledTokens (address[])
+//   slot 0:  sequencer (address)
+//   slot 1:  pendingSequencer (address)
+//   slot 2:  zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+//   slot 3:  blockHash (bytes32)
+//   slot 4:  currentDepositQueueHash (bytes32)
+//   slot 5:  depositCount (uint64) + lastProcessedDepositNumber (uint64) + lastSyncedTempoBlockNumber (uint64) [packed]
+//   slot 6:  _encryptionKeys (EncryptionKeyEntry[])
+//   slot 7:  _tokenConfigs (mapping(address => TokenConfig))
+//   slot 8:  _enabledTokens (address[])
+//   slot 9:  _withdrawalQueue.head (uint256)
+//   slot 10: _withdrawalQueue.tail (uint256)
+//   slot 11: _withdrawalQueue.slots (mapping)
+//   slot 12: tempoGasRate (uint128) — appended to keep cross-domain slot constants stable
+//   slot 13: _refunds (mapping(address => mapping(address => uint128)))
 //
 // These constants are the single source of truth for cross-domain reads.
-// ZoneConfig and ZoneInbox use them to read portal state via
+// ZoneConfig, ZoneInbox, and ZoneOutbox use them to read portal state via
 // TempoState.readTempoStorageSlot(). If the portal layout changes,
 // update these constants and the vm.load regression tests will catch mismatches.
 bytes32 constant PORTAL_SEQUENCER_SLOT = bytes32(uint256(0));
@@ -374,6 +392,7 @@ bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
 bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(8));
+bytes32 constant PORTAL_TEMPO_GAS_RATE_SLOT = bytes32(uint256(12));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -499,7 +518,9 @@ interface IZonePortal {
         address to,
         uint128 netAmount,
         uint128 fee,
+        uint128 bouncebackFee,
         bytes32 memo,
+        address bouncebackRecipient,
         uint64 depositNumber
     );
 
@@ -515,13 +536,34 @@ interface IZonePortal {
         address indexed to, address token, uint128 amount, bool callbackSuccess
     );
 
-    event BounceBack(
+    event WithdrawalBounceBack(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed fallbackRecipient,
         address token,
         uint128 amount,
         uint64 depositNumber
     );
+
+    event DepositBounceBack(
+        address indexed bouncebackRecipient,
+        address token,
+        uint128 amount,
+        uint128 bouncebackFee
+    );
+
+    /// @notice Emitted when a deposit-bounce-back transfer reverted on Tempo
+    ///         (e.g. the recipient is rejected by the active TIP-403 policy)
+    ///         and the residual amount was parked in the per-recipient refund
+    ///         registry. The recipient claims via `claimRefund(token)`.
+    event DepositBounceBackPending(
+        address indexed bouncebackRecipient,
+        address token,
+        uint128 amount,
+        uint128 bouncebackFee
+    );
+
+    /// @notice Emitted when a recipient claims an outstanding deposit-bounce-back refund.
+    event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
     event SequencerTransferStarted(
         address indexed currentSequencer, address indexed pendingSequencer
@@ -535,6 +577,7 @@ interface IZonePortal {
         address token,
         uint128 netAmount,
         uint128 fee,
+        uint128 bouncebackFee,
         uint256 keyIndex,
         bytes32 ephemeralPubkeyX,
         uint8 ephemeralPubkeyYParity,
@@ -553,6 +596,7 @@ interface IZonePortal {
         bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+    event TempoGasRateUpdated(uint128 tempoGasRate);
 
     /// @notice Emitted when sequencer enables a new TIP-20 token for bridging
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
@@ -577,13 +621,18 @@ interface IZonePortal {
     error InvalidProofOfPossession();
     error DepositPolicyForbids();
     error DepositTooSmall();
+    error MissingBouncebackRecipient();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
     error DepositsNotActive();
     error TokenAlreadyEnabled();
+    error NoRefundAvailable();
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
+
+    /// @notice Fixed gas value for deposit bounce-back fee calculation (300,000 gas)
+    function FIXED_BOUNCEBACK_GAS() external view returns (uint64);
 
     /// @notice Maximum allowed gas fee rate (1e18)
     function MAX_GAS_FEE_RATE() external view returns (uint128);
@@ -593,6 +642,7 @@ interface IZonePortal {
     function sequencer() external view returns (address);
     function pendingSequencer() external view returns (address);
     function zoneGasRate() external view returns (uint128);
+    function tempoGasRate() external view returns (uint128);
     function verifier() external view returns (address);
     function withdrawalBatchIndex() external view returns (uint64);
     function blockHash() external view returns (bytes32);
@@ -687,8 +737,35 @@ interface IZonePortal {
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external;
 
-    /// @notice Calculate the fee for a deposit
+    /// @notice Set Tempo gas rate. Only callable by sequencer.
+    /// @dev    Single canonical source for all Tempo-priced fees:
+    ///           - Deposit bounce-back fees on Tempo (`FIXED_BOUNCEBACK_GAS * tempoGasRate`)
+    ///           - Withdrawal fees on Tempo (`(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate`)
+    ///         The zone reads this slot via the `TempoState` predeploy to compute
+    ///         withdrawal fees at request time.
+    /// @param _tempoGasRate Zone token units per gas unit on Tempo
+    function setTempoGasRate(uint128 _tempoGasRate) external;
+
+    /// @notice Outstanding deposit-bounce-back refundable balance for `owner` on `token`.
+    /// @dev    Populated when a deposit-bounce-back transfer reverts (e.g. TIP-403 policy
+    ///         rejects the recipient at refund time). The recipient claims via
+    ///         `claimRefund(token)`.
+    function refunds(address token, address owner) external view returns (uint128);
+
+    /// @notice Claim outstanding deposit-bounce-back refunds in `token` for `msg.sender`.
+    /// @dev    Reverts (`NoRefundAvailable`) if there is nothing to claim. Reverts via
+    ///         the underlying TIP-20 if the active TIP-403 policy still forbids
+    ///         `msg.sender`; storage is unchanged on revert and the user can retry.
+    function claimRefund(address token) external returns (uint128 amount);
+
+    /// @notice Calculate the fee for a deposit (zone-side processing)
     function calculateDepositFee() external view returns (uint128 fee);
+
+    /// @notice Calculate the bounce-back fee for a deposit (Tempo-side bounce-back work)
+    /// @dev    Fee = FIXED_BOUNCEBACK_GAS * tempoGasRate. Reserved at deposit time, only
+    ///         charged if the deposit ultimately bounces back; otherwise it is implicitly
+    ///         returned to the user as part of the minted amount on the zone.
+    function calculateBouncebackFee() external view returns (uint128 fee);
 
     /// @notice Check if an encryption key is still valid for new deposits
     /// @dev A key is valid if it's the current key OR if it was superseded less than
@@ -705,7 +782,8 @@ interface IZonePortal {
         address token,
         address to,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -719,12 +797,14 @@ interface IZonePortal {
     /// @param amount Amount to deposit
     /// @param keyIndex Index of the encryption key used (from encryptionKeyAt)
     /// @param encrypted The encrypted payload (recipient and memo)
+    /// @param bouncebackRecipient L1 address for refund if zone-side processing fails
     /// @return newCurrentDepositQueueHash The new deposit queue hash
     function depositEncrypted(
         address token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted
+        EncryptedDepositPayload calldata encrypted,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -886,6 +966,47 @@ interface IZoneInbox {
     event EncryptedDepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
+
+    /// @notice Emitted when a regular deposit fails zone-side (e.g., TIP-403 blocks the mint)
+    event DepositFailed(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        address to,
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
+    );
+
+    /// @notice Emitted when the sequencer marks a deposit as rejected via QueuedDeposit.rejected
+    /// @dev Distinguishes operator-initiated rejection from a TIP-403 / mint failure
+    ///      (DepositFailed) or an invalid-encryption / decrypted-mint failure
+    ///      (EncryptedDepositFailed). Funds are bounced back identically.
+    event DepositRejected(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        DepositType depositType,
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
+    );
+
+    /// @notice Emitted when an internal withdrawal-bounce-back deposit was minted
+    ///         successfully to the original `fallbackRecipient` on the zone.
+    event WithdrawalBounceBackProcessed(
+        address indexed fallbackRecipient, address token, uint128 amount
+    );
+
+    /// @notice Emitted when the zone-side mint for a withdrawal-bounce-back deposit
+    ///         reverted (e.g. zone TIP-403 policy now forbids the recipient) and the
+    ///         amount was credited to the inbox refund registry, claimable via
+    ///         `claimRefund(token)`.
+    event WithdrawalBounceBackPending(
+        address indexed fallbackRecipient, address token, uint128 amount
+    );
+
+    /// @notice Emitted when a recipient claims an outstanding withdrawal-bounce-back refund.
+    event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
+
     /// @notice Emitted when a TIP-20 token is enabled on the zone via advanceTempo
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
@@ -894,6 +1015,7 @@ interface IZoneInbox {
     error MissingDecryptionData();
     error ExtraDecryptionData();
     error InvalidSharedSecretProof();
+    error NoRefundAvailable();
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);
 
@@ -931,6 +1053,18 @@ interface IZoneInbox {
     )
         external;
 
+    /// @notice Outstanding withdrawal-bounce-back refundable balance for `owner` on `token`.
+    /// @dev    Populated when a zone-side mint for a withdrawal-bounce-back deposit
+    ///         reverted (e.g. zone TIP-403 policy rejected the recipient at processing
+    ///         time). The recipient claims via `claimRefund(token)`.
+    function refunds(address token, address owner) external view returns (uint128);
+
+    /// @notice Claim outstanding withdrawal-bounce-back refunds in `token` for `msg.sender`.
+    /// @dev    Reverts (`NoRefundAvailable`) if there is nothing to claim. Reverts via
+    ///         the underlying `mint` if the active TIP-403 policy still forbids the
+    ///         recipient; storage is unchanged on revert and the user can retry.
+    function claimRefund(address token) external returns (uint128 amount);
+
 }
 
 /// @title IZoneOutbox
@@ -957,8 +1091,6 @@ interface IZoneOutbox {
         bytes revealTo
     );
 
-    event TempoGasRateUpdated(uint128 tempoGasRate);
-
     event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
 
     /// @notice Emitted when sequencer finalizes a batch at end of block
@@ -967,10 +1099,6 @@ interface IZoneOutbox {
 
     /// @notice Zone configuration (reads sequencer from L1)
     function config() external view returns (IZoneConfig);
-
-    /// @notice Tempo gas rate (zone token units per gas unit on Tempo)
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
-    function tempoGasRate() external view returns (uint128);
 
     /// @notice Next withdrawal index (monotonically increasing)
     function nextWithdrawalIndex() external view returns (uint64);
@@ -987,17 +1115,14 @@ interface IZoneOutbox {
     /// @notice Maximum number of withdrawal requests per zone block (0 = unlimited)
     function maxWithdrawalsPerBlock() external view returns (uint256);
 
-    /// @notice Set Tempo gas rate. Only callable by sequencer.
-    /// @dev Sequencer publishes this rate and takes the risk on Tempo gas price fluctuations.
-    /// @param _tempoGasRate Zone token units per gas unit on Tempo
-    function setTempoGasRate(uint128 _tempoGasRate) external;
-
     /// @notice Set maximum withdrawal requests per zone block. Only callable by sequencer.
     /// @dev Set to 0 for unlimited. Provides rate-limiting in addition to the gas fee mechanism.
     function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external;
 
-    /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    /// @notice Calculate the fee for a withdrawal with the given gasLimit.
+    /// @dev    Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate, where `tempoGasRate`
+    ///         is read from `ZonePortal` on Tempo via the `TempoState` predeploy. There
+    ///         is no zone-local copy; the canonical source of truth lives on Tempo.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     /// @notice Request a withdrawal from the zone back to Tempo
@@ -1029,6 +1154,19 @@ interface IZoneOutbox {
     )
         external
         returns (bytes32 withdrawalQueueHash);
+
+    /// @notice Enqueue a bounce-back withdrawal for a failed deposit
+    /// @dev Only callable by the ZoneInbox during advanceTempo when a deposit mint fails.
+    ///      The bounce-back withdrawal returns escrowed funds to the depositor's
+    ///      bouncebackRecipient on L1, less the snapshotted bouncebackFee which is
+    ///      paid to the sequencer in ZonePortal.processWithdrawal.
+    function enqueueDepositBounceBack(
+        address token,
+        uint128 amount,
+        address bouncebackRecipient,
+        uint128 bouncebackFee
+    )
+        external;
 
 }
 

@@ -91,7 +91,8 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
 
             ITIP20(tokenOut).approve(targetPortal, amountOut);
-            IZonePortal(targetPortal).depositEncrypted(tokenOut, amountOut, keyIndex, encrypted);
+            IZonePortal(targetPortal)
+                .depositEncrypted(tokenOut, amountOut, keyIndex, encrypted, msg.sender);
         } else {
             (, // skip isEncrypted
                 address tokenOut,
@@ -106,7 +107,7 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             uint128 amountOut = _swapIfNeeded(tokenIn, tokenOut, amount, minAmountOut);
 
             ITIP20(tokenOut).approve(targetPortal, amountOut);
-            IZonePortal(targetPortal).deposit(tokenOut, recipient, amountOut, memo);
+            IZonePortal(targetPortal).deposit(tokenOut, recipient, amountOut, memo, msg.sender);
         }
 
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
