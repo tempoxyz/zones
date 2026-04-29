@@ -255,9 +255,8 @@ fn api_result(
 /// Dispatch a single JSON-RPC request through the private zone RPC pipeline.
 ///
 /// Enforces a strict whitelist of allowed methods (see [`classify_method`]) and
-/// rejects anything unknown or disabled. Restricted methods are gated on
-/// [`AuthContext::is_sequencer`]. Individual handlers may apply additional
-/// per-method access checks (e.g. `full` block requests are sequencer-only).
+/// rejects anything unknown or disabled. Individual handlers may apply
+/// additional per-method access checks.
 pub async fn dispatch(
     req: &JsonRpcRequest,
     auth: &AuthContext,
@@ -274,7 +273,7 @@ pub async fn dispatch(
         MethodTier::Disabled => {
             return JsonRpcResponse::error(id, JsonRpcError::method_disabled());
         }
-        MethodTier::Restricted if !auth.is_sequencer => {
+        MethodTier::Restricted => {
             return JsonRpcResponse::error(id, JsonRpcError::sequencer_only());
         }
         _ => {}
@@ -370,7 +369,7 @@ async fn handle_get_block_by_number(
     };
     let number = normalize_block_number(number);
 
-    if full && !auth.is_sequencer {
+    if full {
         return JsonRpcResponse::error(id, JsonRpcError::sequencer_only());
     }
 
@@ -381,7 +380,7 @@ async fn handle_get_block_by_number(
     )
 }
 
-/// Handle `eth_getBlockByHash`. Rejects `full=true` for non-sequencer callers.
+/// Handle `eth_getBlockByHash`. Rejects `full=true`.
 async fn handle_get_block_by_hash(
     id: Value,
     raw: &str,
@@ -393,7 +392,7 @@ async fn handle_get_block_by_hash(
         Err(resp) => return resp,
     };
 
-    if full && !auth.is_sequencer {
+    if full {
         return JsonRpcResponse::error(id, JsonRpcError::sequencer_only());
     }
 
@@ -456,7 +455,7 @@ async fn handle_call(
             Err(resp) => return resp,
         };
 
-    if !auth.is_sequencer && state_override.is_some() {
+    if state_override.is_some() {
         return JsonRpcResponse::error(
             id,
             JsonRpcError::invalid_params("state overrides not allowed"),
@@ -471,7 +470,7 @@ async fn handle_call(
 }
 
 /// Handle `eth_estimateGas`. Same `from`-enforcement as `eth_call`.
-/// Rejects state overrides for non-sequencer callers.
+/// Rejects state overrides.
 async fn handle_estimate_gas(
     id: Value,
     raw: &str,
@@ -484,7 +483,7 @@ async fn handle_estimate_gas(
             Err(resp) => return resp,
         };
 
-    if !auth.is_sequencer && state_override.is_some() {
+    if state_override.is_some() {
         return JsonRpcResponse::error(
             id,
             JsonRpcError::invalid_params("state overrides not allowed"),
@@ -832,12 +831,11 @@ mod tests {
             })
         }
 
-        fn zone_get_zone_info(&self, auth: AuthContext) -> BoxFut<'_> {
+        fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
             Box::pin(async move {
                 to_raw(&json!({
                     "zoneId": "0x1",
                     "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
-                    "sequencer": format!("{:#x}", auth.caller),
                     "chainId": "0x2a",
                 }))
             })
@@ -864,15 +862,6 @@ mod tests {
     fn auth() -> AuthContext {
         AuthContext {
             caller: Address::repeat_byte(0xaa),
-            is_sequencer: false,
-            expires_at: 1_700_000_000,
-        }
-    }
-
-    fn sequencer_auth() -> AuthContext {
-        AuthContext {
-            caller: Address::repeat_byte(0xbb),
-            is_sequencer: true,
             expires_at: 1_700_000_000,
         }
     }
@@ -947,7 +936,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_state_override_for_non_sequencer_eth_call() {
+    async fn rejects_state_override_for_eth_call() {
         let api = MockZoneRpcApi::default();
         let resp = dispatch(
             &request(
@@ -970,30 +959,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn allows_state_override_for_sequencer_eth_call() {
-        let api = MockZoneRpcApi::default();
-        let resp = dispatch(
-            &request(
-                "eth_call",
-                json!([
-                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
-                    "latest",
-                    {}
-                ]),
-            ),
-            &sequencer_auth(),
-            &api,
-        )
-        .await;
-
-        assert!(resp.result.is_none());
-        let err = resp.error.expect("sequencer request should reach the API");
-        assert_eq!(err.code, -32603);
-        assert_eq!(err.message, "not implemented");
-    }
-
-    #[tokio::test]
-    async fn rejects_state_override_for_non_sequencer_estimate_gas() {
+    async fn rejects_state_override_for_estimate_gas() {
         let api = MockZoneRpcApi::default();
         let resp = dispatch(
             &request(
@@ -1013,29 +979,6 @@ mod tests {
         let err = resp.error.expect("should reject state overrides");
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "state overrides not allowed");
-    }
-
-    #[tokio::test]
-    async fn allows_state_override_for_sequencer_estimate_gas() {
-        let api = MockZoneRpcApi::default();
-        let resp = dispatch(
-            &request(
-                "eth_estimateGas",
-                json!([
-                    {"to": format!("{:#x}", Address::repeat_byte(0x11)), "data": "0x"},
-                    "latest",
-                    {}
-                ]),
-            ),
-            &sequencer_auth(),
-            &api,
-        )
-        .await;
-
-        assert!(resp.result.is_none());
-        let err = resp.error.expect("sequencer request should reach the API");
-        assert_eq!(err.code, -32603);
-        assert_eq!(err.message, "not implemented");
     }
 
     #[tokio::test]

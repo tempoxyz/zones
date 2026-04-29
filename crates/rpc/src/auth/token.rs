@@ -33,8 +33,6 @@ pub const DEFAULT_MAX_AUTH_TOKEN_VALIDITY: Duration =
 pub struct AuthContext {
     /// The authenticated account address.
     pub caller: Address,
-    /// Whether this caller is the sequencer.
-    pub is_sequencer: bool,
     /// Token expiry timestamp (unix seconds).
     pub expires_at: u64,
 }

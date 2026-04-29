@@ -874,11 +874,11 @@ async fn test_encrypted_deposit_and_withdrawal() -> eyre::Result<()> {
     // Must start the zone BEFORE registering the encryption key, so the zone's
     // genesis anchor captures the current L1 block. The encryption key registration
     // and deposit happen in subsequent L1 blocks that the zone processes naturally.
-    let zone = ZoneTestNode::start_from_l1_with_sequencer_key(
+    let zone = ZoneTestNode::start_from_l1_with_sequencer_signer(
         l1.http_url(),
         l1.ws_url(),
         portal_address,
-        encryption_key.clone(),
+        alloy_signer_local::PrivateKeySigner::from_signing_key(encryption_key.clone().into()),
     )
     .await?;
 
@@ -1045,11 +1045,11 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     );
 
     // --- Step 3: Start zone with sequencer key ---
-    let zone = ZoneTestNode::start_from_l1_with_sequencer_key(
+    let zone = ZoneTestNode::start_from_l1_with_sequencer_signer(
         l1.http_url(),
         l1.ws_url(),
         portal_address,
-        encryption_key.clone(),
+        alloy_signer_local::PrivateKeySigner::from_signing_key(encryption_key.clone().into()),
     )
     .await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
