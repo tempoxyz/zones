@@ -214,9 +214,13 @@ fn setup_zone_evm_with_contracts() -> TempoEvm<CacheDB<EmptyDB>> {
     );
     nonce += 1;
 
-    // 4. ZoneOutbox(address config)
+    // 4. ZoneOutbox(address config, address zonePortal, address tempoState)
     let zone_outbox_bytecode = load_artifact("ZoneOutbox");
-    let zone_outbox_args = alloy_sol_types::SolValue::abi_encode_params(&(ZONE_CONFIG_ADDRESS,));
+    let zone_outbox_args = alloy_sol_types::SolValue::abi_encode_params(&(
+        ZONE_CONFIG_ADDRESS,
+        tempo_portal,
+        TEMPO_STATE_ADDRESS,
+    ));
     deploy_contract(
         &mut evm,
         &zone_outbox_bytecode,

@@ -49,9 +49,15 @@ contract ZonePortal is IZonePortal {
     /// @notice Fixed gas value for deposit bounce-back fee calculation
     /// @dev Set to 300,000 gas. Bounceback fee = FIXED_BOUNCEBACK_GAS * tempoGasRate.
     ///      Sized to cover the worst-case Tempo-side refund cost, including new-account
-    ///      creation and `systemForceTransfer` on a TIP-20 token. Snapshotted at deposit
-    ///      time so the user is shielded from later sequencer-driven rate changes.
+    ///      creation and the standard TIP-20 `transfer` plus a possible refund-registry
+    ///      write. Snapshotted at deposit time so the user is shielded from later
+    ///      sequencer-driven rate changes.
     uint64 public constant FIXED_BOUNCEBACK_GAS = 300_000;
+
+    /// @notice Default Tempo gas rate at zone genesis
+    /// @dev Matches `tempo-chainspec`'s `TEMPO_T0_BASE_FEE` (10_000_000_000 token units
+    ///      per gas unit). The sequencer can rotate this via `setTempoGasRate`.
+    uint128 public constant DEFAULT_TEMPO_GAS_RATE = 10_000_000_000;
 
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
@@ -110,14 +116,24 @@ contract ZonePortal is IZonePortal {
     /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
     WithdrawalQueue internal _withdrawalQueue;
 
-    /// @notice Tempo gas rate (zone token units per gas unit on Tempo) used to price
-    ///         deposit bounce-back fees that pay for the Tempo-side refund work.
-    /// @dev Independent from `ZoneOutbox.tempoGasRate` (which prices withdrawal fees).
-    ///      Sequencer publishes this rate and absorbs cost variance.
-    ///      Bounceback fee = FIXED_BOUNCEBACK_GAS * tempoGasRate, snapshotted at deposit time.
+    /// @notice Canonical Tempo gas rate (zone token units per gas unit on Tempo).
+    /// @dev Single source of truth for all Tempo-priced fees:
+    ///        - Deposit bounce-back fees: FIXED_BOUNCEBACK_GAS * tempoGasRate
+    ///        - Withdrawal fees: (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
+    ///      The zone reads this slot via the `TempoState` predeploy when computing
+    ///      withdrawal fees on the zone side; there is no zone-local copy.
+    ///      Sequencer publishes this rate and absorbs cost variance. Snapshotted at
+    ///      deposit time / withdrawal-request time so a later rate change cannot
+    ///      retroactively raise the fee on already-queued items.
     ///      Appended at the end of the storage layout so cross-domain slot constants
     ///      (PORTAL_*_SLOT) defined in IZone.sol remain stable.
     uint128 public tempoGasRate;
+
+    /// @notice Refund registry for deposit bounce-back transfers that reverted on
+    ///         Tempo (e.g. the recipient is rejected by the token's TIP-403 policy
+    ///         at refund time, or the token is paused). The recipient claims via
+    ///         `claimRefund(token)`.
+    mapping(address token => mapping(address owner => uint128 amount)) internal _refunds;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -138,6 +154,12 @@ contract ZonePortal is IZonePortal {
         verifier = _verifier;
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
+
+        // Initialize tempoGasRate to the current Tempo flat-fee base fee so the zone
+        // can charge withdrawal fees and price deposit bounce-back fees from genesis
+        // without the sequencer needing to call setTempoGasRate first.
+        tempoGasRate = DEFAULT_TEMPO_GAS_RATE;
+        emit TempoGasRateUpdated(DEFAULT_TEMPO_GAS_RATE);
 
         // Enable the initial token
         _enableTokenInternal(_initialToken);
@@ -184,8 +206,11 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Set Tempo gas rate. Only callable by sequencer.
-    /// @dev Used to price the deposit bounce-back fee, which covers Tempo-side refund work
-    ///      (new-account creation, `systemForceTransfer`). Sequencer absorbs cost variance.
+    /// @dev Single canonical source for all Tempo-priced fees:
+    ///        - Deposit bounce-back fees on Tempo (`FIXED_BOUNCEBACK_GAS * tempoGasRate`)
+    ///        - Withdrawal fees on Tempo (`(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate`)
+    ///      The zone reads this slot via `TempoState` for withdrawal fee calculation.
+    ///      Sequencer absorbs cost variance.
     /// @param _tempoGasRate Zone token units per gas unit on Tempo
     function setTempoGasRate(uint128 _tempoGasRate) external onlySequencer {
         if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
@@ -533,21 +558,18 @@ contract ZonePortal is IZonePortal {
         // (_enqueueWithdrawalBounceBack), which bypasses this entry point.
         if (bouncebackRecipient == address(0)) revert MissingBouncebackRecipient();
 
-        // Enforce TIP-403 policy: the recipient must be authorized under the
-        // token's transfer policy before accepting the deposit.
+        // Enforce TIP-403 policy: the deposit recipient `to` must be authorized
+        // under the token's transfer policy before accepting the deposit. We do
+        // NOT validate `bouncebackRecipient` against the policy here — if the
+        // bounce-back transfer is later rejected by the policy, the funds land
+        // in the per-recipient refund registry (claimRefund) rather than
+        // reverting the bounce-back, so an unauthorized refund target does not
+        // stall queue progress.
         uint64 policyId = ITIP20(_token).transferPolicyId();
         if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
             revert DepositPolicyForbids();
         }
         if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
-            revert DepositPolicyForbids();
-        }
-
-        // Validate bouncebackRecipient against TIP-403 at deposit time so that
-        // bounceback transfers on L1 are guaranteed to succeed against this
-        // specific policy even if the recipient is later blacklisted (portal
-        // has a TIP-403 bypass on the bounceback path).
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
             revert DepositPolicyForbids();
         }
 
@@ -630,16 +652,10 @@ contract ZonePortal is IZonePortal {
         // Encrypted deposits cannot opt out of bounce-back: a ciphertext that fails
         // onchain decryption verification has no well-defined recipient on the zone,
         // so without a refund target the deposit queue would stall on that entry.
+        // We do NOT validate `bouncebackRecipient` against the token's TIP-403 policy
+        // here — the on-Tempo refund path catches a policy-rejected transfer and
+        // routes the funds to the refund registry instead of reverting.
         if (bouncebackRecipient == address(0)) revert MissingBouncebackRecipient();
-
-        // Validate bouncebackRecipient against the token's TIP-403 policy at deposit
-        // time so that bounceback transfers on L1 are guaranteed to succeed for this
-        // recipient even if the recipient is later blacklisted (portal has a TIP-403
-        // bypass on the bounceback path).
-        uint64 policyId = ITIP20(_token).transferPolicyId();
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
-            revert DepositPolicyForbids();
-        }
 
         // Validate ephemeral public key is a valid secp256k1 point
         // Prevents griefing: invalid points make Chaum-Pedersen proofs impossible,
@@ -726,7 +742,10 @@ contract ZonePortal is IZonePortal {
     ///      withdrawal with `fallbackRecipient == address(0)`, `fee == 0`, `gasLimit == 0`,
     ///      and a non-zero `bouncebackFee` carried from the original deposit. On this
     ///      path the portal pays the snapshotted bouncebackFee to the sequencer and
-    ///      transfers `amount - bouncebackFee` to `to` (the original bouncebackRecipient).
+    ///      attempts a standard `transfer` of `amount - bouncebackFee` to `to`. If that
+    ///      transfer reverts (e.g. TIP-403 forbids the recipient at refund time), the
+    ///      residual is parked in the per-recipient refund registry instead, claimable
+    ///      via `claimRefund(token)` once the policy permits.
     function processWithdrawal(
         Withdrawal calldata withdrawal,
         bytes32 remainingQueue
@@ -749,11 +768,12 @@ contract ZonePortal is IZonePortal {
         // Detect the deposit-bounce-back path: enqueueDepositBounceBack always sets
         // fee = 0, gasLimit = 0, fallbackRecipient = address(0), and a non-zero
         // bouncebackFee. We pay the snapshotted bouncebackFee to the sequencer and
-        // forward the residual to the original bouncebackRecipient (carried in `to`).
-        // We use systemForceTransfer to bypass the TIP-403 transfer policy on the
-        // refund leg, mirroring the zone-side systemForceMint guarantee (TIP-1052):
-        // the recipient was TIP-403-validated at deposit time, so the refund is
-        // guaranteed-live against later policy edits.
+        // attempt to forward the residual to the original bouncebackRecipient
+        // (carried in `to`) via the standard TIP-20 `transfer`. The transfer is
+        // wrapped in `try/catch`: if the active TIP-403 policy now forbids the
+        // recipient (or any other token-side rejection occurs), the residual is
+        // parked in the refund registry and the user can claim it later via
+        // `claimRefund`. The bounce-back entry is fully retired either way.
         if (
             withdrawal.fallbackRecipient == address(0) && withdrawal.gasLimit == 0
                 && withdrawal.bouncebackFee > 0
@@ -767,10 +787,23 @@ contract ZonePortal is IZonePortal {
             if (amt < bbFee) revert DepositTooSmall();
 
             ITIP20(_token).transfer(sequencer, bbFee);
-            ITIP20(_token).systemForceTransfer(address(this), withdrawal.to, amt - bbFee);
 
-            emit DepositBounceBack(withdrawal.to, _token, amt - bbFee, bbFee);
-            emit WithdrawalProcessed(withdrawal.to, _token, amt - bbFee, true);
+            uint128 residual = amt - bbFee;
+            bool transferred;
+            try ITIP20(_token).transfer(withdrawal.to, residual) returns (bool ok) {
+                transferred = ok;
+            } catch {
+                transferred = false;
+            }
+
+            if (transferred) {
+                emit DepositBounceBack(withdrawal.to, _token, residual, bbFee);
+                emit WithdrawalProcessed(withdrawal.to, _token, residual, true);
+            } else {
+                _refunds[_token][withdrawal.to] += residual;
+                emit DepositBounceBackPending(withdrawal.to, _token, residual, bbFee);
+                emit WithdrawalProcessed(withdrawal.to, _token, residual, false);
+            }
             return;
         }
 
@@ -833,8 +866,8 @@ contract ZonePortal is IZonePortal {
             memo: bytes32(0),
             bouncebackRecipient: address(0),
             // Terminal one-shot path: this deposit cannot bounce again, so no fee is
-            // reserved. ZoneInbox processes such entries via systemForceMint and never
-            // re-enqueues a Tempo-side bounce-back for them.
+            // reserved. ZoneInbox attempts a standard mint and routes failures into
+            // its own refund registry rather than re-enqueueing a Tempo-side bounce-back.
             bouncebackFee: 0
         });
 
@@ -846,6 +879,36 @@ contract ZonePortal is IZonePortal {
         emit WithdrawalBounceBack(
             newCurrentDepositQueueHash, fallbackRecipient, _token, amount, thisDeposit
         );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           REFUND REGISTRY
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Outstanding refundable balance for a recipient on a given token.
+    /// @param _token The TIP-20 token
+    /// @param owner The recipient address
+    function refunds(address _token, address owner) external view returns (uint128) {
+        return _refunds[_token][owner];
+    }
+
+    /// @notice Claim outstanding deposit-bounce-back refunds in `token` for `msg.sender`.
+    /// @dev If the active TIP-403 policy still forbids `msg.sender`, the underlying
+    ///      `ITIP20.transfer` reverts and storage is unchanged — the user retries later.
+    /// @param _token The TIP-20 token to claim a refund for
+    /// @return amount The amount transferred
+    function claimRefund(address _token) external returns (uint128 amount) {
+        amount = _refunds[_token][msg.sender];
+        if (amount == 0) revert NoRefundAvailable();
+
+        // CEI: zero the slot before the external call so a reverting transfer
+        // rolls back to the original balance and a successful transfer is
+        // non-reentrant-safe (a re-entered claim sees a zero balance).
+        _refunds[_token][msg.sender] = 0;
+
+        ITIP20(_token).transfer(msg.sender, amount);
+
+        emit RefundClaimed(msg.sender, _token, amount);
     }
 
     /*//////////////////////////////////////////////////////////////

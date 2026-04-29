@@ -49,7 +49,7 @@ contract ZoneOutboxTest is Test {
         tempoState.setMockStorageValue(
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
-        outbox = new ZoneOutbox(address(config));
+        outbox = new ZoneOutbox(address(config), mockPortal, address(tempoState));
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState), address(outbox));
 
         // Grant minter role to inbox and burner role to outbox

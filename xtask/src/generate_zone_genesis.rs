@@ -181,7 +181,8 @@ impl GenerateZoneGenesis {
         nonce += 1;
 
         let zone_outbox_bytecode = load_artifact(&self.specs_out, "ZoneOutbox")?;
-        let zone_outbox_args = (ZONE_CONFIG_ADDRESS,).abi_encode_params();
+        let zone_outbox_args =
+            (ZONE_CONFIG_ADDRESS, self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
         deploy_contract(
             &mut evm,
             &zone_outbox_bytecode,

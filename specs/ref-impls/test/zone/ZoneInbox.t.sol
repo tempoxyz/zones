@@ -58,7 +58,7 @@ contract ZoneInboxTest is Test {
         tempoState.setMockStorageValue(
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
-        outbox = new ZoneOutbox(address(config));
+        outbox = new ZoneOutbox(address(config), mockPortal, address(tempoState));
 
         // Deploy inbox normally, then relocate its bytecode to the canonical
         // ZONE_INBOX address. ZoneOutbox.enqueueDepositBounceBack only accepts
@@ -116,7 +116,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             memo: bytes32("payment"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -142,7 +142,7 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             memo: bytes32("d1"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
         deposits[1] = Deposit({
@@ -151,7 +151,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             memo: bytes32("d2"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
         deposits[2] = Deposit({
@@ -160,7 +160,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 300e6,
             memo: bytes32("d3"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -193,7 +193,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             memo: bytes32("payment"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -221,7 +221,7 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             memo: bytes32("d1"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
         allDeposits[1] = Deposit({
@@ -230,7 +230,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             memo: bytes32("d2"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -297,7 +297,7 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             memo: bytes32("d1"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
         batch1[1] = Deposit({
@@ -306,7 +306,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             memo: bytes32("d2"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -329,7 +329,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 500e6,
             memo: bytes32("d3"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -357,7 +357,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             memo: bytes32("payment"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -388,7 +388,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             memo: bytes32("payment"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -418,7 +418,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 0,
             memo: bytes32("empty"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
 
@@ -461,7 +461,7 @@ contract ZoneInboxTest is Test {
                 to: bob,
                 amount: uint128(i + 1) * 1e6,
                 memo: bytes32(i),
-                bouncebackRecipient: address(0),
+                bouncebackRecipient: alice,
             bouncebackFee: 0
             });
             currentHash = keccak256(abi.encode(DepositType.Regular, deposits[i], currentHash));
@@ -662,7 +662,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 100e6,
             memo: bytes32("d1"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
         QueuedDeposit memory qdRegular =
@@ -731,7 +731,7 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 100e6,
             memo: bytes32("d1"),
-            bouncebackRecipient: address(0),
+            bouncebackRecipient: alice,
             bouncebackFee: 0
         });
         QueuedDeposit memory qd =

@@ -177,7 +177,7 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.setMinter(address(l2Inbox), true);
 
         // Zone outbox (handles withdrawals)
-        l2Outbox = new ZoneOutbox(address(l2Config));
+        l2Outbox = new ZoneOutbox(address(l2Config), address(l1Portal), address(l2TempoState));
         l2ZoneToken.setBurner(address(l2Outbox), true);
 
         // Initialize zone block hash

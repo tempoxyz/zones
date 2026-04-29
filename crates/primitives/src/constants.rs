@@ -68,8 +68,10 @@ pub const ZONE_INBOX_PROCESSED_HASH_SLOT: U256 = U256::ZERO;
 
 /// ZoneOutbox storage slot 1: `_lastBatch.withdrawalQueueHash` (bytes32).
 ///
-/// Slot 0 is packed `(tempoGasRate, nextWithdrawalIndex, withdrawalBatchIndex)`.
-/// The `_lastBatch` struct starts at slot 1 with `withdrawalQueueHash` occupying the full slot.
+/// Slot 0 is packed `(nextWithdrawalIndex, withdrawalBatchIndex)`. The canonical
+/// `tempoGasRate` lives on `ZonePortal` on Tempo and is read by the outbox via
+/// `TempoState`. The `_lastBatch` struct starts at slot 1 with `withdrawalQueueHash`
+/// occupying the full slot.
 pub const ZONE_OUTBOX_LAST_BATCH_HASH_SLOT: U256 = {
     let mut le = [0u8; 32];
     le[0] = 1;

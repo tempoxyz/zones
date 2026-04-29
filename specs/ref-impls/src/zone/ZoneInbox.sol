@@ -53,6 +53,11 @@ contract ZoneInbox is IZoneInbox {
     /// @notice Last processed deposit number (mirrors lastProcessedDepositNumber on L1)
     uint64 public processedDepositNumber;
 
+    /// @notice Refund registry for withdrawal-bounce-back deposits whose zone-side
+    ///         mint reverted (e.g. the recipient is rejected by the zone TIP-403
+    ///         policy at processing time). The recipient claims via `claimRefund(token)`.
+    mapping(address token => mapping(address owner => uint128 amount)) internal _refunds;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -265,15 +270,18 @@ contract ZoneInbox is IZoneInbox {
                     }
                 } else {
                     // Internal withdrawal-bounce-back deposit — terminal one-shot path.
-                    // Use systemForceMint to bypass the zone-side TIP-403 mint-recipient
-                    // check (TIP-1052). fallbackRecipient was TIP-403-validated on the
-                    // zone at requestWithdrawal time; this guarantees the refund mint
-                    // succeeds against policy drift between request time and bounce-back
-                    // processing time. Without the bypass, a policy edit would be able to
-                    // stall ZoneInbox.advanceTempo on the bounce-back entry.
+                    // Attempt the standard mint to fallbackRecipient. If the zone-side
+                    // TIP-403 policy now forbids the recipient (or any other token-side
+                    // rejection occurs), credit the user in the per-recipient refund
+                    // registry instead of reverting; the recipient can retry later via
+                    // `claimRefund(token)`. The deposit queue advances either way.
                     // The sequencer's `rejected` flag is ignored on this terminal path.
-                    IZoneToken(d.token).systemForceMint(d.to, d.amount);
-                    emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
+                    try IZoneToken(d.token).mint(d.to, d.amount) {
+                        emit WithdrawalBounceBackProcessed(d.to, d.token, d.amount);
+                    } catch {
+                        _refunds[d.token][d.to] += d.amount;
+                        emit WithdrawalBounceBackPending(d.to, d.token, d.amount);
+                    }
                 }
             } else {
                 // Decode encrypted deposit
@@ -409,6 +417,37 @@ contract ZoneInbox is IZoneInbox {
             currentHash,
             processedDepositNumber
         );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           REFUND REGISTRY
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Outstanding refundable balance for a recipient on a given token.
+    /// @dev    Populated when a withdrawal-bounce-back mint reverted on the zone
+    ///         (e.g. the zone-side TIP-403 policy rejected the recipient). The
+    ///         recipient claims via `claimRefund(token)`.
+    function refunds(address token, address owner) external view returns (uint128) {
+        return _refunds[token][owner];
+    }
+
+    /// @notice Claim outstanding withdrawal-bounce-back refunds in `token` for `msg.sender`.
+    /// @dev    Reverts (`NoRefundAvailable`) if there is nothing to claim. If the
+    ///         active TIP-403 policy still forbids `msg.sender`, the underlying
+    ///         `mint` reverts and storage is unchanged; the user can retry later.
+    /// @param  token The TIP-20 token to claim a refund for
+    /// @return amount The amount minted to msg.sender
+    function claimRefund(address token) external returns (uint128 amount) {
+        amount = _refunds[token][msg.sender];
+        if (amount == 0) revert NoRefundAvailable();
+
+        // CEI: zero the slot before the external call so a reverting mint rolls
+        // storage back to the original balance and re-entrancy sees zero.
+        _refunds[token][msg.sender] = 0;
+
+        IZoneToken(token).mint(msg.sender, amount);
+
+        emit RefundClaimed(msg.sender, token, amount);
     }
 
 }
