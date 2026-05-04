@@ -518,6 +518,28 @@ contract ZoneOutboxTest is Test {
         assertEq(outbox.pendingWithdrawalsCount(), 1);
     }
 
+    function test_requestWithdrawal_revertsWhenGasLimitTooHigh() public {
+        uint64 highGasLimit = outbox.MAX_WITHDRAWAL_GAS_LIMIT() + 1;
+        assertEq(outbox.MAX_WITHDRAWAL_GAS_LIMIT(), 10_000_000);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
+
+        vm.expectRevert(ZoneOutbox.GasLimitTooHigh.selector);
+        outbox.requestWithdrawal(
+            address(zoneToken), bob, 500e6, bytes32(0), highGasLimit, alice, "callback"
+        );
+        vm.stopPrank();
+    }
+
+    function test_calculateWithdrawalFee_revertsWhenGasLimitTooHigh() public {
+        uint64 highGasLimit = outbox.MAX_WITHDRAWAL_GAS_LIMIT() + 1;
+        assertEq(outbox.MAX_WITHDRAWAL_GAS_LIMIT(), 10_000_000);
+
+        vm.expectRevert(ZoneOutbox.GasLimitTooHigh.selector);
+        outbox.calculateWithdrawalFee(highGasLimit);
+    }
+
     function test_requestWithdrawal_validRevealTo_ok() public {
         vm.startPrank(alice);
         zoneToken.approve(address(outbox), 500e6);

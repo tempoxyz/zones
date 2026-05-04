@@ -40,13 +40,33 @@ use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
-    abi::{self, ZonePortal},
+    abi::{self, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
     metrics::WithdrawalProcessorMetrics,
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
 
 const PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
+const PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS: u64 = 2_000_000;
+#[cfg(test)]
+const MAX_PROCESS_WITHDRAWAL_TX_GAS: u64 =
+    process_withdrawal_tx_gas_limit(MAX_WITHDRAWAL_GAS_LIMIT);
+
+const fn eip150_cushion(gas_limit: u64) -> u64 {
+    gas_limit / 63 + if gas_limit.is_multiple_of(63) { 0 } else { 1 }
+}
+
+const fn process_withdrawal_tx_gas_limit(callback_gas_limit: u64) -> u64 {
+    let bounded_callback_gas = if callback_gas_limit > MAX_WITHDRAWAL_GAS_LIMIT {
+        MAX_WITHDRAWAL_GAS_LIMIT
+    } else {
+        callback_gas_limit
+    };
+
+    bounded_callback_gas
+        + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
+        + eip150_cushion(bounded_callback_gas)
+}
 
 /// Shared handle to the withdrawal store.
 #[derive(Clone)]
@@ -376,7 +396,9 @@ impl WithdrawalProcessor {
             //
             // The tx gas limit is composed of three parts:
             //
-            //   txGas = gasLimit + CALLBACK_OVERHEAD + eip150_cushion
+            //   txGas = min(gasLimit, MAX_WITHDRAWAL_GAS_LIMIT)
+            //         + CALLBACK_OVERHEAD
+            //         + eip150_cushion
             //
             // 1. `gasLimit`          — gas the user requested for their callback.
             // 2. `CALLBACK_OVERHEAD` — fixed cost for the portal + messenger
@@ -387,11 +409,25 @@ impl WithdrawalProcessor {
             // 3. EIP-150 cushion     — the 63/64 forwarding rule means the
             //    caller must hold back 1/64 of remaining gas. To guarantee
             //    the inner CALL receives at least `gasLimit`, the outer frame
-            //    needs an extra `ceil(gasLimit / 63)`.
+            //    needs an extra `ceil(bounded_callback_gas / 63)`.
+            //
+            // `MAX_WITHDRAWAL_GAS_LIMIT` mirrors the contract-level cap. It
+            // also bounds legacy over-cap withdrawals so RPC nodes do not
+            // reject the transaction before the portal can dequeue and
+            // bounce them back.
             let call = if withdrawal.gasLimit > 0 {
-                const CALLBACK_OVERHEAD: u64 = 2_000_000;
-                let eip150_cushion = withdrawal.gasLimit.div_ceil(63);
-                call.gas(withdrawal.gasLimit + CALLBACK_OVERHEAD + eip150_cushion)
+                let tx_gas_limit = process_withdrawal_tx_gas_limit(withdrawal.gasLimit);
+                if withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT {
+                    warn!(
+                        slot = head_val,
+                        index = i,
+                        requested_gas_limit = withdrawal.gasLimit,
+                        max_gas_limit = MAX_WITHDRAWAL_GAS_LIMIT,
+                        tx_gas_limit,
+                        "withdrawal callback gas exceeds protocol cap; submitting bounded tx"
+                    );
+                }
+                call.gas(tx_gas_limit)
             } else {
                 call
             };
@@ -640,6 +676,22 @@ mod tests {
         let remaining = compute_remaining_queue(&[w0, w1.clone(), w2.clone()], 1);
         let expected = abi::Withdrawal::queue_hash(&[w1, w2]);
         assert_eq!(remaining, expected);
+    }
+
+    #[test]
+    fn callback_tx_gas_limit_is_capped_below_l1_block_limit() {
+        let at_cap = process_withdrawal_tx_gas_limit(MAX_WITHDRAWAL_GAS_LIMIT);
+        let over_cap = process_withdrawal_tx_gas_limit(MAX_WITHDRAWAL_GAS_LIMIT + 1);
+
+        assert_eq!(over_cap, at_cap);
+        assert_eq!(at_cap, MAX_PROCESS_WITHDRAWAL_TX_GAS);
+        assert_eq!(
+            at_cap,
+            MAX_WITHDRAWAL_GAS_LIMIT
+                + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
+                + MAX_WITHDRAWAL_GAS_LIMIT.div_ceil(63)
+        );
+        assert!(at_cap < 30_000_000);
     }
 
     #[test]

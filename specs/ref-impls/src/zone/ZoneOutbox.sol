@@ -7,6 +7,7 @@ import {
     IZoneToken,
     IZoneTxContext,
     LastBatch,
+    MAX_WITHDRAWAL_CALLBACK_GAS,
     PendingWithdrawal,
     Withdrawal,
     ZONE_TX_CONTEXT
@@ -27,6 +28,10 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Maximum size of callback data in bytes
     /// @dev Limits storage costs and hash computation overhead
     uint256 public constant MAX_CALLBACK_DATA_SIZE = 1024;
+
+    /// @notice Maximum gas a withdrawal callback may request
+    /// @dev The L1 processor adds overhead and an EIP-150 cushion around this value.
+    uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
     /// @notice Maximum gas fee rate ($1 per gas for 6-decimal stablecoins)
     /// @dev Ensures gasLimit (uint64) * gasFeeRate fits in uint128 without overflow.
@@ -106,6 +111,7 @@ contract ZoneOutbox is IZoneOutbox {
     error InvalidCurrentTxHash();
     error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
+    error GasLimitTooHigh();
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -145,7 +151,8 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param gasLimit Total gas limit (must cover processWithdrawal + any callback)
     /// @return fee The total fee in zone token units
     function calculateWithdrawalFee(uint64 gasLimit) public view returns (uint128 fee) {
-        fee = uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate;
+        _validateGasLimit(gasLimit);
+        fee = _calculateWithdrawalFee(gasLimit);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -225,6 +232,8 @@ contract ZoneOutbox is IZoneOutbox {
             revert InvalidFallbackRecipient();
         }
 
+        _validateGasLimit(gasLimit);
+
         // Limit callback data size to prevent storage bloat and hash computation abuse
         if (data.length > MAX_CALLBACK_DATA_SIZE) {
             revert CallbackDataTooLarge();
@@ -246,7 +255,7 @@ contract ZoneOutbox is IZoneOutbox {
 
         // Calculate processing fee (locked in at request time)
         // Fee is paid in the same token being withdrawn
-        uint128 fee = calculateWithdrawalFee(gasLimit);
+        uint128 fee = _calculateWithdrawalFee(gasLimit);
         uint128 totalBurn = amount + fee;
         bytes32 txHash = IZoneTxContext(ZONE_TX_CONTEXT).currentTxHash();
         if (txHash == bytes32(0)) revert InvalidCurrentTxHash();
@@ -411,6 +420,14 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Last finalized batch parameters (for proof access via state root)
     function lastBatch() external view returns (LastBatch memory) {
         return _lastBatch;
+    }
+
+    function _validateGasLimit(uint64 gasLimit) internal pure {
+        if (gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) revert GasLimitTooHigh();
+    }
+
+    function _calculateWithdrawalFee(uint64 gasLimit) internal view returns (uint128) {
+        return uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate;
     }
 
     function _validateRevealTo(bytes memory revealTo) internal view {
