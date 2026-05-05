@@ -146,9 +146,10 @@ contract ZoneOutbox is IZoneOutbox {
         emit MaxWithdrawalsPerBlockUpdated(_maxWithdrawalsPerBlock);
     }
 
-    /// @notice Calculate the fee for a withdrawal with the given gasLimit
-    /// @dev Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate. User must estimate total gas needed.
-    /// @param gasLimit Total gas limit (must cover processWithdrawal + any callback)
+    /// @notice Calculate the fee for a withdrawal with the given callback gas limit
+    /// @dev Reverts if `gasLimit` exceeds MAX_WITHDRAWAL_GAS_LIMIT.
+    ///      Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate.
+    /// @param gasLimit L1 callback gas limit (0 = no callback)
     /// @return fee The total fee in zone token units
     function calculateWithdrawalFee(uint64 gasLimit) public view returns (uint128 fee) {
         _validateGasLimit(gasLimit);
@@ -169,7 +170,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param to The Tempo recipient address
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
-    /// @param gasLimit Gas limit for IWithdrawalReceiver callback (0 = no callback)
+    /// @param gasLimit L1 callback gas limit (0 = no callback, capped by MAX_WITHDRAWAL_GAS_LIMIT)
     /// @param fallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     function requestWithdrawal(
@@ -196,7 +197,7 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param to The Tempo recipient address
     /// @param amount Amount to send to recipient (fee is additional)
     /// @param memo User-provided context (e.g., payment reference)
-    /// @param gasLimit Gas limit for IWithdrawalReceiver callback (0 = no callback)
+    /// @param gasLimit L1 callback gas limit (0 = no callback, capped by MAX_WITHDRAWAL_GAS_LIMIT)
     /// @param fallbackRecipient Zone address for bounce-back if callback fails
     /// @param data Calldata for IWithdrawalReceiver callback
     /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
@@ -215,6 +216,18 @@ contract ZoneOutbox is IZoneOutbox {
         _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo);
     }
 
+    /// @notice Shared implementation for withdrawal requests with optional sender reveal
+    /// @dev Validates the callback gas cap before fee calculation and before storing
+    ///      the withdrawal, so over-cap requests cannot enter the L2 withdrawal queue.
+    ///      Transfers and burns `amount + fee` before appending the pending withdrawal.
+    /// @param token The TIP-20 token to withdraw
+    /// @param to The Tempo recipient address
+    /// @param amount Amount to send to recipient (fee is additional)
+    /// @param memo User-provided context (e.g., payment reference)
+    /// @param gasLimit L1 callback gas limit (0 = no callback)
+    /// @param fallbackRecipient Zone address for bounce-back if callback fails
+    /// @param data Calldata for IWithdrawalReceiver callback
+    /// @param revealTo Optional compressed secp256k1 pubkey for encrypted sender reveal
     function _requestWithdrawal(
         address token,
         address to,
@@ -422,10 +435,19 @@ contract ZoneOutbox is IZoneOutbox {
         return _lastBatch;
     }
 
+    /// @notice Revert if a withdrawal callback gas limit exceeds the protocol cap
+    /// @dev Applied by both fee estimation and request submission to keep the L2
+    ///      withdrawal queue free of callbacks that cannot fit in an L1 block.
+    /// @param gasLimit L1 callback gas limit requested by the user
     function _validateGasLimit(uint64 gasLimit) internal pure {
         if (gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) revert GasLimitTooHigh();
     }
 
+    /// @notice Calculate the withdrawal processing fee for a validated gas limit
+    /// @dev Caller must validate `gasLimit` with _validateGasLimit() first.
+    ///      Fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate.
+    /// @param gasLimit L1 callback gas limit included in the fee
+    /// @return fee The total fee in zone token units
     function _calculateWithdrawalFee(uint64 gasLimit) internal view returns (uint128) {
         return uint128(WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate;
     }
