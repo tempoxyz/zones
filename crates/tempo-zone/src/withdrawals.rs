@@ -52,22 +52,6 @@ const PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS: u64 = 2_000_000;
 const MAX_PROCESS_WITHDRAWAL_TX_GAS: u64 =
     process_withdrawal_tx_gas_limit(MAX_WITHDRAWAL_GAS_LIMIT);
 
-const fn eip150_cushion(gas_limit: u64) -> u64 {
-    gas_limit / 63 + if gas_limit.is_multiple_of(63) { 0 } else { 1 }
-}
-
-const fn process_withdrawal_tx_gas_limit(callback_gas_limit: u64) -> u64 {
-    let bounded_callback_gas = if callback_gas_limit > MAX_WITHDRAWAL_GAS_LIMIT {
-        MAX_WITHDRAWAL_GAS_LIMIT
-    } else {
-        callback_gas_limit
-    };
-
-    bounded_callback_gas
-        + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
-        + eip150_cushion(bounded_callback_gas)
-}
-
 /// Shared handle to the withdrawal store.
 #[derive(Clone)]
 pub struct SharedWithdrawalStore(Arc<Mutex<WithdrawalStore>>);
@@ -216,6 +200,33 @@ struct StoreSnapshot {
     prev_slot: Option<u64>,
     next_slot: Option<u64>,
     withdrawals: Option<Vec<abi::Withdrawal>>,
+}
+
+/// Return the extra outer-frame gas needed for EIP-150's 63/64 forwarding rule.
+///
+/// `ZonePortal.processWithdrawal` must keep enough gas in the caller frame for the
+/// callback CALL to receive at least `gas_limit`. The cushion is `ceil(gas_limit / 63)`,
+/// which compensates for the 1/64 of remaining gas that EIP-150 withholds from the call.
+const fn eip150_cushion(gas_limit: u64) -> u64 {
+    gas_limit / 63 + if gas_limit.is_multiple_of(63) { 0 } else { 1 }
+}
+
+/// Return the outer transaction gas limit for a callback withdrawal.
+///
+/// The callback portion is capped at [`MAX_WITHDRAWAL_GAS_LIMIT`] before adding the
+/// fixed portal/messenger overhead and the EIP-150 cushion. This keeps legacy over-cap
+/// withdrawals submit-able so the portal can dequeue and bounce them instead of letting
+/// the RPC reject the transaction before it reaches L1 execution.
+const fn process_withdrawal_tx_gas_limit(callback_gas_limit: u64) -> u64 {
+    let bounded_callback_gas = if callback_gas_limit > MAX_WITHDRAWAL_GAS_LIMIT {
+        MAX_WITHDRAWAL_GAS_LIMIT
+    } else {
+        callback_gas_limit
+    };
+
+    bounded_callback_gas
+        + PROCESS_WITHDRAWAL_CALLBACK_OVERHEAD_GAS
+        + eip150_cushion(bounded_callback_gas)
 }
 
 /// Background task that processes withdrawals from the ZonePortal queue on Tempo L1.
