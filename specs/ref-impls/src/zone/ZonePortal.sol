@@ -16,6 +16,7 @@ import {
     IVerifier,
     IZoneMessenger,
     IZonePortal,
+    MAX_WITHDRAWAL_CALLBACK_GAS,
     QueuedDeposit,
     TokenConfig,
     Withdrawal
@@ -45,6 +46,10 @@ contract ZonePortal is IZonePortal {
     ///      This provides a stable pricing basis for deposits while allowing sequencer
     ///      flexibility to adjust the zoneGasRate based on operational costs.
     uint64 public constant FIXED_DEPOSIT_GAS = 100_000;
+
+    /// @notice Maximum gas a withdrawal callback may request
+    /// @dev Over-cap legacy withdrawals are dequeued and bounced back in `processWithdrawal`.
+    uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
     /// @notice Maximum allowed gas fee rate to prevent overflows
     uint128 public constant MAX_GAS_FEE_RATE = 1e18;
@@ -642,6 +647,12 @@ contract ZonePortal is IZonePortal {
         // Transfer fee to sequencer (always, regardless of withdrawal success)
         if (withdrawal.fee > 0) {
             ITIP20(_token).transfer(sequencer, withdrawal.fee);
+        }
+
+        if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
+            _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
+            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
+            return;
         }
 
         // Execute the withdrawal

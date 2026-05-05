@@ -5,6 +5,12 @@ use alloy_primitives::{Address, B256, U256, address};
 /// Sentinel value for empty withdrawal queue slots.
 pub const EMPTY_SENTINEL: B256 = B256::new([0xff; 32]);
 
+/// Maximum callback gas a withdrawal may request.
+///
+/// The L1 processor adds fixed overhead plus an EIP-150 cushion, so this value
+/// keeps the outer `processWithdrawal` transaction well below a 30M gas block.
+pub const MAX_WITHDRAWAL_GAS_LIMIT: u64 = 10_000_000;
+
 /// TempoState predeploy address on Zone L2.
 pub const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 

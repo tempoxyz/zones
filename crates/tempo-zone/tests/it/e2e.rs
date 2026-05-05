@@ -5,8 +5,12 @@
 //! subscriber retries a dummy URL in the background, but L2 execution is fully
 //! exercised via queue injection (with the L1 state cache seeded for precompile reads).
 
-use alloy::primitives::{Address, B256, U256, address};
+use alloy::primitives::{Address, B256, Bytes, U256, address};
 use alloy_eips::NumHash;
+use alloy_provider::ProviderBuilder;
+use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
+use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use zone::{
     ChainTempoStateExt,
@@ -17,8 +21,8 @@ use zone::{
 };
 
 use crate::utils::{
-    DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, ZoneTestNode, poll_until, seed_fixture_for_zone,
-    start_local_zone_with_fixture,
+    DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TEST_MNEMONIC, WITHDRAWAL_TX_GAS, ZoneTestNode,
+    poll_until, seed_fixture_for_zone, start_local_zone_with_fixture,
 };
 
 /// Self-contained test: inject a deposit via the queue and verify the zone
@@ -415,6 +419,85 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
         last_batch.withdrawalQueueHash,
         B256::ZERO,
         "lastBatch.withdrawalQueueHash should be zero with no withdrawals"
+    );
+
+    Ok(())
+}
+
+/// Submit a signed L2 withdrawal request with an over-cap callback gas limit.
+///
+/// This exercises the RPC transaction path: the transaction is accepted into a
+/// zone block, reverts in `ZoneOutbox`, and does not enter the pending
+/// withdrawal queue.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+
+    let dev_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let dev_address = dev_signer.address();
+
+    let provider = ProviderBuilder::new()
+        .wallet(dev_signer)
+        .connect_http(zone.http_url().clone());
+    let zone_token = ITIP20::new(PATH_USD_ADDRESS, &provider);
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+
+    let deposit_amount: u128 = 1_000_000;
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
+    fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
+
+    zone.wait_for_balance(
+        PATH_USD_ADDRESS,
+        dev_address,
+        U256::from(deposit_amount),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    let approve_pending = zone_token
+        .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    let approve_receipt = approve_pending.get_receipt().await?;
+    assert!(approve_receipt.status(), "approve should succeed");
+
+    let pending_before = outbox.pendingWithdrawalsCount().call().await?;
+    let max_callback_gas = outbox.MAX_WITHDRAWAL_GAS_LIMIT().call().await?;
+
+    let withdrawal_pending = outbox
+        .requestWithdrawal(
+            PATH_USD_ADDRESS,
+            dev_address,
+            250_000,
+            B256::ZERO,
+            max_callback_gas + 1,
+            dev_address,
+            Bytes::from_static(b"callback"),
+            Bytes::new(),
+        )
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(WITHDRAWAL_TX_GAS)
+        .send()
+        .await?;
+
+    fixture.inject_empty_block(zone.deposit_queue());
+    let withdrawal_receipt = withdrawal_pending.get_receipt().await?;
+    assert!(
+        !withdrawal_receipt.status(),
+        "over-cap withdrawal request should revert on L2"
+    );
+
+    let pending_after = outbox.pendingWithdrawalsCount().call().await?;
+    assert_eq!(
+        pending_after, pending_before,
+        "reverted withdrawal must not enter the pending queue"
     );
 
     Ok(())

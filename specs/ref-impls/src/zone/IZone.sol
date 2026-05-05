@@ -291,6 +291,12 @@ interface ITempoStateReader {
 
 }
 
+// Maximum callback gas a withdrawal may request.
+// The processor adds fixed overhead plus an EIP-150 cushion, so this value
+// keeps the outer `processWithdrawal` transaction well below a 30M gas L1 block
+// limit.
+uint64 constant MAX_WITHDRAWAL_CALLBACK_GAS = 10_000_000;
+
 struct Withdrawal {
     address token; // TIP-20 token being withdrawn
     bytes32 senderTag; // keccak256(abi.encodePacked(sender, txHash))
@@ -584,6 +590,9 @@ interface IZonePortal {
 
     /// @notice Fixed gas value for deposit fee calculation (100,000 gas)
     function FIXED_DEPOSIT_GAS() external view returns (uint64);
+
+    /// @notice Maximum callback gas accepted for withdrawals
+    function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
     /// @notice Maximum allowed gas fee rate (1e18)
     function MAX_GAS_FEE_RATE() external view returns (uint128);
@@ -939,6 +948,9 @@ interface IZoneOutbox {
 
     /// @notice Maximum callback data size (1KB)
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
+
+    /// @notice Maximum callback gas accepted for withdrawals
+    function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
     /// @notice Base gas cost for processing a withdrawal on Tempo (excluding callback)
     function WITHDRAWAL_BASE_GAS() external view returns (uint64);

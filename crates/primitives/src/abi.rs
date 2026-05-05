@@ -16,9 +16,10 @@ use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
 use alloy_sol_types::SolValue;
 
 pub use crate::constants::{
-    EMPTY_SENTINEL, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, TEMPO_BLOCK_HASH_SLOT,
-    TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS, TEMPO_STATE_READER_ADDRESS, ZONE_CONFIG_ADDRESS,
-    ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
+    EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT,
+    TEMPO_BLOCK_HASH_SLOT, TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS, TEMPO_STATE_READER_ADDRESS,
+    ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
+    ZONE_TX_CONTEXT_ADDRESS,
 };
 
 /// Internal macro that emits the full `sol!` block, placing `$($rpc_attr)*`
@@ -209,6 +210,7 @@ macro_rules! define_abi {
                 function calculateDepositFee() external view returns (uint128 fee);
                 function depositCount() external view returns (uint64);
                 function lastProcessedDepositNumber() external view returns (uint64);
+                function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
                 // -- State-changing functions --
 
@@ -286,6 +288,7 @@ macro_rules! define_abi {
                 // -- Errors --
 
                 error OnlySequencer();
+                error GasLimitTooHigh();
 
                 // -- View functions --
 
@@ -294,6 +297,7 @@ macro_rules! define_abi {
                 function nextWithdrawalIndex() external view returns (uint64);
                 function pendingWithdrawalsCount() external view returns (uint256);
                 function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128 fee);
+                function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 
                 // -- State-changing functions --
 
