@@ -38,6 +38,8 @@ sol! {
     struct DecryptionData {
         bytes32 sharedSecret;
         uint8 sharedSecretYParity;
+        address to;
+        bytes32 memo;
         ChaumPedersenProof cpProof;
     }
     struct EnabledToken {

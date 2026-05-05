@@ -386,11 +386,12 @@ macro_rules! define_abi {
             }
 
             /// Decryption data provided by the sequencer for encrypted deposits.
-            /// The decrypted (to, memo) are derived on-chain from the AES-GCM decryption.
             #[derive(Debug)]
             struct DecryptionData {
                 bytes32 sharedSecret;
                 uint8 sharedSecretYParity;
+                address to;
+                bytes32 memo;
                 ChaumPedersenProof cpProof;
             }
 
