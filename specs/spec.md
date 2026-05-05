@@ -22,6 +22,7 @@
     - [Deposit Queue](#deposit-queue)
     - [Encrypted Deposits](#encrypted-deposits)
     - [Onchain Decryption Verification](#onchain-decryption-verification)
+    - [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)
   - [Withdrawals](#withdrawals)
     - [Withdrawal Request](#withdrawal-request)
     - [Withdrawal Fees](#withdrawal-fees)
@@ -236,16 +237,16 @@ The portal maintains a `TokenConfig` per token with an `enabled` flag and a conf
 
 ### Gas Rate Configuration
 
-The sequencer configures two gas rates that determine fees for deposits and withdrawals:
+The sequencer configures two gas rates that determine fees for deposits, withdrawals, and bounce-backs. Each rate is the price (in token units) of one gas unit on the chain where the work runs:
 
 | Rate | Set via | Used for |
 |------|---------|----------|
 | `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` |
-| `tempoGasRate` | `ZoneOutbox.setTempoGasRate()` | Withdrawal fees: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
+| `tempoGasRate` | `ZonePortal.setTempoGasRate()` | Deposit bounce-back fees on Tempo: `FIXED_BOUNCEBACK_GAS (300,000) * tempoGasRate`; withdrawal fees on Tempo: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
 
-Both rates are denominated in token units per gas unit. A single uniform `zoneGasRate` applies to all tokens. Fees are paid in the same token being deposited or withdrawn.
+Both rates live on `ZonePortal` on Tempo and are set by the sequencer. `zoneGasRate` is read on Tempo at deposit time. `tempoGasRate` is read on Tempo at deposit time (for the bounce-back fee snapshot) and on the zone at withdrawal-request time, where the outbox proxies it through the [`TempoState`](#tempostate-predeploy) predeploy via `readTempoStorageSlot(ZONE_PORTAL, TEMPO_GAS_RATE_SLOT)`. Both fees are snapshotted onto the queued entry, so in-flight rate changes never retroactively raise the fee on already-queued items.
 
-The sequencer takes the risk on Tempo gas price fluctuations for withdrawals. If actual gas costs on Tempo exceed the fee collected, the sequencer covers the difference. If costs are lower, the sequencer keeps the surplus.
+`tempoGasRate` defaults to `TEMPO_T0_BASE_FEE = 10,000,000,000` token units per gas unit at zone genesis. All rates are denominated in token units per gas unit and fees are paid in the same token being deposited or withdrawn. The sequencer takes the risk on gas-price fluctuations: if actual costs exceed the fee collected, the sequencer covers the difference; if they are lower, the sequencer keeps the surplus.
 
 ### Encryption Key Management
 
@@ -272,17 +273,19 @@ Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, 
 
 ### Regular Deposits
 
-A user deposits by calling `deposit(token, to, amount, memo)` on the portal. The portal:
+A user deposits by calling `deposit(token, to, amount, memo, bouncebackRecipient)` on the portal. The portal:
 
 1. Validates the token is enabled and deposits are active.
-2. Transfers `amount` from the user into the portal.
-3. Deducts the deposit fee (see [Deposit Fees](#deposit-fees)) and pays it to the sequencer immediately.
-4. Appends the deposit to the deposit queue hash chain with the net amount (`amount - fee`).
-5. Emits `DepositMade`.
+2. Requires `bouncebackRecipient != address(0)` (reverts otherwise).
+3. Snapshots the deposit fee at the current `zoneGasRate` and the bounce-back fee at the current portal-side `tempoGasRate` (see [Deposit Fees](#deposit-fees)), and requires `amount >= depositFee + bouncebackFee` (reverts `DepositTooSmall` otherwise). The bounce-back fee covers the worst-case Tempo gas of paying out a refund (including new-account creation for `bouncebackRecipient`), so it is priced in Tempo gas, not zone gas.
+4. Transfers `amount` from the user into the portal.
+5. Pays the `depositFee` to the sequencer immediately. The `bouncebackFee` is reserved on the queued entry; it is only consumed if the deposit later bounces back.
+6. Appends the deposit to the deposit queue hash chain with the net amount (`amount - depositFee`), `bouncebackRecipient`, and the snapshotted `bouncebackFee`.
+7. Emits `DepositMade`.
 
 The sequencer observes `DepositMade` events and relays deposits to the zone via `ZoneInbox.advanceTempo()`. This function processes deposits in order, minting the zone-side TIP-20 token to each recipient: `mint(deposit.to, deposit.amount)`.
 
-Deposits always succeed on the zone. There are no callbacks or failure modes for regular deposits. If the sequencer withholds deposits, funds remain locked in the portal with no forced inclusion mechanism.
+If the zone-side mint reverts (for example, because the recipient is blocked by a TIP-403 policy active on the zone at processing time), the deposit bounces back to `bouncebackRecipient` on Tempo. See [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back) for the full mechanism. If the sequencer withholds deposits, funds remain locked in the portal with no forced inclusion mechanism.
 
 ```mermaid
 sequenceDiagram
@@ -301,14 +304,19 @@ sequenceDiagram
 
 ### Deposit Fees
 
-Each deposit incurs a fixed processing fee:
+Every deposit is associated with two separate fees, both paid in the same token being deposited but priced at different gas rates because the work they cover runs on different chains:
 
 ```
-fee = FIXED_DEPOSIT_GAS * zoneGasRate
-    = 100,000 * zoneGasRate
+depositFee    = FIXED_DEPOSIT_GAS    * zoneGasRate    (= 100,000 * zoneGasRate)
+bouncebackFee = FIXED_BOUNCEBACK_GAS * tempoGasRate   (= 300,000 * tempoGasRate)
 ```
 
-The fee is paid in the same token being deposited. It is deducted from the deposit amount and paid to the sequencer immediately on Tempo. The deposit queue stores the net amount (`amount - fee`), which is what gets minted on the zone. A deposit must be large enough to cover the fee. If it is not, the portal reverts with `DepositTooSmall`.
+`zoneGasRate` and `tempoGasRate` both live on `ZonePortal` on Tempo and are sequencer-managed there via `setZoneGasRate()` / `setTempoGasRate()` (see [Gas Rate Configuration](#gas-rate-configuration)). The same `tempoGasRate` is used for withdrawal fees on Tempo; the zone reads it from Tempo state via the [`TempoState`](#tempostate-predeploy) predeploy when computing withdrawal fees at request time.
+
+The two fees are conceptually independent because their work happens on different chains:
+
+- The **deposit fee** covers the sequencer's cost of processing the deposit on the zone (calling `advanceTempo`, performing the mint, advancing the queue) and is therefore priced at the zone's gas rate. It is charged on every deposit, success or failure, and paid to the sequencer immediately on Tempo.
+- The **bounce-back fee** covers the sequencer's worst-case Tempo-side cost of paying out a refund — primarily new-account creation for `bouncebackRecipient`, which can dominate the gas of `processWithdrawal` and is much larger than the steady-state per-deposit gas — and is priced at Tempo's gas rate. It is charged only when a deposit actually bounces back, and is paid to the sequencer at that point.
 
 ### Deposit Queue
 
@@ -331,7 +339,7 @@ The encryption scheme is ECIES with secp256k1:
 1. The user generates an ephemeral keypair and derives a shared secret via ECDH with the sequencer's published encryption key.
 2. The user derives an AES-256 key from the shared secret using HKDF-SHA256.
 3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
-4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)).
+4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload, bouncebackRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `bouncebackRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Like `deposit()`, `depositEncrypted` requires `bouncebackRecipient != address(0)` (reverts otherwise) and `amount >= depositFee + bouncebackFee` (reverts `DepositTooSmall` otherwise), and snapshots the bounce-back fee on the queued deposit.
 
 The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`. The sequencer decrypts the payload off-chain and provides the decrypted `(to, memo)` when processing the deposit on the zone via `advanceTempo()`.
 
@@ -347,8 +355,9 @@ Deposits are processed in the exact order they were made, regardless of type.
 | Field | Visibility | Reason |
 |-------|------------|--------|
 | `token` | Public | Required for onchain accounting and zone-side minting |
-| `sender` | Public | Required for refunds if decryption fails |
+| `sender` | Public | Required for onchain accounting and as the origin of the deposit event |
 | `amount` | Public | Required for onchain accounting |
+| `bouncebackRecipient` | Public | Required; receives the Tempo-side refund if decryption or the final mint fails |
 | `to` | Encrypted | Only the sequencer learns the recipient |
 | `memo` | Encrypted | Only the sequencer learns the payment context |
 
@@ -364,7 +373,9 @@ The sequencer provides the ECDH shared secret alongside the decrypted data. Veri
 
 3. **Plaintext validation.** The zone confirms the decrypted plaintext matches the `(to, memo)` the sequencer claimed. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes.
 
-If any step fails (invalid proof, GCM tag mismatch, plaintext mismatch), the zone mints the tokens to the sender's address on the zone instead. The Tempo-side funds remain locked in the portal. This ensures chain progress is never blocked by invalid encrypted deposits.
+If any step fails (invalid proof, GCM tag mismatch, plaintext mismatch), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `bouncebackRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `depositEncrypted` requires a non-zero `bouncebackRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue.
+
+The verification above is only performed when the sequencer accepts an encrypted deposit. If the sequencer marks the deposit as rejected via `QueuedDeposit.rejected = true` (see [Sequencer rejection](#sequencer-rejection)), all three steps are skipped and the inbox enqueues a bounce-back without invoking the cryptographic precompiles or consuming a `DecryptionData` entry.
 
 The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
 
@@ -374,15 +385,105 @@ sequenceDiagram
     participant T as Tempo
     participant Z as Zone
 
-    U->>T: ZonePortal.depositEncrypted()
+    U->>T: ZonePortal.depositEncrypted(..., bouncebackRecipient)
+    Note over T: require bouncebackRecipient != address(0)
     T->>T: append to depositQueue
     Note over T: emit EncryptedDepositMade
     Z-->>T: observe EncryptedDepositMade
-    Z->>Z: ZoneInbox.advanceTempo()
-    Z->>Z: onchain decryption (Chaum-Pedersen + AES-GCM)
-    Z->>Z: TIP20.mint(to, amount)
-    Note over Z: if verification fails
-    Z->>Z: TIP20.mint(sender, amount)
+    Z->>Z: ZoneInbox.advanceTempo(..., QueuedDeposit{rejected})
+    alt sequencer rejects
+        Note over Z: skip onchain decryption verification
+        Z->>T: bounce back to bouncebackRecipient via withdrawal queue
+    else sequencer accepts
+        Z->>Z: onchain decryption (Chaum-Pedersen + AES-GCM)
+        alt verification succeeds
+            Z->>Z: TIP20.mint(decryptedTo, amount)
+            Note over Z: if mint reverts
+            Z->>T: bounce back to bouncebackRecipient via withdrawal queue
+        else verification fails
+            Note over Z: no zone-side mint attempted
+            Z->>T: bounce back to bouncebackRecipient via withdrawal queue
+        end
+    end
+```
+
+### Deposit Failures and Bounce-Back
+
+Deposits can fail for three main reasons: a recipient blocked by the TIP-403 policy, an invalid encrypted deposit, or rejection by the sequencer. To make sure that all cases can be handled without loss of user funds, every deposit carries a `bouncebackRecipient`: a Tempo address that receives a refund if zone-side processing fails.
+
+**Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require `bouncebackRecipient != address(0)` and revert otherwise (`MissingBouncebackRecipient`). The portal does **not** validate `bouncebackRecipient` against the token's TIP-403 policy at deposit time; if the on-Tempo refund transfer is later rejected by the policy, the funds are parked in a per-recipient refund registry on the portal and the recipient claims them via `claimRefund(token)` (see [Tempo-side refund](#tempo-side-refund) below).
+
+**Triggering conditions.** There are three triggering sites:
+
+- **Regular deposit, mint reverts.** `ZoneInbox.advanceTempo` calls `TIP20.mint(deposit.to, deposit.amount)`. If that mint reverts the deposit bounces back to the user-supplied `bouncebackRecipient`. The user-facing `deposit(...)` entry point ensures `bouncebackRecipient != address(0)`, so the queue can always advance past a failed mint.
+- **Encrypted deposit.** Two failure modes, both of which unconditionally bounce back (no zone-side mint is attempted as a fallback):
+  - **Invalid encryption.** The Chaum-Pedersen proof, AES-GCM tag, or plaintext comparison fails during [Onchain Decryption Verification](#onchain-decryption-verification). There is no well-defined recipient on the zone in this case, so the zone does not try to mint to the depositor; it bounces back immediately.
+  - **Valid decryption, mint reverts.** `TIP20.mint(decryptedTo, amount)` reverts (for example, because a TIP-403 policy active on the zone forbids minting to the decrypted recipient, or a custom TIP-20 `mint` reverts for some token-specific reason). The deposit bounces back.
+- **Sequencer rejection.** The sequencer can mark any user-initiated deposit (regular or encrypted) as rejected when calling `advanceTempo` (see [Sequencer rejection](#sequencer-rejection) below). The zone treats the deposit as if it had failed: it skips the zone-side mint entirely (and, for encrypted deposits, the onchain decryption verification) and enqueues a bounce-back to `bouncebackRecipient`.
+
+Because both deposit entry points require a non-zero `bouncebackRecipient`, every user-initiated deposit has a refund target and the deposit queue never stalls on a failed mint, invalid encryption, or sequencer rejection.
+
+The portal's internal withdrawal-bounce-back deposits are the only entries with `bouncebackRecipient == address(0)`. They are introduced by `_enqueueWithdrawalBounceBack` after a withdrawal callback fails, and their zone-side mint failure path is the symmetric refund-registry described in [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back). The sequencer cannot reject these entries: a `rejected` flag on an internal withdrawal-bounce-back deposit is silently ignored and the deposit is processed as if not rejected, preserving the terminal-bounce invariant.
+
+**Zone-side handling.** When an encrypted deposit fails (either branch), when a regular deposit's mint reverts, or when the sequencer rejects a deposit, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, bouncebackRecipient, bouncebackFee)`. For a regular deposit whose mint reverted the revert is caught in a `try/catch`; for an encrypted deposit with invalid encryption no mint is attempted and the inbox enqueues the bounce-back directly; for a sequencer-rejected deposit the inbox skips processing entirely and enqueues the bounce-back without ever calling the token contract (and, for encrypted deposits, without performing onchain decryption verification). `enqueueDepositBounceBack` records a zero-fee, zero-callback, zero-`fallbackRecipient` withdrawal in the outbox's pending list with the snapshotted `bouncebackFee`, with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits one of three events so off-chain observers can distinguish the failure mode: `DepositFailed` (regular deposit whose mint reverted), `EncryptedDepositFailed` (encrypted deposit, either invalid encryption or mint revert), or `DepositRejected` (sequencer-initiated rejection, regardless of deposit type). The deposit queue hash chain advances normally; no retries are performed on the zone.
+
+**Tempo-side refund.** The bounce-back withdrawal is submitted in the next batch alongside any user-initiated withdrawals. When `ZonePortal.processWithdrawal` runs on the deposit-bounce-back entry (`gasLimit == 0`, `fee == 0`, `fallbackRecipient == address(0)`), it deducts the snapshotted `bouncebackFee` from the queued amount, pays it to the sequencer, and attempts `ITIP20.transfer(bouncebackRecipient, amount - bouncebackFee)` from the portal's escrow, wrapped in `try/catch`.
+
+If the transfer succeeds, the portal emits `DepositBounceBack(bouncebackRecipient, token, amount - bouncebackFee, bouncebackFee)`. If it reverts (e.g. the token's TIP-403 policy forbids `bouncebackRecipient`, or the token is paused), the funds stay in the portal's locked balance and the portal credits `_refunds[token][bouncebackRecipient] += (amount - bouncebackFee)` and emits `DepositBounceBackPending(...)`. Either way the bounce-back entry is fully retired and the sequencer collects `bouncebackFee`.
+
+In the case of a failed bounceback, the recipient can claim the parked funds by calling `ZonePortal.claimRefund(token)` on Tempo. The portal zeroes `_refunds[token][msg.sender]` and calls `ITIP20.transfer(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
+
+**Sequencer rejection.** When calling `advanceTempo`, the sequencer can mark any individual deposit as rejected by setting `QueuedDeposit.rejected = true` for that entry. A rejected deposit is processed exactly like a deposit-time failure: the zone skips the zone-side mint and enqueues a bounce-back to `bouncebackRecipient`. For encrypted deposits, rejection short-circuits the cryptographic verification — the sequencer is not required to provide a `DecryptionData` entry for a rejected encrypted deposit and the AES-GCM / Chaum-Pedersen precompiles are not invoked. The 1:1 correspondence between non-rejected encrypted deposits and `DecryptionData` entries still holds.
+
+- A deposit created by the portal as a bounce-back from a failed _withdrawal_ (`_enqueueWithdrawalBounceBack`) always sets `bouncebackRecipient = address(0)`. This is an internal sentinel — the user-facing `deposit()` entry point rejects zero — that tells the zone to treat the entry as terminal: the zone-side mint is attempted with the standard `mint`, and on failure the funds land in a refund registry on `ZoneInbox` (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)) rather than re-bouncing.
+- A withdrawal created by the zone as a bounce-back from a failed _deposit_ (`enqueueDepositBounceBack`) always sets `fee = 0`, `gasLimit = 0`, `callbackData = ""`, and `fallbackRecipient = address(0)`. The Tempo-side refund transfer is wrapped in `try/catch`: on success the user receives `amount - bouncebackFee` directly, on failure the same value is parked in the portal's refund registry.
+
+**Events summary.**
+
+| Event | Emitted by | When |
+|-------|------------|------|
+| `DepositFailed` | `ZoneInbox` | Mint for a regular deposit reverted, funds queued for bounce-back |
+| `EncryptedDepositFailed` | `ZoneInbox` | Encrypted deposit failed — either invalid encryption, or valid decryption with a mint that reverted; funds queued for bounce-back |
+| `DepositRejected` | `ZoneInbox` | Sequencer marked the deposit (regular or encrypted) as rejected; funds queued for bounce-back without invoking the token or decryption precompiles |
+| `DepositBounceBack` | `ZonePortal` | Bounce-back withdrawal processed on Tempo and the refund transfer to `bouncebackRecipient` succeeded |
+| `DepositBounceBackPending` | `ZonePortal` | Bounce-back transfer reverted on Tempo (e.g. TIP-403 forbids `bouncebackRecipient`); funds parked in the portal's refund registry, claimable via `claimRefund(token)` |
+| `RefundClaimed` | `ZonePortal` | Recipient claimed an outstanding deposit-bounce-back refund |
+| `WithdrawalBounceBack` | `ZonePortal` | Withdrawal-side bounce-back processed on Tempo (zone-side refund mint will be attempted by the inbox; renamed from `BounceBack` for symmetry with `DepositBounceBack`) |
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant T as Tempo
+    participant Z as Zone
+
+    U->>T: ZonePortal.deposit(..., bouncebackRecipient)
+    Note over T: require bouncebackRecipient != address(0)
+    T->>T: append to depositQueue
+    Note over T: emit DepositMade
+    Z-->>T: observe DepositMade
+    Z->>Z: ZoneInbox.advanceTempo(..., QueuedDeposit{rejected})
+    alt sequencer rejects
+        Z->>Z: ZoneOutbox.enqueueDepositBounceBack()
+        Note over Z: emit DepositRejected
+    else sequencer accepts
+        Z->>Z: try TIP20.mint(deposit.to, amount)
+        Note over Z: if mint reverts
+        Z->>Z: ZoneOutbox.enqueueDepositBounceBack()
+        Note over Z: emit DepositFailed
+    end
+    Z->>T: ZoneOutbox.finalizeWithdrawalBatch + submitBatch
+    T->>T: ZonePortal.processWithdrawal (zero-fee, zero-callback)
+    T->>T: pay bouncebackFee to sequencer
+    alt TIP20.transfer(bouncebackRecipient, amount-fee) succeeds
+        T->>U: receives amount-bouncebackFee
+        Note over T: emit DepositBounceBack
+    else transfer reverts (e.g. TIP-403)
+        T->>T: _refunds[token][bouncebackRecipient] += amount-bouncebackFee
+        Note over T: emit DepositBounceBackPending
+        U->>T: later: ZonePortal.claimRefund(token)
+        T->>U: TIP20.transfer(msg.sender, claimed)
+        Note over T: emit RefundClaimed
+    end
 ```
 
 <br>
@@ -393,7 +494,7 @@ Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawa
 
 ### Withdrawal Request
 
-A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token.
+A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token. The outbox requires `fallbackRecipient != address(0)` (reverts with `InvalidFallbackRecipient`). The outbox does **not** validate `fallbackRecipient` against the token's TIP-403 policy at request time; if the zone-side refund mint is later rejected by the policy, the funds are parked in a per-recipient refund registry on `ZoneInbox` and the recipient claims them via `ZoneInbox.claimRefund(token)` (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
 
 The outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender (zone events are private).
 
@@ -431,6 +532,8 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
 ```
 
 `WITHDRAWAL_BASE_GAS` (50,000) covers the fixed overhead of processing a withdrawal on Tempo (queue dequeue, transfer, event emission). The user specifies `gasLimit` covering any additional execution costs (e.g., callback gas). For simple withdrawals with no callback, use `gasLimit = 0`. The fee is paid in the same token being withdrawn. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`. The sequencer keeps the fee regardless of outcome.
+
+`tempoGasRate` lives on `ZonePortal` on Tempo (see [Gas Rate Configuration](#gas-rate-configuration)). The outbox reads it via `TempoState.readTempoStorageSlot(ZONE_PORTAL, TEMPO_GAS_RATE_SLOT)` at request time and snapshots it onto the queued withdrawal.
 
 ### Withdrawal Batching
 
@@ -470,20 +573,30 @@ This enables composable withdrawals where funds flow directly into Tempo contrac
 
 ### Withdrawal Failures and Bounce-Back
 
-Withdrawals can fail for several reasons:
+Withdrawals can fail on the Tempo side for several reasons:
 
-- TIP-403 policy restricts the portal or recipient
+- TIP-403 policy restricts the portal or `withdrawal.to`
 - The token is paused
 - The callback reverts (out of gas, logic error)
 - The receiver returns the wrong selector
 
-When a withdrawal fails, the portal bounces back the funds by creating a new deposit to `fallbackRecipient` on the zone:
+To make sure that all of these cases can be handled without loss of user funds, every withdrawal carries a `fallbackRecipient`: a zone address that receives a refund mint if Tempo-side processing fails.
+
+**Validation at withdrawal request time.** `requestWithdrawal(...)` requires `fallbackRecipient != address(0)` and reverts otherwise (`InvalidFallbackRecipient`). The outbox does **not** validate `fallbackRecipient` against the token's TIP-403 policy at request time; if the zone-side refund mint is later rejected by the policy, the funds are parked in a per-recipient refund registry on `ZoneInbox` and the recipient claims them via `claimRefund(token)` (see **Zone-side handling** below).
+
+**Triggering conditions.** When `ZonePortal.processWithdrawal` runs on Tempo and the user-facing transfer or callback fails, the portal calls `_enqueueWithdrawalBounceBack(token, amount, fallbackRecipient)`. This constructs an internal `Deposit` with `to = fallbackRecipient`, `bouncebackRecipient = address(0)` (the sentinel reserved for portal-internal bounce-backs), and appends it to the deposit queue:
 
 ```
 currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDeposit, currentDepositQueueHash))
 ```
 
-The zone processes the bounce-back deposit like any other deposit, crediting `fallbackRecipient`. The sequencer keeps the fee regardless of success or failure.
+**Zone-side handling.** The next time the sequencer calls `ZoneInbox.advanceTempo`, the inbox sees a `Regular` deposit with `bouncebackRecipient == address(0)` and attempts `IZoneToken.mint(fallbackRecipient, amount)` wrapped in `try/catch`. The `rejected` flag has no effect on this path (see [Sequencer rejection](#sequencer-rejection)).
+
+If the mint succeeds, the inbox emits `WithdrawalBounceBackProcessed(fallbackRecipient, token, amount)`. If it reverts (e.g. the zone-side TIP-403 policy forbids `fallbackRecipient`, or the token is paused), the inbox credits `_refunds[token][fallbackRecipient] += amount` and emits `WithdrawalBounceBackPending(...)`. Either way the bounce-back deposit is fully retired.
+
+The recipient claims the parked funds by calling `ZoneInbox.claimRefund(token)`. The inbox zeroes `_refunds[token][msg.sender]` and calls `IZoneToken.mint(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
+
+The sequencer keeps the withdrawal fee regardless of whether the withdrawal succeeded on Tempo or bounced back.
 
 ### Authenticated Withdrawals
 
@@ -1364,27 +1477,39 @@ interface IZonePortal {
     // Events
     event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
-        address token, address to, uint128 netAmount, uint128 fee, bytes32 memo
+        address token, address to, uint128 netAmount, uint128 fee, uint128 bouncebackFee, bytes32 memo,
+        address bouncebackRecipient, uint64 depositNumber
     );
     event EncryptedDepositMade(
         bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
-        address token, uint128 netAmount, uint128 fee, uint256 keyIndex,
+        address token, uint128 netAmount, uint128 fee, uint128 bouncebackFee, uint256 keyIndex,
         bytes32 ephemeralPubkeyX, uint8 ephemeralPubkeyYParity,
-        bytes ciphertext, bytes12 nonce, bytes16 tag
+        bytes ciphertext, bytes12 nonce, bytes16 tag, uint64 depositNumber
     );
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex, bytes32 nextProcessedDepositQueueHash,
-        bytes32 nextBlockHash, bytes32 withdrawalQueueHash
+        bytes32 nextBlockHash, bytes32 withdrawalQueueHash,
+        uint64 lastProcessedDepositNumber
     );
     event WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess);
-    event BounceBack(
+    event WithdrawalBounceBack(
         bytes32 indexed newCurrentDepositQueueHash, address indexed fallbackRecipient,
-        address token, uint128 amount
+        address token, uint128 amount, uint64 depositNumber
     );
+    event DepositBounceBack(
+        address indexed bouncebackRecipient, address token,
+        uint128 amount, uint128 bouncebackFee
+    );
+    event DepositBounceBackPending(
+        address indexed bouncebackRecipient, address token,
+        uint128 amount, uint128 bouncebackFee
+    );
+    event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
     event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+    event TempoGasRateUpdated(uint128 tempoGasRate);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
     event DepositsPaused(address indexed token);
     event DepositsResumed(address indexed token);
@@ -1399,11 +1524,27 @@ interface IZonePortal {
     function enabledTokenAt(uint256 index) external view returns (address);
 
     // Deposits
-    function deposit(address token, address to, uint128 amount, bytes32 memo)
-        external returns (bytes32 newCurrentDepositQueueHash);
-    function depositEncrypted(address token, uint128 amount, uint256 keyIndex, EncryptedDepositPayload calldata encrypted)
-        external returns (bytes32 newCurrentDepositQueueHash);
+    /// @dev Reverts (`MissingBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
+    ///      Every user-initiated deposit must carry a usable refund target so that a
+    ///      failed mint can be recovered without stalling the deposit queue. The portal
+    ///      does not validate the recipient against the token's TIP-403 policy at
+    ///      deposit time; if the on-Tempo refund transfer is later rejected by the
+    ///      policy, the funds are parked in the per-recipient refund registry exposed
+    ///      via `refunds(token, owner)` / `claimRefund(token)`.
+    function deposit(
+        address token, address to, uint128 amount, bytes32 memo, address bouncebackRecipient
+    ) external returns (bytes32 newCurrentDepositQueueHash);
+    /// @dev Reverts (`MissingBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
+    ///      A ciphertext that fails onchain decryption verification has no well-defined
+    ///      recipient on the zone, so the bounce-back target must always be set.
+    function depositEncrypted(
+        address token, uint128 amount, uint256 keyIndex,
+        EncryptedDepositPayload calldata encrypted, address bouncebackRecipient
+    ) external returns (bytes32 newCurrentDepositQueueHash);
     function calculateDepositFee() external view returns (uint128 fee);
+    function calculateBouncebackFee() external view returns (uint128 fee);
+    function depositCount() external view returns (uint64);
+    function lastProcessedDepositNumber() external view returns (uint64);
 
     // Batch submission
     function submitBatch(
@@ -1415,10 +1556,24 @@ interface IZonePortal {
     // Withdrawal processing
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
+    // Refund registry (deposit bounce-back transfers that reverted on Tempo, e.g.
+    // because the recipient was rejected by the token's TIP-403 policy at refund time)
+    /// @notice Outstanding refundable balance for a recipient on a given token.
+    function refunds(address token, address owner) external view returns (uint128);
+    /// @notice Claim outstanding refunds in `token` for `msg.sender`. Reverts if the
+    ///         underlying TIP-20 transfer reverts (e.g. policy still forbids the recipient).
+    function claimRefund(address token) external returns (uint128 amount);
+
     // Sequencer management
     function transferSequencer(address newSequencer) external;
     function acceptSequencer() external;
     function setZoneGasRate(uint128 _zoneGasRate) external;
+    /// @notice Set the canonical Tempo gas rate. Used to price both deposit-bounce-back
+    ///         fees on Tempo and withdrawal fees on Tempo (the latter is read by the
+    ///         zone via the TempoState predeploy).
+    function setTempoGasRate(uint128 _tempoGasRate) external;
+    function tempoGasRate() external view returns (uint128);
+    function zoneGasRate() external view returns (uint128);
 
     // Encryption keys
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
@@ -1484,6 +1639,22 @@ Address: `0x1c00000000000000000000000000000000000001`
 
 ```solidity
 interface IZoneInbox {
+    /// @notice A deposit queued for processing on the zone, paired with the
+    ///         sequencer's accept/reject decision.
+    /// @dev `rejected` is supplied by the sequencer per-deposit when calling
+    ///      advanceTempo. It is NOT part of the deposit queue hash chain (which
+    ///      stays canonical to the deposit content produced by the portal). A
+    ///      rejected user-initiated deposit skips the zone-side mint (and, for
+    ///      encrypted deposits, the onchain decryption verification) and bounces
+    ///      back to bouncebackRecipient on Tempo. A `rejected = true` flag on an
+    ///      internal withdrawal-bounce-back deposit (bouncebackRecipient ==
+    ///      address(0)) is silently ignored.
+    struct QueuedDeposit {
+        DepositType depositType;
+        bytes depositData; // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+        bool rejected;
+    }
+
     event TempoAdvanced(
         bytes32 indexed tempoBlockHash, uint64 indexed tempoBlockNumber,
         uint256 depositsProcessed, bytes32 newProcessedDepositQueueHash
@@ -1499,6 +1670,33 @@ interface IZoneInbox {
     event EncryptedDepositFailed(
         bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
     );
+    /// @notice Emitted when the sequencer marks a deposit as rejected via QueuedDeposit.rejected.
+    /// @dev Distinguishes operator-initiated rejection from a TIP-403 / mint failure
+    ///      (DepositFailed) or an invalid-encryption / decrypted-mint failure
+    ///      (EncryptedDepositFailed). Funds are bounced back identically.
+    event DepositRejected(
+        bytes32 indexed depositHash,
+        address indexed sender,
+        DepositType depositType,
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
+    );
+    /// @notice Emitted when a withdrawal-bounce-back deposit (synthesized by the portal
+    ///         with `bouncebackRecipient == address(0)`) was minted successfully to the
+    ///         original `fallbackRecipient` on the zone.
+    event WithdrawalBounceBackProcessed(
+        address indexed fallbackRecipient, address token, uint128 amount
+    );
+    /// @notice Emitted when the zone-side refund mint for a withdrawal-bounce-back
+    ///         deposit reverted (e.g. zone TIP-403 policy forbids the recipient) and
+    ///         the amount was credited to the inbox refund registry, claimable via
+    ///         `claimRefund(token)`.
+    event WithdrawalBounceBackPending(
+        address indexed fallbackRecipient, address token, uint128 amount
+    );
+    /// @notice Emitted when a recipient claims an outstanding withdrawal-bounce-back refund.
+    event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
     function processedDepositQueueHash() external view returns (bytes32);
@@ -1506,6 +1704,14 @@ interface IZoneInbox {
         bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
     ) external;
+
+    // Refund registry (withdrawal bounce-back mints that reverted on the zone, e.g.
+    // because the recipient was rejected by the zone-side TIP-403 policy at mint time)
+    /// @notice Outstanding refundable balance for a recipient on a given token.
+    function refunds(address token, address owner) external view returns (uint128);
+    /// @notice Claim outstanding refunds in `token` for `msg.sender`. Reverts if the
+    ///         underlying mint reverts (e.g. policy still forbids the recipient).
+    function claimRefund(address token) external returns (uint128 amount);
 }
 ```
 
@@ -1522,14 +1728,14 @@ interface IZoneOutbox {
         uint128 amount, uint128 fee, bytes32 memo, uint64 gasLimit,
         address fallbackRecipient, bytes data, bytes revealTo
     );
-    event TempoGasRateUpdated(uint128 tempoGasRate);
     event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
 
-    function tempoGasRate() external view returns (uint128);
     function lastBatch() external view returns (LastBatch memory);
+    /// @notice Compute the withdrawal fee for the current Tempo gas rate. Reads
+    ///         `tempoGasRate` from `ZonePortal` on Tempo via the `TempoState` predeploy
+    ///         and snapshots it onto the queued withdrawal at request time.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
-    function setTempoGasRate(uint128 _tempoGasRate) external;
 
     function requestWithdrawal(
         address token, address to, uint128 amount, bytes32 memo,
