@@ -72,9 +72,10 @@ impl ZoneTxContext {
                     target: "zone::precompile",
                     "ZoneTxContext called via DELEGATECALL — rejecting"
                 );
-                return Ok(PrecompileOutput::new_reverted(
+                return Ok(PrecompileOutput::revert(
                     0,
                     DelegateCallNotAllowed {}.abi_encode().into(),
+                    input.reservoir,
                 ));
             }
 
@@ -85,7 +86,7 @@ impl ZoneTxContext {
                     data_len = data.len(),
                     "ZoneTxContext called with insufficient data"
                 );
-                return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
             }
 
             let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
@@ -95,14 +96,14 @@ impl ZoneTxContext {
                     ?selector,
                     "ZoneTxContext: unknown selector"
                 );
-                return Ok(PrecompileOutput::new_reverted(0, Bytes::new()));
+                return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
             }
 
             debug!(target: "zone::precompile", "ZoneTxContext: currentTxHash");
 
             let tx_hash = current_tx_hash().unwrap_or_else(|| synthetic_tx_hash(&input));
             let encoded = currentTxHashCall::abi_encode_returns(&tx_hash);
-            Ok(PrecompileOutput::new(20, encoded.into()))
+            Ok(PrecompileOutput::new(20, encoded.into(), input.reservoir))
         })
     }
 }

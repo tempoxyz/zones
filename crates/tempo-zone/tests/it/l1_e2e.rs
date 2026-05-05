@@ -153,8 +153,8 @@ async fn test_zone_advances_with_real_l1() -> eyre::Result<()> {
 /// 8. Wait for the batch to be submitted and the withdrawal to be processed on L1.
 ///
 /// NOTE: This test requires the Foundry-compiled ZoneFactory artifact
-/// at `docs/specs/out/ZoneFactory.sol/ZoneFactory.json`.
-/// Run `forge build` in `docs/specs/` first.
+/// at `specs/ref-impls/out/ZoneFactory.sol/ZoneFactory.json`.
+/// Run `forge build` in `specs/ref-impls/` first.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_deposit_via_real_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -246,7 +246,7 @@ async fn test_deposit_via_real_l1() -> eyre::Result<()> {
 ///    |<-- deposit 0.2 ----|                 |
 /// ```
 ///
-/// NOTE: Requires `forge build` in `docs/specs/` for ZoneFactory + SwapAndDepositRouter artifacts.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory + SwapAndDepositRouter artifacts.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -702,7 +702,7 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_
 ///    |<-- withdraw ZoneUSD --------|  ✓ ZoneUSD burned
 /// ```
 ///
-/// NOTE: Requires `forge build` in `docs/specs/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -856,7 +856,7 @@ async fn test_multiasset_deposit_withdrawal() -> eyre::Result<()> {
 ///   │            → tokens to L1              │
 /// ```
 ///
-/// NOTE: Requires `forge build` in `docs/specs/` for ZoneFactory artifact.
+/// NOTE: Requires `forge build` in `specs/ref-impls/` for ZoneFactory artifact.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_encrypted_deposit_and_withdrawal() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -874,11 +874,11 @@ async fn test_encrypted_deposit_and_withdrawal() -> eyre::Result<()> {
     // Must start the zone BEFORE registering the encryption key, so the zone's
     // genesis anchor captures the current L1 block. The encryption key registration
     // and deposit happen in subsequent L1 blocks that the zone processes naturally.
-    let zone = ZoneTestNode::start_from_l1_with_sequencer_key(
+    let zone = ZoneTestNode::start_from_l1_with_sequencer_signer(
         l1.http_url(),
         l1.ws_url(),
         portal_address,
-        encryption_key.clone(),
+        alloy_signer_local::PrivateKeySigner::from_signing_key(encryption_key.clone().into()),
     )
     .await?;
 
@@ -1045,11 +1045,11 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
     );
 
     // --- Step 3: Start zone with sequencer key ---
-    let zone = ZoneTestNode::start_from_l1_with_sequencer_key(
+    let zone = ZoneTestNode::start_from_l1_with_sequencer_signer(
         l1.http_url(),
         l1.ws_url(),
         portal_address,
-        encryption_key.clone(),
+        alloy_signer_local::PrivateKeySigner::from_signing_key(encryption_key.clone().into()),
     )
     .await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;

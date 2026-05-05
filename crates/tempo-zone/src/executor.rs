@@ -7,7 +7,10 @@
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
-    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, OnStateHook},
+    block::{
+        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput,
+        OnStateHook,
+    },
     eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_evm::block::StateDB;
@@ -100,21 +103,11 @@ where
             .execute_transaction_without_commit((tx_env, recovered))
     }
 
-    fn commit_transaction(&mut self, output: Self::Result) -> Result<u64, BlockExecutionError> {
-        let gas_used = self.inner.commit_transaction(output)?;
-
-        // Collect revert logs (same as Tempo L1 executor).
-        let logs = self.inner.evm.take_revert_logs();
-        if !logs.is_empty() {
-            self.inner
-                .receipts
-                .last_mut()
-                .expect("receipt was just pushed")
-                .logs
-                .extend(logs);
-        }
-
-        Ok(gas_used)
+    fn commit_transaction(
+        &mut self,
+        output: Self::Result,
+    ) -> Result<GasOutput, BlockExecutionError> {
+        self.inner.commit_transaction(output)
     }
 
     fn finish(
@@ -227,7 +220,7 @@ mod tests {
                 // Zone executor override: validatorTokens[sequencer] = fee_token.
                 fee_manager.validator_tokens[sequencer].write(*token)?;
 
-                fee_manager.collect_fee_pre_tx(user, *token, *max, sequencer)?;
+                fee_manager.collect_fee_pre_tx(user, *token, *max, sequencer, false)?;
                 fee_manager.collect_fee_post_tx(user, *used, *max - *used, *token, sequencer)?;
             }
 

@@ -97,9 +97,6 @@ impl ProxyZoneRpc {
         id: &FilterId,
         auth: &AuthContext,
     ) -> Result<(), JsonRpcError> {
-        if auth.is_sequencer {
-            return Ok(());
-        }
         let owners = self.filter_owners.lock().await;
         match owners.get(id) {
             Some(owner) if *owner == auth.caller => Ok(()),
@@ -200,7 +197,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer && address != auth.caller {
+            if address != auth.caller {
                 return Ok(raw_zero());
             }
             self.forward("eth_getBalance", serde_json::json!([address, block]))
@@ -215,7 +212,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer && address != auth.caller {
+            if address != auth.caller {
                 return Ok(raw_zero());
             }
             self.forward(
@@ -230,16 +227,12 @@ impl ZoneRpcApi for ProxyZoneRpc {
         &self,
         number: BlockNumberOrTag,
         full: bool,
-        auth: AuthContext,
+        _auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
             let result = self
                 .forward("eth_getBlockByNumber", serde_json::json!([number, full]))
                 .await?;
-
-            if auth.is_sequencer {
-                return Ok(result);
-            }
 
             let mut block: serde_json::Value =
                 serde_json::from_str(result.get()).map_err(internal)?;
@@ -257,16 +250,12 @@ impl ZoneRpcApi for ProxyZoneRpc {
         &self,
         hash: alloy_primitives::B256,
         full: bool,
-        auth: AuthContext,
+        _auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
             let result = self
                 .forward("eth_getBlockByHash", serde_json::json!([hash, full]))
                 .await?;
-
-            if auth.is_sequencer {
-                return Ok(result);
-            }
 
             let mut block: serde_json::Value =
                 serde_json::from_str(result.get()).map_err(internal)?;
@@ -292,7 +281,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 return Ok(result);
             }
 
-            if !auth.is_sequencer && json_from(&tx) != Some(auth.caller) {
+            if json_from(&tx) != Some(auth.caller) {
                 return Ok(raw_null());
             }
 
@@ -313,10 +302,6 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 return Ok(result);
             };
 
-            if auth.is_sequencer {
-                return Ok(result);
-            }
-
             if receipt.from() != auth.caller {
                 return Ok(raw_null());
             }
@@ -333,14 +318,11 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer && state_override.is_some() {
+            if state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
-            if !auth.is_sequencer {
-                policy::enforce_from(&mut request, &auth)?;
-            }
-
+            policy::enforce_from(&mut request, &auth)?;
             policy::enforce_no_contract_creation(&request)?;
 
             self.forward(
@@ -359,14 +341,11 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer && state_override.is_some() {
+            if state_override.is_some() {
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
-            if !auth.is_sequencer {
-                policy::enforce_from(&mut request, &auth)?;
-            }
-
+            policy::enforce_from(&mut request, &auth)?;
             policy::enforce_no_contract_creation(&request)?;
 
             self.forward(
@@ -379,9 +358,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
 
     fn send_raw_transaction(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                policy::verify_raw_tx_sender(&data, &auth)?;
-            }
+            policy::verify_raw_tx_sender(&data, &auth)?;
 
             self.forward("eth_sendRawTransaction", serde_json::json!([data]))
                 .await
@@ -390,17 +367,11 @@ impl ZoneRpcApi for ProxyZoneRpc {
 
     fn send_raw_transaction_sync(&self, data: Bytes, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                policy::verify_raw_tx_sender(&data, &auth)?;
-            }
+            policy::verify_raw_tx_sender(&data, &auth)?;
 
             let result = self
                 .forward("eth_sendRawTransactionSync", serde_json::json!([data]))
                 .await?;
-
-            if auth.is_sequencer {
-                return Ok(result);
-            }
 
             let receipt: TempoTransactionReceipt =
                 serde_json::from_str(result.get()).map_err(internal)?;
@@ -414,9 +385,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                policy::enforce_from(&mut request, &auth)?;
-            }
+            policy::enforce_from(&mut request, &auth)?;
 
             policy::enforce_no_contract_creation(&request)?;
 
@@ -427,12 +396,6 @@ impl ZoneRpcApi for ProxyZoneRpc {
 
     fn get_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if auth.is_sequencer {
-                return self
-                    .forward("eth_getLogs", serde_json::json!([filter]))
-                    .await;
-            }
-
             filter::scope_filter(&mut filter);
             let result = self
                 .forward("eth_getLogs", serde_json::json!([filter]))
@@ -445,9 +408,7 @@ impl ZoneRpcApi for ProxyZoneRpc {
 
     fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            if !auth.is_sequencer {
-                filter::scope_filter(&mut filter);
-            }
+            filter::scope_filter(&mut filter);
             let result = self
                 .forward("eth_newFilter", serde_json::json!([filter]))
                 .await?;
@@ -465,10 +426,6 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 .forward("eth_getFilterLogs", serde_json::json!([id]))
                 .await?;
 
-            if auth.is_sequencer {
-                return Ok(result);
-            }
-
             let logs: Vec<Log> = serde_json::from_str(result.get()).map_err(internal)?;
             let filtered = filter::filter_logs(logs, &auth.caller);
             to_raw(&filtered)
@@ -482,10 +439,6 @@ impl ZoneRpcApi for ProxyZoneRpc {
             let result = self
                 .forward("eth_getFilterChanges", serde_json::json!([id]))
                 .await?;
-
-            if auth.is_sequencer {
-                return Ok(result);
-            }
 
             // Try to parse as logs for filtering. If the result is block hashes
             // (from a block filter) or empty, the parse will fail and we pass through.
@@ -635,7 +588,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn transaction_receipt_filters_logs_for_non_sequencer() {
+    async fn transaction_receipt_filters_logs() {
         let caller = address!("0x0000000000000000000000000000000000000001");
         let other = address!("0x0000000000000000000000000000000000000002");
         let third = address!("0x0000000000000000000000000000000000000003");
@@ -665,7 +618,6 @@ mod tests {
                 TxHash::with_last_byte(1),
                 AuthContext {
                     caller,
-                    is_sequencer: false,
                     expires_at: u64::MAX,
                 },
             )

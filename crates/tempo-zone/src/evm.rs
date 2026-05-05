@@ -339,6 +339,7 @@ impl ConfigureEvm for ZoneEvmConfig {
             general_gas_limit: 0,
             shared_gas_limit: 0,
             validator_set: None,
+            consensus_context: block.header().consensus_context,
             subblock_fee_recipients: Default::default(),
         })
     }

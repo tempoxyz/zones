@@ -2,9 +2,9 @@
 //!
 //! These tests launch a zone node with a private RPC server and verify:
 //! - Authentication enforcement (missing/invalid tokens, wrong chain ID)
-//! - Public method access (both sequencer and regular users)
+//! - Public method access
 //! - Balance & state privacy (users only see their own data)
-//! - Block redaction (logsBloom zeroed, transactions cleared for non-sequencers)
+//! - Block redaction (logsBloom zeroed, transactions cleared)
 //! - Method tier enforcement (restricted/disabled/unknown methods)
 
 use crate::utils::{
@@ -22,10 +22,7 @@ use futures::{SinkExt, StreamExt};
 use p256::ecdsa::SigningKey as P256SigningKey;
 use rand::thread_rng;
 use serde_json::{Value, json};
-use std::{
-    collections::{HashMap, HashSet},
-    time::Duration,
-};
+use std::{collections::HashSet, time::Duration};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::{
     ITIP20 as ContractTip20,
@@ -620,7 +617,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
             "eth_call",
             serde_json::json!([
                 {
-                    "from": format!("{:#x}", ctx.config.sequencer),
+                    "from": format!("{:#x}", ctx.sequencer_signer.address()),
                     "to": format!("{PATH_USD_ADDRESS:#x}"),
                     "data": format!("0x{}", hex::encode(balance_call.abi_encode())),
                 },
@@ -644,7 +641,7 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
             "eth_call",
             serde_json::json!([
                 {
-                    "from": format!("{:#x}", ctx.config.sequencer),
+                    "from": format!("{:#x}", ctx.sequencer_signer.address()),
                     "to": format!("{PATH_USD_ADDRESS:#x}"),
                     "data": format!("0x{}", hex::encode(allowance_call.abi_encode())),
                 },
@@ -721,30 +718,6 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
             user_override_resp["error"]["message"].as_str().unwrap(),
             "state overrides not allowed",
         );
-
-        let sequencer_override_resp = ctx
-            .call_as_sequencer(
-                method,
-                json!([
-                    {
-                        "from": format!("{:#x}", ctx.config.sequencer),
-                        "to": simulation_target.clone(),
-                        "data": "0x"
-                    },
-                    "latest",
-                    {}
-                ]),
-            )
-            .await?;
-        assert_eq!(
-            sequencer_override_resp.get("error"),
-            None,
-            "{method} should preserve sequencer state override access: {sequencer_override_resp}",
-        );
-        assert!(
-            sequencer_override_resp.get("result").is_some(),
-            "{method} should return a result for sequencer state overrides: {sequencer_override_resp}",
-        );
     }
 
     let fill_resp = ctx
@@ -767,8 +740,8 @@ async fn test_simulation_validation_rejects_create_and_overrides() -> eyre::Resu
     Ok(())
 }
 
-/// Block access control: user gets redacted blocks (full=false), rejected for full=true;
-/// sequencer gets full blocks.
+/// Block access control: full=true is rejected for all callers;
+/// full=false returns redacted blocks (empty txs, zeroed logsBloom).
 #[tokio::test(flavor = "multi_thread")]
 async fn test_block_access_control() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -778,7 +751,7 @@ async fn test_block_access_control() -> eyre::Result<()> {
 
     let user_signer = PrivateKeySigner::random();
 
-    // User full=true → rejected with -32005
+    // full=true → rejected with -32005
     let resp = ctx
         .call_as_user(
             "eth_getBlockByNumber",
@@ -786,16 +759,14 @@ async fn test_block_access_control() -> eyre::Result<()> {
             &user_signer,
         )
         .await?;
-    let error = resp
-        .get("error")
-        .expect("full=true should be rejected for user");
+    let error = resp.get("error").expect("full=true should be rejected");
     assert_eq!(
         error["code"].as_i64().unwrap(),
         -32005,
-        "full=true for non-sequencer should return -32005"
+        "full=true should return -32005"
     );
 
-    // User full=false → redacted block (empty txs, zeroed logsBloom)
+    // full=false → redacted block (empty txs, zeroed logsBloom)
     let resp = ctx
         .call_as_user(
             "eth_getBlockByNumber",
@@ -811,29 +782,20 @@ async fn test_block_access_control() -> eyre::Result<()> {
         .expect("block should have transactions field");
     assert!(
         txs.as_array().is_some_and(|a| a.is_empty()),
-        "non-sequencer block transactions should be empty (redacted)"
+        "block transactions should be empty (redacted)"
     );
     if let Some(bloom) = block.get("logsBloom").and_then(|b| b.as_str()) {
         let bloom_trimmed = bloom.strip_prefix("0x").unwrap_or(bloom);
         assert!(
             bloom_trimmed.chars().all(|c| c == '0'),
-            "non-sequencer block logsBloom should be all zeros"
+            "block logsBloom should be all zeros"
         );
     }
-
-    // Sequencer full=true → allowed
-    let resp = ctx
-        .call_as_sequencer("eth_getBlockByNumber", serde_json::json!(["latest", true]))
-        .await?;
-    assert!(
-        resp.get("result").is_some() && resp.get("error").is_none(),
-        "sequencer should get full block without error"
-    );
 
     Ok(())
 }
 
-/// Method tier enforcement: restricted → -32005 for users (allowed for sequencer),
+/// Method tier enforcement: restricted → -32005 for all callers,
 /// disabled → -32006 for everyone, unknown → -32601.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_method_tiers() -> eyre::Result<()> {
@@ -842,7 +804,7 @@ async fn test_method_tiers() -> eyre::Result<()> {
     let ctx = start_zone_with_private_rpc().await?;
     let user_signer = PrivateKeySigner::random();
 
-    // Restricted methods → -32005 for non-sequencer
+    // Restricted methods → -32005 for all callers
     for method in [
         "eth_getCode",
         "eth_getStorageAt",
@@ -855,35 +817,22 @@ async fn test_method_tiers() -> eyre::Result<()> {
             .await?;
         let error = resp
             .get("error")
-            .unwrap_or_else(|| panic!("{method} should return error for non-sequencer"));
+            .unwrap_or_else(|| panic!("{method} should return error"));
         assert_eq!(
             error["code"].as_i64().unwrap(),
             -32005,
-            "{method} should return -32005 (Sequencer only)"
+            "{method} should return -32005"
         );
     }
 
-    // Restricted methods → allowed for sequencer (no -32005)
-    let resp = ctx
-        .call_as_sequencer(
-            "eth_getCode",
-            serde_json::json!([format!("{:#x}", ctx.config.sequencer), "latest"]),
-        )
-        .await?;
-    if let Some(error) = resp.get("error") {
-        assert_ne!(
-            error["code"].as_i64().unwrap(),
-            -32005,
-            "sequencer should not get 'Sequencer only' error for restricted methods"
-        );
-    }
-
-    // Disabled methods → -32006 for everyone (including sequencer)
+    // Disabled methods → -32006 for everyone
     for method in ["eth_subscribe", "eth_mining", "eth_hashrate"] {
-        let resp = ctx.call_as_sequencer(method, serde_json::json!([])).await?;
+        let resp = ctx
+            .call_as_user(method, serde_json::json!([]), &user_signer)
+            .await?;
         let error = resp
             .get("error")
-            .unwrap_or_else(|| panic!("{method} should return error even for sequencer"));
+            .unwrap_or_else(|| panic!("{method} should return error"));
         assert_eq!(
             error["code"].as_i64().unwrap(),
             -32006,
@@ -893,7 +842,11 @@ async fn test_method_tiers() -> eyre::Result<()> {
 
     // Unknown method → -32601
     let resp = ctx
-        .call_as_sequencer("eth_someNonexistentMethod", serde_json::json!([]))
+        .call_as_user(
+            "eth_someNonexistentMethod",
+            serde_json::json!([]),
+            &user_signer,
+        )
         .await?;
     let error = resp
         .get("error")
@@ -907,10 +860,10 @@ async fn test_method_tiers() -> eyre::Result<()> {
     Ok(())
 }
 
-/// WebSocket log subscriptions apply the same caller-scoped filtering as
-/// polling log APIs, while the sequencer sees the full stream.
+/// WebSocket log subscriptions are sender-scoped: callers only see logs
+/// from their own transactions.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_ws_logs_subscription_scopes_non_sequencer_and_allows_sequencer() -> eyre::Result<()> {
+async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let mut ctx = start_zone_with_private_rpc().await?;
@@ -936,17 +889,10 @@ async fn test_ws_logs_subscription_scopes_non_sequencer_and_allows_sequencer() -
     .await?;
 
     let owner_token = ctx.user_token(&owner_signer);
-    let sequencer_token = ctx.sequencer_token();
     let mut owner_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &owner_token).await?;
-    let mut sequencer_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &sequencer_token).await?;
 
     let owner_subscription = ws_subscribe(
         &mut owner_ws,
-        json!(["logs", {"address": format!("{PATH_USD_ADDRESS:#x}")}]),
-    )
-    .await?;
-    let sequencer_subscription = ws_subscribe(
-        &mut sequencer_ws,
         json!(["logs", {"address": format!("{PATH_USD_ADDRESS:#x}")}]),
     )
     .await?;
@@ -972,7 +918,6 @@ async fn test_ws_logs_subscription_scopes_non_sequencer_and_allows_sequencer() -
         .await?;
 
     let owner_hash = *owner_pending.tx_hash();
-    let outsider_hash = *outsider_pending.tx_hash();
 
     ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
 
@@ -999,31 +944,10 @@ async fn test_ws_logs_subscription_scopes_non_sequencer_and_allows_sequencer() -
         .collect::<HashSet<_>>();
     assert_eq!(owner_hashes, HashSet::from([format!("{owner_hash:#x}")]));
 
-    let mut sequencer_notifications = vec![ws_next_json(&mut sequencer_ws).await?];
-    sequencer_notifications.extend(
-        ws_collect_messages_until_quiet(&mut sequencer_ws, Duration::from_millis(500)).await?,
-    );
-    let sequencer_hashes = sequencer_notifications
-        .into_iter()
-        .map(|notification| {
-            assert_eq!(
-                notification["params"]["subscription"].as_str().unwrap(),
-                sequencer_subscription
-            );
-            notification["params"]["result"]["transactionHash"]
-                .as_str()
-                .unwrap()
-                .to_owned()
-        })
-        .collect::<HashSet<_>>();
-    assert!(sequencer_hashes.contains(&format!("{owner_hash:#x}")));
-    assert!(sequencer_hashes.contains(&format!("{outsider_hash:#x}")));
-
     Ok(())
 }
 
-/// Pending transaction subscriptions are sender-scoped for non-sequencers,
-/// while the sequencer sees the unfiltered full transaction stream.
+/// Pending transaction subscriptions are sender-scoped for all callers.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_ws_pending_transactions_are_sender_scoped_for_users() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -1051,13 +975,9 @@ async fn test_ws_pending_transactions_are_sender_scoped_for_users() -> eyre::Res
     .await?;
 
     let owner_token = ctx.user_token(&owner_signer);
-    let sequencer_token = ctx.sequencer_token();
     let mut owner_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &owner_token).await?;
-    let mut sequencer_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &sequencer_token).await?;
 
     let owner_subscription = ws_subscribe(&mut owner_ws, json!(["newPendingTransactions"])).await?;
-    let sequencer_subscription =
-        ws_subscribe(&mut sequencer_ws, json!(["newPendingTransactions", true])).await?;
 
     let owner_provider = ProviderBuilder::new()
         .wallet(owner_signer.clone())
@@ -1080,7 +1000,6 @@ async fn test_ws_pending_transactions_are_sender_scoped_for_users() -> eyre::Res
         .await?;
 
     let owner_hash = *owner_pending.tx_hash();
-    let outsider_hash = *outsider_pending.tx_hash();
 
     let owner_notification = ws_next_json(&mut owner_ws).await?;
     assert_eq!(
@@ -1094,35 +1013,6 @@ async fn test_ws_pending_transactions_are_sender_scoped_for_users() -> eyre::Res
         format!("{owner_hash:#x}")
     );
     ws_expect_no_message(&mut owner_ws, Duration::from_millis(500)).await?;
-
-    let mut sequencer_pending = HashMap::new();
-    for _ in 0..2 {
-        let notification = ws_next_json(&mut sequencer_ws).await?;
-        assert_eq!(
-            notification["params"]["subscription"].as_str().unwrap(),
-            sequencer_subscription
-        );
-        let tx = notification["params"]["result"]
-            .as_object()
-            .expect("sequencer should receive full pending tx objects");
-        sequencer_pending.insert(
-            tx["hash"].as_str().unwrap().to_owned(),
-            tx["from"].as_str().unwrap().to_owned(),
-        );
-    }
-    assert_eq!(
-        sequencer_pending,
-        HashMap::from([
-            (
-                format!("{owner_hash:#x}"),
-                format!("{:#x}", owner_signer.address()),
-            ),
-            (
-                format!("{outsider_hash:#x}"),
-                format!("{:#x}", outsider_signer.address()),
-            ),
-        ])
-    );
 
     ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
     let owner_receipt = owner_pending.get_receipt().await?;
@@ -1173,10 +1063,6 @@ async fn test_zone_metadata_methods() -> eyre::Result<()> {
             .map(|token| token.as_str().unwrap())
             .collect::<Vec<_>>(),
         vec!["0x20c0000000000000000000000000000000000000"],
-    );
-    assert_eq!(
-        zone_info["result"]["sequencer"].as_str().unwrap(),
-        format!("{:#x}", ctx.config.sequencer),
     );
     assert_eq!(
         zone_info["result"]["chainId"].as_str().unwrap(),
