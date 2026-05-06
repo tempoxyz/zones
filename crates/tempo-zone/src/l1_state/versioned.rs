@@ -61,14 +61,15 @@ impl<V: Copy> HeightVersioned<V> {
 
     /// Records a value at the given block height.
     ///
-    /// If `block_number` is at or below the baseline height, the baseline is updated directly.
-    /// Otherwise the value is stored in the pending map.
+    /// Values at or below the baseline height are ignored. The baseline represents finalized
+    /// engine-consumed state and is only updated by [`advance`](Self::advance), which prevents
+    /// delayed RPC fallback results from overwriting newer event-derived state.
     pub fn set(&mut self, block_number: u64, value: V) {
         if block_number <= self.baseline_height {
-            self.baseline = Some(value);
-        } else {
-            self.pending.insert(block_number, value);
+            return;
         }
+
+        self.pending.insert(block_number, value);
     }
 
     /// Advance the baseline to `new_height`, folding all pending entries up to that height.
@@ -195,14 +196,18 @@ mod tests {
     }
 
     #[test]
-    fn set_below_baseline_updates_baseline() {
+    fn set_at_or_below_baseline_is_ignored() {
         let mut v = HeightVersioned::default();
         v.set(10, 1u64);
         v.advance(20);
 
-        // Setting at or below baseline updates it directly
+        // Delayed writes from finalized heights must not rewrite the baseline.
         v.set(15, 99);
-        assert_eq!(v.get(20), Some(99));
+        v.set(20, 100);
+        assert_eq!(v.get(20), Some(1));
+
+        v.set(21, 2);
+        assert_eq!(v.get(21), Some(2));
     }
 
     #[test]
