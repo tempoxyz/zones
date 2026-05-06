@@ -118,7 +118,7 @@ reth-node-builder = { git = "https://github.com/paradigmxyz/reth", rev = "0b3305
 reth-node-core = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057" }
 reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057" }
 reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057" }
-reth-primitives-traits = { version = "0.3.0", default-features = false }
+reth-primitives-traits = { version = "0.3.1", default-features = false }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057" }
 reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057", features = [
   "std",
@@ -135,7 +135,7 @@ reth-transaction-pool = { git = "https://github.com/paradigmxyz/reth", rev = "0b
 revm = { version = "37.0.0", features = ["optional_fee_charge"], default-features = false }
 
 # alloy
-alloy = { version = "2.0.0", default-features = false }
+alloy = { version = "2.0.1", default-features = false }
 alloy-consensus = { version = "2.0.0", default-features = false }
 alloy-contract = { version = "2.0.0", default-features = false }
 alloy-eips = { version = "2.0.0", default-features = false }
@@ -162,7 +162,7 @@ commonware-utils = "2026.2.0"
 # misc
 aes-gcm = "0.10.3"
 base64 = "0.22.1"
-clap = { version = "4.5.45", features = ["derive"] }
+clap = { version = "4.6.1", features = ["derive"] }
 const-hex = { version = "1.15.0" }
 derive_more = { version = "2.0.0" }
 either = "1.15.0"
@@ -170,13 +170,13 @@ eyre = "0.6.12"
 futures = "0.3.31"
 indicatif = "0.18"
 itertools = "0.14.0"
-metrics = "0.24.3"
+metrics = "0.24.4"
 k256 = { version = "0.13.4", features = ["arithmetic", "ecdh"] }
 parking_lot = "0.12.4"
 p256 = { version = "0.13.2", default-features = false, features = ["ecdsa"] }
 rand = "0.8.5"
 sha2 = "0.10.9"
-rayon = "1.10"
+rayon = "1.12"
 secp256k1 = { version = "0.30.0", features = ["recovery", "global-context"] }
 serde = { version = "1.0.219", default-features = false, features = ["derive", "alloc"] }
 serde_json = "1.0.142"
