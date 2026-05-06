@@ -381,6 +381,7 @@ interface IZoneTxContext {
 //   slot 11: _withdrawalQueue.slots (mapping)
 //   slot 12: tempoGasRate (uint128) — appended to keep cross-domain slot constants stable
 //   slot 13: _refunds (mapping(address => mapping(address => uint128)))
+//   slot 14: depositPolicyId (uint64)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig, ZoneInbox, and ZoneOutbox use them to read portal state via
@@ -393,6 +394,7 @@ bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(6));
 bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(8));
 bytes32 constant PORTAL_TEMPO_GAS_RATE_SLOT = bytes32(uint256(12));
+bytes32 constant PORTAL_DEPOSIT_POLICY_ID_SLOT = bytes32(uint256(14));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -596,6 +598,17 @@ interface IZonePortal {
         bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+    /// @notice Emitted when sequencer updates the portal's deposit-side TIP-403 policy.
+    event DepositPolicyUpdated(uint64 depositPolicyId);
+    /// @notice Emitted when a deposit is escrowed because the depositor failed the
+    ///         portal's `depositPolicyId` check. The funds are credited to
+    ///         `_refunds[token][bouncebackRecipient]` (see `claimRefund`).
+    event DepositBlocked(
+        address indexed token,
+        address indexed sender,
+        uint128 amount,
+        uint64 depositPolicyId
+    );
     event TempoGasRateUpdated(uint128 tempoGasRate);
 
     /// @notice Emitted when sequencer enables a new TIP-20 token for bridging
@@ -619,7 +632,6 @@ interface IZonePortal {
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
-    error DepositPolicyForbids();
     error DepositTooSmall();
     error MissingBouncebackRecipient();
     error GasFeeRateTooHigh();
@@ -736,6 +748,11 @@ interface IZonePortal {
     /// @notice Set zone gas rate. Only callable by sequencer.
     /// @param _zoneGasRate Zone token units per gas unit on the zone
     function setZoneGasRate(uint128 _zoneGasRate) external;
+    /// @notice Sequencer-controlled TIP-403 policy applied to every depositor.
+    ///         Defaults to policy 1 (built-in allow-all); set policy 0 (built-in
+    ///         empty WHITELIST) to halt all deposits, or any custom policy id.
+    function setDepositPolicyId(uint64 _depositPolicyId) external;
+    function depositPolicyId() external view returns (uint64);
 
     /// @notice Set Tempo gas rate. Only callable by sequencer.
     /// @dev    Single canonical source for all Tempo-priced fees:

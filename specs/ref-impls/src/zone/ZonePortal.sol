@@ -135,6 +135,26 @@ contract ZonePortal is IZonePortal {
     ///         `claimRefund(token)`.
     mapping(address token => mapping(address owner => uint128 amount)) internal _refunds;
 
+    /// @notice Sequencer-controlled TIP-403 policy applied to depositors at deposit time.
+    /// @dev Always enforced via `TIP403_REGISTRY.isAuthorizedSender(depositPolicyId, msg.sender)`
+    ///      in `deposit()` and `depositEncrypted()`. Defaults to TIP-403 policy 1
+    ///      (registry's built-in empty BLACKLIST) so a freshly deployed zone accepts
+    ///      deposits without a compliance gate; the sequencer can tighten with any
+    ///      other policy id, or set policy 0 (built-in empty WHITELIST) to halt
+    ///      all deposits. Independent of the per-token TIP-403 transfer policy that
+    ///      `transferFrom` continues to enforce.
+    ///
+    ///      A blocked depositor does NOT cause `deposit()` / `depositEncrypted()` to
+    ///      revert. Funds are pulled into the portal as for a normal deposit, then
+    ///      credited to `_refunds[token][bouncebackRecipient]` and surfaced via the
+    ///      `DepositBlocked` event; `bouncebackRecipient` recovers them via
+    ///      `claimRefund(token)`. This TIP-1028-style escrow path keeps `deposit()`
+    ///      callable from contracts that rely on it returning success.
+    ///
+    ///      Appended at the end of the storage layout so cross-domain slot
+    ///      constants (PORTAL_*_SLOT) in IZone.sol remain stable.
+    uint64 public depositPolicyId;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -160,6 +180,12 @@ contract ZonePortal is IZonePortal {
         // without the sequencer needing to call setTempoGasRate first.
         tempoGasRate = DEFAULT_TEMPO_GAS_RATE;
         emit TempoGasRateUpdated(DEFAULT_TEMPO_GAS_RATE);
+
+        // Default to TIP-403 policy 1 (registry's built-in empty BLACKLIST,
+        // which authorizes every sender) so the portal accepts deposits out
+        // of the box. The sequencer can tighten this at any time via
+        // setDepositPolicyId.
+        depositPolicyId = 1;
 
         // Enable the initial token
         _enableTokenInternal(_initialToken);
@@ -216,6 +242,17 @@ contract ZonePortal is IZonePortal {
         if (_tempoGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         tempoGasRate = _tempoGasRate;
         emit TempoGasRateUpdated(_tempoGasRate);
+    }
+
+    /// @notice Set the portal's deposit-side TIP-403 policy. Only callable by sequencer.
+    /// @dev The check is always enforced; pass policy 1 (built-in empty BLACKLIST)
+    ///      to authorize every sender, or policy 0 (built-in empty WHITELIST) to
+    ///      halt all deposits. This is independent of the per-token TIP-403 policy
+    ///      that `transferFrom` already enforces on the depositor.
+    /// @param _depositPolicyId Policy id (must exist in the TIP-403 registry).
+    function setDepositPolicyId(uint64 _depositPolicyId) external onlySequencer {
+        depositPolicyId = _depositPolicyId;
+        emit DepositPolicyUpdated(_depositPolicyId);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -558,21 +595,6 @@ contract ZonePortal is IZonePortal {
         // (_enqueueWithdrawalBounceBack), which bypasses this entry point.
         if (bouncebackRecipient == address(0)) revert MissingBouncebackRecipient();
 
-        // Enforce TIP-403 policy: the deposit recipient `to` must be authorized
-        // under the token's transfer policy before accepting the deposit. We do
-        // NOT validate `bouncebackRecipient` against the policy here — if the
-        // bounce-back transfer is later rejected by the policy, the funds land
-        // in the per-recipient refund registry (claimRefund) rather than
-        // reverting the bounce-back, so an unauthorized refund target does not
-        // stall queue progress.
-        uint64 policyId = ITIP20(_token).transferPolicyId();
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
-            revert DepositPolicyForbids();
-        }
-        if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
-            revert DepositPolicyForbids();
-        }
-
         // Snapshot fees at deposit time. The bouncebackFee is reserved out of `amount`
         // but only charged to the user if the deposit ultimately bounces back; on
         // success it is returned to the user implicitly via the zone-side mint.
@@ -584,6 +606,21 @@ contract ZonePortal is IZonePortal {
         // Transfer full amount from sender to this contract
         // TIP-20 transfers revert on failure, so no boolean check is needed here.
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
+
+        // Enforce the portal's deposit-side TIP-403 policy on the depositor. The
+        // sequencer picks this policy id and applies it on top of whatever the
+        // token's own transfer policy enforces inside `transferFrom` above. On a
+        // policy block we do NOT revert — the funds are already in the portal,
+        // so we credit them to `_refunds[token][bouncebackRecipient]`, emit
+        // `DepositBlocked`, and return. No fee is charged, no zone-side processing
+        // happens, and `bouncebackRecipient` recovers the funds via
+        // `claimRefund(token)`. This keeps `deposit()` callable from contracts that
+        // rely on it returning success (TIP-1028-style escrow path).
+        if (!TIP403_REGISTRY.isAuthorizedSender(depositPolicyId, msg.sender)) {
+            _refunds[_token][bouncebackRecipient] += amount;
+            emit DepositBlocked(_token, msg.sender, amount, depositPolicyId);
+            return bytes32(0);
+        }
 
         // Transfer deposit fee to sequencer up-front (zone-side processing fee).
         // The bouncebackFee stays escrowed in the portal alongside `netAmount` and is
@@ -691,6 +728,16 @@ contract ZonePortal is IZonePortal {
 
         // Transfer full amount from sender to this contract
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
+
+        // Enforce the portal's deposit-side TIP-403 policy on the depositor (see
+        // `deposit()` for details). On a policy block, the funds are escrowed for
+        // the user-supplied `bouncebackRecipient` instead of reverting.
+        if (!TIP403_REGISTRY.isAuthorizedSender(depositPolicyId, msg.sender)) {
+            _refunds[_token][bouncebackRecipient] += amount;
+            emit DepositBlocked(_token, msg.sender, amount, depositPolicyId);
+            return bytes32(0);
+        }
+
         if (fee > 0) {
             ITIP20(_token).transfer(sequencer, fee);
         }

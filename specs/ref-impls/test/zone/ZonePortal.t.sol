@@ -319,79 +319,85 @@ contract ZonePortalTest is BaseTest {
         assertTrue(hash1 != hash3);
     }
 
-    function test_deposit_revertsWhenCompoundPolicyBlocksMintRecipient() public {
+    function test_deposit_defaultsToAllowAllPolicy() public {
+        // Fresh portal: depositPolicyId == 1 (built-in empty BLACKLIST), every
+        // sender is authorized so an ordinary deposit goes through.
+        assertEq(portal.depositPolicyId(), 1);
         uint128 depositAmount = 1000e6;
-
-        address[] memory senderAccounts = new address[](2);
-        senderAccounts[0] = alice;
-        senderAccounts[1] = address(portal);
-        uint64 senderPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, senderAccounts
-        );
-
-        address[] memory recipientAccounts = new address[](3);
-        recipientAccounts[0] = alice;
-        recipientAccounts[1] = address(portal);
-        recipientAccounts[2] = bob;
-        uint64 recipientPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, recipientAccounts
-        );
-
-        address[] memory mintRecipientAccounts = new address[](1);
-        mintRecipientAccounts[0] = charlie;
-        uint64 mintRecipientPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
-        );
-
-        uint64 compoundPolicyId =
-            registry.createCompoundPolicy(senderPolicyId, recipientPolicyId, mintRecipientPolicyId);
-        vm.prank(pathUSDAdmin);
-        pathUSD.changeTransferPolicyId(compoundPolicyId);
-
-        vm.startPrank(alice);
-        pathUSD.approve(address(portal), depositAmount);
-        vm.expectRevert(IZonePortal.DepositPolicyForbids.selector);
-        portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"), address(0));
-        vm.stopPrank();
-    }
-
-    function test_deposit_allowsCompoundPolicyMintRecipient() public {
-        uint128 depositAmount = 1000e6;
-
-        address[] memory senderAccounts = new address[](2);
-        senderAccounts[0] = alice;
-        senderAccounts[1] = address(portal);
-        uint64 senderPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, senderAccounts
-        );
-
-        address[] memory recipientAccounts = new address[](3);
-        recipientAccounts[0] = alice;
-        recipientAccounts[1] = address(portal);
-        recipientAccounts[2] = bob;
-        uint64 recipientPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, recipientAccounts
-        );
-
-        address[] memory mintRecipientAccounts = new address[](1);
-        mintRecipientAccounts[0] = bob;
-        uint64 mintRecipientPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
-        );
-
-        uint64 compoundPolicyId =
-            registry.createCompoundPolicy(senderPolicyId, recipientPolicyId, mintRecipientPolicyId);
-        vm.prank(pathUSDAdmin);
-        pathUSD.changeTransferPolicyId(compoundPolicyId);
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
         bytes32 depositHash =
-            portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"), address(0));
+            portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"), alice);
         vm.stopPrank();
 
         assertEq(portal.currentDepositQueueHash(), depositHash);
         assertEq(pathUSD.balanceOf(address(portal)), depositAmount);
+        assertEq(portal.refunds(address(pathUSD), alice), 0);
+    }
+
+    function test_deposit_escrowsRefundWhenSenderBlocked() public {
+        // Sequencer installs a WHITELIST that does not include alice; her deposit
+        // should NOT revert — it should escrow into _refunds[token][bouncebackRecipient].
+        address[] memory accounts = new address[](1);
+        accounts[0] = bob;
+        uint64 policyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, accounts
+        );
+
+        vm.prank(portal.sequencer());
+        portal.setDepositPolicyId(policyId);
+        assertEq(portal.depositPolicyId(), policyId);
+
+        uint128 depositAmount = 1000e6;
+        bytes32 hashBefore = portal.currentDepositQueueHash();
+        uint64 countBefore = portal.depositCount();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.DepositBlocked(address(pathUSD), alice, depositAmount, policyId);
+        bytes32 ret =
+            portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"), charlie);
+        vm.stopPrank();
+
+        // No queue mutation, no fee paid, full amount credited to bouncebackRecipient.
+        assertEq(ret, bytes32(0));
+        assertEq(portal.currentDepositQueueHash(), hashBefore);
+        assertEq(portal.depositCount(), countBefore);
+        assertEq(portal.refunds(address(pathUSD), charlie), depositAmount);
+        assertEq(pathUSD.balanceOf(address(portal)), depositAmount);
+    }
+
+    function test_deposit_escrowsWhenPolicyHaltsAll() public {
+        // Policy 0 is the built-in empty WHITELIST: rejects everyone. Every
+        // depositor escrows.
+        vm.prank(portal.sequencer());
+        portal.setDepositPolicyId(0);
+
+        uint128 depositAmount = 500e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        bytes32 ret =
+            portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        assertEq(ret, bytes32(0));
+        assertEq(portal.refunds(address(pathUSD), alice), depositAmount);
+    }
+
+    function test_setDepositPolicyId_revertsWhenNotSequencer() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setDepositPolicyId(42);
+    }
+
+    function test_setDepositPolicyId_emitsAndUpdates() public {
+        vm.expectEmit(false, false, false, true);
+        emit IZonePortal.DepositPolicyUpdated(7);
+        vm.prank(portal.sequencer());
+        portal.setDepositPolicyId(7);
+        assertEq(portal.depositPolicyId(), 7);
     }
 
     /*//////////////////////////////////////////////////////////////
