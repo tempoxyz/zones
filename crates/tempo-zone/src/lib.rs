@@ -27,7 +27,7 @@ mod tx_context;
 pub mod withdrawals;
 pub mod zonemonitor;
 
-pub use batch::{BatchData, BatchSubmitter};
+pub use batch::{BatchAnchorConfig, BatchData, BatchSubmitter};
 pub use engine::ZoneEngine;
 pub use l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1BlockDeposits, L1Deposit,
@@ -71,6 +71,8 @@ pub struct ZoneSequencerConfig {
     pub zone_poll_interval: Duration,
     /// Maximum time to accumulate zone blocks before submitting a batch to L1.
     pub batch_interval: Duration,
+    /// EIP-2935 history and safety-margin limits used by the batch submitter.
+    pub batch_anchor_config: BatchAnchorConfig,
 }
 
 /// Handles returned by [`spawn_zone_sequencer`] for managing background tasks.
@@ -92,8 +94,7 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 /// This is the top-level POC entrypoint that starts:
 /// - **Zone monitor** — polls the Zone L2 for new blocks, extracts withdrawal events into the
 ///   shared store, builds [`BatchData`], and submits each batch **synchronously** to the
-///   ZonePortal on Tempo L1 (with empty proof bytes). Local state only advances on
-///   successful submission.
+///   ZonePortal on Tempo L1. Local state only advances on successful submission.
 /// - **Withdrawal processor** — polls the ZonePortal withdrawal queue on Tempo L1 and calls
 ///   `processWithdrawal` for each pending withdrawal.
 ///
@@ -141,6 +142,7 @@ pub async fn spawn_zone_sequencer(
         poll_interval: config.zone_poll_interval,
         batch_interval: config.batch_interval,
         portal_address: config.portal_address,
+        batch_anchor_config: config.batch_anchor_config,
     };
 
     let withdrawal_handle = withdrawals::spawn_withdrawal_processor(
