@@ -917,7 +917,7 @@ interface IZoneInbox {
     ///      must be an ancestor of (or equal to) Tempo's currentDepositQueueHash.
     ///
     ///      For encrypted deposits, the sequencer provides DecryptionData with the
-    ///      decrypted (to, memo) values. The proof/TEE validates correctness.
+    ///      ECDH shared secret and proof. ZoneInbox derives (to, memo) onchain.
     ///
     /// @param header RLP-encoded Tempo block header
     /// @param deposits Array of queued deposits to process (oldest first, must be contiguous)

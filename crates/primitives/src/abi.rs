@@ -390,8 +390,6 @@ macro_rules! define_abi {
             struct DecryptionData {
                 bytes32 sharedSecret;
                 uint8 sharedSecretYParity;
-                address to;
-                bytes32 memo;
                 ChaumPedersenProof cpProof;
             }
 
@@ -837,6 +835,45 @@ mod tests {
 
         assert_eq!(solidity_encoding, rust_encoding, "ABI encodings must match");
         assert_eq!(solidity_hash, rust_hash, "Deposit hash chains must match");
+    }
+
+    #[test]
+    fn test_decryption_data_encoding_uses_trimmed_layout() {
+        let shared_secret = B256::from([0x11; 32]);
+        let shared_secret_y_parity = 0x02;
+        let proof_s = B256::from([0x33; 32]);
+        let proof_c = B256::from([0x44; 32]);
+
+        let decryption = DecryptionData {
+            sharedSecret: shared_secret,
+            sharedSecretYParity: shared_secret_y_parity,
+            cpProof: ChaumPedersenProof {
+                s: proof_s,
+                c: proof_c,
+            },
+        };
+
+        let encoded = decryption.abi_encode();
+        let mut expected_y_parity_word = [0u8; 32];
+        expected_y_parity_word[31] = shared_secret_y_parity;
+
+        assert_eq!(
+            encoded.len(),
+            4 * 32,
+            "DecryptionData must encode as four ABI words"
+        );
+        assert_eq!(
+            &encoded[0..32],
+            shared_secret.as_slice(),
+            "word 0 is sharedSecret"
+        );
+        assert_eq!(
+            &encoded[32..64],
+            expected_y_parity_word,
+            "word 1 is sharedSecretYParity"
+        );
+        assert_eq!(&encoded[64..96], proof_s.as_slice(), "word 2 is cpProof.s");
+        assert_eq!(&encoded[96..128], proof_c.as_slice(), "word 3 is cpProof.c");
     }
 
     #[test]

@@ -333,7 +333,7 @@ The encryption scheme is ECIES with secp256k1:
 3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
 4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)).
 
-The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`. The sequencer decrypts the payload off-chain and provides the decrypted `(to, memo)` when processing the deposit on the zone via `advanceTempo()`.
+The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`. The sequencer provides the ECDH shared secret and proof when processing the deposit on the zone via `advanceTempo()`; the zone decrypts `(to, memo)` from the ciphertext onchain.
 
 Regular and encrypted deposits share a single ordered queue with a type discriminator in the hash:
 
@@ -362,7 +362,7 @@ The sequencer provides the ECDH shared secret alongside a proof of its correct d
 
 2. **AES-GCM decryption.** The zone derives an AES-256 key from the shared secret using HKDF-SHA256 (implemented in Solidity using the SHA256 precompile at `0x02`). The HKDF info string includes `tempoPortal`, `keyIndex`, and `ephemeralPubkeyX` for domain separation. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts the ciphertext and validates the GCM authentication tag. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes; the zone parses `(to, memo)` directly from it and uses those values for the mint.
 
-If either step fails (invalid proof or GCM tag mismatch), the zone mints the tokens to the sender's address on the zone instead. The Tempo-side funds remain locked in the portal. This ensures chain progress is never blocked by invalid encrypted deposits. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
+If the proof is invalid, `advanceTempo()` reverts because the sequencer has not proven the shared secret corresponds to the registered encryption key. If the proof is valid but AES-GCM decryption fails (for example because the tag is invalid or the plaintext length is wrong), the zone mints the tokens to the sender's address on the zone instead. The Tempo-side funds remain locked in the portal. This ensures chain progress is not blocked by malformed ciphertext once the sequencer proves the shared secret. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
 
 The Chaum-Pedersen proof also prevents griefing. Without it, a user could submit garbage ciphertext that the sequencer cannot decrypt and cannot prove invalid, blocking the chain. The proof lets the sequencer demonstrate correct shared secret derivation, and the GCM tag failure then proves the ciphertext itself was invalid.
 
@@ -804,7 +804,7 @@ flowchart TB
 
             subgraph DEC["decryptions"]
                 direction TB
-                DD["DecryptionData[k]<br/>shared_secret<br/>shared_secret_y_parity<br/>to<br/>memo<br/>cp_proof"]
+                DD["DecryptionData[k]<br/>shared_secret<br/>shared_secret_y_parity<br/>cp_proof"]
                 CP["ChaumPedersenProof<br/>s<br/>c"]
                 DD ~~~ CP
             end
@@ -949,8 +949,6 @@ pub enum DepositType {
 pub struct DecryptionData {
     pub shared_secret: B256,        // ECDH shared secret (x-coordinate)
     pub shared_secret_y_parity: u8, // Y coordinate parity of the shared secret point
-    pub to: Address,                // Decrypted recipient
-    pub memo: B256,                 // Decrypted memo
     pub cp_proof: ChaumPedersenProof,
 }
 
@@ -1055,7 +1053,7 @@ The stateless execution function must reject the witness on any failed check, mi
    If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This validates header continuity, updates the bound `tempoBlockNumber`, `tempoBlockHash`, and `tempoStateRoot`, and make the new Tempo root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`.
 
 6. **Process deposits and encrypted deposit decryptions inside `advanceTempo`.**
-   Using the now-bound Tempo root for this block, verify the Tempo-side reads needed by `ZoneInbox` such as the portal's current deposit queue hash. Process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). For encrypted deposits, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when valid, and apply the fallback mint-to-sender path when decryption verification fails as specified in [Onchain Decryption Verification](#onchain-decryption-verification).
+   Using the now-bound Tempo root for this block, verify the Tempo-side reads needed by `ZoneInbox` such as the portal's current deposit queue hash. Process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). For encrypted deposits, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and apply the fallback mint-to-sender path when AES-GCM decryption fails after a valid proof as specified in [Onchain Decryption Verification](#onchain-decryption-verification).
 
 7. **Execute user transactions in order.**
    Run each user transaction against the materialized zone state using the current block environment. Whenever execution calls `TempoState.readTempoStorageSlot`, satisfy that call by locating the corresponding `L1StateRead`, proving it against the Tempo root currently bound for this block, and requiring the decoded value to match the witness entry. Any zone-state or Tempo-state access not covered by the witness is an error.

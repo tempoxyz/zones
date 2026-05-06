@@ -1207,14 +1207,13 @@ impl L1BlockDeposits {
                             )
                             .await?;
 
-                        let recipient = if authorized {
+                        if authorized {
                             debug!(
                                 target: "zone::engine",
                                 recipient = %dec.to,
                                 token = %d.token,
                                 "Policy authorized encrypted deposit recipient"
                             );
-                            dec.to
                         } else {
                             warn!(
                                 target: "zone::engine",
@@ -1222,16 +1221,13 @@ impl L1BlockDeposits {
                                 recipient = %dec.to,
                                 token = %d.token,
                                 amount = %d.amount,
-                                "Encrypted deposit recipient unauthorized, redirecting to sender"
+                                "Encrypted deposit recipient unauthorized; ZoneInbox will refund if mint is rejected"
                             );
-                            d.sender
-                        };
+                        }
 
                         let decryption = abi::DecryptionData {
                             sharedSecret: dec.proof.shared_secret,
                             sharedSecretYParity: dec.proof.shared_secret_y_parity,
-                            to: recipient,
-                            memo: dec.memo,
                             cpProof: abi::ChaumPedersenProof {
                                 s: dec.proof.cp_proof_s,
                                 c: dec.proof.cp_proof_c,
@@ -1259,8 +1255,6 @@ impl L1BlockDeposits {
                         let decryption = abi::DecryptionData {
                             sharedSecret: proof.shared_secret,
                             sharedSecretYParity: proof.shared_secret_y_parity,
-                            to: d.sender,
-                            memo: B256::ZERO,
                             cpProof: abi::ChaumPedersenProof {
                                 s: proof.cp_proof_s,
                                 c: proof.cp_proof_c,
@@ -1280,8 +1274,6 @@ impl L1BlockDeposits {
                     let decryption = abi::DecryptionData {
                         sharedSecret: B256::ZERO,
                         sharedSecretYParity: 0x02,
-                        to: d.sender,
-                        memo: B256::ZERO,
                         cpProof: abi::ChaumPedersenProof {
                             s: B256::ZERO,
                             c: B256::ZERO,

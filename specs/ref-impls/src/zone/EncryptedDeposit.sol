@@ -117,7 +117,7 @@ library EncryptedDepositLib {
 ///      - Encrypted: keccak256(abi.encode(DepositType.Encrypted, encryptedDeposit, prevHash))
 ///
 ///      The zone's advanceTempo() processes deposits in order. For encrypted deposits,
-///      the sequencer provides the decrypted (to, memo) alongside the encrypted data.
-///      The proof/TEE validates that decryptions are correct.
+///      the sequencer provides the ECDH shared secret and proof; the zone decrypts
+///      (to, memo) from the ciphertext onchain.
 ///
 ///      Types QueuedDeposit and DecryptionData are defined in IZone.sol.
