@@ -279,9 +279,10 @@ A user deposits by calling `deposit(token, to, amount, memo, bouncebackRecipient
 2. Requires `bouncebackRecipient != address(0)` (reverts otherwise).
 3. Snapshots the deposit fee at the current `zoneGasRate` and the bounce-back fee at the current portal-side `tempoGasRate` (see [Deposit Fees](#deposit-fees)), and requires `amount >= depositFee + bouncebackFee` (reverts `DepositTooSmall` otherwise). The bounce-back fee covers the worst-case Tempo gas of paying out a refund (including new-account creation for `bouncebackRecipient`), so it is priced in Tempo gas, not zone gas.
 4. Transfers `amount` from the user into the portal.
-5. Pays the `depositFee` to the sequencer immediately. The `bouncebackFee` is reserved on the queued entry; it is only consumed if the deposit later bounces back.
-6. Appends the deposit to the deposit queue hash chain with the net amount (`amount - depositFee`), `bouncebackRecipient`, and the snapshotted `bouncebackFee`.
-7. Emits `DepositMade`.
+5. Enforces the portal's deposit-side TIP-403 policy on `msg.sender` via `isAuthorizedSender(depositPolicyId, msg.sender)` (see [Policy Enforcement on Zones](#policy-enforcement-on-zones)). If the depositor is blocked the portal does **not** revert: it credits `amount` to `_refunds[token][bouncebackRecipient]`, emits `DepositBlocked`, and returns. No fee is charged, the deposit is not enqueued, and `bouncebackRecipient` can later pull the funds via `claimRefund(token)`. This keeps `deposit(...)` callable from contracts that rely on it returning success (analogous to TIP-1028's escrow path for receiver-side blocks). See [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back) for the full refund-registry semantics.
+6. Pays the `depositFee` to the sequencer immediately. The `bouncebackFee` is reserved on the queued entry; it is only consumed if the deposit later bounces back.
+7. Appends the deposit to the deposit queue hash chain with the net amount (`amount - depositFee`), `bouncebackRecipient`, and the snapshotted `bouncebackFee`.
+8. Emits `DepositMade`.
 
 The sequencer observes `DepositMade` events and relays deposits to the zone via `ZoneInbox.advanceTempo()`. This function processes deposits in order, minting the zone-side TIP-20 token to each recipient: `mint(deposit.to, deposit.amount)`.
 
@@ -409,12 +410,13 @@ sequenceDiagram
 
 ### Deposit Failures and Bounce-Back
 
-Deposits can fail for three main reasons: a recipient blocked by the TIP-403 policy, an invalid encrypted deposit, or rejection by the sequencer. To make sure that all cases can be handled without loss of user funds, every deposit carries a `bouncebackRecipient`: a Tempo address that receives a refund if zone-side processing fails.
+Deposits can fail for four main reasons: the portal's `depositPolicyId` blocks the depositor at deposit time, the zone-side mint reverts (e.g. the recipient is blocked by the token's TIP-403 policy), an invalid encrypted deposit, or rejection by the sequencer. To make sure that all cases can be handled without loss of user funds, every deposit carries a `bouncebackRecipient`: a Tempo address that owns the refund slot for any of these failure modes.
 
 **Validation at deposit time.** Both `deposit(...)` and `depositEncrypted(...)` require `bouncebackRecipient != address(0)` and revert otherwise (`MissingBouncebackRecipient`). The portal does **not** validate `bouncebackRecipient` against the token's TIP-403 policy at deposit time; if the on-Tempo refund transfer is later rejected by the policy, the funds are parked in a per-recipient refund registry on the portal and the recipient claims them via `claimRefund(token)` (see [Tempo-side refund](#tempo-side-refund) below).
 
-**Triggering conditions.** There are three triggering sites:
+**Triggering conditions.** There are four triggering sites:
 
+- **Deposit-time portal policy block.** `ZonePortal.deposit(...)` and `ZonePortal.depositEncrypted(...)` enforce `isAuthorizedSender(depositPolicyId, msg.sender)` after pulling the funds from the depositor (see [Portal deposit policy](#portal-deposit-policy)). On a block the portal does **not** revert: it credits `_refunds[token][bouncebackRecipient] += amount`, emits `DepositBlocked`, and returns. No fee is charged, no zone-side processing happens, and the deposit is never enqueued — the funds are recoverable from Tempo directly via `claimRefund(token)`. This is the only failure path that doesn't round-trip through the zone.
 - **Regular deposit, mint reverts.** `ZoneInbox.advanceTempo` calls `TIP20.mint(deposit.to, deposit.amount)`. If that mint reverts the deposit bounces back to the user-supplied `bouncebackRecipient`. The user-facing `deposit(...)` entry point ensures `bouncebackRecipient != address(0)`, so the queue can always advance past a failed mint.
 - **Encrypted deposit.** Two failure modes, both of which unconditionally bounce back (no zone-side mint is attempted as a fallback):
   - **Invalid encryption.** The Chaum-Pedersen proof, AES-GCM tag, or plaintext comparison fails during [Onchain Decryption Verification](#onchain-decryption-verification). There is no well-defined recipient on the zone in this case, so the zone does not try to mint to the depositor; it bounces back immediately.
@@ -725,6 +727,12 @@ Zones inherit compliance policies from Tempo automatically. Token issuers set tr
 The zone has a `TIP403Registry` deployed at the same address as on Tempo. This contract is read-only and does not support writing policies. Its `isAuthorized` function reads policy state from Tempo via `TempoState.readTempoStorageSlot()`.
 
 Zone-side TIP-20 transfers check `isAuthorized(policyId, from)` and `isAuthorized(policyId, to)` before executing. If either check fails, the transfer reverts.
+
+#### Portal deposit policy
+
+The portal applies an additional sequencer-controlled TIP-403 policy to depositors. The sequencer sets `ZonePortal.depositPolicyId` via `setDepositPolicyId(uint64)` (emitting `DepositPolicyUpdated`); both `deposit(...)` and `depositEncrypted(...)` always enforce it via `TIP403Registry.isAuthorizedSender(depositPolicyId, msg.sender)`. The default at zone genesis is policy 1, the TIP-403 registry's built-in empty BLACKLIST that authorizes every sender, so deposits work out of the box. The sequencer can switch to any other policy id (including policy 0, the built-in empty WHITELIST, to halt all deposits) without redeploying. This is independent of the per-token TIP-403 transfer policy that `transferFrom` already enforces.
+
+Unlike a token-level TIP-403 rejection, a depositor blocked by `depositPolicyId` does **not** cause `deposit()` / `depositEncrypted()` to revert. The funds are pulled into the portal as for a normal deposit, then credited to `_refunds[token][bouncebackRecipient]` and surfaced via the `DepositBlocked` event; `bouncebackRecipient` recovers them via `claimRefund(token)`. The escrow path follows TIP-1028's design philosophy: don't break callers (especially contracts) that rely on `deposit()` returning success — give them an event-driven recovery path instead. The trade-off is that the portal's deposit policy provides liveness, not asset confiscation: a blocked depositor can name any unblocked address as `bouncebackRecipient` and pull the funds straight back. Sanctions-style asset freeze on the portal is out of scope for this mechanism.
 
 ### Policy Inheritance
 
@@ -1509,6 +1517,10 @@ interface IZonePortal {
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
     event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
     event ZoneGasRateUpdated(uint128 zoneGasRate);
+    event DepositPolicyUpdated(uint64 depositPolicyId);
+    event DepositBlocked(
+        address indexed token, address indexed sender, uint128 amount, uint64 depositPolicyId
+    );
     event TempoGasRateUpdated(uint128 tempoGasRate);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
     event DepositsPaused(address indexed token);
@@ -1568,6 +1580,11 @@ interface IZonePortal {
     function transferSequencer(address newSequencer) external;
     function acceptSequencer() external;
     function setZoneGasRate(uint128 _zoneGasRate) external;
+    /// @notice Sequencer-controlled TIP-403 policy applied to every depositor.
+    ///         Defaults to policy 1 (built-in allow-all); set policy 0 (built-in
+    ///         empty WHITELIST) to halt all deposits, or any custom policy id.
+    function setDepositPolicyId(uint64 _depositPolicyId) external;
+    function depositPolicyId() external view returns (uint64);
     /// @notice Set the canonical Tempo gas rate. Used to price both deposit-bounce-back
     ///         fees on Tempo and withdrawal fees on Tempo (the latter is read by the
     ///         zone via the TempoState predeploy).
