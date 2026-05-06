@@ -967,8 +967,6 @@ contract ZoneBridgeTest is BaseTest {
             decs[i] = DecryptionData({
                 sharedSecret: bytes32(uint256(0xDEAD)),
                 sharedSecretYParity: 0x02,
-                to: decryptedTo,
-                memo: decryptedMemo,
                 cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
             });
         }
@@ -1090,7 +1088,7 @@ contract ZoneBridgeTest is BaseTest {
         _sequencerObserveEncryptedDeposit(alice, netAmount, 0, payload);
         _setupEncryptionKeyMockOnZone(0, encKeyX, encKeyYParity);
 
-        // Even with shouldSucceed=false, we need a to/memo for DecryptionData (values don't matter)
+        // Even with shouldSucceed=false, we still call the relay helper
         bytes32 newProcessedHash =
             _sequencerRelayEncryptedDepositsToL2(address(0xBEEF), bytes32("wrong"), false);
 
@@ -1196,8 +1194,6 @@ contract ZoneBridgeTest is BaseTest {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xDEAD)),
             sharedSecretYParity: 0x02,
-            to: decryptedTo,
-            memo: decryptedMemo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
 
@@ -1309,15 +1305,11 @@ contract ZoneBridgeTest is BaseTest {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xDEAD)),
             sharedSecretYParity: 0x02,
-            to: aliceRecipient,
-            memo: aliceMemo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
         });
         decs[1] = DecryptionData({
             sharedSecret: bytes32(uint256(0xBEEF)),
             sharedSecretYParity: 0x02,
-            to: bobRecipient,
-            memo: bobMemo,
             cpProof: ChaumPedersenProof({ s: bytes32(uint256(3)), c: bytes32(uint256(4)) })
         });
 
@@ -1329,30 +1321,11 @@ contract ZoneBridgeTest is BaseTest {
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, hash2
         );
 
-        // Mock precompiles — we use broad mocks since vm.mockCall matches any input
-        // For the success path, we need AES-GCM to return the correct plaintext.
-        // Since vm.mockCall with just the selector matches ALL calls, we mock for the LAST
-        // decryption (bobRecipient). For aliceRecipient we set up mock before advanceTempo,
-        // but vm.mockCall replaces: we need a workaround.
-        //
-        // Since Foundry's vm.mockCall uses last-registered-wins for the same address+selector,
-        // and encrypted deposits are processed sequentially, we can't differentiate two calls
-        // to the same precompile with different expected outputs using selector-only mocking.
-        //
-        // Workaround: mock both precompiles to return bobRecipient's plaintext.
-        // Alice's deposit will fail the plaintext check (dec.to != decryptedTo), causing a bounce.
-        // We test a simpler scenario: mock for aliceRecipient so BOTH succeed with the same plaintext.
-        //
-        // Actually, the cleanest approach: make both deposits decrypt to the same recipient/memo.
-        // This tests key rotation without needing differentiated mocks.
-
-        // Use same recipient/memo for both decryptions
+        // Mock precompiles to return the same plaintext for both deposits.
+        // Since vm.mockCall with just the selector matches ALL calls, both encrypted
+        // deposits will decrypt to the same (sharedRecipient, sharedMemo).
         address sharedRecipient = address(0x700);
         bytes32 sharedMemo = bytes32("shared-secret");
-        decs[0].to = sharedRecipient;
-        decs[0].memo = sharedMemo;
-        decs[1].to = sharedRecipient;
-        decs[1].memo = sharedMemo;
 
         vm.etch(CHAUM_PEDERSEN_VERIFY, hex"00");
         vm.etch(AES_GCM_DECRYPT, hex"00");
