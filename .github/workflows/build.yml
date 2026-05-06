@@ -37,7 +37,7 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@5d458579430fc14a04a08a1e7d3694f545e91ce6 # stable
       - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       - uses: taiki-e/install-action@c802b5ed6fc0b87c8c603a600ac1d864e6dc1cbe # just
       - name: Build
         run: just build ${{ matrix.binary }} "--profile ${{ inputs.profile || 'dev' }}"
