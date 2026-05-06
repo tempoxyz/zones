@@ -261,7 +261,7 @@ just demo-swap-and-deposit my-zone
 Optional parameters:
 
 ```bash
-just demo-swap-and-deposit my-zone amount=100000000 tick=0
+just demo-swap-and-deposit my-zone 100000000 0
 ```
 
 This is a same-zone demo only. The command creates its own temporary tokens and DEX liquidity automatically, so you do not need to pre-create assets or seed the order book yourself.
