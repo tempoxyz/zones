@@ -11,7 +11,6 @@ pub mod cli;
 pub mod ext;
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub mod batch;
-pub mod builder;
 pub mod engine;
 pub mod evm;
 mod executor;

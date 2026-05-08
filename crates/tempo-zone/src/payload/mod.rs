@@ -1,9 +1,13 @@
-//! Zone-specific payload types.
+//! Zone payload types and builder.
 //!
 //! Owns the full payload attribute types for the zone, wrapping Ethereum
 //! payload attributes and adding L1 block data plus the millisecond timestamp
 //! portion. This avoids pulling in Tempo-specific concepts the zone doesn't
 //! use (interrupts, subblocks, DKG extra-data).
+
+mod builder;
+
+pub use builder::{ZonePayloadBuilder, ZonePayloadFactory, build_advance_tempo_tx};
 
 use std::sync::Arc;
 

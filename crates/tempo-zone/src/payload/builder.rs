@@ -47,7 +47,7 @@ use tempo_primitives::{
 use tempo_transaction_pool::TempoTransactionPool;
 use tracing::{error, info, warn};
 
-use super::node::ZoneNode;
+use crate::node::ZoneNode;
 
 use alloy_evm::block::{BlockExecutor, TxResult};
 

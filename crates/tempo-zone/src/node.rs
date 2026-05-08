@@ -6,7 +6,6 @@
 use crate::{
     DepositQueue, L1SubscriberConfig, PolicyCache, ZoneEngine, ZoneSequencerConfig,
     abi::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal},
-    builder::ZonePayloadFactory,
     evm::ZoneEvmConfig,
     ext::TempoStateExt,
     l1::L1Subscriber,
@@ -14,7 +13,7 @@ use crate::{
         L1StateProvider, L1StateProviderConfig, PolicyProvider, SharedL1StateCache,
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
-    payload::{ZonePayloadAttributes, ZonePayloadTypes},
+    payload::{ZonePayloadAttributes, ZonePayloadFactory, ZonePayloadTypes},
     rpc::{TempoZoneRpc, ZoneRpcApi, start_private_rpc},
     rpc_connection_config, spawn_zone_sequencer,
 };
