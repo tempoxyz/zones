@@ -36,7 +36,7 @@ alloy = { workspace = true, features = [
 ] }
 alloy-eips.workspace = true
 alloy-rlp.workspace = true
-clap = { version = "4.5.45", features = ["derive", "env"] }
+clap = { version = "4.6.1", features = ["derive", "env"] }
 const-hex.workspace = true
 eyre.workspace = true
 futures.workspace = true
