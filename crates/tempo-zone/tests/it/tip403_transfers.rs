@@ -10,10 +10,11 @@
 //! a block that includes it.
 
 use alloy::primitives::{B256, U256, address};
-use alloy_provider::ProviderBuilder;
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
+use tempo_node::rpc::NATIVE_BALANCE_PLACEHOLDER;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use zone::abi::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
 
@@ -59,10 +60,22 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
         .connect_http(zone.http_url().clone());
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
 
+    let native_balance = provider.get_balance(dev_address).await?;
+    assert_eq!(
+        native_balance, NATIVE_BALANCE_PLACEHOLDER,
+        "zone should expose Tempo's placeholder native balance"
+    );
+
+    let estimated_gas = tip20
+        .transfer(bob, U256::from(transfer_amount))
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .estimate_gas()
+        .await?;
+    assert!(estimated_gas > 0, "transfer gas estimate should be nonzero");
+
     let pending = tip20
         .transfer(bob, U256::from(transfer_amount))
         .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
         .send()
         .await?;
 

@@ -18,7 +18,7 @@ use crate::{
     rpc::{TempoZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
     spawn_zone_sequencer,
 };
-use alloy_primitives::{Address, U256};
+use alloy_primitives::Address;
 use alloy_provider::Provider as _;
 use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
@@ -35,17 +35,16 @@ use reth_node_builder::{
         NoopNetworkBuilder, PoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
-        BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
-        NoopEngineApiBuilder, PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
+        BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, NoopEngineApiBuilder,
+        PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
 use reth_primitives_traits::{
     AlloyBlockHeader, SealedBlock, SealedHeader, transaction::error::InvalidTransactionError,
 };
 use reth_provider::ChainSpecProvider;
-use reth_rpc::DynRpcConverter;
 use reth_rpc_builder::Identity;
-use reth_rpc_eth_api::{EthApiTypes, RpcConverter};
+use reth_rpc_eth_api::EthApiTypes;
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::{
     Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
@@ -56,7 +55,7 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoEvmConfig;
 use tempo_node::{
-    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoReceiptConverter,
+    DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
 use tempo_payload_types::TempoExecutionData;
 use tempo_primitives::{
@@ -238,10 +237,14 @@ impl NodeTypes for ZoneNode {
 }
 
 /// Addons for Tempo Zone nodes.
-pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> {
+pub struct ZoneAddOns<N>
+where
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
+{
     inner: RpcAddOns<
         N,
-        ZoneEthApiBuilder,
+        TempoEthApiBuilder<N>,
         ZoneEngineValidatorBuilder,
         NoopEngineApiBuilder,
         BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>,
@@ -263,8 +266,10 @@ pub struct ZoneAddOns<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfi
     sequencer_config: Option<ZoneSequencerAddOnsConfig>,
 }
 
-impl<N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>> std::fmt::Debug
-    for ZoneAddOns<N>
+impl<N> std::fmt::Debug for ZoneAddOns<N>
+where
+    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
+    N::Pool: reth_transaction_pool::TransactionPool<Transaction = TempoPooledTransaction>,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZoneAddOns").finish_non_exhaustive()
@@ -287,7 +292,7 @@ where
     ) -> Self {
         Self {
             inner: RpcAddOns::new(
-                ZoneEthApiBuilder::default(),
+                TempoEthApiBuilder::default(),
                 ZoneEngineValidatorBuilder,
                 NoopEngineApiBuilder::default(),
                 BasicEngineValidatorBuilder::default(),
@@ -311,11 +316,11 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    ZoneEthApiBuilder: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
 {
     type Handle = <RpcAddOns<
         N,
-        ZoneEthApiBuilder,
+        TempoEthApiBuilder<N>,
         ZoneEngineValidatorBuilder,
         NoopEngineApiBuilder,
         BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>,
@@ -394,7 +399,7 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    ZoneEthApiBuilder: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
 {
     /// Resolve enabled tokens and seed the policy cache.
     async fn resolve_and_seed_tokens(
@@ -614,10 +619,10 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    ZoneEthApiBuilder:
+    TempoEthApiBuilder<N>:
         EthApiBuilder<N, EthApi: reth_rpc_eth_api::EthApiTypes<NetworkTypes = TempoNetwork>>,
 {
-    type EthApi = <ZoneEthApiBuilder as EthApiBuilder<N>>::EthApi;
+    type EthApi = <TempoEthApiBuilder<N> as EthApiBuilder<N>>::EthApi;
 
     fn hooks_mut(&mut self) -> &mut reth_node_builder::rpc::RpcHooks<N, Self::EthApi> {
         self.inner.hooks_mut()
@@ -630,7 +635,7 @@ where
     N::Pool: reth_transaction_pool::TransactionPool<
             Transaction = tempo_transaction_pool::transaction::TempoPooledTransaction,
         >,
-    ZoneEthApiBuilder: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
+    TempoEthApiBuilder<N>: EthApiBuilder<N, EthApi: EthApiTypes<NetworkTypes = TempoNetwork>>,
 {
     type ValidatorBuilder = BasicEngineValidatorBuilder<ZoneEngineValidatorBuilder>;
 
@@ -902,27 +907,5 @@ where
         debug!(target: "reth::cli", "Spawned txpool maintenance task");
 
         Ok(transaction_pool)
-    }
-}
-
-/// EthApi builder for Zone
-#[derive(Debug, Default, Clone)]
-pub struct ZoneEthApiBuilder;
-
-impl<N> EthApiBuilder<N> for ZoneEthApiBuilder
-where
-    N: FullNodeComponents<Types = ZoneNode, Evm = ZoneEvmConfig>,
-{
-    type EthApi = reth_rpc::EthApi<N, DynRpcConverter<ZoneEvmConfig, TempoNetwork>>;
-
-    async fn build_eth_api(self, ctx: EthApiCtx<'_, N>) -> eyre::Result<Self::EthApi> {
-        let chain_spec = ctx.components.provider().chain_spec();
-        let eth_api = ctx
-            .eth_api_builder()
-            .modify_gas_oracle_config(|config| config.default_suggested_fee = Some(U256::ZERO))
-            .map_converter(|_| RpcConverter::new(TempoReceiptConverter::new(chain_spec)).erased())
-            .build();
-
-        Ok(eth_api)
     }
 }
