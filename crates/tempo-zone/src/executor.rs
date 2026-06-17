@@ -7,9 +7,7 @@
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
-    block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput,
-    },
+    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput},
     eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_evm::block::StateDB;

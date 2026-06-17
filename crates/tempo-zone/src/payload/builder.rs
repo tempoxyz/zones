@@ -433,8 +433,7 @@ where
         );
 
         let recovered_block = Arc::new(block);
-        let eth_payload =
-            EthBuiltPayload::new(recovered_block.clone(), total_fees, requests, None);
+        let eth_payload = EthBuiltPayload::new(recovered_block.clone(), total_fees, requests, None);
 
         let execution_output = BlockExecutionOutput {
             result: execution_result,
