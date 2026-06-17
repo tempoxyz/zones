@@ -32,7 +32,7 @@ use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, NoopConsensusBuilder,
-        NoopNetworkBuilder, PoolBuilder, TxPoolBuilder, spawn_maintenance_tasks,
+        NoopNetworkBuilder, PoolBuilder, spawn_maintenance_tasks,
     },
     rpc::{
         BasicEngineValidatorBuilder, EngineValidatorAddOn, EthApiBuilder, EthApiCtx,
@@ -48,7 +48,7 @@ use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::{EthApiTypes, RpcConverter};
 use reth_storage_api::{BlockNumReader, EmptyBodyStorage, HeaderProvider, StateProviderFactory};
 use reth_transaction_pool::{
-    TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
+    Pool, TransactionValidationTaskExecutor, blobstore::InMemoryBlobStore,
     error::InvalidPoolTransactionError,
 };
 use std::{collections::HashSet, sync::Arc, time::Duration};
@@ -65,6 +65,7 @@ use tempo_primitives::{
 use tempo_transaction_pool::{
     AA2dPool, AA2dPoolConfig, TempoTransactionPool,
     amm::AmmLiquidityCache,
+    ordering::TempoTipOrdering,
     transaction::TempoPooledTransaction,
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
@@ -291,6 +292,7 @@ where
                 NoopEngineApiBuilder::default(),
                 BasicEngineValidatorBuilder::default(),
                 Identity::default(),
+                Default::default(),
             ),
             deposit_queue,
             l1_config,
@@ -791,6 +793,7 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
     ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
         let TempoExecutionData {
             block,
+            block_access_list: _,
             validator_set: _,
         } = payload;
         Ok(Arc::unwrap_or_clone(block))
@@ -877,9 +880,12 @@ where
                 amm_liquidity_cache.clone(),
             )
         });
-        let protocol_pool = TxPoolBuilder::new(ctx)
-            .with_validator(validator)
-            .build(blob_store, pool_config.clone());
+        let protocol_pool = Pool::new(
+            validator,
+            TempoTipOrdering::default(),
+            blob_store,
+            pool_config.clone(),
+        );
 
         let transaction_pool = TempoTransactionPool::new(protocol_pool, aa_2d_pool);
 

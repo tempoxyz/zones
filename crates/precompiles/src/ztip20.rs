@@ -352,6 +352,7 @@ where
         sequencer: Arc<dyn SequencerExt>,
     ) -> DynPrecompile {
         let spec = cfg.spec;
+        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
         let gas_params = cfg.gas_params.clone();
         let token = Self::new(registry, sequencer);
 
@@ -380,6 +381,7 @@ where
                     if is_fixed_gas { u64::MAX } else { input.gas },
                     input.reservoir,
                     spec,
+                    amsterdam_eip8037_enabled,
                     input.is_static,
                     gas_params.clone(),
                 );
@@ -618,10 +620,18 @@ mod tests {
             f: impl FnOnce(&mut EvmPrecompileStorageProvider<'_>) -> TestResult<T>,
         ) -> TestResult<T> {
             let spec = ctx.cfg.spec;
+            let amsterdam_eip8037_enabled = ctx.cfg.enable_amsterdam_eip8037;
             let gas_params = ctx.cfg.gas_params.clone();
             let internals = EvmInternals::from_context(ctx);
-            let mut storage =
-                EvmPrecompileStorageProvider::new(internals, gas_limit, 0, spec, false, gas_params);
+            let mut storage = EvmPrecompileStorageProvider::new(
+                internals,
+                gas_limit,
+                0,
+                spec,
+                amsterdam_eip8037_enabled,
+                false,
+                gas_params,
+            );
             f(&mut storage)
         }
 

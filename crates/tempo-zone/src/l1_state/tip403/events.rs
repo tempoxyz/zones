@@ -138,6 +138,13 @@ impl PolicyEvent {
                 );
                 None
             }
+            ITIP403RegistryEvents::ReceivePolicyUpdated(event) => {
+                tracing::debug!(
+                    policy_id = ?event,
+                    "Receive policy updated on L1 (ignored)"
+                );
+                None
+            }
         }
     }
 

@@ -589,7 +589,7 @@ where
                 &self.eth.api,
                 request,
                 block.unwrap_or_default(),
-                state_override,
+                EvmOverrides::state(state_override),
             )
             .await
             .map_err(internal)?;

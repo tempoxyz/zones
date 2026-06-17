@@ -100,9 +100,13 @@ impl PayloadTypes for ZonePayloadTypes {
     type BuiltPayload = TempoBuiltPayload;
     type PayloadAttributes = ZonePayloadAttributes;
 
-    fn block_to_payload(block: SealedBlock<Block>) -> Self::ExecutionData {
+    fn block_to_payload(
+        block: SealedBlock<Block>,
+        bal: Option<alloy_primitives::Bytes>,
+    ) -> Self::ExecutionData {
         TempoExecutionData {
             block: Arc::new(block),
+            block_access_list: bal,
             validator_set: None,
         }
     }

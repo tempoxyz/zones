@@ -1107,7 +1107,7 @@ impl L1TestNode {
         let provider = self.dev_provider();
         let factory = ITIP20Factory::new(TIP20_FACTORY_ADDRESS, &provider);
         let receipt = factory
-            .createToken(
+            .createToken_0(
                 name.to_string(),
                 symbol.to_string(),
                 "USD".to_string(),

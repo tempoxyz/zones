@@ -207,7 +207,7 @@ impl DemoBlacklist {
         println!("  Predicted address: {token_addr}");
 
         let receipt = factory
-            .createToken(
+            .createToken_0(
                 "DemoUSD".to_string(),
                 "DUSD".to_string(),
                 "USD".to_string(),
