@@ -139,7 +139,7 @@ alloy = { version = "2.0.0", default-features = false }
 alloy-consensus = { version = "2.0.0", default-features = false }
 alloy-contract = { version = "2.0.0", default-features = false }
 alloy-eips = { version = "2.0.0", default-features = false }
-alloy-evm = { version = "0.32.0", default-features = false }
+alloy-evm = { version = "0.36.0", default-features = false }
 alloy-network = { version = "2.0.0", default-features = false }
 alloy-primitives = { version = "1.5.7", default-features = false }
 alloy-provider = { version = "2.0.0", default-features = false }
