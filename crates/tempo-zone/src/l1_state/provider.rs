@@ -21,7 +21,7 @@ use tracing::{debug, info, warn};
 use zone_precompiles::SequencerExt;
 
 use super::cache::L1StateCache;
-use crate::abi::PORTAL_SEQUENCER_SLOT;
+use crate::{abi::PORTAL_SEQUENCER_SLOT, rpc::rpc_connection_config};
 
 /// Configuration for the [`L1StateProvider`].
 #[derive(Debug, Clone)]
@@ -98,7 +98,7 @@ impl L1StateProvider {
         let retry_layer =
             RetryBackoffLayer::new(config.max_retries, config.initial_backoff_ms, u64::MAX);
 
-        let conn_config = crate::rpc_connection_config(config.retry_connection_interval);
+        let conn_config = rpc_connection_config(config.retry_connection_interval);
 
         let client = RpcClient::builder()
             .layer(retry_layer)

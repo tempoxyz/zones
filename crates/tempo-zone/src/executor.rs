@@ -7,10 +7,7 @@
 use alloy_consensus::transaction::TxHashRef;
 use alloy_evm::{
     Database, Evm, RecoveredTx,
-    block::{
-        BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput,
-        OnStateHook,
-    },
+    block::{BlockExecutionError, BlockExecutionResult, BlockExecutor, ExecutableTx, GasOutput},
     eth::{EthBlockExecutor, EthTxResult},
 };
 use reth_evm::block::StateDB;
@@ -28,7 +25,7 @@ use crate::tx_context;
 ///
 /// Wraps [`EthBlockExecutor`] without any subblock validation, gas-section tracking,
 /// or end-of-block metadata system transaction requirements.
-pub(crate) struct ZoneBlockExecutor<'a, DB: Database, I> {
+pub struct ZoneBlockExecutor<'a, DB: Database, I> {
     inner: EthBlockExecutor<'a, TempoEvm<DB, I>, &'a TempoChainSpec, TempoReceiptBuilder>,
 }
 
@@ -103,10 +100,7 @@ where
             .execute_transaction_without_commit((tx_env, recovered))
     }
 
-    fn commit_transaction(
-        &mut self,
-        output: Self::Result,
-    ) -> Result<GasOutput, BlockExecutionError> {
+    fn commit_transaction(&mut self, output: Self::Result) -> GasOutput {
         self.inner.commit_transaction(output)
     }
 
@@ -114,10 +108,6 @@ where
         self,
     ) -> Result<(Self::Evm, BlockExecutionResult<Self::Receipt>), BlockExecutionError> {
         self.inner.finish()
-    }
-
-    fn set_state_hook(&mut self, hook: Option<Box<dyn OnStateHook>>) {
-        self.inner.set_state_hook(hook)
     }
 
     fn evm_mut(&mut self) -> &mut Self::Evm {

@@ -59,7 +59,7 @@ async fn test_l1_deposit_mints_on_zone() -> eyre::Result<()> {
 
     let factory = ITIP20Factory::new(TIP20_FACTORY_ADDRESS, zone_provider.clone());
     let receipt = factory
-        .createToken(
+        .createToken_0(
             "ZoneTest".to_string(),
             "ZTEST".to_string(),
             "USD".to_string(),

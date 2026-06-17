@@ -78,7 +78,6 @@ reth-ethereum = { workspace = true, features = [
 reth-tracing = { workspace = true, optional = true }
 url = "2"
 derive_more = { workspace = true, features = ["deref", "deref_mut"] }
-either.workspace = true
 eyre.workspace = true
 serde = { workspace = true, features = ["derive"] }
 futures.workspace = true

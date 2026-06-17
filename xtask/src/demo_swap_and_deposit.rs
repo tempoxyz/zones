@@ -409,7 +409,7 @@ async fn create_demo_token<P: Provider<TempoNetwork>>(
         .await
         .wrap_err("failed to compute token address")?;
     let receipt = factory
-        .createToken(
+        .createToken_0(
             name.to_string(),
             symbol.to_string(),
             "USD".to_string(),

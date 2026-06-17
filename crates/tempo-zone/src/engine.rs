@@ -260,7 +260,7 @@ impl ZoneEngine {
 
         let header = payload.block().sealed_header().clone();
         let block_number = header.number();
-        let payload = ZonePayloadTypes::block_to_payload(payload.block().clone());
+        let payload = ZonePayloadTypes::block_to_payload(payload.block().clone(), None);
         let res = self.to_engine.new_payload(payload).await?;
 
         if !res.is_valid() {

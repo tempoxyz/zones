@@ -91,6 +91,7 @@ impl ZoneTokenFactory {
         };
 
         let spec = cfg.spec;
+        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
         let gas_params = cfg.gas_params.clone();
         alloy_evm::precompiles::DynPrecompile::new_stateful(
             PrecompileId::Custom("ZoneTokenFactory".into()),
@@ -108,6 +109,7 @@ impl ZoneTokenFactory {
                     input.gas,
                     input.reservoir,
                     spec,
+                    amsterdam_eip8037_enabled,
                     input.is_static,
                     gas_params.clone(),
                 );

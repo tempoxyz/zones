@@ -15,7 +15,6 @@ use alloy_eips::eip4895::Withdrawals;
 use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolEvent};
-use either::Either;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -116,6 +115,7 @@ where
             parent_header,
             attributes,
             payload_id: _,
+            parent_block_info: _,
         } = config;
 
         let start = Instant::now();
@@ -285,7 +285,7 @@ where
             if pool_tx.transaction.is_create() {
                 best_txs.mark_invalid(
                     &pool_tx,
-                    &InvalidPoolTransactionError::Consensus(
+                    InvalidPoolTransactionError::Consensus(
                         reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
                     ),
                 );
@@ -295,7 +295,7 @@ where
             if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
                 best_txs.mark_invalid(
                     &pool_tx,
-                    &InvalidPoolTransactionError::ExceedsGasLimit(
+                    InvalidPoolTransactionError::ExceedsGasLimit(
                         pool_tx.gas_limit(),
                         gas_limit_left.saturating_sub(cumulative_gas_used),
                     ),
@@ -311,7 +311,7 @@ where
             let tx_hash = *pool_tx.hash();
             match builder.execute_transaction(tx_with_env) {
                 Ok(gas_used) => {
-                    cumulative_gas_used += gas_used;
+                    cumulative_gas_used += gas_used.tx_gas_used();
                     if let Some(receipt) = builder.executor().receipts().last() {
                         collect_requested_withdrawals(
                             receipt,
@@ -326,7 +326,7 @@ where
                     if !error.is_nonce_too_low() {
                         best_txs.mark_invalid(
                             &pool_tx,
-                            &InvalidPoolTransactionError::Consensus(
+                            InvalidPoolTransactionError::Consensus(
                                 reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
                             ),
                         );
@@ -410,6 +410,7 @@ where
             hashed_state,
             trie_updates,
             block,
+            block_access_list: _,
         } = builder.finish(&*state_provider, None)?;
 
         let requests = chain_spec
@@ -431,7 +432,8 @@ where
             "Built zone payload"
         );
 
-        let eth_payload = EthBuiltPayload::new(sealed_block, total_fees, requests, None);
+        let recovered_block = Arc::new(block);
+        let eth_payload = EthBuiltPayload::new(recovered_block.clone(), total_fees, requests, None);
 
         let execution_output = BlockExecutionOutput {
             result: execution_result,
@@ -439,13 +441,19 @@ where
         };
 
         let executed_block = BuiltPayloadExecutedBlock {
-            recovered_block: Arc::new(block),
+            recovered_block,
             execution_output: Arc::new(execution_output),
-            hashed_state: Either::Left(Arc::new(hashed_state)),
-            trie_updates: Either::Left(Arc::new(trie_updates)),
+            hashed_state: Arc::new(hashed_state),
+            trie_updates: Arc::new(trie_updates),
         };
 
-        let payload = TempoBuiltPayload::new(eth_payload, Some(executed_block));
+        let payload = TempoBuiltPayload::new(
+            eth_payload,
+            None,
+            Some(executed_block),
+            std::time::Duration::ZERO,
+            std::time::Duration::ZERO,
+        );
 
         drop(db);
         // Zone payloads are deterministic (one L1 block = one zone block), so freeze
