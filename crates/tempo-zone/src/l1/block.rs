@@ -217,11 +217,6 @@ impl L1BlockDeposits {
 /// All ECIES decryption, TIP-403 policy checks, and ABI encoding have been
 /// performed. The builder only needs to RLP-encode the header and assemble
 /// the `advanceTempo` calldata.
-///
-/// Implements `Serialize`/`Deserialize` to satisfy the `PayloadAttributes`
-/// trait bound, but the deposit fields are `#[serde(skip)]` because the sol!
-/// types don't derive serde. This is fine — payload attributes only flow
-/// through in-process channels and are never serialised to the wire.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PreparedL1Block {
     /// The sealed L1 block header.

@@ -28,10 +28,6 @@ pub(crate) enum EnqueueOutcome {
 }
 
 /// Events extracted from the ZonePortal in a single L1 block.
-///
-/// Bundles all portal-emitted events for one block into a single extensible
-/// type. New event types (e.g. token pausing, sequencer changes) can be
-/// added as fields without restructuring the pipeline.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct L1PortalEvents {
     /// Deposit events (regular + encrypted).
