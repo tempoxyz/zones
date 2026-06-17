@@ -1,3 +1,7 @@
+// The `sol!`generated `ZoneFactory` event/contract bindings expand to functions
+// with more than 7 parameters, which trips `clippy::too_many_arguments`.
+#![allow(clippy::too_many_arguments)]
+
 use alloy::{
     network::{
         EthereumWallet,
