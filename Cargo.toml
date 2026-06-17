@@ -118,7 +118,7 @@ reth-node-builder = { git = "https://github.com/paradigmxyz/reth", rev = "0b3305
 reth-node-core = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057" }
 reth-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057" }
 reth-payload-primitives = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057" }
-reth-primitives-traits = { version = "0.3.0", default-features = false }
+reth-primitives-traits = { version = "0.4.2", default-features = false }
 reth-provider = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057" }
 reth-revm = { git = "https://github.com/paradigmxyz/reth", rev = "0b33057", features = [
   "std",
