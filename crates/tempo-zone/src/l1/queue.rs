@@ -90,7 +90,10 @@ impl PendingDeposits {
                     };
                 }
                 // block_number == last.number + 1 — verify parent connects.
-                // If it doesn't, the consumed block was reorged                if parent_hash != last.hash {
+                // If it doesn't, the consumed block was reorged — clear
+                // `last_enqueued` so backfill can re-enqueue that block number
+                // with its new (post-reorg) hash.
+                if parent_hash != last.hash {
                     self.last_enqueued = None;
                     return EnqueueOutcome::NeedBackfill {
                         from: last.number,
