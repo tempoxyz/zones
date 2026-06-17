@@ -15,8 +15,8 @@ use crate::{
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
     payload::{ZonePayloadAttributes, ZonePayloadFactory, ZonePayloadTypes},
-    rpc::{TempoZoneRpc, ZoneRpcApi, start_private_rpc},
-    rpc_connection_config, spawn_zone_sequencer,
+    rpc::{TempoZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
+    spawn_zone_sequencer,
 };
 use alloy_primitives::{Address, U256};
 use alloy_provider::Provider as _;

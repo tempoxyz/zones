@@ -48,6 +48,7 @@ use tokio::{
 use crate::abi::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
 };
+use alloy_rpc_client::ConnectionConfig;
 use zone_rpc::{
     auth::AuthContext,
     types::{
@@ -157,7 +158,7 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
         let l1_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &l1_rpc_url,
-                crate::rpc_connection_config(config.retry_connection_interval),
+                rpc_connection_config(config.retry_connection_interval),
             )
             .await
             .wrap_err("failed to connect private RPC L1 provider")?
@@ -165,7 +166,7 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
         let zone_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_with_config(
                 &zone_rpc_url,
-                crate::rpc_connection_config(config.retry_connection_interval),
+                rpc_connection_config(config.retry_connection_interval),
             )
             .await
             .wrap_err("failed to connect private RPC zone provider")?
@@ -1029,6 +1030,12 @@ fn redact_ws_header(header: &mut TempoHeaderResponse) {
 fn redact_block(block: &mut RpcBlock) {
     redact_tempo_header(&mut block.header.inner);
     block.transactions = BlockTransactions::Hashes(Vec::new());
+}
+
+pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> ConnectionConfig {
+    ConnectionConfig::new()
+        .with_max_retries(u32::MAX)
+        .with_retry_interval(retry_connection_interval)
 }
 
 #[cfg(test)]

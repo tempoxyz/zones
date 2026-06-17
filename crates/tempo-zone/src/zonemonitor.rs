@@ -43,6 +43,7 @@ use crate::{
         AnchorGapKind, BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot,
         fetch_slot_withdrawals, log_query_ranges,
     },
+    rpc::rpc_connection_config,
     withdrawals::SharedWithdrawalStore,
 };
 
@@ -154,7 +155,7 @@ impl ZoneMonitor {
             .layer(retry_layer)
             .connect_with_config(
                 &config.zone_rpc_url,
-                crate::rpc_connection_config(config.retry_connection_interval),
+                rpc_connection_config(config.retry_connection_interval),
             )
             .await
             .wrap_err_with(|| format!("failed to connect to Zone RPC at {zone_rpc_url}"))?;

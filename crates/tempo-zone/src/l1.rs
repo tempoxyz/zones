@@ -150,7 +150,8 @@ impl L1Subscriber {
         info!(url = %self.config.l1_rpc_url, "Connecting to L1 node");
 
         let url: url::Url = self.config.l1_rpc_url.parse()?;
-        let mut conn_config = crate::rpc_connection_config(self.config.retry_connection_interval);
+        let mut conn_config =
+            crate::rpc::rpc_connection_config(self.config.retry_connection_interval);
 
         if !url.username().is_empty() {
             let auth = Authorization::basic(url.username(), url.password().unwrap_or_default());
