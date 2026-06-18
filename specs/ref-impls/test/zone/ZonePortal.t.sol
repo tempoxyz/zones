@@ -2324,7 +2324,9 @@ contract ZonePortalTest is BaseTest {
 
     function test_rpcUrl_setAtCreation() public view {
         // setUp() created the zone with this RPC URL
-        assertEq(portal.rpcUrl(), "https://rpc.test-zone.example", "rpcUrl should be set at creation");
+        assertEq(
+            portal.rpcUrl(), "https://rpc.test-zone.example", "rpcUrl should be set at creation"
+        );
     }
 
     function test_setRpcUrl_updates() public {
