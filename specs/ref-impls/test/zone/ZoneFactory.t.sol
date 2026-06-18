@@ -36,7 +36,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         (uint32 zoneId, address portal) = zoneFactory.createZone(params);
@@ -66,7 +67,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         (uint32 zoneId, address portal) = zoneFactory.createZone(params);
@@ -92,7 +94,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         (uint32 zoneId1, address portal1) = zoneFactory.createZone(params1);
@@ -105,7 +108,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: keccak256("genesis2"),
                 genesisTempoBlockHash: keccak256("tempoGenesis2"),
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         (uint32 zoneId2, address portal2) = zoneFactory.createZone(params2);
@@ -132,7 +136,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         // Record logs and verify ZoneCreated event was emitted
@@ -176,7 +181,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -195,7 +201,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -211,7 +218,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         vm.expectRevert(IZoneFactory.InvalidToken.selector);
@@ -231,7 +239,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         vm.expectRevert(IZoneFactory.InvalidSequencer.selector);
@@ -251,7 +260,8 @@ contract ZoneFactoryTest is BaseTest {
                 genesisBlockHash: GENESIS_BLOCK_HASH,
                 genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
                 genesisTempoBlockNumber: uint64(block.number)
-            })
+            }),
+            rpcUrl: ""
         });
 
         vm.expectRevert(IZoneFactory.InvalidVerifier.selector);

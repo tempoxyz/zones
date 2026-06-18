@@ -103,7 +103,8 @@ contract ZoneIntegrationTest is BaseTest {
             admin,
             l1Factory.verifier(),
             GENESIS_BLOCK_HASH,
-            genesisTempoBlockNumber
+            genesisTempoBlockNumber,
+            ""
         );
         zoneId = 1;
 

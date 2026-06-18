@@ -232,6 +232,10 @@ macro_rules! define_abi {
 
                 function enableToken(address token) external;
 
+                // -- Zone RPC endpoint (set at creation, updatable by sequencer) --
+                function rpcUrl() external view returns (string memory);
+                function setRpcUrl(string calldata rpcUrl) external;
+
                 function depositEncrypted(
                     address token,
                     uint128 amount,
@@ -412,6 +416,7 @@ macro_rules! define_abi {
                 bytes32 genesisBlockHash;
                 bytes32 genesisTempoBlockHash;
                 uint64 genesisTempoBlockNumber;
+                string rpcUrl;
             }
 
             $($rpc_attr)*
@@ -426,6 +431,7 @@ macro_rules! define_abi {
                     address sequencer;
                     address verifier;
                     ZoneParams zoneParams;
+                    string rpcUrl;
                 }
                 #[derive(Debug)]
                 event ZoneCreated(

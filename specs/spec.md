@@ -198,6 +198,7 @@ The following table lists every privileged action and the role authorized to inv
 | `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **sequencer** |
 | `setTempoGasRate(rate)` | [`ZonePortal`](#izoneportal) | **sequencer** |
 | `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
+| `setMetadata(key, value)` | [`ZonePortal`](#izoneportal) | **sequencer** |
 | `submitBatch(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
 | `processWithdrawal(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
 | `finalizeWithdrawalBatch(...)` | [`ZoneOutbox`](#izoneoutbox) (zone-side) | **sequencer** (block beneficiary) |
@@ -1570,6 +1571,14 @@ interface IZonePortal {
     function areDepositsActive(address token) external view returns (bool);
     function enabledTokenCount() external view returns (uint256);
     function enabledTokenAt(uint256 index) external view returns (address);
+
+    // Zone metadata (sequencer-published generic key/value store)
+    // Canonical keys: "rpcUrl" (public RPC endpoint), "name", "chainId", "explorerUrl".
+    // Off-chain consumers (e.g. the Zone Portal UI) read these directly from Tempo L1.
+    event MetadataUpdated(string indexed key, string key_, string value);
+    function setMetadata(string calldata key, string calldata value) external; // sequencer-only
+    function metadata(string calldata key) external view returns (string memory value);
+    function rpcUrl() external view returns (string memory);
 
     // Deposits
     /// @dev Reverts (`MissingBouncebackRecipient`) if `bouncebackRecipient == address(0)`.

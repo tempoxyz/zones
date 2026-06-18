@@ -108,6 +108,11 @@ contract ZonePortal is IZonePortal {
     /// @notice Withdrawal queue (zone→Tempo): fixed-size ring buffer
     WithdrawalQueue internal _withdrawalQueue;
 
+    /// @notice Public RPC endpoint for the zone (e.g. "https://rpc.my-zone.example")
+    /// @dev Set at zone creation and updatable by the sequencer via setRpcUrl().
+    ///      Published on-chain so clients can discover how to reach the zone.
+    string public rpcUrl;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -119,7 +124,8 @@ contract ZonePortal is IZonePortal {
         address _sequencer,
         address _verifier,
         bytes32 _genesisBlockHash,
-        uint64 _genesisTempoBlockNumber
+        uint64 _genesisTempoBlockNumber,
+        string memory _rpcUrl
     ) {
         zoneId = _zoneId;
         messenger = _messenger;
@@ -127,6 +133,7 @@ contract ZonePortal is IZonePortal {
         verifier = _verifier;
         blockHash = _genesisBlockHash;
         genesisTempoBlockNumber = _genesisTempoBlockNumber;
+        rpcUrl = _rpcUrl;
 
         // Enable the initial token
         _enableTokenInternal(_initialToken);
@@ -258,6 +265,19 @@ contract ZonePortal is IZonePortal {
         string memory currency = ITIP20(_token).currency();
 
         emit TokenEnabled(_token, name, symbol, currency);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                RPC URL
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Update the zone's public RPC endpoint. Only callable by sequencer.
+    /// @dev The RPC URL is set at zone creation and can be updated here if the zone
+    ///      moves to a new endpoint.
+    /// @param _rpcUrl The new RPC URL (may be empty to clear it)
+    function setRpcUrl(string calldata _rpcUrl) external onlySequencer {
+        rpcUrl = _rpcUrl;
+        emit RpcUrlUpdated(_rpcUrl);
     }
 
     /*//////////////////////////////////////////////////////////////

@@ -157,7 +157,8 @@ contract ZoneBridgeTest is BaseTest {
             admin, // sequencer
             l1Factory.verifier(),
             GENESIS_BLOCK_HASH,
-            genesisTempoBlockNumber
+            genesisTempoBlockNumber,
+            ""
         );
         zoneId = 1;
 
