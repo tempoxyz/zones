@@ -232,7 +232,6 @@ macro_rules! define_abi {
 
                 function enableToken(address token) external;
 
-                // -- Zone RPC endpoint (set at creation, updatable by sequencer) --
                 function rpcUrl() external view returns (string memory);
                 function setRpcUrl(string calldata rpcUrl) external;
 

@@ -437,7 +437,7 @@ interface IZoneFactory {
         address sequencer;
         address verifier;
         ZoneParams zoneParams;
-        string rpcUrl; // public RPC endpoint for the zone (may be empty, updatable later)
+        string rpcUrl;
     }
 
     event ZoneCreated(
