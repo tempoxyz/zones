@@ -231,6 +231,9 @@ impl CreateZone {
         println!("  Initial Token: {}", self.initial_token);
         println!("  Sequencer: {}", self.sequencer);
         println!("  ZoneFactory: {}", self.zone_factory);
+        if !self.rpc_url.is_empty() {
+            println!("  RPC URL: {}", self.rpc_url);
+        }
         println!("  Tempo anchor block: {}", confirm_header.inner.number);
         println!(
             "  Genesis written to: {}",
