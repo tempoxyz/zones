@@ -5,33 +5,48 @@
 //! - **ZonePortal** — deployed on Tempo L1. Escrows gas tokens, manages the deposit queue,
 //!   accepts batch proofs, and processes withdrawals back to L1 recipients.
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
-//!   withdrawal hash chains, and exposes [`LastBatch`] state for proof generation.
+//!   withdrawal hash chains, and exposes `LastBatch` state for proof generation.
 //! - **ZoneInbox**, **TempoState**, **TempoStateReader**, **ZoneTxContext** — Zone L2 predeploys.
 //! - **ZoneFactory**, **SwapAndDepositRouter** — deployed on Tempo L1.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
-// The `sol!` macro generates functions whose arity we don't control.
+// auto-generated sol! builders for events/errors/functions with many fields trigger this
 #![allow(clippy::too_many_arguments)]
 
 extern crate alloc;
 
-pub mod bindings;
-pub mod swap_and_deposit_router;
-mod types;
-mod zone_portal;
+/// Helper macro to allow feature-gating rpc and serde implementations.
+macro_rules! sol {
+    ($($input:tt)*) => {
+        #[cfg(all(feature = "rpc", feature = "serde"))]
+        alloy_sol_types::sol! {
+            #[sol(rpc)]
+            #[derive(serde::Serialize, serde::Deserialize)]
+            $($input)*
+        }
+        #[cfg(all(feature = "rpc", not(feature = "serde")))]
+        alloy_sol_types::sol! {
+            #[sol(rpc)]
+            $($input)*
+        }
+        #[cfg(all(not(feature = "rpc"), feature = "serde"))]
+        alloy_sol_types::sol! {
+            #[derive(serde::Serialize, serde::Deserialize)]
+            $($input)*
+        }
+        #[cfg(all(not(feature = "rpc"), not(feature = "serde")))]
+        alloy_sol_types::sol! {
+            $($input)*
+        }
+    };
+}
 
-pub use bindings::*;
-pub use swap_and_deposit_router::*;
+pub(crate) use sol;
 
-// Re-export the address and slot constants the bindings build on, so callers can reach them
-// through the contracts crate (e.g. `tempo_zone_contracts::TEMPO_STATE_ADDRESS`).
-pub use zone_primitives::constants::{
-    EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT,
-    TEMPO_BLOCK_HASH_SLOT, TEMPO_PACKED_SLOT, TEMPO_STATE_ADDRESS, TEMPO_STATE_READER_ADDRESS,
-    ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS,
-    ZONE_TX_CONTEXT_ADDRESS,
-};
+pub mod precompiles;
+
+pub use precompiles::*;
 
 #[cfg(test)]
 mod tests {

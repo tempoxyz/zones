@@ -1,10 +1,21 @@
-//! Hand-written callback payloads for the
-//! [`SwapAndDepositRouter`](crate::bindings::SwapAndDepositRouter) deployed on Tempo L1.
+//! `SwapAndDepositRouter` — deployed on Tempo L1.
 
-use crate::bindings::EncryptedDepositPayload;
+use crate::EncryptedDepositPayload;
 use alloc::vec::Vec;
 use alloy_primitives::{Address, B256, U256};
 use alloy_sol_types::SolValue;
+
+crate::sol! {
+    #[derive(Debug)]
+    contract SwapAndDepositRouter {
+        function onWithdrawalReceived(
+            bytes32 senderTag,
+            address tokenIn,
+            uint128 amount,
+            bytes calldata data
+        ) external returns (bytes4);
+    }
+}
 
 /// Plaintext callback payload for `SwapAndDepositRouter.onWithdrawalReceived`.
 ///
