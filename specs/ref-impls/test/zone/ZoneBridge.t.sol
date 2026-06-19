@@ -252,7 +252,12 @@ contract ZoneBridgeTest is BaseTest {
     {
         // Record the deposit
         Deposit memory d = Deposit({
-            token: address(l2ZoneToken), sender: sender, to: to, amount: amount, bouncebackRecipient: to, memo: memo
+            token: address(l2ZoneToken),
+            sender: sender,
+            to: to,
+            amount: amount,
+            bouncebackRecipient: to,
+            memo: memo
         });
 
         // Calculate the new hash (matches what Tempo portal computes)
@@ -396,8 +401,9 @@ contract ZoneBridgeTest is BaseTest {
         uint128 depositAmount = 1000e6;
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 l1DepositHash =
-            l1Portal.deposit(address(l2ZoneToken), alice, depositAmount, bytes32("hello zone"), alice);
+        bytes32 l1DepositHash = l1Portal.deposit(
+            address(l2ZoneToken), alice, depositAmount, bytes32("hello zone"), alice
+        );
         vm.stopPrank();
 
         // Verify L1 state
@@ -1139,7 +1145,8 @@ contract ZoneBridgeTest is BaseTest {
         l2ZoneToken.setMinter(address(this), false);
         vm.startPrank(carol);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h3 = l1Portal.deposit(address(l2ZoneToken), carol, depositAmount, bytes32("carol"), carol);
+        bytes32 h3 =
+            l1Portal.deposit(address(l2ZoneToken), carol, depositAmount, bytes32("carol"), carol);
         vm.stopPrank();
 
         assertEq(l1Portal.currentDepositQueueHash(), h3, "L1 hash should be after 3rd deposit");
@@ -1254,7 +1261,8 @@ contract ZoneBridgeTest is BaseTest {
 
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h1 = l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload1, alice);
+        bytes32 h1 =
+            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 0, payload1, alice);
         vm.stopPrank();
 
         // === STEP 3: Sequencer rotates to second encryption key ===
@@ -1266,7 +1274,8 @@ contract ZoneBridgeTest is BaseTest {
 
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l1Portal), depositAmount);
-        bytes32 h2 = l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 1, payload2, bob);
+        bytes32 h2 =
+            l1Portal.depositEncrypted(address(l2ZoneToken), depositAmount, 1, payload2, bob);
         vm.stopPrank();
 
         assertEq(l1Portal.currentDepositQueueHash(), h2, "L1 hash after both deposits");

@@ -233,7 +233,12 @@ contract ZoneIntegrationTest is BaseTest {
             memo: bytes32("alice2")
         });
         deposits[2] = Deposit({
-            token: address(l2ZoneToken), sender: bob, to: bob, amount: 3000e6, bouncebackRecipient: bob, memo: bytes32("bob1")
+            token: address(l2ZoneToken),
+            sender: bob,
+            to: bob,
+            amount: 3000e6,
+            bouncebackRecipient: bob,
+            memo: bytes32("bob1")
         });
         deposits[3] = Deposit({
             token: address(l2ZoneToken),
@@ -609,7 +614,12 @@ contract ZoneIntegrationTest is BaseTest {
             memo: bytes32("d1")
         });
         deposits1[1] = Deposit({
-            token: address(l2ZoneToken), sender: bob, to: bob, amount: 5000e6, bouncebackRecipient: bob, memo: bytes32("d2")
+            token: address(l2ZoneToken),
+            sender: bob,
+            to: bob,
+            amount: 5000e6,
+            bouncebackRecipient: bob,
+            memo: bytes32("d2")
         });
 
         l2TempoState.setMockStorageValue(
