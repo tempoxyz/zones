@@ -52,6 +52,7 @@ macro_rules! define_abi {
                 address sender;
                 address to;
                 uint128 amount;
+                address bouncebackRecipient;
                 bytes32 memo;
             }
 
@@ -71,6 +72,7 @@ macro_rules! define_abi {
                 address token;
                 address sender;
                 uint128 amount;
+                address bouncebackRecipient;
                 uint256 keyIndex;
                 EncryptedDepositPayload encrypted;
             }
@@ -124,6 +126,7 @@ macro_rules! define_abi {
                     uint128 netAmount,
                     uint128 fee,
                     bytes32 memo,
+                    address bouncebackRecipient,
                     uint64 depositNumber
                 );
 
@@ -140,6 +143,7 @@ macro_rules! define_abi {
                     bytes ciphertext,
                     bytes12 nonce,
                     bytes16 tag,
+                    address bouncebackRecipient,
                     uint64 depositNumber
                 );
 
@@ -168,6 +172,17 @@ macro_rules! define_abi {
                     uint128 amount,
                     uint64 depositNumber
                 );
+
+                #[derive(Debug)]
+                event DepositBounceBack(
+                    address indexed bouncebackRecipient,
+                    address token,
+                    uint128 amount,
+                    bool success
+                );
+
+                #[derive(Debug)]
+                event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
                 #[derive(Debug)]
                 event SequencerTransferStarted(
@@ -214,7 +229,13 @@ macro_rules! define_abi {
 
                 // -- State-changing functions --
 
-                function deposit(address token, address to, uint128 amount, bytes32 memo)
+                function deposit(
+                    address token,
+                    address to,
+                    uint128 amount,
+                    bytes32 memo,
+                    address bouncebackRecipient
+                )
                     external
                     returns (bytes32 newCurrentDepositQueueHash);
 
@@ -236,7 +257,8 @@ macro_rules! define_abi {
                     address token,
                     uint128 amount,
                     uint256 keyIndex,
-                    EncryptedDepositPayload calldata encrypted
+                    EncryptedDepositPayload calldata encrypted,
+                    address bouncebackRecipient
                 ) external returns (bytes32 newCurrentDepositQueueHash);
 
                 function setSequencerEncryptionKey(

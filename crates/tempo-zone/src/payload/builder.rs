@@ -677,6 +677,7 @@ mod tests {
                             sender,
                             to: recipient,
                             amount: 500_000,
+                            bouncebackRecipient: recipient,
                             memo: B256::ZERO,
                         }),
                     ),
@@ -688,6 +689,7 @@ mod tests {
                             token,
                             sender,
                             amount: 300_000,
+                            bouncebackRecipient: sender,
                             keyIndex: U256::ZERO,
                             encrypted: abi::EncryptedDepositPayload {
                                 ephemeralPubkeyX: B256::with_last_byte(0xDD),

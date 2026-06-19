@@ -200,18 +200,18 @@ contract ZoneIntegrationTest is BaseTest {
         // Alice, Bob, Charlie all deposit
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("alice1"));
-        l1Portal.deposit(address(l2ZoneToken), alice, 2000e6, bytes32("alice2"));
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("alice1"), alice);
+        l1Portal.deposit(address(l2ZoneToken), alice, 2000e6, bytes32("alice2"), alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l1Portal), 5000e6);
-        l1Portal.deposit(address(l2ZoneToken), bob, 3000e6, bytes32("bob1"));
+        l1Portal.deposit(address(l2ZoneToken), bob, 3000e6, bytes32("bob1"), bob);
         vm.stopPrank();
 
         vm.startPrank(charlie);
         l2ZoneToken.approve(address(l1Portal), 2000e6);
-        l1Portal.deposit(address(l2ZoneToken), charlie, 500e6, bytes32("charlie1"));
+        l1Portal.deposit(address(l2ZoneToken), charlie, 500e6, bytes32("charlie1"), charlie);
         vm.stopPrank();
 
         // Build deposit array
@@ -221,6 +221,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 1000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("alice1")
         });
         deposits[1] = Deposit({
@@ -228,16 +229,18 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 2000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("alice2")
         });
         deposits[2] = Deposit({
-            token: address(l2ZoneToken), sender: bob, to: bob, amount: 3000e6, memo: bytes32("bob1")
+            token: address(l2ZoneToken), sender: bob, to: bob, amount: 3000e6, bouncebackRecipient: bob, memo: bytes32("bob1")
         });
         deposits[3] = Deposit({
             token: address(l2ZoneToken),
             sender: charlie,
             to: charlie,
             amount: 500e6,
+            bouncebackRecipient: charlie,
             memo: bytes32("charlie1")
         });
 
@@ -276,8 +279,8 @@ contract ZoneIntegrationTest is BaseTest {
         // Batch 1: Two deposits
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
-        bytes32 d1 = l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("d1"));
-        bytes32 d2 = l1Portal.deposit(address(l2ZoneToken), alice, 2000e6, bytes32("d2"));
+        bytes32 d1 = l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("d1"), alice);
+        bytes32 d2 = l1Portal.deposit(address(l2ZoneToken), alice, 2000e6, bytes32("d2"), alice);
         vm.stopPrank();
 
         // Process only first deposit
@@ -287,6 +290,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 1000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("d1")
         });
 
@@ -326,7 +330,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // More deposits arrive
         vm.prank(alice);
-        l1Portal.deposit(address(l2ZoneToken), alice, 3000e6, bytes32("d3"));
+        l1Portal.deposit(address(l2ZoneToken), alice, 3000e6, bytes32("d3"), alice);
 
         // Process remaining deposits
         Deposit[] memory batch2 = new Deposit[](2);
@@ -335,6 +339,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 2000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("d2")
         });
         batch2[1] = Deposit({
@@ -342,6 +347,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 3000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("d3")
         });
 
@@ -367,7 +373,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
         bytes32 depositHash =
-            l1Portal.deposit(address(l2ZoneToken), alice, 5000e6, bytes32("deposit"));
+            l1Portal.deposit(address(l2ZoneToken), alice, 5000e6, bytes32("deposit"), alice);
         vm.stopPrank();
 
         // Process deposit on L2
@@ -377,6 +383,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 5000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("deposit")
         });
         l2TempoState.setMockStorageValue(
@@ -442,7 +449,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 100_000e6);
         bytes32 depositHash =
-            l1Portal.deposit(address(l2ZoneToken), alice, 50_000e6, bytes32("big deposit"));
+            l1Portal.deposit(address(l2ZoneToken), alice, 50_000e6, bytes32("big deposit"), alice);
         vm.stopPrank();
 
         // Process on L2
@@ -452,6 +459,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 50_000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("big deposit")
         });
         l2TempoState.setMockStorageValue(
@@ -582,12 +590,12 @@ contract ZoneIntegrationTest is BaseTest {
         // Phase 1: Initial deposits
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 100_000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 10_000e6, bytes32("d1"));
+        l1Portal.deposit(address(l2ZoneToken), alice, 10_000e6, bytes32("d1"), alice);
         vm.stopPrank();
 
         vm.startPrank(bob);
         l2ZoneToken.approve(address(l1Portal), 100_000e6);
-        bytes32 d2 = l1Portal.deposit(address(l2ZoneToken), bob, 5000e6, bytes32("d2"));
+        bytes32 d2 = l1Portal.deposit(address(l2ZoneToken), bob, 5000e6, bytes32("d2"), bob);
         vm.stopPrank();
 
         // Process both deposits
@@ -597,10 +605,11 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 10_000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("d1")
         });
         deposits1[1] = Deposit({
-            token: address(l2ZoneToken), sender: bob, to: bob, amount: 5000e6, memo: bytes32("d2")
+            token: address(l2ZoneToken), sender: bob, to: bob, amount: 5000e6, bouncebackRecipient: bob, memo: bytes32("d2")
         });
 
         l2TempoState.setMockStorageValue(
@@ -625,7 +634,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Phase 3: More deposits arrive while withdrawals are pending
         vm.startPrank(charlie);
         l2ZoneToken.approve(address(l1Portal), 20_000e6);
-        bytes32 d3 = l1Portal.deposit(address(l2ZoneToken), charlie, 7500e6, bytes32("d3"));
+        bytes32 d3 = l1Portal.deposit(address(l2ZoneToken), charlie, 7500e6, bytes32("d3"), charlie);
         vm.stopPrank();
 
         // Submit batch with withdrawals
@@ -654,6 +663,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: charlie,
             to: charlie,
             amount: 7500e6,
+            bouncebackRecipient: charlie,
             memo: bytes32("d3")
         });
 
@@ -694,7 +704,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Deposit 10000
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
-        bytes32 d1 = l1Portal.deposit(address(l2ZoneToken), alice, 10_000e6, bytes32("d1"));
+        bytes32 d1 = l1Portal.deposit(address(l2ZoneToken), alice, 10_000e6, bytes32("d1"), alice);
         vm.stopPrank();
 
         Deposit[] memory deposits = new Deposit[](1);
@@ -703,6 +713,7 @@ contract ZoneIntegrationTest is BaseTest {
             sender: alice,
             to: alice,
             amount: 10_000e6,
+            bouncebackRecipient: alice,
             memo: bytes32("d1")
         });
         l2TempoState.setMockStorageValue(
@@ -738,7 +749,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Make a deposit to get a non-zero currentDepositQueueHash
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 1000e6);
-        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("layout-test"));
+        l1Portal.deposit(address(l2ZoneToken), alice, 1000e6, bytes32("layout-test"), alice);
         vm.stopPrank();
 
         // Read via vm.load using our constant
