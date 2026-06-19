@@ -14,6 +14,7 @@ crate::sol! {
             address sender;
             address to;
             uint128 amount;
+            address bouncebackRecipient;
             bytes32 memo;
         }
 

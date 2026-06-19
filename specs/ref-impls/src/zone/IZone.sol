@@ -71,6 +71,7 @@ struct Deposit {
     address sender;
     address to;
     uint128 amount;
+    address bouncebackRecipient;
     bytes32 memo;
 }
 
@@ -97,6 +98,7 @@ struct EncryptedDeposit {
     address token; // TIP-20 token being deposited (public, for escrow accounting)
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
+    address bouncebackRecipient; // Tempo recipient for a failed-deposit refund
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
@@ -512,6 +514,7 @@ interface IZonePortal {
         uint128 netAmount,
         uint128 fee,
         bytes32 memo,
+        address bouncebackRecipient,
         uint64 depositNumber
     );
 
@@ -553,8 +556,18 @@ interface IZonePortal {
         bytes ciphertext,
         bytes12 nonce,
         bytes16 tag,
+        address bouncebackRecipient,
         uint64 depositNumber
     );
+
+    /// @notice Emitted when a failed deposit's bounce-back refund is processed on Tempo.
+    /// @dev `success` is true when the refund transfer to `bouncebackRecipient` succeeds.
+    event DepositBounceBack(
+        address indexed bouncebackRecipient, address token, uint128 amount, bool success
+    );
+
+    /// @notice Emitted when a recipient claims a previously-parked bounce-back refund.
+    event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
     /// @notice Emitted when sequencer updates their encryption key
     /// @param x The X coordinate of the new key
@@ -743,7 +756,8 @@ interface IZonePortal {
         address token,
         address to,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);
@@ -762,7 +776,8 @@ interface IZonePortal {
         address token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted
+        EncryptedDepositPayload calldata encrypted,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash);

@@ -1125,6 +1125,7 @@ async fn test_encrypted_deposit_blacklisted_recipient() -> eyre::Result<()> {
                     nonce: alloy_primitives::FixedBytes(enc.nonce),
                     tag: alloy_primitives::FixedBytes(enc.tag),
                 },
+                depositor.address(),
             )
             .send()
             .await?
@@ -1244,7 +1245,7 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
 
         let portal = ZonePortal::new(portal_address, &dev_provider);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, alice, deposit_amount, B256::ZERO)
+            .deposit(PATH_USD_ADDRESS, alice, deposit_amount, B256::ZERO, alice)
             .send()
             .await?
             .get_receipt()
@@ -1359,6 +1360,7 @@ async fn test_deposit_to_blacklisted_recipient_reverts_on_l1() -> eyre::Result<(
             blacklisted_recipient,
             deposit_amount,
             B256::ZERO,
+            depositor,
         )
         .send()
         .await;

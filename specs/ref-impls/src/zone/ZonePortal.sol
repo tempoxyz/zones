@@ -498,7 +498,8 @@ contract ZonePortal is IZonePortal {
         address _token,
         address to,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
@@ -533,8 +534,14 @@ contract ZonePortal is IZonePortal {
         }
 
         // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
-        Deposit memory depositData =
-            Deposit({ token: _token, sender: msg.sender, to: to, amount: netAmount, memo: memo });
+        Deposit memory depositData = Deposit({
+            token: _token,
+            sender: msg.sender,
+            to: to,
+            amount: netAmount,
+            bouncebackRecipient: bouncebackRecipient,
+            memo: memo
+        });
 
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
@@ -542,7 +549,15 @@ contract ZonePortal is IZonePortal {
         uint64 thisDeposit = ++depositCount;
 
         emit DepositMade(
-            newCurrentDepositQueueHash, msg.sender, _token, to, netAmount, fee, memo, thisDeposit
+            newCurrentDepositQueueHash,
+            msg.sender,
+            _token,
+            to,
+            netAmount,
+            fee,
+            memo,
+            bouncebackRecipient,
+            thisDeposit
         );
     }
 
@@ -560,7 +575,8 @@ contract ZonePortal is IZonePortal {
         address _token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata encrypted
+        EncryptedDepositPayload calldata encrypted,
+        address bouncebackRecipient
     )
         external
         returns (bytes32 newCurrentDepositQueueHash)
@@ -614,6 +630,7 @@ contract ZonePortal is IZonePortal {
             token: _token,
             sender: msg.sender,
             amount: netAmount,
+            bouncebackRecipient: bouncebackRecipient,
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -636,6 +653,7 @@ contract ZonePortal is IZonePortal {
             encrypted.ciphertext,
             encrypted.nonce,
             encrypted.tag,
+            bouncebackRecipient,
             thisDeposit
         );
     }
@@ -725,6 +743,7 @@ contract ZonePortal is IZonePortal {
             sender: address(this),
             to: fallbackRecipient,
             amount: amount,
+            bouncebackRecipient: address(0),
             memo: bytes32(0)
         });
 

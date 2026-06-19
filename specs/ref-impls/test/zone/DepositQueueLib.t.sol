@@ -40,6 +40,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
+            bouncebackRecipient: address(0x300),
             memo: bytes32("memo")
         });
 
@@ -55,6 +56,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
+            bouncebackRecipient: address(0x300),
             memo: bytes32("d1")
         });
         Deposit memory d2 = Deposit({
@@ -62,6 +64,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x300),
             to: address(0x200),
             amount: 200e6,
+            bouncebackRecipient: address(0x200),
             memo: bytes32("d2")
         });
         Deposit memory d3 = Deposit({
@@ -69,6 +72,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x200),
             amount: 300e6,
+            bouncebackRecipient: address(0x200),
             memo: bytes32("d3")
         });
 
@@ -93,6 +97,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
+            bouncebackRecipient: address(0x300),
             memo: bytes32("first")
         });
         Deposit memory d2 = Deposit({
@@ -100,6 +105,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x300),
             to: address(0x200),
             amount: 200e6,
+            bouncebackRecipient: address(0x200),
             memo: bytes32("second")
         });
 
@@ -113,7 +119,12 @@ contract DepositQueueLibTest is Test {
     function test_enqueue_emptyToEmpty() public pure {
         // An empty deposit struct should still produce a valid hash
         Deposit memory d = Deposit({
-            token: address(0x1000), sender: address(0), to: address(0), amount: 0, memo: bytes32(0)
+            token: address(0x1000),
+            sender: address(0),
+            to: address(0),
+            amount: 0,
+            bouncebackRecipient: address(0),
+            memo: bytes32(0)
         });
 
         bytes32 h = DepositQueueLib.enqueue(bytes32(0), d);
@@ -128,6 +139,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
+            bouncebackRecipient: address(0x300),
             memo: bytes32("memo1")
         });
         Deposit memory d2 = Deposit({
@@ -135,6 +147,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
+            bouncebackRecipient: address(0x300),
             memo: bytes32("memo2") // Only memo differs
         });
 
@@ -150,6 +163,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
+            bouncebackRecipient: address(0x300),
             memo: bytes32("memo")
         });
 
@@ -168,6 +182,7 @@ contract DepositQueueLibTest is Test {
             token: address(0x1000),
             sender: address(0x200),
             amount: 100e6,
+            bouncebackRecipient: address(0x200),
             keyIndex: 0,
             encrypted: EncryptedDepositPayload({
                 ephemeralPubkeyX: bytes32(uint256(1)),
@@ -189,6 +204,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
+            bouncebackRecipient: address(0x300),
             memo: bytes32("d1")
         });
 
@@ -196,6 +212,7 @@ contract DepositQueueLibTest is Test {
             token: address(0x1000),
             sender: address(0x300),
             amount: 200e6,
+            bouncebackRecipient: address(0x300),
             keyIndex: 0,
             encrypted: EncryptedDepositPayload({
                 ephemeralPubkeyX: bytes32(uint256(1)),
@@ -211,6 +228,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x200),
             amount: 300e6,
+            bouncebackRecipient: address(0x200),
             memo: bytes32("d3")
         });
 
@@ -234,6 +252,7 @@ contract DepositQueueLibTest is Test {
             sender: address(0x200),
             to: address(0x300),
             amount: 100e6,
+            bouncebackRecipient: address(0x300),
             memo: bytes32("memo")
         });
 
@@ -241,6 +260,7 @@ contract DepositQueueLibTest is Test {
             token: address(0x1000),
             sender: address(0x200),
             amount: 100e6,
+            bouncebackRecipient: address(0x200),
             keyIndex: 0,
             encrypted: EncryptedDepositPayload({
                 ephemeralPubkeyX: bytes32(0),

@@ -62,6 +62,7 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
+            bouncebackRecipient: address!("0x0000000000000000000000000000000000000001"),
             memo: B256::ZERO,
         };
 
@@ -85,6 +86,7 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
+            bouncebackRecipient: address!("0x0000000000000000000000000000000000000001"),
             memo: B256::ZERO,
         };
 
@@ -144,6 +146,7 @@ mod tests {
             sender: address!("0x0000000000000000000000000000000000000001"),
             to: address!("0x0000000000000000000000000000000000000002"),
             amount: 1000u128,
+            bouncebackRecipient: address!("0x0000000000000000000000000000000000000001"),
             memo: B256::ZERO,
         };
         let prev_hash = B256::ZERO;

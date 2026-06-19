@@ -41,6 +41,7 @@ crate::sol! {
             address token;
             address sender;
             uint128 amount;
+            address bouncebackRecipient;
             uint256 keyIndex;
             EncryptedDepositPayload encrypted;
         }
@@ -67,6 +68,7 @@ crate::sol! {
             uint128 netAmount,
             uint128 fee,
             bytes32 memo,
+            address bouncebackRecipient,
             uint64 depositNumber
         );
 
@@ -82,6 +84,7 @@ crate::sol! {
             bytes ciphertext,
             bytes12 nonce,
             bytes16 tag,
+            address bouncebackRecipient,
             uint64 depositNumber
         );
 
@@ -106,6 +109,15 @@ crate::sol! {
             uint128 amount,
             uint64 depositNumber
         );
+
+        event DepositBounceBack(
+            address indexed bouncebackRecipient,
+            address token,
+            uint128 amount,
+            bool success
+        );
+
+        event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
         event SequencerTransferStarted(
             address indexed currentSequencer,
@@ -146,7 +158,13 @@ crate::sol! {
 
         // -- State-changing functions --
 
-        function deposit(address token, address to, uint128 amount, bytes32 memo)
+        function deposit(
+            address token,
+            address to,
+            uint128 amount,
+            bytes32 memo,
+            address bouncebackRecipient
+        )
             external
             returns (bytes32 newCurrentDepositQueueHash);
 
@@ -171,7 +189,8 @@ crate::sol! {
             address token,
             uint128 amount,
             uint256 keyIndex,
-            EncryptedDepositPayload calldata encrypted
+            EncryptedDepositPayload calldata encrypted,
+            address bouncebackRecipient
         ) external returns (bytes32 newCurrentDepositQueueHash);
 
         function setSequencerEncryptionKey(
