@@ -75,12 +75,14 @@ contract MockZonePortalForRouter {
     mapping(address => bool) public enabledTokens;
 
     address public lastDepositRecipient;
+    address public lastDepositBouncebackRecipient;
     uint128 public lastDepositAmount;
     bytes32 public lastDepositMemo;
     bool public depositCalled;
 
     uint128 public lastEncryptedAmount;
     uint256 public lastEncryptedKeyIndex;
+    address public lastEncryptedBouncebackRecipient;
     bool public encryptedDepositCalled;
 
     function enableToken(address _token) external {
@@ -95,13 +97,15 @@ contract MockZonePortalForRouter {
         address _token,
         address to,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient
     )
         external
         returns (bytes32)
     {
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastDepositRecipient = to;
+        lastDepositBouncebackRecipient = bouncebackRecipient;
         lastDepositAmount = amount;
         lastDepositMemo = memo;
         depositCalled = true;
@@ -112,7 +116,8 @@ contract MockZonePortalForRouter {
         address _token,
         uint128 amount,
         uint256 keyIndex,
-        EncryptedDepositPayload calldata
+        EncryptedDepositPayload calldata,
+        address bouncebackRecipient
     )
         external
         returns (bytes32)
@@ -120,6 +125,7 @@ contract MockZonePortalForRouter {
         ITIP20(_token).transferFrom(msg.sender, address(this), amount);
         lastEncryptedAmount = amount;
         lastEncryptedKeyIndex = keyIndex;
+        lastEncryptedBouncebackRecipient = bouncebackRecipient;
         encryptedDepositCalled = true;
         return bytes32(0);
     }
@@ -246,6 +252,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
         assertTrue(mockPortal.depositCalled());
         assertEq(mockPortal.lastDepositRecipient(), alice);
+        assertEq(mockPortal.lastDepositBouncebackRecipient(), alice);
         assertEq(mockPortal.lastDepositAmount(), AMOUNT);
         assertEq(mockPortal.lastDepositMemo(), bytes32("hello"));
     }
@@ -264,6 +271,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
         assertTrue(mockPortal2.depositCalled());
         assertEq(mockPortal2.lastDepositRecipient(), alice);
+        assertEq(mockPortal2.lastDepositBouncebackRecipient(), alice);
         assertEq(mockPortal2.lastDepositAmount(), swapOut);
         assertEq(mockPortal2.lastDepositMemo(), bytes32("swap"));
     }
@@ -280,6 +288,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertTrue(mockPortal.encryptedDepositCalled());
         assertEq(mockPortal.lastEncryptedAmount(), AMOUNT);
         assertEq(mockPortal.lastEncryptedKeyIndex(), 0);
+        assertEq(mockPortal.lastEncryptedBouncebackRecipient(), address(router));
     }
 
     function test_encryptedDeposit_withSwap() public {
@@ -297,6 +306,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertTrue(mockPortal2.encryptedDepositCalled());
         assertEq(mockPortal2.lastEncryptedAmount(), swapOut);
         assertEq(mockPortal2.lastEncryptedKeyIndex(), 1);
+        assertEq(mockPortal2.lastEncryptedBouncebackRecipient(), address(router));
     }
 
     function test_swapSlippageReverts() public {
