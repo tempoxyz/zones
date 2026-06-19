@@ -11364,6 +11364,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempo-zone-contracts"
+version = "0.1.0"
+dependencies = [
+ "alloy-contract",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-sol-types",
+ "const-hex",
+ "futures",
+ "serde",
+ "tokio",
+ "zone-primitives",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13380,6 +13396,7 @@ dependencies = [
  "tempo-primitives",
  "tempo-revm",
  "tempo-transaction-pool",
+ "tempo-zone-contracts",
  "thiserror 2.0.18",
  "tokio",
  "tokio-tungstenite",
@@ -13408,6 +13425,7 @@ dependencies = [
  "tempo-contracts",
  "tempo-precompiles",
  "tempo-precompiles-macros",
+ "tempo-zone-contracts",
  "tracing",
  "zone-primitives",
 ]
@@ -13416,16 +13434,9 @@ dependencies = [
 name = "zone-primitives"
 version = "0.1.0"
 dependencies = [
- "alloy-contract",
- "alloy-network",
  "alloy-primitives",
- "alloy-provider",
  "alloy-rlp",
- "alloy-sol-types",
- "const-hex",
- "futures",
  "serde",
- "tokio",
 ]
 
 [[package]]

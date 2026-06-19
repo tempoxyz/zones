@@ -7,7 +7,6 @@
 
 extern crate alloc;
 
-pub mod abi;
 pub mod constants;
 mod header;
 pub mod policy;

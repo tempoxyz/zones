@@ -8,6 +8,7 @@ publish = false
 [workspace]
 members = [
   "bin/tempo-zone",
+  "crates/contracts",
   "crates/precompiles",
   "crates/primitives",
   "crates/tempo-zone",
@@ -99,6 +100,7 @@ tempo-revm = { git = "https://github.com/tempoxyz/tempo", rev = "19631ec55ccbb9e
 tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "19631ec55ccbb9e8996b3d1481332d06d1ef5803", default-features = false }
 
 # zones
+tempo-zone-contracts = { path = "crates/contracts", default-features = false }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
 zone-rpc = { path = "crates/rpc" }

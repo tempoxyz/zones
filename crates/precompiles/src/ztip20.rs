@@ -24,8 +24,8 @@ use tempo_precompiles::{
     tip20::{IRolesAuth, ITIP20, RolesAuthError, TIP20Token},
 };
 use tracing::{trace, warn};
+use tempo_zone_contracts::Unauthorized;
 use zone_primitives::{
-    abi::Unauthorized,
     constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
     policy::AuthRole,
 };

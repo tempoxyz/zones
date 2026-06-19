@@ -1,3 +1,3 @@
-//! ABI bindings — re-exported from [`zone_primitives::abi`].
+//! ABI bindings — re-exported from [`tempo_zone_contracts`].
 
-pub use zone_primitives::abi::*;
+pub use tempo_zone_contracts::*;
