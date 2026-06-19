@@ -1981,7 +1981,13 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(PATH_USD_ADDRESS, recipient, amount, B256::ZERO)
+            .deposit(
+                PATH_USD_ADDRESS,
+                recipient,
+                amount,
+                B256::ZERO,
+                self.address,
+            )
             .send()
             .await?
             .get_receipt()
@@ -2036,7 +2042,7 @@ impl ZoneAccount {
 
         let portal = ZonePortal::new(self.portal_address, &self.l1_provider);
         let receipt = portal
-            .deposit(token, self.address, amount, B256::ZERO)
+            .deposit(token, self.address, amount, B256::ZERO, self.address)
             .send()
             .await?
             .get_receipt()
@@ -2141,6 +2147,7 @@ impl ZoneAccount {
                     nonce: alloy_primitives::FixedBytes(enc.nonce),
                     tag: alloy_primitives::FixedBytes(enc.tag),
                 },
+                self.address,
             )
             .send()
             .await?
@@ -3062,6 +3069,7 @@ impl L1Fixture {
             to,
             amount,
             fee: 0,
+            bounceback_recipient: sender,
             memo: B256::ZERO,
         }
     }
@@ -3123,6 +3131,7 @@ impl L1Fixture {
             sender,
             amount,
             fee: 0,
+            bounceback_recipient: sender,
             key_index: alloy_primitives::U256::ZERO,
             ephemeral_pubkey_x: B256::ZERO,
             ephemeral_pubkey_y_parity: 0x02,
@@ -3146,6 +3155,7 @@ impl L1Fixture {
             to,
             amount,
             fee: 0,
+            bounceback_recipient: sender,
             memo: B256::ZERO,
         }
     }
@@ -3202,6 +3212,7 @@ impl L1Fixture {
             sender,
             amount,
             fee: 0,
+            bounceback_recipient: sender,
             key_index,
             ephemeral_pubkey_x: eph_pub_x,
             ephemeral_pubkey_y_parity: eph_pub_y_parity,

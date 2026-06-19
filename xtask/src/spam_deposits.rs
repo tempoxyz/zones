@@ -325,6 +325,7 @@ impl SpamDeposits {
                 amount: self.amount,
                 keyIndex: key_index,
                 encrypted: payload,
+                bouncebackRecipient: recipient,
             }
             .abi_encode())
         } else {
@@ -333,6 +334,7 @@ impl SpamDeposits {
                 to: recipient,
                 amount: self.amount,
                 memo: B256::ZERO,
+                bouncebackRecipient: recipient,
             }
             .abi_encode())
         }
