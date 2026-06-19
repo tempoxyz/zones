@@ -93,9 +93,8 @@ contract SwapAndDepositRouter is IWithdrawalReceiver {
             ITIP20(tokenOut).approve(targetPortal, amountOut);
             // Encrypted deposits have no plaintext recipient; route any bounce-back refund
             // back to this router.
-            IZonePortal(targetPortal).depositEncrypted(
-                tokenOut, amountOut, keyIndex, encrypted, address(this)
-            );
+            IZonePortal(targetPortal)
+                .depositEncrypted(tokenOut, amountOut, keyIndex, encrypted, address(this));
         } else {
             (, // skip isEncrypted
                 address tokenOut,
