@@ -46,7 +46,7 @@ use tokio::{
 };
 
 use crate::abi::{
-    DepositType, TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
+    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox, ZonePortal,
 };
 use alloy_rpc_client::ConnectionConfig;
 use zone_rpc::{
@@ -916,12 +916,9 @@ where
 
                         let include = match (&terminal, sender == auth.caller) {
                             (_, true) => true,
-                            (
-                                Some(TerminalDepositEvent::EncryptedProcessed {
-                                    recipient, ..
-                                }),
-                                false,
-                            ) => *recipient == auth.caller,
+                            (Some(TerminalDepositEvent::Encrypted { recipient, .. }), false) => {
+                                *recipient == auth.caller
+                            }
                             _ => false,
                         };
 
