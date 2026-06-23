@@ -1290,7 +1290,7 @@ async fn test_blacklisted_sender_transfer_rejected() -> eyre::Result<()> {
 ///  2. Create a blacklist policy, assign to pathUSD, blacklist a user.
 ///  3. Fund the blacklisted user on L1.
 ///  4. Attempt a deposit targeting the blacklisted user — should revert with
-///     `DepositPolicyForbids` on the L1 portal contract.
+///     `PolicyForbids` on the L1 portal contract.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_deposit_to_blacklisted_recipient_reverts_on_l1() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();

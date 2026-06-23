@@ -145,7 +145,7 @@ crate::sol! {
         error NotSequencer();
         error InvalidProof();
         error InvalidTempoBlockNumber();
-        error DepositPolicyForbids();
+        error PolicyForbids();
         error InvalidBouncebackRecipient();
 
         // -- View functions --
@@ -293,7 +293,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
-            Self::DepositPolicyForbids(_) => f.write_str("DepositPolicyForbids"),
+            Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
         }
     }
