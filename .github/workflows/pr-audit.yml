@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   audit:
-    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@main
+    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@e8cf360f266e64f6fb3fe6975cadbad95a2c94b5 # main
     with:
       required-label: cyclops
     secrets:
