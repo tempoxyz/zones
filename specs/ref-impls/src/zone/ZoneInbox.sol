@@ -221,16 +221,14 @@ contract ZoneInbox is IZoneInbox {
                 if (d.bouncebackRecipient == address(0)) {
                     _processWithdrawalBounceBack(d);
                 } else if (qd.rejected) {
-                    _enqueueDepositBounceBack(
-                        d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
-                    );
-                    emit DepositRejected(
+                    _rejectDeposit(
                         currentHash,
-                        d.sender,
                         DepositType.Regular,
+                        d.sender,
                         d.token,
                         d.amount,
-                        d.bouncebackRecipient
+                        d.bouncebackRecipient,
+                        d.bouncebackFee
                     );
                 } else {
                     try IZoneToken(d.token).mint(d.to, d.amount) {
@@ -251,16 +249,14 @@ contract ZoneInbox is IZoneInbox {
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
                 if (qd.rejected) {
-                    _enqueueDepositBounceBack(
-                        ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
-                    );
-                    emit DepositRejected(
+                    _rejectDeposit(
                         currentHash,
-                        ed.sender,
                         DepositType.Encrypted,
+                        ed.sender,
                         ed.token,
                         ed.amount,
-                        ed.bouncebackRecipient
+                        ed.bouncebackRecipient,
+                        ed.bouncebackFee
                     );
                     continue;
                 }
@@ -315,31 +311,19 @@ contract ZoneInbox is IZoneInbox {
                 // Step 4: Decode the decrypted (to, memo) from the plaintext.
                 // Plaintext is packed as [address(20 bytes)][memo(32 bytes)][padding(12 bytes)]
                 // and must be exactly ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE (64) bytes.
-                address decryptedTo;
-                bytes32 decryptedMemo;
-                if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
-                    (decryptedTo, decryptedMemo) =
-                        EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
-                } else {
-                    valid = false;
+                if (!valid || decryptedPlaintext.length != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
+                    _failEncryptedDeposit(currentHash, ed);
+                    continue;
                 }
+                (address decryptedTo, bytes32 decryptedMemo) =
+                    EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
 
-                if (!valid) {
-                    _enqueueDepositBounceBack(
-                        ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
+                try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
+                    emit EncryptedDepositProcessed(
+                        currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo
                     );
-                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
-                } else {
-                    try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
-                        emit EncryptedDepositProcessed(
-                            currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo
-                        );
-                    } catch {
-                        _enqueueDepositBounceBack(
-                            ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
-                        );
-                        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
-                    }
+                } catch {
+                    _failEncryptedDeposit(currentHash, ed);
                 }
             }
         }
@@ -375,6 +359,26 @@ contract ZoneInbox is IZoneInbox {
         );
     }
 
+    function _rejectDeposit(
+        bytes32 currentHash,
+        DepositType depositType,
+        address sender,
+        address token,
+        uint128 amount,
+        address bouncebackRecipient,
+        uint128 bouncebackFee
+    )
+        internal
+    {
+        _enqueueDepositBounceBack(token, amount, bouncebackRecipient, bouncebackFee);
+        emit DepositRejected(currentHash, sender, depositType, token, amount, bouncebackRecipient);
+    }
+
+    function _failEncryptedDeposit(bytes32 currentHash, EncryptedDeposit memory ed) internal {
+        _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee);
+        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+    }
+
     function _enqueueDepositBounceBack(
         address token,
         uint128 amount,
@@ -400,12 +404,8 @@ contract ZoneInbox is IZoneInbox {
         amount = refunds[token][msg.sender];
         refunds[token][msg.sender] = 0;
 
-        try IZoneToken(token).mint(msg.sender, amount) {
-            emit RefundClaimed(msg.sender, token, amount);
-        } catch {
-            refunds[token][msg.sender] = amount;
-            revert();
-        }
+        IZoneToken(token).mint(msg.sender, amount);
+        emit RefundClaimed(msg.sender, token, amount);
     }
 
 }
