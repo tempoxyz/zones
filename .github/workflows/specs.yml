@@ -79,6 +79,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: tempoxyz/tempo
+          ref: 8e6872af7d699bca497541d35a7b9495614fbb38
           path: tempo
           persist-credentials: false
 
@@ -86,7 +87,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: foundry-rs/foundry
-          ref: master
+          ref: 67f249d241dfee7264d523e131f82639eb236174
           path: foundry
           persist-credentials: false
 
