@@ -534,7 +534,7 @@ impl L1Subscriber {
     }
 
     /// Extract portal and policy events from pre-fetched receipts (no RPC).
-    fn extract_events(
+    pub(crate) fn extract_events(
         &mut self,
         block_number: u64,
         receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
@@ -545,6 +545,9 @@ impl L1Subscriber {
         let mut portal_events = L1PortalEvents::default();
         let mut policy_events = Vec::new();
 
+        // First pass: decode portal events (deposits, sequencer transfers, token
+        // enables) and TIP-403 registry policy events. This also grows
+        // `tracked_tokens` with every token enabled in this block.
         for receipt in receipts {
             for log in receipt.logs() {
                 let addr = log.address();
@@ -561,11 +564,24 @@ impl L1Subscriber {
                             self.tracked_tokens.push(token);
                         }
                     }
-                } else if addr == TIP403_REGISTRY_ADDRESS {
-                    if let Some(event) = PolicyEvent::decode_registry(log) {
-                        policy_events.push(event);
-                    }
-                } else if self.tracked_tokens.contains(&addr)
+                } else if addr == TIP403_REGISTRY_ADDRESS
+                    && let Some(event) = PolicyEvent::decode_registry(log)
+                {
+                    policy_events.push(event);
+                }
+            }
+        }
+
+        // Second pass: collect TIP-20 transfer-policy updates. This runs after
+        // the first pass so a token that is enabled *and* updates its transfer
+        // policy in the same L1 block is captured even when its
+        // `TransferPolicyUpdate` log precedes the portal `TokenEnabled` log.
+        // The two are emitted by different transactions, so their relative order
+        // within a block is not guaranteed; a single pass would drop the policy
+        // update because `tracked_tokens` would not yet contain the token.
+        for receipt in receipts {
+            for log in receipt.logs() {
+                if self.tracked_tokens.contains(&log.address())
                     && log.topics().first() == Some(&TransferPolicyUpdate::SIGNATURE_HASH)
                     && let Some(event) = PolicyEvent::decode_tip20(log)
                 {
