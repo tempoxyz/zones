@@ -164,6 +164,95 @@ fn make_portal_log<E: SolEvent>(portal_address: Address, event: E) -> Log {
     }
 }
 
+/// Wrap a set of logs in a successful L1 transaction receipt.
+fn make_receipt_with_logs(logs: Vec<Log>) -> tempo_alloy::rpc::TempoTransactionReceipt {
+    use alloy_consensus::ReceiptWithBloom;
+    use alloy_primitives::TxHash;
+    use alloy_rpc_types_eth::TransactionReceipt;
+    use tempo_primitives::{TempoReceipt, TempoTxType};
+
+    let receipt = TempoReceipt {
+        tx_type: TempoTxType::Legacy,
+        success: true,
+        cumulative_gas_used: 21_000,
+        logs,
+    };
+
+    tempo_alloy::rpc::TempoTransactionReceipt {
+        inner: TransactionReceipt {
+            inner: ReceiptWithBloom::from(receipt),
+            transaction_hash: TxHash::with_last_byte(1),
+            transaction_index: Some(0),
+            block_hash: Some(B256::with_last_byte(2)),
+            block_number: Some(1),
+            gas_used: 21_000,
+            effective_gas_price: 1,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: Address::ZERO,
+            to: Some(Address::ZERO),
+            contract_address: None,
+        },
+        fee_token: None,
+        fee_payer: Address::ZERO,
+    }
+}
+
+#[test]
+fn extract_events_captures_same_block_policy_update_before_token_enabled() {
+    use tempo_contracts::precompiles::ITIP20::TransferPolicyUpdate;
+
+    let mut subscriber =
+        test_subscriber(Arc::new(SequenceLocalTempoStateReader::new([0])), Some(0));
+    let portal = subscriber.config.portal_address;
+    let token = address!("0x0000000000000000000000000000000000002000");
+    let updater = address!("0x0000000000000000000000000000000000003000");
+
+    // A token can be enabled and set its transfer policy in the same L1 block.
+    // Here the token's `TransferPolicyUpdate` log is ordered *before* the portal
+    // `TokenEnabled` log — exactly the case a single-pass scan would drop.
+    let policy_log = Log {
+        inner: alloy_primitives::Log {
+            address: token,
+            data: TransferPolicyUpdate {
+                updater,
+                newPolicyId: 7,
+            }
+            .encode_log_data(),
+        },
+        block_hash: None,
+        block_number: None,
+        block_timestamp: None,
+        transaction_hash: None,
+        transaction_index: None,
+        log_index: None,
+        removed: false,
+    };
+    let enable_log = make_portal_log(
+        portal,
+        TokenEnabled {
+            token,
+            name: "Token".to_owned(),
+            symbol: "TKN".to_owned(),
+            currency: "USD".to_owned(),
+        },
+    );
+
+    let receipt = make_receipt_with_logs(vec![policy_log, enable_log]);
+    let (_portal_events, policy_events) =
+        subscriber.extract_events(1, std::slice::from_ref(&receipt));
+
+    assert!(
+        policy_events.iter().any(|event| matches!(
+            event,
+            PolicyEvent::TokenPolicyChanged { token: t, policy_id: 7 } if t == &token
+        )),
+        "policy update for a token enabled in the same block must be captured \
+         regardless of intra-block log order: {policy_events:?}"
+    );
+    assert!(subscriber.tracked_tokens.contains(&token));
+}
+
 #[tokio::test]
 async fn test_resolve_start_block_reads_live_local_state_each_time() {
     let subscriber = test_subscriber(
