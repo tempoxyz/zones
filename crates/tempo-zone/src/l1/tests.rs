@@ -46,6 +46,10 @@ struct EncryptedDepositPayloadFixture {
 struct MalformedTempoHeadersFixture {
     trailing_bytes_after_outer_list: String,
     outer_list_length_mismatch: String,
+    outer_list_long_length_leading_zero: String,
+    difficulty_non_canonical_short_string: String,
+    block_number_leading_zero: String,
+    extra_data_long_length_below_short_threshold: String,
 }
 
 fn encrypted_deposit_hash_fixture() -> EncryptedDepositHashFixture {
@@ -188,15 +192,41 @@ fn header_hash(header: &TempoHeader) -> B256 {
 #[test]
 fn tempo_header_rejects_trailing_bytes_after_outer_list() {
     let fixture = malformed_tempo_headers_fixture();
-    let malformed = parse_fixture_hex(&fixture.trailing_bytes_after_outer_list);
-
-    assert_tempo_header_rejected(&malformed);
+    assert_tempo_header_fixture_rejected(&fixture.trailing_bytes_after_outer_list);
 }
 
 #[test]
 fn tempo_header_rejects_outer_list_length_mismatch() {
     let fixture = malformed_tempo_headers_fixture();
-    let malformed = parse_fixture_hex(&fixture.outer_list_length_mismatch);
+    assert_tempo_header_fixture_rejected(&fixture.outer_list_length_mismatch);
+}
+
+#[test]
+fn tempo_header_rejects_outer_list_long_length_leading_zero() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.outer_list_long_length_leading_zero);
+}
+
+#[test]
+fn tempo_header_rejects_difficulty_non_canonical_short_string() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.difficulty_non_canonical_short_string);
+}
+
+#[test]
+fn tempo_header_rejects_block_number_leading_zero() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.block_number_leading_zero);
+}
+
+#[test]
+fn tempo_header_rejects_extra_data_long_length_below_short_threshold() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.extra_data_long_length_below_short_threshold);
+}
+
+fn assert_tempo_header_fixture_rejected(value: &str) {
+    let malformed = parse_fixture_hex(value);
 
     assert_tempo_header_rejected(&malformed);
 }

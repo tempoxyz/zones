@@ -5,6 +5,16 @@ import { ITempoState, ZONE_INBOX } from "../../src/zone/IZone.sol";
 import { TempoState } from "../../src/zone/TempoState.sol";
 import { Test, stdJson } from "forge-std/Test.sol";
 
+contract TempoStateRlpHarness is TempoState {
+
+    constructor(bytes memory genesisHeader) TempoState(genesisHeader) { }
+
+    function decodeUint256(bytes memory data) external pure returns (uint256) {
+        return _decodeUint256Mem(data, 0);
+    }
+
+}
+
 /// @title TempoStateTest
 /// @notice Tests for the TempoState predeploy contract
 contract TempoStateTest is Test {
@@ -15,6 +25,7 @@ contract TempoStateTest is Test {
         "/test/fixtures/malformedTempoHeaders.json";
 
     TempoState public tempoState;
+    TempoStateRlpHarness public rlpHarness;
 
     address public zoneInbox = ZONE_INBOX;
     address public notZoneInbox = address(0x2);
@@ -45,6 +56,7 @@ contract TempoStateTest is Test {
         genesisBlockHash = keccak256(genesisHeader);
 
         tempoState = new TempoState(genesisHeader);
+        rlpHarness = new TempoStateRlpHarness(genesisHeader);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -63,19 +75,27 @@ contract TempoStateTest is Test {
     }
 
     function test_constructor_revertsOnTrailingBytesAfterOuterList() public {
-        bytes memory malformedHeader =
-            _malformedTempoHeadersFixtureJson().readBytes(".trailingBytesAfterOuterList");
-
-        vm.expectRevert(ITempoState.InvalidRlpData.selector);
-        new TempoState(malformedHeader);
+        _expectConstructorRejectsMalformedHeader(".trailingBytesAfterOuterList");
     }
 
     function test_constructor_revertsOnOuterListLengthMismatch() public {
-        bytes memory malformedHeader =
-            _malformedTempoHeadersFixtureJson().readBytes(".outerListLengthMismatch");
+        _expectConstructorRejectsMalformedHeader(".outerListLengthMismatch");
+    }
 
-        vm.expectRevert(ITempoState.InvalidRlpData.selector);
-        new TempoState(malformedHeader);
+    function test_constructor_revertsOnOuterListLongLengthLeadingZero() public {
+        _expectConstructorRejectsMalformedHeader(".outerListLongLengthLeadingZero");
+    }
+
+    function test_constructor_revertsOnDifficultyNonCanonicalShortString() public {
+        _expectConstructorRejectsMalformedHeader(".difficultyNonCanonicalShortString");
+    }
+
+    function test_constructor_revertsOnBlockNumberLeadingZero() public {
+        _expectConstructorRejectsMalformedHeader(".blockNumberLeadingZero");
+    }
+
+    function test_constructor_revertsOnExtraDataLongLengthBelowShortThreshold() public {
+        _expectConstructorRejectsMalformedHeader(".extraDataLongLengthBelowShortThreshold");
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -256,6 +276,23 @@ contract TempoStateTest is Test {
         tempoState.readTempoStorageSlots(address(0x1234), slots);
     }
 
+    function test_decodeUint256_acceptsCanonicalEncodings() public view {
+        assertEq(rlpHarness.decodeUint256(hex"80"), 0);
+        assertEq(rlpHarness.decodeUint256(hex"7f"), 127);
+        assertEq(rlpHarness.decodeUint256(hex"8180"), 128);
+        assertEq(rlpHarness.decodeUint256(hex"820100"), 256);
+    }
+
+    function test_decodeUint256_revertsOnNonCanonicalShortString() public {
+        vm.expectRevert(ITempoState.InvalidRlpData.selector);
+        rlpHarness.decodeUint256(hex"817f");
+    }
+
+    function test_decodeUint256_revertsOnLeadingZero() public {
+        vm.expectRevert(ITempoState.InvalidRlpData.selector);
+        rlpHarness.decodeUint256(hex"820080");
+    }
+
     /*//////////////////////////////////////////////////////////////
                           RLP ENCODING HELPERS
     //////////////////////////////////////////////////////////////*/
@@ -418,6 +455,13 @@ contract TempoStateTest is Test {
 
     function _malformedTempoHeadersFixtureJson() internal view returns (string memory) {
         return vm.readFile(string.concat(vm.projectRoot(), MALFORMED_TEMPO_HEADERS_FIXTURE_PATH));
+    }
+
+    function _expectConstructorRejectsMalformedHeader(string memory key) internal {
+        bytes memory malformedHeader = _malformedTempoHeadersFixtureJson().readBytes(key);
+
+        vm.expectRevert(ITempoState.InvalidRlpData.selector);
+        new TempoState(malformedHeader);
     }
 
 }
