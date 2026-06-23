@@ -7,7 +7,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, Bytes, hex};
+use alloy_primitives::{Address, B256, Bytes, hex};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, Log, state::StateOverride};
 use alloy_sol_types::SolCall;
 use eyre::WrapErr;
@@ -440,14 +440,26 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 .forward("eth_getFilterChanges", serde_json::json!([id]))
                 .await?;
 
-            // Try to parse as logs for filtering. If the result is block hashes
-            // (from a block filter) or empty, the parse will fail and we pass through.
+            // A log filter returns an array of `Log` objects, which carry
+            // private state and must be filtered down to the caller's visible
+            // logs. A block / pending-transaction filter returns an array of
+            // 32-byte hashes, which carries no private state and is passed
+            // through unchanged.
+            //
+            // We must fail *closed*: if the payload parses as neither shape
+            // (e.g. an unexpected or future result format) we return an error
+            // rather than passing the raw upstream payload through unfiltered,
+            // which could leak another account's logs.
             if let Ok(logs) = serde_json::from_str::<Vec<Log>>(result.get()) {
                 let filtered = filter::filter_logs(logs, &auth.caller);
                 return to_raw(&filtered);
             }
 
-            Ok(result)
+            if serde_json::from_str::<Vec<B256>>(result.get()).is_ok() {
+                return Ok(result);
+            }
+
+            Err(internal("unexpected eth_getFilterChanges result shape"))
         })
     }
 
@@ -635,5 +647,98 @@ mod tests {
             receipt.inner.inner.logs_bloom,
             upstream.inner.inner.logs_bloom
         );
+    }
+
+    #[tokio::test]
+    async fn filter_changes_filters_log_results() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let other = address!("0x0000000000000000000000000000000000000002");
+        let third = address!("0x0000000000000000000000000000000000000003");
+
+        let visible = make_log(
+            Address::ZERO,
+            vec![
+                filter::TRANSFER_TOPIC,
+                caller_word(&caller),
+                caller_word(&other),
+            ],
+        );
+        let hidden = make_log(
+            Address::ZERO,
+            vec![
+                filter::TRANSFER_TOPIC,
+                caller_word(&other),
+                caller_word(&third),
+            ],
+        );
+        let result = serde_json::to_value(vec![visible.clone(), hidden]).unwrap();
+        let proxy = ProxyZoneRpc::new(spawn_upstream(result).await);
+
+        let id = FilterId::Num(1);
+        proxy.filter_owners.lock().await.insert(id.clone(), caller);
+
+        let raw = proxy
+            .get_filter_changes(
+                id,
+                AuthContext {
+                    caller,
+                    expires_at: u64::MAX,
+                },
+            )
+            .await
+            .expect("proxy should return filtered changes");
+
+        let logs: Vec<Log> = serde_json::from_str(raw.get()).expect("deserialize filtered logs");
+        assert_eq!(logs, vec![visible]);
+    }
+
+    #[tokio::test]
+    async fn filter_changes_passes_through_block_hashes() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let hashes = vec![B256::with_last_byte(7), B256::with_last_byte(8)];
+        let result = serde_json::to_value(&hashes).unwrap();
+        let proxy = ProxyZoneRpc::new(spawn_upstream(result).await);
+
+        let id = FilterId::Num(2);
+        proxy.filter_owners.lock().await.insert(id.clone(), caller);
+
+        let raw = proxy
+            .get_filter_changes(
+                id,
+                AuthContext {
+                    caller,
+                    expires_at: u64::MAX,
+                },
+            )
+            .await
+            .expect("block-hash changes should pass through");
+
+        let out: Vec<B256> = serde_json::from_str(raw.get()).expect("deserialize block hashes");
+        assert_eq!(out, hashes);
+    }
+
+    #[tokio::test]
+    async fn filter_changes_fails_closed_on_unexpected_shape() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        // An object payload matches neither `Vec<Log>` nor `Vec<B256>`; the
+        // proxy must error rather than pass the raw upstream payload through.
+        let result = serde_json::json!({ "unexpected": "shape" });
+        let proxy = ProxyZoneRpc::new(spawn_upstream(result).await);
+
+        let id = FilterId::Num(3);
+        proxy.filter_owners.lock().await.insert(id.clone(), caller);
+
+        let err = proxy
+            .get_filter_changes(
+                id,
+                AuthContext {
+                    caller,
+                    expires_at: u64::MAX,
+                },
+            )
+            .await
+            .expect_err("unexpected shape must fail closed");
+
+        assert!(err.message.contains("unexpected"));
     }
 }
