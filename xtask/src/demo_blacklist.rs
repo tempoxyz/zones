@@ -445,8 +445,10 @@ impl DemoBlacklist {
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
         send_encrypted_deposit(&portal, self.portal, token_addr, target, self.amount).await?;
 
-        println!("  Waiting for zone to process (expecting failed EncryptedDepositProcessed)...");
-        let bounced = wait_for_encrypted_result(&l2, l2_block_before, admin, Some(target)).await?;
+        println!("  Waiting for zone to process (expecting EncryptedDepositFailed)...");
+        let bounced =
+            wait_for_encrypted_result(&l2, l2_block_before, admin, token_addr, self.amount, target)
+                .await?;
         if bounced {
             println!("  BOUNCED! Deposit to blacklisted address was correctly rejected.");
             let sender_l2_balance = get_l2_balance(&l2, token_addr, admin).await?;
@@ -513,7 +515,9 @@ impl DemoBlacklist {
         send_encrypted_deposit(&portal, self.portal, token_addr, target, self.amount).await?;
 
         println!("  Waiting for zone to process (expecting EncryptedDepositProcessed)...");
-        let bounced = wait_for_encrypted_result(&l2, l2_block_before, admin, Some(target)).await?;
+        let bounced =
+            wait_for_encrypted_result(&l2, l2_block_before, admin, token_addr, self.amount, target)
+                .await?;
         if bounced {
             println!("  WARNING: Deposit still bounced — policy may need more time to sync.");
         } else {
@@ -729,7 +733,7 @@ async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
     Err(eyre!("timeout waiting for DepositProcessed"))
 }
 
-/// Poll L2 for `EncryptedDepositProcessed`.
+/// Poll L2 for the encrypted deposit terminal event.
 ///
 /// Returns `true` if the deposit bounced (blacklisted), `false` if it was accepted.
 /// Times out after 60 seconds (120 polls × 500ms).
@@ -737,11 +741,17 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
     l2: &P,
     from_block: u64,
     sender: Address,
-    to: Option<Address>,
+    token: Address,
+    amount: u128,
+    to: Address,
 ) -> eyre::Result<bool> {
     let processed_filter = Filter::new()
         .address(zone::abi::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
+        .from_block(from_block);
+    let failed_filter = Filter::new()
+        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
         .from_block(from_block);
 
     for _ in 0..120 {
@@ -749,9 +759,22 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
         for log in &logs {
             if let Ok(event) = ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
                 && event.data.sender == sender
-                && (!event.data.success || to.is_none_or(|t| event.data.to == t))
+                && event.data.to == to
+                && event.data.token == token
+                && event.data.amount == amount
             {
-                return Ok(!event.data.success);
+                return Ok(false);
+            }
+        }
+
+        let logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
+        for log in &logs {
+            if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
+                && event.data.sender == sender
+                && event.data.token == token
+                && event.data.amount == amount
+            {
+                return Ok(true);
             }
         }
 
