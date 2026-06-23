@@ -801,7 +801,7 @@ impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
             block_access_list: _,
             validator_set: _,
         } = payload;
-        Ok(Arc::unwrap_or_clone(block))
+        Ok(block.into_sealed_block())
     }
 
     fn validate_payload_attributes_against_header(

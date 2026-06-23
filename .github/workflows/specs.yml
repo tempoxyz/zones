@@ -79,7 +79,7 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           repository: tempoxyz/tempo
-          ref: b78b440950a0fa31b5e55c8a2c81976131e44ba3
+          ref: d6905c39c80a2b607965f71ef6a51c78acc78bf1
           path: tempo
           persist-credentials: false
 
