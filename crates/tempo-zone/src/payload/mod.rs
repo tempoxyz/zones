@@ -9,8 +9,6 @@ mod builder;
 
 pub use builder::{ZonePayloadBuilder, ZonePayloadFactory, build_advance_tempo_tx};
 
-use std::sync::Arc;
-
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::{PayloadAttributes as EthPayloadAttributes, PayloadId};
 use alloy_rpc_types_eth::Withdrawal;
@@ -105,7 +103,7 @@ impl PayloadTypes for ZonePayloadTypes {
         bal: Option<alloy_primitives::Bytes>,
     ) -> Self::ExecutionData {
         TempoExecutionData {
-            block: Arc::new(block),
+            block: block.into(),
             block_access_list: bal,
             validator_set: None,
         }

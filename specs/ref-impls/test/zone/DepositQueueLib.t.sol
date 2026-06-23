@@ -12,7 +12,7 @@ import {
     EncryptedDeposit,
     EncryptedDepositPayload
 } from "../../src/zone/IZone.sol";
-import { Test } from "forge-std/Test.sol";
+import { Test, stdJson } from "forge-std/Test.sol";
 
 /// @notice External wrapper to test EncryptedDepositLib.decodePlaintext (which is internal)
 contract PlaintextDecoder {
@@ -26,6 +26,11 @@ contract PlaintextDecoder {
 /// @title DepositQueueLibTest
 /// @notice Direct tests for DepositQueueLib functionality
 contract DepositQueueLibTest is Test {
+
+    using stdJson for string;
+
+    string internal constant ENCRYPTED_DEPOSIT_HASH_FIXTURE_PATH =
+        "/test/fixtures/encryptedDepositHashChain.json";
 
     address public alice = address(0x200);
     address public bob = address(0x300);
@@ -206,6 +211,40 @@ contract DepositQueueLibTest is Test {
 
         bytes32 newHash = DepositQueueLib.enqueueEncrypted(bytes32(0), ed);
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
+        assertEq(newHash, expectedHash);
+    }
+
+    function test_enqueueEncrypted_matchesRegressionFixture() public view {
+        string memory json = _encryptedDepositHashFixtureJson();
+        string memory depositRoot = ".deposit";
+        string memory encryptedRoot = string.concat(depositRoot, ".encrypted");
+
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            token: json.readAddress(string.concat(depositRoot, ".token")),
+            sender: json.readAddress(string.concat(depositRoot, ".sender")),
+            amount: uint128(json.readUint(string.concat(depositRoot, ".amount"))),
+            bouncebackRecipient: json.readAddress(
+                string.concat(depositRoot, ".bouncebackRecipient")
+            ),
+            bouncebackFee: uint128(json.readUint(string.concat(depositRoot, ".bouncebackFee"))),
+            keyIndex: json.readUint(string.concat(depositRoot, ".keyIndex")),
+            encrypted: EncryptedDepositPayload({
+                ephemeralPubkeyX: json.readBytes32(
+                    string.concat(encryptedRoot, ".ephemeralPubkeyX")
+                ),
+                ephemeralPubkeyYParity: uint8(
+                    json.readUint(string.concat(encryptedRoot, ".ephemeralPubkeyYParity"))
+                ),
+                ciphertext: json.readBytes(string.concat(encryptedRoot, ".ciphertext")),
+                nonce: _readBytes12(json, string.concat(encryptedRoot, ".nonce")),
+                tag: _readBytes16(json, string.concat(encryptedRoot, ".tag"))
+            })
+        });
+
+        bytes32 previousHash = json.readBytes32(".previousHash");
+        bytes32 expectedHash = json.readBytes32(".expectedHash");
+        bytes32 newHash = DepositQueueLib.enqueueEncrypted(previousHash, ed);
+
         assertEq(newHash, expectedHash);
     }
 
@@ -400,6 +439,40 @@ contract DepositQueueLibTest is Test {
             )
         );
         decoder.decode(data);
+    }
+
+    function _encryptedDepositHashFixtureJson() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), ENCRYPTED_DEPOSIT_HASH_FIXTURE_PATH));
+    }
+
+    function _readBytes12(
+        string memory json,
+        string memory key
+    )
+        internal
+        pure
+        returns (bytes12 value)
+    {
+        bytes memory raw = json.readBytes(key);
+        assertEq(raw.length, 12, "fixture bytes12 length");
+        assembly {
+            value := mload(add(raw, 32))
+        }
+    }
+
+    function _readBytes16(
+        string memory json,
+        string memory key
+    )
+        internal
+        pure
+        returns (bytes16 value)
+    {
+        bytes memory raw = json.readBytes(key);
+        assertEq(raw.length, 16, "fixture bytes16 length");
+        assembly {
+            value := mload(add(raw, 32))
+        }
     }
 
 }

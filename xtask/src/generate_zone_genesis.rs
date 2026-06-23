@@ -32,7 +32,7 @@ use tempo_precompiles::{
     account_keychain::AccountKeychain,
     nonce::NonceManager,
     stablecoin_dex::StablecoinDEX,
-    storage::StorageCtx,
+    storage::{StorageActions, StorageCtx},
     tip_fee_manager::TipFeeManager,
     tip20::{ISSUER_ROLE, ITIP20, TIP20Token},
     tip20_factory::TIP20Factory,
@@ -476,6 +476,7 @@ fn initialize_tip403_registry(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Res
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
+        StorageActions::disabled(),
         || TIP403Registry::new().initialize(),
     )?;
     println!("Initialized TIP403Registry");
@@ -490,6 +491,7 @@ fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
+        StorageActions::disabled(),
         || ZoneTokenFactory::new().initialize(),
     )?;
     println!("Initialized ZoneTokenFactory");
@@ -510,6 +512,7 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<(
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
+        StorageActions::disabled(),
         || {
             TIP20Factory::new().create_token_reserved_address(
                 PATH_USD_ADDRESS,
@@ -553,6 +556,7 @@ fn initialize_fee_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
+        StorageActions::disabled(),
         || {
             let mut fee_manager = TipFeeManager::new();
             fee_manager
@@ -572,6 +576,7 @@ fn initialize_stablecoin_dex(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resu
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
+        StorageActions::disabled(),
         || StablecoinDEX::new().initialize(),
     )?;
     println!("Initialized StablecoinDEX");
@@ -586,6 +591,7 @@ fn initialize_nonce_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
+        StorageActions::disabled(),
         || NonceManager::new().initialize(),
     )?;
     println!("Initialized NonceManager");
@@ -600,6 +606,7 @@ fn initialize_account_keychain(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Re
         &ctx.block,
         &ctx.cfg,
         &ctx.tx,
+        StorageActions::disabled(),
         || AccountKeychain::new().initialize(),
     )?;
     println!("Initialized AccountKeychain");

@@ -537,10 +537,13 @@ contract ZonePortal is IZonePortal {
         // token's transfer policy before accepting the deposit.
         uint64 policyId = ITIP20(_token).transferPolicyId();
         if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
-            revert DepositPolicyForbids();
+            revert ITIP20.PolicyForbids();
         }
         if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
-            revert DepositPolicyForbids();
+            revert ITIP20.PolicyForbids();
+        }
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+            revert ITIP20.PolicyForbids();
         }
 
         // Calculate deposit fee
@@ -614,6 +617,11 @@ contract ZonePortal is IZonePortal {
         TokenConfig storage cfg = _tokenConfigs[_token];
         if (!cfg.enabled) revert TokenNotEnabled();
         if (!cfg.depositsActive) revert DepositsNotActive();
+
+        uint64 policyId = ITIP20(_token).transferPolicyId();
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, bouncebackRecipient)) {
+            revert ITIP20.PolicyForbids();
+        }
 
         // Validate ephemeral public key is a valid secp256k1 point
         // Prevents griefing: invalid points make Chaum-Pedersen proofs impossible,

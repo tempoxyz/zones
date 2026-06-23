@@ -4,10 +4,113 @@ use alloy_consensus::Header;
 use alloy_primitives::{FixedBytes, address};
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
+use serde::Deserialize;
 use std::{
     collections::{HashSet, VecDeque},
     time::Duration,
 };
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EncryptedDepositHashFixture {
+    previous_hash: String,
+    expected_hash: String,
+    single_value_tuple_hash: String,
+    deposit: EncryptedDepositFixture,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EncryptedDepositFixture {
+    token: String,
+    sender: String,
+    amount: u128,
+    bounceback_recipient: String,
+    bounceback_fee: u128,
+    key_index: u64,
+    encrypted: EncryptedDepositPayloadFixture,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EncryptedDepositPayloadFixture {
+    ephemeral_pubkey_x: String,
+    ephemeral_pubkey_y_parity: u8,
+    ciphertext: String,
+    nonce: String,
+    tag: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MalformedTempoHeadersFixture {
+    trailing_bytes_after_outer_list: String,
+    outer_list_length_mismatch: String,
+    outer_list_long_length_leading_zero: String,
+    difficulty_non_canonical_short_string: String,
+    block_number_leading_zero: String,
+    extra_data_long_length_below_short_threshold: String,
+}
+
+fn encrypted_deposit_hash_fixture() -> EncryptedDepositHashFixture {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../specs/ref-impls/test/fixtures/encryptedDepositHashChain.json"
+    )))
+    .expect("encrypted deposit hash fixture JSON should decode")
+}
+
+fn malformed_tempo_headers_fixture() -> MalformedTempoHeadersFixture {
+    serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../specs/ref-impls/test/fixtures/malformedTempoHeaders.json"
+    )))
+    .expect("malformed Tempo headers fixture JSON should decode")
+}
+
+fn parse_fixture_address(value: &str) -> Address {
+    value
+        .parse()
+        .unwrap_or_else(|err| panic!("invalid fixture address {value}: {err}"))
+}
+
+fn parse_fixture_b256(value: &str) -> B256 {
+    value
+        .parse()
+        .unwrap_or_else(|err| panic!("invalid fixture bytes32 {value}: {err}"))
+}
+
+fn parse_fixture_hex(value: &str) -> Vec<u8> {
+    const_hex::decode(value.strip_prefix("0x").unwrap_or(value))
+        .unwrap_or_else(|err| panic!("invalid fixture hex {value}: {err}"))
+}
+
+fn parse_fixture_fixed<const N: usize>(value: &str, name: &str) -> [u8; N] {
+    let bytes = parse_fixture_hex(value);
+    assert_eq!(bytes.len(), N, "fixture field {name} should be {N} bytes");
+    let mut out = [0; N];
+    out.copy_from_slice(&bytes);
+    out
+}
+
+impl EncryptedDepositFixture {
+    fn to_l1_deposit(&self) -> EncryptedDeposit {
+        EncryptedDeposit {
+            token: parse_fixture_address(&self.token),
+            sender: parse_fixture_address(&self.sender),
+            amount: self.amount,
+            fee: 0,
+            bounceback_recipient: parse_fixture_address(&self.bounceback_recipient),
+            bounceback_fee: self.bounceback_fee,
+            key_index: U256::from(self.key_index),
+            ephemeral_pubkey_x: parse_fixture_b256(&self.encrypted.ephemeral_pubkey_x),
+            ephemeral_pubkey_y_parity: self.encrypted.ephemeral_pubkey_y_parity,
+            ciphertext: parse_fixture_hex(&self.encrypted.ciphertext),
+            nonce: parse_fixture_fixed(&self.encrypted.nonce, "encrypted.nonce"),
+            tag: parse_fixture_fixed(&self.encrypted.tag, "encrypted.tag"),
+        }
+    }
+}
 
 struct SequenceLocalTempoStateReader {
     values: Mutex<VecDeque<u64>>,
@@ -84,6 +187,58 @@ fn seal(header: TempoHeader) -> SealedHeader<TempoHeader> {
 
 fn header_hash(header: &TempoHeader) -> B256 {
     keccak256(alloy_rlp::encode(header))
+}
+
+#[test]
+fn tempo_header_rejects_trailing_bytes_after_outer_list() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.trailing_bytes_after_outer_list);
+}
+
+#[test]
+fn tempo_header_rejects_outer_list_length_mismatch() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.outer_list_length_mismatch);
+}
+
+#[test]
+fn tempo_header_rejects_outer_list_long_length_leading_zero() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.outer_list_long_length_leading_zero);
+}
+
+#[test]
+fn tempo_header_rejects_difficulty_non_canonical_short_string() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.difficulty_non_canonical_short_string);
+}
+
+#[test]
+fn tempo_header_rejects_block_number_leading_zero() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.block_number_leading_zero);
+}
+
+#[test]
+fn tempo_header_rejects_extra_data_long_length_below_short_threshold() {
+    let fixture = malformed_tempo_headers_fixture();
+    assert_tempo_header_fixture_rejected(&fixture.extra_data_long_length_below_short_threshold);
+}
+
+fn assert_tempo_header_fixture_rejected(value: &str) {
+    let malformed = parse_fixture_hex(value);
+
+    assert_tempo_header_rejected(&malformed);
+}
+
+fn assert_tempo_header_rejected(input: &[u8]) {
+    let mut buf = input;
+    let decoded = <TempoHeader as alloy_rlp::Decodable>::decode(&mut buf);
+    assert!(
+        decoded.is_err() || !buf.is_empty(),
+        "TempoHeader should reject malformed RLP input 0x{}",
+        const_hex::encode(input)
+    );
 }
 
 #[test]
@@ -560,29 +715,13 @@ fn test_drain_returns_block_grouped_deposits() {
 
 #[test]
 fn test_encrypted_deposit_hash_chain() {
-    let token = address!("0x0000000000000000000000000000000000001000");
-    let sender = address!("0x0000000000000000000000000000000000001234");
+    let fixture = encrypted_deposit_hash_fixture();
+    let encrypted = fixture.deposit.to_l1_deposit();
+    let previous_hash = parse_fixture_b256(&fixture.previous_hash);
 
-    let encrypted = EncryptedDeposit {
-        token,
-        sender,
-        amount: 1_000_000,
-        fee: 0,
-        bounceback_recipient: sender,
-        bounceback_fee: 0,
-        key_index: U256::ZERO,
-        ephemeral_pubkey_x: B256::with_last_byte(0xAA),
-        ephemeral_pubkey_y_parity: 0x02,
-        ciphertext: vec![0x42u8; 64],
-        nonce: [0x01; 12],
-        tag: [0x02; 16],
-    };
-
-    // Compute via PendingDeposits (Rust implementation)
     let transition =
-        PendingDeposits::transition(B256::ZERO, &[L1Deposit::Encrypted(encrypted.clone())]);
+        PendingDeposits::transition(previous_hash, &[L1Deposit::Encrypted(encrypted.clone())]);
 
-    // Compute expected hash via direct Solidity-compatible encoding
     let abi_encrypted = abi::EncryptedDeposit {
         token: encrypted.token,
         sender: encrypted.sender,
@@ -598,11 +737,22 @@ fn test_encrypted_deposit_hash_chain() {
             tag: encrypted.tag.into(),
         },
     };
-    let expected = keccak256((DepositType::Encrypted, abi_encrypted, B256::ZERO).abi_encode());
+    let expected = parse_fixture_b256(&fixture.expected_hash);
+    let tuple_value_hash =
+        keccak256((DepositType::Encrypted, abi_encrypted, previous_hash).abi_encode());
+    let single_value_tuple_hash = parse_fixture_b256(&fixture.single_value_tuple_hash);
 
     assert_eq!(
         transition.next_processed_hash, expected,
-        "encrypted deposit hash chain must match Solidity keccak256(abi.encode(Encrypted, deposit, prevHash))"
+        "encrypted deposit hash chain must match Solidity DepositQueueLib.enqueueEncrypted"
+    );
+    assert_eq!(
+        tuple_value_hash, single_value_tuple_hash,
+        "fixture should document the previous single-value tuple encoding"
+    );
+    assert_ne!(
+        expected, tuple_value_hash,
+        "single-value tuple encoding should not match Solidity abi.encode(...) for dynamic encrypted deposits"
     );
     assert_ne!(
         transition.next_processed_hash,
@@ -665,7 +815,7 @@ fn test_mixed_deposit_hash_chain() {
             },
             B256::ZERO,
         )
-            .abi_encode(),
+            .abi_encode_params(),
     );
 
     let hash_2 = keccak256(
@@ -688,7 +838,7 @@ fn test_mixed_deposit_hash_chain() {
             },
             hash_1,
         )
-            .abi_encode(),
+            .abi_encode_params(),
     );
 
     assert_eq!(transition.prev_processed_hash, B256::ZERO);

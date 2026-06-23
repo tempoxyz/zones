@@ -351,8 +351,27 @@ contract ZonePortalTest is BaseTest {
 
         vm.startPrank(alice);
         pathUSD.approve(address(portal), depositAmount);
-        vm.expectRevert(IZonePortal.DepositPolicyForbids.selector);
+        vm.expectRevert(ITIP20.PolicyForbids.selector);
         portal.deposit(address(pathUSD), bob, depositAmount, bytes32("memo"), bob);
+        vm.stopPrank();
+    }
+
+    function test_deposit_revertsWhenBouncebackRecipientBlocked() public {
+        uint128 depositAmount = 1000e6;
+
+        address[] memory accounts = new address[](2);
+        accounts[0] = alice;
+        accounts[1] = address(portal);
+        uint64 policyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, accounts
+        );
+        vm.prank(pathUSDAdmin);
+        pathUSD.changeTransferPolicyId(policyId);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        vm.expectRevert(ITIP20.PolicyForbids.selector);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), bob);
         vm.stopPrank();
     }
 
@@ -2282,6 +2301,26 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(IZonePortal.DepositTooSmall.selector);
         portal.depositEncrypted(address(pathUSD), 99_999, 0, _makeEncryptedPayload(), alice);
+        vm.stopPrank();
+    }
+
+    function test_depositEncrypted_revertsWhenBouncebackRecipientBlocked() public {
+        _setEncKeyWithPoP(ENC_KEY_1);
+
+        uint128 depositAmount = 1000e6;
+        address[] memory accounts = new address[](2);
+        accounts[0] = alice;
+        accounts[1] = address(portal);
+        uint64 policyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.WHITELIST, accounts
+        );
+        vm.prank(pathUSDAdmin);
+        pathUSD.changeTransferPolicyId(policyId);
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        vm.expectRevert(ITIP20.PolicyForbids.selector);
+        portal.depositEncrypted(address(pathUSD), depositAmount, 0, _makeEncryptedPayload(), bob);
         vm.stopPrank();
     }
 
