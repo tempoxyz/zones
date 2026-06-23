@@ -80,12 +80,13 @@ send-deposit amount="1000000" to="" token="0x20C00000000000000000000000000000000
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
+    SENDER=$(cast wallet address "$PK")
     TO="{{to}}"
     if [[ -z "$TO" ]]; then
-        TO=$(cast wallet address "$PK")
+        TO="$SENDER"
     fi
     echo "Depositing {{amount}} to $TO..."
-    TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" \
+    TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32,address)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" "$SENDER" \
         --rpc-url "$RPC" --private-key "$PK" --json)
     TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
     L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
@@ -613,10 +614,20 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     ACCOUNT=$(cast wallet address "$PK")
     TOKEN=$(just zone-auth-token {{name}})
     ACCOUNT_LOWER=$(echo "$ACCOUNT" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
-    RESULT=$(curl -s -X POST "{{rpc}}" \
+    RESPONSE=$(curl -sS -w '\n%{http_code}' -X POST "{{rpc}}" \
         -H "Content-Type: application/json" \
         -H "x-authorization-token: ${TOKEN}" \
-        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"from\":\"$ACCOUNT\",\"to\":\"{{token}}\",\"data\":\"0x70a08231000000000000000000000000${ACCOUNT_LOWER}\"}],\"id\":1}")
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"from\":\"$ACCOUNT\",\"to\":\"{{token}}\",\"data\":\"0x70a08231000000000000000000000000${ACCOUNT_LOWER}\"}],\"id\":1}") || {
+            echo "Failed to reach private RPC at {{rpc}}"
+            exit 1
+        }
+    HTTP_STATUS=$(printf '%s' "$RESPONSE" | tail -n1)
+    RESULT=$(printf '%s' "$RESPONSE" | sed '$d')
+    if [[ "$HTTP_STATUS" != "200" ]]; then
+        echo "Private RPC HTTP $HTTP_STATUS"
+        echo "${RESULT:-<empty response>}"
+        exit 1
+    fi
     RAW=$(echo "$RESULT" | jq -r '.result // empty')
     ERROR=$(echo "$RESULT" | jq -r '.error.message // empty')
     if [[ -n "$ERROR" ]]; then

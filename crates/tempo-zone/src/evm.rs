@@ -29,7 +29,7 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use std::sync::Arc;
+use std::{cell::RefCell, rc::Rc, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::TempoChainSpec;
 use tempo_evm::{
@@ -39,8 +39,9 @@ use tempo_evm::{
 };
 use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, STABLECOIN_DEX_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv, STABLECOIN_DEX_ADDRESS,
     TIP_FEE_MANAGER_ADDRESS, account_keychain::AccountKeychain, nonce::NonceManager,
+    storage::actions::StorageActions, storage_credits::NonCreditableSlots,
     tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
@@ -113,6 +114,11 @@ impl ZoneEvmFactory {
         // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
         // static map via `apply_precompile` and take priority over this.
         let zone_cfg = cfg.clone();
+        let zone_env = PrecompileEnv::new(
+            &cfg,
+            StorageActions::disabled(),
+            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+        );
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
                 Some(ZoneTip20Token::create(
@@ -122,13 +128,13 @@ impl ZoneEvmFactory {
                     sequencer.clone(),
                 ))
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
-                Some(TipFeeManager::create_precompile(&zone_cfg))
+                Some(TipFeeManager::create_precompile(&zone_env))
             } else if *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
-                Some(NonceManager::create_precompile(&zone_cfg))
+                Some(NonceManager::create_precompile(&zone_env))
             } else if *address == ACCOUNT_KEYCHAIN_ADDRESS {
-                Some(AccountKeychain::create_precompile(&zone_cfg))
+                Some(AccountKeychain::create_precompile(&zone_env))
             } else {
                 None
             }

@@ -38,7 +38,7 @@ use reth_transaction_pool::{
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoNextBlockEnvAttributes;
-use tempo_payload_types::TempoBuiltPayload;
+use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
     TempoHeader, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
@@ -441,6 +441,10 @@ where
         );
 
         let recovered_block = Arc::new(block);
+        let execution_block_encoded = EncodedBlock::default();
+        let execution_block_size_estimate = execution_block_encoded
+            .get_or_encode(sealed_block.as_ref())
+            .len();
         let eth_payload = EthBuiltPayload::new(recovered_block.clone(), total_fees, requests, None);
 
         let execution_output = BlockExecutionOutput {
@@ -461,6 +465,8 @@ where
             Some(executed_block),
             std::time::Duration::ZERO,
             std::time::Duration::ZERO,
+            execution_block_size_estimate,
+            execution_block_encoded,
         );
 
         drop(db);

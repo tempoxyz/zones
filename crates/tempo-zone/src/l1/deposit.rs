@@ -119,7 +119,7 @@ impl L1Deposit {
                     },
                     prev_hash,
                 )
-                    .abi_encode(),
+                    .abi_encode_params(),
             ),
             Self::Encrypted(d) => keccak256(
                 (
@@ -140,7 +140,7 @@ impl L1Deposit {
                     },
                     prev_hash,
                 )
-                    .abi_encode(),
+                    .abi_encode_params(),
             ),
         }
     }

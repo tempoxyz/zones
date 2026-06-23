@@ -15,7 +15,9 @@ use reth_revm::Inspector;
 use revm::context::{ContextTr, JournalTr, Transaction};
 use tempo_chainspec::TempoChainSpec;
 use tempo_evm::{TempoBlockExecutionCtx, TempoReceiptBuilder, evm::TempoEvm};
-use tempo_precompiles::{TIP_FEE_MANAGER_ADDRESS, tip_fee_manager::TipFeeManager};
+use tempo_precompiles::{
+    TIP_FEE_MANAGER_ADDRESS, storage::actions::StorageActions, tip_fee_manager::TipFeeManager,
+};
 use tempo_primitives::{TempoReceipt, TempoTxEnvelope, TempoTxType};
 use tempo_revm::{TempoStateAccess, evm::TempoContext};
 
@@ -56,7 +58,12 @@ where
         let fee_payer = ctx.tx.fee_payer().unwrap_or(ctx.tx.caller());
         let spec = ctx.cfg.spec;
 
-        let fee_token = match ctx.journaled_state.get_fee_token(&ctx.tx, fee_payer, spec) {
+        let fee_token = match ctx.journaled_state.get_fee_token(
+            &ctx.tx,
+            fee_payer,
+            spec,
+            StorageActions::disabled(),
+        ) {
             Ok(token) => token,
             Err(_) => return,
         };

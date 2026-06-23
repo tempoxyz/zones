@@ -231,6 +231,7 @@ impl ZoneEngine {
                     .is_cancun_active_at_timestamp(timestamp_secs)
                     .then_some(B256::ZERO),
                 slot_number: None,
+                target_gas_limit: None,
             },
             timestamp_millis_part,
             l1_block,
