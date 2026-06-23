@@ -445,7 +445,7 @@ impl DemoBlacklist {
         let l2_block_before = l2.get_block_number().await.unwrap_or(0);
         send_encrypted_deposit(&portal, self.portal, token_addr, target, self.amount).await?;
 
-        println!("  Waiting for zone to process (expecting EncryptedDepositFailed)...");
+        println!("  Waiting for zone to process (expecting failed EncryptedDepositProcessed)...");
         let bounced = wait_for_encrypted_result(&l2, l2_block_before, admin, Some(target)).await?;
         if bounced {
             println!("  BOUNCED! Deposit to blacklisted address was correctly rejected.");
@@ -729,7 +729,7 @@ async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
     Err(eyre!("timeout waiting for DepositProcessed"))
 }
 
-/// Poll L2 for either `EncryptedDepositProcessed` or `EncryptedDepositFailed`.
+/// Poll L2 for `EncryptedDepositProcessed`.
 ///
 /// Returns `true` if the deposit bounced (blacklisted), `false` if it was accepted.
 /// Times out after 60 seconds (120 polls × 500ms).
@@ -744,28 +744,14 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
         .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
 
-    let failed_filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
-        .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
-        .from_block(from_block);
-
     for _ in 0..120 {
         let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
         for log in &logs {
             if let Ok(event) = ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
                 && event.data.sender == sender
-                && to.is_none_or(|t| event.data.to == t)
+                && (!event.data.success || to.is_none_or(|t| event.data.to == t))
             {
-                return Ok(false);
-            }
-        }
-
-        let failed_logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
-        for log in &failed_logs {
-            if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
-                && event.data.sender == sender
-            {
-                return Ok(true);
+                return Ok(!event.data.success);
             }
         }
 

@@ -140,7 +140,7 @@ impl EncryptedDeposit {
         Ok(())
     }
 
-    /// Poll the zone L2 for the `EncryptedDepositProcessed` or `EncryptedDepositFailed` event.
+    /// Poll the zone L2 for the `EncryptedDepositProcessed` event.
     async fn wait_for_l2_processing(
         &self,
         zone_rpc: &str,
@@ -158,44 +158,31 @@ impl EncryptedDeposit {
             .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
             .from_block(from_block);
 
-        let failed_filter = Filter::new()
-            .address(ZONE_INBOX_ADDRESS)
-            .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
-            .from_block(from_block);
-
         loop {
-            // Check for successful processing
             let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
             for log in &logs {
                 if let Ok(event) = ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
                     && event.data.sender == sender
-                    && event.data.to == to
+                    && (!event.data.success || event.data.to == to)
                 {
                     let block = log.block_number.unwrap_or(0);
+                    if !event.data.success {
+                        println!(
+                            "WARNING: Encrypted deposit FAILED on L2 (block {block}). \
+                             Funds returned to sender."
+                        );
+                        println!("  Token:  {}", event.data.token);
+                        println!("  Sender: {}", event.data.sender);
+                        println!("  Amount: {}", event.data.amount);
+                        return Ok(());
+                    }
+
                     println!("Encrypted deposit processed on L2! (block {block})");
                     println!("  Token:  {}", event.data.token);
                     println!("  Sender: {}", event.data.sender);
                     println!("  To:     {}", event.data.to);
                     println!("  Amount: {}", event.data.amount);
                     println!("  Memo:   {}", event.data.memo);
-                    return Ok(());
-                }
-            }
-
-            // Check for failure
-            let failed_logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
-            for log in &failed_logs {
-                if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
-                    && event.data.sender == sender
-                {
-                    let block = log.block_number.unwrap_or(0);
-                    println!(
-                        "WARNING: Encrypted deposit FAILED on L2 (block {block}). \
-                         Funds returned to sender."
-                    );
-                    println!("  Token:  {}", event.data.token);
-                    println!("  Sender: {}", event.data.sender);
-                    println!("  Amount: {}", event.data.amount);
                     return Ok(());
                 }
             }
