@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, EncryptedDepositLib} from "./EncryptedDeposit.sol";
+import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, EncryptedDepositLib } from "./EncryptedDeposit.sol";
 import {
     AES_GCM_DECRYPT,
     CHAUM_PEDERSEN_VERIFY,
@@ -24,13 +24,14 @@ import {
     TIP20_FACTORY_ADDRESS,
     ZONE_OUTBOX
 } from "./IZone.sol";
-import {TempoState} from "./TempoState.sol";
+import { TempoState } from "./TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
 /// @dev Called by sequencer. Combines Tempo header advancement
 ///      with deposit queue processing in a single atomic operation.
 contract ZoneInbox is IZoneInbox {
+
     /*//////////////////////////////////////////////////////////////
                                 STORAGE
     //////////////////////////////////////////////////////////////*/
@@ -73,9 +74,11 @@ contract ZoneInbox is IZoneInbox {
     //////////////////////////////////////////////////////////////*/
 
     /// @dev HMAC ipad constant (0x36 repeated 32 times)
-    bytes32 private constant _IPAD = 0x3636363636363636363636363636363636363636363636363636363636363636;
+    bytes32 private constant _IPAD =
+        0x3636363636363636363636363636363636363636363636363636363636363636;
     /// @dev HMAC opad constant (0x5c repeated 32 times)
-    bytes32 private constant _OPAD = 0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
+    bytes32 private constant _OPAD =
+        0x5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c5c;
 
     /// @notice HMAC-SHA256 implementation using the SHA256 precompile
     /// @dev HMAC(key, message) = SHA256((key ⊕ opad) || SHA256((key ⊕ ipad) || message))
@@ -84,7 +87,14 @@ contract ZoneInbox is IZoneInbox {
     /// @param key The HMAC key (will be hashed if longer than 64 bytes)
     /// @param message The message to authenticate
     /// @return result The 32-byte HMAC-SHA256 output
-    function _hmacSha256(bytes memory key, bytes memory message) internal view returns (bytes32 result) {
+    function _hmacSha256(
+        bytes memory key,
+        bytes memory message
+    )
+        internal
+        view
+        returns (bytes32 result)
+    {
         // Load key into two 32-byte words (SHA256 block size = 64 bytes = 2 words)
         bytes32 keyWord0;
         bytes32 keyWord1;
@@ -131,7 +141,15 @@ contract ZoneInbox is IZoneInbox {
     /// @param salt Salt value (use "ecies-aes-key" for ECIES)
     /// @param info Context-specific info (typically empty for ECIES)
     /// @return okm Output key material (32 bytes for AES-256)
-    function _hkdfSha256(bytes32 ikm, bytes memory salt, bytes memory info) internal view returns (bytes32 okm) {
+    function _hkdfSha256(
+        bytes32 ikm,
+        bytes memory salt,
+        bytes memory info
+    )
+        internal
+        view
+        returns (bytes32 okm)
+    {
         // HKDF-Extract: PRK = HMAC-SHA256(salt, IKM)
         bytes32 prk = _hmacSha256(salt, abi.encodePacked(ikm));
 
@@ -171,7 +189,9 @@ contract ZoneInbox is IZoneInbox {
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
-    ) external {
+    )
+        external
+    {
         if (msg.sender != address(0) && msg.sender != config.sequencer()) {
             revert OnlySequencer();
         }
@@ -182,7 +202,8 @@ contract ZoneInbox is IZoneInbox {
         // Enable new tokens
         for (uint256 i = 0; i < enabledTokens.length; i++) {
             EnabledToken calldata t = enabledTokens[i];
-            ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS).enableToken(t.token, t.name, t.symbol, t.currency);
+            ITIP20ZoneFactory(TIP20_FACTORY_ADDRESS)
+                .enableToken(t.token, t.name, t.symbol, t.currency);
             emit TokenEnabled(t.token, t.name, t.symbol, t.currency);
         }
 
@@ -202,14 +223,23 @@ contract ZoneInbox is IZoneInbox {
                 } else if (qd.rejected) {
                     _enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
                     emit DepositRejected(
-                        currentHash, d.sender, DepositType.Regular, d.token, d.amount, d.bouncebackRecipient
+                        currentHash,
+                        d.sender,
+                        DepositType.Regular,
+                        d.token,
+                        d.amount,
+                        d.bouncebackRecipient
                     );
                 } else {
                     try IZoneToken(d.token).mint(d.to, d.amount) {
-                        emit DepositProcessed(currentHash, d.sender, d.to, d.token, d.amount, d.memo);
+                        emit DepositProcessed(
+                            currentHash, d.sender, d.to, d.token, d.amount, d.memo
+                        );
                     } catch {
                         _enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
-                        emit DepositFailed(currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient);
+                        emit DepositFailed(
+                            currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient
+                        );
                     }
                 }
             } else {
@@ -219,7 +249,12 @@ contract ZoneInbox is IZoneInbox {
                 if (qd.rejected) {
                     _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
                     emit DepositRejected(
-                        currentHash, ed.sender, DepositType.Encrypted, ed.token, ed.amount, ed.bouncebackRecipient
+                        currentHash,
+                        ed.sender,
+                        DepositType.Encrypted,
+                        ed.token,
+                        ed.amount,
+                        ed.bouncebackRecipient
                     );
                     continue;
                 }
@@ -277,7 +312,8 @@ contract ZoneInbox is IZoneInbox {
                 address decryptedTo;
                 bytes32 decryptedMemo;
                 if (valid && decryptedPlaintext.length == ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
-                    (decryptedTo, decryptedMemo) = EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
+                    (decryptedTo, decryptedMemo) =
+                        EncryptedDepositLib.decodePlaintext(decryptedPlaintext);
                 } else {
                     valid = false;
                 }
@@ -306,7 +342,8 @@ contract ZoneInbox is IZoneInbox {
         // The proof validates that our processedDepositQueueHash is an ancestor of (or equal to)
         // tempoCurrentHash, allowing partial deposit processing.
         // On-chain we only need to verify the hash chain when all deposits have been caught up.
-        bytes32 tempoCurrentHash = _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
+        bytes32 tempoCurrentHash =
+            _tempoState.readTempoStorageSlot(tempoPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT);
 
         if (currentHash != tempoCurrentHash) {
             // Partial processing is allowed — the proof validates ancestor contiguity.
@@ -328,7 +365,13 @@ contract ZoneInbox is IZoneInbox {
         );
     }
 
-    function _enqueueDepositBounceBack(address token, uint128 amount, address bouncebackRecipient) internal {
+    function _enqueueDepositBounceBack(
+        address token,
+        uint128 amount,
+        address bouncebackRecipient
+    )
+        internal
+    {
         IZoneOutbox(ZONE_OUTBOX).enqueueDepositBounceBack(token, amount, bouncebackRecipient);
     }
 
@@ -352,4 +395,5 @@ contract ZoneInbox is IZoneInbox {
             revert();
         }
     }
+
 }

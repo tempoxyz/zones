@@ -1,21 +1,32 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import {DepositQueueLib} from "../../src/zone/DepositQueueLib.sol";
-import {ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE, EncryptedDepositLib} from "../../src/zone/EncryptedDeposit.sol";
-import {Deposit, DepositType, EncryptedDeposit, EncryptedDepositPayload} from "../../src/zone/IZone.sol";
-import {Test} from "forge-std/Test.sol";
+import { DepositQueueLib } from "../../src/zone/DepositQueueLib.sol";
+import {
+    ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE,
+    EncryptedDepositLib
+} from "../../src/zone/EncryptedDeposit.sol";
+import {
+    Deposit,
+    DepositType,
+    EncryptedDeposit,
+    EncryptedDepositPayload
+} from "../../src/zone/IZone.sol";
+import { Test } from "forge-std/Test.sol";
 
 /// @notice External wrapper to test EncryptedDepositLib.decodePlaintext (which is internal)
 contract PlaintextDecoder {
+
     function decode(bytes memory plaintext) external pure returns (address to, bytes32 memo) {
         return EncryptedDepositLib.decodePlaintext(plaintext);
     }
+
 }
 
 /// @title DepositQueueLibTest
 /// @notice Direct tests for DepositQueueLib functionality
 contract DepositQueueLibTest is Test {
+
     address public alice = address(0x200);
     address public bob = address(0x300);
 
@@ -299,7 +310,9 @@ contract DepositQueueLibTest is Test {
         bytes memory short = new bytes(52);
         vm.expectRevert(
             abi.encodeWithSelector(
-                EncryptedDepositLib.InvalidPlaintextLength.selector, uint256(52), ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                uint256(52),
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
             )
         );
         decoder.decode(short);
@@ -311,7 +324,9 @@ contract DepositQueueLibTest is Test {
         bytes memory empty = new bytes(0);
         vm.expectRevert(
             abi.encodeWithSelector(
-                EncryptedDepositLib.InvalidPlaintextLength.selector, uint256(0), ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                uint256(0),
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
             )
         );
         decoder.decode(empty);
@@ -324,7 +339,9 @@ contract DepositQueueLibTest is Test {
         bytes memory long = new bytes(65);
         vm.expectRevert(
             abi.encodeWithSelector(
-                EncryptedDepositLib.InvalidPlaintextLength.selector, uint256(65), ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                uint256(65),
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
             )
         );
         decoder.decode(long);
@@ -336,7 +353,9 @@ contract DepositQueueLibTest is Test {
         bytes memory almostRight = new bytes(63);
         vm.expectRevert(
             abi.encodeWithSelector(
-                EncryptedDepositLib.InvalidPlaintextLength.selector, uint256(63), ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                uint256(63),
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
             )
         );
         decoder.decode(almostRight);
@@ -359,9 +378,12 @@ contract DepositQueueLibTest is Test {
         bytes memory data = new bytes(len);
         vm.expectRevert(
             abi.encodeWithSelector(
-                EncryptedDepositLib.InvalidPlaintextLength.selector, len, ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
+                EncryptedDepositLib.InvalidPlaintextLength.selector,
+                len,
+                ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
             )
         );
         decoder.decode(data);
     }
+
 }
