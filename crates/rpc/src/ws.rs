@@ -292,32 +292,10 @@ async fn handle_subscribe(
             }
         }
         SubscriptionKind::NewPendingTransactions => {
-            let full = match params.unwrap_or(SubscriptionParams::None) {
-                SubscriptionParams::None | SubscriptionParams::Bool(false) => false,
-                SubscriptionParams::Bool(true) => true,
-                SubscriptionParams::Logs(_) | SubscriptionParams::TransactionReceipts(_) => {
-                    return WsDispatchResult::response_only(JsonRpcResponse::error(
-                        req.id.clone(),
-                        JsonRpcError::invalid_params(
-                            "eth_subscribe(newPendingTransactions) expects an optional boolean",
-                        ),
-                    ));
-                }
-            };
-
-            match state
-                .api
-                .ws_subscribe_pending_transactions(full, auth.clone())
-                .await
-            {
-                Ok(subscription) => subscription,
-                Err(err) => {
-                    return WsDispatchResult::response_only(JsonRpcResponse::error(
-                        req.id.clone(),
-                        err,
-                    ));
-                }
-            }
+            return WsDispatchResult::response_only(JsonRpcResponse::error(
+                req.id.clone(),
+                JsonRpcError::method_disabled(),
+            ));
         }
         SubscriptionKind::Syncing => {
             return WsDispatchResult::response_only(JsonRpcResponse::error(

@@ -30,7 +30,6 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::logs_utils;
-use reth_transaction_pool::TransactionPool;
 use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoHeaderResponse, TempoTransactionRequest},
@@ -823,44 +822,6 @@ where
                     zone_rpc::filter::is_log_visible(&log, &caller).then(|| to_raw(&log)),
                 )
             });
-            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
-            Ok(stream)
-        })
-    }
-
-    fn ws_subscribe_pending_transactions(
-        &self,
-        full: bool,
-        auth: AuthContext,
-    ) -> BoxWsSubscriptionFut<'_> {
-        Box::pin(async move {
-            let caller = auth.caller;
-            let pool = self.eth.api.pool().clone();
-
-            if !full {
-                let stream =
-                    pool.new_pending_pool_transactions_listener()
-                        .filter_map(move |pending_tx| {
-                            std::future::ready(
-                                (pending_tx.transaction.sender() == caller)
-                                    .then(|| to_raw(pending_tx.transaction.hash())),
-                            )
-                        });
-                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
-                return Ok(stream);
-            }
-
-            let api = self.eth.api.clone();
-            let stream =
-                pool.new_pending_pool_transactions_listener()
-                    .filter_map(move |pending_tx| {
-                        std::future::ready((pending_tx.transaction.sender() == caller).then(|| {
-                            api.converter()
-                                .fill_pending(pending_tx.transaction.to_consensus())
-                                .map_err(internal)
-                                .and_then(|tx| to_raw(&tx))
-                        }))
-                    });
             let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
             Ok(stream)
         })
