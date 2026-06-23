@@ -184,7 +184,7 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 - Operates the zone: collects transactions, produces blocks, advances Tempo, processes deposits and withdrawals, and submits batches with proofs.
 - Expected to be an online operational key.
 - Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
-- Holds the encryption private key used to decrypt [encrypted deposits](#encrypted-deposits). The admin MUST NOT hold this key.
+- Holds the encryption private key used to decrypt [encrypted deposits](#encrypted-deposits).
 
 A zone MAY be deployed with `admin == sequencer`. In that case the same address holds both roles, but the protocol still treats each privileged call as belonging to its role.
 
@@ -210,7 +210,7 @@ Rationale notes:
 
 - **Token enablement and deposit pause/resume are admin-only** because they govern what the zone is and which deposit flows are open. A compromised sequencer hot key MUST NOT be able to enable arbitrary tokens or unilaterally re-open paused deposits.
 - **Gas rates are sequencer-controlled** because the sequencer takes the economic risk on gas-price fluctuations and needs to react quickly to operational events without involving the cold key.
-- **Encryption key management is sequencer-only** because the proof of possession requires the encryption private key, which the admin does not hold by design.
+- **Encryption key management is sequencer-only** because the proof of possession requires the encryption private key.
 - **`processWithdrawal` is sequencer-only** today; whether to make it permissionless once the proof has settled is tracked separately.
 
 <br>
