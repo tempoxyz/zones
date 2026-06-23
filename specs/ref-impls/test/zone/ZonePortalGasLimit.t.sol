@@ -101,7 +101,7 @@ contract ZonePortalGasLimitTest is Test {
         _storeSingleWithdrawal(w);
 
         vm.expectEmit(true, false, false, true, address(portal));
-        emit IZonePortal.DepositBounceBack(recipient, address(token), 975e6, 25e6);
+        emit IZonePortal.DepositBounceBack(recipient, address(token), 975e6, 25e6, true);
         portal.processWithdrawal(w, bytes32(0));
 
         assertEq(token.balanceOf(address(this)), 25e6);
@@ -118,7 +118,7 @@ contract ZonePortalGasLimitTest is Test {
         _storeSingleWithdrawal(w);
 
         vm.expectEmit(true, false, false, true, address(portal));
-        emit IZonePortal.DepositBounceBackPending(recipient, address(token), 975e6, 25e6);
+        emit IZonePortal.DepositBounceBack(recipient, address(token), 975e6, 25e6, false);
         portal.processWithdrawal(w, bytes32(0));
 
         assertEq(token.balanceOf(address(this)), 25e6);

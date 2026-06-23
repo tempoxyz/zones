@@ -224,25 +224,41 @@ contract ZoneInbox is IZoneInbox {
                     _enqueueDepositBounceBack(
                         d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
                     );
-                    emit DepositRejected(
+                    emit DepositProcessed(
                         currentHash,
                         d.sender,
-                        DepositType.Regular,
+                        d.to,
                         d.token,
                         d.amount,
-                        d.bouncebackRecipient
+                        d.memo,
+                        d.bouncebackRecipient,
+                        false
                     );
                 } else {
                     try IZoneToken(d.token).mint(d.to, d.amount) {
                         emit DepositProcessed(
-                            currentHash, d.sender, d.to, d.token, d.amount, d.memo
+                            currentHash,
+                            d.sender,
+                            d.to,
+                            d.token,
+                            d.amount,
+                            d.memo,
+                            d.bouncebackRecipient,
+                            true
                         );
                     } catch {
                         _enqueueDepositBounceBack(
                             d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
                         );
-                        emit DepositFailed(
-                            currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient
+                        emit DepositProcessed(
+                            currentHash,
+                            d.sender,
+                            d.to,
+                            d.token,
+                            d.amount,
+                            d.memo,
+                            d.bouncebackRecipient,
+                            false
                         );
                     }
                 }
@@ -254,13 +270,15 @@ contract ZoneInbox is IZoneInbox {
                     _enqueueDepositBounceBack(
                         ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
                     );
-                    emit DepositRejected(
+                    emit EncryptedDepositProcessed(
                         currentHash,
                         ed.sender,
-                        DepositType.Encrypted,
+                        address(0),
                         ed.token,
                         ed.amount,
-                        ed.bouncebackRecipient
+                        bytes32(0),
+                        ed.bouncebackRecipient,
+                        false
                     );
                     continue;
                 }
@@ -328,17 +346,42 @@ contract ZoneInbox is IZoneInbox {
                     _enqueueDepositBounceBack(
                         ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
                     );
-                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+                    emit EncryptedDepositProcessed(
+                        currentHash,
+                        ed.sender,
+                        address(0),
+                        ed.token,
+                        ed.amount,
+                        bytes32(0),
+                        ed.bouncebackRecipient,
+                        false
+                    );
                 } else {
                     try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
                         emit EncryptedDepositProcessed(
-                            currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo
+                            currentHash,
+                            ed.sender,
+                            decryptedTo,
+                            ed.token,
+                            ed.amount,
+                            decryptedMemo,
+                            ed.bouncebackRecipient,
+                            true
                         );
                     } catch {
                         _enqueueDepositBounceBack(
                             ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
                         );
-                        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
+                        emit EncryptedDepositProcessed(
+                            currentHash,
+                            ed.sender,
+                            decryptedTo,
+                            ed.token,
+                            ed.amount,
+                            decryptedMemo,
+                            ed.bouncebackRecipient,
+                            false
+                        );
                     }
                 }
             }
@@ -389,10 +432,10 @@ contract ZoneInbox is IZoneInbox {
 
     function _processWithdrawalBounceBack(Deposit memory d) internal {
         try IZoneToken(d.token).mint(d.to, d.amount) {
-            emit WithdrawalBounceBackProcessed(d.to, d.token, d.amount);
+            emit WithdrawalBounceBack(d.to, d.token, d.amount, true);
         } catch {
             refunds[d.token][d.to] += d.amount;
-            emit WithdrawalBounceBackPending(d.to, d.token, d.amount);
+            emit WithdrawalBounceBack(d.to, d.token, d.amount, false);
         }
     }
 

@@ -69,7 +69,9 @@ crate::sol! {
             address indexed to,
             address token,
             uint128 amount,
-            bytes32 memo
+            bytes32 memo,
+            address bouncebackRecipient,
+            bool success
         );
 
         event EncryptedDepositProcessed(
@@ -78,37 +80,12 @@ crate::sol! {
             address indexed to,
             address token,
             uint128 amount,
-            bytes32 memo
+            bytes32 memo,
+            address bouncebackRecipient,
+            bool success
         );
 
-        event EncryptedDepositFailed(
-            bytes32 indexed depositHash,
-            address indexed sender,
-            address token,
-            uint128 amount
-        );
-
-        event DepositFailed(
-            bytes32 indexed depositHash,
-            address indexed sender,
-            address indexed to,
-            address token,
-            uint128 amount,
-            address bouncebackRecipient
-        );
-
-        event DepositRejected(
-            bytes32 indexed depositHash,
-            address indexed sender,
-            DepositType depositType,
-            address token,
-            uint128 amount,
-            address bouncebackRecipient
-        );
-
-        event WithdrawalBounceBackProcessed(address indexed fallbackRecipient, address token, uint128 amount);
-
-        event WithdrawalBounceBackPending(address indexed fallbackRecipient, address token, uint128 amount);
+        event WithdrawalBounceBack(address indexed fallbackRecipient, address token, uint128 amount, bool success);
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 

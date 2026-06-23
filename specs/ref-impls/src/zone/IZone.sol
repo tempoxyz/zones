@@ -573,11 +573,11 @@ interface IZonePortal {
     );
 
     event DepositBounceBack(
-        address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee
-    );
-
-    event DepositBounceBackPending(
-        address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee
+        address indexed bouncebackRecipient,
+        address token,
+        uint128 amount,
+        uint128 bouncebackFee,
+        bool success
     );
 
     /// @notice Emitted when a recipient claims a previously-parked bounce-back refund.
@@ -958,49 +958,24 @@ interface IZoneInbox {
         address indexed to,
         address token,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient,
+        bool success
     );
 
-    /// @notice Emitted when an encrypted deposit is processed (decrypted and credited)
-    // Revealed after decryption
     event EncryptedDepositProcessed(
         bytes32 indexed depositHash,
         address indexed sender,
         address indexed to,
         address token,
         uint128 amount,
-        bytes32 memo
+        bytes32 memo,
+        address bouncebackRecipient,
+        bool success
     );
 
-    /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
-    event EncryptedDepositFailed(
-        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
-    );
-
-    event DepositFailed(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        address indexed to,
-        address token,
-        uint128 amount,
-        address bouncebackRecipient
-    );
-
-    event DepositRejected(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        DepositType depositType,
-        address token,
-        uint128 amount,
-        address bouncebackRecipient
-    );
-
-    event WithdrawalBounceBackProcessed(
-        address indexed fallbackRecipient, address token, uint128 amount
-    );
-
-    event WithdrawalBounceBackPending(
-        address indexed fallbackRecipient, address token, uint128 amount
+    event WithdrawalBounceBack(
+        address indexed fallbackRecipient, address token, uint128 amount, bool success
     );
 
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);

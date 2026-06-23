@@ -118,14 +118,8 @@ crate::sol! {
             address indexed bouncebackRecipient,
             address token,
             uint128 amount,
-            uint128 bouncebackFee
-        );
-
-        event DepositBounceBackPending(
-            address indexed bouncebackRecipient,
-            address token,
-            uint128 amount,
-            uint128 bouncebackFee
+            uint128 bouncebackFee,
+            bool success
         );
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);

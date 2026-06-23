@@ -391,7 +391,7 @@ contract ZoneInboxTest is Test {
         vm.prank(sequencer);
         vm.expectEmit(true, true, true, true);
         emit IZoneInbox.DepositProcessed(
-            expectedHash, alice, bob, address(zoneToken), 1000e6, bytes32("payment")
+            expectedHash, alice, bob, address(zoneToken), 1000e6, bytes32("payment"), bob, true
         );
         _advanceTempo(deposits);
     }

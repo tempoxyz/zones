@@ -781,12 +781,12 @@ contract ZonePortal is IZonePortal {
         }
 
         if (success) {
-            emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee);
+            emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee, true);
             return;
         }
 
         refunds[_token][withdrawal.to] += refundAmount;
-        emit DepositBounceBackPending(withdrawal.to, _token, refundAmount, bouncebackFee);
+        emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee, false);
     }
 
     function claimRefund(address token) external returns (uint128 amount) {

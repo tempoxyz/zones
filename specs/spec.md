@@ -478,11 +478,11 @@ Because both deposit entry points require a non-zero `bouncebackRecipient`, ever
 
 The portal's internal withdrawal-bounce-back deposits are the only entries with `bouncebackRecipient == address(0)`. They are introduced by `_enqueueWithdrawalBounceBack` after a withdrawal callback fails, and their zone-side mint failure path is the symmetric refund-registry described in [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back). The sequencer cannot reject these entries: a `rejected` flag on an internal withdrawal-bounce-back deposit is silently ignored and the deposit is processed as if not rejected, preserving the terminal-bounce invariant.
 
-**Zone-side handling.** When an encrypted deposit fails (either branch), when a regular deposit's mint reverts, or when the sequencer rejects a deposit, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, bouncebackRecipient, bouncebackFee)`. For a regular deposit whose mint reverted the revert is caught in a `try/catch`; for an encrypted deposit with invalid encryption no mint is attempted and the inbox enqueues the bounce-back directly; for a sequencer-rejected deposit the inbox skips processing entirely and enqueues the bounce-back without ever calling the token contract (and, for encrypted deposits, without performing onchain decryption verification). `enqueueDepositBounceBack` records a zero-fee, zero-callback, zero-`fallbackRecipient` withdrawal in the outbox's pending list with the snapshotted `bouncebackFee`, with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits one of three events so off-chain observers can distinguish the failure mode: `DepositFailed` (regular deposit whose mint reverted), `EncryptedDepositFailed` (encrypted deposit, either invalid encryption or mint revert), or `DepositRejected` (sequencer-initiated rejection, regardless of deposit type). The deposit queue hash chain advances normally; no retries are performed on the zone.
+**Zone-side handling.** When an encrypted deposit fails (either branch), when a regular deposit's mint reverts, or when the sequencer rejects a deposit, the `ZoneInbox` calls `ZoneOutbox.enqueueDepositBounceBack(token, amount, bouncebackRecipient, bouncebackFee)`. For a regular deposit whose mint reverted the revert is caught in a `try/catch`; for an encrypted deposit with invalid encryption no mint is attempted and the inbox enqueues the bounce-back directly; for a sequencer-rejected deposit the inbox skips processing entirely and enqueues the bounce-back without ever calling the token contract (and, for encrypted deposits, without performing onchain decryption verification). `enqueueDepositBounceBack` records a zero-fee, zero-callback, zero-`fallbackRecipient` withdrawal in the outbox's pending list with the snapshotted `bouncebackFee`, with `sender = address(0)` and `txHash = bytes32(0)`. The inbox emits `DepositProcessed(..., bouncebackRecipient, success)` for regular deposits and `EncryptedDepositProcessed(..., bouncebackRecipient, success)` for encrypted deposits. `success=false` means the deposit failed or was rejected and funds were queued for bounce-back; `success=true` means the zone-side mint succeeded. The deposit queue hash chain advances normally; no retries are performed on the zone.
 
 **Tempo-side refund.** The bounce-back withdrawal is submitted in the next batch alongside any user-initiated withdrawals. When `ZonePortal.processWithdrawal` runs on the deposit-bounce-back entry (`gasLimit == 0`, `fee == 0`, `fallbackRecipient == address(0)`), it deducts the snapshotted `bouncebackFee` from the queued amount, pays it to the sequencer, and attempts `ITIP20.transfer(bouncebackRecipient, amount - bouncebackFee)` from the portal's escrow, wrapped in `try/catch`.
 
-If the transfer succeeds, the portal emits `DepositBounceBack(bouncebackRecipient, token, amount - bouncebackFee, bouncebackFee)`. If it reverts (e.g. the token's TIP-403 policy forbids `bouncebackRecipient`, or the token is paused), the funds stay in the portal's locked balance and the portal credits `_refunds[token][bouncebackRecipient] += (amount - bouncebackFee)` and emits `DepositBounceBackPending(...)`. Either way the bounce-back entry is fully retired and the sequencer collects `bouncebackFee`.
+If the transfer succeeds, the portal emits `DepositBounceBack(bouncebackRecipient, token, amount - bouncebackFee, bouncebackFee, true)`. If it reverts (e.g. the token's TIP-403 policy forbids `bouncebackRecipient`, or the token is paused), the funds stay in the portal's locked balance and the portal credits `_refunds[token][bouncebackRecipient] += (amount - bouncebackFee)` and emits `DepositBounceBack(..., false)`. Either way the bounce-back entry is fully retired and the sequencer collects `bouncebackFee`.
 
 In the case of a failed bounceback, the recipient can claim the parked funds by calling `ZonePortal.claimRefund(token)` on Tempo. The portal zeroes `_refunds[token][msg.sender]` and calls `ITIP20.transfer(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
 
@@ -495,11 +495,9 @@ In the case of a failed bounceback, the recipient can claim the parked funds by 
 
 | Event | Emitted by | When |
 |-------|------------|------|
-| `DepositFailed` | `ZoneInbox` | Mint for a regular deposit reverted, funds queued for bounce-back |
-| `EncryptedDepositFailed` | `ZoneInbox` | Encrypted deposit failed — either invalid encryption, or valid decryption with a mint that reverted; funds queued for bounce-back |
-| `DepositRejected` | `ZoneInbox` | Sequencer marked the deposit (regular or encrypted) as rejected; funds queued for bounce-back without invoking the token or decryption precompiles |
-| `DepositBounceBack` | `ZonePortal` | Bounce-back withdrawal processed on Tempo and the refund transfer to `bouncebackRecipient` succeeded |
-| `DepositBounceBackPending` | `ZonePortal` | Bounce-back transfer reverted on Tempo (e.g. TIP-403 forbids `bouncebackRecipient`); funds parked in the portal's refund registry, claimable via `claimRefund(token)` |
+| `DepositProcessed(..., success)` | `ZoneInbox` | Regular deposit reached a terminal zone-side outcome; `success=false` means mint/rejection failure and funds queued for bounce-back |
+| `EncryptedDepositProcessed(..., success)` | `ZoneInbox` | Encrypted deposit reached a terminal zone-side outcome; `success=false` means decryption/mint/rejection failure and funds queued for bounce-back |
+| `DepositBounceBack(..., success)` | `ZonePortal` | Deposit bounce-back withdrawal processed on Tempo; `success=false` means transfer reverted and funds were parked in the portal refund registry |
 | `RefundClaimed` | `ZonePortal` | Recipient claimed an outstanding deposit-bounce-back refund |
 | `WithdrawalBounceBack` | `ZonePortal` | Withdrawal-side bounce-back processed on Tempo (zone-side refund mint will be attempted by the inbox; renamed from `BounceBack` for symmetry with `DepositBounceBack`) |
 
@@ -517,22 +515,22 @@ sequenceDiagram
     Z->>Z: ZoneInbox.advanceTempo(..., QueuedDeposit{rejected})
     alt sequencer rejects
         Z->>Z: ZoneOutbox.enqueueDepositBounceBack()
-        Note over Z: emit DepositRejected
+        Note over Z: emit DepositProcessed(success=false)
     else sequencer accepts
         Z->>Z: try TIP20.mint(deposit.to, amount)
         Note over Z: if mint reverts
         Z->>Z: ZoneOutbox.enqueueDepositBounceBack()
-        Note over Z: emit DepositFailed
+        Note over Z: emit DepositProcessed(success=false)
     end
     Z->>T: ZoneOutbox.finalizeWithdrawalBatch + submitBatch
     T->>T: ZonePortal.processWithdrawal (zero-fee, zero-callback)
     T->>T: pay bouncebackFee to sequencer
     alt TIP20.transfer(bouncebackRecipient, amount-fee) succeeds
         T->>U: receives amount-bouncebackFee
-        Note over T: emit DepositBounceBack
+        Note over T: emit DepositBounceBack(success=true)
     else transfer reverts (e.g. TIP-403)
         T->>T: _refunds[token][bouncebackRecipient] += amount-bouncebackFee
-        Note over T: emit DepositBounceBackPending
+        Note over T: emit DepositBounceBack(success=false)
         U->>T: later: ZonePortal.claimRefund(token)
         T->>U: TIP20.transfer(msg.sender, claimed)
         Note over T: emit RefundClaimed
@@ -647,7 +645,7 @@ currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, bounceBackDe
 
 **Zone-side handling.** The next time the sequencer calls `ZoneInbox.advanceTempo`, the inbox sees a `Regular` deposit with `bouncebackRecipient == address(0)` and attempts `IZoneToken.mint(fallbackRecipient, amount)` wrapped in `try/catch`. The `rejected` flag has no effect on this path (see [Sequencer rejection](#sequencer-rejection)).
 
-If the mint succeeds, the inbox emits `WithdrawalBounceBackProcessed(fallbackRecipient, token, amount)`. If it reverts (e.g. the zone-side TIP-403 policy forbids `fallbackRecipient`, or the token is paused), the inbox credits `_refunds[token][fallbackRecipient] += amount` and emits `WithdrawalBounceBackPending(...)`. Either way the bounce-back deposit is fully retired.
+If the mint succeeds, the inbox emits `WithdrawalBounceBack(fallbackRecipient, token, amount, true)`. If it reverts (e.g. the zone-side TIP-403 policy forbids `fallbackRecipient`, or the token is paused), the inbox credits `_refunds[token][fallbackRecipient] += amount` and emits `WithdrawalBounceBack(..., false)`. Either way the bounce-back deposit is fully retired.
 
 The recipient claims the parked funds by calling `ZoneInbox.claimRefund(token)`. The inbox zeroes `_refunds[token][msg.sender]` and calls `IZoneToken.mint(msg.sender, amount)`; on success it emits `RefundClaimed(msg.sender, token, amount)`, on revert storage is unchanged and the user retries later.
 
@@ -1549,11 +1547,7 @@ interface IZonePortal {
     );
     event DepositBounceBack(
         address indexed bouncebackRecipient, address token,
-        uint128 amount, uint128 bouncebackFee
-    );
-    event DepositBounceBackPending(
-        address indexed bouncebackRecipient, address token,
-        uint128 amount, uint128 bouncebackFee
+        uint128 amount, uint128 bouncebackFee, bool success
     );
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
@@ -1718,39 +1712,16 @@ interface IZoneInbox {
     );
     event DepositProcessed(
         bytes32 indexed depositHash, address indexed sender, address indexed to,
-        address token, uint128 amount, bytes32 memo
+        address token, uint128 amount, bytes32 memo,
+        address bouncebackRecipient, bool success
     );
     event EncryptedDepositProcessed(
         bytes32 indexed depositHash, address indexed sender, address indexed to,
-        address token, uint128 amount, bytes32 memo
+        address token, uint128 amount, bytes32 memo,
+        address bouncebackRecipient, bool success
     );
-    event EncryptedDepositFailed(
-        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
-    );
-    /// @notice Emitted when the sequencer marks a deposit as rejected via QueuedDeposit.rejected.
-    /// @dev Distinguishes operator-initiated rejection from a TIP-403 / mint failure
-    ///      (DepositFailed) or an invalid-encryption / decrypted-mint failure
-    ///      (EncryptedDepositFailed). Funds are bounced back identically.
-    event DepositRejected(
-        bytes32 indexed depositHash,
-        address indexed sender,
-        DepositType depositType,
-        address token,
-        uint128 amount,
-        address bouncebackRecipient
-    );
-    /// @notice Emitted when a withdrawal-bounce-back deposit (synthesized by the portal
-    ///         with `bouncebackRecipient == address(0)`) was minted successfully to the
-    ///         original `fallbackRecipient` on the zone.
-    event WithdrawalBounceBackProcessed(
-        address indexed fallbackRecipient, address token, uint128 amount
-    );
-    /// @notice Emitted when the zone-side refund mint for a withdrawal-bounce-back
-    ///         deposit reverted (e.g. zone TIP-403 policy forbids the recipient) and
-    ///         the amount was credited to the inbox refund registry, claimable via
-    ///         `claimRefund(token)`.
-    event WithdrawalBounceBackPending(
-        address indexed fallbackRecipient, address token, uint128 amount
+    event WithdrawalBounceBack(
+        address indexed fallbackRecipient, address token, uint128 amount, bool success
     );
     /// @notice Emitted when a recipient claims an outstanding withdrawal-bounce-back refund.
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);

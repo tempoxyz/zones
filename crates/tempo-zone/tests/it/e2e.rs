@@ -318,6 +318,7 @@ async fn test_zone_inbox_events_on_deposit() -> eyre::Result<()> {
         dp_event.amount, deposit_amount,
         "DepositProcessed amount mismatch"
     );
+    assert!(dp_event.success, "DepositProcessed success mismatch");
 
     Ok(())
 }
