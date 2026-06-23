@@ -3,11 +3,16 @@ pragma solidity ^0.8.13;
 
 import { ITempoState, ZONE_INBOX } from "../../src/zone/IZone.sol";
 import { TempoState } from "../../src/zone/TempoState.sol";
-import { Test } from "forge-std/Test.sol";
+import { Test, stdJson } from "forge-std/Test.sol";
 
 /// @title TempoStateTest
 /// @notice Tests for the TempoState predeploy contract
 contract TempoStateTest is Test {
+
+    using stdJson for string;
+
+    string internal constant MALFORMED_TEMPO_HEADERS_FIXTURE_PATH =
+        "/test/fixtures/malformedTempoHeaders.json";
 
     TempoState public tempoState;
 
@@ -55,6 +60,22 @@ contract TempoStateTest is Test {
         assertEq(tempoState.tempoTransactionsRoot(), GENESIS_TX_ROOT);
         assertEq(tempoState.tempoParentHash(), GENESIS_PARENT_HASH);
         assertEq(tempoState.tempoBeneficiary(), GENESIS_BENEFICIARY);
+    }
+
+    function test_constructor_revertsOnTrailingBytesAfterOuterList() public {
+        bytes memory malformedHeader =
+            _malformedTempoHeadersFixtureJson().readBytes(".trailingBytesAfterOuterList");
+
+        vm.expectRevert(ITempoState.InvalidRlpData.selector);
+        new TempoState(malformedHeader);
+    }
+
+    function test_constructor_revertsOnOuterListLengthMismatch() public {
+        bytes memory malformedHeader =
+            _malformedTempoHeadersFixtureJson().readBytes(".outerListLengthMismatch");
+
+        vm.expectRevert(ITempoState.InvalidRlpData.selector);
+        new TempoState(malformedHeader);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -393,6 +414,10 @@ contract TempoStateTest is Test {
             value >>= 8;
         }
         return count == 0 ? 1 : count;
+    }
+
+    function _malformedTempoHeadersFixtureJson() internal view returns (string memory) {
+        return vm.readFile(string.concat(vm.projectRoot(), MALFORMED_TEMPO_HEADERS_FIXTURE_PATH));
     }
 
 }
