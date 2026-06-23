@@ -182,87 +182,110 @@ contract TempoState is ITempoState {
         // Decode outer list header
         (uint256 outerListLen, uint256 outerListOffset) = _decodeListHeaderMem(header, ptr);
         if (outerListOffset == 0) revert InvalidRlpData();
+        uint256 outerListEnd = outerListOffset + outerListLen;
+        if (outerListEnd != header.length) revert InvalidRlpData();
         ptr = outerListOffset;
 
         // Field 0: general_gas_limit
+        if (ptr >= outerListEnd) revert InvalidRlpData();
         generalGasLimit = _decodeUint64Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, outerListEnd);
 
         // Field 1: shared_gas_limit
+        if (ptr >= outerListEnd) revert InvalidRlpData();
         sharedGasLimit = _decodeUint64Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, outerListEnd);
 
         // Field 2: timestamp_millis_part
+        if (ptr >= outerListEnd) revert InvalidRlpData();
         tempoTimestampMillis = _decodeUint64Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, outerListEnd);
 
         // Field 3: inner Ethereum header (a list)
+        if (ptr >= outerListEnd) revert InvalidRlpData();
         (uint256 innerListLen, uint256 innerListOffset) = _decodeListHeaderMem(header, ptr);
         if (innerListOffset == 0) revert InvalidRlpData();
+        uint256 innerListEnd = innerListOffset + innerListLen;
+        if (innerListEnd > outerListEnd) revert InvalidRlpData();
         ptr = innerListOffset;
 
         // Inner field 0: parentHash
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoParentHash = _decodeBytes32Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 1: ommersHash - skip
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 2: beneficiary
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoBeneficiary = _decodeAddressMem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 3: stateRoot
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoStateRoot = _decodeBytes32Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 4: transactionsRoot
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoTransactionsRoot = _decodeBytes32Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 5: receiptsRoot
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoReceiptsRoot = _decodeBytes32Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 6: logsBloom - skip
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 7: difficulty - skip
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 8: number
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoBlockNumber = _decodeUint64Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 9: gasLimit
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoGasLimit = _decodeUint64Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 10: gasUsed
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoGasUsed = _decodeUint64Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 11: timestamp
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoTimestamp = _decodeUint64Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 12: extraData - skip
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 13: mixHash (prevRandao)
+        if (ptr >= innerListEnd) revert InvalidRlpData();
         tempoPrevRandao = _decodeBytes32Mem(header, ptr);
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 14: nonce - skip
-        (, ptr) = _skipRlpItemMem(header, ptr);
+        ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Skip any remaining optional fields we don't record.
-        while (ptr < innerListOffset + innerListLen) {
-            (, ptr) = _skipRlpItemMem(header, ptr);
+        while (ptr < innerListEnd) {
+            ptr = _skipRlpItemInList(header, ptr, innerListEnd);
         }
 
-        // Silence unused variable warning
-        outerListLen;
+        ptr = innerListEnd;
+
+        // TempoHeader has one optional trailing outer field: consensus_context.
+        if (ptr < outerListEnd) {
+            ptr = _skipRlpItemInList(header, ptr, outerListEnd);
+        }
+        if (ptr != outerListEnd) revert InvalidRlpData();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -289,17 +312,28 @@ contract TempoState is ITempoState {
             // Short list: 0xc0 + length
             listLen = prefix - 0xc0;
             offset = ptr + 1;
+            if (offset + listLen > data.length) revert InvalidRlpData();
         } else {
             // Long list: 0xf7 + length of length
             uint256 lenLen = prefix - 0xf7;
-            if (ptr + 1 + lenLen > data.length) return (0, 0);
-
-            listLen = 0;
-            for (uint256 i = 0; i < lenLen; i++) {
-                listLen = (listLen << 8) | uint8(data[ptr + 1 + i]);
-            }
+            listLen = _decodeRlpLongPayloadLength(data, ptr, lenLen);
             offset = ptr + 1 + lenLen;
+            if (offset + listLen > data.length) revert InvalidRlpData();
         }
+    }
+
+    function _skipRlpItemInList(
+        bytes memory data,
+        uint256 ptr,
+        uint256 listEnd
+    )
+        internal
+        pure
+        returns (uint256 nextPtr)
+    {
+        if (ptr >= listEnd) revert InvalidRlpData();
+        (, nextPtr) = _skipRlpItemMem(data, ptr);
+        if (nextPtr > listEnd) revert InvalidRlpData();
     }
 
     /// @notice Skip an RLP item in memory and return next position
@@ -319,25 +353,42 @@ contract TempoState is ITempoState {
             return (1, ptr + 1);
         } else if (prefix <= 0xb7) {
             uint256 strLen = prefix - 0x80;
+            if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
+            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) revert InvalidRlpData();
             return (1 + strLen, ptr + 1 + strLen);
         } else if (prefix <= 0xbf) {
             uint256 lenLen = prefix - 0xb7;
-            uint256 strLen = 0;
-            for (uint256 i = 0; i < lenLen; i++) {
-                strLen = (strLen << 8) | uint8(data[ptr + 1 + i]);
-            }
+            uint256 strLen = _decodeRlpLongPayloadLength(data, ptr, lenLen);
+            if (ptr + 1 + lenLen + strLen > data.length) revert InvalidRlpData();
             return (1 + lenLen + strLen, ptr + 1 + lenLen + strLen);
         } else if (prefix <= 0xf7) {
             uint256 listLen = prefix - 0xc0;
+            if (ptr + 1 + listLen > data.length) revert InvalidRlpData();
             return (1 + listLen, ptr + 1 + listLen);
         } else {
             uint256 lenLen = prefix - 0xf7;
-            uint256 listLen = 0;
-            for (uint256 i = 0; i < lenLen; i++) {
-                listLen = (listLen << 8) | uint8(data[ptr + 1 + i]);
-            }
+            uint256 listLen = _decodeRlpLongPayloadLength(data, ptr, lenLen);
+            if (ptr + 1 + lenLen + listLen > data.length) revert InvalidRlpData();
             return (1 + lenLen + listLen, ptr + 1 + lenLen + listLen);
         }
+    }
+
+    function _decodeRlpLongPayloadLength(
+        bytes memory data,
+        uint256 ptr,
+        uint256 lenLen
+    )
+        internal
+        pure
+        returns (uint256 payloadLen)
+    {
+        if (ptr + 1 + lenLen > data.length) revert InvalidRlpData();
+        if (uint8(data[ptr + 1]) == 0) revert InvalidRlpData();
+
+        for (uint256 i = 0; i < lenLen; i++) {
+            payloadLen = (payloadLen << 8) | uint8(data[ptr + 1 + i]);
+        }
+        if (payloadLen < 56) revert InvalidRlpData();
     }
 
     /// @notice Decode a bytes32 from RLP in memory
@@ -359,22 +410,6 @@ contract TempoState is ITempoState {
             assembly {
                 value := mload(add(add(data, 0x20), add(ptr, 1)))
             }
-        } else if (prefix <= 0x7f) {
-            value = bytes32(uint256(prefix));
-        } else if (prefix >= 0x80 && prefix <= 0xb7) {
-            uint256 strLen = prefix - 0x80;
-            if (strLen == 0) {
-                value = bytes32(0);
-            } else if (strLen <= 32) {
-                if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
-                assembly {
-                    value := mload(add(add(data, 0x20), add(ptr, 1)))
-                }
-                // Clear extra bytes on the right
-                value = value & bytes32(~((1 << (8 * (32 - strLen))) - 1));
-            } else {
-                revert InvalidRlpData();
-            }
         } else {
             revert InvalidRlpData();
         }
@@ -393,6 +428,8 @@ contract TempoState is ITempoState {
         } else if (prefix >= 0x81 && prefix <= 0x88) {
             uint256 strLen = prefix - 0x80;
             if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
+            if (uint8(data[ptr + 1]) == 0) revert InvalidRlpData();
+            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) revert InvalidRlpData();
 
             value = 0;
             for (uint256 i = 0; i < strLen; i++) {
@@ -423,6 +460,8 @@ contract TempoState is ITempoState {
         } else if (prefix >= 0x81 && prefix <= 0xa0) {
             uint256 strLen = prefix - 0x80;
             if (ptr + 1 + strLen > data.length) revert InvalidRlpData();
+            if (uint8(data[ptr + 1]) == 0) revert InvalidRlpData();
+            if (strLen == 1 && uint8(data[ptr + 1]) < 0x80) revert InvalidRlpData();
 
             value = 0;
             for (uint256 i = 0; i < strLen; i++) {
@@ -452,9 +491,6 @@ contract TempoState is ITempoState {
             assembly {
                 value := shr(96, mload(add(add(data, 0x20), add(ptr, 1))))
             }
-        } else if (prefix == 0x80) {
-            // Empty = zero address
-            value = address(0);
         } else {
             revert InvalidRlpData();
         }
