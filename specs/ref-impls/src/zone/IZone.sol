@@ -72,7 +72,6 @@ struct Deposit {
     address to;
     uint128 amount;
     address bouncebackRecipient;
-    uint128 bouncebackFee;
     bytes32 memo;
 }
 
@@ -100,7 +99,6 @@ struct EncryptedDeposit {
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
     address bouncebackRecipient; // Tempo recipient for a failed-deposit refund
-    uint128 bouncebackFee; // Tempo-side refund processing fee snapshotted at deposit time
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
@@ -313,7 +311,6 @@ struct Withdrawal {
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     uint128 fee; // processing fee for sequencer (calculated at request time)
-    uint128 bouncebackFee; // deposit bounce-back fee reserved at deposit time (zero for user withdrawals)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient; // zone address for bounce-back if call fails
@@ -328,7 +325,6 @@ struct PendingWithdrawal {
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     uint128 fee; // processing fee for sequencer (calculated at request time)
-    uint128 bouncebackFee; // deposit bounce-back fee reserved at deposit time (zero for user withdrawals)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient; // zone address for bounce-back if call fails
@@ -523,7 +519,6 @@ interface IZonePortal {
         address to,
         uint128 netAmount,
         uint128 fee,
-        uint128 bouncebackFee,
         bytes32 memo,
         address bouncebackRecipient,
         uint64 depositNumber
@@ -561,7 +556,6 @@ interface IZonePortal {
         address token,
         uint128 netAmount,
         uint128 fee,
-        uint128 bouncebackFee,
         uint256 keyIndex,
         bytes32 ephemeralPubkeyX,
         uint8 ephemeralPubkeyYParity,
@@ -1053,7 +1047,6 @@ interface IZoneOutbox {
         address to,
         uint128 amount,
         uint128 fee,
-        uint128 bouncebackFee,
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
@@ -1124,8 +1117,7 @@ interface IZoneOutbox {
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient,
-        uint128 bouncebackFee
+        address bouncebackRecipient
     )
         external;
 

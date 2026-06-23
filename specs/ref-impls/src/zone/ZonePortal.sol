@@ -51,9 +51,6 @@ contract ZonePortal is IZonePortal {
     /// @dev Priced against Tempo gas because the refund is paid on Tempo.
     uint64 public constant FIXED_BOUNCEBACK_GAS = 300_000;
 
-    /// @notice Fixed Tempo gas rate used to price deposit bounce-back fees.
-    uint128 public constant TEMPO_T1_BASE_FEE = 20_000_000_000;
-
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
 
@@ -500,10 +497,10 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Calculate the reserved fee for a failed-deposit bounce-back
-    /// @dev Fee = ceil(FIXED_BOUNCEBACK_GAS * TEMPO_T1_BASE_FEE / 1e12)
+    /// @dev Fee = ceil(FIXED_BOUNCEBACK_GAS * block.basefee / 1e12)
     /// @return fee The bounce-back fee in token units
-    function calculateBouncebackFee() public pure returns (uint128 fee) {
-        uint256 gasFee = uint256(FIXED_BOUNCEBACK_GAS) * TEMPO_T1_BASE_FEE;
+    function calculateBouncebackFee() public view returns (uint128 fee) {
+        uint256 gasFee = uint256(FIXED_BOUNCEBACK_GAS) * block.basefee;
         // Round up after scaling so bounce-backs do not underpay.
         fee = uint128((gasFee + TEMPO_BASE_FEE_SCALE - 1) / TEMPO_BASE_FEE_SCALE);
     }
@@ -568,7 +565,6 @@ contract ZonePortal is IZonePortal {
             to: to,
             amount: netAmount,
             bouncebackRecipient: bouncebackRecipient,
-            bouncebackFee: bouncebackFee,
             memo: memo
         });
 
@@ -584,7 +580,6 @@ contract ZonePortal is IZonePortal {
             to,
             netAmount,
             fee,
-            bouncebackFee,
             memo,
             bouncebackRecipient,
             thisDeposit
@@ -669,7 +664,6 @@ contract ZonePortal is IZonePortal {
             sender: msg.sender,
             amount: netAmount,
             bouncebackRecipient: bouncebackRecipient,
-            bouncebackFee: bouncebackFee,
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -686,7 +680,6 @@ contract ZonePortal is IZonePortal {
             _token,
             netAmount,
             fee,
-            bouncebackFee,
             keyIndex,
             encrypted.ephemeralPubkeyX,
             encrypted.ephemeralPubkeyYParity,
@@ -774,7 +767,10 @@ contract ZonePortal is IZonePortal {
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {
         address _token = withdrawal.token;
-        uint128 bouncebackFee = withdrawal.bouncebackFee;
+        uint128 bouncebackFee = calculateBouncebackFee();
+        if (bouncebackFee > withdrawal.amount) {
+            bouncebackFee = withdrawal.amount;
+        }
         uint128 refundAmount = withdrawal.amount - bouncebackFee;
 
         if (bouncebackFee > 0) {
@@ -831,7 +827,6 @@ contract ZonePortal is IZonePortal {
             to: fallbackRecipient,
             amount: amount,
             bouncebackRecipient: address(0),
-            bouncebackFee: 0,
             memo: bytes32(0)
         });
 
