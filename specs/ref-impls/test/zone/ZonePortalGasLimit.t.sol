@@ -69,7 +69,6 @@ contract ZonePortalGasLimitTest is Test {
             to: recipient,
             amount: 500e6,
             fee: 0,
-            bouncebackFee: 0,
             memo: bytes32(0),
             gasLimit: portal.MAX_WITHDRAWAL_GAS_LIMIT() + 1,
             fallbackRecipient: fallbackRecipient,
@@ -96,16 +95,18 @@ contract ZonePortalGasLimitTest is Test {
 
     function test_processWithdrawal_depositBounceBack_paysFeeAndRefundsNetAmount() public {
         token.mint(address(portal), 1000e6);
+        uint128 bouncebackFee = portal.calculateBouncebackFee();
+        uint128 refundAmount = 1000e6 - bouncebackFee;
 
-        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6, 25e6);
+        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6);
         _storeSingleWithdrawal(w);
 
         vm.expectEmit(true, false, false, true, address(portal));
-        emit IZonePortal.DepositBounceBack(recipient, address(token), 975e6, 25e6, true);
+        emit IZonePortal.DepositBounceBack(recipient, address(token), refundAmount, bouncebackFee);
         portal.processWithdrawal(w, bytes32(0));
 
-        assertEq(token.balanceOf(address(this)), 25e6);
-        assertEq(token.balanceOf(recipient), 975e6);
+        assertEq(token.balanceOf(address(this)), bouncebackFee);
+        assertEq(token.balanceOf(recipient), refundAmount);
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
     }
@@ -113,22 +114,26 @@ contract ZonePortalGasLimitTest is Test {
     function test_processWithdrawal_depositBounceBack_parksRefundWhenTransferFails() public {
         token.mint(address(portal), 1000e6);
         token.setBlockedRecipient(recipient, true);
+        uint128 bouncebackFee = portal.calculateBouncebackFee();
+        uint128 refundAmount = 1000e6 - bouncebackFee;
 
-        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6, 25e6);
+        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6);
         _storeSingleWithdrawal(w);
 
         vm.expectEmit(true, false, false, true, address(portal));
-        emit IZonePortal.DepositBounceBack(recipient, address(token), 975e6, 25e6, false);
+        emit IZonePortal.DepositBounceBackPending(
+            recipient, address(token), refundAmount, bouncebackFee
+        );
         portal.processWithdrawal(w, bytes32(0));
 
-        assertEq(token.balanceOf(address(this)), 25e6);
+        assertEq(token.balanceOf(address(this)), bouncebackFee);
         assertEq(token.balanceOf(recipient), 0);
-        assertEq(portal.refunds(address(token), recipient), 975e6);
+        assertEq(portal.refunds(address(token), recipient), refundAmount);
 
         token.setBlockedRecipient(recipient, false);
         vm.prank(recipient);
-        assertEq(portal.claimRefund(address(token)), 975e6);
-        assertEq(token.balanceOf(recipient), 975e6);
+        assertEq(portal.claimRefund(address(token)), refundAmount);
+        assertEq(token.balanceOf(recipient), refundAmount);
         assertEq(portal.refunds(address(token), recipient), 0);
     }
 
@@ -136,10 +141,7 @@ contract ZonePortalGasLimitTest is Test {
         return keccak256(abi.encode(slot, WITHDRAWAL_QUEUE_SLOTS_MAPPING_SLOT));
     }
 
-    function _depositBounceBackWithdrawal(
-        uint128 amount,
-        uint128 bouncebackFee
-    )
+    function _depositBounceBackWithdrawal(uint128 amount)
         internal
         view
         returns (Withdrawal memory)
@@ -150,7 +152,6 @@ contract ZonePortalGasLimitTest is Test {
             to: recipient,
             amount: amount,
             fee: 0,
-            bouncebackFee: bouncebackFee,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: address(0),

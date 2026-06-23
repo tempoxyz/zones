@@ -20,7 +20,6 @@ crate::sol! {
             address to;
             uint128 amount;
             uint128 fee;
-            uint128 bouncebackFee;
             bytes32 memo;
             uint64 gasLimit;
             address fallbackRecipient;
@@ -43,7 +42,6 @@ crate::sol! {
             address sender;
             uint128 amount;
             address bouncebackRecipient;
-            uint128 bouncebackFee;
             uint256 keyIndex;
             EncryptedDepositPayload encrypted;
         }
@@ -69,7 +67,6 @@ crate::sol! {
             address to,
             uint128 netAmount,
             uint128 fee,
-            uint128 bouncebackFee,
             bytes32 memo,
             address bouncebackRecipient,
             uint64 depositNumber
@@ -81,7 +78,6 @@ crate::sol! {
             address token,
             uint128 netAmount,
             uint128 fee,
-            uint128 bouncebackFee,
             uint256 keyIndex,
             bytes32 ephemeralPubkeyX,
             uint8 ephemeralPubkeyYParity,
@@ -118,8 +114,14 @@ crate::sol! {
             address indexed bouncebackRecipient,
             address token,
             uint128 amount,
-            uint128 bouncebackFee,
-            bool success
+            uint128 bouncebackFee
+        );
+
+        event DepositBounceBackPending(
+            address indexed bouncebackRecipient,
+            address token,
+            uint128 amount,
+            uint128 bouncebackFee
         );
 
         event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
@@ -325,7 +327,6 @@ impl Withdrawal {
             to: event.to,
             amount: event.amount,
             fee: event.fee,
-            bouncebackFee: event.bouncebackFee,
             memo: event.memo,
             gasLimit: event.gasLimit,
             fallbackRecipient: event.fallbackRecipient,

@@ -221,44 +221,24 @@ contract ZoneInbox is IZoneInbox {
                 if (d.bouncebackRecipient == address(0)) {
                     _processWithdrawalBounceBack(d);
                 } else if (qd.rejected) {
-                    _enqueueDepositBounceBack(
-                        d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
-                    );
-                    emit DepositProcessed(
+                    _enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
+                    emit DepositRejected(
                         currentHash,
                         d.sender,
-                        d.to,
+                        DepositType.Regular,
                         d.token,
                         d.amount,
-                        d.memo,
-                        d.bouncebackRecipient,
-                        false
+                        d.bouncebackRecipient
                     );
                 } else {
                     try IZoneToken(d.token).mint(d.to, d.amount) {
                         emit DepositProcessed(
-                            currentHash,
-                            d.sender,
-                            d.to,
-                            d.token,
-                            d.amount,
-                            d.memo,
-                            d.bouncebackRecipient,
-                            true
+                            currentHash, d.sender, d.to, d.token, d.amount, d.memo
                         );
                     } catch {
-                        _enqueueDepositBounceBack(
-                            d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
-                        );
-                        emit DepositProcessed(
-                            currentHash,
-                            d.sender,
-                            d.to,
-                            d.token,
-                            d.amount,
-                            d.memo,
-                            d.bouncebackRecipient,
-                            false
+                        _enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
+                        emit DepositFailed(
+                            currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient
                         );
                     }
                 }
@@ -267,18 +247,14 @@ contract ZoneInbox is IZoneInbox {
                 currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
 
                 if (qd.rejected) {
-                    _enqueueDepositBounceBack(
-                        ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
-                    );
-                    emit EncryptedDepositProcessed(
+                    _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
+                    emit DepositRejected(
                         currentHash,
                         ed.sender,
-                        address(0),
+                        DepositType.Encrypted,
                         ed.token,
                         ed.amount,
-                        bytes32(0),
-                        ed.bouncebackRecipient,
-                        false
+                        ed.bouncebackRecipient
                     );
                     continue;
                 }
@@ -343,45 +319,16 @@ contract ZoneInbox is IZoneInbox {
                 }
 
                 if (!valid) {
-                    _enqueueDepositBounceBack(
-                        ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
-                    );
-                    emit EncryptedDepositProcessed(
-                        currentHash,
-                        ed.sender,
-                        address(0),
-                        ed.token,
-                        ed.amount,
-                        bytes32(0),
-                        ed.bouncebackRecipient,
-                        false
-                    );
+                    _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
+                    emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                 } else {
                     try IZoneToken(ed.token).mint(decryptedTo, ed.amount) {
                         emit EncryptedDepositProcessed(
-                            currentHash,
-                            ed.sender,
-                            decryptedTo,
-                            ed.token,
-                            ed.amount,
-                            decryptedMemo,
-                            ed.bouncebackRecipient,
-                            true
+                            currentHash, ed.sender, decryptedTo, ed.token, ed.amount, decryptedMemo
                         );
                     } catch {
-                        _enqueueDepositBounceBack(
-                            ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee
-                        );
-                        emit EncryptedDepositProcessed(
-                            currentHash,
-                            ed.sender,
-                            decryptedTo,
-                            ed.token,
-                            ed.amount,
-                            decryptedMemo,
-                            ed.bouncebackRecipient,
-                            false
-                        );
+                        _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
+                        emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
                     }
                 }
             }
@@ -421,21 +368,19 @@ contract ZoneInbox is IZoneInbox {
     function _enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient,
-        uint128 bouncebackFee
+        address bouncebackRecipient
     )
         internal
     {
-        IZoneOutbox(ZONE_OUTBOX)
-            .enqueueDepositBounceBack(token, amount, bouncebackRecipient, bouncebackFee);
+        IZoneOutbox(ZONE_OUTBOX).enqueueDepositBounceBack(token, amount, bouncebackRecipient);
     }
 
     function _processWithdrawalBounceBack(Deposit memory d) internal {
         try IZoneToken(d.token).mint(d.to, d.amount) {
-            emit WithdrawalBounceBack(d.to, d.token, d.amount, true);
+            emit WithdrawalBounceBackProcessed(d.to, d.token, d.amount);
         } catch {
             refunds[d.token][d.to] += d.amount;
-            emit WithdrawalBounceBack(d.to, d.token, d.amount, false);
+            emit WithdrawalBounceBackPending(d.to, d.token, d.amount);
         }
     }
 
