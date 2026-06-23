@@ -292,16 +292,16 @@ The portal maintains a `TokenConfig` per token with an `enabled` flag and a conf
 
 ### Gas Rate Configuration
 
-The sequencer configures gas rates for work that cannot read the relevant chain's live gas price directly:
+The sequencer configures two gas rates that determine fees for deposits and withdrawals. Each rate is the price (in token units) of one gas unit on the chain where the work runs:
 
 | Rate | Set via | Used for |
 |------|---------|----------|
 | `zoneGasRate` | `ZonePortal.setZoneGasRate()` | Deposit fees: `FIXED_DEPOSIT_GAS (100,000) * zoneGasRate` |
-| `tempoGasRate` | `ZoneOutbox.setTempoGasRate()` | Withdrawal fees for future Tempo work: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
+| `tempoGasRate` | `ZonePortal.setTempoGasRate()` | Withdrawal fees on Tempo: `(WITHDRAWAL_BASE_GAS (50,000) + gasLimit) * tempoGasRate` |
 
-Deposit bounce-back refunds execute on Tempo, so the portal prices them from Tempo's live `block.basefee` instead of a sequencer-managed `tempoGasRate`.
+Both rates live on `ZonePortal` on Tempo and are set by the sequencer. `zoneGasRate` is read on Tempo at deposit time. `tempoGasRate` is read on the zone at withdrawal-request time, where the outbox proxies it through the [`TempoState`](#tempostate-predeploy) predeploy via `readTempoStorageSlot(ZONE_PORTAL, TEMPO_GAS_RATE_SLOT)`. Fees are snapshotted onto the queued entry, so in-flight rate changes never retroactively raise the fee on already-queued items.
 
-All fees are paid in the same token being deposited or withdrawn. Supported TIP-20s use 6 decimals, while Tempo basefee is 18-decimal native units, so Tempo-basefee-denominated fees are scaled by `1e12`.
+`tempoGasRate` defaults to `TEMPO_T0_BASE_FEE = 10,000,000,000` token units per gas unit at zone genesis. All rates are denominated in token units per gas unit and fees are paid in the same token being deposited or withdrawn. The sequencer takes the risk on gas-price fluctuations: if actual costs exceed the fee collected, the sequencer covers the difference; if they are lower, the sequencer keeps the surplus.
 
 ### Encryption Key Management
 
@@ -587,7 +587,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
 
 `WITHDRAWAL_BASE_GAS` (50,000) covers the fixed overhead of processing a withdrawal on Tempo (queue dequeue, transfer, event emission). The user specifies `gasLimit` covering any additional Tempo L1 callback gas. `gasLimit` must be less than or equal to `MAX_WITHDRAWAL_GAS_LIMIT` (10,000,000), which keeps the outer `processWithdrawal` transaction below the Tempo L1 block gas limit after portal overhead and the EIP-150 cushion are added. For simple withdrawals with no callback, use `gasLimit = 0`. The fee is paid in the same token being withdrawn. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`. The sequencer keeps the fee regardless of outcome.
 
-`tempoGasRate` lives on `ZoneOutbox` on the zone (see [Gas Rate Configuration](#gas-rate-configuration)) and is read at withdrawal request time.
+`tempoGasRate` lives on `ZonePortal` on Tempo (see [Gas Rate Configuration](#gas-rate-configuration)). The outbox reads it via `TempoState.readTempoStorageSlot(ZONE_PORTAL, TEMPO_GAS_RATE_SLOT)` at request time and snapshots it onto the queued withdrawal.
 
 ### Withdrawal Batching
 
@@ -1626,6 +1626,9 @@ interface IZonePortal {
     function transferSequencer(address newSequencer) external;
     function acceptSequencer() external;
     function setZoneGasRate(uint128 _zoneGasRate) external;
+    /// @notice Set the canonical Tempo gas rate. Used to price withdrawal fees on Tempo.
+    function setTempoGasRate(uint128 _tempoGasRate) external;
+    function tempoGasRate() external view returns (uint128);
     function zoneGasRate() external view returns (uint128);
 
     // Encryption keys
@@ -1786,7 +1789,9 @@ interface IZoneOutbox {
 
     function lastBatch() external view returns (LastBatch memory);
     function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
-    /// @notice Compute the withdrawal fee for the current ZoneOutbox Tempo gas rate.
+    /// @notice Compute the withdrawal fee for the current Tempo gas rate. Reads
+    ///         `tempoGasRate` from `ZonePortal` on Tempo via the `TempoState` predeploy
+    ///         and snapshots it onto the queued withdrawal at request time.
     function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128);
 
     function requestWithdrawal(
