@@ -2964,8 +2964,8 @@ impl L1Fixture {
         num_blocks: u64,
     ) {
         let mut cache = cache.write();
-        let deposit_queue_hash_slot = B256::with_last_byte(4);
-        let refunds_slot = B256::with_last_byte(9);
+        let deposit_queue_hash_slot = B256::with_last_byte(5);
+        let refunds_slot = B256::with_last_byte(10);
 
         for block in 0..=num_blocks {
             let mut sequencer_bytes = [0u8; 32];
@@ -2976,7 +2976,7 @@ impl L1Fixture {
                 block,
                 B256::new(sequencer_bytes),
             );
-            // Deposit queue hash slot (4) — read by ZoneInbox after finalizeTempo.
+            // Deposit queue hash slot (5) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
