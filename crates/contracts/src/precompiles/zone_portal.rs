@@ -143,6 +143,7 @@ crate::sol! {
         // -- Errors --
 
         error NotSequencer();
+        error NotAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
         error PolicyForbids();
@@ -151,6 +152,7 @@ crate::sol! {
         // -- View functions --
 
         function zoneId() external view returns (uint32);
+        function admin() external view returns (address);
         function sequencer() external view returns (address);
         function verifier() external view returns (address);
         function sequencerPubkey() external view returns (bytes32);
@@ -291,6 +293,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
+            Self::NotAdmin(_) => f.write_str("NotAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),

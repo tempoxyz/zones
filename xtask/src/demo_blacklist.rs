@@ -160,7 +160,8 @@ impl DemoBlacklist {
         l1.client()
             .set_poll_interval(std::time::Duration::from_secs(1));
 
-        // Separate provider for sequencer-only operations (enableToken)
+        // Separate provider for portal admin operations. Existing demo zones use
+        // the sequencer key as the admin key.
         let l1_seq = ProviderBuilder::new_with_network::<TempoNetwork>()
             .wallet(seq_wallet)
             .connect(&http_rpc)
@@ -266,7 +267,7 @@ impl DemoBlacklist {
         // ── Step 3: Enable token on the zone ─────────────────────────────
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Step 3: Enable token on zone");
-        println!("  Only the sequencer ({sequencer_addr}) can call enableToken on the portal.");
+        println!("  Only the portal admin can call enableToken on the portal.");
         println!();
 
         let portal = ZonePortal::new(self.portal, &l1);
@@ -293,7 +294,8 @@ impl DemoBlacklist {
                             last_err = Some(e);
                             continue;
                         }
-                        return Err(e).wrap_err("enableToken failed — is SEQUENCER_KEY correct?");
+                        return Err(e)
+                            .wrap_err("enableToken failed — is the portal admin key correct?");
                     }
                 }
             }

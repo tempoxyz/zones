@@ -30,6 +30,7 @@ sol! {
 
     struct CreateZoneParams {
         address initialToken;
+        address admin;
         address sequencer;
         address verifier;
         ZoneParams zoneParams;
@@ -43,6 +44,7 @@ sol! {
             address indexed portal,
             address indexed messenger,
             address initialToken,
+            address admin,
             address sequencer,
             address verifier,
             bytes32 genesisBlockHash,
@@ -78,6 +80,11 @@ pub(crate) struct CreateZone {
     /// Sequencer address that will operate the zone.
     #[arg(long)]
     sequencer: Address,
+
+    /// Admin address that controls token enablement and deposit pause/resume.
+    /// Defaults to the sequencer address when omitted.
+    #[arg(long)]
+    admin: Option<Address>,
 
     /// Public RPC endpoint for the zone, published on-chain in the portal.
     /// Can be left empty and set later via `ZonePortal.setRpcUrl`.
@@ -125,8 +132,13 @@ impl CreateZone {
         // via --l1.genesis-block-number.
         let current_block = provider.get_block_number().await?;
 
+        let admin = self.admin.unwrap_or(self.sequencer);
+        println!("Admin: {admin}");
+        println!("Sequencer: {}", self.sequencer);
+
         let params = CreateZoneParams {
             initialToken: self.initial_token,
+            admin,
             sequencer: self.sequencer,
             verifier,
             zoneParams: ZoneParams {

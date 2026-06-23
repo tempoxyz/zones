@@ -539,7 +539,7 @@ async fn enable_token_with_retry<P: Provider<TempoNetwork>>(
                     continue;
                 }
                 return Err(err)
-                    .wrap_err("enableToken failed — check SEQUENCER_KEY and zone state");
+                    .wrap_err("enableToken failed — check the portal admin key and zone state");
             }
         }
     }

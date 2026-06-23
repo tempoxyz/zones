@@ -57,6 +57,7 @@ contract ZoneFactory is IZoneFactory {
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(params.initialToken)) {
             revert InvalidToken();
         }
+        if (params.admin == address(0)) revert InvalidAdmin();
         if (params.sequencer == address(0)) revert InvalidSequencer();
         if (!_validVerifiers[params.verifier]) revert InvalidVerifier();
         if (gasleft() < ZONE_CREATION_GAS) revert InsufficientGas();
@@ -91,6 +92,7 @@ contract ZoneFactory is IZoneFactory {
             zoneId,
             params.initialToken,
             messengerAddress,
+            params.admin,
             params.sequencer,
             params.verifier,
             params.zoneParams.genesisBlockHash,
@@ -108,6 +110,7 @@ contract ZoneFactory is IZoneFactory {
             portal: portal,
             messenger: messengerAddress,
             initialToken: params.initialToken,
+            admin: params.admin,
             sequencer: params.sequencer,
             verifier: params.verifier,
             genesisBlockHash: params.zoneParams.genesisBlockHash,
@@ -124,6 +127,7 @@ contract ZoneFactory is IZoneFactory {
             portal,
             messengerAddress,
             params.initialToken,
+            params.admin,
             params.sequencer,
             params.verifier,
             params.zoneParams.genesisBlockHash,

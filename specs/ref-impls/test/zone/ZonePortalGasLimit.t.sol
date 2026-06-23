@@ -55,6 +55,7 @@ contract ZonePortalGasLimitTest is Test {
             address(token),
             address(0x400),
             address(this),
+            address(this),
             address(0),
             keccak256("genesis"),
             uint64(block.number),

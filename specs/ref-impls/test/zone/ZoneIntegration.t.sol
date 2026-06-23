@@ -101,6 +101,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(l2ZoneToken),
             address(messengerContract),
             admin,
+            admin,
             l1Factory.verifier(),
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber,

@@ -156,6 +156,7 @@ contract ZoneBridgeTest is BaseTest {
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
             address(messengerContract),
+            admin, // admin
             admin, // sequencer
             l1Factory.verifier(),
             GENESIS_BLOCK_HASH,

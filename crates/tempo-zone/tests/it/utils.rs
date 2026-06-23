@@ -1010,7 +1010,8 @@ impl L1TestNode {
         let verifier_address = factory.verifier().call().await?;
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
-                token: PATH_USD_ADDRESS,
+                admin: sequencer,
+                initialToken: PATH_USD_ADDRESS,
                 sequencer,
                 verifier: verifier_address,
                 zoneParams: ZoneFactory::ZoneParams {
@@ -1135,7 +1136,7 @@ impl L1TestNode {
         Ok(event.token)
     }
 
-    /// Enable a token on a ZonePortal (must be called by the sequencer).
+    /// Enable a token on a ZonePortal (must be called by the admin).
     pub(crate) async fn enable_token_on_portal(
         &self,
         portal_address: Address,
