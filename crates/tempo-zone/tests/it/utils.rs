@@ -3059,7 +3059,6 @@ impl L1Fixture {
             amount,
             fee: 0,
             bounceback_recipient: sender,
-            bounceback_fee: 0,
             memo: B256::ZERO,
         }
     }
@@ -3122,7 +3121,6 @@ impl L1Fixture {
             amount,
             fee: 0,
             bounceback_recipient: sender,
-            bounceback_fee: 0,
             key_index: alloy_primitives::U256::ZERO,
             ephemeral_pubkey_x: B256::ZERO,
             ephemeral_pubkey_y_parity: 0x02,
@@ -3147,7 +3145,6 @@ impl L1Fixture {
             amount,
             fee: 0,
             bounceback_recipient: sender,
-            bounceback_fee: 0,
             memo: B256::ZERO,
         }
     }
@@ -3205,7 +3202,6 @@ impl L1Fixture {
             amount,
             fee: 0,
             bounceback_recipient: sender,
-            bounceback_fee: 0,
             key_index,
             ephemeral_pubkey_x: eph_pub_x,
             ephemeral_pubkey_y_parity: eph_pub_y_parity,
