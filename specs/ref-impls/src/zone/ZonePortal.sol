@@ -698,13 +698,7 @@ contract ZonePortal is IZonePortal {
     /// @dev Fee is always paid to sequencer regardless of success/failure.
     ///      On failure, only the amount (not fee) is bounced back.
     ///      The token to transfer is read from the withdrawal struct.
-    function processWithdrawal(
-        Withdrawal calldata withdrawal,
-        bytes32 remainingQueue
-    )
-        external
-        onlySequencer
-    {
+    function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external onlySequencer {
         // Pop from withdrawal queue (library handles swap and hash verification)
         _withdrawalQueue.dequeue(withdrawal, remainingQueue);
 
@@ -726,41 +720,37 @@ contract ZonePortal is IZonePortal {
             return;
         }
 
+        bool success = false;
         // Execute the withdrawal
         if (withdrawal.gasLimit == 0) {
             // Simple transfer, no callback
-            bool success;
             try ITIP20(_token).transfer(withdrawal.to, withdrawal.amount) returns (bool ok) {
                 success = ok;
             } catch {
                 success = false;
             }
-
-            if (!success) {
-                _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
-                emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
-                return;
+        } else {
+            // Try callback via messenger; revert is treated as failure
+            try IZoneMessenger(messenger)
+                .relayMessage(
+                    _token,
+                    withdrawal.senderTag,
+                    withdrawal.to,
+                    withdrawal.amount,
+                    withdrawal.gasLimit,
+                    withdrawal.callbackData
+                ) {
+                success = true;
+            } catch {
+                success = false;
             }
-
-            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, true);
-            return;
         }
-
-        // Try callback via messenger; revert is treated as failure
-        try IZoneMessenger(messenger)
-            .relayMessage(
-                _token,
-                withdrawal.senderTag,
-                withdrawal.to,
-                withdrawal.amount,
-                withdrawal.gasLimit,
-                withdrawal.callbackData
-            ) {
-            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, true);
-        } catch {
+        if (!success) {
             // Callback failed: bounce back to zone (only amount, not fee)
             _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
             emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
+        } else {
+            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, true);
         }
     }
 
@@ -782,11 +772,10 @@ contract ZonePortal is IZonePortal {
 
         if (success) {
             emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee);
-            return;
+        } else {
+            refunds[_token][withdrawal.to] += refundAmount;
+            emit DepositBounceBackPending(withdrawal.to, _token, refundAmount, bouncebackFee);
         }
-
-        refunds[_token][withdrawal.to] += refundAmount;
-        emit DepositBounceBackPending(withdrawal.to, _token, refundAmount, bouncebackFee);
     }
 
     function claimRefund(address token) external returns (uint128 amount) {
@@ -795,11 +784,9 @@ contract ZonePortal is IZonePortal {
 
         try ITIP20(token).transfer(msg.sender, amount) returns (bool ok) {
             if (!ok) {
-                refunds[token][msg.sender] = amount;
                 revert CallbackRejected();
             }
         } catch {
-            refunds[token][msg.sender] = amount;
             revert CallbackRejected();
         }
 
@@ -877,7 +864,6 @@ contract ZonePortal is IZonePortal {
             }
 
             anchorBlockHash = getBlockHash(tempoBlockNumber);
-            if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
         } else {
             // Ancestry mode: read recentTempoBlockNumber hash, proof verifies ancestry chain
             if (recentTempoBlockNumber <= tempoBlockNumber) {
@@ -889,8 +875,9 @@ contract ZonePortal is IZonePortal {
 
             anchorBlockNumber = recentTempoBlockNumber;
             anchorBlockHash = getBlockHash(recentTempoBlockNumber);
-            if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
         }
+
+        if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
 
         // Verify proof (handles both direct and ancestry modes)
         bool valid = IVerifier(verifier)
