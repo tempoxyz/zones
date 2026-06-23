@@ -14,14 +14,15 @@ import {
     ZONE_TX_CONTEXT
 } from "./IZone.sol";
 
-import {Secp256k1Lib} from "./Secp256k1Lib.sol";
-import {EMPTY_SENTINEL} from "./WithdrawalQueueLib.sol";
+import { Secp256k1Lib } from "./Secp256k1Lib.sol";
+import { EMPTY_SENTINEL } from "./WithdrawalQueueLib.sol";
 
 /// @title ZoneOutbox
 /// @notice Zone-side predeploy for requesting withdrawals back to Tempo
 /// @dev Burns zone tokens and stores pending withdrawals. Sequencer calls finalizeWithdrawalBatch()
 ///      at the end of a block to construct withdrawal queue hash on-chain.
 contract ZoneOutbox is IZoneOutbox {
+
     /*//////////////////////////////////////////////////////////////
                                CONSTANTS
     //////////////////////////////////////////////////////////////*/
@@ -175,7 +176,9 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 gasLimit,
         address fallbackRecipient,
         bytes calldata data
-    ) external {
+    )
+        external
+    {
         _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, "");
     }
 
@@ -202,7 +205,9 @@ contract ZoneOutbox is IZoneOutbox {
         address fallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo
-    ) external {
+    )
+        external
+    {
         _requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo);
     }
 
@@ -227,7 +232,9 @@ contract ZoneOutbox is IZoneOutbox {
         address fallbackRecipient,
         bytes memory data,
         bytes memory revealTo
-    ) internal {
+    )
+        internal
+    {
         // Always require a valid fallback recipient
         if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
@@ -294,13 +301,29 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 index = nextWithdrawalIndex++;
 
         emit WithdrawalRequested(
-            index, msg.sender, token, to, amount, fee, 0, memo, gasLimit, fallbackRecipient, data, revealTo
+            index,
+            msg.sender,
+            token,
+            to,
+            amount,
+            fee,
+            0,
+            memo,
+            gasLimit,
+            fallbackRecipient,
+            data,
+            revealTo
         );
     }
 
     /// @notice Enqueue a failed-deposit bounce-back withdrawal.
     /// @dev Only the ZoneInbox may call this while processing the canonical deposit queue.
-    function enqueueDepositBounceBack(address token, uint128 amount, address bouncebackRecipient, uint128 bouncebackFee)
+    function enqueueDepositBounceBack(
+        address token,
+        uint128 amount,
+        address bouncebackRecipient,
+        uint128 bouncebackFee
+    )
         external
     {
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
@@ -324,7 +347,18 @@ contract ZoneOutbox is IZoneOutbox {
 
         uint64 index = nextWithdrawalIndex++;
         emit WithdrawalRequested(
-            index, address(0), token, bouncebackRecipient, amount, 0, bouncebackFee, bytes32(0), 0, address(0), "", ""
+            index,
+            address(0),
+            token,
+            bouncebackRecipient,
+            amount,
+            0,
+            bouncebackFee,
+            bytes32(0),
+            0,
+            address(0),
+            "",
+            ""
         );
     }
 
@@ -341,14 +375,22 @@ contract ZoneOutbox is IZoneOutbox {
     /// @param count Max number of withdrawals to process (avoids unbounded loops)
     /// @param encryptedSenders One ciphertext per finalized withdrawal (empty for plaintext withdrawals)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders)
+    function finalizeWithdrawalBatch(
+        uint256 count,
+        uint64 blockNumber,
+        bytes[] calldata encryptedSenders
+    )
         external
         returns (bytes32 withdrawalQueueHash)
     {
         return _finalizeWithdrawalBatch(count, blockNumber, encryptedSenders);
     }
 
-    function _finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] memory encryptedSenders)
+    function _finalizeWithdrawalBatch(
+        uint256 count,
+        uint64 blockNumber,
+        bytes[] memory encryptedSenders
+    )
         internal
         returns (bytes32 withdrawalQueueHash)
     {
@@ -382,7 +424,9 @@ contract ZoneOutbox is IZoneOutbox {
 
                 Withdrawal memory w = Withdrawal({
                     token: pendingWithdrawal.token,
-                    senderTag: keccak256(abi.encodePacked(pendingWithdrawal.sender, pendingWithdrawal.txHash)),
+                    senderTag: keccak256(
+                        abi.encodePacked(pendingWithdrawal.sender, pendingWithdrawal.txHash)
+                    ),
                     to: pendingWithdrawal.to,
                     amount: pendingWithdrawal.amount,
                     fee: pendingWithdrawal.fee,
@@ -413,8 +457,10 @@ contract ZoneOutbox is IZoneOutbox {
         uint64 currentWithdrawalBatchIndex = withdrawalBatchIndex;
 
         // Write withdrawal batch parameters to state (for proof access via state root)
-        _lastBatch =
-            LastBatch({withdrawalQueueHash: withdrawalQueueHash, withdrawalBatchIndex: currentWithdrawalBatchIndex});
+        _lastBatch = LastBatch({
+            withdrawalQueueHash: withdrawalQueueHash,
+            withdrawalBatchIndex: currentWithdrawalBatchIndex
+        });
 
         // Emit event for observability (proof reads from state, not events)
         emit BatchFinalized(withdrawalQueueHash, currentWithdrawalBatchIndex);
@@ -465,10 +511,18 @@ contract ZoneOutbox is IZoneOutbox {
         if (!Secp256k1Lib.isValidX(x)) revert InvalidRevealTo();
     }
 
-    function _validateEncryptedSender(bytes memory revealTo, bytes memory encryptedSender) internal pure {
-        uint256 expectedLength = revealTo.length == 0 ? 0 : AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH;
+    function _validateEncryptedSender(
+        bytes memory revealTo,
+        bytes memory encryptedSender
+    )
+        internal
+        pure
+    {
+        uint256 expectedLength =
+            revealTo.length == 0 ? 0 : AUTHENTICATED_WITHDRAWAL_CIPHERTEXT_LENGTH;
         if (encryptedSender.length != expectedLength) {
             revert InvalidEncryptedSenderLength(encryptedSender.length, expectedLength);
         }
     }
+
 }
