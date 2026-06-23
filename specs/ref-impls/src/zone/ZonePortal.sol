@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { getBlockHash } from "./BlockHashHistory.sol";
-import { DepositQueueLib } from "./DepositQueueLib.sol";
-import { ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE } from "./EncryptedDeposit.sol";
+import {getBlockHash} from "./BlockHashHistory.sol";
+import {DepositQueueLib} from "./DepositQueueLib.sol";
+import {ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE} from "./EncryptedDeposit.sol";
+import {Secp256k1Lib} from "./Secp256k1Lib.sol";
 import {
     BlockTransition,
     Deposit,
@@ -21,16 +22,15 @@ import {
     TokenConfig,
     Withdrawal
 } from "./IZone.sol";
-import { WithdrawalQueue, WithdrawalQueueLib } from "./WithdrawalQueueLib.sol";
-import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
-import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
-import { ITIP20Factory } from "tempo-std/interfaces/ITIP20Factory.sol";
-import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
+import {WithdrawalQueue, WithdrawalQueueLib} from "./WithdrawalQueueLib.sol";
+import {StdPrecompiles} from "tempo-std/StdPrecompiles.sol";
+import {ITIP20} from "tempo-std/interfaces/ITIP20.sol";
+import {ITIP20Factory} from "tempo-std/interfaces/ITIP20Factory.sol";
+import {ITIP403Registry} from "tempo-std/interfaces/ITIP403Registry.sol";
 
 /// @title ZonePortal
 /// @notice Per-zone portal that escrows zone tokens on Tempo and manages deposits/withdrawals
 contract ZonePortal is IZonePortal {
-
     using WithdrawalQueueLib for WithdrawalQueue;
 
     /*//////////////////////////////////////////////////////////////
@@ -38,8 +38,7 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice TIP-403 registry for transfer policy authorization checks
-    ITIP403Registry internal constant TIP403_REGISTRY =
-        ITIP403Registry(StdPrecompiles.TIP403_REGISTRY_ADDRESS);
+    ITIP403Registry internal constant TIP403_REGISTRY = ITIP403Registry(StdPrecompiles.TIP403_REGISTRY_ADDRESS);
 
     /// @notice Fixed gas value for deposit fee calculation
     /// @dev Set to 100,000 gas. Deposit fee = FIXED_DEPOSIT_GAS * zoneGasRate.
@@ -264,7 +263,7 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Internal function to enable a token (used by constructor and enableToken)
     function _enableTokenInternal(address _token) internal {
-        _tokenConfigs[_token] = TokenConfig({ enabled: true, depositsActive: true });
+        _tokenConfigs[_token] = TokenConfig({enabled: true, depositsActive: true});
         _enabledTokens.push(_token);
 
         // Give messenger max approval for this token
@@ -308,34 +307,26 @@ contract ZonePortal is IZonePortal {
     /// @param popV Recovery id of the proof-of-possession signature
     /// @param popR R component of the proof-of-possession signature
     /// @param popS S component of the proof-of-possession signature
-    function setSequencerEncryptionKey(
-        bytes32 x,
-        uint8 yParity,
-        uint8 popV,
-        bytes32 popR,
-        bytes32 popS
-    )
+    function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS)
         external
         onlySequencer
     {
         // Validate yParity
-        if (yParity != 0x02 && yParity != 0x03) revert InvalidEphemeralPubkey();
+        if (!Secp256k1Lib.isCompressedYParity(yParity)) revert InvalidEphemeralPubkey();
 
         // Validate x is on the secp256k1 curve
-        if (!_isValidSecp256k1X(x)) revert InvalidEphemeralPubkey();
+        if (!Secp256k1Lib.isValidX(x)) revert InvalidEphemeralPubkey();
 
         // Verify proof of possession: the sequencer must sign with the encryption key's private key
         bytes32 message = keccak256(abi.encode(address(this), x, yParity));
         address recovered = ecrecover(message, popV, popR, popS);
-        address expected = _deriveAddressFromPubKey(x, yParity);
+        address expected = Secp256k1Lib.deriveAddress(x, yParity);
         if (recovered == address(0) || recovered != expected) {
             revert InvalidProofOfPossession();
         }
 
         uint64 activationBlock = uint64(block.number);
-        _encryptionKeys.push(
-            EncryptionKeyEntry({ x: x, yParity: yParity, activationBlock: activationBlock })
-        );
+        _encryptionKeys.push(EncryptionKeyEntry({x: x, yParity: yParity, activationBlock: activationBlock}));
         emit SequencerEncryptionKeyUpdated(x, yParity, _encryptionKeys.length - 1, activationBlock);
     }
 
@@ -347,11 +338,7 @@ contract ZonePortal is IZonePortal {
     /// @notice Get a historical encryption key by index
     /// @param index The index in the key history (0 = first key)
     /// @return entry The key entry with activation block
-    function encryptionKeyAt(uint256 index)
-        external
-        view
-        returns (EncryptionKeyEntry memory entry)
-    {
+    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry) {
         if (index >= _encryptionKeys.length) {
             revert InvalidEncryptionKeyIndex(index);
         }
@@ -393,11 +380,7 @@ contract ZonePortal is IZonePortal {
     /// @param keyIndex The key index to check
     /// @return valid True if the key can be used for new deposits
     /// @return expiresAtBlock Block number when this key expires (0 if current key)
-    function isEncryptionKeyValid(uint256 keyIndex)
-        public
-        view
-        returns (bool valid, uint64 expiresAtBlock)
-    {
+    function isEncryptionKeyValid(uint256 keyIndex) public view returns (bool valid, uint64 expiresAtBlock) {
         if (keyIndex >= _encryptionKeys.length) {
             return (false, 0);
         }
@@ -413,79 +396,6 @@ contract ZonePortal is IZonePortal {
 
         valid = block.number < expiration;
         expiresAtBlock = expiration;
-    }
-
-    /*//////////////////////////////////////////////////////////////
-                       EPHEMERAL KEY VALIDATION
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice secp256k1 field prime
-    uint256 internal constant SECP256K1_P =
-        0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEFFFFFC2F;
-
-    /// @notice (SECP256K1_P - 1) / 2 for Euler's criterion
-    uint256 internal constant SECP256K1_HALF_PM1 =
-        0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF7FFFFE17;
-
-    /// @notice (SECP256K1_P + 1) / 4 for modular square root (p ≡ 3 mod 4)
-    uint256 internal constant SECP256K1_SQRT_EXP =
-        0x3FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFBFFFFF0C;
-
-    /// @notice Validate that an X coordinate corresponds to a valid secp256k1 point
-    /// @dev Uses Euler's criterion via the MODEXP precompile (0x05):
-    ///      x³ + 7 is a quadratic residue mod p iff (x³+7)^((p-1)/2) ≡ 1 (mod p)
-    function _isValidSecp256k1X(bytes32 x) internal view returns (bool) {
-        uint256 px = uint256(x);
-        if (px == 0 || px >= SECP256K1_P) return false;
-
-        // rhs = x³ + 7 mod p
-        uint256 rhs = addmod(mulmod(mulmod(px, px, SECP256K1_P), px, SECP256K1_P), 7, SECP256K1_P);
-
-        // Call MODEXP precompile: rhs^((p-1)/2) mod p
-        // Input format: Bsize(32) || Esize(32) || Msize(32) || B || E || M
-        bytes memory input = abi.encodePacked(
-            uint256(32), uint256(32), uint256(32), rhs, SECP256K1_HALF_PM1, SECP256K1_P
-        );
-
-        (bool success, bytes memory result) = address(0x05).staticcall(input);
-        if (!success || result.length != 32) return false;
-
-        return uint256(bytes32(result)) == 1;
-    }
-
-    /// @notice Derive the Ethereum address corresponding to a compressed secp256k1 public key
-    /// @dev Computes y from x using modular square root, then keccak256(x || y)
-    /// @param x The X coordinate (must be a valid secp256k1 x-coordinate)
-    /// @param yParity 0x02 (even y) or 0x03 (odd y)
-    /// @return addr The derived Ethereum address
-    function _deriveAddressFromPubKey(
-        bytes32 x,
-        uint8 yParity
-    )
-        internal
-        view
-        returns (address addr)
-    {
-        uint256 px = uint256(x);
-
-        // Compute y² = x³ + 7 mod p
-        uint256 rhs = addmod(mulmod(mulmod(px, px, SECP256K1_P), px, SECP256K1_P), 7, SECP256K1_P);
-
-        // Compute y = rhs^((p+1)/4) mod p (valid because p ≡ 3 mod 4)
-        bytes memory modexpInput = abi.encodePacked(
-            uint256(32), uint256(32), uint256(32), rhs, SECP256K1_SQRT_EXP, SECP256K1_P
-        );
-        (bool success, bytes memory modexpResult) = address(0x05).staticcall(modexpInput);
-        require(success && modexpResult.length == 32, "modexp failed");
-        uint256 y = uint256(bytes32(modexpResult));
-
-        // Select correct y based on parity: 0x02 = even, 0x03 = odd
-        if ((y % 2 == 0) != (yParity == 0x02)) {
-            y = SECP256K1_P - y;
-        }
-
-        // Address = last 20 bytes of keccak256(uncompressed public key)
-        addr = address(uint160(uint256(keccak256(abi.encodePacked(px, y)))));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -508,6 +418,43 @@ contract ZonePortal is IZonePortal {
         fee = uint128((gasFee + TEMPO_BASE_FEE_SCALE - 1) / TEMPO_BASE_FEE_SCALE);
     }
 
+    function _validateDepositsActive(address _token) internal view {
+        TokenConfig storage cfg = _tokenConfigs[_token];
+        if (!cfg.enabled) revert TokenNotEnabled();
+        if (!cfg.depositsActive) revert DepositsNotActive();
+    }
+
+    function _validateDepositPolicy(address _token, address to) internal view {
+        uint64 policyId = ITIP20(_token).transferPolicyId();
+        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
+            revert DepositPolicyForbids();
+        }
+        if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
+            revert DepositPolicyForbids();
+        }
+    }
+
+    function _collectDepositFunds(address _token, uint128 amount)
+        internal
+        returns (uint128 fee, uint128 bouncebackFee, uint128 netAmount)
+    {
+        fee = calculateDepositFee();
+        bouncebackFee = calculateBouncebackFee();
+        if (amount < fee + bouncebackFee) revert DepositTooSmall();
+        netAmount = amount - fee;
+
+        // TIP-20 transfers revert on failure, so no boolean check is needed here.
+        ITIP20(_token).transferFrom(msg.sender, address(this), amount);
+        if (fee > 0) {
+            ITIP20(_token).transfer(sequencer, fee);
+        }
+    }
+
+    function _recordDeposit(bytes32 newCurrentDepositQueueHash) internal returns (uint64 thisDeposit) {
+        currentDepositQueueHash = newCurrentDepositQueueHash;
+        thisDeposit = ++depositCount;
+    }
+
     /// @notice Deposit a TIP-20 token into the zone. Returns the new current deposit queue hash.
     /// @dev Fee is deducted from amount and paid to sequencer in the same token.
     ///      The token must be enabled and deposits must be active.
@@ -516,47 +463,15 @@ contract ZonePortal is IZonePortal {
     /// @param amount Total amount to deposit (fee will be deducted)
     /// @param memo User-provided context
     /// @return newCurrentDepositQueueHash The new deposit queue hash after this deposit
-    function deposit(
-        address _token,
-        address to,
-        uint128 amount,
-        bytes32 memo,
-        address bouncebackRecipient
-    )
+    function deposit(address _token, address to, uint128 amount, bytes32 memo, address bouncebackRecipient)
         external
         returns (bytes32 newCurrentDepositQueueHash)
     {
         if (bouncebackRecipient == address(0)) revert InvalidBouncebackRecipient();
 
-        // Validate token is enabled and deposits are active
-        TokenConfig storage cfg = _tokenConfigs[_token];
-        if (!cfg.enabled) revert TokenNotEnabled();
-        if (!cfg.depositsActive) revert DepositsNotActive();
-
-        // Enforce TIP-403 policy: the recipient must be authorized under the
-        // token's transfer policy before accepting the deposit.
-        uint64 policyId = ITIP20(_token).transferPolicyId();
-        if (!TIP403_REGISTRY.isAuthorizedRecipient(policyId, to)) {
-            revert DepositPolicyForbids();
-        }
-        if (!TIP403_REGISTRY.isAuthorizedMintRecipient(policyId, to)) {
-            revert DepositPolicyForbids();
-        }
-
-        // Calculate deposit fee
-        uint128 fee = calculateDepositFee();
-        uint128 bouncebackFee = calculateBouncebackFee();
-        if (amount < fee + bouncebackFee) revert DepositTooSmall();
-        uint128 netAmount = amount - fee;
-
-        // Transfer full amount from sender to this contract
-        // TIP-20 transfers revert on failure, so no boolean check is needed here.
-        ITIP20(_token).transferFrom(msg.sender, address(this), amount);
-
-        // Transfer fee to sequencer
-        if (fee > 0) {
-            ITIP20(_token).transfer(sequencer, fee);
-        }
+        _validateDepositsActive(_token);
+        _validateDepositPolicy(_token, to);
+        (uint128 fee, uint128 bouncebackFee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
         // Build deposit struct with net amount (fee already paid to sequencer on Tempo)
         Deposit memory depositData = Deposit({
@@ -571,8 +486,7 @@ contract ZonePortal is IZonePortal {
 
         // Insert deposit into queue
         newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
-        currentDepositQueueHash = newCurrentDepositQueueHash;
-        uint64 thisDeposit = ++depositCount;
+        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
 
         emit DepositMade(
             newCurrentDepositQueueHash,
@@ -604,33 +518,25 @@ contract ZonePortal is IZonePortal {
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted,
         address bouncebackRecipient
-    )
-        external
-        returns (bytes32 newCurrentDepositQueueHash)
-    {
+    ) external returns (bytes32 newCurrentDepositQueueHash) {
         if (bouncebackRecipient == address(0)) revert InvalidBouncebackRecipient();
 
-        // Validate token is enabled and deposits are active
-        TokenConfig storage cfg = _tokenConfigs[_token];
-        if (!cfg.enabled) revert TokenNotEnabled();
-        if (!cfg.depositsActive) revert DepositsNotActive();
+        _validateDepositsActive(_token);
 
         // Validate ephemeral public key is a valid secp256k1 point
         // Prevents griefing: invalid points make Chaum-Pedersen proofs impossible,
         // which would block chain progress on the zone side.
-        if (encrypted.ephemeralPubkeyYParity != 0x02 && encrypted.ephemeralPubkeyYParity != 0x03) {
+        if (!Secp256k1Lib.isCompressedYParity(encrypted.ephemeralPubkeyYParity)) {
             revert InvalidEphemeralPubkey();
         }
-        if (!_isValidSecp256k1X(encrypted.ephemeralPubkeyX)) {
+        if (!Secp256k1Lib.isValidX(encrypted.ephemeralPubkeyX)) {
             revert InvalidEphemeralPubkey();
         }
 
         // Validate ciphertext length — GCM ciphertext == plaintext length (tag is separate)
         // Prevents DoS: oversized ciphertexts inflate zone-side AES-GCM processing cost
         if (encrypted.ciphertext.length != ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE) {
-            revert InvalidCiphertextLength(
-                encrypted.ciphertext.length, ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE
-            );
+            revert InvalidCiphertextLength(encrypted.ciphertext.length, ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE);
         }
 
         // Validate encryption key
@@ -644,16 +550,7 @@ contract ZonePortal is IZonePortal {
             revert EncryptionKeyExpired(keyIndex, key.activationBlock, nextKey.activationBlock);
         }
 
-        uint128 fee = calculateDepositFee();
-        uint128 bouncebackFee = calculateBouncebackFee();
-        if (amount < fee + bouncebackFee) revert DepositTooSmall();
-        uint128 netAmount = amount - fee;
-
-        // Transfer full amount from sender to this contract
-        ITIP20(_token).transferFrom(msg.sender, address(this), amount);
-        if (fee > 0) {
-            ITIP20(_token).transfer(sequencer, fee);
-        }
+        (uint128 fee, uint128 bouncebackFee, uint128 netAmount) = _collectDepositFunds(_token, amount);
 
         // Build encrypted deposit struct
         EncryptedDeposit memory depositData = EncryptedDeposit({
@@ -667,10 +564,8 @@ contract ZonePortal is IZonePortal {
         });
 
         // Insert encrypted deposit into queue
-        newCurrentDepositQueueHash =
-            DepositQueueLib.enqueueEncrypted(currentDepositQueueHash, depositData);
-        currentDepositQueueHash = newCurrentDepositQueueHash;
-        uint64 thisDeposit = ++depositCount;
+        newCurrentDepositQueueHash = DepositQueueLib.enqueueEncrypted(currentDepositQueueHash, depositData);
+        uint64 thisDeposit = _recordDeposit(newCurrentDepositQueueHash);
 
         emit EncryptedDepositMade(
             newCurrentDepositQueueHash,
@@ -797,13 +692,7 @@ contract ZonePortal is IZonePortal {
     /// @param _token The token from the failed withdrawal
     /// @param amount The amount to bounce back
     /// @param fallbackRecipient The zone address to receive the bounce-back
-    function _enqueueBounceBack(
-        address _token,
-        uint128 amount,
-        address fallbackRecipient
-    )
-        internal
-    {
+    function _enqueueBounceBack(address _token, uint128 amount, address fallbackRecipient) internal {
         Deposit memory depositData = Deposit({
             token: _token,
             sender: address(this),
@@ -814,14 +703,11 @@ contract ZonePortal is IZonePortal {
             memo: bytes32(0)
         });
 
-        bytes32 newCurrentDepositQueueHash =
-            DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
+        bytes32 newCurrentDepositQueueHash = DepositQueueLib.enqueue(currentDepositQueueHash, depositData);
         currentDepositQueueHash = newCurrentDepositQueueHash;
         uint64 thisDeposit = ++depositCount;
 
-        emit WithdrawalBounceBack(
-            newCurrentDepositQueueHash, fallbackRecipient, _token, amount, thisDeposit
-        );
+        emit WithdrawalBounceBack(newCurrentDepositQueueHash, fallbackRecipient, _token, amount, thisDeposit);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -839,10 +725,7 @@ contract ZonePortal is IZonePortal {
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
-    )
-        external
-        onlySequencer
-    {
+    ) external onlySequencer {
         if (blockTransition.prevBlockHash != blockHash) {
             revert InvalidProof();
         }
@@ -912,5 +795,4 @@ contract ZonePortal is IZonePortal {
             lastProcessedDepositNumber
         );
     }
-
 }
