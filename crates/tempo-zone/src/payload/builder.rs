@@ -633,7 +633,6 @@ mod tests {
             to: address!("0x0000000000000000000000000000000000002000"),
             amount: 500_000,
             fee: 0,
-            bouncebackFee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
             fallbackRecipient: sender,
@@ -687,7 +686,6 @@ mod tests {
                             to: recipient,
                             amount: 500_000,
                             bouncebackRecipient: recipient,
-                            bouncebackFee: 0,
                             memo: B256::ZERO,
                         }),
                     ),
@@ -701,7 +699,6 @@ mod tests {
                             sender,
                             amount: 300_000,
                             bouncebackRecipient: sender,
-                            bouncebackFee: 0,
                             keyIndex: U256::ZERO,
                             encrypted: abi::EncryptedDepositPayload {
                                 ephemeralPubkeyX: B256::with_last_byte(0xDD),

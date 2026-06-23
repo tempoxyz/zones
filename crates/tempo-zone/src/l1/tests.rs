@@ -588,7 +588,6 @@ fn test_encrypted_deposit_hash_chain() {
         sender: encrypted.sender,
         amount: encrypted.amount,
         bouncebackRecipient: encrypted.bounceback_recipient,
-        bouncebackFee: encrypted.bounceback_fee,
         keyIndex: encrypted.key_index,
         encrypted: abi::EncryptedDepositPayload {
             ephemeralPubkeyX: encrypted.ephemeral_pubkey_x,
@@ -660,7 +659,6 @@ fn test_mixed_deposit_hash_chain() {
                 to: regular.to,
                 amount: regular.amount,
                 bouncebackRecipient: regular.bounceback_recipient,
-                bouncebackFee: regular.bounceback_fee,
                 memo: regular.memo,
             },
             B256::ZERO,
@@ -676,7 +674,6 @@ fn test_mixed_deposit_hash_chain() {
                 sender: encrypted.sender,
                 amount: encrypted.amount,
                 bouncebackRecipient: encrypted.bounceback_recipient,
-                bouncebackFee: encrypted.bounceback_fee,
                 keyIndex: encrypted.key_index,
                 encrypted: abi::EncryptedDepositPayload {
                     ephemeralPubkeyX: encrypted.ephemeral_pubkey_x,

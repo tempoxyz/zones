@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { EncryptedDepositLib } from "../../src/zone/EncryptedDeposit.sol";
+import {EncryptedDepositLib} from "../../src/zone/EncryptedDeposit.sol";
 import {
     AES_GCM_DECRYPT,
     CHAUM_PEDERSEN_VERIFY,
@@ -21,16 +21,15 @@ import {
     QueuedDeposit,
     ZONE_OUTBOX
 } from "../../src/zone/IZone.sol";
-import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
-import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
-import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { MockZoneToken } from "./mocks/MockZoneToken.sol";
-import { Test } from "forge-std/Test.sol";
+import {ZoneConfig} from "../../src/zone/ZoneConfig.sol";
+import {ZoneInbox} from "../../src/zone/ZoneInbox.sol";
+import {MockTempoState} from "./mocks/MockTempoState.sol";
+import {MockZoneToken} from "./mocks/MockZoneToken.sol";
+import {Test} from "forge-std/Test.sol";
 
 /// @title ZoneInboxTest
 /// @notice Tests for ZoneInbox covering edge cases
 contract ZoneInboxTest is Test {
-
     ZoneConfig public config;
     ZoneInbox public inbox;
     MockZoneToken public zoneToken;
@@ -46,37 +45,26 @@ contract ZoneInboxTest is Test {
 
     function setUp() public {
         zoneToken = new MockZoneToken("Zone USD", "zUSD");
-        tempoState =
-            new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
+        tempoState = new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, GENESIS_TEMPO_BLOCK_NUMBER);
         config = new ZoneConfig(mockPortal, address(tempoState));
-        tempoState.setMockStorageValue(
-            mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
-        );
+        tempoState.setMockStorageValue(mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer))));
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         vm.etch(ZONE_OUTBOX, hex"00");
 
         zoneToken.setMinter(address(inbox), true);
     }
 
-    function _wrapDeposits(Deposit[] memory deposits)
-        internal
-        pure
-        returns (QueuedDeposit[] memory queued)
-    {
+    function _wrapDeposits(Deposit[] memory deposits) internal pure returns (QueuedDeposit[] memory queued) {
         queued = new QueuedDeposit[](deposits.length);
         for (uint256 i = 0; i < deposits.length; i++) {
             queued[i] = QueuedDeposit({
-                depositType: DepositType.Regular,
-                depositData: abi.encode(deposits[i]),
-                rejected: false
+                depositType: DepositType.Regular, depositData: abi.encode(deposits[i]), rejected: false
             });
         }
     }
 
     function _advanceTempo(Deposit[] memory deposits) internal {
-        inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
-        );
+        inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0));
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -85,9 +73,7 @@ contract ZoneInboxTest is Test {
 
     function test_advanceTempo_emptyDepositsArray() public {
         // Set mock to return bytes32(0) for currentDepositQueueHash (empty queue)
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, bytes32(0)
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, bytes32(0));
 
         Deposit[] memory deposits = new Deposit[](0);
 
@@ -106,16 +92,13 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("payment")
         });
 
         // Calculate expected hash
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         vm.prank(sequencer);
         _advanceTempo(deposits);
@@ -132,7 +115,6 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         deposits[1] = Deposit({
@@ -141,7 +123,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
         deposits[2] = Deposit({
@@ -150,7 +131,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 300e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d3")
         });
 
@@ -183,7 +163,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("payment")
         });
 
@@ -211,7 +190,6 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         allDeposits[1] = Deposit({
@@ -220,7 +198,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
 
@@ -258,9 +235,7 @@ contract ZoneInboxTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     function test_advanceTempo_onlySequencer() public {
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, bytes32(0)
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, bytes32(0));
 
         Deposit[] memory deposits = new Deposit[](0);
 
@@ -287,7 +262,6 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         batch1[1] = Deposit({
@@ -296,7 +270,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
 
@@ -319,7 +292,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 500e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d3")
         });
 
@@ -347,15 +319,12 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("payment")
         });
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         vm.prank(sequencer);
         vm.expectEmit(true, true, false, true);
@@ -378,21 +347,16 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("payment")
         });
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         vm.prank(sequencer);
         vm.expectEmit(true, true, true, true);
-        emit IZoneInbox.DepositProcessed(
-            expectedHash, alice, bob, address(zoneToken), 1000e6, bytes32("payment")
-        );
+        emit IZoneInbox.DepositProcessed(expectedHash, alice, bob, address(zoneToken), 1000e6, bytes32("payment"));
         _advanceTempo(deposits);
     }
 
@@ -408,15 +372,12 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 0,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("empty")
         });
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)));
 
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         vm.prank(sequencer);
         _advanceTempo(deposits);
@@ -451,15 +412,12 @@ contract ZoneInboxTest is Test {
                 to: bob,
                 amount: uint128(i + 1) * 1e6,
                 bouncebackRecipient: bob,
-                bouncebackFee: 0,
                 memo: bytes32(i)
             });
             currentHash = keccak256(abi.encode(DepositType.Regular, deposits[i], currentHash));
         }
 
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, currentHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, currentHash);
 
         vm.prank(sequencer);
         _advanceTempo(deposits);
@@ -485,11 +443,7 @@ contract ZoneInboxTest is Test {
     }
 
     /// @notice Build an EncryptedDeposit and its QueuedDeposit wrapper
-    function _makeEncryptedDeposit(
-        address sender,
-        uint128 amount,
-        uint256 keyIndex
-    )
+    function _makeEncryptedDeposit(address sender, uint128 amount, uint256 keyIndex)
         internal
         view
         returns (QueuedDeposit memory qd, EncryptedDeposit memory ed)
@@ -499,7 +453,6 @@ contract ZoneInboxTest is Test {
             sender: sender,
             amount: amount,
             bouncebackRecipient: sender,
-            bouncebackFee: 0,
             keyIndex: keyIndex,
             encrypted: EncryptedDepositPayload({
                 ephemeralPubkeyX: bytes32(uint256(0x1234)),
@@ -509,9 +462,7 @@ contract ZoneInboxTest is Test {
                 tag: bytes16(0)
             })
         });
-        qd = QueuedDeposit({
-            depositType: DepositType.Encrypted, depositData: abi.encode(ed), rejected: false
-        });
+        qd = QueuedDeposit({depositType: DepositType.Encrypted, depositData: abi.encode(ed), rejected: false});
     }
 
     /// @notice Set up precompile mocks for successful encrypted deposit processing
@@ -522,17 +473,13 @@ contract ZoneInboxTest is Test {
 
         // Mock Chaum-Pedersen to return valid
         vm.mockCall(
-            CHAUM_PEDERSEN_VERIFY,
-            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
-            abi.encode(true)
+            CHAUM_PEDERSEN_VERIFY, abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector), abi.encode(true)
         );
 
         // Mock AES-GCM to return expected plaintext
         bytes memory plaintext = EncryptedDepositLib.encodePlaintext(recipient, memo);
         vm.mockCall(
-            AES_GCM_DECRYPT,
-            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
-            abi.encode(plaintext, true)
+            AES_GCM_DECRYPT, abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector), abi.encode(plaintext, true)
         );
     }
 
@@ -550,14 +497,11 @@ contract ZoneInboxTest is Test {
         _setupPrecompileMocks(recipient, memo);
 
         // Build encrypted deposit
-        (QueuedDeposit memory qd, EncryptedDeposit memory ed) =
-            _makeEncryptedDeposit(alice, amount, 0);
+        (QueuedDeposit memory qd, EncryptedDeposit memory ed) = _makeEncryptedDeposit(alice, amount, 0);
 
         // Compute expected hash and set in mock storage
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         // Build deposits and decryptions arrays
         QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
@@ -567,7 +511,7 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
             sharedSecretYParity: 0x02,
-            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            cpProof: ChaumPedersenProof({s: bytes32(uint256(1)), c: bytes32(uint256(2))})
         });
 
         vm.prank(sequencer);
@@ -590,26 +534,19 @@ contract ZoneInboxTest is Test {
 
         // Mock CP to return valid
         vm.mockCall(
-            CHAUM_PEDERSEN_VERIFY,
-            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
-            abi.encode(true)
+            CHAUM_PEDERSEN_VERIFY, abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector), abi.encode(true)
         );
 
         // Mock AES-GCM to return FAILURE
         vm.mockCall(
-            AES_GCM_DECRYPT,
-            abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector),
-            abi.encode(new bytes(0), false)
+            AES_GCM_DECRYPT, abi.encodeWithSelector(IAesGcmDecrypt.decrypt.selector), abi.encode(new bytes(0), false)
         );
 
         // Build encrypted deposit
-        (QueuedDeposit memory qd, EncryptedDeposit memory ed) =
-            _makeEncryptedDeposit(alice, amount, 0);
+        (QueuedDeposit memory qd, EncryptedDeposit memory ed) = _makeEncryptedDeposit(alice, amount, 0);
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
         deposits[0] = qd;
@@ -618,7 +555,7 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
             sharedSecretYParity: 0x02,
-            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            cpProof: ChaumPedersenProof({s: bytes32(uint256(1)), c: bytes32(uint256(2))})
         });
 
         vm.prank(sequencer);
@@ -645,16 +582,13 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 100e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
-        QueuedDeposit memory qdRegular = QueuedDeposit({
-            depositType: DepositType.Regular, depositData: abi.encode(d), rejected: false
-        });
+        QueuedDeposit memory qdRegular =
+            QueuedDeposit({depositType: DepositType.Regular, depositData: abi.encode(d), rejected: false});
 
         // Build encrypted deposit
-        (QueuedDeposit memory qdEnc, EncryptedDeposit memory ed) =
-            _makeEncryptedDeposit(bob, 200e6, 0);
+        (QueuedDeposit memory qdEnc, EncryptedDeposit memory ed) = _makeEncryptedDeposit(bob, 200e6, 0);
 
         // Compute expected hash chain: regular first, then encrypted
         bytes32 h1 = keccak256(abi.encode(DepositType.Regular, d, bytes32(0)));
@@ -670,7 +604,7 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xabcd)),
             sharedSecretYParity: 0x02,
-            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            cpProof: ChaumPedersenProof({s: bytes32(uint256(1)), c: bytes32(uint256(2))})
         });
 
         vm.prank(sequencer);
@@ -691,9 +625,7 @@ contract ZoneInboxTest is Test {
         (QueuedDeposit memory qd,) = _makeEncryptedDeposit(alice, 1000e6, 0);
 
         // We need to set the current hash to something - doesn't matter since we expect revert
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever")
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever"));
 
         QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
         deposits[0] = qd;
@@ -713,17 +645,13 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 100e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
-        QueuedDeposit memory qd = QueuedDeposit({
-            depositType: DepositType.Regular, depositData: abi.encode(d), rejected: false
-        });
+        QueuedDeposit memory qd =
+            QueuedDeposit({depositType: DepositType.Regular, depositData: abi.encode(d), rejected: false});
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Regular, d, bytes32(0)));
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
         deposits[0] = qd;
@@ -733,7 +661,7 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(1)),
             sharedSecretYParity: 0x02,
-            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            cpProof: ChaumPedersenProof({s: bytes32(uint256(1)), c: bytes32(uint256(2))})
         });
 
         vm.prank(sequencer);
@@ -765,9 +693,7 @@ contract ZoneInboxTest is Test {
         // Read via ZoneConfig — this should use the _encryptionKeys array slot
         (bytes32 readX, uint8 readYParity) = config.sequencerEncryptionKey();
         assertEq(readX, keyX, "ZoneConfig should read key x from encryption keys array");
-        assertEq(
-            readYParity, keyYParity, "ZoneConfig should read yParity from encryption keys array"
-        );
+        assertEq(readYParity, keyYParity, "ZoneConfig should read yParity from encryption keys array");
     }
 
     /// @notice Verify ZoneConfig.sequencerEncryptionKey() returns the LAST key when multiple exist.
@@ -840,17 +766,13 @@ contract ZoneInboxTest is Test {
 
         // Mock CP to return INVALID
         vm.mockCall(
-            CHAUM_PEDERSEN_VERIFY,
-            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
-            abi.encode(false)
+            CHAUM_PEDERSEN_VERIFY, abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector), abi.encode(false)
         );
 
         // Build encrypted deposit
         (QueuedDeposit memory qd,) = _makeEncryptedDeposit(alice, amount, 0);
 
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever")
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, keccak256("whatever"));
 
         QueuedDeposit[] memory deposits = new QueuedDeposit[](1);
         deposits[0] = qd;
@@ -859,7 +781,7 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xbad)),
             sharedSecretYParity: 0x02,
-            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            cpProof: ChaumPedersenProof({s: bytes32(uint256(1)), c: bytes32(uint256(2))})
         });
 
         vm.prank(sequencer);
@@ -872,10 +794,7 @@ contract ZoneInboxTest is Test {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Helper: set up an encrypted deposit flow where AES-GCM returns a specific plaintext
-    function _setupEncryptedDepositWithPlaintext(
-        bytes memory mockPlaintext,
-        bool aesValid
-    )
+    function _setupEncryptedDepositWithPlaintext(bytes memory mockPlaintext, bool aesValid)
         internal
         returns (QueuedDeposit[] memory deposits, DecryptionData[] memory decs)
     {
@@ -890,9 +809,7 @@ contract ZoneInboxTest is Test {
 
         // Mock CP to return valid
         vm.mockCall(
-            CHAUM_PEDERSEN_VERIFY,
-            abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector),
-            abi.encode(true)
+            CHAUM_PEDERSEN_VERIFY, abi.encodeWithSelector(IChaumPedersenVerify.verifyProof.selector), abi.encode(true)
         );
 
         // Mock AES-GCM to return the specified plaintext
@@ -903,13 +820,10 @@ contract ZoneInboxTest is Test {
         );
 
         // Build encrypted deposit
-        (QueuedDeposit memory qd, EncryptedDeposit memory ed) =
-            _makeEncryptedDeposit(alice, amount, 0);
+        (QueuedDeposit memory qd, EncryptedDeposit memory ed) = _makeEncryptedDeposit(alice, amount, 0);
 
         bytes32 expectedHash = keccak256(abi.encode(DepositType.Encrypted, ed, bytes32(0)));
-        tempoState.setMockStorageValue(
-            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash
-        );
+        tempoState.setMockStorageValue(mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, expectedHash);
 
         deposits = new QueuedDeposit[](1);
         deposits[0] = qd;
@@ -918,7 +832,7 @@ contract ZoneInboxTest is Test {
         decs[0] = DecryptionData({
             sharedSecret: bytes32(uint256(0xdeadbeef)),
             sharedSecretYParity: 0x02,
-            cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            cpProof: ChaumPedersenProof({s: bytes32(uint256(1)), c: bytes32(uint256(2))})
         });
     }
 
@@ -1006,5 +920,4 @@ contract ZoneInboxTest is Test {
         assertEq(zoneToken.balanceOf(recipient), 1000e6, "recipient should receive funds");
         assertEq(zoneToken.balanceOf(alice), 0, "sender should get nothing (successful deposit)");
     }
-
 }

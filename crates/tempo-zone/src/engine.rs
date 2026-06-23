@@ -123,6 +123,7 @@ impl ZoneEngine {
     /// 2. Advances the zone chain for each available L1 block (no delay between blocks)
     /// 3. Sends periodic FCU heartbeats
     pub async fn run(mut self) {
+        // NOTE: why is this one second?
         let mut fcu_interval = tokio::time::interval(Duration::from_secs(1));
         fcu_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

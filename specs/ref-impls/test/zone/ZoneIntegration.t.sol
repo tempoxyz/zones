@@ -16,45 +16,34 @@ import {
     Withdrawal,
     ZoneParams
 } from "../../src/zone/IZone.sol";
-import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
-import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
-import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
-import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
-import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
-import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
-import { ZonePortal } from "../../src/zone/ZonePortal.sol";
-import { BaseTest } from "../BaseTest.t.sol";
-import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
+import {EMPTY_SENTINEL} from "../../src/zone/WithdrawalQueueLib.sol";
+import {ZoneConfig} from "../../src/zone/ZoneConfig.sol";
+import {ZoneFactory} from "../../src/zone/ZoneFactory.sol";
+import {ZoneInbox} from "../../src/zone/ZoneInbox.sol";
+import {ZoneMessenger} from "../../src/zone/ZoneMessenger.sol";
+import {ZoneOutbox} from "../../src/zone/ZoneOutbox.sol";
+import {ZonePortal} from "../../src/zone/ZonePortal.sol";
+import {BaseTest} from "../BaseTest.t.sol";
+import {ITIP20} from "tempo-std/interfaces/ITIP20.sol";
 
-import { MockTempoState } from "./mocks/MockTempoState.sol";
-import { MockZoneToken } from "./mocks/MockZoneToken.sol";
+import {MockTempoState} from "./mocks/MockTempoState.sol";
+import {MockZoneToken} from "./mocks/MockZoneToken.sol";
 
 /// @notice Mock receiver that tracks received amounts
 contract TrackingReceiver is IWithdrawalReceiver {
-
     uint256 public totalReceived;
     uint256 public callCount;
 
-    function onWithdrawalReceived(
-        bytes32,
-        address,
-        uint128 amount,
-        bytes calldata
-    )
-        external
-        returns (bytes4)
-    {
+    function onWithdrawalReceived(bytes32, address, uint128 amount, bytes calldata) external returns (bytes4) {
         totalReceived += amount;
         callCount++;
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }
-
 }
 
 /// @title ZoneIntegrationTest
 /// @notice Comprehensive integration tests for the full zone lifecycle
 contract ZoneIntegrationTest is BaseTest {
-
     // L1 contracts
     ZoneFactory public l1Factory;
     ZonePortal public l1Portal;
@@ -111,9 +100,7 @@ contract ZoneIntegrationTest is BaseTest {
         // L2 setup
         l2TempoState = new MockTempoState(admin, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
         l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(admin))));
         l2Inbox = new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));
         l2Outbox = new ZoneOutbox(address(l2Config));
 
@@ -121,25 +108,17 @@ contract ZoneIntegrationTest is BaseTest {
         l2ZoneToken.setBurner(address(l2Outbox), true);
     }
 
-    function _wrapDeposits(Deposit[] memory deposits)
-        internal
-        pure
-        returns (QueuedDeposit[] memory queued)
-    {
+    function _wrapDeposits(Deposit[] memory deposits) internal pure returns (QueuedDeposit[] memory queued) {
         queued = new QueuedDeposit[](deposits.length);
         for (uint256 i = 0; i < deposits.length; i++) {
             queued[i] = QueuedDeposit({
-                depositType: DepositType.Regular,
-                depositData: abi.encode(deposits[i]),
-                rejected: false
+                depositType: DepositType.Regular, depositData: abi.encode(deposits[i]), rejected: false
             });
         }
     }
 
     function _advanceTempo(Deposit[] memory deposits) internal {
-        l2Inbox.advanceTempo(
-            "", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0)
-        );
+        l2Inbox.advanceTempo("", _wrapDeposits(deposits), new DecryptionData[](0), new EnabledToken[](0));
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
@@ -155,18 +134,13 @@ contract ZoneIntegrationTest is BaseTest {
         uint64 gasLimit,
         address fallbackRecipient,
         bytes memory callbackData
-    )
-        internal
-        view
-        returns (Withdrawal memory)
-    {
+    ) internal view returns (Withdrawal memory) {
         return Withdrawal({
             token: address(l2ZoneToken),
             senderTag: _senderTag(sender, txSequence),
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
@@ -175,11 +149,7 @@ contract ZoneIntegrationTest is BaseTest {
         });
     }
 
-    function _emptyEncryptedSenders(uint256 count)
-        internal
-        view
-        returns (bytes[] memory encryptedSenders)
-    {
+    function _emptyEncryptedSenders(uint256 count) internal view returns (bytes[] memory encryptedSenders) {
         uint256 pending = l2Outbox.pendingWithdrawalsCount();
         if (count > pending) {
             count = pending;
@@ -189,9 +159,7 @@ contract ZoneIntegrationTest is BaseTest {
 
     function _finalizeWithdrawalBatch(uint256 count) internal returns (bytes32) {
         vm.startPrank(admin);
-        bytes32 hash = l2Outbox.finalizeWithdrawalBatch(
-            count, uint64(block.number), _emptyEncryptedSenders(count)
-        );
+        bytes32 hash = l2Outbox.finalizeWithdrawalBatch(count, uint64(block.number), _emptyEncryptedSenders(count));
         vm.stopPrank();
         return hash;
     }
@@ -226,7 +194,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 1000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("alice1")
         });
         deposits[1] = Deposit({
@@ -235,7 +202,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 2000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("alice2")
         });
         deposits[2] = Deposit({
@@ -244,7 +210,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: bob,
             amount: 3000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("bob1")
         });
         deposits[3] = Deposit({
@@ -253,7 +218,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: charlie,
             amount: 500e6,
             bouncebackRecipient: charlie,
-            bouncebackFee: 0,
             memo: bytes32("charlie1")
         });
 
@@ -263,9 +227,7 @@ contract ZoneIntegrationTest is BaseTest {
         bytes32 l2h2 = keccak256(abi.encode(DepositType.Regular, deposits[1], l2h1));
         bytes32 l2h3 = keccak256(abi.encode(DepositType.Regular, deposits[2], l2h2));
         bytes32 l2h4 = keccak256(abi.encode(DepositType.Regular, deposits[3], l2h3));
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2h4
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2h4);
 
         // Capture balances after L1 deposits but before L2 minting
         uint256 alicePre = l2ZoneToken.balanceOf(alice);
@@ -304,15 +266,12 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 1000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
 
         // Deposit hash uses l2ZoneToken consistently
         bytes32 l2Hash1 = keccak256(abi.encode(DepositType.Regular, batch1[0], bytes32(0)));
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash1
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash1);
         uint256 alicePreBatch1 = l2ZoneToken.balanceOf(alice);
         vm.prank(admin);
         _advanceTempo(batch1);
@@ -325,15 +284,10 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({
-                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
-            }),
+            BlockTransition({prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")}),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: d1,
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
+                prevProcessedHash: bytes32(0), nextProcessedHash: d1, prevDepositNumber: 0, nextDepositNumber: 0
+            }),
             bytes32(0),
             "",
             ""
@@ -354,7 +308,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 2000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
         batch2[1] = Deposit({
@@ -363,16 +316,13 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 3000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d3")
         });
 
         // Compute L2 hash chain continuing from l2Hash1
         bytes32 l2Hash2 = keccak256(abi.encode(DepositType.Regular, batch2[0], l2Hash1));
         bytes32 l2Hash3 = keccak256(abi.encode(DepositType.Regular, batch2[1], l2Hash2));
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash3
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash3);
         uint256 alicePreBatch2 = l2ZoneToken.balanceOf(alice);
         vm.prank(admin);
         _advanceTempo(batch2);
@@ -388,8 +338,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Setup: Alice deposits
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 10_000e6);
-        bytes32 depositHash =
-            l1Portal.deposit(address(l2ZoneToken), alice, 5000e6, bytes32("deposit"), alice);
+        bytes32 depositHash = l1Portal.deposit(address(l2ZoneToken), alice, 5000e6, bytes32("deposit"), alice);
         vm.stopPrank();
 
         // Process deposit on L2
@@ -400,12 +349,9 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 5000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("deposit")
         });
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash);
         vm.prank(admin);
         _advanceTempo(deposits);
 
@@ -413,13 +359,7 @@ contract ZoneIntegrationTest is BaseTest {
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), 2000e6);
         l2Outbox.requestWithdrawal(
-            address(l2ZoneToken),
-            address(receiver),
-            2000e6,
-            bytes32("payment"),
-            5_000_000,
-            alice,
-            "callback"
+            address(l2ZoneToken), address(receiver), 2000e6, bytes32("payment"), 5_000_000, alice, "callback"
         );
         vm.stopPrank();
 
@@ -431,24 +371,21 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({
-                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("state")
-            }),
+            BlockTransition({prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("state")}),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: depositHash,
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
             withdrawalHash,
             "",
             ""
         );
 
         // Process withdrawal
-        Withdrawal memory w = _withdrawal(
-            1, alice, address(receiver), 2000e6, bytes32("payment"), 5_000_000, alice, "callback"
-        );
+        Withdrawal memory w =
+            _withdrawal(1, alice, address(receiver), 2000e6, bytes32("payment"), 5_000_000, alice, "callback");
         l1Portal.processWithdrawal(w, bytes32(0));
 
         // Verify callback was executed
@@ -465,8 +402,7 @@ contract ZoneIntegrationTest is BaseTest {
         // Initial deposit
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l1Portal), 100_000e6);
-        bytes32 depositHash =
-            l1Portal.deposit(address(l2ZoneToken), alice, 50_000e6, bytes32("big deposit"), alice);
+        bytes32 depositHash = l1Portal.deposit(address(l2ZoneToken), alice, 50_000e6, bytes32("big deposit"), alice);
         vm.stopPrank();
 
         // Process on L2
@@ -477,21 +413,16 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 50_000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("big deposit")
         });
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash);
         vm.prank(admin);
         _advanceTempo(deposits);
 
         // First batch: Alice withdraws to Bob
         vm.startPrank(alice);
         l2ZoneToken.approve(address(l2Outbox), 50_000e6);
-        l2Outbox.requestWithdrawal(
-            address(l2ZoneToken), bob, 1000e6, bytes32("to bob"), 0, alice, ""
-        );
+        l2Outbox.requestWithdrawal(address(l2ZoneToken), bob, 1000e6, bytes32("to bob"), 0, alice, "");
         vm.stopPrank();
 
         // Each finalizeWithdrawalBatch requires blockNumber == block.number, and each
@@ -503,15 +434,13 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({
-                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
-            }),
+            BlockTransition({prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")}),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: depositHash,
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
             wHash1,
             "",
             ""
@@ -519,9 +448,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Second batch: Alice withdraws to Charlie
         vm.startPrank(alice);
-        l2Outbox.requestWithdrawal(
-            address(l2ZoneToken), charlie, 2000e6, bytes32("to charlie"), 0, alice, ""
-        );
+        l2Outbox.requestWithdrawal(address(l2ZoneToken), charlie, 2000e6, bytes32("to charlie"), 0, alice, "");
         vm.stopPrank();
 
         vm.roll(block.number + 1);
@@ -531,15 +458,13 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({
-                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s2")
-            }),
+            BlockTransition({prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s2")}),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: depositHash,
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
             wHash2,
             "",
             ""
@@ -547,9 +472,7 @@ contract ZoneIntegrationTest is BaseTest {
 
         // Third batch: Alice withdraws to herself
         vm.startPrank(alice);
-        l2Outbox.requestWithdrawal(
-            address(l2ZoneToken), alice, 3000e6, bytes32("to self"), 0, alice, ""
-        );
+        l2Outbox.requestWithdrawal(address(l2ZoneToken), alice, 3000e6, bytes32("to self"), 0, alice, "");
         vm.stopPrank();
 
         vm.roll(block.number + 1);
@@ -559,15 +482,13 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({
-                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s3")
-            }),
+            BlockTransition({prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s3")}),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: depositHash,
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
             wHash3,
             "",
             ""
@@ -585,13 +506,11 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.processWithdrawal(w1, bytes32(0));
         assertEq(l2ZoneToken.balanceOf(bob), bobBefore + 1000e6);
 
-        Withdrawal memory w2 =
-            _withdrawal(2, alice, charlie, 2000e6, bytes32("to charlie"), 0, alice, "");
+        Withdrawal memory w2 = _withdrawal(2, alice, charlie, 2000e6, bytes32("to charlie"), 0, alice, "");
         l1Portal.processWithdrawal(w2, bytes32(0));
         assertEq(l2ZoneToken.balanceOf(charlie), charlieBefore + 2000e6);
 
-        Withdrawal memory w3 =
-            _withdrawal(3, alice, alice, 3000e6, bytes32("to self"), 0, alice, "");
+        Withdrawal memory w3 = _withdrawal(3, alice, alice, 3000e6, bytes32("to self"), 0, alice, "");
         l1Portal.processWithdrawal(w3, bytes32(0));
         assertEq(l2ZoneToken.balanceOf(alice), aliceBefore + 3000e6);
 
@@ -624,7 +543,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 10_000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         deposits1[1] = Deposit({
@@ -633,13 +551,10 @@ contract ZoneIntegrationTest is BaseTest {
             to: bob,
             amount: 5000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
 
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d2
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d2);
         vm.prank(admin);
         _advanceTempo(deposits1);
 
@@ -667,15 +582,10 @@ contract ZoneIntegrationTest is BaseTest {
         l1Portal.submitBatch(
             uint64(block.number - 1),
             0,
-            BlockTransition({
-                prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")
-            }),
+            BlockTransition({prevBlockHash: l1Portal.blockHash(), nextBlockHash: keccak256("s1")}),
             DepositQueueTransition({
-                    prevProcessedHash: bytes32(0),
-                    nextProcessedHash: d2,
-                    prevDepositNumber: 0,
-                    nextDepositNumber: 0
-                }),
+                prevProcessedHash: bytes32(0), nextProcessedHash: d2, prevDepositNumber: 0, nextDepositNumber: 0
+            }),
             wHash,
             "",
             ""
@@ -689,13 +599,10 @@ contract ZoneIntegrationTest is BaseTest {
             to: charlie,
             amount: 7500e6,
             bouncebackRecipient: charlie,
-            bouncebackFee: 0,
             memo: bytes32("d3")
         });
 
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3);
         vm.prank(admin);
         _advanceTempo(deposits2);
 
@@ -740,12 +647,9 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 10_000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1
-        );
+        l2TempoState.setMockStorageValue(address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1);
         vm.prank(admin);
         _advanceTempo(deposits);
 
@@ -792,5 +696,4 @@ contract ZoneIntegrationTest is BaseTest {
         // Sanity: value should be non-zero after deposit
         assertTrue(fromSlot != bytes32(0), "deposit queue hash should be non-zero after deposit");
     }
-
 }

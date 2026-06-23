@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZonePortal, Withdrawal } from "../../src/zone/IZone.sol";
-import { EMPTY_SENTINEL } from "../../src/zone/WithdrawalQueueLib.sol";
-import { ZonePortal } from "../../src/zone/ZonePortal.sol";
-import { Test } from "forge-std/Test.sol";
+import {IZonePortal, Withdrawal} from "../../src/zone/IZone.sol";
+import {EMPTY_SENTINEL} from "../../src/zone/WithdrawalQueueLib.sol";
+import {ZonePortal} from "../../src/zone/ZonePortal.sol";
+import {Test} from "forge-std/Test.sol";
 
 contract MockPortalToken {
-
     string public name = "Mock USD";
     string public symbol = "mUSD";
     string public currency = "USD";
@@ -34,11 +33,9 @@ contract MockPortalToken {
         balanceOf[to] += amount;
         return true;
     }
-
 }
 
 contract ZonePortalGasLimitTest is Test {
-
     uint256 internal constant WITHDRAWAL_QUEUE_TAIL_SLOT = 11;
     uint256 internal constant WITHDRAWAL_QUEUE_SLOTS_MAPPING_SLOT = 12;
 
@@ -51,14 +48,7 @@ contract ZonePortalGasLimitTest is Test {
     function setUp() public {
         token = new MockPortalToken();
         portal = new ZonePortal(
-            1,
-            address(token),
-            address(0x400),
-            address(this),
-            address(0),
-            keccak256("genesis"),
-            uint64(block.number),
-            ""
+            1, address(token), address(0x400), address(this), address(0), keccak256("genesis"), uint64(block.number), ""
         );
     }
 
@@ -69,7 +59,6 @@ contract ZonePortalGasLimitTest is Test {
             to: recipient,
             amount: 500e6,
             fee: 0,
-            bouncebackFee: 0,
             memo: bytes32(0),
             gasLimit: portal.MAX_WITHDRAWAL_GAS_LIMIT() + 1,
             fallbackRecipient: fallbackRecipient,
@@ -82,9 +71,7 @@ contract ZonePortalGasLimitTest is Test {
         vm.store(address(portal), _withdrawalQueueSlot(0), wHash);
 
         vm.expectEmit(false, true, false, true, address(portal));
-        emit IZonePortal.WithdrawalBounceBack(
-            bytes32(0), fallbackRecipient, address(token), 500e6, 1
-        );
+        emit IZonePortal.WithdrawalBounceBack(bytes32(0), fallbackRecipient, address(token), 500e6, 1);
         vm.expectEmit(true, false, false, true, address(portal));
         emit IZonePortal.WithdrawalProcessed(recipient, address(token), 500e6, false);
         portal.processWithdrawal(w, bytes32(0));
@@ -96,16 +83,18 @@ contract ZonePortalGasLimitTest is Test {
 
     function test_processWithdrawal_depositBounceBack_paysFeeAndRefundsNetAmount() public {
         token.mint(address(portal), 1000e6);
+        uint128 bouncebackFee = portal.calculateBouncebackFee();
+        uint128 refundAmount = 1000e6 - bouncebackFee;
 
-        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6, 25e6);
+        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6);
         _storeSingleWithdrawal(w);
 
         vm.expectEmit(true, false, false, true, address(portal));
-        emit IZonePortal.DepositBounceBack(recipient, address(token), 975e6, 25e6);
+        emit IZonePortal.DepositBounceBack(recipient, address(token), refundAmount, bouncebackFee);
         portal.processWithdrawal(w, bytes32(0));
 
-        assertEq(token.balanceOf(address(this)), 25e6);
-        assertEq(token.balanceOf(recipient), 975e6);
+        assertEq(token.balanceOf(address(this)), bouncebackFee);
+        assertEq(token.balanceOf(recipient), refundAmount);
         assertEq(portal.withdrawalQueueHead(), 1);
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
     }
@@ -113,22 +102,24 @@ contract ZonePortalGasLimitTest is Test {
     function test_processWithdrawal_depositBounceBack_parksRefundWhenTransferFails() public {
         token.mint(address(portal), 1000e6);
         token.setBlockedRecipient(recipient, true);
+        uint128 bouncebackFee = portal.calculateBouncebackFee();
+        uint128 refundAmount = 1000e6 - bouncebackFee;
 
-        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6, 25e6);
+        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6);
         _storeSingleWithdrawal(w);
 
         vm.expectEmit(true, false, false, true, address(portal));
-        emit IZonePortal.DepositBounceBackPending(recipient, address(token), 975e6, 25e6);
+        emit IZonePortal.DepositBounceBackPending(recipient, address(token), refundAmount, bouncebackFee);
         portal.processWithdrawal(w, bytes32(0));
 
-        assertEq(token.balanceOf(address(this)), 25e6);
+        assertEq(token.balanceOf(address(this)), bouncebackFee);
         assertEq(token.balanceOf(recipient), 0);
-        assertEq(portal.refunds(address(token), recipient), 975e6);
+        assertEq(portal.refunds(address(token), recipient), refundAmount);
 
         token.setBlockedRecipient(recipient, false);
         vm.prank(recipient);
-        assertEq(portal.claimRefund(address(token)), 975e6);
-        assertEq(token.balanceOf(recipient), 975e6);
+        assertEq(portal.claimRefund(address(token)), refundAmount);
+        assertEq(token.balanceOf(recipient), refundAmount);
         assertEq(portal.refunds(address(token), recipient), 0);
     }
 
@@ -136,21 +127,13 @@ contract ZonePortalGasLimitTest is Test {
         return keccak256(abi.encode(slot, WITHDRAWAL_QUEUE_SLOTS_MAPPING_SLOT));
     }
 
-    function _depositBounceBackWithdrawal(
-        uint128 amount,
-        uint128 bouncebackFee
-    )
-        internal
-        view
-        returns (Withdrawal memory)
-    {
+    function _depositBounceBackWithdrawal(uint128 amount) internal view returns (Withdrawal memory) {
         return Withdrawal({
             token: address(token),
             senderTag: keccak256(abi.encodePacked(address(0), bytes32(0))),
             to: recipient,
             amount: amount,
             fee: 0,
-            bouncebackFee: bouncebackFee,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: address(0),
@@ -163,5 +146,4 @@ contract ZonePortalGasLimitTest is Test {
         vm.store(address(portal), bytes32(WITHDRAWAL_QUEUE_TAIL_SLOT), bytes32(uint256(1)));
         vm.store(address(portal), _withdrawalQueueSlot(0), keccak256(abi.encode(w, EMPTY_SENTINEL)));
     }
-
 }

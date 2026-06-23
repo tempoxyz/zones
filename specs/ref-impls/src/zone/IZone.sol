@@ -4,7 +4,6 @@ pragma solidity ^0.8.13;
 /// @title IZoneToken
 /// @notice Interface for the zone's zone token (TIP-20 with mint/burn for system)
 interface IZoneToken {
-
     function mint(address to, uint256 amount) external;
 
     function burn(uint256 amount) external;
@@ -14,7 +13,6 @@ interface IZoneToken {
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
 
     function balanceOf(address account) external view returns (uint256);
-
 }
 
 /// @notice Common types for the Zone protocol
@@ -72,7 +70,6 @@ struct Deposit {
     address to;
     uint128 amount;
     address bouncebackRecipient;
-    uint128 bouncebackFee;
     bytes32 memo;
 }
 
@@ -100,7 +97,6 @@ struct EncryptedDeposit {
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
     address bouncebackRecipient; // Tempo recipient for a failed-deposit refund
-    uint128 bouncebackFee; // Tempo-side refund processing fee snapshotted at deposit time
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
@@ -174,15 +170,7 @@ struct EnabledToken {
 /// @title ITIP20ZoneFactory
 /// @notice Interface for the zone's TIP20 factory that enables new tokens
 interface ITIP20ZoneFactory {
-
-    function enableToken(
-        address token,
-        string calldata name,
-        string calldata symbol,
-        string calldata currency
-    )
-        external;
-
+    function enableToken(address token, string calldata name, string calldata symbol, string calldata currency) external;
 }
 
 // TIP20 factory predeploy address
@@ -207,7 +195,6 @@ address constant SHA256 = 0x0000000000000000000000000000000000000002;
 ///      - sharedSecretPoint = privSeq * ephemeralPub (the ECDH computation)
 ///      This proves correct derivation without revealing the private key.
 interface IChaumPedersenVerify {
-
     /// @notice Verify a Chaum-Pedersen proof for ECDH shared secret derivation
     /// @dev Verification equations:
     ///      - R1 = s*G - c*pubSeq
@@ -230,11 +217,7 @@ interface IChaumPedersenVerify {
         bytes32 sequencerPubX,
         uint8 sequencerPubYParity,
         ChaumPedersenProof calldata proof
-    )
-        external
-        view
-        returns (bool valid);
-
+    ) external view returns (bool valid);
 }
 
 /// @title IAesGcmDecrypt
@@ -242,7 +225,6 @@ interface IChaumPedersenVerify {
 /// @dev Decrypts ciphertext and verifies the GCM authentication tag.
 ///      HKDF-SHA256 key derivation is done in Solidity using the SHA256 precompile.
 interface IAesGcmDecrypt {
-
     /// @notice Decrypt AES-256-GCM ciphertext and verify authentication tag
     /// @dev Returns empty bytes and false if tag verification fails.
     ///      AAD (Additional Authenticated Data) is typically empty for ECIES.
@@ -253,52 +235,32 @@ interface IAesGcmDecrypt {
     /// @param tag GCM authentication tag (16 bytes)
     /// @return plaintext The decrypted data (empty if verification fails)
     /// @return valid True if the tag verifies and decryption succeeds
-    function decrypt(
-        bytes32 key,
-        bytes12 nonce,
-        bytes calldata ciphertext,
-        bytes calldata aad,
-        bytes16 tag
-    )
+    function decrypt(bytes32 key, bytes12 nonce, bytes calldata ciphertext, bytes calldata aad, bytes16 tag)
         external
         view
         returns (bytes memory plaintext, bool valid);
-
 }
 
 /// @title ITempoStateReader
 /// @notice Standalone precompile for reading Tempo L1 contract storage at a given block height
 /// @dev Predeploy at 0x1c00000000000000000000000000000000000004
 interface ITempoStateReader {
-
     /// @notice Read a single storage slot from a Tempo L1 contract
     /// @param account The Tempo L1 contract address
     /// @param slot The storage slot to read
     /// @param blockNumber The L1 block number to query
     /// @return value The storage value
-    function readStorageAt(
-        address account,
-        bytes32 slot,
-        uint64 blockNumber
-    )
-        external
-        view
-        returns (bytes32);
+    function readStorageAt(address account, bytes32 slot, uint64 blockNumber) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo L1 contract
     /// @param account The Tempo L1 contract address
     /// @param slots The storage slots to read
     /// @param blockNumber The L1 block number to query
     /// @return values The storage values
-    function readStorageBatchAt(
-        address account,
-        bytes32[] calldata slots,
-        uint64 blockNumber
-    )
+    function readStorageBatchAt(address account, bytes32[] calldata slots, uint64 blockNumber)
         external
         view
         returns (bytes32[] memory);
-
 }
 
 // Maximum callback gas a withdrawal may request.
@@ -313,7 +275,6 @@ struct Withdrawal {
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     uint128 fee; // processing fee for sequencer (calculated at request time)
-    uint128 bouncebackFee; // deposit bounce-back fee reserved at deposit time (zero for user withdrawals)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient; // zone address for bounce-back if call fails
@@ -328,7 +289,6 @@ struct PendingWithdrawal {
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     uint128 fee; // processing fee for sequencer (calculated at request time)
-    uint128 bouncebackFee; // deposit bounce-back fee reserved at deposit time (zero for user withdrawals)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient; // zone address for bounce-back if call fails
@@ -361,10 +321,8 @@ address constant ZONE_TX_CONTEXT = 0x1C00000000000000000000000000000000000005;
 /// @title IZoneTxContext
 /// @notice Interface for the zone precompile that exposes the currently executing tx hash
 interface IZoneTxContext {
-
     /// @notice Returns the hash of the currently executing zone transaction
     function currentTxHash() external returns (bytes32);
-
 }
 
 /*//////////////////////////////////////////////////////////////
@@ -401,7 +359,6 @@ bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(8));
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
 interface IVerifier {
-
     /// @notice Verify a batch proof
     /// @dev The proof validates:
     ///      1. Valid state transition from prevBlockHash to nextBlockHash
@@ -433,17 +390,12 @@ interface IVerifier {
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
-    )
-        external
-        view
-        returns (bool);
-
+    ) external view returns (bool);
 }
 
 /// @title IZoneFactory
 /// @notice Interface for creating zones
 interface IZoneFactory {
-
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (sequencer can enable more later)
         address sequencer;
@@ -479,9 +431,7 @@ interface IZoneFactory {
     /// @param params The initial token, sequencer, verifier, and genesis parameters for the zone.
     /// @return zoneId The newly assigned zone ID.
     /// @return portal The deployed portal address for the new zone.
-    function createZone(CreateZoneParams calldata params)
-        external
-        returns (uint32 zoneId, address portal);
+    function createZone(CreateZoneParams calldata params) external returns (uint32 zoneId, address portal);
 
     /// @notice Returns the number of zones created so far.
     /// @return count The total number of created zones, excluding reserved zone ID 0.
@@ -501,7 +451,6 @@ interface IZoneFactory {
     /// @param messenger The messenger address to check.
     /// @return isMessenger True if `messenger` was created by this factory.
     function isZoneMessenger(address messenger) external view returns (bool);
-
 }
 
 /// @notice Per-token configuration in the portal's token registry
@@ -515,7 +464,6 @@ struct TokenConfig {
 /// @title IZonePortal
 /// @notice Interface for zone portal on Tempo
 interface IZonePortal {
-
     event DepositMade(
         bytes32 indexed newCurrentDepositQueueHash,
         address indexed sender,
@@ -523,7 +471,6 @@ interface IZonePortal {
         address to,
         uint128 netAmount,
         uint128 fee,
-        uint128 bouncebackFee,
         bytes32 memo,
         address bouncebackRecipient,
         uint64 depositNumber
@@ -537,9 +484,7 @@ interface IZonePortal {
         uint64 lastProcessedDepositNumber
     );
 
-    event WithdrawalProcessed(
-        address indexed to, address token, uint128 amount, bool callbackSuccess
-    );
+    event WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess);
 
     event WithdrawalBounceBack(
         bytes32 indexed newCurrentDepositQueueHash,
@@ -549,9 +494,7 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
-    event SequencerTransferStarted(
-        address indexed currentSequencer, address indexed pendingSequencer
-    );
+    event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
 
     /// @notice Emitted when an encrypted deposit is made (recipient/memo not revealed)
@@ -561,7 +504,6 @@ interface IZonePortal {
         address token,
         uint128 netAmount,
         uint128 fee,
-        uint128 bouncebackFee,
         uint256 keyIndex,
         bytes32 ephemeralPubkeyX,
         uint8 ephemeralPubkeyYParity,
@@ -572,9 +514,7 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
-    event DepositBounceBack(
-        address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee
-    );
+    event DepositBounceBack(address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee);
 
     event DepositBounceBackPending(
         address indexed bouncebackRecipient, address token, uint128 amount, uint128 bouncebackFee
@@ -588,9 +528,7 @@ interface IZonePortal {
     /// @param yParity The Y coordinate parity (0x02 or 0x03)
     /// @param keyIndex The index of this key in the history array
     /// @param activationBlock The Tempo block when this key becomes active
-    event SequencerEncryptionKeyUpdated(
-        bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock
-    );
+    event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
     /// @notice Emitted when sequencer enables a new TIP-20 token for bridging
@@ -723,14 +661,7 @@ interface IZonePortal {
     /// @param popV Recovery id of the proof-of-possession signature
     /// @param popR R component of the proof-of-possession signature
     /// @param popS S component of the proof-of-possession signature
-    function setSequencerEncryptionKey(
-        bytes32 x,
-        uint8 yParity,
-        uint8 popV,
-        bytes32 popR,
-        bytes32 popS
-    )
-        external;
+    function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
 
     /// @notice Get the number of encryption keys in the history
     /// @return The total count of keys (including current)
@@ -768,18 +699,9 @@ interface IZonePortal {
     /// @param keyIndex The key index to check
     /// @return valid True if the key can be used for new deposits
     /// @return expiresAtBlock Block number when this key expires (0 if current key, never expires)
-    function isEncryptionKeyValid(uint256 keyIndex)
-        external
-        view
-        returns (bool valid, uint64 expiresAtBlock);
+    function isEncryptionKeyValid(uint256 keyIndex) external view returns (bool valid, uint64 expiresAtBlock);
 
-    function deposit(
-        address token,
-        address to,
-        uint128 amount,
-        bytes32 memo,
-        address bouncebackRecipient
-    )
+    function deposit(address token, address to, uint128 amount, bytes32 memo, address bouncebackRecipient)
         external
         returns (bytes32 newCurrentDepositQueueHash);
 
@@ -799,9 +721,7 @@ interface IZonePortal {
         uint256 keyIndex,
         EncryptedDepositPayload calldata encrypted,
         address bouncebackRecipient
-    )
-        external
-        returns (bytes32 newCurrentDepositQueueHash);
+    ) external returns (bytes32 newCurrentDepositQueueHash);
 
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
@@ -817,15 +737,12 @@ interface IZonePortal {
         bytes32 withdrawalQueueHash,
         bytes calldata verifierConfig,
         bytes calldata proof
-    )
-        external;
-
+    ) external;
 }
 
 /// @title IZoneMessenger
 /// @notice Interface for zone messenger on Tempo (handles withdrawal callbacks)
 interface IZoneMessenger {
-
     /// @notice Returns the zone's portal address
     function portal() external view returns (address);
 
@@ -845,24 +762,15 @@ interface IZoneMessenger {
         uint128 amount,
         uint64 gasLimit,
         bytes calldata data
-    )
-        external;
-
+    ) external;
 }
 
 /// @title IWithdrawalReceiver
 /// @notice Interface for contracts that receive withdrawals with callbacks
 interface IWithdrawalReceiver {
-
-    function onWithdrawalReceived(
-        bytes32 senderTag,
-        address token,
-        uint128 amount,
-        bytes calldata callbackData
-    )
+    function onWithdrawalReceived(bytes32 senderTag, address token, uint128 amount, bytes calldata callbackData)
         external
         returns (bytes4);
-
 }
 
 /// @notice Withdrawal batch parameters stored in state for proof access
@@ -879,10 +787,7 @@ struct LastBatch {
 ///      System-only contract. Only ZoneInbox can call finalizeTempo().
 ///      Only ZoneInbox, ZoneOutbox, and ZoneConfig can call readTempoStorageSlot(s).
 interface ITempoState {
-
-    event TempoBlockFinalized(
-        bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot
-    );
+    event TempoBlockFinalized(bytes32 indexed blockHash, uint64 indexed blockNumber, bytes32 stateRoot);
 
     error InvalidParentHash();
     error InvalidBlockNumber();
@@ -930,20 +835,12 @@ interface ITempoState {
     function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
 
     /// @notice Read multiple storage slots from a Tempo contract
-    function readTempoStorageSlots(
-        address account,
-        bytes32[] calldata slots
-    )
-        external
-        view
-        returns (bytes32[] memory);
-
+    function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
 }
 
 /// @title IZoneInbox
 /// @notice Interface for zone-side system contract that advances Tempo state and processes deposits
 interface IZoneInbox {
-
     event TempoAdvanced(
         bytes32 indexed tempoBlockHash,
         uint64 indexed tempoBlockNumber,
@@ -973,9 +870,7 @@ interface IZoneInbox {
     );
 
     /// @notice Emitted when an encrypted deposit fails (invalid ciphertext, funds returned to sender)
-    event EncryptedDepositFailed(
-        bytes32 indexed depositHash, address indexed sender, address token, uint128 amount
-    );
+    event EncryptedDepositFailed(bytes32 indexed depositHash, address indexed sender, address token, uint128 amount);
 
     event DepositFailed(
         bytes32 indexed depositHash,
@@ -995,13 +890,9 @@ interface IZoneInbox {
         address bouncebackRecipient
     );
 
-    event WithdrawalBounceBackProcessed(
-        address indexed fallbackRecipient, address token, uint128 amount
-    );
+    event WithdrawalBounceBackProcessed(address indexed fallbackRecipient, address token, uint128 amount);
 
-    event WithdrawalBounceBackPending(
-        address indexed fallbackRecipient, address token, uint128 amount
-    );
+    event WithdrawalBounceBackPending(address indexed fallbackRecipient, address token, uint128 amount);
 
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
 
@@ -1054,15 +945,12 @@ interface IZoneInbox {
         QueuedDeposit[] calldata deposits,
         DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
-    )
-        external;
-
+    ) external;
 }
 
 /// @title IZoneOutbox
 /// @notice Interface for zone outbox on the zone
 interface IZoneOutbox {
-
     /// @notice Maximum callback data size (1KB)
     function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
 
@@ -1079,7 +967,6 @@ interface IZoneOutbox {
         address to,
         uint128 amount,
         uint128 fee,
-        uint128 bouncebackFee,
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
@@ -1144,30 +1031,18 @@ interface IZoneOutbox {
         address fallbackRecipient,
         bytes calldata data,
         bytes calldata revealTo
-    )
-        external;
+    ) external;
 
-    function enqueueDepositBounceBack(
-        address token,
-        uint128 amount,
-        address bouncebackRecipient,
-        uint128 bouncebackFee
-    )
-        external;
+    function enqueueDepositBounceBack(address token, uint128 amount, address bouncebackRecipient) external;
 
     /// @notice Finalize batch at end of block - build withdrawal hash and write to state
     /// @dev Only callable by sequencer. Required per batch (count may be 0).
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
     /// @param count Max number of withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
-    function finalizeWithdrawalBatch(
-        uint256 count,
-        uint64 blockNumber,
-        bytes[] calldata encryptedSenders
-    )
+    function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders)
         external
         returns (bytes32 withdrawalQueueHash);
-
 }
 
 /// @title IZoneConfig
@@ -1175,7 +1050,6 @@ interface IZoneOutbox {
 /// @dev System contract predeploy at 0x1c00000000000000000000000000000000000003
 ///      Provides centralized access to zone metadata and reads sequencer from L1.
 interface IZoneConfig {
-
     error NotSequencer();
     error NoEncryptionKeySet();
 
@@ -1201,5 +1075,4 @@ interface IZoneConfig {
 
     /// @notice Check if a token is enabled by reading from L1 ZonePortal
     function isEnabledToken(address token) external view returns (bool);
-
 }

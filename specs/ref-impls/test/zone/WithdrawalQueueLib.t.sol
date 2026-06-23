@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { Withdrawal } from "../../src/zone/IZone.sol";
+import {Withdrawal} from "../../src/zone/IZone.sol";
 import {
     EMPTY_SENTINEL,
     WITHDRAWAL_QUEUE_CAPACITY,
     WithdrawalQueue,
     WithdrawalQueueLib
 } from "../../src/zone/WithdrawalQueueLib.sol";
-import { Test } from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 
 /// @title WithdrawalQueueHarness
 /// @notice Test harness that wraps the library to convert memory to calldata
 contract WithdrawalQueueHarness {
-
     using WithdrawalQueueLib for WithdrawalQueue;
 
     WithdrawalQueue internal queue;
@@ -45,13 +44,11 @@ contract WithdrawalQueueHarness {
     function slots(uint256 index) external view returns (bytes32) {
         return queue.slots[index];
     }
-
 }
 
 /// @title WithdrawalQueueLibTest
 /// @notice Direct tests for WithdrawalQueueLib functionality
 contract WithdrawalQueueLibTest is Test {
-
     WithdrawalQueueHarness internal harness;
 
     address public alice = address(0x200);
@@ -343,22 +340,13 @@ contract WithdrawalQueueLibTest is Test {
                             HELPER FUNCTIONS
     //////////////////////////////////////////////////////////////*/
 
-    function _makeWithdrawal(
-        address sender,
-        address to,
-        uint128 amount
-    )
-        internal
-        pure
-        returns (Withdrawal memory)
-    {
+    function _makeWithdrawal(address sender, address to, uint128 amount) internal pure returns (Withdrawal memory) {
         return Withdrawal({
             token: address(0x100),
             senderTag: keccak256(abi.encodePacked(sender)),
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: sender,
@@ -366,5 +354,4 @@ contract WithdrawalQueueLibTest is Test {
             encryptedSender: ""
         });
     }
-
 }
