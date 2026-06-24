@@ -261,7 +261,19 @@ where
                         ),
                     )));
                 }
-                Ok(_) => {}
+                Ok(gas_used) => {
+                    // Charge the advanceTempo system tx against the block gas
+                    // budget. The inner block executor enforces the block gas
+                    // limit against a counter that already includes this system
+                    // tx, so the builder's own `cumulative_gas_used` must too.
+                    // Otherwise the admission check below would over-estimate the
+                    // remaining gas and let through a pool tx that the executor
+                    // then rejects with `TransactionGasLimitMoreThanAvailableBlockGas`
+                    // — an error that aborts the whole build and, because zone
+                    // blocks are deterministic, recurs on every rebuild, halting
+                    // block production.
+                    cumulative_gas_used += gas_used.tx_gas_used();
+                }
                 Err(err) => {
                     error!(
                         ?err,
