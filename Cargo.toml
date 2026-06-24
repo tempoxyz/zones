@@ -159,9 +159,9 @@ alloy-sol-types = { version = "1.6.0", default-features = false }
 alloy-transport = "2.1.0"
 
 # commonware
-commonware-codec = "=2026.4.0"
+commonware-codec = "=2026.5.0"
 commonware-consensus = "=2026.4.0"
-commonware-cryptography = "=2026.4.0"
+commonware-cryptography = "=2026.5.0"
 commonware-math = "=2026.4.0"
 commonware-utils = "=2026.4.0"
 
