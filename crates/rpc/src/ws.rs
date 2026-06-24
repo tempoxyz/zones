@@ -49,6 +49,7 @@ const MAX_WS_SUBSCRIPTIONS: usize = 32;
 type NotificationTx = mpsc::Sender<String>;
 type CloseSessionTx = watch::Sender<bool>;
 
+/// Per-subscription redaction applied before sending notifications.
 #[derive(Clone, Copy)]
 enum SubscriptionRedaction {
     None,
@@ -66,6 +67,7 @@ struct ActiveSubscription {
     task: JoinHandle<()>,
 }
 
+/// Subscription stream accepted by RPC dispatch but not yet spawned.
 struct PendingSubscription {
     id: FilterId,
     stream: WsSubscriptionStream,
@@ -183,6 +185,7 @@ fn redacted_subscription_result(
     }
 }
 
+/// Apply block-header privacy rules to `eth_subscribe("newHeads")` payloads.
 fn redact_new_head_result(result: Box<RawValue>) -> Box<RawValue> {
     let Ok(mut header) = serde_json::from_str::<Value>(result.get()) else {
         return result;
@@ -200,6 +203,7 @@ fn redact_new_head_result(result: Box<RawValue>) -> Box<RawValue> {
     to_raw(header).unwrap_or(result)
 }
 
+/// Forward subscription stream items into the session outbound queue.
 fn spawn_subscription(
     subscription_id: FilterId,
     mut subscription: WsSubscriptionStream,
@@ -492,6 +496,7 @@ fn duration_until_unix_timestamp(timestamp: u64) -> Duration {
     Duration::from_secs(timestamp.saturating_sub(now_unix_seconds()))
 }
 
+/// Re-check keychain auth for long-lived WebSocket sessions.
 async fn keychain_auth_still_valid(auth: &AuthContext, state: &RpcState) -> bool {
     let Some(key_id) = auth.keychain_key_id else {
         return true;
