@@ -415,6 +415,17 @@ where
         })
     }
 
+    fn syncing(&self) -> BoxFut<'_> {
+        Box::pin(async move {
+            let status = EthApiSpec::sync_status(&self.eth.api).map_err(internal)?;
+            to_raw(&status)
+        })
+    }
+
+    fn coinbase(&self) -> BoxFut<'_> {
+        Box::pin(async move { to_raw(&Address::ZERO) })
+    }
+
     fn gas_price(&self) -> BoxFut<'_> {
         Box::pin(async move {
             let price = EthFees::gas_price(&self.eth.api).await.map_err(internal)?;
