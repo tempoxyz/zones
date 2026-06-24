@@ -24,8 +24,8 @@ use zone::{
 
 use crate::zone_utils::{
     ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
-    normalize_http_rpc, token_balance, wait_for_balance, wait_for_deposit_processed,
-    wait_for_token_enabled, wait_for_withdrawal_processed,
+    normalize_http_rpc, token_balance, verify_portal_admin, wait_for_balance,
+    wait_for_deposit_processed, wait_for_token_enabled, wait_for_withdrawal_processed,
 };
 
 const DEMO_PATHUSD_GAS_NET: u128 = 5_000_000;
@@ -65,8 +65,13 @@ pub(crate) struct DemoSwapAndDeposit {
     #[arg(long, env = "PRIVATE_KEY")]
     private_key: String,
 
-    /// Sequencer private key (hex). Needed to enable tokens on the portal and
-    /// to encrypt the routed deposit payload.
+    /// Portal admin private key (hex). Needed to enable tokens on the portal.
+    /// If not set, reads adminKey from zone.json, then falls back to sequencer
+    /// key for legacy zones.
+    #[arg(long, env = "ADMIN_KEY")]
+    admin_key: Option<String>,
+
+    /// Sequencer private key (hex). Needed to encrypt the routed deposit payload.
     #[arg(long, env = "SEQUENCER_KEY")]
     sequencer_key: Option<String>,
 
@@ -105,11 +110,17 @@ impl DemoSwapAndDeposit {
                     self.zone_dir.join("zone.json").display()
                 )
             })?;
+        let admin_key = self
+            .admin_key
+            .or_else(|| zone_metadata.get_optional_string("adminKey"))
+            .unwrap_or_else(|| sequencer_key.clone());
 
         let operator_signer = parse_private_key(&self.private_key)?;
         let operator = operator_signer.address();
         let sequencer_signer = parse_private_key(&sequencer_key)?;
         let sequencer = sequencer_signer.address();
+        let admin_signer = parse_private_key(&admin_key)?;
+        let portal_admin = admin_signer.address();
 
         let http_rpc = normalize_http_rpc(&self.l1_rpc_url);
 
@@ -130,6 +141,14 @@ impl DemoSwapAndDeposit {
             .connect(&http_rpc)
             .await?;
         l1_seq
+            .client()
+            .set_poll_interval(std::time::Duration::from_secs(1));
+        let admin_wallet = EthereumWallet::from(admin_signer);
+        let l1_admin = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .wallet(admin_wallet)
+            .connect(&http_rpc)
+            .await?;
+        l1_admin
             .client()
             .set_poll_interval(std::time::Duration::from_secs(1));
 
@@ -170,6 +189,7 @@ impl DemoSwapAndDeposit {
         println!();
         println!("  Operator:         {operator}");
         println!("  Sequencer:        {sequencer}");
+        println!("  Portal admin:     {portal_admin}");
         println!("  Portal:           {portal}");
         println!("  Router:           {router}");
         println!("  L1 RPC:           {http_rpc}");
@@ -217,11 +237,12 @@ impl DemoSwapAndDeposit {
         println!();
 
         println!("Step 4: Enable both tokens on the zone portal");
+        verify_portal_admin(&l1, portal, portal_admin).await?;
         let zone_inbox_from_block = l2.get_block_number().await.unwrap_or(0);
-        enable_token_with_retry(&ZonePortal::new(portal, &l1_seq), alpha).await?;
+        enable_token_with_retry(&ZonePortal::new(portal, &l1_admin), alpha).await?;
         wait_for_token_enabled(&l2, zone_inbox_from_block, alpha).await?;
         let zone_inbox_from_block = l2.get_block_number().await.unwrap_or(0);
-        enable_token_with_retry(&ZonePortal::new(portal, &l1_seq), beta).await?;
+        enable_token_with_retry(&ZonePortal::new(portal, &l1_admin), beta).await?;
         wait_for_token_enabled(&l2, zone_inbox_from_block, beta).await?;
         println!("  Both demo tokens are now available on the zone");
         println!();
@@ -539,7 +560,7 @@ async fn enable_token_with_retry<P: Provider<TempoNetwork>>(
                     continue;
                 }
                 return Err(err)
-                    .wrap_err("enableToken failed — check SEQUENCER_KEY and zone state");
+                    .wrap_err("enableToken failed — check the portal admin key and zone state");
             }
         }
     }

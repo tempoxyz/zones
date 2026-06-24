@@ -43,10 +43,10 @@
 //!
 //! - Each run uses a random salt and random target wallet so runs are fully
 //!   isolated and idempotent.
-//! - Two L1 providers are needed: one for the admin wallet (token operations,
-//!   deposits) and one for the sequencer wallet (`enableToken`). The sequencer
-//!   key is shared with the running zone node, so `enableToken` uses a retry
-//!   loop to handle transient nonce conflicts.
+//! - Two L1 providers are needed: one for the token admin wallet (token operations,
+//!   deposits) and one for the portal admin wallet (`enableToken`). `ADMIN_KEY`
+//!   signs portal governance calls, with `sequencerKey` retained as a legacy
+//!   fallback for zones where admin == sequencer.
 //! - TIP-403 policies are assigned directly to the token via
 //!   `changeTransferPolicyId`. The deployed L1 `TIP403Registry` does not have
 //!   `createCompoundPolicy`, so we use a simple blacklist policy.
@@ -96,12 +96,16 @@ pub(crate) struct DemoBlacklist {
     #[arg(long, env = "PRIVATE_KEY")]
     private_key: String,
 
-    /// Sequencer private key (hex). Required because only the sequencer can enable tokens.
-    /// If not set, reads from the zone.json file specified by --zone-dir.
+    /// Portal admin private key (hex). If not set, reads adminKey from zone.json,
+    /// then falls back to SEQUENCER_KEY / sequencerKey for legacy zones.
+    #[arg(long, env = "ADMIN_KEY")]
+    admin_key: Option<String>,
+
+    /// Sequencer private key (hex). Legacy fallback for zones where admin == sequencer.
     #[arg(long, env = "SEQUENCER_KEY")]
     sequencer_key: Option<String>,
 
-    /// Path to zone directory containing zone.json (used to read sequencer key if --sequencer-key is not set).
+    /// Path to zone directory containing zone.json.
     #[arg(long, default_value = "generated/z5")]
     zone_dir: String,
 
@@ -124,29 +128,28 @@ impl DemoBlacklist {
         let admin = signer.address();
         let wallet = EthereumWallet::from(signer);
 
-        // Resolve sequencer key: CLI flag > env var > zone.json
-        let seq_key_str = match &self.sequencer_key {
-            Some(k) => k.clone(),
-            None => {
-                let zone_json_path = std::path::PathBuf::from(&self.zone_dir).join("zone.json");
-                let zone_json: serde_json::Value = serde_json::from_str(
-                    &std::fs::read_to_string(&zone_json_path).wrap_err_with(|| {
-                        format!(
-                            "no --sequencer-key and could not read {}",
-                            zone_json_path.display()
-                        )
-                    })?,
-                )?;
-                zone_json["sequencerKey"]
-                    .as_str()
-                    .ok_or_else(|| eyre!("sequencerKey not found in {}", zone_json_path.display()))?
-                    .to_string()
-            }
-        };
-        let seq_key = seq_key_str.strip_prefix("0x").unwrap_or(&seq_key_str);
-        let seq_signer: PrivateKeySigner = seq_key.parse()?;
-        let sequencer_addr = seq_signer.address();
-        let seq_wallet = EthereumWallet::from(seq_signer);
+        let zone_json_path = std::path::PathBuf::from(&self.zone_dir).join("zone.json");
+        let zone_json = std::fs::read_to_string(&zone_json_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+        let portal_admin_key_str = self
+            .admin_key
+            .clone()
+            .or_else(|| zone_json.as_ref()?.get("adminKey")?.as_str().map(str::to_owned))
+            .or_else(|| self.sequencer_key.clone())
+            .or_else(|| zone_json.as_ref()?.get("sequencerKey")?.as_str().map(str::to_owned))
+            .ok_or_else(|| {
+                eyre!(
+                    "portal admin key missing. Set ADMIN_KEY or store adminKey in {}. SEQUENCER_KEY/sequencerKey only works for legacy zones where admin == sequencer.",
+                    zone_json_path.display()
+                )
+            })?;
+        let portal_admin_key = portal_admin_key_str
+            .strip_prefix("0x")
+            .unwrap_or(&portal_admin_key_str);
+        let portal_admin_signer: PrivateKeySigner = portal_admin_key.parse()?;
+        let portal_admin = portal_admin_signer.address();
+        let portal_admin_wallet = EthereumWallet::from(portal_admin_signer);
 
         let http_rpc = self
             .l1_rpc_url
@@ -160,12 +163,11 @@ impl DemoBlacklist {
         l1.client()
             .set_poll_interval(std::time::Duration::from_secs(1));
 
-        // Separate provider for sequencer-only operations (enableToken)
-        let l1_seq = ProviderBuilder::new_with_network::<TempoNetwork>()
-            .wallet(seq_wallet)
+        let l1_portal_admin = ProviderBuilder::new_with_network::<TempoNetwork>()
+            .wallet(portal_admin_wallet)
             .connect(&http_rpc)
             .await?;
-        l1_seq
+        l1_portal_admin
             .client()
             .set_poll_interval(std::time::Duration::from_secs(1));
 
@@ -177,11 +179,11 @@ impl DemoBlacklist {
         println!("║          TIP-20 + TIP-403 Blacklist Demo                    ║");
         println!("╚══════════════════════════════════════════════════════════════╝");
         println!();
-        println!("  Admin:     {admin}");
-        println!("  Sequencer: {sequencer_addr}");
-        println!("  Portal:    {}", self.portal);
-        println!("  L1 RPC:    {http_rpc}");
-        println!("  Zone RPC:  {}", self.zone_rpc_url);
+        println!("  Admin:        {admin}");
+        println!("  Portal admin: {portal_admin}");
+        println!("  Portal:       {}", self.portal);
+        println!("  L1 RPC:       {http_rpc}");
+        println!("  Zone RPC:     {}", self.zone_rpc_url);
         println!();
 
         // Generate a fresh target wallet for the demo
@@ -266,18 +268,19 @@ impl DemoBlacklist {
         // ── Step 3: Enable token on the zone ─────────────────────────────
         println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
         println!("Step 3: Enable token on zone");
-        println!("  Only the sequencer ({sequencer_addr}) can call enableToken on the portal.");
+        println!("  Only the portal admin can call enableToken on the portal.");
         println!();
 
         let portal = ZonePortal::new(self.portal, &l1);
-        let seq_portal = ZonePortal::new(self.portal, &l1_seq);
-        // Retry enableToken because the sequencer key is shared with the running zone
-        // node, which may have pending transactions causing nonce conflicts.
+        crate::zone_utils::verify_portal_admin(&l1, self.portal, portal_admin).await?;
+        let admin_portal = ZonePortal::new(self.portal, &l1_portal_admin);
+        // Retry enableToken because legacy zones may still use the sequencer key
+        // as the admin key, and the running node can create nonce conflicts.
         let receipt = {
             let mut last_err = None;
             let mut pending = None;
             for attempt in 0..5u32 {
-                match seq_portal.enableToken(token_addr).send().await {
+                match admin_portal.enableToken(token_addr).send().await {
                     Ok(p) => {
                         pending = Some(p);
                         break;
@@ -293,7 +296,8 @@ impl DemoBlacklist {
                             last_err = Some(e);
                             continue;
                         }
-                        return Err(e).wrap_err("enableToken failed — is SEQUENCER_KEY correct?");
+                        return Err(e)
+                            .wrap_err("enableToken failed — is the portal admin key correct?");
                     }
                 }
             }
@@ -446,7 +450,9 @@ impl DemoBlacklist {
         send_encrypted_deposit(&portal, self.portal, token_addr, target, self.amount).await?;
 
         println!("  Waiting for zone to process (expecting EncryptedDepositFailed)...");
-        let bounced = wait_for_encrypted_result(&l2, l2_block_before, admin, Some(target)).await?;
+        let bounced =
+            wait_for_encrypted_result(&l2, l2_block_before, admin, token_addr, self.amount, target)
+                .await?;
         if bounced {
             println!("  BOUNCED! Deposit to blacklisted address was correctly rejected.");
             let sender_l2_balance = get_l2_balance(&l2, token_addr, admin).await?;
@@ -513,7 +519,9 @@ impl DemoBlacklist {
         send_encrypted_deposit(&portal, self.portal, token_addr, target, self.amount).await?;
 
         println!("  Waiting for zone to process (expecting EncryptedDepositProcessed)...");
-        let bounced = wait_for_encrypted_result(&l2, l2_block_before, admin, Some(target)).await?;
+        let bounced =
+            wait_for_encrypted_result(&l2, l2_block_before, admin, token_addr, self.amount, target)
+                .await?;
         if bounced {
             println!("  WARNING: Deposit still bounced — policy may need more time to sync.");
         } else {
@@ -729,7 +737,7 @@ async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
     Err(eyre!("timeout waiting for DepositProcessed"))
 }
 
-/// Poll L2 for either `EncryptedDepositProcessed` or `EncryptedDepositFailed`.
+/// Poll L2 for the encrypted deposit terminal event.
 ///
 /// Returns `true` if the deposit bounced (blacklisted), `false` if it was accepted.
 /// Times out after 60 seconds (120 polls × 500ms).
@@ -737,13 +745,14 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
     l2: &P,
     from_block: u64,
     sender: Address,
-    to: Option<Address>,
+    token: Address,
+    amount: u128,
+    to: Address,
 ) -> eyre::Result<bool> {
     let processed_filter = Filter::new()
         .address(zone::abi::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
-
     let failed_filter = Filter::new()
         .address(zone::abi::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
@@ -754,16 +763,20 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
         for log in &logs {
             if let Ok(event) = ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
                 && event.data.sender == sender
-                && to.is_none_or(|t| event.data.to == t)
+                && event.data.to == to
+                && event.data.token == token
+                && event.data.amount == amount
             {
                 return Ok(false);
             }
         }
 
-        let failed_logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
-        for log in &failed_logs {
+        let logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
+        for log in &logs {
             if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
                 && event.data.sender == sender
+                && event.data.token == token
+                && event.data.amount == amount
             {
                 return Ok(true);
             }

@@ -215,7 +215,7 @@ just token-policy $TOKEN
 ### 6. Enable the token on the zone and deposit
 
 ```bash
-# Enable the token for bridging (requires SEQUENCER_KEY)
+# Enable the token for bridging (requires ADMIN_KEY; SEQUENCER_KEY works only for legacy zones where admin == sequencer)
 just enable-token $TOKEN
 
 # Approve the portal to spend your tokens

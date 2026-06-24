@@ -30,7 +30,6 @@ use reth_rpc_eth_api::{
     helpers::{EthApiSpec, EthBlocks, EthCall, EthFees, EthState, EthTransactions, FullEthApi},
 };
 use reth_rpc_eth_types::logs_utils;
-use reth_transaction_pool::TransactionPool;
 use tempo_alloy::{
     TempoNetwork,
     rpc::{TempoHeaderResponse, TempoTransactionRequest},
@@ -301,6 +300,18 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
             .map_err(internal)
     }
 
+    async fn zone_sequencer(&self) -> Result<Address, JsonRpcError> {
+        if self.config.zone_portal.is_zero() {
+            return Ok(Address::ZERO);
+        }
+
+        ZonePortal::new(self.config.zone_portal, &self.l1_provider)
+            .sequencer()
+            .call()
+            .await
+            .map_err(internal)
+    }
+
     async fn terminal_event_for_deposit(
         &self,
         deposit_hash: B256,
@@ -414,6 +425,17 @@ where
             let chain_id = EthApiSpec::chain_id(&self.eth.api);
             to_raw(&chain_id.to_string())
         })
+    }
+
+    fn syncing(&self) -> BoxFut<'_> {
+        Box::pin(async move {
+            let status = EthApiSpec::sync_status(&self.eth.api).map_err(internal)?;
+            to_raw(&status)
+        })
+    }
+
+    fn coinbase(&self) -> BoxFut<'_> {
+        Box::pin(async move { to_raw(&self.zone_sequencer().await?) })
     }
 
     fn gas_price(&self) -> BoxFut<'_> {
@@ -657,6 +679,8 @@ where
 
     fn get_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
+            let zone_tokens = self.zone_tokens().await?;
+            zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
             zone_rpc::filter::scope_filter(&mut filter);
             let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
                 .await
@@ -668,6 +692,8 @@ where
 
     fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
+            let zone_tokens = self.zone_tokens().await?;
+            zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
             zone_rpc::filter::scope_filter(&mut filter);
             let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
                 .await
@@ -799,6 +825,8 @@ where
             let provider = self.eth.api.provider().clone();
             let caller = auth.caller;
 
+            let zone_tokens = self.zone_tokens().await?;
+            zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
             zone_rpc::filter::scope_filter(&mut filter);
 
             let stream = provider
@@ -828,44 +856,6 @@ where
         })
     }
 
-    fn ws_subscribe_pending_transactions(
-        &self,
-        full: bool,
-        auth: AuthContext,
-    ) -> BoxWsSubscriptionFut<'_> {
-        Box::pin(async move {
-            let caller = auth.caller;
-            let pool = self.eth.api.pool().clone();
-
-            if !full {
-                let stream =
-                    pool.new_pending_pool_transactions_listener()
-                        .filter_map(move |pending_tx| {
-                            std::future::ready(
-                                (pending_tx.transaction.sender() == caller)
-                                    .then(|| to_raw(pending_tx.transaction.hash())),
-                            )
-                        });
-                let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
-                return Ok(stream);
-            }
-
-            let api = self.eth.api.clone();
-            let stream =
-                pool.new_pending_pool_transactions_listener()
-                    .filter_map(move |pending_tx| {
-                        std::future::ready((pending_tx.transaction.sender() == caller).then(|| {
-                            api.converter()
-                                .fill_pending(pending_tx.transaction.to_consensus())
-                                .map_err(internal)
-                                .and_then(|tx| to_raw(&tx))
-                        }))
-                    });
-            let stream: zone_rpc::WsSubscriptionStream = Box::pin(stream);
-            Ok(stream)
-        })
-    }
-
     fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             to_raw(&AuthorizationTokenInfoResponse {
@@ -878,9 +868,11 @@ where
     fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             let zone_tokens = self.zone_tokens().await?;
+            let sequencer = self.zone_sequencer().await?;
             to_raw(&ZoneInfoResponse {
                 zone_id: U64::from(self.config.zone_id),
                 zone_tokens,
+                sequencer,
                 chain_id: U64::from(self.config.chain_id),
             })
         })

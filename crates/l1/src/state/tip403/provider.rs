@@ -5,7 +5,7 @@
 //! falls back to `isAuthorized(policyId, user)` via the L1 RPC and writes the result back
 //! into the cache so subsequent lookups are instant.
 //!
-//! This mirrors the [`L1StateProvider`](crate::l1_state::L1StateProvider) pattern used for
+//! This mirrors the [`L1StateProvider`](crate::state::L1StateProvider) pattern used for
 //! storage slot reads.
 
 use alloy_primitives::Address;

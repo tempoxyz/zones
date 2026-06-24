@@ -1010,7 +1010,8 @@ impl L1TestNode {
         let verifier_address = factory.verifier().call().await?;
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
-                token: PATH_USD_ADDRESS,
+                admin: sequencer,
+                initialToken: PATH_USD_ADDRESS,
                 sequencer,
                 verifier: verifier_address,
                 zoneParams: ZoneFactory::ZoneParams {
@@ -1135,7 +1136,7 @@ impl L1TestNode {
         Ok(event.token)
     }
 
-    /// Enable a token on a ZonePortal (must be called by the sequencer).
+    /// Enable a token on a ZonePortal (must be called by the admin).
     pub(crate) async fn enable_token_on_portal(
         &self,
         portal_address: Address,
@@ -2963,8 +2964,8 @@ impl L1Fixture {
         num_blocks: u64,
     ) {
         let mut cache = cache.write();
-        let deposit_queue_hash_slot = B256::with_last_byte(4);
-        let refunds_slot = B256::with_last_byte(9);
+        let deposit_queue_hash_slot = B256::with_last_byte(5);
+        let refunds_slot = B256::with_last_byte(10);
 
         for block in 0..=num_blocks {
             let mut sequencer_bytes = [0u8; 32];
@@ -2975,7 +2976,7 @@ impl L1Fixture {
                 block,
                 B256::new(sequencer_bytes),
             );
-            // Deposit queue hash slot (4) — read by ZoneInbox after finalizeTempo.
+            // Deposit queue hash slot (5) — read by ZoneInbox after finalizeTempo.
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
@@ -3059,7 +3060,6 @@ impl L1Fixture {
             amount,
             fee: 0,
             bounceback_recipient: sender,
-            bounceback_fee: 0,
             memo: B256::ZERO,
         }
     }
@@ -3122,7 +3122,6 @@ impl L1Fixture {
             amount,
             fee: 0,
             bounceback_recipient: sender,
-            bounceback_fee: 0,
             key_index: alloy_primitives::U256::ZERO,
             ephemeral_pubkey_x: B256::ZERO,
             ephemeral_pubkey_y_parity: 0x02,
@@ -3147,7 +3146,6 @@ impl L1Fixture {
             amount,
             fee: 0,
             bounceback_recipient: sender,
-            bounceback_fee: 0,
             memo: B256::ZERO,
         }
     }
@@ -3205,7 +3203,6 @@ impl L1Fixture {
             amount,
             fee: 0,
             bounceback_recipient: sender,
-            bounceback_fee: 0,
             key_index,
             ephemeral_pubkey_x: eph_pub_x,
             ephemeral_pubkey_y_parity: eph_pub_y_parity,

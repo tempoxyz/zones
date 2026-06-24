@@ -33,9 +33,8 @@ pub(crate) struct DeployRouter {
     #[arg(long, env = "PRIVATE_KEY")]
     private_key: String,
 
-    /// ZoneFactory contract address.
-    /// Falls back to `zone.json`, then `MODERATO_ZONE_FACTORY` on Moderato.
-    #[arg(long)]
+    /// ZoneFactory contract address. Falls back to `zone.json`, then the shared Moderato default.
+    #[arg(long, env = "ZONE_FACTORY")]
     zone_factory: Option<Address>,
 
     /// StablecoinDEX address passed to the router constructor.

@@ -19,6 +19,7 @@ import {
     IZoneFactory,
     IZoneMessenger,
     IZonePortal,
+    PORTAL_ADMIN_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
@@ -162,6 +163,7 @@ contract ZonePortalTest is BaseTest {
         // Create a zone
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
+            admin: admin,
             sequencer: admin, // admin is the sequencer for tests
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
@@ -208,7 +210,6 @@ contract ZonePortalTest is BaseTest {
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
@@ -225,6 +226,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.zoneId(), testZoneId);
         assertTrue(portal.isTokenEnabled(address(pathUSD)));
         assertEq(portal.sequencer(), admin);
+        assertEq(portal.admin(), admin);
         assertEq(portal.verifier(), zoneFactory.verifier());
         assertEq(portal.blockHash(), GENESIS_BLOCK_HASH);
         assertEq(portal.withdrawalBatchIndex(), 0);
@@ -240,6 +242,30 @@ contract ZonePortalTest is BaseTest {
         assertEq(info.portal, address(portal));
         assertEq(info.messenger, address(messenger));
         assertEq(info.initialToken, address(pathUSD));
+        assertEq(info.admin, admin);
+    }
+
+    function test_adminCanPauseAndResumeDeposits() public {
+        vm.prank(admin);
+        portal.pauseDeposits(address(pathUSD));
+        assertFalse(portal.areDepositsActive(address(pathUSD)));
+
+        vm.prank(admin);
+        portal.resumeDeposits(address(pathUSD));
+        assertTrue(portal.areDepositsActive(address(pathUSD)));
+    }
+
+    function test_tokenGovernance_revertsIfNotAdmin() public {
+        vm.startPrank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.pauseDeposits(address(pathUSD));
+
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.resumeDeposits(address(pathUSD));
+
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.enableToken(address(pathUSD));
+        vm.stopPrank();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -343,9 +369,8 @@ contract ZonePortalTest is BaseTest {
             admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
         );
 
-        uint64 compoundPolicyId = registry.createCompoundPolicy(
-            senderPolicyId, recipientPolicyId, mintRecipientPolicyId
-        );
+        uint64 compoundPolicyId =
+            registry.createCompoundPolicy(senderPolicyId, recipientPolicyId, mintRecipientPolicyId);
         vm.prank(pathUSDAdmin);
         pathUSD.changeTransferPolicyId(compoundPolicyId);
 
@@ -399,9 +424,8 @@ contract ZonePortalTest is BaseTest {
             admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
         );
 
-        uint64 compoundPolicyId = registry.createCompoundPolicy(
-            senderPolicyId, recipientPolicyId, mintRecipientPolicyId
-        );
+        uint64 compoundPolicyId =
+            registry.createCompoundPolicy(senderPolicyId, recipientPolicyId, mintRecipientPolicyId);
         vm.prank(pathUSDAdmin);
         pathUSD.changeTransferPolicyId(compoundPolicyId);
 
@@ -1663,7 +1687,6 @@ contract ZonePortalTest is BaseTest {
             to: bob,
             amount: 500e6,
             bouncebackRecipient: address(0),
-            bouncebackFee: 0,
             memo: bytes32(0)
         });
         bytes32 expectedHash =
@@ -1747,7 +1770,6 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectEmit(true, true, false, true);
         uint128 fee = portal.calculateDepositFee();
-        uint128 bouncebackFee = portal.calculateBouncebackFee();
         uint128 netAmount = 500e6 - fee;
         bytes32 expectedHash = keccak256(
             abi.encode(
@@ -1758,23 +1780,13 @@ contract ZonePortalTest is BaseTest {
                     to: bob,
                     amount: netAmount,
                     bouncebackRecipient: bob,
-                    bouncebackFee: bouncebackFee,
                     memo: bytes32("test")
                 }),
                 bytes32(0)
             )
         );
         emit IZonePortal.DepositMade(
-            expectedHash,
-            alice,
-            address(pathUSD),
-            bob,
-            netAmount,
-            fee,
-            bouncebackFee,
-            bytes32("test"),
-            bob,
-            1
+            expectedHash, alice, address(pathUSD), bob, netAmount, fee, bytes32("test"), bob, 1
         );
 
         portal.deposit(address(pathUSD), bob, 500e6, bytes32("test"), bob);
@@ -2109,7 +2121,6 @@ contract ZonePortalTest is BaseTest {
 
         uint128 depositAmount = 1000e6;
         uint128 fee = portal.calculateDepositFee();
-        uint128 bouncebackFee = portal.calculateBouncebackFee();
         uint128 netAmount = depositAmount - fee;
 
         EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
@@ -2125,7 +2136,6 @@ contract ZonePortalTest is BaseTest {
             sender: alice,
             amount: netAmount,
             bouncebackRecipient: alice,
-            bouncebackFee: bouncebackFee,
             keyIndex: 0,
             encrypted: encrypted
         });
@@ -2179,7 +2189,6 @@ contract ZonePortalTest is BaseTest {
 
         uint128 depositAmount = 1000e6;
         uint128 fee = portal.calculateDepositFee();
-        uint128 bouncebackFee = portal.calculateBouncebackFee();
         uint128 netAmount = depositAmount - fee;
 
         EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
@@ -2193,7 +2202,6 @@ contract ZonePortalTest is BaseTest {
             sender: alice,
             amount: netAmount,
             bouncebackRecipient: alice,
-            bouncebackFee: bouncebackFee,
             keyIndex: 0,
             encrypted: encrypted
         });
@@ -2206,7 +2214,6 @@ contract ZonePortalTest is BaseTest {
             address(pathUSD),
             netAmount,
             fee,
-            bouncebackFee,
             0,
             VALID_SECP256K1_X,
             0x02,
@@ -2430,57 +2437,62 @@ contract ZonePortalTest is BaseTest {
     ///
     ///      Slot layout (non-immutable variables only):
     ///        slot 0: sequencer (address)
-    ///        slot 1: pendingSequencer (address)
-    ///        slot 2: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
-    ///        slot 3: blockHash (bytes32)
-    ///        slot 4: currentDepositQueueHash (bytes32)
-    ///        slot 5: lastSyncedTempoBlockNumber (uint64)
-    ///        slot 6: _encryptionKeys.length (EncryptionKeyEntry[])
+    ///        slot 1: admin (address)
+    ///        slot 2: pendingSequencer (address)
+    ///        slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+    ///        slot 4: blockHash (bytes32)
+    ///        slot 5: currentDepositQueueHash (bytes32)
+    ///        slot 6: deposit counters
+    ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: sequencer ---
         bytes32 slot0 = vm.load(address(portal), bytes32(uint256(0)));
         assertEq(address(uint160(uint256(slot0))), portal.sequencer(), "slot 0: sequencer mismatch");
 
-        // --- Slot 1: pendingSequencer ---
+        // --- Slot 1: admin ---
+        bytes32 adminFromSlot = vm.load(address(portal), PORTAL_ADMIN_SLOT);
+        assertEq(address(uint160(uint256(adminFromSlot))), portal.admin(), "slot 1: admin mismatch");
+
+        // --- Slot 2: pendingSequencer ---
         // Transfer sequencer to get a non-zero pendingSequencer
         portal.transferSequencer(alice);
-        bytes32 slot1 = vm.load(address(portal), bytes32(uint256(1)));
+        bytes32 slot1 = vm.load(address(portal), bytes32(uint256(2)));
         assertEq(
             address(uint160(uint256(slot1))),
             portal.pendingSequencer(),
-            "slot 1: pendingSequencer mismatch"
+            "slot 2: pendingSequencer mismatch"
         );
 
-        // --- Slot 2: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) packed ---
+        // --- Slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) packed ---
         uint128 testRate = 42;
         portal.setZoneGasRate(testRate);
-        bytes32 slot2 = vm.load(address(portal), bytes32(uint256(2)));
+        bytes32 slot2 = vm.load(address(portal), bytes32(uint256(3)));
         // zoneGasRate is at the lowest 128 bits (uint128), withdrawalBatchIndex at bits 128-191
         uint128 loadedRate = uint128(uint256(slot2));
-        assertEq(loadedRate, testRate, "slot 2: zoneGasRate mismatch");
+        assertEq(loadedRate, testRate, "slot 3: zoneGasRate mismatch");
 
-        // --- Slot 3: blockHash ---
-        bytes32 slot3 = vm.load(address(portal), bytes32(uint256(3)));
-        assertEq(slot3, portal.blockHash(), "slot 3: blockHash mismatch");
-
-        // --- Slot 4: currentDepositQueueHash ---
+        // --- Slot 4: blockHash ---
         bytes32 slot4 = vm.load(address(portal), bytes32(uint256(4)));
-        assertEq(
-            slot4, portal.currentDepositQueueHash(), "slot 4: currentDepositQueueHash mismatch"
-        );
+        assertEq(slot4, portal.blockHash(), "slot 4: blockHash mismatch");
 
-        // --- Slot 5: lastSyncedTempoBlockNumber ---
+        // --- Slot 5: currentDepositQueueHash ---
         bytes32 slot5 = vm.load(address(portal), bytes32(uint256(5)));
         assertEq(
-            uint64(uint256(slot5)),
-            portal.lastSyncedTempoBlockNumber(),
-            "slot 5: lastSyncedTempoBlockNumber mismatch"
+            slot5, portal.currentDepositQueueHash(), "slot 5: currentDepositQueueHash mismatch"
         );
 
-        // --- Slot 6: _encryptionKeys array length ---
+        // --- Slot 6: deposit counters ---
+        bytes32 slot6 = vm.load(address(portal), bytes32(uint256(6)));
+        assertEq(
+            uint64(uint256(slot6) >> 128),
+            portal.lastSyncedTempoBlockNumber(),
+            "slot 6: lastSyncedTempoBlockNumber mismatch"
+        );
+
+        // --- Slot 7: _encryptionKeys array length ---
         // Before adding keys, length should be 0
-        bytes32 slot6keys = vm.load(address(portal), bytes32(uint256(6)));
-        assertEq(uint256(slot6keys), 0, "slot 6: _encryptionKeys length should be 0 initially");
+        bytes32 slot7keys = vm.load(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT);
+        assertEq(uint256(slot7keys), 0, "slot 7: _encryptionKeys length should be 0 initially");
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.
@@ -2500,8 +2512,8 @@ contract ZonePortalTest is BaseTest {
         vm.roll(block.number + 100);
         (bytes32 keyX2, uint8 keyYParity2) = _setEncKeyWithPoP(ENC_KEY_2);
 
-        // Verify array length at slot 6
-        uint256 arraySlot = 6;
+        // Verify array length at the shared encryption keys slot
+        uint256 arraySlot = uint256(PORTAL_ENCRYPTION_KEYS_SLOT);
         bytes32 lengthRaw = vm.load(address(portal), bytes32(arraySlot));
         assertEq(uint256(lengthRaw), 2, "encryption keys array length should be 2");
 

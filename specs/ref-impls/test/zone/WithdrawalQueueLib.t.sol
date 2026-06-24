@@ -358,7 +358,6 @@ contract WithdrawalQueueLibTest is Test {
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: sender,

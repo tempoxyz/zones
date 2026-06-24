@@ -20,7 +20,6 @@ crate::sol! {
             address to;
             uint128 amount;
             uint128 fee;
-            uint128 bouncebackFee;
             bytes32 memo;
             uint64 gasLimit;
             address fallbackRecipient;
@@ -43,7 +42,6 @@ crate::sol! {
             address sender;
             uint128 amount;
             address bouncebackRecipient;
-            uint128 bouncebackFee;
             uint256 keyIndex;
             EncryptedDepositPayload encrypted;
         }
@@ -69,7 +67,6 @@ crate::sol! {
             address to,
             uint128 netAmount,
             uint128 fee,
-            uint128 bouncebackFee,
             bytes32 memo,
             address bouncebackRecipient,
             uint64 depositNumber
@@ -81,7 +78,6 @@ crate::sol! {
             address token,
             uint128 netAmount,
             uint128 fee,
-            uint128 bouncebackFee,
             uint256 keyIndex,
             bytes32 ephemeralPubkeyX,
             uint8 ephemeralPubkeyYParity,
@@ -143,6 +139,7 @@ crate::sol! {
         // -- Errors --
 
         error NotSequencer();
+        error NotAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
         error PolicyForbids();
@@ -151,6 +148,7 @@ crate::sol! {
         // -- View functions --
 
         function zoneId() external view returns (uint32);
+        function admin() external view returns (address);
         function sequencer() external view returns (address);
         function verifier() external view returns (address);
         function sequencerPubkey() external view returns (bytes32);
@@ -194,6 +192,8 @@ crate::sol! {
         ) external;
 
         function enableToken(address token) external;
+        function pauseDeposits(address token) external;
+        function resumeDeposits(address token) external;
 
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;
@@ -291,6 +291,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
+            Self::NotAdmin(_) => f.write_str("NotAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
@@ -331,7 +332,6 @@ impl Withdrawal {
             to: event.to,
             amount: event.amount,
             fee: event.fee,
-            bouncebackFee: event.bouncebackFee,
             memo: event.memo,
             gasLimit: event.gasLimit,
             fallbackRecipient: event.fallbackRecipient,

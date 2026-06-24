@@ -26,7 +26,7 @@ impl L1BlockDeposits {
         self,
         sequencer_key: &k256::SecretKey,
         portal_address: Address,
-        policy_provider: &crate::l1_state::PolicyProvider,
+        policy_provider: &crate::state::PolicyProvider,
     ) -> eyre::Result<PreparedL1Block> {
         use crate::precompiles::ecies;
 
@@ -45,7 +45,6 @@ impl L1BlockDeposits {
                         to: d.to,
                         amount: d.amount,
                         bouncebackRecipient: d.bounceback_recipient,
-                        bouncebackFee: d.bounceback_fee,
                         memo: d.memo,
                     };
                     queued_deposits.push(abi::QueuedDeposit {
@@ -63,7 +62,6 @@ impl L1BlockDeposits {
                                 sender: d.sender,
                                 amount: d.amount,
                                 bouncebackRecipient: d.bounceback_recipient,
-                                bouncebackFee: d.bounceback_fee,
                                 keyIndex: d.key_index,
                                 encrypted: abi::EncryptedDepositPayload {
                                     ephemeralPubkeyX: d.ephemeral_pubkey_x,
@@ -109,7 +107,7 @@ impl L1BlockDeposits {
                                 d.token,
                                 dec.to,
                                 l1_block_number,
-                                crate::l1_state::AuthRole::MintRecipient,
+                                crate::state::AuthRole::MintRecipient,
                             )
                             .await?;
 

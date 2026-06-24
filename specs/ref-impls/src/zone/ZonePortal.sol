@@ -51,9 +51,6 @@ contract ZonePortal is IZonePortal {
     /// @dev Priced against Tempo gas because the refund is paid on Tempo.
     uint64 public constant FIXED_BOUNCEBACK_GAS = 300_000;
 
-    /// @notice Fixed Tempo gas rate used to price deposit bounce-back fees.
-    uint128 public constant TEMPO_T1_BASE_FEE = 20_000_000_000;
-
     /// @notice Scale factor from 18-decimal Tempo gas prices to 6-decimal TIP-20 units
     uint256 internal constant TEMPO_BASE_FEE_SCALE = 1e12;
 
@@ -75,6 +72,9 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Current sequencer address
     address public sequencer;
+
+    /// @notice Governance admin address
+    address public admin;
 
     /// @notice Pending sequencer for two-step transfer
     address public pendingSequencer;
@@ -104,14 +104,14 @@ contract ZonePortal is IZonePortal {
 
     /// @notice Historical encryption keys with activation blocks
     /// @dev Users specify which key they encrypted to (by index). Maintained for key rotation.
-    ///      Stored at slot 6 in the ZonePortal storage layout.
+    ///      Stored at slot 7 in the ZonePortal storage layout.
     EncryptionKeyEntry[] internal _encryptionKeys;
 
-    /// @notice Per-token configuration (stored at slot 7)
+    /// @notice Per-token configuration (stored at slot 8)
     /// @dev TokenConfig.enabled is permanent (write-once true); depositsActive can be toggled.
     mapping(address => TokenConfig) internal _tokenConfigs;
 
-    /// @notice Append-only list of enabled tokens (stored at slot 8)
+    /// @notice Append-only list of enabled tokens (stored at slot 9)
     /// @dev Tokens can never be removed from this list (non-custodial guarantee).
     address[] internal _enabledTokens;
 
@@ -132,6 +132,7 @@ contract ZonePortal is IZonePortal {
         uint32 _zoneId,
         address _initialToken,
         address _messenger,
+        address _admin,
         address _sequencer,
         address _verifier,
         bytes32 _genesisBlockHash,
@@ -140,6 +141,7 @@ contract ZonePortal is IZonePortal {
     ) {
         zoneId = _zoneId;
         messenger = _messenger;
+        admin = _admin;
         sequencer = _sequencer;
         verifier = _verifier;
         blockHash = _genesisBlockHash;
@@ -156,6 +158,11 @@ contract ZonePortal is IZonePortal {
 
     modifier onlySequencer() {
         if (msg.sender != sequencer) revert NotSequencer();
+        _;
+    }
+
+    modifier onlyAdmin() {
+        if (msg.sender != admin) revert NotAdmin();
         _;
     }
 
@@ -236,10 +243,10 @@ contract ZonePortal is IZonePortal {
         return _enabledTokens[index];
     }
 
-    /// @notice Enable a new TIP-20 token for bridging. Only callable by sequencer.
+    /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled (non-custodial guarantee).
     ///      Validates the token is a TIP-20 and grants messenger max approval.
-    function enableToken(address _token) external onlySequencer {
+    function enableToken(address _token) external onlyAdmin {
         if (_tokenConfigs[_token].enabled) revert TokenAlreadyEnabled();
         if (!ITIP20Factory(StdPrecompiles.TIP20_FACTORY_ADDRESS).isTIP20(_token)) {
             revert TokenNotEnabled();
@@ -247,16 +254,16 @@ contract ZonePortal is IZonePortal {
         _enableTokenInternal(_token);
     }
 
-    /// @notice Pause deposits for a token. Only callable by sequencer.
+    /// @notice Pause deposits for a token. Only callable by admin.
     /// @dev Does not affect withdrawal processing (non-custodial guarantee).
-    function pauseDeposits(address _token) external onlySequencer {
+    function pauseDeposits(address _token) external onlyAdmin {
         if (!_tokenConfigs[_token].enabled) revert TokenNotEnabled();
         _tokenConfigs[_token].depositsActive = false;
         emit DepositsPaused(_token);
     }
 
-    /// @notice Resume deposits for a token. Only callable by sequencer.
-    function resumeDeposits(address _token) external onlySequencer {
+    /// @notice Resume deposits for a token. Only callable by admin.
+    function resumeDeposits(address _token) external onlyAdmin {
         if (!_tokenConfigs[_token].enabled) revert TokenNotEnabled();
         _tokenConfigs[_token].depositsActive = true;
         emit DepositsResumed(_token);
@@ -500,10 +507,10 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Calculate the reserved fee for a failed-deposit bounce-back
-    /// @dev Fee = ceil(FIXED_BOUNCEBACK_GAS * TEMPO_T1_BASE_FEE / 1e12)
+    /// @dev Fee = ceil(FIXED_BOUNCEBACK_GAS * block.basefee / 1e12)
     /// @return fee The bounce-back fee in token units
-    function calculateBouncebackFee() public pure returns (uint128 fee) {
-        uint256 gasFee = uint256(FIXED_BOUNCEBACK_GAS) * TEMPO_T1_BASE_FEE;
+    function calculateBouncebackFee() public view returns (uint128 fee) {
+        uint256 gasFee = uint256(FIXED_BOUNCEBACK_GAS) * block.basefee;
         // Round up after scaling so bounce-backs do not underpay.
         fee = uint128((gasFee + TEMPO_BASE_FEE_SCALE - 1) / TEMPO_BASE_FEE_SCALE);
     }
@@ -568,7 +575,6 @@ contract ZonePortal is IZonePortal {
             to: to,
             amount: netAmount,
             bouncebackRecipient: bouncebackRecipient,
-            bouncebackFee: bouncebackFee,
             memo: memo
         });
 
@@ -584,7 +590,6 @@ contract ZonePortal is IZonePortal {
             to,
             netAmount,
             fee,
-            bouncebackFee,
             memo,
             bouncebackRecipient,
             thisDeposit
@@ -669,7 +674,6 @@ contract ZonePortal is IZonePortal {
             sender: msg.sender,
             amount: netAmount,
             bouncebackRecipient: bouncebackRecipient,
-            bouncebackFee: bouncebackFee,
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -686,7 +690,6 @@ contract ZonePortal is IZonePortal {
             _token,
             netAmount,
             fee,
-            bouncebackFee,
             keyIndex,
             encrypted.ephemeralPubkeyX,
             encrypted.ephemeralPubkeyYParity,
@@ -774,7 +777,10 @@ contract ZonePortal is IZonePortal {
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {
         address _token = withdrawal.token;
-        uint128 bouncebackFee = withdrawal.bouncebackFee;
+        uint128 bouncebackFee = calculateBouncebackFee();
+        if (bouncebackFee > withdrawal.amount) {
+            bouncebackFee = withdrawal.amount;
+        }
         uint128 refundAmount = withdrawal.amount - bouncebackFee;
 
         if (bouncebackFee > 0) {
@@ -831,7 +837,6 @@ contract ZonePortal is IZonePortal {
             to: fallbackRecipient,
             amount: amount,
             bouncebackRecipient: address(0),
-            bouncebackFee: 0,
             memo: bytes32(0)
         });
 

@@ -75,6 +75,12 @@ impl MockZoneRpcApi {
             ws_subscriptions_enabled: true,
         }
     }
+
+    fn revoke_key(&self, account: Address, key_id: Address) {
+        if let Some(key_info) = self.key_infos.lock().get_mut(&(account, key_id)) {
+            key_info.isRevoked = true;
+        }
+    }
 }
 
 macro_rules! stub {
@@ -114,6 +120,8 @@ impl ZoneRpcApi for MockZoneRpcApi {
     }
 
     stub!(net_version);
+    stub!(syncing);
+    stub!(coinbase);
     stub!(gas_price);
     stub!(max_priority_fee_per_gas);
     stub!(fee_history, _a: u64, _b: alloy_rpc_types_eth::BlockNumberOrTag, _c: Option<Vec<f64>>);
@@ -152,7 +160,8 @@ impl ZoneRpcApi for MockZoneRpcApi {
                 ),
                 "number": "0x42",
                 "parentHash": format!("{:#x}", alloy_primitives::B256::ZERO),
-                "logsBloom": format!("0x{}", "0".repeat(512)),
+                "logsBloom": format!("0x{}", "f".repeat(512)),
+                "transactions": ["0x1234"],
             }))]);
             let stream: WsSubscriptionStream = Box::pin(stream);
             Ok(stream)
@@ -190,38 +199,6 @@ impl ZoneRpcApi for MockZoneRpcApi {
                 "logIndex": "0x0",
                 "removed": false
             }))]);
-            let stream: WsSubscriptionStream = Box::pin(stream);
-            Ok(stream)
-        })
-    }
-
-    fn ws_subscribe_pending_transactions(
-        &self,
-        full: bool,
-        _auth: zone_rpc::auth::AuthContext,
-    ) -> BoxWsSubscriptionFut<'_> {
-        let enabled = self.ws_subscriptions_enabled;
-        Box::pin(async move {
-            if !enabled {
-                return Err(JsonRpcError::method_disabled());
-            }
-
-            let stream = if full {
-                stream::iter(vec![zone_rpc::types::to_raw(&json!({
-                    "hash": format!(
-                        "{:#x}",
-                        b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
-                    ),
-                    "from": format!("{:#x}", Address::repeat_byte(0x11)),
-                    "to": format!("{:#x}", Address::repeat_byte(0x22)),
-                    "nonce": "0x7"
-                }))])
-            } else {
-                stream::iter(vec![zone_rpc::types::to_raw(&format!(
-                    "{:#x}",
-                    b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
-                ))])
-            };
             let stream: WsSubscriptionStream = Box::pin(stream);
             Ok(stream)
         })
@@ -276,6 +253,10 @@ struct TestContext {
 
 impl TestContext {
     async fn start(api: MockZoneRpcApi) -> Self {
+        Self::start_shared(Arc::new(api)).await
+    }
+
+    async fn start_shared(api: Arc<MockZoneRpcApi>) -> Self {
         let signer = PrivateKeySigner::random();
         let config = PrivateRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
@@ -287,13 +268,17 @@ impl TestContext {
             max_auth_token_validity: zone_rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
             zone_portal: Address::ZERO,
         };
-        let addr = start_private_rpc(config, Arc::new(api)).await.unwrap();
+        let addr = start_private_rpc(config, api).await.unwrap();
         Self { addr, signer }
     }
 
     fn build_token(&self) -> String {
         let now = now_secs();
-        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        self.build_token_expiring_at(now, now + 600)
+    }
+
+    fn build_token_expiring_at(&self, issued_at: u64, expires_at: u64) -> String {
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, issued_at, expires_at);
         let sig = self.signer.sign_hash_sync(&digest).expect("signing failed");
 
         let mut blob = Vec::with_capacity(65 + fields.len());
@@ -616,67 +601,25 @@ async fn ws_subscribe_logs_emits_notifications() {
 }
 
 #[tokio::test]
-async fn ws_subscribe_pending_transactions_hashes_emits_notifications() {
+async fn ws_subscribe_pending_transactions_is_disabled() {
     let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
     let mut ws = connect_with_header(&ctx).await;
 
-    ws.send(tungstenite::Message::Text(
-        jsonrpc_with_params("eth_subscribe", json!(["newPendingTransactions"]), 1).into(),
-    ))
-    .await
-    .unwrap();
-    let resp = parse_response(ws.next().await.unwrap().unwrap());
-
-    assert_eq!(resp["id"], 1);
-    let subscription_id = resp["result"].as_str().expect("subscription id");
-
-    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
+    for (id, params) in [
+        (1, json!(["newPendingTransactions"])),
+        (2, json!(["newPendingTransactions", true])),
+        (3, json!(["newPendingTransactions", {}])),
+    ] {
+        ws.send(tungstenite::Message::Text(
+            jsonrpc_with_params("eth_subscribe", params, id).into(),
+        ))
         .await
-        .expect("timed out waiting for pending tx hash notification")
-        .unwrap()
         .unwrap();
-    let notification = parse_response(notification);
+        let resp = parse_response(ws.next().await.unwrap().unwrap());
 
-    assert_eq!(notification["method"], "eth_subscription");
-    assert_eq!(notification["params"]["subscription"], subscription_id);
-    assert_eq!(
-        notification["params"]["result"],
-        format!(
-            "{:#x}",
-            b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
-        )
-    );
-}
-
-#[tokio::test]
-async fn ws_subscribe_pending_transactions_full_emits_notifications() {
-    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
-    let mut ws = connect_with_header(&ctx).await;
-
-    ws.send(tungstenite::Message::Text(
-        jsonrpc_with_params("eth_subscribe", json!(["newPendingTransactions", true]), 1).into(),
-    ))
-    .await
-    .unwrap();
-    let resp = parse_response(ws.next().await.unwrap().unwrap());
-
-    assert_eq!(resp["id"], 1);
-    let subscription_id = resp["result"].as_str().expect("subscription id");
-
-    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
-        .await
-        .expect("timed out waiting for full pending tx notification")
-        .unwrap()
-        .unwrap();
-    let notification = parse_response(notification);
-
-    assert_eq!(notification["method"], "eth_subscription");
-    assert_eq!(notification["params"]["subscription"], subscription_id);
-    assert_eq!(notification["params"]["result"]["nonce"], "0x7");
-    assert_eq!(
-        notification["params"]["result"]["from"],
-        format!("{:#x}", Address::repeat_byte(0x11))
-    );
+        assert_eq!(resp["id"], id);
+        assert_eq!(resp["error"]["code"], -32006);
+    }
 }
 
 #[tokio::test]
@@ -713,11 +656,7 @@ async fn ws_subscribe_rejects_invalid_param_shapes() {
     let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
     let mut ws = connect_with_header(&ctx).await;
 
-    for (id, params) in [
-        (1, json!(["newHeads", false])),
-        (2, json!(["logs", false])),
-        (3, json!(["newPendingTransactions", {}])),
-    ] {
+    for (id, params) in [(1, json!(["newHeads", false])), (2, json!(["logs", false]))] {
         ws.send(tungstenite::Message::Text(
             jsonrpc_with_params("eth_subscribe", params, id).into(),
         ))
@@ -864,6 +803,46 @@ async fn ws_roundtrip_with_keychain_auth() {
 
     assert_eq!(resp["id"], 11);
     assert_eq!(resp["result"], "0x42");
+}
+
+#[tokio::test]
+async fn ws_closes_when_auth_token_expires() {
+    let ctx = TestContext::start(MockZoneRpcApi::default()).await;
+    let now = now_secs();
+    let token = ctx.build_token_expiring_at(now, now + 1);
+    let mut ws = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect("ws connect failed");
+
+    let _closed = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("timed out waiting for token-expiry close");
+}
+
+#[tokio::test]
+async fn ws_closes_when_keychain_key_is_revoked() {
+    let root_account = Address::repeat_byte(0x77);
+    let access_signer = P256SigningKey::random(&mut thread_rng());
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+    let (signature, key_id) = sign_keychain_signature(digest, &access_signer, root_account, 0x04)
+        .expect("keychain signing should succeed");
+    let api = Arc::new(MockZoneRpcApi::with_key(
+        root_account,
+        key_id,
+        KeyInfoSignatureType::P256,
+    ));
+    let ctx = TestContext::start_shared(api.clone()).await;
+    let token = build_token_with_signature(signature, &fields);
+    let mut ws = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect("authorized keychain ws connect failed");
+
+    api.revoke_key(root_account, key_id);
+
+    let _closed = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("timed out waiting for keychain-revocation close");
 }
 
 #[tokio::test]

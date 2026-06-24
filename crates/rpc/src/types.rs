@@ -177,6 +177,8 @@ pub struct ZoneInfoResponse {
     pub zone_id: U64,
     /// The enabled zone token contract addresses.
     pub zone_tokens: Vec<Address>,
+    /// The active sequencer address.
+    pub sequencer: Address,
     /// The zone chain ID.
     pub chain_id: U64,
 }
@@ -298,30 +300,30 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "eth_getStorageAt"
         | "eth_getBlockReceipts"
         | "eth_sendTransaction"
-        | "debug_traceTransaction"
-        | "debug_traceBlockByNumber"
-        | "debug_traceBlockByHash"
         | "eth_createAccessList"
         | "eth_getBlockTransactionCountByNumber"
         | "eth_getBlockTransactionCountByHash"
         | "eth_getTransactionByBlockNumberAndIndex"
         | "eth_getTransactionByBlockHashAndIndex"
         | "eth_getUncleCountByBlockNumber"
-        | "eth_getUncleCountByBlockHash"
-        | "txpool_content"
-        | "txpool_status"
-        | "txpool_inspect" => Some(MethodTier::Restricted),
+        | "eth_getUncleCountByBlockHash" => Some(MethodTier::Restricted),
 
         // Disabled (mempool observation, mining, subscriptions not supported via HTTP proxy)
-        "eth_mining"
+        "eth_getProof"
+        | "eth_newPendingTransactionFilter"
+        | "eth_getUncleByBlockNumberAndIndex"
+        | "eth_getUncleByBlockHashAndIndex"
+        | "eth_mining"
         | "eth_hashrate"
+        | "eth_getWork"
         | "eth_submitWork"
         | "eth_submitHashrate"
-        | "eth_newPendingTransactionFilter"
         | "eth_subscribe"
         | "eth_unsubscribe" => Some(MethodTier::Disabled),
 
         _ if method.starts_with("admin_") => Some(MethodTier::Restricted),
+        _ if method.starts_with("debug_") => Some(MethodTier::Restricted),
+        _ if method.starts_with("txpool_") => Some(MethodTier::Restricted),
         _ => None,
     }
 }
