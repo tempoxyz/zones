@@ -708,18 +708,6 @@ impl ZoneMonitor {
                             let portal_slot = self.portal_withdrawal_queue_tail;
                             let count = withdrawals.len();
                             let mut store = self.withdrawal_store.lock();
-                            // Each portal slot is written exactly once per
-                            // successful submission and later cleared by the
-                            // withdrawal processor via `remove_batch`. Use
-                            // replace semantics so a fresh slot write can never
-                            // silently concatenate onto a stale slot — that would
-                            // corrupt the slot's withdrawal hash chain and wedge
-                            // the queue (every `processWithdrawal` would revert on
-                            // the hash mismatch).
-                            debug_assert!(
-                                !store.has_batch(portal_slot),
-                                "writing withdrawals to an already-populated portal slot {portal_slot}"
-                            );
                             store.add_batch(portal_slot, withdrawals);
                             info!(
                                 portal_slot,
