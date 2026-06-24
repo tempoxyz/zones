@@ -22,7 +22,7 @@ use axum::{
 use futures::{SinkExt, stream::StreamExt};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, value::RawValue};
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -31,7 +31,10 @@ use tracing::warn;
 
 use crate::{
     auth::{self, AuthContext, AuthError},
-    server::{MAX_BATCH_SIZE, RpcState, authenticate_token, dispatch_request},
+    server::{
+        MAX_BATCH_SIZE, RpcState, authenticate_token, dispatch_request, now_unix_seconds,
+        validate_keychain_key_info,
+    },
     subscription::WsSubscriptionStream,
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, to_raw},
 };
@@ -45,6 +48,12 @@ const MAX_WS_SUBSCRIPTIONS: usize = 32;
 
 type NotificationTx = mpsc::Sender<String>;
 type CloseSessionTx = watch::Sender<bool>;
+
+#[derive(Clone, Copy)]
+enum SubscriptionRedaction {
+    None,
+    NewHeads,
+}
 
 /// Query parameters for the WebSocket upgrade endpoint.
 #[derive(serde::Deserialize, Default)]
@@ -60,6 +69,7 @@ struct ActiveSubscription {
 struct PendingSubscription {
     id: FilterId,
     stream: WsSubscriptionStream,
+    redaction: SubscriptionRedaction,
 }
 
 struct WsSession {
@@ -163,11 +173,39 @@ fn subscription_notification_raw(subscription_id: &FilterId, result: &RawValue) 
     .expect("subscription notification serialization is infallible")
 }
 
+fn redacted_subscription_result(
+    result: Box<RawValue>,
+    redaction: SubscriptionRedaction,
+) -> Box<RawValue> {
+    match redaction {
+        SubscriptionRedaction::None => result,
+        SubscriptionRedaction::NewHeads => redact_new_head_result(result),
+    }
+}
+
+fn redact_new_head_result(result: Box<RawValue>) -> Box<RawValue> {
+    let Ok(mut header) = serde_json::from_str::<Value>(result.get()) else {
+        return result;
+    };
+    let Some(header) = header.as_object_mut() else {
+        return result;
+    };
+
+    header.insert(
+        "logsBloom".to_string(),
+        Value::String(format!("0x{}", "0".repeat(512))),
+    );
+    header.remove("transactions");
+
+    to_raw(header).unwrap_or(result)
+}
+
 fn spawn_subscription(
     subscription_id: FilterId,
     mut subscription: WsSubscriptionStream,
     notifications: NotificationTx,
     close_session: CloseSessionTx,
+    redaction: SubscriptionRedaction,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(item) = subscription.next().await {
@@ -183,6 +221,7 @@ fn spawn_subscription(
                     break;
                 }
             };
+            let result = redacted_subscription_result(result, redaction);
 
             if !try_queue_notification(
                 &notifications,
@@ -260,7 +299,7 @@ async fn handle_subscribe(
             }
 
             match state.api.ws_subscribe_new_heads(auth.clone()).await {
-                Ok(subscription) => subscription,
+                Ok(subscription) => (subscription, SubscriptionRedaction::NewHeads),
                 Err(err) => {
                     return WsDispatchResult::response_only(JsonRpcResponse::error(
                         req.id.clone(),
@@ -282,7 +321,7 @@ async fn handle_subscribe(
             };
 
             match state.api.ws_subscribe_logs(filter, auth.clone()).await {
-                Ok(subscription) => subscription,
+                Ok(subscription) => (subscription, SubscriptionRedaction::None),
                 Err(err) => {
                     return WsDispatchResult::response_only(JsonRpcResponse::error(
                         req.id.clone(),
@@ -321,7 +360,8 @@ async fn handle_subscribe(
         response: success_response(req.id.clone(), &subscription_id),
         pending_subscriptions: vec![PendingSubscription {
             id: subscription_id,
-            stream: subscription,
+            stream: subscription.0,
+            redaction: subscription.1,
         }],
     }
 }
@@ -442,8 +482,27 @@ fn activate_pending_subscriptions(
             pending.stream,
             notifications.clone(),
             close_session.clone(),
+            pending.redaction,
         );
         session.activate_subscription(pending.id, task);
+    }
+}
+
+fn duration_until_unix_timestamp(timestamp: u64) -> Duration {
+    Duration::from_secs(timestamp.saturating_sub(now_unix_seconds()))
+}
+
+async fn keychain_auth_still_valid(auth: &AuthContext, state: &RpcState) -> bool {
+    let Some(key_id) = auth.keychain_key_id else {
+        return true;
+    };
+
+    match state.api.get_keychain_key(auth.caller, key_id).await {
+        Ok(key_info) => validate_keychain_key_info(&key_info).is_ok(),
+        Err(err) => {
+            warn!(target: "zone::rpc", err = %err, "ws keychain revalidation failed");
+            false
+        }
     }
 }
 
@@ -488,6 +547,9 @@ async fn handle_ws_session(
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let (notifications, mut outbound) = mpsc::channel::<String>(MAX_WS_OUTBOUND_QUEUE);
     let (close_session, mut close_session_rx) = watch::channel(false);
+    let token_expiry = tokio::time::sleep(duration_until_unix_timestamp(auth.expires_at));
+    tokio::pin!(token_expiry);
+    let mut keychain_recheck = tokio::time::interval(Duration::from_secs(1));
     let writer = tokio::spawn(async move {
         while let Some(message) = outbound.recv().await {
             if ws_sender.send(Message::Text(message.into())).await.is_err() {
@@ -500,6 +562,13 @@ async fn handle_ws_session(
 
     loop {
         let msg = tokio::select! {
+            _ = &mut token_expiry => break,
+            _ = keychain_recheck.tick(), if auth.keychain_key_id.is_some() => {
+                if !keychain_auth_still_valid(&auth, &state).await {
+                    break;
+                }
+                continue;
+            }
             _ = close_session_rx.changed() => break,
             msg = ws_receiver.next() => match msg {
                 Some(msg) => msg,

@@ -619,6 +619,7 @@ mod tests {
                 AuthContext {
                     caller,
                     expires_at: u64::MAX,
+                    keychain_key_id: None,
                 },
             )
             .await

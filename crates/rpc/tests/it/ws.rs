@@ -75,6 +75,12 @@ impl MockZoneRpcApi {
             ws_subscriptions_enabled: true,
         }
     }
+
+    fn revoke_key(&self, account: Address, key_id: Address) {
+        if let Some(key_info) = self.key_infos.lock().get_mut(&(account, key_id)) {
+            key_info.isRevoked = true;
+        }
+    }
 }
 
 macro_rules! stub {
@@ -152,7 +158,8 @@ impl ZoneRpcApi for MockZoneRpcApi {
                 ),
                 "number": "0x42",
                 "parentHash": format!("{:#x}", alloy_primitives::B256::ZERO),
-                "logsBloom": format!("0x{}", "0".repeat(512)),
+                "logsBloom": format!("0x{}", "f".repeat(512)),
+                "transactions": ["0x1234"],
             }))]);
             let stream: WsSubscriptionStream = Box::pin(stream);
             Ok(stream)
@@ -244,6 +251,10 @@ struct TestContext {
 
 impl TestContext {
     async fn start(api: MockZoneRpcApi) -> Self {
+        Self::start_shared(Arc::new(api)).await
+    }
+
+    async fn start_shared(api: Arc<MockZoneRpcApi>) -> Self {
         let signer = PrivateKeySigner::random();
         let config = PrivateRpcConfig {
             listen_addr: ([127, 0, 0, 1], 0).into(),
@@ -255,13 +266,17 @@ impl TestContext {
             max_auth_token_validity: zone_rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY,
             zone_portal: Address::ZERO,
         };
-        let addr = start_private_rpc(config, Arc::new(api)).await.unwrap();
+        let addr = start_private_rpc(config, api).await.unwrap();
         Self { addr, signer }
     }
 
     fn build_token(&self) -> String {
         let now = now_secs();
-        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        self.build_token_expiring_at(now, now + 600)
+    }
+
+    fn build_token_expiring_at(&self, issued_at: u64, expires_at: u64) -> String {
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, issued_at, expires_at);
         let sig = self.signer.sign_hash_sync(&digest).expect("signing failed");
 
         let mut blob = Vec::with_capacity(65 + fields.len());
@@ -786,6 +801,46 @@ async fn ws_roundtrip_with_keychain_auth() {
 
     assert_eq!(resp["id"], 11);
     assert_eq!(resp["result"], "0x42");
+}
+
+#[tokio::test]
+async fn ws_closes_when_auth_token_expires() {
+    let ctx = TestContext::start(MockZoneRpcApi::default()).await;
+    let now = now_secs();
+    let token = ctx.build_token_expiring_at(now, now + 1);
+    let mut ws = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect("ws connect failed");
+
+    let _closed = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("timed out waiting for token-expiry close");
+}
+
+#[tokio::test]
+async fn ws_closes_when_keychain_key_is_revoked() {
+    let root_account = Address::repeat_byte(0x77);
+    let access_signer = P256SigningKey::random(&mut thread_rng());
+    let now = now_secs();
+    let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+    let (signature, key_id) = sign_keychain_signature(digest, &access_signer, root_account, 0x04)
+        .expect("keychain signing should succeed");
+    let api = Arc::new(MockZoneRpcApi::with_key(
+        root_account,
+        key_id,
+        KeyInfoSignatureType::P256,
+    ));
+    let ctx = TestContext::start_shared(api.clone()).await;
+    let token = build_token_with_signature(signature, &fields);
+    let mut ws = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect("authorized keychain ws connect failed");
+
+    api.revoke_key(root_account, key_id);
+
+    let _closed = tokio::time::timeout(Duration::from_secs(3), ws.next())
+        .await
+        .expect("timed out waiting for keychain-revocation close");
 }
 
 #[tokio::test]

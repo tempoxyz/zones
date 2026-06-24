@@ -883,6 +883,7 @@ mod tests {
         AuthContext {
             caller: Address::repeat_byte(0xaa),
             expires_at: 1_700_000_000,
+            keychain_key_id: None,
         }
     }
 
