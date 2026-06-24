@@ -22,7 +22,6 @@ import {
     IZonePortal,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
-    PORTAL_TOKEN_CONFIGS_SLOT,
     QueuedDeposit,
     Withdrawal,
     ZONE_INBOX,
@@ -175,7 +174,7 @@ contract ZoneBridgeTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
         );
-        _setL2TokenEnabled(address(l2ZoneToken), true);
+        l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
 
         // Zone inbox (advances Tempo state and processes deposits)
         ZoneInbox inboxImpl =
@@ -192,13 +191,6 @@ contract ZoneBridgeTest is BaseTest {
 
         // Initialize zone block hash
         l2BlockHash = GENESIS_BLOCK_HASH;
-    }
-
-    function _setL2TokenEnabled(address token, bool enabled) internal {
-        bytes32 configSlot = keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT));
-        l2TempoState.setMockStorageValue(
-            address(l1Portal), configSlot, bytes32(uint256(enabled ? 1 : 0))
-        );
     }
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {

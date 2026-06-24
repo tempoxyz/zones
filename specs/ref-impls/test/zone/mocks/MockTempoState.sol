@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
+import { PORTAL_TOKEN_CONFIGS_SLOT } from "../../../src/zone/IZone.sol";
+
 /// @title MockTempoState
 /// @notice Mock TempoState for testing ZoneInbox
 /// @dev Allows setting storage slot values and simulates finalizeTempo
@@ -42,6 +44,14 @@ contract MockTempoState {
     /// @notice Set a mock storage value for readTempoStorageSlot
     function setMockStorageValue(address account, bytes32 slot, bytes32 value) external {
         mockStorageValues[account][slot] = value;
+    }
+
+    /// @notice Set the mocked ZonePortal TokenConfig.enabled field.
+    function setMockTokenEnabled(address portal, address token, bool enabled) external {
+        bytes32 configSlot = keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT));
+        uint256 raw = uint256(mockStorageValues[portal][configSlot]);
+        raw = (raw & ~uint256(0xff)) | (enabled ? 1 : 0);
+        mockStorageValues[portal][configSlot] = bytes32(raw);
     }
 
     /// @notice Mock finalizeTempo - just advances block number
