@@ -167,7 +167,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
@@ -227,7 +226,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 1000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("alice1")
         });
         deposits[1] = Deposit({
@@ -236,7 +234,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 2000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("alice2")
         });
         deposits[2] = Deposit({
@@ -245,7 +242,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: bob,
             amount: 3000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("bob1")
         });
         deposits[3] = Deposit({
@@ -254,7 +250,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: charlie,
             amount: 500e6,
             bouncebackRecipient: charlie,
-            bouncebackFee: 0,
             memo: bytes32("charlie1")
         });
 
@@ -305,7 +300,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 1000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
 
@@ -355,7 +349,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 2000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
         batch2[1] = Deposit({
@@ -364,7 +357,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 3000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d3")
         });
 
@@ -401,7 +393,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 5000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("deposit")
         });
         l2TempoState.setMockStorageValue(
@@ -478,7 +469,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 50_000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("big deposit")
         });
         l2TempoState.setMockStorageValue(
@@ -625,7 +615,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 10_000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         deposits1[1] = Deposit({
@@ -634,7 +623,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: bob,
             amount: 5000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
 
@@ -690,7 +678,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: charlie,
             amount: 7500e6,
             bouncebackRecipient: charlie,
-            bouncebackFee: 0,
             memo: bytes32("d3")
         });
 
@@ -741,7 +728,6 @@ contract ZoneIntegrationTest is BaseTest {
             to: alice,
             amount: 10_000e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         l2TempoState.setMockStorageValue(

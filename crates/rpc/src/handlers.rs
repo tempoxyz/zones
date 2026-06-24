@@ -169,16 +169,6 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
         Box::pin(async { Err(JsonRpcError::method_disabled()) })
     }
 
-    /// `eth_subscribe("newPendingTransactions", full?)` — opens a stream of
-    /// pending transactions, returning either hashes or full transaction objects.
-    fn ws_subscribe_pending_transactions(
-        &self,
-        _full: bool,
-        _auth: AuthContext,
-    ) -> BoxWsSubscriptionFut<'_> {
-        Box::pin(async { Err(JsonRpcError::method_disabled()) })
-    }
-
     /// `zone_getAuthorizationTokenInfo()` — returns the authenticated account
     /// and token expiry.
     fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_>;

@@ -195,38 +195,6 @@ impl ZoneRpcApi for MockZoneRpcApi {
         })
     }
 
-    fn ws_subscribe_pending_transactions(
-        &self,
-        full: bool,
-        _auth: zone_rpc::auth::AuthContext,
-    ) -> BoxWsSubscriptionFut<'_> {
-        let enabled = self.ws_subscriptions_enabled;
-        Box::pin(async move {
-            if !enabled {
-                return Err(JsonRpcError::method_disabled());
-            }
-
-            let stream = if full {
-                stream::iter(vec![zone_rpc::types::to_raw(&json!({
-                    "hash": format!(
-                        "{:#x}",
-                        b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
-                    ),
-                    "from": format!("{:#x}", Address::repeat_byte(0x11)),
-                    "to": format!("{:#x}", Address::repeat_byte(0x22)),
-                    "nonce": "0x7"
-                }))])
-            } else {
-                stream::iter(vec![zone_rpc::types::to_raw(&format!(
-                    "{:#x}",
-                    b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
-                ))])
-            };
-            let stream: WsSubscriptionStream = Box::pin(stream);
-            Ok(stream)
-        })
-    }
-
     fn zone_get_authorization_token_info(&self, auth: zone_rpc::auth::AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
             zone_rpc::types::to_raw(&serde_json::json!({
@@ -616,67 +584,25 @@ async fn ws_subscribe_logs_emits_notifications() {
 }
 
 #[tokio::test]
-async fn ws_subscribe_pending_transactions_hashes_emits_notifications() {
+async fn ws_subscribe_pending_transactions_is_disabled() {
     let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
     let mut ws = connect_with_header(&ctx).await;
 
-    ws.send(tungstenite::Message::Text(
-        jsonrpc_with_params("eth_subscribe", json!(["newPendingTransactions"]), 1).into(),
-    ))
-    .await
-    .unwrap();
-    let resp = parse_response(ws.next().await.unwrap().unwrap());
-
-    assert_eq!(resp["id"], 1);
-    let subscription_id = resp["result"].as_str().expect("subscription id");
-
-    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
+    for (id, params) in [
+        (1, json!(["newPendingTransactions"])),
+        (2, json!(["newPendingTransactions", true])),
+        (3, json!(["newPendingTransactions", {}])),
+    ] {
+        ws.send(tungstenite::Message::Text(
+            jsonrpc_with_params("eth_subscribe", params, id).into(),
+        ))
         .await
-        .expect("timed out waiting for pending tx hash notification")
-        .unwrap()
         .unwrap();
-    let notification = parse_response(notification);
+        let resp = parse_response(ws.next().await.unwrap().unwrap());
 
-    assert_eq!(notification["method"], "eth_subscription");
-    assert_eq!(notification["params"]["subscription"], subscription_id);
-    assert_eq!(
-        notification["params"]["result"],
-        format!(
-            "{:#x}",
-            b256!("0x5555555555555555555555555555555555555555555555555555555555555555")
-        )
-    );
-}
-
-#[tokio::test]
-async fn ws_subscribe_pending_transactions_full_emits_notifications() {
-    let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
-    let mut ws = connect_with_header(&ctx).await;
-
-    ws.send(tungstenite::Message::Text(
-        jsonrpc_with_params("eth_subscribe", json!(["newPendingTransactions", true]), 1).into(),
-    ))
-    .await
-    .unwrap();
-    let resp = parse_response(ws.next().await.unwrap().unwrap());
-
-    assert_eq!(resp["id"], 1);
-    let subscription_id = resp["result"].as_str().expect("subscription id");
-
-    let notification = tokio::time::timeout(Duration::from_secs(2), ws.next())
-        .await
-        .expect("timed out waiting for full pending tx notification")
-        .unwrap()
-        .unwrap();
-    let notification = parse_response(notification);
-
-    assert_eq!(notification["method"], "eth_subscription");
-    assert_eq!(notification["params"]["subscription"], subscription_id);
-    assert_eq!(notification["params"]["result"]["nonce"], "0x7");
-    assert_eq!(
-        notification["params"]["result"]["from"],
-        format!("{:#x}", Address::repeat_byte(0x11))
-    );
+        assert_eq!(resp["id"], id);
+        assert_eq!(resp["error"]["code"], -32006);
+    }
 }
 
 #[tokio::test]
@@ -713,11 +639,7 @@ async fn ws_subscribe_rejects_invalid_param_shapes() {
     let ctx = TestContext::start(MockZoneRpcApi::with_ws_subscriptions()).await;
     let mut ws = connect_with_header(&ctx).await;
 
-    for (id, params) in [
-        (1, json!(["newHeads", false])),
-        (2, json!(["logs", false])),
-        (3, json!(["newPendingTransactions", {}])),
-    ] {
+    for (id, params) in [(1, json!(["newHeads", false])), (2, json!(["logs", false]))] {
         ws.send(tungstenite::Message::Text(
             jsonrpc_with_params("eth_subscribe", params, id).into(),
         ))

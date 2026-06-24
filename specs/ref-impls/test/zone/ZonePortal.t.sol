@@ -210,7 +210,6 @@ contract ZonePortalTest is BaseTest {
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
@@ -370,9 +369,8 @@ contract ZonePortalTest is BaseTest {
             admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
         );
 
-        uint64 compoundPolicyId = registry.createCompoundPolicy(
-            senderPolicyId, recipientPolicyId, mintRecipientPolicyId
-        );
+        uint64 compoundPolicyId =
+            registry.createCompoundPolicy(senderPolicyId, recipientPolicyId, mintRecipientPolicyId);
         vm.prank(pathUSDAdmin);
         pathUSD.changeTransferPolicyId(compoundPolicyId);
 
@@ -426,9 +424,8 @@ contract ZonePortalTest is BaseTest {
             admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
         );
 
-        uint64 compoundPolicyId = registry.createCompoundPolicy(
-            senderPolicyId, recipientPolicyId, mintRecipientPolicyId
-        );
+        uint64 compoundPolicyId =
+            registry.createCompoundPolicy(senderPolicyId, recipientPolicyId, mintRecipientPolicyId);
         vm.prank(pathUSDAdmin);
         pathUSD.changeTransferPolicyId(compoundPolicyId);
 
@@ -1690,7 +1687,6 @@ contract ZonePortalTest is BaseTest {
             to: bob,
             amount: 500e6,
             bouncebackRecipient: address(0),
-            bouncebackFee: 0,
             memo: bytes32(0)
         });
         bytes32 expectedHash =
@@ -1774,7 +1770,6 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectEmit(true, true, false, true);
         uint128 fee = portal.calculateDepositFee();
-        uint128 bouncebackFee = portal.calculateBouncebackFee();
         uint128 netAmount = 500e6 - fee;
         bytes32 expectedHash = keccak256(
             abi.encode(
@@ -1785,23 +1780,13 @@ contract ZonePortalTest is BaseTest {
                     to: bob,
                     amount: netAmount,
                     bouncebackRecipient: bob,
-                    bouncebackFee: bouncebackFee,
                     memo: bytes32("test")
                 }),
                 bytes32(0)
             )
         );
         emit IZonePortal.DepositMade(
-            expectedHash,
-            alice,
-            address(pathUSD),
-            bob,
-            netAmount,
-            fee,
-            bouncebackFee,
-            bytes32("test"),
-            bob,
-            1
+            expectedHash, alice, address(pathUSD), bob, netAmount, fee, bytes32("test"), bob, 1
         );
 
         portal.deposit(address(pathUSD), bob, 500e6, bytes32("test"), bob);
@@ -2136,7 +2121,6 @@ contract ZonePortalTest is BaseTest {
 
         uint128 depositAmount = 1000e6;
         uint128 fee = portal.calculateDepositFee();
-        uint128 bouncebackFee = portal.calculateBouncebackFee();
         uint128 netAmount = depositAmount - fee;
 
         EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
@@ -2152,7 +2136,6 @@ contract ZonePortalTest is BaseTest {
             sender: alice,
             amount: netAmount,
             bouncebackRecipient: alice,
-            bouncebackFee: bouncebackFee,
             keyIndex: 0,
             encrypted: encrypted
         });
@@ -2206,7 +2189,6 @@ contract ZonePortalTest is BaseTest {
 
         uint128 depositAmount = 1000e6;
         uint128 fee = portal.calculateDepositFee();
-        uint128 bouncebackFee = portal.calculateBouncebackFee();
         uint128 netAmount = depositAmount - fee;
 
         EncryptedDepositPayload memory encrypted = _makeEncryptedPayload();
@@ -2220,7 +2202,6 @@ contract ZonePortalTest is BaseTest {
             sender: alice,
             amount: netAmount,
             bouncebackRecipient: alice,
-            bouncebackFee: bouncebackFee,
             keyIndex: 0,
             encrypted: encrypted
         });
@@ -2233,7 +2214,6 @@ contract ZonePortalTest is BaseTest {
             address(pathUSD),
             netAmount,
             fee,
-            bouncebackFee,
             0,
             VALID_SECP256K1_X,
             0x02,

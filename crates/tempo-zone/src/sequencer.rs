@@ -5,12 +5,13 @@ use std::{sync::Arc, time::Duration};
 use alloy_primitives::Address;
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_signer_local::PrivateKeySigner;
+use alloy_transport::TransportResult;
 use tempo_alloy::{TempoNetwork, provider::ext::TempoProviderBuilderExt};
 use tokio::sync::Notify;
 
 use crate::{
     BatchAnchorConfig, SharedWithdrawalStore, WithdrawalProcessorConfig, ZoneMonitorConfig,
-    spawn_zone_monitor, withdrawals,
+    rpc::rpc_connection_config, spawn_zone_monitor, withdrawals,
 };
 
 /// Configuration for all zone sequencer background tasks.
@@ -66,15 +67,10 @@ pub async fn spawn_zone_sequencer(
     // Build a single shared L1 provider with the sequencer wallet.
     // Both the batch submitter (inside the zone monitor) and the withdrawal
     // processor use this provider, ensuring nonces are tracked in one place.
-    let wallet = alloy_network::EthereumWallet::from(signer);
-    let l1_provider: DynProvider<TempoNetwork> =
-        ProviderBuilder::new_with_network::<TempoNetwork>()
-            .with_nonce_key_filler()
-            .wallet(wallet)
-            .connect(&config.l1_rpc_url)
+    let l1_provider =
+        connect_l1_provider(&config.l1_rpc_url, config.retry_connection_interval, signer)
             .await
-            .expect("valid L1 RPC URL")
-            .erased();
+            .expect("valid L1 RPC URL");
 
     let withdrawal_store: SharedWithdrawalStore = Default::default();
     let withdrawal_notify = Arc::new(Notify::new());
@@ -116,5 +112,119 @@ pub async fn spawn_zone_sequencer(
     ZoneSequencerHandle {
         withdrawal_handle,
         monitor_handle,
+    }
+}
+
+/// Build the shared L1 provider used by all sequencer-side L1 transaction tasks.
+async fn connect_l1_provider(
+    l1_rpc_url: &str,
+    retry_connection_interval: Duration,
+    signer: PrivateKeySigner,
+) -> TransportResult<DynProvider<TempoNetwork>> {
+    let wallet = alloy_network::EthereumWallet::from(signer);
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .with_nonce_key_filler()
+        .wallet(wallet)
+        .connect_with_config(l1_rpc_url, rpc_connection_config(retry_connection_interval))
+        .await?
+        .erased();
+
+    Ok(provider)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_provider::Provider;
+    use futures::{SinkExt, StreamExt};
+    use serde_json::{Value, json};
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    use tokio::{
+        net::{TcpListener, TcpStream},
+        time::{Duration, timeout},
+    };
+    use tokio_tungstenite::{accept_async, tungstenite::Message};
+
+    async fn serve_block_number(
+        stream: TcpStream,
+        result: &'static str,
+        close_after_response: bool,
+    ) {
+        let mut ws = accept_async(stream).await.unwrap();
+        while let Some(message) = ws.next().await {
+            let message = message.unwrap();
+            let Message::Text(text) = message else {
+                continue;
+            };
+            let request: Value = serde_json::from_str(&text).unwrap();
+            if request["method"] != "eth_blockNumber" {
+                continue;
+            }
+
+            let response = json!({
+                "jsonrpc": "2.0",
+                "id": request["id"].clone(),
+                "result": result,
+            });
+            ws.send(Message::Text(response.to_string().into()))
+                .await
+                .unwrap();
+
+            if close_after_response {
+                let _ = ws.close(None).await;
+                break;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn l1_provider_reconnects_after_wss_backend_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("ws://{addr}");
+        let connections = Arc::new(AtomicUsize::new(0));
+        let server_connections = connections.clone();
+
+        let server = tokio::spawn(async move {
+            let (first_stream, _) = listener.accept().await.unwrap();
+            server_connections.fetch_add(1, Ordering::SeqCst);
+
+            // Drop the listener while closing the first connection so the
+            // provider's immediate reconnect attempt fails. With the configured
+            // 10ms retry interval below, it should recover quickly once the
+            // listener comes back; Alloy's default 3s interval would miss the
+            // test timeout.
+            drop(listener);
+            serve_block_number(first_stream, "0x1", true).await;
+
+            tokio::time::sleep(Duration::from_millis(100)).await;
+
+            let listener = TcpListener::bind(addr).await.unwrap();
+            let (second_stream, _) = listener.accept().await.unwrap();
+            server_connections.fetch_add(1, Ordering::SeqCst);
+            serve_block_number(second_stream, "0x2", false).await;
+        });
+
+        let provider =
+            connect_l1_provider(&url, Duration::from_millis(10), PrivateKeySigner::random())
+                .await
+                .unwrap();
+
+        assert_eq!(provider.get_block_number().await.unwrap(), 1);
+
+        let second_block = timeout(Duration::from_secs(2), provider.get_block_number())
+            .await
+            .expect("provider should reconnect after first WSS backend closes")
+            .unwrap();
+        assert_eq!(second_block, 2);
+        assert!(
+            connections.load(Ordering::SeqCst) >= 2,
+            "provider should have opened a replacement WSS connection"
+        );
+
+        server.abort();
     }
 }

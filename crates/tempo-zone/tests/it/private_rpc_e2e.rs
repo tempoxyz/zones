@@ -117,18 +117,6 @@ async fn ws_subscribe(ws: &mut PrivateRpcWs, params: Value) -> eyre::Result<Stri
         .to_owned())
 }
 
-async fn ws_expect_no_message(ws: &mut PrivateRpcWs, duration: Duration) -> eyre::Result<()> {
-    match tokio::time::timeout(duration, ws.next()).await {
-        Err(_) => Ok(()),
-        Ok(Some(Ok(Message::Close(_)))) | Ok(None) => Ok(()),
-        Ok(Some(Ok(Message::Text(text)))) => {
-            eyre::bail!("unexpected websocket message: {text}")
-        }
-        Ok(Some(Ok(other))) => eyre::bail!("unexpected websocket frame: {other:?}"),
-        Ok(Some(Err(err))) => Err(err.into()),
-    }
-}
-
 async fn ws_collect_messages_until_quiet(
     ws: &mut PrivateRpcWs,
     duration: Duration,
@@ -947,78 +935,34 @@ async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Pending transaction subscriptions are sender-scoped for all callers.
+/// Pending transaction subscriptions are disabled because they expose mempool activity.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_ws_pending_transactions_are_sender_scoped_for_users() -> eyre::Result<()> {
+async fn test_ws_pending_transaction_subscriptions_are_disabled() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
-    let mut ctx = start_zone_with_private_rpc().await?;
-    let owner_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
-    let outsider_signer = PrivateKeySigner::random();
-    let spender = PrivateKeySigner::random().address();
+    let ctx = start_zone_with_private_rpc().await?;
+    let user_signer = PrivateKeySigner::random();
+    let user_token = ctx.user_token(&user_signer);
+    let mut user_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &user_token).await?;
 
-    ctx.inject_deposit(
-        PATH_USD_ADDRESS,
-        owner_signer.address(),
-        owner_signer.address(),
-        1_000_000,
-    )
-    .await?;
-    ctx.inject_deposit(
-        PATH_USD_ADDRESS,
-        outsider_signer.address(),
-        outsider_signer.address(),
-        1_000_000,
-    )
-    .await?;
-
-    let owner_token = ctx.user_token(&owner_signer);
-    let mut owner_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &owner_token).await?;
-
-    let owner_subscription = ws_subscribe(&mut owner_ws, json!(["newPendingTransactions"])).await?;
-
-    let owner_provider = ProviderBuilder::new()
-        .wallet(owner_signer.clone())
-        .connect_http(ctx.zone.http_url().clone());
-    let outsider_provider = ProviderBuilder::new()
-        .wallet(outsider_signer.clone())
-        .connect_http(ctx.zone.http_url().clone());
-
-    let owner_pending = ContractTip20::new(PATH_USD_ADDRESS, &owner_provider)
-        .approve(spender, U256::from(333u64))
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
-        .send()
-        .await?;
-    let outsider_pending = ContractTip20::new(PATH_USD_ADDRESS, &outsider_provider)
-        .approve(spender, U256::from(444u64))
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
-        .send()
-        .await?;
-
-    let owner_hash = *owner_pending.tx_hash();
-
-    let owner_notification = ws_next_json(&mut owner_ws).await?;
-    assert_eq!(
-        owner_notification["params"]["subscription"]
-            .as_str()
-            .unwrap(),
-        owner_subscription
-    );
-    assert_eq!(
-        owner_notification["params"]["result"].as_str().unwrap(),
-        format!("{owner_hash:#x}")
-    );
-    ws_expect_no_message(&mut owner_ws, Duration::from_millis(500)).await?;
-
-    ctx.fixture.inject_empty_block(ctx.zone.deposit_queue());
-    let owner_receipt = owner_pending.get_receipt().await?;
-    let outsider_receipt = outsider_pending.get_receipt().await?;
-    assert!(owner_receipt.status(), "owner approve should succeed");
-    assert!(outsider_receipt.status(), "outsider approve should succeed");
+    for (id, params) in [
+        (1, json!(["newPendingTransactions"])),
+        (2, json!(["newPendingTransactions", true])),
+        (3, json!(["newPendingTransactions", {}])),
+    ] {
+        user_ws
+            .send(Message::Text(
+                jsonrpc_with_params("eth_subscribe", params, id).into(),
+            ))
+            .await?;
+        let response = ws_next_json(&mut user_ws).await?;
+        assert_eq!(response["id"], id);
+        assert_eq!(
+            response["error"]["code"].as_i64().unwrap(),
+            -32006,
+            "newPendingTransactions should be disabled"
+        );
+    }
 
     Ok(())
 }
