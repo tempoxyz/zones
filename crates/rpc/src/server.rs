@@ -15,11 +15,9 @@ use axum::{
 };
 use std::{
     sync::Arc,
-    time::{Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
-    KeyInfo, SignatureType as KeyInfoSignatureType,
-};
+use tempo_contracts::precompiles::account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType;
 use tempo_primitives::transaction::{
     SignatureType as TempoSignatureType,
     tt_signature::{KeychainSignature, TempoSignature},
@@ -146,6 +144,28 @@ pub(crate) async fn process_rpc_text(
     }
 }
 
+/// Minimum response time enforced on scoped methods that fetch data before
+/// checking authorization (see [`method_requires_speed_bump`]).
+const MIN_RESPONSE_TIME: Duration = Duration::from_millis(100);
+
+/// Whether a method needs the timing-side-channel speed bump.
+///
+/// These methods fetch data before checking authorization, so their response
+/// time would otherwise leak the existence of another account's data. Methods
+/// that check authorization before any data fetch (`eth_getBalance`,
+/// `eth_call`, `eth_sendRawTransaction`) do not need it. See the spec's
+/// "Timing Side Channels" section.
+fn method_requires_speed_bump(method: &str) -> bool {
+    matches!(
+        method,
+        "eth_getTransactionByHash"
+            | "eth_getTransactionReceipt"
+            | "eth_getLogs"
+            | "eth_getFilterLogs"
+            | "eth_getFilterChanges"
+    )
+}
+
 pub(crate) async fn dispatch_request(
     req: &JsonRpcRequest,
     auth: &AuthContext,
@@ -164,6 +184,16 @@ pub(crate) async fn dispatch_request(
         metrics.failed_total.increment(1);
     } else {
         metrics.successful_total.increment(1);
+    }
+
+    // Timing side-channel mitigation: pad the response time of scoped methods
+    // up to a fixed floor so an attacker cannot distinguish "exists but not
+    // yours" from "does not exist" by latency. Applied regardless of
+    // success/error, since the error path can be faster than the data path.
+    if method_requires_speed_bump(&req.method)
+        && let Some(remaining) = MIN_RESPONSE_TIME.checked_sub(started_at.elapsed())
+    {
+        tokio::time::sleep(remaining).await;
     }
 
     response
@@ -236,16 +266,13 @@ pub(crate) async fn authenticate_token(
         .recover_signer(&token.digest)
         .map_err(|_| AuthError::InvalidSignature)?;
 
-    let keychain_key_id = if let TempoSignature::Keychain(keychain_signature) = &signature {
-        Some(validate_keychain_signature(api, caller, keychain_signature, &token.digest).await?)
-    } else {
-        None
-    };
+    if let TempoSignature::Keychain(keychain_signature) = &signature {
+        validate_keychain_signature(api, caller, keychain_signature, &token.digest).await?;
+    }
 
     Ok(AuthContext {
         caller,
         expires_at: token.expires_at,
-        keychain_key_id,
     })
 }
 
@@ -254,13 +281,21 @@ async fn validate_keychain_signature(
     caller: alloy_primitives::Address,
     keychain_signature: &KeychainSignature,
     digest: &alloy_primitives::B256,
-) -> Result<alloy_primitives::Address, AuthenticateError> {
+) -> Result<(), AuthenticateError> {
     let key_id = keychain_signature
         .key_id(digest)
         .map_err(|_| AuthError::InvalidSignature)?;
     let key_info = api.get_keychain_key(caller, key_id).await?;
 
-    validate_keychain_key_info(&key_info)?;
+    if key_info.isRevoked {
+        return Err(AuthError::RevokedKeychainKey.into());
+    }
+    if key_info.keyId.is_zero() {
+        return Err(AuthError::UnauthorizedKeychainKey.into());
+    }
+    if key_info.expiry <= now_unix_seconds() {
+        return Err(AuthError::ExpiredKeychainKey.into());
+    }
 
     let expected_signature_type = match keychain_signature.signature.signature_type() {
         TempoSignatureType::Secp256k1 => KeyInfoSignatureType::Secp256k1,
@@ -272,24 +307,10 @@ async fn validate_keychain_signature(
         return Err(AuthError::KeychainSignatureTypeMismatch.into());
     }
 
-    Ok(key_id)
-}
-
-pub(crate) fn validate_keychain_key_info(key_info: &KeyInfo) -> Result<(), AuthenticateError> {
-    if key_info.isRevoked {
-        return Err(AuthError::RevokedKeychainKey.into());
-    }
-    if key_info.keyId.is_zero() {
-        return Err(AuthError::UnauthorizedKeychainKey.into());
-    }
-    if key_info.expiry <= now_unix_seconds() {
-        return Err(AuthError::ExpiredKeychainKey.into());
-    }
-
     Ok(())
 }
 
-pub(crate) fn now_unix_seconds() -> u64 {
+fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
@@ -372,8 +393,6 @@ mod tests {
         stub!(block_number);
         stub!(chain_id);
         stub!(net_version);
-        stub!(syncing);
-        stub!(coinbase);
         stub!(gas_price);
         stub!(max_priority_fee_per_gas);
         stub!(fee_history, _a: u64, _b: alloy_rpc_types_eth::BlockNumberOrTag, _c: Option<Vec<f64>>);
@@ -496,5 +515,76 @@ mod tests {
             AuthenticateError::Invalid(crate::auth::AuthError::RevokedKeychainKey)
         ));
         assert_eq!(err.status_code(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn speed_bump_covers_exactly_the_spec_methods() {
+        for method in [
+            "eth_getTransactionByHash",
+            "eth_getTransactionReceipt",
+            "eth_getLogs",
+            "eth_getFilterLogs",
+            "eth_getFilterChanges",
+        ] {
+            assert!(
+                super::method_requires_speed_bump(method),
+                "{method} must be speed-bumped"
+            );
+        }
+        for method in [
+            "eth_getBalance",
+            "eth_call",
+            "eth_sendRawTransaction",
+            "eth_blockNumber",
+            "eth_chainId",
+        ] {
+            assert!(
+                !super::method_requires_speed_bump(method),
+                "{method} must not be speed-bumped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_pads_scoped_method_to_minimum_response_time() {
+        use crate::{auth::AuthContext, types::JsonRpcRequest};
+        use std::time::Instant;
+
+        let api = TestApi {
+            key_infos: Mutex::new(HashMap::new()),
+        };
+        let auth = AuthContext {
+            caller: Address::ZERO,
+            expires_at: u64::MAX,
+        };
+
+        // A scoped method must take at least MIN_RESPONSE_TIME, even though the
+        // stubbed handler returns immediately.
+        let scoped = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "eth_getLogs".to_string(),
+            params: None,
+            id: serde_json::Value::Null,
+        };
+        let start = Instant::now();
+        let _ = super::dispatch_request(&scoped, &auth, &api).await;
+        assert!(
+            start.elapsed() >= super::MIN_RESPONSE_TIME,
+            "scoped method must be padded to the minimum response time"
+        );
+
+        // A non-scoped method is not padded.
+        let unscoped = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            method: "eth_chainId".to_string(),
+            params: None,
+            id: serde_json::Value::Null,
+        };
+        let start = Instant::now();
+        let _ = super::dispatch_request(&unscoped, &auth, &api).await;
+        assert!(
+            start.elapsed() < super::MIN_RESPONSE_TIME,
+            "non-scoped method must not be padded"
+        );
     }
 }
