@@ -26,7 +26,7 @@ impl L1BlockDeposits {
         self,
         sequencer_key: &k256::SecretKey,
         portal_address: Address,
-        policy_provider: &crate::l1_state::PolicyProvider,
+        policy_provider: &crate::state::PolicyProvider,
     ) -> eyre::Result<PreparedL1Block> {
         use crate::precompiles::ecies;
 
@@ -107,7 +107,7 @@ impl L1BlockDeposits {
                                 d.token,
                                 dec.to,
                                 l1_block_number,
-                                crate::l1_state::AuthRole::MintRecipient,
+                                crate::state::AuthRole::MintRecipient,
                             )
                             .await?;
 

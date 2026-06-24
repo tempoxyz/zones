@@ -23,6 +23,7 @@ tempo-alloy.workspace = true
 tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
+zone-l1.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true, features = ["std", "serde"] }
 zone-rpc.workspace = true
@@ -77,8 +78,6 @@ reth-ethereum = { workspace = true, features = [
   "cli",
 ], optional = true }
 reth-tracing = { workspace = true, optional = true }
-url = "2"
-derive_more = { workspace = true, features = ["deref", "deref_mut"] }
 eyre.workspace = true
 serde = { workspace = true, features = ["derive"] }
 futures.workspace = true
@@ -121,6 +120,7 @@ sha2.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true
+url = "2"
 
 [features]
 default = []

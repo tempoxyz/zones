@@ -518,9 +518,9 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | Contract | Address |
 |----------|---------|
 | pathUSD (TIP-20) | `0x20C0000000000000000000000000000000000000` |
-| ZoneFactory (moderato) | `0xC73b446C0768bc315Be7741D60B4e494E3ebc0dC` |
+| ZoneFactory (moderato) | `0x3F07435187fB4B4d4A562138A93C0397D0734F2b` |
 
-This deployment predates the admin-aware `createZone` ABI. Until a fresh shared factory is deployed, pass a compatible factory explicitly with `--zone-factory` or `ZONE_FACTORY`; `deploy-router` reads `zoneFactory` from `zone.json` or requires `--zone-factory`.
+The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zone` and `zone-info` point at it automatically, and `deploy-router` uses `zoneFactory` from `zone.json` before falling back to this address. Pass `--zone-factory` or set `ZONE_FACTORY` to override it.
 
 ### Deploying a New ZoneFactory
 
@@ -547,16 +547,16 @@ cast call "$ZONE_FACTORY" "zoneCount()(uint32)" --rpc-url "$ETH_RPC_URL"
 cast call "$ZONE_FACTORY" "verifier()(address)" --rpc-url "$ETH_RPC_URL"
 ```
 
-`zoneCount()` should be `0` on a fresh deployment, and `verifier()` should return the verifier deployed by the factory constructor. Pass the new address via `--zone-factory` / `ZONE_FACTORY`, and update the Key Addresses table above and any other `rg` hits for the previous address.
+`zoneCount()` should be `0` on a fresh deployment, and `verifier()` should return the verifier deployed by the factory constructor. Update `MODERATO_ZONE_FACTORY` in `xtask/src/zone_utils.rs`, the Key Addresses table above, and any other `rg` hits for the previous address.
 
 Current deployment:
 
 | Field | Value |
 |-------|-------|
-| Address | `0xC73b446C0768bc315Be7741D60B4e494E3ebc0dC` |
-| Transaction | `0xd2864f54ef14553fc083cde8a42b68bd75eaea56a7e5f6928ecf2db0205f9a28` |
-| Block | `19482946` |
-| Deployed | `2026-05-27 06:29:47 UTC` |
+| Address | `0x3F07435187fB4B4d4A562138A93C0397D0734F2b` |
+| Transaction | `0x97037ae1ccec2ac6e9425f1499ae0d6c08deebe07054181d2e154987907480fd` |
+| Block | `23667934` |
+| Deployed | `2026-06-24 18:27:45 UTC` |
 
 ### Zone Node CLI Options
 
@@ -587,14 +587,14 @@ Current deployment:
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
 | `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
-| `ZONE_FACTORY` | Yes for `create-zone` / `deploy-zone` / `zone-info` | ZoneFactory address matching the current `createZone` ABI |
+| `ZONE_FACTORY` | No | Optional ZoneFactory override; xtasks default to the current Moderato shared deployment |
 
 ## Justfile Commands Reference
 
 | Command | Description |
 |---------|-------------|
 | `just deploy-zone <name> [<tip20>]` | One-shot: keygen → fund → create → genesis → start node |
-| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, `ZONE_FACTORY`) |
+| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`) |
 | `just deploy-router <name>` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal` | Approve portal to spend tokens on L1 |
