@@ -372,6 +372,8 @@ mod tests {
         stub!(block_number);
         stub!(chain_id);
         stub!(net_version);
+        stub!(syncing);
+        stub!(coinbase);
         stub!(gas_price);
         stub!(max_priority_fee_per_gas);
         stub!(fee_history, _a: u64, _b: alloy_rpc_types_eth::BlockNumberOrTag, _c: Option<Vec<f64>>);

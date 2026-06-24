@@ -164,6 +164,14 @@ impl ZoneRpcApi for ProxyZoneRpc {
         Box::pin(async move { self.forward("net_version", serde_json::json!([])).await })
     }
 
+    fn syncing(&self) -> BoxFut<'_> {
+        Box::pin(async move { self.forward("eth_syncing", serde_json::json!([])).await })
+    }
+
+    fn coinbase(&self) -> BoxFut<'_> {
+        Box::pin(async move { self.forward("eth_coinbase", serde_json::json!([])).await })
+    }
+
     fn gas_price(&self) -> BoxFut<'_> {
         Box::pin(async move { self.forward("eth_gasPrice", serde_json::json!([])).await })
     }

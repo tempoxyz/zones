@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use alloy_primitives::{Address, B256, Bytes, U64};
+use alloy_primitives::{Address, B256, Bytes, U64, keccak256};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, state::StateOverride};
 use serde_json::{Value, value::RawValue};
 use tempo_alloy::rpc::TempoTransactionRequest;
@@ -47,6 +47,12 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `net_version` — returns the network ID as a decimal string.
     fn net_version(&self) -> BoxFut<'_>;
+
+    /// `eth_syncing` — returns sync status from the upstream node.
+    fn syncing(&self) -> BoxFut<'_>;
+
+    /// `eth_coinbase` — returns the configured block beneficiary address.
+    fn coinbase(&self) -> BoxFut<'_>;
 
     /// `eth_gasPrice` — returns the current gas price.
     fn gas_price(&self) -> BoxFut<'_>;
@@ -290,6 +296,9 @@ pub async fn dispatch(
         ),
         "net_version" => api_result(id, "net_version", api.net_version().await),
         "net_listening" => api_result(id, "net_listening", crate::types::to_raw(&true)),
+        "eth_syncing" => api_result(id, "eth_syncing", api.syncing().await),
+        "eth_coinbase" => api_result(id, "eth_coinbase", api.coinbase().await),
+        "web3_sha3" => handle_web3_sha3(id, raw).await,
         "web3_clientVersion" => api_result(
             id,
             "web3_clientVersion",
@@ -370,6 +379,16 @@ async fn enforce_timing_floor(started_at: Option<Instant>) {
     if elapsed < TIMING_SIDE_CHANNEL_MIN_RESPONSE_TIME {
         tokio::time::sleep(TIMING_SIDE_CHANNEL_MIN_RESPONSE_TIME - elapsed).await;
     }
+}
+
+/// Handle `web3_sha3(data)` locally.
+async fn handle_web3_sha3(id: Value, raw: &str) -> JsonRpcResponse {
+    let (data,) = match parse_params::<(Bytes,)>(raw, &id, "expected [data]") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    api_result(id, "web3_sha3", crate::types::to_raw(&keccak256(data)))
 }
 
 /// Handle `eth_getBlockByNumber`. Rejects `full=true` for non-sequencer callers.
@@ -851,6 +870,14 @@ mod tests {
             })
         }
 
+        fn syncing(&self) -> BoxFut<'_> {
+            Box::pin(async move { to_raw(&false) })
+        }
+
+        fn coinbase(&self) -> BoxFut<'_> {
+            Box::pin(async move { to_raw(&Address::repeat_byte(0xbb)) })
+        }
+
         fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
             Box::pin(async move {
                 to_raw(&json!({
@@ -915,6 +942,34 @@ mod tests {
             format!("{:#x}", Address::repeat_byte(0xaa)),
         );
         assert_eq!(body["expiresAt"], "0x6553f100");
+    }
+
+    #[tokio::test]
+    async fn dispatches_allowed_compatibility_methods() {
+        let api = MockZoneRpcApi::default();
+
+        let syncing = dispatch(&request("eth_syncing", json!([])), &auth(), &api).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(syncing.result.as_ref().unwrap().get()).unwrap(),
+            false
+        );
+
+        let coinbase = dispatch(&request("eth_coinbase", json!([])), &auth(), &api).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(coinbase.result.as_ref().unwrap().get()).unwrap(),
+            format!("{:#x}", Address::repeat_byte(0xbb))
+        );
+
+        let sha3 = dispatch(
+            &request("web3_sha3", json!(["0x68656c6c6f"])),
+            &auth(),
+            &api,
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_str::<Value>(sha3.result.as_ref().unwrap().get()).unwrap(),
+            "0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8"
+        );
     }
 
     #[tokio::test]
