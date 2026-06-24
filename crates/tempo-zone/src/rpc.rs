@@ -667,6 +667,8 @@ where
 
     fn get_logs(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
+            let zone_tokens = self.zone_tokens().await?;
+            zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
             zone_rpc::filter::scope_filter(&mut filter);
             let logs = EthFilterApiServer::logs(&self.eth.filter, filter)
                 .await
@@ -678,6 +680,8 @@ where
 
     fn new_filter(&self, mut filter: Filter, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
+            let zone_tokens = self.zone_tokens().await?;
+            zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
             zone_rpc::filter::scope_filter(&mut filter);
             let id = EthFilterApiServer::new_filter(&self.eth.filter, filter)
                 .await
@@ -809,6 +813,8 @@ where
             let provider = self.eth.api.provider().clone();
             let caller = auth.caller;
 
+            let zone_tokens = self.zone_tokens().await?;
+            zone_rpc::filter::scope_filter_addresses(&mut filter, &zone_tokens)?;
             zone_rpc::filter::scope_filter(&mut filter);
 
             let stream = provider
