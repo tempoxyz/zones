@@ -22,7 +22,11 @@ use axum::{
 use futures::{SinkExt, stream::StreamExt};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, value::RawValue};
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
@@ -32,8 +36,7 @@ use tracing::warn;
 use crate::{
     auth::{self, AuthContext, AuthError},
     server::{
-        MAX_BATCH_SIZE, RpcState, authenticate_token, dispatch_request, now_unix_seconds,
-        validate_keychain_key_info,
+        MAX_BATCH_SIZE, RpcState, authenticate_token, dispatch_request, validate_keychain_key_info,
     },
     subscription::WsSubscriptionStream,
     types::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, to_raw},
@@ -492,8 +495,14 @@ fn activate_pending_subscriptions(
     }
 }
 
+/// Time remaining until the given unix-second deadline, using the full system
+/// clock precision (not truncated to whole seconds) so the session closes as
+/// close as possible to the exact `expires_at` boundary.
 fn duration_until_unix_timestamp(timestamp: u64) -> Duration {
-    Duration::from_secs(timestamp.saturating_sub(now_unix_seconds()))
+    let deadline = UNIX_EPOCH + Duration::from_secs(timestamp);
+    deadline
+        .duration_since(SystemTime::now())
+        .unwrap_or_default()
 }
 
 /// Re-check keychain auth for long-lived WebSocket sessions.
@@ -567,14 +576,23 @@ async fn handle_ws_session(
 
     loop {
         let msg = tokio::select! {
+            biased;
             _ = &mut token_expiry => break,
+            _ = close_session_rx.changed() => break,
             _ = keychain_recheck.tick(), if auth.keychain_key_id.is_some() => {
-                if !keychain_auth_still_valid(&auth, &state).await {
+                // Revalidation may be slow; allow token expiry / forced close to
+                // interrupt it so those deadlines are not delayed by a hung RPC.
+                let still_valid = tokio::select! {
+                    biased;
+                    _ = &mut token_expiry => false,
+                    _ = close_session_rx.changed() => false,
+                    valid = keychain_auth_still_valid(&auth, &state) => valid,
+                };
+                if !still_valid {
                     break;
                 }
                 continue;
             }
-            _ = close_session_rx.changed() => break,
             msg = ws_receiver.next() => match msg {
                 Some(msg) => msg,
                 None => break,
