@@ -13,7 +13,9 @@ use revm::{
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::TempoBlockEnv;
-use zone_primitives::constants::zone_chain_id;
+use zone_primitives::constants::{
+    PORTAL_ADMIN_SLOT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, zone_chain_id,
+};
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -21,6 +23,16 @@ const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
+
+#[test]
+fn zone_portal_storage_slot_constants_match_solidity() {
+    assert_eq!(PORTAL_SEQUENCER_SLOT, zone::abi::PORTAL_SEQUENCER_SLOT);
+    assert_eq!(PORTAL_ADMIN_SLOT, zone::abi::PORTAL_ADMIN_SLOT);
+    assert_eq!(
+        PORTAL_PENDING_SEQUENCER_SLOT,
+        zone::abi::PORTAL_PENDING_SEQUENCER_SLOT
+    );
+}
 
 sol! {
     function advanceTempo(bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions, EnabledToken[] calldata enabledTokens);
