@@ -260,8 +260,12 @@ impl TestContext {
     }
 
     fn build_token(&self) -> String {
+        self.build_token_expiring_in(600)
+    }
+
+    fn build_token_expiring_in(&self, ttl_secs: u64) -> String {
         let now = now_secs();
-        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + 600);
+        let (fields, digest) = build_token_fields(ZONE_ID, CHAIN_ID, now, now + ttl_secs);
         let sig = self.signer.sign_hash_sync(&digest).expect("signing failed");
 
         let mut blob = Vec::with_capacity(65 + fields.len());
@@ -333,6 +337,34 @@ fn parse_response(msg: tungstenite::Message) -> Value {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn ws_session_closes_when_token_expires() {
+    let ctx = TestContext::start(MockZoneRpcApi::default()).await;
+    // Token is valid at upgrade time but expires ~1s later.
+    let token = ctx.build_token_expiring_in(1);
+    let mut ws = connect_with_token(&ctx.ws_url(), ctx.addr, &token)
+        .await
+        .expect("ws connect should succeed before expiry");
+
+    // With no client activity, the server must close the session once the token
+    // expires. Bound the wait generously to avoid flakiness.
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match ws.next().await {
+                Some(Ok(tungstenite::Message::Close(_))) | None => break,
+                Some(Err(_)) => break,
+                Some(Ok(_)) => continue,
+            }
+        }
+    })
+    .await;
+
+    assert!(
+        closed.is_ok(),
+        "ws session must close itself after the auth token expires"
+    );
+}
 
 #[tokio::test]
 async fn ws_roundtrip_with_header_auth() {
