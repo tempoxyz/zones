@@ -13324,6 +13324,7 @@ dependencies = [
  "reth-eth-wire-types",
  "reth-ethereum",
  "reth-evm",
+ "reth-metrics",
  "reth-node-api",
  "reth-node-builder",
  "reth-node-core",
@@ -13331,7 +13332,6 @@ dependencies = [
  "reth-payload-primitives",
  "reth-primitives-traits",
  "reth-provider",
- "reth-revm",
  "reth-rpc",
  "reth-rpc-builder",
  "reth-rpc-eth-api",
@@ -13360,12 +13360,40 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "url",
+ "zone-evm",
  "zone-l1",
  "zone-payload",
- "zone-precompiles",
  "zone-primitives",
  "zone-rpc",
  "zone-sequencer",
+]
+
+[[package]]
+name = "zone-evm"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-evm",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-sol-types",
+ "eyre",
+ "reth-evm",
+ "reth-primitives-traits",
+ "reth-revm",
+ "revm",
+ "tempo-alloy",
+ "tempo-chainspec",
+ "tempo-evm",
+ "tempo-payload-types",
+ "tempo-precompiles",
+ "tempo-primitives",
+ "tempo-revm",
+ "tempo-zone-contracts",
+ "tokio",
+ "tracing",
+ "zone-l1",
+ "zone-precompiles",
 ]
 
 [[package]]

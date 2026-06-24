@@ -9,10 +9,11 @@ use reth_consensus::noop::NoopConsensus;
 use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
+use zone_evm::ZoneEvmConfig;
 
 use crate::{
     BatchAnchorConfig, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig,
-    evm::ZoneEvmConfig, rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
+    rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 
 const MAX_LOGS_PER_RESPONSE: u64 = 1_000_000;

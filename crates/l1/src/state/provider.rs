@@ -125,8 +125,8 @@ impl L1StateProvider {
 
     /// Create a provider from pre-constructed components.
     ///
-    /// Used by [`ZoneEvmConfig::new_without_l1`](crate::evm::ZoneEvmConfig::new_without_l1)
-    /// to build a fallback provider that won't panic on an empty RPC URL.
+    /// Used by `ZoneEvmConfig::new_without_l1` to build a fallback provider
+    /// that won't panic on an empty RPC URL.
     pub fn new_raw(
         config: L1StateProviderConfig,
         cache: L1StateCache,

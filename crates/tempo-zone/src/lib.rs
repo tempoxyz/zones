@@ -12,8 +12,6 @@ pub mod ext;
 pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub mod batch;
 pub mod engine;
-pub mod evm;
-mod executor;
 pub mod l1;
 pub mod l1_state;
 mod node;
@@ -22,7 +20,6 @@ pub mod payload;
 pub mod precompiles;
 pub mod rpc;
 pub mod sequencer;
-mod tx_context;
 pub mod withdrawals;
 pub mod zonemonitor;
 

@@ -1,3 +1,3 @@
-//! Zone-specific precompiles — re-exported from [`zone_precompiles`].
+//! Re-exports for Zone EVM precompiles.
 
-pub use zone_precompiles::*;
+pub use zone_evm::precompiles::*;

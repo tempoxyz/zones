@@ -1,7 +1,8 @@
 use super::*;
 use crate::abi::{DepositType, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT};
-use alloy_consensus::Header;
-use alloy_primitives::{FixedBytes, address};
+use alloy_consensus::{Header, ReceiptWithBloom};
+use alloy_primitives::{Bloom, FixedBytes, address};
+use alloy_rpc_types_eth::TransactionReceipt;
 use alloy_sol_types::SolEvent;
 use alloy_transport::mock::Asserter;
 use serde::Deserialize;
@@ -9,6 +10,8 @@ use std::{
     collections::{HashSet, VecDeque},
     time::Duration,
 };
+use tempo_alloy::rpc::TempoTransactionReceipt;
+use tempo_primitives::{TempoReceipt, TempoTxType};
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -185,6 +188,162 @@ fn seal(header: TempoHeader) -> SealedHeader<TempoHeader> {
 
 fn header_hash(header: &TempoHeader) -> B256 {
     keccak256(alloy_rlp::encode(header))
+}
+
+fn make_test_receipt(
+    block_number: u64,
+    block_hash: B256,
+    tx_hash: B256,
+    tx_index: u64,
+    cumulative_gas_used: u64,
+    logs_bloom: Bloom,
+) -> TempoTransactionReceipt {
+    TempoTransactionReceipt {
+        inner: TransactionReceipt {
+            inner: ReceiptWithBloom::new(
+                TempoReceipt {
+                    tx_type: TempoTxType::Legacy,
+                    success: true,
+                    cumulative_gas_used,
+                    logs: vec![],
+                },
+                logs_bloom,
+            ),
+            transaction_hash: tx_hash,
+            transaction_index: Some(tx_index),
+            block_hash: Some(block_hash),
+            block_number: Some(block_number),
+            gas_used: cumulative_gas_used,
+            effective_gas_price: 0,
+            blob_gas_used: None,
+            blob_gas_price: None,
+            from: Address::ZERO,
+            to: Some(Address::ZERO),
+            contract_address: None,
+        },
+        fee_token: None,
+        fee_payer: Address::ZERO,
+    }
+}
+
+fn calculate_test_receipts_root(receipts: &[TempoTransactionReceipt]) -> B256 {
+    let receipts = receipts
+        .iter()
+        .map(|receipt| {
+            receipt
+                .inner
+                .inner
+                .clone()
+                .map_receipt(|receipt| receipt.map_logs(Into::into))
+        })
+        .collect::<Vec<_>>();
+    alloy_consensus::proofs::calculate_receipt_root(&receipts)
+}
+
+#[test]
+fn verify_receipts_accepts_matching_root_and_logs_bloom() {
+    let block_number = 42;
+    let header = make_test_header(block_number);
+    let block_hash = header_hash(&header);
+    let block = NumHash::new(block_number, block_hash);
+    let receipts = vec![
+        make_test_receipt(
+            block_number,
+            block_hash,
+            B256::with_last_byte(0x01),
+            0,
+            21_000,
+            Bloom::ZERO,
+        ),
+        make_test_receipt(
+            block_number,
+            block_hash,
+            B256::with_last_byte(0x02),
+            1,
+            42_000,
+            Bloom::ZERO,
+        ),
+    ];
+    let receipts_root = calculate_test_receipts_root(&receipts);
+
+    verify_receipts(block, receipts_root, Bloom::ZERO, &receipts)
+        .expect("matching receipts root should validate");
+}
+
+#[test]
+fn verify_receipts_rejects_receipts_root_mismatch() {
+    let block_number = 42;
+    let header = make_test_header(block_number);
+    let block_hash = header_hash(&header);
+    let block = NumHash::new(block_number, block_hash);
+    let receipts = vec![make_test_receipt(
+        block_number,
+        block_hash,
+        B256::with_last_byte(0x01),
+        0,
+        21_000,
+        Bloom::ZERO,
+    )];
+
+    let err = verify_receipts(block, B256::with_last_byte(0xff), Bloom::ZERO, &receipts)
+        .expect_err("mismatched receipts root should fail");
+
+    assert!(
+        err.to_string().contains("receipt root mismatch"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn verify_receipts_rejects_changed_receipt_bloom() {
+    let block_number = 42;
+    let header = make_test_header(block_number);
+    let block_hash = header_hash(&header);
+    let block = NumHash::new(block_number, block_hash);
+    let receipts = vec![make_test_receipt(
+        block_number,
+        block_hash,
+        B256::with_last_byte(0x01),
+        0,
+        21_000,
+        Bloom::ZERO,
+    )];
+    let receipts_root = calculate_test_receipts_root(&receipts);
+    let mut tampered_receipts = receipts;
+    tampered_receipts[0].inner.inner.logs_bloom = Bloom::repeat_byte(0x01);
+
+    let err = verify_receipts(block, receipts_root, Bloom::ZERO, &tampered_receipts)
+        .expect_err("tampered receipt bloom should fail");
+
+    assert!(
+        err.to_string().contains("receipt root mismatch"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn verify_receipts_rejects_logs_bloom_mismatch() {
+    let block_number = 42;
+    let header = make_test_header(block_number);
+    let block_hash = header_hash(&header);
+    let block = NumHash::new(block_number, block_hash);
+    let receipts = vec![make_test_receipt(
+        block_number,
+        block_hash,
+        B256::with_last_byte(0x01),
+        0,
+        21_000,
+        Bloom::repeat_byte(0x01),
+    )];
+    let receipts_root = calculate_test_receipts_root(&receipts);
+
+    let err = verify_receipts(block, receipts_root, Bloom::ZERO, &receipts)
+        .expect_err("mismatched header logs bloom should fail");
+
+    assert!(
+        err.to_string().contains("logs bloom mismatch"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

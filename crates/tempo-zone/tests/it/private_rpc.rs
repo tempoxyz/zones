@@ -358,6 +358,7 @@ fn classify_disabled_methods() {
         "eth_hashrate",
         "eth_submitWork",
         "eth_submitHashrate",
+        "eth_newPendingTransactionFilter",
         "eth_subscribe",
         "eth_unsubscribe",
     ] {

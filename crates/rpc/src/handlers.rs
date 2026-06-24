@@ -987,6 +987,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rejects_pending_transaction_filter_endpoint() {
+        let api = MockZoneRpcApi::default();
+
+        let resp = dispatch(
+            &request("eth_newPendingTransactionFilter", json!([])),
+            &auth(),
+            &api,
+        )
+        .await;
+
+        assert!(resp.result.is_none());
+        assert_eq!(resp.error.as_ref().unwrap().code, -32006);
+    }
+
+    #[tokio::test]
     async fn rejects_state_override_for_eth_call() {
         let api = MockZoneRpcApi::default();
         let resp = dispatch(

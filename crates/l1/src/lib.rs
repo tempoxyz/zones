@@ -18,7 +18,8 @@
 
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::NumHash;
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_network::primitives::HeaderResponse as _;
+use alloy_primitives::{Address, B256, Bloom, Bytes, U256, keccak256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_client::RpcClient;
 use alloy_rpc_types_eth::{BlockId, Log};
@@ -94,4 +95,5 @@ pub(crate) use queue::PendingDeposits;
 #[cfg(test)]
 pub(crate) use subscriber::{
     LocalTempoStateReader, address_to_storage_value, apply_sequencer_events_to_cache,
+    verify_receipts,
 };

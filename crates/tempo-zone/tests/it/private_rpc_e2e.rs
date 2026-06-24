@@ -814,7 +814,12 @@ async fn test_method_tiers() -> eyre::Result<()> {
     }
 
     // Disabled methods → -32006 for everyone
-    for method in ["eth_subscribe", "eth_mining", "eth_hashrate"] {
+    for method in [
+        "eth_subscribe",
+        "eth_newPendingTransactionFilter",
+        "eth_mining",
+        "eth_hashrate",
+    ] {
         let resp = ctx
             .call_as_user(method, serde_json::json!([]), &user_signer)
             .await?;

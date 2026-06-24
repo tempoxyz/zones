@@ -7,7 +7,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, Bytes, hex};
+use alloy_primitives::{Address, B256, Bytes, hex};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, Log, state::StateOverride};
 use alloy_sol_types::SolCall;
 use eyre::WrapErr;
@@ -42,8 +42,8 @@ struct UpstreamResponse {
 pub struct ProxyZoneRpc {
     client: reqwest::Client,
     upstream_url: String,
-    /// Maps filter IDs to the authenticated account that created them.
-    filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
+    /// Maps filter IDs to the authenticated account and filter type that created them.
+    filter_owners: Arc<Mutex<HashMap<FilterId, TrackedFilter>>>,
 }
 
 impl ProxyZoneRpc {
@@ -96,13 +96,36 @@ impl ProxyZoneRpc {
         &self,
         id: &FilterId,
         auth: &AuthContext,
-    ) -> Result<(), JsonRpcError> {
+    ) -> Result<TrackedFilterKind, JsonRpcError> {
         let owners = self.filter_owners.lock().await;
         match owners.get(id) {
-            Some(owner) if *owner == auth.caller => Ok(()),
+            Some(filter) if filter.owner == auth.caller => Ok(filter.kind),
             _ => Err(JsonRpcError::invalid_params("filter not found")),
         }
     }
+}
+
+/// Metadata for filters created through the private RPC.
+///
+/// The upstream filter ID alone does not tell us whether
+/// `eth_getFilterChanges` should return logs or block hashes. Keeping the
+/// locally-created filter kind lets the proxy validate the upstream result shape
+/// before returning anything to the caller.
+#[derive(Clone, Copy)]
+struct TrackedFilter {
+    /// Authenticated account that created the filter.
+    owner: Address,
+    /// Expected shape for subsequent `eth_getFilterChanges` responses.
+    kind: TrackedFilterKind,
+}
+
+/// Filter types exposed by the private RPC.
+#[derive(Clone, Copy)]
+enum TrackedFilterKind {
+    /// Log filter created by `eth_newFilter`; changes are `Vec<Log>` and must be filtered.
+    Log,
+    /// Block filter created by `eth_newBlockFilter`; changes are `Vec<B256>` block hashes.
+    Block,
 }
 
 /// Strip privacy-sensitive fields from a block JSON object for non-sequencer callers.
@@ -421,7 +444,13 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 .forward("eth_newFilter", serde_json::json!([filter]))
                 .await?;
             let id: FilterId = serde_json::from_str(result.get()).map_err(internal)?;
-            self.filter_owners.lock().await.insert(id, auth.caller);
+            self.filter_owners.lock().await.insert(
+                id,
+                TrackedFilter {
+                    owner: auth.caller,
+                    kind: TrackedFilterKind::Log,
+                },
+            );
             Ok(result)
         })
     }
@@ -442,20 +471,27 @@ impl ZoneRpcApi for ProxyZoneRpc {
 
     fn get_filter_changes(&self, id: FilterId, auth: AuthContext) -> BoxFut<'_> {
         Box::pin(async move {
-            self.ensure_filter_owner(&id, &auth).await?;
+            let kind = self.ensure_filter_owner(&id, &auth).await?;
 
             let result = self
                 .forward("eth_getFilterChanges", serde_json::json!([id]))
                 .await?;
 
-            // Try to parse as logs for filtering. If the result is block hashes
-            // (from a block filter) or empty, the parse will fail and we pass through.
-            if let Ok(logs) = serde_json::from_str::<Vec<Log>>(result.get()) {
-                let filtered = filter::filter_logs(logs, &auth.caller);
-                return to_raw(&filtered);
+            match kind {
+                TrackedFilterKind::Log => {
+                    let logs: Vec<Log> = serde_json::from_str(result.get()).map_err(|_| {
+                        internal("unexpected eth_getFilterChanges log filter result shape")
+                    })?;
+                    let filtered = filter::filter_logs(logs, &auth.caller);
+                    to_raw(&filtered)
+                }
+                TrackedFilterKind::Block => {
+                    serde_json::from_str::<Vec<B256>>(result.get()).map_err(|_| {
+                        internal("unexpected eth_getFilterChanges block filter result shape")
+                    })?;
+                    Ok(result)
+                }
             }
-
-            Ok(result)
         })
     }
 
@@ -465,7 +501,13 @@ impl ZoneRpcApi for ProxyZoneRpc {
                 .forward("eth_newBlockFilter", serde_json::json!([]))
                 .await?;
             let id: FilterId = serde_json::from_str(result.get()).map_err(internal)?;
-            self.filter_owners.lock().await.insert(id, auth.caller);
+            self.filter_owners.lock().await.insert(
+                id,
+                TrackedFilter {
+                    owner: auth.caller,
+                    kind: TrackedFilterKind::Block,
+                },
+            );
             Ok(result)
         })
     }
@@ -644,5 +686,133 @@ mod tests {
             receipt.inner.inner.logs_bloom,
             upstream.inner.inner.logs_bloom
         );
+    }
+
+    #[tokio::test]
+    async fn filter_changes_filters_log_results() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let other = address!("0x0000000000000000000000000000000000000002");
+        let third = address!("0x0000000000000000000000000000000000000003");
+
+        let visible = make_log(
+            Address::ZERO,
+            vec![
+                filter::TRANSFER_TOPIC,
+                caller_word(&caller),
+                caller_word(&other),
+            ],
+        );
+        let hidden = make_log(
+            Address::ZERO,
+            vec![
+                filter::TRANSFER_TOPIC,
+                caller_word(&other),
+                caller_word(&third),
+            ],
+        );
+        let result = serde_json::to_value(vec![visible.clone(), hidden]).unwrap();
+        let proxy = ProxyZoneRpc::new(spawn_upstream(result).await);
+
+        let id = FilterId::Num(1);
+        proxy.filter_owners.lock().await.insert(
+            id.clone(),
+            TrackedFilter {
+                owner: caller,
+                kind: TrackedFilterKind::Log,
+            },
+        );
+
+        let raw = proxy
+            .get_filter_changes(
+                id,
+                AuthContext {
+                    caller,
+                    expires_at: u64::MAX,
+                    keychain_key_id: None,
+                },
+            )
+            .await
+            .expect("proxy should return filtered changes");
+
+        let logs: Vec<Log> = serde_json::from_str(raw.get()).expect("deserialize filtered logs");
+        assert_eq!(logs, vec![visible]);
+    }
+
+    #[tokio::test]
+    async fn filter_changes_passes_through_block_hashes() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let hashes = vec![B256::with_last_byte(7), B256::with_last_byte(8)];
+        let result = serde_json::to_value(&hashes).unwrap();
+        let proxy = ProxyZoneRpc::new(spawn_upstream(result).await);
+
+        let id = FilterId::Num(2);
+        proxy.filter_owners.lock().await.insert(
+            id.clone(),
+            TrackedFilter {
+                owner: caller,
+                kind: TrackedFilterKind::Block,
+            },
+        );
+
+        let raw = proxy
+            .get_filter_changes(
+                id,
+                AuthContext {
+                    caller,
+                    expires_at: u64::MAX,
+                    keychain_key_id: None,
+                },
+            )
+            .await
+            .expect("block-hash changes should pass through");
+
+        let out: Vec<B256> = serde_json::from_str(raw.get()).expect("deserialize block hashes");
+        assert_eq!(out, hashes);
+    }
+
+    #[tokio::test]
+    async fn filter_changes_fails_closed_on_pending_transaction_results() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let recipient = address!("0x0000000000000000000000000000000000000002");
+        let result = serde_json::json!([
+            {
+                "hash": format!("{:#x}", TxHash::with_last_byte(9)),
+                "nonce": "0x0",
+                "blockHash": null,
+                "blockNumber": null,
+                "transactionIndex": null,
+                "from": format!("{caller:#x}"),
+                "to": format!("{recipient:#x}"),
+                "value": "0x0",
+                "gas": "0x5208",
+                "gasPrice": "0x1",
+                "input": "0x"
+            }
+        ]);
+        let proxy = ProxyZoneRpc::new(spawn_upstream(result).await);
+
+        let id = FilterId::Num(3);
+        proxy.filter_owners.lock().await.insert(
+            id.clone(),
+            TrackedFilter {
+                owner: caller,
+                kind: TrackedFilterKind::Block,
+            },
+        );
+
+        let err = proxy
+            .get_filter_changes(
+                id,
+                AuthContext {
+                    caller,
+                    expires_at: u64::MAX,
+                    keychain_key_id: None,
+                },
+            )
+            .await
+            .expect_err("pending transaction changes must fail closed");
+
+        assert_eq!(err.code, JsonRpcError::internal("").code);
+        assert!(err.message.contains("block filter result shape"));
     }
 }

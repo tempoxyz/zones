@@ -209,25 +209,29 @@ impl L1Subscriber {
                 let subscriber_metrics = subscriber_metrics.clone();
                 async move {
                     let block_number = header.number();
+                    let block_hash = header.hash();
+                    let block = NumHash::new(block_number, block_hash);
+                    let expected_receipts_root = header.receipts_root();
+                    let expected_logs_bloom = header.logs_bloom();
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let receipts = provider
-                        .get_block_receipts(BlockId::number(block_number))
-                        .await
-                        .map_err(eyre::Report::from)
-                        .and_then(|receipts| {
-                            receipts
-                                .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
-                        })
-                        .inspect_err(|_| {
-                            fetch_failures.increment(1);
-                        })?;
+                    let receipts = fetch_and_verify_receipts_for_header(
+                        provider,
+                        block,
+                        expected_receipts_root,
+                        expected_logs_bloom,
+                    )
+                    .await
+                    .inspect_err(|_| {
+                        fetch_failures.increment(1);
+                    })?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
+                        %block_hash,
                         elapsed_ms = elapsed.as_millis() as u64,
                         receipts = receipts.len(),
-                        "Fetched live block receipts"
+                        "Fetched and validated live block receipts"
                     );
                     Ok::<_, eyre::Report>((header, receipts))
                 }
@@ -326,10 +330,10 @@ impl L1Subscriber {
 
     /// Backfill L1 blocks from `from..=to` with pipelined RPC fetching.
     ///
-    /// Fetches receipts and headers for up to `BACKFILL_CONCURRENCY` blocks in
+    /// Fetches headers and receipts for up to `l1_fetch_concurrency` blocks in
     /// parallel, then processes them sequentially (event extraction, policy
-    /// application, enqueue). This avoids the round-trip latency of fetching
-    /// one block at a time.
+    /// application, enqueue). Receipts are fetched by the corresponding block
+    /// hash and validated against the header's receipts root before processing.
     #[instrument(skip(self, l1_provider), fields(from, to))]
     async fn backfill(
         &mut self,
@@ -339,9 +343,7 @@ impl L1Subscriber {
     ) -> eyre::Result<()> {
         use futures::stream;
 
-        // Backfill sends 2 requests per block (receipts + header), so halve
-        // the concurrency to stay within the configured fetch budget.
-        let concurrency = (self.config.l1_fetch_concurrency / 2).max(1);
+        let concurrency = self.config.l1_fetch_concurrency.max(1);
         let subscriber_metrics = self.subscriber_metrics.clone();
 
         let mut fetched = stream::iter(from..=to)
@@ -351,32 +353,39 @@ impl L1Subscriber {
                 async move {
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let (receipts, header_resp) = tokio::try_join!(
-                        async {
-                            provider
-                                .get_block_receipts(BlockId::number(block_number))
-                                .await
-                                .map_err(eyre::Report::from)?
-                                .ok_or_else(|| eyre::eyre!("no receipts for block {block_number}"))
-                        },
-                        async {
-                            provider
-                                .get_header_by_number(block_number.into())
-                                .await?
-                                .ok_or_else(|| {
-                                    eyre::eyre!("L1 header not found for block {block_number}")
-                                })
-                        },
+                    let header_resp = async {
+                        provider
+                            .get_header_by_number(block_number.into())
+                            .await?
+                            .ok_or_else(|| {
+                                eyre::eyre!("L1 header not found for block {block_number}")
+                            })
+                    }
+                    .await
+                    .inspect_err(|_| {
+                        fetch_failures.increment(1);
+                    })?;
+                    let block_hash = header_resp.hash();
+                    let block = NumHash::new(block_number, block_hash);
+                    let expected_receipts_root = header_resp.receipts_root();
+                    let expected_logs_bloom = header_resp.logs_bloom();
+                    let receipts = fetch_and_verify_receipts_for_header(
+                        provider,
+                        block,
+                        expected_receipts_root,
+                        expected_logs_bloom,
                     )
+                    .await
                     .inspect_err(|_| {
                         fetch_failures.increment(1);
                     })?;
                     let elapsed = start.elapsed();
                     debug!(
                         block_number,
+                        %block_hash,
                         elapsed_ms = elapsed.as_millis() as u64,
                         receipts = receipts.len(),
-                        "Fetched L1 block data"
+                        "Fetched and validated L1 block data"
                     );
                     let header = header_resp.inner.inner;
                     Ok::<_, eyre::Report>((header, receipts))
@@ -685,8 +694,66 @@ impl L1Subscriber {
             guard.clear();
             self.config.policy_cache.write().clear();
         }
-        guard.update_anchor(NumHash { number, hash });
+        guard.update_anchor(NumHash::new(number, hash));
     }
+}
+
+/// Fetch receipts for the L1 header by block hash and verify they match the
+/// header's receipts root and logs bloom before returning them.
+async fn fetch_and_verify_receipts_for_header(
+    provider: &impl Provider<TempoNetwork>,
+    block: NumHash,
+    expected_receipts_root: B256,
+    expected_logs_bloom: Bloom,
+) -> eyre::Result<Vec<tempo_alloy::rpc::TempoTransactionReceipt>> {
+    let block_number = block.number;
+    let block_hash = block.hash;
+    let receipts = provider
+        .get_block_receipts(BlockId::hash(block_hash))
+        .await?
+        .ok_or_else(|| eyre::eyre!("no receipts for block {block_number} ({block_hash})"))?;
+    verify_receipts(
+        block,
+        expected_receipts_root,
+        expected_logs_bloom,
+        &receipts,
+    )?;
+    Ok(receipts)
+}
+
+pub(crate) fn verify_receipts(
+    block: NumHash,
+    expected_receipts_root: B256,
+    expected_logs_bloom: Bloom,
+    receipts: &[tempo_alloy::rpc::TempoTransactionReceipt],
+) -> eyre::Result<()> {
+    let block_number = block.number;
+    let block_hash = block.hash;
+    let receipts = receipts
+        .iter()
+        .map(|receipt| {
+            receipt
+                .inner
+                .inner
+                .clone()
+                .map_receipt(|receipt| receipt.map_logs(Into::into))
+        })
+        .collect::<Vec<_>>();
+    let computed_receipts_root = alloy_consensus::proofs::calculate_receipt_root(&receipts);
+    if computed_receipts_root != expected_receipts_root {
+        eyre::bail!(
+            "receipt root mismatch for L1 block {block_number} ({block_hash}): expected {expected_receipts_root}, got {computed_receipts_root}"
+        );
+    }
+    let computed_logs_bloom = receipts
+        .iter()
+        .fold(Bloom::ZERO, |bloom, receipt| bloom | receipt.bloom_ref());
+    if computed_logs_bloom != expected_logs_bloom {
+        eyre::bail!(
+            "logs bloom mismatch for L1 block {block_number} ({block_hash}): expected {expected_logs_bloom}, got {computed_logs_bloom}"
+        );
+    }
+    Ok(())
 }
 
 pub(crate) fn apply_sequencer_events_to_cache(

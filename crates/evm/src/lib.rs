@@ -1,16 +1,22 @@
 //! Zone-specific EVM configuration.
 //!
 //! Wraps [`TempoEvmConfig`] with a custom [`ZoneEvmFactory`] that registers the
-//! [`TempoStateReader`](crate::l1_state::TempoStateReader) precompile at
-//! [`TEMPO_STATE_READER_ADDRESS`](crate::abi::TEMPO_STATE_READER_ADDRESS).
+//! [`TempoStateReader`](zone_l1::state::TempoStateReader) precompile at
+//! [`TEMPO_STATE_READER_ADDRESS`](tempo_zone_contracts::TEMPO_STATE_READER_ADDRESS).
+
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+#![allow(unnameable_types)]
+
+mod executor;
+pub mod precompiles;
+mod tx_context;
 
 use crate::{
-    abi::{TEMPO_STATE_READER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS},
     executor::ZoneBlockExecutor,
-    l1_state::{L1StateCache, L1StateProvider, PolicyProvider, TempoStateReader},
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
+        SequencerExt, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
         ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
     tx_context::ZoneTxContext,
@@ -46,6 +52,10 @@ use tempo_precompiles::{
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
+};
+use tempo_zone_contracts::{TEMPO_STATE_READER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
+use zone_l1::state::{
+    L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider, TempoStateReader,
 };
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -94,8 +104,7 @@ impl ZoneEvmFactory {
             .policy_provider
             .clone()
             .map(ZoneTip403ProxyRegistry::new);
-        let sequencer: Arc<dyn crate::precompiles::SequencerExt> =
-            Arc::new(self.l1_provider.clone());
+        let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_provider.clone());
 
         if let Some(provider) = self.policy_provider.clone() {
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
@@ -262,7 +271,7 @@ impl ZoneEvmConfig {
             .connect_http("http://127.0.0.1:1".parse().expect("valid fallback URL"))
             .erased();
         let runtime_handle = tokio::runtime::Handle::current();
-        let config = crate::l1_state::L1StateProviderConfig::default();
+        let config = L1StateProviderConfig::default();
         let l1_provider = L1StateProvider::new_raw(config, cache, provider, runtime_handle);
         Self::new(chain_spec, l1_provider)
     }

@@ -14,18 +14,15 @@ workspace = true
 # tempo
 tempo-chainspec.workspace = true
 tempo-evm = { workspace = true, features = ["rpc", "engine"] }
-tempo-revm.workspace = true
 tempo-node.workspace = true
-tempo-payload-types.workspace = true
 tempo-primitives.workspace = true
 tempo-transaction-pool.workspace = true
 tempo-alloy.workspace = true
 tempo-contracts.workspace = true
-tempo-precompiles.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
+zone-evm.workspace = true
 zone-l1.workspace = true
 zone-payload.workspace = true
-zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true, features = ["std", "serde"] }
 zone-rpc.workspace = true
 zone-sequencer.workspace = true
@@ -34,13 +31,13 @@ zone-sequencer.workspace = true
 reth-chainspec.workspace = true
 reth-eth-wire-types.workspace = true
 reth-evm.workspace = true
+reth-metrics.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
-reth-revm.workspace = true
 reth-rpc.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
@@ -51,7 +48,6 @@ reth-transaction-pool.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
-alloy-evm.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
 alloy-provider.workspace = true
@@ -60,9 +56,6 @@ alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
-
-# revm
-revm.workspace = true
 
 # misc
 clap = { workspace = true, optional = true }
@@ -90,6 +83,7 @@ alloy = { workspace = true, features = [
 ] }
 alloy-contract.workspace = true
 alloy-eips.workspace = true
+alloy-evm.workspace = true
 alloy-primitives.workspace = true
 alloy-rlp.workspace = true
 alloy-rpc-types-engine.workspace = true
@@ -106,11 +100,13 @@ reth-tracing.workspace = true
 serde = { workspace = true, features = ["derive"] }
 alloy-signer.workspace = true
 reqwest.workspace = true
+revm.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tempo-chainspec.workspace = true
 tempo-contracts.workspace = true
 tempo-payload-types.workspace = true
+tempo-revm.workspace = true
 sha2.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
@@ -130,12 +126,10 @@ jemalloc = ["reth-ethereum?/jemalloc"]
 test-utils = [
   "reth-chainspec/test-utils",
   "reth-ethereum/test-utils",
-  "reth-evm/test-utils",
   "reth-node-builder/test-utils",
   "reth-payload-builder/test-utils",
   "reth-primitives-traits/test-utils",
   "reth-provider/test-utils",
-  "reth-revm/test-utils",
   "reth-transaction-pool/test-utils",
   "tempo-precompiles/test-utils",
   "tempo-transaction-pool/test-utils",

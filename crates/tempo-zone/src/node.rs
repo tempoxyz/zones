@@ -7,7 +7,6 @@ use crate::{
     BatchAnchorConfig, DepositQueue, L1SubscriberConfig, PolicyCache, ZoneEngine,
     ZoneSequencerConfig,
     abi::{TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal},
-    evm::ZoneEvmConfig,
     ext::TempoStateExt,
     l1::L1Subscriber,
     l1_state::{
@@ -65,6 +64,7 @@ use tempo_transaction_pool::{
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tracing::{debug, info};
+use zone_evm::ZoneEvmConfig;
 
 /// Network primitives for Zone Nodes
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
