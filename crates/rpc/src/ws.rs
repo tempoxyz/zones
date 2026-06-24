@@ -22,12 +22,17 @@ use axum::{
 use futures::{SinkExt, stream::StreamExt};
 use serde::de::DeserializeOwned;
 use serde_json::{Value, value::RawValue};
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tokio::{
     sync::{mpsc, watch},
     task::JoinHandle,
+    time::{Instant, sleep_until},
 };
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::{
     auth::{self, AuthContext, AuthError},
@@ -498,9 +503,25 @@ async fn handle_ws_session(
 
     let mut session = WsSession::default();
 
+    // Auth is validated only once, during the HTTP upgrade handshake. Enforce
+    // the token's expiry for the lifetime of the session so a connection opened
+    // shortly before expiry cannot keep streaming private state (logs, heads)
+    // indefinitely after the token has expired — expiry is the token's only
+    // revocation mechanism on this private chain.
+    let now_secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let auth_deadline =
+        Instant::now() + Duration::from_secs(auth.expires_at.saturating_sub(now_secs));
+
     loop {
         let msg = tokio::select! {
             _ = close_session_rx.changed() => break,
+            _ = sleep_until(auth_deadline) => {
+                debug!(target: "zone::rpc", "ws session auth token expired, closing");
+                break;
+            }
             msg = ws_receiver.next() => match msg {
                 Some(msg) => msg,
                 None => break,
