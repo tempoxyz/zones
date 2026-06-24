@@ -3,10 +3,7 @@
 //! Each handler calls the underlying EthApi via the [`ZoneRpcApi`] trait,
 //! which performs typed privacy redactions internally before serialization.
 
-use std::{
-    str::FromStr,
-    time::{Duration, Instant},
-};
+use std::str::FromStr;
 
 use alloy_primitives::{Address, B256, Bytes, U64, keccak256};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, state::StateOverride};
@@ -14,8 +11,6 @@ use serde_json::{Value, value::RawValue};
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tempo_contracts::precompiles::account_keychain::IAccountKeychain::KeyInfo;
 use tracing::warn;
-
-const TIMING_SIDE_CHANNEL_MIN_RESPONSE_TIME: Duration = Duration::from_millis(100);
 
 use crate::{
     auth::AuthContext,
@@ -264,7 +259,6 @@ pub async fn dispatch(
     api: &dyn ZoneRpcApi,
 ) -> JsonRpcResponse {
     let id = req.id.clone();
-    let timing_floor_started_at = method_needs_timing_floor(&req.method).then(Instant::now);
 
     let tier = match classify_method(&req.method) {
         Some(tier) => tier,
@@ -284,7 +278,7 @@ pub async fn dispatch(
     // Raw params JSON — handlers deserialize directly, no intermediate Vec<Value>.
     let raw = req.params.as_deref().map(|p| p.get()).unwrap_or("[]");
 
-    let response = match req.method.as_str() {
+    match req.method.as_str() {
         // Simple passthrough methods (no params, no auth scoping)
         "eth_blockNumber" => api_result(id, "eth_blockNumber", api.block_number().await),
         "eth_chainId" => api_result(id, "eth_chainId", api.chain_id().await),
@@ -354,30 +348,6 @@ pub async fn dispatch(
                 JsonRpcError::internal("method not yet implemented in private RPC"),
             )
         }
-    };
-
-    enforce_timing_floor(timing_floor_started_at).await;
-    response
-}
-
-fn method_needs_timing_floor(method: &str) -> bool {
-    matches!(
-        method,
-        "eth_getTransactionByHash"
-            | "eth_getTransactionReceipt"
-            | "eth_getLogs"
-            | "eth_getFilterLogs"
-            | "eth_getFilterChanges"
-    )
-}
-
-async fn enforce_timing_floor(started_at: Option<Instant>) {
-    let Some(started_at) = started_at else {
-        return;
-    };
-    let elapsed = started_at.elapsed();
-    if elapsed < TIMING_SIDE_CHANNEL_MIN_RESPONSE_TIME {
-        tokio::time::sleep(TIMING_SIDE_CHANNEL_MIN_RESPONSE_TIME - elapsed).await;
     }
 }
 
@@ -1085,7 +1055,6 @@ mod tests {
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "expected [request, block?, stateOverride?]");
     }
-
     #[tokio::test]
     async fn classifies_spec_disabled_and_restricted_methods() {
         let api = MockZoneRpcApi::default();
@@ -1109,21 +1078,5 @@ mod tests {
             assert_eq!(err.code, -32005);
             assert_eq!(err.message, "Sequencer only");
         }
-    }
-
-    #[tokio::test]
-    async fn enforces_timing_floor_for_fetch_then_check_methods() {
-        let api = MockZoneRpcApi::default();
-        let started_at = Instant::now();
-
-        let resp = dispatch(
-            &request("eth_getTransactionByHash", json!(["not-a-hash"])),
-            &auth(),
-            &api,
-        )
-        .await;
-
-        assert!(resp.result.is_none());
-        assert!(started_at.elapsed() >= TIMING_SIDE_CHANNEL_MIN_RESPONSE_TIME);
     }
 }
