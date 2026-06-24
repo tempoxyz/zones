@@ -5,7 +5,6 @@
 
 use crate::{
     abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
-    evm::ZoneEvmConfig,
     ext::TempoStateExt,
     l1::PreparedL1Block,
     payload::ZonePayloadAttributes,
@@ -45,6 +44,7 @@ use tempo_primitives::{
 };
 use tempo_transaction_pool::TempoTransactionPool;
 use tracing::{error, info, warn};
+use zone_evm::ZoneEvmConfig;
 
 use crate::node::ZoneNode;
 
