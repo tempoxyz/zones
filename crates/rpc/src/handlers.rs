@@ -1082,6 +1082,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn classifies_spec_disabled_and_restricted_methods() {
+        let api = MockZoneRpcApi::default();
+
+        for method in [
+            "eth_getProof",
+            "eth_newPendingTransactionFilter",
+            "eth_getUncleByBlockNumberAndIndex",
+            "eth_getUncleByBlockHashAndIndex",
+            "eth_getWork",
+        ] {
+            let resp = dispatch(&request(method, json!([])), &auth(), &api).await;
+            let err = resp.error.expect("method should be disabled");
+            assert_eq!(err.code, -32006);
+            assert_eq!(err.message, "Method disabled");
+        }
+
+        for method in ["debug_accountRange", "txpool_contentFrom", "admin_peers"] {
+            let resp = dispatch(&request(method, json!([])), &auth(), &api).await;
+            let err = resp.error.expect("method should be sequencer-only");
+            assert_eq!(err.code, -32005);
+            assert_eq!(err.message, "Sequencer only");
+        }
+    }
+
+    #[tokio::test]
     async fn enforces_timing_floor_for_fetch_then_check_methods() {
         let api = MockZoneRpcApi::default();
         let started_at = Instant::now();
