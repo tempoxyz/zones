@@ -29,7 +29,6 @@ zone-rpc.workspace = true
 # reth
 reth-chainspec.workspace = true
 reth-eth-wire-types.workspace = true
-reth-evm = { workspace = true, optional = true }
 reth-metrics.workspace = true
 reth-node-api.workspace = true
 reth-node-builder.workspace = true
@@ -37,7 +36,6 @@ reth-payload-builder.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
-reth-revm = { workspace = true, optional = true }
 reth-rpc.workspace = true
 reth-rpc-builder.workspace = true
 reth-rpc-eth-api.workspace = true
@@ -129,14 +127,10 @@ jemalloc = ["reth-ethereum?/jemalloc"]
 test-utils = [
   "reth-chainspec/test-utils",
   "reth-ethereum/test-utils",
-  "dep:reth-evm",
-  "reth-evm/test-utils",
   "reth-node-builder/test-utils",
   "reth-payload-builder/test-utils",
   "reth-primitives-traits/test-utils",
   "reth-provider/test-utils",
-  "dep:reth-revm",
-  "reth-revm/test-utils",
   "reth-transaction-pool/test-utils",
   "tempo-precompiles/test-utils",
   "tempo-transaction-pool/test-utils",
