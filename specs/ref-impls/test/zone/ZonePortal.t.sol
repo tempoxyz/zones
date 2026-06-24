@@ -1034,18 +1034,19 @@ contract ZonePortalTest is BaseTest {
         uint256 charlieBalanceBefore = pathUSD.balanceOf(charlie);
         uint64 depositCountBefore = portal.depositCount();
 
-        // The portal can send to withdrawal recipients, but the sequencer cannot receive fees.
+        // Blacklist the sequencer as a token recipient while leaving everyone else allowed.
         // This makes w1's fee transfer revert while leaving the user-facing transfer valid.
-        address[] memory allowedAccounts = new address[](3);
-        allowedAccounts[0] = address(portal);
-        allowedAccounts[1] = bob;
-        allowedAccounts[2] = charlie;
-        // No admin in allowedAccounts so the fee transfer will fail
+        address[] memory blockedAccounts = new address[](1);
+        blockedAccounts[0] = admin;
         uint64 policyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, allowedAccounts
+            admin, ITIP403Registry.PolicyType.BLACKLIST, blockedAccounts
         );
         vm.prank(pathUSDAdmin);
         pathUSD.changeTransferPolicyId(policyId);
+
+        assertFalse(registry.isAuthorizedRecipient(policyId, admin));
+        assertTrue(registry.isAuthorizedRecipient(policyId, bob));
+        assertTrue(registry.isAuthorizedRecipient(policyId, charlie));
 
         // Process w1. The fee is forgiven, bob receives the withdrawal amount, and no
         // bounce-back deposit is created
