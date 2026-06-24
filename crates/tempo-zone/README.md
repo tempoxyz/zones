@@ -151,7 +151,8 @@ End-to-end walkthrough for creating a TIP-20 token on L1, assigning a
 blacklist policy, enabling it on the zone, and verifying enforcement.
 
 **Prerequisites:** `L1_RPC_URL`, `PRIVATE_KEY`, `L1_PORTAL_ADDRESS`, and
-`SEQUENCER_KEY` env vars set. A running zone (`just zone-up <name>`).
+`ADMIN_KEY` env vars set. `SEQUENCER_KEY` works only for legacy zones where
+admin equals sequencer. A running zone (`just zone-up <name>`).
 
 ### 1. Create a TIP-20 token on L1
 
@@ -222,7 +223,7 @@ just enable-token $TOKEN
 just max-approve-portal
 
 # Deposit to yourself on the zone
-just send-deposit token=$TOKEN
+just send-deposit 1000000 "" $TOKEN
 ```
 
 ### 7. Test enforcement on the zone

@@ -7,8 +7,8 @@
 //!
 //!  1. Create a fresh TIP-20 token on L1 (via `TIP20Factory`)
 //!  2. Configure the token (supply cap, ISSUER_ROLE, mint, approve)
-//!  3. Sequencer enables the token on the zone portal
-//!  4. Deposit tokens into the zone (plain deposit to admin)
+//!  3. Portal admin enables the token on the zone portal
+//!  4. Deposit tokens into the zone (plain deposit to the PRIVATE_KEY wallet)
 //!  5. Create a TIP-403 blacklist policy, blacklist a target wallet, assign it to the token
 //!  6. Encrypted deposit to the blacklisted target → zone bounces it back
 //!  7. Remove target from the blacklist on L1
@@ -23,7 +23,8 @@
 //! - A running zone (defaults to z5: `generated/z5/zone.json`)
 //! - The zone's sequencer must be actively producing blocks
 //! - An L1 account with enough funds for gas (set via `PRIVATE_KEY`)
-//! - The admin account needs a small pathUSD balance on L1 (deposited to
+//! - Portal admin authority via `ADMIN_KEY`, or `adminKey` in zone.json
+//! - The `PRIVATE_KEY` account needs a small pathUSD balance on L1 (deposited to
 //!   the target wallet for L2 gas fees)
 //!
 //! # Usage
@@ -31,6 +32,7 @@
 //! ```sh
 //! just demo-blacklist              # defaults: zone z5, amount=500000
 //! just demo-blacklist 1000000      # custom deposit amount
+//! just demo-blacklist 500000 http://localhost:8546 generated/my-zone
 //! ```
 //!
 //! Or directly via cargo:
@@ -48,8 +50,8 @@
 //!   signs portal governance calls, with `sequencerKey` retained as a legacy
 //!   fallback for zones where admin == sequencer.
 //! - TIP-403 policies are assigned directly to the token via
-//!   `changeTransferPolicyId`. The deployed L1 `TIP403Registry` does not have
-//!   `createCompoundPolicy`, so we use a simple blacklist policy.
+//!   `changeTransferPolicyId`. This demo uses a simple blacklist policy; use
+//!   `just create-compound-policy` for role-specific sender/recipient policies.
 //! - After modifying the blacklist on L1, the zone needs a few seconds to sync
 //!   the policy state via its L1 listener. We wait 6 seconds which is enough
 //!   for a couple of L1 blocks.

@@ -35,6 +35,7 @@ Use this skill for repo-local zone deployment, smoke tests, and sync debugging.
 
 - Fresh `dev` nodes can look broken because they are still compiling and replaying L1; use `release` for meaningful validation.
 - Direct deposit/withdraw validation needs both approvals: `just max-approve-portal` before depositing and `just max-approve-outbox` before withdrawing.
+- Admin-only portal calls (`enable-token`, deposit pause/resume, and demos that enable temporary tokens) need `ADMIN_KEY` or a saved `adminKey`; `SEQUENCER_KEY` only works on zones where admin equals sequencer.
 - The demo's first real wait point is token enablement on L2. If the zone is still replaying older L1 blocks, `demo-swap-and-deposit` can time out before the `TokenEnabled` event appears.
 - The current `just demo-swap-and-deposit` recipe takes optional overrides positionally, not as `amount=... tick=...`.
 - If a restarted zone crashes while seeding `transferPolicyId` for a temporary token, check `crates/tempo-zone/src/l1_state/tip403/cache.rs` and consider retesting with a fresh zone.

@@ -12,12 +12,14 @@ Create a fresh zone when you need a clean router test:
 just deploy-zone my-zone
 ```
 
-That recipe creates the zone, stores `sequencerKey` in `generated/my-zone/zone.json`, and starts the node immediately. If you need tighter control, run:
+That recipe creates the zone, stores `sequencerKey` and `adminKey` in `generated/my-zone/zone.json`, and starts the node immediately. If you need tighter control, run:
 
 ```bash
 target/debug/tempo-xtask create-zone --output generated/my-zone --l1-rpc-url "$HTTP_RPC" --sequencer "$SEQUENCER_ADDR" --private-key "$SEQUENCER_KEY"
 target/debug/tempo-xtask set-encryption-key --l1-rpc-url "$HTTP_RPC" --portal "$PORTAL" --private-key "$SEQUENCER_KEY"
 ```
+
+`deploy-zone` also stores `adminKey` and `adminAddress` using the generated sequencer key, because that convenience flow creates zones with `admin == sequencer`. For manual `create-zone` flows, pass `--admin "$ADMIN_ADDR"` when separating the cold admin role from the hot sequencer role, and keep the matching `ADMIN_KEY` available for admin-only portal calls.
 
 ## Start a zone in release
 
@@ -37,7 +39,7 @@ cast block-number --rpc-url http://localhost:8546
 Read deployment metadata:
 
 ```bash
-jq '{zoneId, portal, tempoAnchorBlock, zoneFactory, swapAndDepositRouter, sequencerAddress}' generated/my-zone/zone.json
+jq '{zoneId, portal, tempoAnchorBlock, zoneFactory, swapAndDepositRouter, admin, sequencer, adminAddress, sequencerAddress}' generated/my-zone/zone.json
 ```
 
 ## Direct deposit + withdrawal validation
@@ -139,6 +141,7 @@ If the zone is still behind the tx block, wait longer or rerun the test with a `
 ## Known failure modes
 
 - `swapAndDepositRouter not found`: run `just deploy-router <name>` or pass `--router`.
+- `resolved admin ... is not the portal admin`: set `ADMIN_KEY` for the portal's on-chain admin, or use the saved `adminKey` from a `deploy-zone` zone. `SEQUENCER_KEY` only works when `admin == sequencer`.
 - Missing sequencer key: read `sequencerKey` from `generated/<name>/zone.json` or set `SEQUENCER_KEY`.
 - Timeout waiting for `TokenEnabled`: the zone is usually still catching up.
 - Restart crash with `failed to seed transferPolicyId ... Uninitialized`: inspect `crates/tempo-zone/src/l1_state/tip403/cache.rs` and prefer a fresh zone for smoke tests involving temporary tokens.
