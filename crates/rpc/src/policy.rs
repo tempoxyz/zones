@@ -1,7 +1,6 @@
 //! Privacy policy enforcement helpers.
 //!
-//! Shared between the in-process ([`TempoZoneRpc`]) and proxy
-//! ([`ProxyZoneRpc`]) implementations of [`ZoneRpcApi`].
+//! Shared by [`ZoneRpcApi`] implementations.
 
 use alloy_consensus::transaction::SignerRecoverable;
 use alloy_eips::eip2718::Decodable2718;

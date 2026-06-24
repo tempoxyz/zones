@@ -308,7 +308,7 @@ pub fn classify_method(method: &str) -> Option<MethodTier> {
         | "eth_getUncleCountByBlockNumber"
         | "eth_getUncleCountByBlockHash" => Some(MethodTier::Restricted),
 
-        // Disabled (mempool observation, mining, subscriptions not supported via HTTP proxy)
+        // Disabled (mempool observation, mining, subscriptions not supported via HTTP)
         "eth_getProof"
         | "eth_newPendingTransactionFilter"
         | "eth_getUncleByBlockNumberAndIndex"

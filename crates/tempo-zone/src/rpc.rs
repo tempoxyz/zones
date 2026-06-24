@@ -1,4 +1,4 @@
-//! [`ZoneRpcApi`] implementation backed by reth's EthApi (in-process reth-backed).
+//! [`ZoneRpcApi`] implementation backed by reth's EthApi.
 //!
 //! Re-exports the standalone `zone-rpc` crate so everything is accessible
 //! via `zone::rpc::*`.
@@ -134,7 +134,7 @@ async fn prune_filter_owners<Api: EthApiTypes + 'static>(
 ///   (`-32003` on mismatch).
 ///
 /// [`classify_method`]: zone_rpc::types::classify_method
-pub struct TempoZoneRpc<Api: EthApiTypes> {
+pub struct ZoneRpc<Api: EthApiTypes> {
     eth: EthHandlers<Api>,
     config: zone_rpc::PrivateRpcConfig,
     l1_provider: DynProvider<TempoNetwork>,
@@ -146,7 +146,7 @@ pub struct TempoZoneRpc<Api: EthApiTypes> {
     filter_owners: Arc<Mutex<HashMap<FilterId, Address>>>,
 }
 
-impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
+impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
     /// Wrap reth's [`EthHandlers`] (api + filter + pubsub).
     pub async fn new(
         eth: EthHandlers<Api>,
@@ -378,7 +378,7 @@ impl<Api: EthApiTypes + 'static> TempoZoneRpc<Api> {
     }
 }
 
-impl<Api> zone_rpc::ZoneRpcApi for TempoZoneRpc<Api>
+impl<Api> zone_rpc::ZoneRpcApi for ZoneRpc<Api>
 where
     Api: FullEthApi + EthApiTypes<NetworkTypes = TempoNetwork> + Send + Sync + 'static,
 {

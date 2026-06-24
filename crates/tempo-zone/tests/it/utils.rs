@@ -596,7 +596,7 @@ impl ZoneTestNode {
             let eth_handlers = eth_handlers.clone();
             Box::pin(async move {
                 Ok(
-                    Arc::new(zone::rpc::TempoZoneRpc::new(eth_handlers, config).await?)
+                    Arc::new(zone::rpc::ZoneRpc::new(eth_handlers, config).await?)
                         as Arc<dyn zone::rpc::ZoneRpcApi>,
                 )
             })
