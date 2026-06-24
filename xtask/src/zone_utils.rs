@@ -116,6 +116,31 @@ pub(crate) async fn fund_l1_wallet<P: Provider<TempoNetwork>>(
     Ok(())
 }
 
+/// Verifies that `resolved_admin` is the portal's on-chain admin.
+///
+/// Portal governance calls (`enableToken`, deposit pause/resume) are `onlyAdmin`,
+/// so a key resolved via the sequencer fallback only works on legacy zones where
+/// `admin == sequencer`. Checking against `portal.admin()` fails fast with a
+/// clear message instead of reverting on-chain with `NotAdmin`.
+pub(crate) async fn verify_portal_admin<P: Provider<TempoNetwork>>(
+    provider: &P,
+    portal: Address,
+    resolved_admin: Address,
+) -> eyre::Result<()> {
+    let onchain_admin = ZonePortal::new(portal, provider)
+        .admin()
+        .call()
+        .await
+        .wrap_err("failed to read portal admin")?;
+    if onchain_admin != resolved_admin {
+        return Err(eyre!(
+            "resolved admin {resolved_admin} is not the portal admin {onchain_admin}; \
+             set ADMIN_KEY/adminKey for this zone (SEQUENCER_KEY only works when admin == sequencer)"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn token_balance<P: Provider<TempoNetwork>>(
     provider: &P,
     token: Address,

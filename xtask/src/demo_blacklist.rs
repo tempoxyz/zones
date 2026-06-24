@@ -272,6 +272,7 @@ impl DemoBlacklist {
         println!();
 
         let portal = ZonePortal::new(self.portal, &l1);
+        crate::zone_utils::verify_portal_admin(&l1, self.portal, portal_admin).await?;
         let admin_portal = ZonePortal::new(self.portal, &l1_portal_admin);
         // Retry enableToken because legacy zones may still use the sequencer key
         // as the admin key, and the running node can create nonce conflicts.

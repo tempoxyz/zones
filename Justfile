@@ -331,6 +331,13 @@ enable-token token:
     fi
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
     HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    # enableToken is onlyAdmin: reject the sequencer fallback unless it is the admin.
+    SIGNER_ADDR=$(cast wallet address "$PK" | tr '[:upper:]' '[:lower:]')
+    ONCHAIN_ADMIN=$(cast call "$PORTAL" "admin()(address)" --rpc-url "$HTTP_RPC" | tr '[:upper:]' '[:lower:]')
+    if [[ "$SIGNER_ADDR" != "$ONCHAIN_ADMIN" ]]; then
+        echo "Signer $SIGNER_ADDR is not the portal admin $ONCHAIN_ADMIN. Set ADMIN_KEY for this zone (SEQUENCER_KEY only works when admin == sequencer)." >&2
+        exit 1
+    fi
     TOKEN="{{token}}"
     # Resolve well-known aliases (lowercased for case-insensitive matching)
     TOKEN_LOWER=$(echo "$TOKEN" | tr '[:upper:]' '[:lower:]')

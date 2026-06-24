@@ -24,8 +24,8 @@ use zone::{
 
 use crate::zone_utils::{
     ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,
-    normalize_http_rpc, token_balance, wait_for_balance, wait_for_deposit_processed,
-    wait_for_token_enabled, wait_for_withdrawal_processed,
+    normalize_http_rpc, token_balance, verify_portal_admin, wait_for_balance,
+    wait_for_deposit_processed, wait_for_token_enabled, wait_for_withdrawal_processed,
 };
 
 const DEMO_PATHUSD_GAS_NET: u128 = 5_000_000;
@@ -237,6 +237,7 @@ impl DemoSwapAndDeposit {
         println!();
 
         println!("Step 4: Enable both tokens on the zone portal");
+        verify_portal_admin(&l1, portal, portal_admin).await?;
         let zone_inbox_from_block = l2.get_block_number().await.unwrap_or(0);
         enable_token_with_retry(&ZonePortal::new(portal, &l1_admin), alpha).await?;
         wait_for_token_enabled(&l2, zone_inbox_from_block, alpha).await?;
