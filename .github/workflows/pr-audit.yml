@@ -8,11 +8,31 @@ permissions:
   contents: read
 
 jobs:
-  audit:
-    uses: tempoxyz/gh-actions/.github/workflows/pr-audit.yml@main
-    with:
-      required-label: cyclops
-    secrets:
-      EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
-      EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
-      EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
+  publish:
+    runs-on: ubuntu-latest
+    if: github.event.label.name == 'cyclops'
+    steps:
+      - name: Publish event
+        run: |
+          set -euo pipefail
+
+          printf '%s' '${{ secrets.EVENTS_KEY }}' > "${RUNNER_TEMP}/key"
+          printf '%s' '${{ secrets.EVENTS_CERT }}' > "${RUNNER_TEMP}/cert"
+
+          jq -n \
+            --arg repo "${{ github.repository }}" \
+            --arg sha "${{ github.event.pull_request.head.sha }}" \
+            --arg pr "${{ github.event.pull_request.number }}" \
+            '{
+              repository: $repo,
+              event: "pr_audit",
+              data: {
+                pr_number: ($pr | tonumber),
+                sha: $sha
+              }
+            }' \
+          | curl -sf -o /dev/null -X POST ${{ secrets.EVENTS_ARGS }} \
+              -H "Content-Type: application/json" \
+              --key "${RUNNER_TEMP}/key" \
+              --cert "${RUNNER_TEMP}/cert" \
+              -d @-
