@@ -82,6 +82,18 @@ pub(crate) const TEST_MNEMONIC: &str =
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 
+fn portal_token_config_slot(token: Address) -> B256 {
+    let portal_token_configs_slot = B256::with_last_byte(8);
+    keccak256((token, portal_token_configs_slot).abi_encode())
+}
+
+fn enabled_deposits_active_token_config() -> B256 {
+    let mut value = [0u8; 32];
+    value[30] = 1; // TokenConfig.depositsActive
+    value[31] = 1; // TokenConfig.enabled
+    B256::new(value)
+}
+
 alloy_sol_types::sol! {
     #[sol(rpc)]
     contract TestStablecoinDEX {
@@ -2966,6 +2978,8 @@ impl L1Fixture {
         let mut cache = cache.write();
         let deposit_queue_hash_slot = B256::with_last_byte(5);
         let refunds_slot = B256::with_last_byte(10);
+        let path_usd_config_slot = portal_token_config_slot(PATH_USD_ADDRESS);
+        let enabled_token_config = enabled_deposits_active_token_config();
 
         for block in 0..=num_blocks {
             let mut sequencer_bytes = [0u8; 32];
@@ -2980,6 +2994,16 @@ impl L1Fixture {
             // The initial value is B256::ZERO (empty queue).
             cache.set(portal_address, deposit_queue_hash_slot, block, B256::ZERO);
             cache.set(portal_address, refunds_slot, block, B256::ZERO);
+            // Local fixtures treat pathUSD as the default enabled bridge token.
+            // ZoneConfig reads the L1 ZonePortal TokenConfig mapping directly, so
+            // seed the packed { enabled, depositsActive } value to avoid a dummy
+            // RPC fallback on self-contained tests.
+            cache.set(
+                portal_address,
+                path_usd_config_slot,
+                block,
+                enabled_token_config,
+            );
         }
 
         cache.update_anchor(NumHash {
