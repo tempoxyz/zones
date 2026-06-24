@@ -591,7 +591,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
 
 ### Withdrawal Batching
 
-At the end of the final block in a batch, the sequencer calls `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox`. The `blockNumber` must match the current zone block number. The `encryptedSenders` array carries one ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`). This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
+At the end of the final block in a batch, the sequencer calls `finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` on the `ZoneOutbox`. The `blockNumber` must match the current zone block number. The `encryptedSenders` array carries one sequencer-supplied ciphertext per finalized withdrawal for [authenticated withdrawals](#authenticated-withdrawals) (empty bytes for withdrawals without `revealTo`); `senderTag` is recomputed by the outbox from the queued withdrawal sender and transaction hash. This constructs a hash chain from pending withdrawals in LIFO order (newest to oldest), so the oldest withdrawal ends up outermost, enabling FIFO processing on Tempo:
 
 ```
 withdrawalQueueHash = EMPTY_SENTINEL
@@ -671,7 +671,7 @@ Two disclosure modes are available:
 - **Manual reveal**: The sender shares `txHash` with a verifier off-chain. The verifier checks `keccak256(abi.encodePacked(sender, txHash)) == senderTag`.
 - **Encrypted reveal**: The holder of the `revealTo` private key decrypts `encryptedSender` to obtain `(sender, txHash)` and verifies against `senderTag`. No off-chain communication needed.
 
-The sequencer computes `senderTag` and `encryptedSender` during `finalizeWithdrawalBatch`. This is trusted: a malicious sequencer could insert incorrect values. This is a modest extension of the existing trust model, where the sequencer is already trusted for liveness and transaction ordering.
+During `finalizeWithdrawalBatch`, the outbox recomputes `senderTag` from the sender and `txHash` stored when `requestWithdrawal` executed. The sequencer supplies only `encryptedSender`; this is trusted because a malicious sequencer could provide an incorrect ciphertext or omit it. The plaintext sender commitment remains deterministic and is covered by the same state transition checks as the rest of the withdrawal queue.
 
 For callback withdrawals, `IWithdrawalReceiver.onWithdrawalReceived` receives `bytes32 senderTag` instead of a plaintext sender address.
 
