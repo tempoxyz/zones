@@ -221,6 +221,7 @@ impl CreateZone {
             "chainId": chain_id,
             "portal": format!("{portal}"),
             "initialToken": format!("{}", self.initial_token),
+            "admin": format!("{admin}"),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": confirm_header.inner.number,
             "zoneFactory": format!("{}", self.zone_factory),
@@ -238,6 +239,7 @@ impl CreateZone {
         println!("  Chain ID: {chain_id}");
         println!("  Portal: {portal}");
         println!("  Initial Token: {}", self.initial_token);
+        println!("  Admin: {admin}");
         println!("  Sequencer: {}", self.sequencer);
         println!("  ZoneFactory: {}", self.zone_factory);
         if !self.rpc_url.is_empty() {

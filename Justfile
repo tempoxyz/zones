@@ -319,12 +319,16 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     done
 
 [group('zone')]
-[doc('Enables a TIP-20 token on the ZonePortal for bridging. Token can be an address or alias (pathusd, alphausd, betausd). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and SEQUENCER_KEY env vars.')]
+[doc('Enables a TIP-20 token on the ZonePortal for bridging. Token can be an address or alias (pathusd, alphausd, betausd). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY env vars. SEQUENCER_KEY works for legacy zones where admin == sequencer.')]
 enable-token token:
     #!/bin/bash
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
-    PK="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var (only the sequencer can enable tokens)}"
+    PK="${ADMIN_KEY:-${SEQUENCER_KEY:-}}"
+    if [[ -z "$PK" ]]; then
+        echo "Set ADMIN_KEY env var (or SEQUENCER_KEY for legacy zones where admin == sequencer)" >&2
+        exit 1
+    fi
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
     HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     TOKEN="{{token}}"
@@ -652,6 +656,7 @@ deploy-zone name token="":
     set -euo pipefail
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    ZONE_FACTORY="${ZONE_FACTORY:?Set ZONE_FACTORY env var}"
     OUTPUT="generated/{{name}}"
     ZONE_TOKEN_L1="{{token}}"
     if [[ -z "$ZONE_TOKEN_L1" ]]; then
@@ -700,14 +705,16 @@ deploy-zone name token="":
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
+        --zone-factory "$ZONE_FACTORY" \
         --initial-token "$ZONE_TOKEN_L1" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$SEQUENCER_KEY"
     echo ""
 
-    # Save sequencer key into zone.json for later use
+    # Save generated keys into zone.json for later use. deploy-zone uses the
+    # sequencer as the portal admin unless --admin is added to create-zone.
     jq --arg sk "$SEQUENCER_KEY" --arg sa "$SEQUENCER_ADDR" \
-        '. + {sequencerKey: $sk, sequencerAddress: $sa}' "$OUTPUT/zone.json" > "$OUTPUT/zone.json.tmp" \
+        '. + {sequencerKey: $sk, sequencerAddress: $sa, adminKey: $sk, adminAddress: $sa}' "$OUTPUT/zone.json" > "$OUTPUT/zone.json.tmp" \
         && mv "$OUTPUT/zone.json.tmp" "$OUTPUT/zone.json"
 
     PORTAL=$(jq -r '.portal' "$OUTPUT/zone.json")
