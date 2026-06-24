@@ -20,7 +20,8 @@
 //!
 //! # Prerequisites
 //!
-//! - A running zone (defaults to z5: `generated/z5/zone.json`)
+//! - A running zone. Pass `--zone-dir` if `generated/*/zone.json` auto-discovery
+//!   cannot match `L1_PORTAL_ADDRESS`.
 //! - The zone's sequencer must be actively producing blocks
 //! - An L1 account with enough funds for gas (set via `PRIVATE_KEY`)
 //! - Portal admin authority via `ADMIN_KEY`, or `adminKey` in zone.json
@@ -30,7 +31,7 @@
 //! # Usage
 //!
 //! ```sh
-//! just demo-blacklist              # defaults: zone z5, amount=500000
+//! just demo-blacklist              # default amount=500000, auto-discovers zone metadata
 //! just demo-blacklist 1000000      # custom deposit amount
 //! just demo-blacklist 500000 http://localhost:8546 generated/my-zone
 //! ```
@@ -98,8 +99,9 @@ pub(crate) struct DemoBlacklist {
     #[arg(long, env = "PRIVATE_KEY")]
     private_key: String,
 
-    /// Portal admin private key (hex). If not set, reads adminKey from zone.json,
-    /// then falls back to SEQUENCER_KEY / sequencerKey for legacy zones.
+    /// Portal admin private key (hex). If not set, reads adminKey from the
+    /// explicit or auto-discovered zone.json, then falls back to SEQUENCER_KEY /
+    /// sequencerKey for legacy zones.
     #[arg(long, env = "ADMIN_KEY")]
     admin_key: Option<String>,
 
@@ -107,9 +109,10 @@ pub(crate) struct DemoBlacklist {
     #[arg(long, env = "SEQUENCER_KEY")]
     sequencer_key: Option<String>,
 
-    /// Path to zone directory containing zone.json.
-    #[arg(long, default_value = "generated/z5")]
-    zone_dir: String,
+    /// Path to zone directory containing zone.json. If omitted, scans
+    /// generated/*/zone.json for the portal address.
+    #[arg(long)]
+    zone_dir: Option<std::path::PathBuf>,
 
     /// Zone L2 RPC URL.
     #[arg(long, env = "ZONE_RPC_URL", default_value = "http://localhost:8546")]
@@ -130,10 +133,8 @@ impl DemoBlacklist {
         let admin = signer.address();
         let wallet = EthereumWallet::from(signer);
 
-        let zone_json_path = std::path::PathBuf::from(&self.zone_dir).join("zone.json");
-        let zone_json = std::fs::read_to_string(&zone_json_path)
-            .ok()
-            .and_then(|contents| serde_json::from_str::<serde_json::Value>(&contents).ok());
+        let (zone_json_path, zone_json) =
+            load_zone_metadata(self.zone_dir.as_deref(), self.portal)?;
         let portal_admin_key_str = self
             .admin_key
             .clone()
@@ -142,8 +143,12 @@ impl DemoBlacklist {
             .or_else(|| zone_json.as_ref()?.get("sequencerKey")?.as_str().map(str::to_owned))
             .ok_or_else(|| {
                 eyre!(
-                    "portal admin key missing. Set ADMIN_KEY or store adminKey in {}. SEQUENCER_KEY/sequencerKey only works for legacy zones where admin == sequencer.",
-                    zone_json_path.display()
+                    "portal admin key missing. Set ADMIN_KEY or store adminKey in {}. \
+                     SEQUENCER_KEY/sequencerKey only works for legacy zones where admin == sequencer.",
+                    zone_json_path
+                        .as_ref()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "the matching generated/<name>/zone.json".to_string())
                 )
             })?;
         let portal_admin_key = portal_admin_key_str
@@ -613,6 +618,46 @@ impl DemoBlacklist {
 
         Ok(())
     }
+}
+
+fn load_zone_metadata(
+    zone_dir: Option<&std::path::Path>,
+    portal: Address,
+) -> eyre::Result<(Option<std::path::PathBuf>, Option<serde_json::Value>)> {
+    if let Some(zone_dir) = zone_dir {
+        let path = zone_dir.join("zone.json");
+        let value = read_zone_json(&path)?;
+        return Ok((Some(path), Some(value)));
+    }
+
+    let generated = std::path::Path::new("generated");
+    if !generated.is_dir() {
+        return Ok((None, None));
+    }
+
+    for entry in std::fs::read_dir(generated).wrap_err("failed reading generated/")? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let path = entry.path().join("zone.json");
+        let Ok(value) = read_zone_json(&path) else {
+            continue;
+        };
+        let Some(json_portal) = value.get("portal").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if json_portal.parse::<Address>().ok() == Some(portal) {
+            return Ok((Some(path), Some(value)));
+        }
+    }
+
+    Ok((None, None))
+}
+
+fn read_zone_json(path: &std::path::Path) -> eyre::Result<serde_json::Value> {
+    let contents = std::fs::read_to_string(path)
+        .wrap_err_with(|| format!("failed reading {}", path.display()))?;
+    serde_json::from_str(&contents).wrap_err_with(|| format!("failed parsing {}", path.display()))
 }
 
 /// Verify a transaction receipt succeeded, returning an error with `label` context if it reverted.
