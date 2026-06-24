@@ -192,6 +192,8 @@ crate::sol! {
         ) external;
 
         function enableToken(address token) external;
+        function pauseDeposits(address token) external;
+        function resumeDeposits(address token) external;
 
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;

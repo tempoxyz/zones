@@ -370,6 +370,13 @@ just enable-token alphausd
 
 If `ZONE_RPC_URL` is set (defaults to `http://localhost:8546`), the command waits for the zone to process the L1 block and confirms the token is available on L2.
 
+The portal admin can also pause and resume deposits for an enabled token (withdrawals are unaffected). These calls are `onlyAdmin`, so they use the same `ADMIN_KEY` as `enable-token`:
+
+```bash
+just pause-deposits <token-address>
+just resume-deposits <token-address>
+```
+
 Once the token is enabled, approve the portal and deposit as usual — just pass the token address:
 
 ```bash
@@ -540,7 +547,7 @@ cast call "$ZONE_FACTORY" "zoneCount()(uint32)" --rpc-url "$ETH_RPC_URL"
 cast call "$ZONE_FACTORY" "verifier()(address)" --rpc-url "$ETH_RPC_URL"
 ```
 
-`zoneCount()` should be `0` on a fresh deployment, and `verifier()` should return the verifier deployed by the factory constructor. Update `MODERATO_ZONE_FACTORY` in `xtask/src/zone_utils.rs`, the Key Addresses table above, and any other `rg` hits for the previous address.
+`zoneCount()` should be `0` on a fresh deployment, and `verifier()` should return the verifier deployed by the factory constructor. Pass the new address via `--zone-factory` / `ZONE_FACTORY`, and update the Key Addresses table above and any other `rg` hits for the previous address.
 
 Current deployment:
 
@@ -580,7 +587,7 @@ Current deployment:
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
 | `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
-| `ZONE_FACTORY` | Yes for `create-zone` / `zone-info` | ZoneFactory address matching the current `createZone` ABI |
+| `ZONE_FACTORY` | Yes for `create-zone` / `deploy-zone` / `zone-info` | ZoneFactory address matching the current `createZone` ABI |
 
 ## Justfile Commands Reference
 
@@ -594,6 +601,8 @@ Current deployment:
 | `just send-deposit [to]` | Deposit tokens from L1 to zone (defaults to sender) |
 | `just send-deposit-encrypted [to]` | Encrypted deposit — hides recipient and memo on-chain |
 | `just enable-token <token>` | Enable a TIP-20 token on the portal for bridging (admin only) |
+| `just pause-deposits <token>` | Pause deposits for an enabled token on the portal (admin only) |
+| `just resume-deposits <token>` | Resume deposits for a paused token on the portal (admin only) |
 | `just max-approve-outbox` | Approve outbox to spend tokens on zone |
 | `just send-withdrawal [to]` | Withdraw tokens from zone to L1 (defaults to sender) |
 | `just demo-swap-and-deposit <name>` | Self-contained same-zone router demo: create tokens, seed DEX liquidity, swap on L1, deposit output back into the zone |
