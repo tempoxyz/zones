@@ -435,7 +435,7 @@ where
     }
 
     fn coinbase(&self) -> BoxFut<'_> {
-        Box::pin(async move { to_raw(&Address::ZERO) })
+        Box::pin(async move { to_raw(&self.zone_sequencer().await?) })
     }
 
     fn gas_price(&self) -> BoxFut<'_> {
