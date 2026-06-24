@@ -331,7 +331,7 @@ Deposits move TIP-20 tokens from Tempo into a zone. The user deposits on Tempo, 
 A user deposits by calling `deposit(token, to, amount, memo, bouncebackRecipient)` on the portal. The portal:
 
 1. Validates the token is enabled and deposits are active.
-2. Requires `bouncebackRecipient != address(0)`, validates `to` against the token's TIP-403 recipient and mint-recipient policies, and validates `bouncebackRecipient` against the token's TIP-403 recipient policy (reverts otherwise).
+2. Requires `bouncebackRecipient != address(0)` (reverts `InvalidBouncebackRecipient` otherwise), validates `to` against the token's TIP-403 recipient and mint-recipient policies, and validates `bouncebackRecipient` against the token's TIP-403 recipient policy (reverts otherwise).
 3. Computes `depositFee` from `zoneGasRate` and checks `amount >= depositFee + currentBouncebackFee`, where `currentBouncebackFee = ceil(FIXED_BOUNCEBACK_GAS * block.basefee / 1e12)` (reverts `DepositTooSmall` otherwise). This prevents obvious dust deposits that could not pay for an immediate Tempo refund.
 4. Transfers `amount` from the user into the portal.
 5. Pays the `depositFee` to the sequencer immediately.
@@ -382,9 +382,11 @@ Deposits flow from Tempo to the zone through a hash chain. The portal tracks a s
 currentDepositQueueHash = keccak256(abi.encode(DepositType.Regular, deposit, currentDepositQueueHash))
 ```
 
-The newest deposit is always outermost, making onchain addition O(1). The zone tracks its own `processedDepositQueueHash` in state. During `advanceTempo()`, the zone processes deposits oldest-first, rebuilding the hash chain and validating that the result matches `currentDepositQueueHash` read from Tempo state via `TempoState.readTempoStorageSlot()`.
+The newest deposit is always outermost, making onchain addition O(1). The zone tracks its own `processedDepositQueueHash` and `processedDepositNumber` in state. During `advanceTempo()`, the zone processes deposits oldest-first, rebuilding the hash chain and validating that the result matches `currentDepositQueueHash` read from Tempo state via `TempoState.readTempoStorageSlot()`.
 
-After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced. Users can check whether their deposit has been processed by comparing their deposit's Tempo block number against this value.
+`advanceTempo()` reads the portal's `currentDepositQueueHash` from Tempo state via `TempoState.readTempoStorageSlot()`. The call must process deposits through the current queue head: after rebuilding the hash chain, the resulting `processedDepositQueueHash` must equal the portal's `currentDepositQueueHash`.
+
+After a batch is accepted, the portal updates `lastSyncedTempoBlockNumber` to record how far Tempo state was synced, and updates `lastProcessedDepositNumber` from the proven `DepositQueueTransition`. Users should track deposit inclusion by deposit number: `DepositMade` and `EncryptedDepositMade` emit `depositNumber`, `ZoneInbox.TempoAdvanced` emits the inbox's `lastProcessedDepositNumber`, and `ZonePortal.BatchSubmitted` emits the accepted portal value. A deposit with number `N` is processed once `lastProcessedDepositNumber >= N`.
 
 ### Encrypted Deposits
 
@@ -395,9 +397,11 @@ The encryption scheme is ECIES with secp256k1:
 1. The user generates an ephemeral keypair and derives a shared secret via ECDH with the sequencer's published encryption key.
 2. The user derives an AES-256 key from the shared secret using HKDF-SHA256.
 3. The user encrypts `(to || memo || padding)` with AES-256-GCM, producing ciphertext, a nonce, and an authentication tag.
-4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload, bouncebackRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `bouncebackRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Like `deposit()`, `depositEncrypted` requires `bouncebackRecipient != address(0)`, requires it to be authorized by the token's TIP-403 recipient policy, and requires `amount >= depositFee + currentBouncebackFee` (reverts `DepositTooSmall` otherwise).
+4. The user calls `depositEncrypted(token, amount, keyIndex, encryptedPayload, bouncebackRecipient)` on the portal, where `keyIndex` references which encryption key they encrypted to (see [Encryption Key Management](#encryption-key-management)), and `bouncebackRecipient` is the Tempo address that receives a refund if zone-side processing fails (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Like `deposit()`, `depositEncrypted` requires `bouncebackRecipient != address(0)` (reverts `InvalidBouncebackRecipient` otherwise), requires it to be authorized by the token's TIP-403 recipient policy, and requires `amount >= depositFee + currentBouncebackFee` (reverts `DepositTooSmall` otherwise).
 
-The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`. The sequencer provides the ECDH shared secret and proof when processing the deposit on the zone via `advanceTempo()`; the zone decrypts `(to, memo)` from the ciphertext onchain.
+Before queue insertion, the portal also validates encrypted-payload shape. `depositEncrypted` reverts `InvalidEphemeralPubkey` if the ephemeral public key parity is not `0x02` or `0x03`, or if the X coordinate is not a valid secp256k1 X coordinate. It reverts `InvalidCiphertextLength(actual, expected)` unless `ciphertext.length == 64`, the fixed plaintext size for `(to, memo, padding)`. These are Tempo-side deposit-time reverts: no queue entry is created and no zone-side bounce-back is needed.
+
+The portal locks the tokens, appends the encrypted deposit to the deposit queue, and emits `EncryptedDepositMade`, including `bouncebackRecipient`. The sequencer provides the ECDH shared secret and proof when processing the deposit on the zone via `advanceTempo()`; the zone decrypts `(to, memo)` from the ciphertext onchain.
 
 Regular and encrypted deposits share a single ordered queue with a type discriminator in the hash:
 
@@ -427,7 +431,7 @@ The sequencer provides the ECDH shared secret alongside a proof of its correct d
 
 2. **AES-GCM decryption.** The zone derives an AES-256 key from the shared secret using HKDF-SHA256 (implemented in Solidity using the SHA256 precompile at `0x02`). The HKDF info string includes `tempoPortal`, `keyIndex`, and `ephemeralPubkeyX` for domain separation. The [AES-GCM Decrypt](#aes-gcm-decrypt) precompile decrypts the ciphertext and validates the GCM authentication tag. The plaintext is packed as `[address (20 bytes)][memo (32 bytes)][padding (12 bytes)]` totaling 64 bytes; the zone parses `(to, memo)` directly from it and uses those values for the mint.
 
-If any step fails (invalid proof or GCM tag mismatch), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `bouncebackRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `depositEncrypted` requires a non-zero `bouncebackRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
+If any step fails (invalid proof, GCM tag mismatch, or invalid decrypted plaintext length), the zone does **not** attempt any zone-side mint. Instead, the deposit bounces back immediately to `bouncebackRecipient` on Tempo via the outbox (see [Deposit Failures and Bounce-Back](#deposit-failures-and-bounce-back)). Because `depositEncrypted` requires a non-zero `bouncebackRecipient` at deposit time, this path always has a well-defined target and never stalls the deposit queue. Because `(to, memo)` are derived from the decrypted plaintext rather than supplied by the sequencer, there is no separate plaintext-mismatch check and the sequencer cannot redirect a valid ciphertext to a different recipient onchain.
 
 The verification above is only performed when the sequencer accepts an encrypted deposit. If the sequencer marks the deposit as rejected via `QueuedDeposit.rejected = true` (see [Sequencer rejection](#sequencer-rejection)), both steps are skipped and the inbox enqueues a bounce-back without invoking the cryptographic precompiles or consuming a `DecryptionData` entry.
 
@@ -471,7 +475,7 @@ Deposits can fail for three main reasons: a recipient blocked by the TIP-403 pol
 
 - **Regular deposit, mint reverts.** `ZoneInbox.advanceTempo` calls `TIP20.mint(deposit.to, deposit.amount)`. If that mint reverts the deposit bounces back to the user-supplied `bouncebackRecipient`. The user-facing `deposit(...)` entry point ensures `bouncebackRecipient != address(0)`, so the queue can always advance past a failed mint.
 - **Encrypted deposit.** Two failure modes, both of which unconditionally bounce back (no zone-side mint is attempted as a fallback):
-  - **Invalid encryption.** The Chaum-Pedersen proof, AES-GCM tag, or plaintext comparison fails during [Onchain Decryption Verification](#onchain-decryption-verification). There is no well-defined recipient on the zone in this case, so the zone does not try to mint to the depositor; it bounces back immediately.
+  - **Invalid encryption.** The Chaum-Pedersen proof, AES-GCM tag, or decrypted plaintext length check fails during [Onchain Decryption Verification](#onchain-decryption-verification). There is no well-defined recipient on the zone in this case, so the zone does not try to mint to the depositor; it bounces back immediately.
   - **Valid decryption, mint reverts.** `TIP20.mint(decryptedTo, amount)` reverts (for example, because a TIP-403 policy active on the zone forbids minting to the decrypted recipient, or a custom TIP-20 `mint` reverts for some token-specific reason). The deposit bounces back.
 - **Sequencer rejection.** The sequencer can mark any user-initiated deposit (regular or encrypted) as rejected when calling `advanceTempo` (see [Sequencer rejection](#sequencer-rejection) below). The zone treats the deposit as if it had failed: it skips the zone-side mint entirely (and, for encrypted deposits, the onchain decryption verification) and enqueues a bounce-back to `bouncebackRecipient`.
 
@@ -956,13 +960,13 @@ flowchart TB
 
             subgraph DEP["deposits"]
                 direction TB
-                QD["QueuedDeposit[j]<br/>deposit_type<br/>deposit_data"]
+                QD["QueuedDeposit[j]<br/>deposit_type<br/>deposit_data<br/>rejected"]
 
                 subgraph PAYLOAD["deposit_data payload"]
                     direction TB
-                    D["Deposit<br/>token<br/>sender<br/>to<br/>amount<br/>memo"]
+                    D["Deposit<br/>token<br/>sender<br/>to<br/>amount<br/>bouncebackRecipient<br/>memo"]
 
-                    ED["EncryptedDeposit<br/>token<br/>sender<br/>amount<br/>keyIndex<br/>encrypted"]
+                    ED["EncryptedDeposit<br/>token<br/>sender<br/>amount<br/>bouncebackRecipient<br/>keyIndex<br/>encrypted"]
 
                     EDP["EncryptedDepositPayload<br/>ephemeralPubkeyX<br/>ephemeralPubkeyYParity<br/>ciphertext<br/>nonce<br/>tag"]
 
@@ -1108,6 +1112,7 @@ pub struct ZoneBlock {
 pub struct QueuedDeposit {
     pub deposit_type: DepositType,
     pub deposit_data: Vec<u8>, // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    pub rejected: bool,
 }
 
 pub enum DepositType {
@@ -1200,7 +1205,7 @@ The state transition function produces:
 | Field | Description |
 |-------|-------------|
 | `block_transition` | `prev_block_hash` to `next_block_hash` covering all blocks in the batch |
-| `deposit_queue_transition` | `prev_processed_hash` to `next_processed_hash` for deposit processing |
+| `deposit_queue_transition` | Deposit queue progress from the previous `(processed_hash, deposit_number)` pair to the next `(processed_hash, deposit_number)` pair |
 | `withdrawal_queue_hash` | Hash chain of withdrawals finalized in this batch (`0` if none) |
 | `last_batch_commitment` | `withdrawal_batch_index` read from `ZoneOutbox.lastBatch` |
 
@@ -1224,7 +1229,7 @@ The stateless execution function must reject the witness on any failed check, mi
    If `tempo_header_rlp` is present, call `TempoState.finalizeTempo(header)` in the modeled execution environment. This validates header continuity, updates the bound `tempoBlockNumber`, `tempoBlockHash`, and `tempoStateRoot`, and make the new Tempo root available for subsequent `TempoState.readTempoStorageSlot` calls in this block. Require the finalized `tempoBlockHash` to equal `keccak256(tempo_header_rlp)`.
 
 6. **Process deposits and encrypted deposit decryptions inside `advanceTempo`.**
-   Using the now-bound Tempo root for this block, verify the Tempo-side reads needed by `ZoneInbox` such as the portal's current deposit queue hash. Process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). For encrypted deposits, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and apply the fallback mint-to-sender path when AES-GCM decryption fails after a valid proof as specified in [Onchain Decryption Verification](#onchain-decryption-verification).
+   Using the now-bound Tempo root for this block, verify the Tempo-side reads needed by `ZoneInbox` such as the portal's current deposit queue hash. Process the `deposits` in witness order, enforcing the queue semantics specified in [Deposit Queue](#deposit-queue). For encrypted deposits, verify the supplied `DecryptionData` and Chaum-Pedersen proof, decode the recipient and memo when AES-GCM decryption succeeds, and enqueue a bounce-back when proof verification, AES-GCM authentication, plaintext length validation, or the decrypted-recipient mint fails as specified in [Onchain Decryption Verification](#onchain-decryption-verification).
 
 7. **Execute user transactions in order.**
    Run each user transaction against the materialized zone state using the current block environment. Whenever execution calls `TempoState.readTempoStorageSlot`, satisfy that call by locating the corresponding `L1StateRead`, proving it against the Tempo root currently bound for this block, and requiring the decoded value to match the witness entry. Any zone-state or Tempo-state access not covered by the witness is an error.
@@ -1242,7 +1247,7 @@ The stateless execution function must reject the witness on any failed check, mi
     Require `TempoState.tempoBlockNumber == public_inputs.tempo_block_number`. If `anchor_block_number == tempo_block_number`, require `TempoState.tempoBlockHash == anchor_block_hash`. Otherwise, verify the parent-hash chain from `tempo_block_number` to `anchor_block_number` using `tempo_ancestry_headers`, ending at `anchor_block_hash`.
 
 12. **Return the batch outputs.**
-    Set `block_transition.prev_block_hash = public_inputs.prev_block_hash` and `block_transition.next_block_hash = prev_block_hash` after the final block. Set `deposit_queue_transition.prev_processed_hash` to the value captured in step 4 and `deposit_queue_transition.next_processed_hash` to the final inbox processed hash. Set `withdrawal_queue_hash` and `last_batch_commitment.withdrawal_batch_index` from the final `ZoneOutbox.lastBatch` state.
+    Set `block_transition.prev_block_hash = public_inputs.prev_block_hash` and `block_transition.next_block_hash = prev_block_hash` after the final block. Set `deposit_queue_transition.prev_processed_hash` and `deposit_queue_transition.prev_deposit_number` to the values captured before executing the batch, and set `deposit_queue_transition.next_processed_hash` and `deposit_queue_transition.next_deposit_number` to the final inbox processed hash and processed deposit number. Set `withdrawal_queue_hash` and `last_batch_commitment.withdrawal_batch_index` from the final `ZoneOutbox.lastBatch` state.
 
 ### Tempo State Proofs
 
@@ -1274,7 +1279,7 @@ The call takes the following parameters:
 | `tempoBlockNumber` | The Tempo block the zone committed to via `TempoState` |
 | `recentTempoBlockNumber` | A recent Tempo block for ancestry validation (`0` for direct lookup) |
 | `blockTransition` | Zone block hash transition: `prevBlockHash` to `nextBlockHash` |
-| `depositQueueTransition` | Deposit queue processing: `prevProcessedHash` to `nextProcessedHash` |
+| `depositQueueTransition` | Deposit queue progress from the previous `(processedHash, depositNumber)` pair to the next `(processedHash, depositNumber)` pair |
 | `withdrawalQueueHash` | Hash chain of withdrawals finalized in this batch (`0` if none) |
 | `verifierConfig` | Opaque payload for the verifier (domain separation, attestation data) |
 | `proof` | The proof or attestation produced by the proving backend |
@@ -1282,7 +1287,7 @@ The call takes the following parameters:
 On success, the portal:
 
 1. Updates `blockHash` to `nextBlockHash`.
-2. Updates `lastSyncedTempoBlockNumber` to `tempoBlockNumber`.
+2. Updates `lastSyncedTempoBlockNumber` to `tempoBlockNumber` and `lastProcessedDepositNumber` to `depositQueueTransition.nextDepositNumber`.
 3. Advances `withdrawalBatchIndex`.
 4. Adds the withdrawal hash chain to the next slot in the withdrawal queue ring buffer (if `withdrawalQueueHash` is non-zero).
 5. Emits `BatchSubmitted`.
@@ -1330,7 +1335,7 @@ The proof must validate:
 4. `ZoneOutbox.lastBatch().withdrawalBatchIndex` equals `expectedWithdrawalBatchIndex`.
 5. `ZoneOutbox.lastBatch().withdrawalQueueHash` matches the submitted `withdrawalQueueHash`.
 6. Every zone block `beneficiary` matches `sequencer`.
-7. Deposit processing is correct (the zone read `currentDepositQueueHash` from Tempo state and processed deposits accordingly).
+7. Deposit processing is correct: deposits are processed oldest-first and contiguously from `prevProcessedHash`, `nextProcessedHash` equals the post-state `ZoneInbox.processedDepositQueueHash`, `nextDepositNumber` equals the post-state processed deposit number, and the proof shows `nextProcessedHash` equals the portal's `currentDepositQueueHash` read from Tempo state.
 
 ## Zone Precompiles
 
@@ -1406,6 +1411,7 @@ struct Deposit {
     address sender;
     address to;
     uint128 amount;
+    address bouncebackRecipient;
     bytes32 memo;
 }
 
@@ -1426,6 +1432,7 @@ struct EncryptedDeposit {
     address token;
     address sender;
     uint128 amount;
+    address bouncebackRecipient;
     uint256 keyIndex;
     EncryptedDepositPayload encrypted;
 }
@@ -1446,6 +1453,7 @@ enum DepositType {
 struct QueuedDeposit {
     DepositType depositType;
     bytes depositData;  // abi.encode(Deposit) or abi.encode(EncryptedDeposit)
+    bool rejected;
 }
 
 struct DecryptionData {
@@ -1467,6 +1475,8 @@ struct BlockTransition {
 struct DepositQueueTransition {
     bytes32 prevProcessedHash;
     bytes32 nextProcessedHash;
+    uint64 prevDepositNumber;
+    uint64 nextDepositNumber;
 }
 
 struct TokenConfig {
@@ -1536,7 +1546,8 @@ interface IZonePortal {
         bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
         address token, uint128 netAmount, uint128 fee, uint256 keyIndex,
         bytes32 ephemeralPubkeyX, uint8 ephemeralPubkeyYParity,
-        bytes ciphertext, bytes12 nonce, bytes16 tag, uint64 depositNumber
+        bytes ciphertext, bytes12 nonce, bytes16 tag,
+        address bouncebackRecipient, uint64 depositNumber
     );
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex, bytes32 nextProcessedDepositQueueHash,
@@ -1581,7 +1592,7 @@ interface IZonePortal {
     function setRpcUrl(string calldata rpcUrl) external; // sequencer-only
 
     // Deposits
-    /// @dev Reverts (`MissingBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
+    /// @dev Reverts (`InvalidBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
     ///      Every user-initiated deposit must carry a usable refund target so that a
     ///      failed mint can be recovered without stalling the deposit queue. The portal
     ///      validates the refund target against the token's TIP-403 recipient policy;
@@ -1591,7 +1602,7 @@ interface IZonePortal {
     function deposit(
         address token, address to, uint128 amount, bytes32 memo, address bouncebackRecipient
     ) external returns (bytes32 newCurrentDepositQueueHash);
-    /// @dev Reverts (`MissingBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
+    /// @dev Reverts (`InvalidBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
     ///      A ciphertext that fails onchain decryption verification has no well-defined
     ///      recipient on the zone, so the bounce-back target must always be set.
     function depositEncrypted(
@@ -1709,7 +1720,8 @@ interface IZoneInbox {
 
     event TempoAdvanced(
         bytes32 indexed tempoBlockHash, uint64 indexed tempoBlockNumber,
-        uint256 depositsProcessed, bytes32 newProcessedDepositQueueHash
+        uint256 depositsProcessed, bytes32 newProcessedDepositQueueHash,
+        uint64 lastProcessedDepositNumber
     );
     event DepositProcessed(
         bytes32 indexed depositHash, address indexed sender, address indexed to,
@@ -1752,6 +1764,7 @@ interface IZoneInbox {
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
     function processedDepositQueueHash() external view returns (bytes32);
+    function processedDepositNumber() external view returns (uint64);
     function advanceTempo(
         bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions,
         EnabledToken[] calldata enabledTokens
