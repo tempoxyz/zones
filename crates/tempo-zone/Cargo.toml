@@ -24,14 +24,13 @@ tempo-contracts.workspace = true
 tempo-precompiles.workspace = true
 tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-l1.workspace = true
+zone-payload.workspace = true
 zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true, features = ["std", "serde"] }
 zone-rpc.workspace = true
 
 # reth
-reth-basic-payload-builder.workspace = true
 reth-chainspec.workspace = true
-reth-errors.workspace = true
 reth-eth-wire-types.workspace = true
 reth-evm.workspace = true
 reth-metrics.workspace = true
@@ -52,7 +51,6 @@ reth-transaction-pool.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
-alloy-eips.workspace = true
 alloy-evm.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
@@ -79,7 +77,6 @@ reth-ethereum = { workspace = true, features = [
 ], optional = true }
 reth-tracing = { workspace = true, optional = true }
 eyre.workspace = true
-serde = { workspace = true, features = ["derive"] }
 futures.workspace = true
 parking_lot.workspace = true
 tokio.workspace = true
@@ -96,6 +93,7 @@ alloy = { workspace = true, features = [
   "rpc-types",
 ] }
 alloy-contract.workspace = true
+alloy-eips.workspace = true
 alloy-primitives.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-sol-types.workspace = true

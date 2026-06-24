@@ -1,30 +1,29 @@
-//! Zone payload types and builder.
+//! Zone payload types.
 //!
 //! Owns the full payload attribute types for the zone, wrapping Ethereum
 //! payload attributes and adding L1 block data plus the millisecond timestamp
 //! portion. This avoids pulling in Tempo-specific concepts the zone doesn't
 //! use (interrupts, subblocks, DKG extra-data).
 
-mod builder;
-
-pub use builder::{ZonePayloadBuilder, ZonePayloadFactory, build_advance_tempo_tx};
-
 use alloy_primitives::{Address, B256, Bytes};
 use alloy_rpc_types_engine::{PayloadAttributes as EthPayloadAttributes, PayloadId};
 use alloy_rpc_types_eth::Withdrawal;
-use reth_node_api::PayloadTypes;
-use reth_primitives_traits::SealedBlock;
+use reth_node_api::{
+    InvalidPayloadAttributesError, NewPayloadError, PayloadTypes, PayloadValidator,
+};
+use reth_payload_primitives::PayloadAttributes;
+use reth_primitives_traits::{AlloyBlockHeader, SealedBlock};
 use serde::{Deserialize, Serialize};
+use tempo_node::engine::TempoEngineValidator;
 use tempo_payload_types::{TempoBuiltPayload, TempoExecutionData};
-use tempo_primitives::Block;
-
-use crate::l1::PreparedL1Block;
+use tempo_primitives::{Block, TempoHeader};
+use zone_l1::PreparedL1Block;
 
 /// Zone RPC payload attributes — the type that flows through FCU.
 ///
 /// Carries standard Ethereum attributes, a millisecond timestamp portion, and
 /// the prepared L1 block whose deposits should be included in this zone block.
-/// The L1 data is set by the [`ZoneEngine`](crate::ZoneEngine) before sending
+/// The L1 data is set by the ZoneEngine before sending
 /// FCU and is skipped during (de)serialisation since it only travels through
 /// in-process channels.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,5 +106,32 @@ impl PayloadTypes for ZonePayloadTypes {
             block_access_list: bal,
             validator_set: None,
         }
+    }
+}
+
+impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
+    type Block = Block;
+
+    fn convert_payload_to_block(
+        &self,
+        payload: TempoExecutionData,
+    ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
+        let TempoExecutionData {
+            block,
+            block_access_list: _,
+            validator_set: _,
+        } = payload;
+        Ok(block.into_sealed_block())
+    }
+
+    fn validate_payload_attributes_against_header(
+        &self,
+        attr: &ZonePayloadAttributes,
+        header: &TempoHeader,
+    ) -> Result<(), InvalidPayloadAttributesError> {
+        if PayloadAttributes::timestamp(attr) < AlloyBlockHeader::timestamp(header) {
+            return Err(InvalidPayloadAttributesError::InvalidTimestamp);
+        }
+        Ok(())
     }
 }

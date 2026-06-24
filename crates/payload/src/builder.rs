@@ -3,15 +3,14 @@
 //! Builds zone blocks by executing `advanceTempo` system transactions (one per L1 block)
 //! followed by pool transactions and a withdrawal batch finalization.
 
-use crate::{
-    abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
-    evm::ZoneEvmConfig,
-    ext::TempoStateExt,
-    l1::PreparedL1Block,
-    payload::ZonePayloadAttributes,
-};
+use crate::abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use alloy_consensus::{Signed, Transaction, TxLegacy, TxReceipt, transaction::TxHashRef};
 use alloy_eips::eip4895::Withdrawals;
+use alloy_evm::{
+    EvmFactory,
+    block::{BlockExecutor, BlockExecutorFactory, TxResult},
+    revm::context_interface::block::Block as RevmBlock,
+};
 use alloy_primitives::{B256, Bytes, U256};
 use alloy_rlp::Encodable;
 use alloy_sol_types::{SolCall, SolEvent};
@@ -21,10 +20,10 @@ use reth_basic_payload_builder::{
 use reth_chainspec::{ChainSpecProvider, EthereumHardforks};
 use reth_errors::ProviderError;
 use reth_evm::{
-    ConfigureEvm, Database, NextBlockEnvAttributes,
+    BlockEnvFor, ConfigureEvm, Database, NextBlockEnvAttributes, TxEnvFor,
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
 };
-use reth_node_api::FullNodeTypes;
+use reth_node_api::{FullNodeTypes, NodeTypes};
 use reth_node_builder::{BuilderContext, components::PayloadBuilderBuilder};
 use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
@@ -45,10 +44,9 @@ use tempo_primitives::{
 };
 use tempo_transaction_pool::TempoTransactionPool;
 use tracing::{error, info, warn};
+use zone_l1::{PreparedL1Block, TempoStateExt};
 
-use crate::node::ZoneNode;
-
-use alloy_evm::block::{BlockExecutor, TxResult};
+use crate::{ZonePayloadAttributes, ZonePayloadTypes};
 
 #[derive(Clone)]
 struct RequestedWithdrawalContext {
@@ -61,18 +59,26 @@ struct RequestedWithdrawalContext {
 #[non_exhaustive]
 pub struct ZonePayloadFactory;
 
-impl<Node> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, ZoneEvmConfig>
+impl<Node, EvmConfig> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, EvmConfig>
     for ZonePayloadFactory
 where
-    Node: FullNodeTypes<Types = ZoneNode>,
+    Node: FullNodeTypes,
+    Node::Types: NodeTypes<ChainSpec = TempoChainSpec, Payload = ZonePayloadTypes>,
+    EvmConfig: ConfigureEvm<
+            Primitives = tempo_primitives::TempoPrimitives,
+            NextBlockEnvCtx = TempoNextBlockEnvAttributes,
+        > + 'static,
+    <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
+        EvmFactory<Tx = tempo_revm::TempoTxEnv>,
+    BlockEnvFor<EvmConfig>: RevmBlock,
 {
-    type PayloadBuilder = ZonePayloadBuilder<Node::Provider>;
+    type PayloadBuilder = ZonePayloadBuilder<Node::Provider, EvmConfig>;
 
     async fn build_payload_builder(
         self,
         ctx: &BuilderContext<Node>,
         pool: TempoTransactionPool<Node::Provider>,
-        evm_config: ZoneEvmConfig,
+        evm_config: EvmConfig,
     ) -> eyre::Result<Self::PayloadBuilder> {
         Ok(ZonePayloadBuilder {
             pool,
@@ -84,19 +90,27 @@ where
 
 /// Zone payload builder that executes `advanceTempo` system txs + pool txs.
 #[derive(Debug, Clone)]
-pub struct ZonePayloadBuilder<Provider> {
+pub struct ZonePayloadBuilder<Provider, EvmConfig> {
     /// Transaction pool for selecting pool txs to include in the block.
     pool: TempoTransactionPool<Provider>,
     /// State provider for reading chain state during block building.
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
-    evm_config: ZoneEvmConfig,
+    evm_config: EvmConfig,
 }
 
-impl<Provider> PayloadBuilder for ZonePayloadBuilder<Provider>
+impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
 where
     Provider:
         StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone + 'static,
+    EvmConfig: ConfigureEvm<
+            Primitives = tempo_primitives::TempoPrimitives,
+            NextBlockEnvCtx = TempoNextBlockEnvAttributes,
+        > + 'static,
+    TxEnvFor<EvmConfig>: From<tempo_revm::TempoTxEnv>,
+    <EvmConfig::BlockExecutorFactory as BlockExecutorFactory>::EvmFactory:
+        EvmFactory<Tx = tempo_revm::TempoTxEnv>,
+    BlockEnvFor<EvmConfig>: RevmBlock,
 {
     type Attributes = ZonePayloadAttributes;
     type BuiltPayload = TempoBuiltPayload;
@@ -201,31 +215,39 @@ where
         let total_fees = U256::ZERO;
         let mut requested_withdrawals = Vec::new();
 
+        let next_block_env_attributes = TempoNextBlockEnvAttributes {
+            inner: NextBlockEnvAttributes {
+                timestamp: attributes.timestamp(),
+                suggested_fee_recipient: attributes.suggested_fee_recipient(),
+                prev_randao: attributes.prev_randao(),
+                gas_limit: block_gas_limit,
+                parent_beacon_block_root: attributes.parent_beacon_block_root(),
+                withdrawals: attributes.withdrawals().cloned().map(Withdrawals::new),
+                extra_data: attributes.extra_data(),
+                slot_number: attributes.slot_number(),
+            },
+            // Zones don't use L1 gas sections. These fields are required
+            // by TempoNextBlockEnvAttributes but ignored by the zone executor.
+            general_gas_limit: 0,
+            shared_gas_limit: block_gas_limit,
+            timestamp_millis_part: attributes.timestamp_millis_part(),
+            consensus_context: None,
+            subblock_fee_recipients: Default::default(),
+        };
+        let next_env = self
+            .evm_config
+            .next_evm_env(parent_header.header(), &next_block_env_attributes)
+            .map_err(PayloadBuilderError::other)?;
+        let base_fee = next_env.block_env.basefee();
+        let block_number: u64 = next_env
+            .block_env
+            .number()
+            .try_into()
+            .expect("block number fits u64");
+
         let mut builder = self
             .evm_config
-            .builder_for_next_block(
-                &mut db,
-                &parent_header,
-                TempoNextBlockEnvAttributes {
-                    inner: NextBlockEnvAttributes {
-                        timestamp: attributes.timestamp(),
-                        suggested_fee_recipient: attributes.suggested_fee_recipient(),
-                        prev_randao: attributes.prev_randao(),
-                        gas_limit: block_gas_limit,
-                        parent_beacon_block_root: attributes.parent_beacon_block_root(),
-                        withdrawals: attributes.withdrawals().cloned().map(Withdrawals::new),
-                        extra_data: attributes.extra_data(),
-                        slot_number: attributes.slot_number(),
-                    },
-                    // Zones don't use L1 gas sections. These fields are required
-                    // by TempoNextBlockEnvAttributes but ignored by the zone executor.
-                    general_gas_limit: 0,
-                    shared_gas_limit: block_gas_limit,
-                    timestamp_millis_part: attributes.timestamp_millis_part(),
-                    consensus_context: None,
-                    subblock_fee_recipients: Default::default(),
-                },
-            )
+            .builder_for_next_block(&mut db, &parent_header, next_block_env_attributes)
             .map_err(PayloadBuilderError::other)?;
 
         builder.apply_pre_execution_changes().map_err(|err| {
@@ -283,7 +305,6 @@ where
 
         // Execute pool transactions
         // TODO: Use gas accounting from TempoPayloadBuilder (payment vs non-payment limits, etc.)
-        let base_fee = builder.evm_mut().block.basefee;
         let mut best_txs = self
             .pool
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
@@ -354,12 +375,6 @@ where
         // Finalize the withdrawal batch — must run after all user txs.
         // Calls ZoneOutbox.finalizeWithdrawalBatch(MAX, blockNumber) to build the
         // withdrawal hash chain and write batch state for proof generation.
-        let block_number: u64 = builder
-            .evm_mut()
-            .block
-            .number
-            .try_into()
-            .expect("block number fits u64");
         let encrypted_senders = requested_withdrawals
             .iter()
             .map(|request| {
@@ -626,10 +641,8 @@ mod tests {
     use reth_primitives_traits::SealedHeader;
     use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxType};
 
-    use crate::{
-        abi::{self, DepositType, ZoneInbox},
-        l1::PreparedL1Block,
-    };
+    use crate::abi::{self, DepositType, ZoneInbox};
+    use zone_l1::PreparedL1Block;
 
     fn make_withdrawal_requested_log(sender: alloy_primitives::Address) -> Log {
         let event = abi::ZoneOutbox::WithdrawalRequested {

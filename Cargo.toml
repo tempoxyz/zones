@@ -10,6 +10,7 @@ members = [
   "bin/tempo-zone",
   "crates/contracts",
   "crates/l1",
+  "crates/payload",
   "crates/precompiles",
   "crates/primitives",
   "crates/tempo-zone",
@@ -103,6 +104,7 @@ tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "651
 # zones
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
 zone-l1 = { path = "crates/l1" }
+zone-payload = { path = "crates/payload" }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
 zone-rpc = { path = "crates/rpc" }

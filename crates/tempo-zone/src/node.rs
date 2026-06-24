@@ -24,9 +24,8 @@ use alloy_signer_local::PrivateKeySigner;
 use k256::SecretKey;
 use reth_eth_wire_types::primitives::BasicNetworkPrimitives;
 use reth_node_api::{
-    AddOnsContext, FullNodeComponents, FullNodeTypes, InvalidPayloadAttributesError,
-    NewPayloadError, NodeAddOns, NodeTypes, PayloadAttributes, PayloadAttributesBuilder,
-    PayloadTypes, PayloadValidator,
+    AddOnsContext, FullNodeComponents, FullNodeTypes, NodeAddOns, NodeTypes,
+    PayloadAttributesBuilder, PayloadTypes,
 };
 use reth_node_builder::{
     BuilderContext, DebugNode, Node, NodeAdapter,
@@ -39,9 +38,7 @@ use reth_node_builder::{
         PayloadValidatorBuilder, RethRpcAddOns, RpcAddOns,
     },
 };
-use reth_primitives_traits::{
-    AlloyBlockHeader, SealedBlock, SealedHeader, transaction::error::InvalidTransactionError,
-};
+use reth_primitives_traits::{SealedHeader, transaction::error::InvalidTransactionError};
 use reth_provider::ChainSpecProvider;
 use reth_rpc_builder::Identity;
 use reth_rpc_eth_api::EthApiTypes;
@@ -57,7 +54,6 @@ use tempo_evm::TempoEvmConfig;
 use tempo_node::{
     DEFAULT_AA_VALID_AFTER_MAX_SECS, engine::TempoEngineValidator, rpc::TempoEthApiBuilder,
 };
-use tempo_payload_types::TempoExecutionData;
 use tempo_primitives::{
     self as primitives, TempoHeader, TempoPrimitives, TempoTxEnvelope, TempoTxType,
 };
@@ -223,7 +219,9 @@ impl ZoneNode {
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(executor_builder)
-            .payload(BasicPayloadServiceBuilder::new(ZonePayloadFactory))
+            .payload(BasicPayloadServiceBuilder::new(
+                ZonePayloadFactory::default(),
+            ))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -786,33 +784,6 @@ where
 
     async fn build(self, _ctx: &AddOnsContext<'_, Node>) -> eyre::Result<Self::Validator> {
         Ok(TempoEngineValidator::new())
-    }
-}
-
-impl PayloadValidator<ZonePayloadTypes> for TempoEngineValidator {
-    type Block = primitives::Block;
-
-    fn convert_payload_to_block(
-        &self,
-        payload: TempoExecutionData,
-    ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
-        let TempoExecutionData {
-            block,
-            block_access_list: _,
-            validator_set: _,
-        } = payload;
-        Ok(block.into_sealed_block())
-    }
-
-    fn validate_payload_attributes_against_header(
-        &self,
-        attr: &ZonePayloadAttributes,
-        header: &TempoHeader,
-    ) -> Result<(), InvalidPayloadAttributesError> {
-        if PayloadAttributes::timestamp(attr) < AlloyBlockHeader::timestamp(header) {
-            return Err(InvalidPayloadAttributesError::InvalidTimestamp);
-        }
-        Ok(())
     }
 }
 
