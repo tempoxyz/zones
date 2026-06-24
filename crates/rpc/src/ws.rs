@@ -178,24 +178,25 @@ fn subscription_notification_raw(subscription_id: &FilterId, result: &RawValue) 
     .expect("subscription notification serialization is infallible")
 }
 
+/// Redact a subscription payload, returning `None` if redaction fails so the
+/// caller can drop the item rather than forwarding unredacted data.
 fn redacted_subscription_result(
     result: Box<RawValue>,
     redaction: SubscriptionRedaction,
-) -> Box<RawValue> {
+) -> Option<Box<RawValue>> {
     match redaction {
-        SubscriptionRedaction::None => result,
-        SubscriptionRedaction::NewHeads => redact_new_head_result(result),
+        SubscriptionRedaction::None => Some(result),
+        SubscriptionRedaction::NewHeads => redact_new_head_result(&result),
     }
 }
 
 /// Apply block-header privacy rules to `eth_subscribe("newHeads")` payloads.
-fn redact_new_head_result(result: Box<RawValue>) -> Box<RawValue> {
-    let Ok(mut header) = serde_json::from_str::<Value>(result.get()) else {
-        return result;
-    };
-    let Some(header) = header.as_object_mut() else {
-        return result;
-    };
+///
+/// Fails closed: returns `None` on any parse/serialize error instead of leaking
+/// the original, potentially unredacted payload.
+fn redact_new_head_result(result: &RawValue) -> Option<Box<RawValue>> {
+    let mut header = serde_json::from_str::<Value>(result.get()).ok()?;
+    let header = header.as_object_mut()?;
 
     header.insert(
         "logsBloom".to_string(),
@@ -203,7 +204,7 @@ fn redact_new_head_result(result: Box<RawValue>) -> Box<RawValue> {
     );
     header.remove("transactions");
 
-    to_raw(header).unwrap_or(result)
+    to_raw(header).ok()
 }
 
 /// Forward subscription stream items into the session outbound queue.
@@ -228,7 +229,14 @@ fn spawn_subscription(
                     break;
                 }
             };
-            let result = redacted_subscription_result(result, redaction);
+            let Some(result) = redacted_subscription_result(result, redaction) else {
+                warn!(
+                    target: "zone::rpc",
+                    subscription = ?subscription_id,
+                    "ws subscription redaction failed; closing subscription"
+                );
+                break;
+            };
 
             if !try_queue_notification(
                 &notifications,
