@@ -513,7 +513,7 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | pathUSD (TIP-20) | `0x20C0000000000000000000000000000000000000` |
 | ZoneFactory (moderato) | `0xC73b446C0768bc315Be7741D60B4e494E3ebc0dC` |
 
-The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zone` and `zone-info` point at it automatically, and `deploy-router` falls back to it when `zone.json` does not already record `zoneFactory`.
+This deployment predates the admin-aware `createZone` ABI. Until a fresh shared factory is deployed, pass a compatible factory explicitly with `--zone-factory` or `ZONE_FACTORY`; `deploy-router` reads `zoneFactory` from `zone.json` or requires `--zone-factory`.
 
 ### Deploying a New ZoneFactory
 
@@ -579,13 +579,14 @@ Current deployment:
 | `L1_PORTAL_ADDRESS` | For deposits | ZonePortal address (from `zone.json`) |
 | `PRIVATE_RPC_MAX_AUTH_TOKEN_VALIDITY_SECS` | No | Maximum auth token validity the private RPC accepts, in seconds. The effective limit is capped at 30 days. |
 | `ZONE_TOKEN` | No | Default initial TIP-20 for `just create-zone` / `just deploy-zone`; defaults to `pathUSD` |
+| `ZONE_FACTORY` | Yes for `create-zone` / `zone-info` | ZoneFactory address matching the current `createZone` ABI |
 
 ## Justfile Commands Reference
 
 | Command | Description |
 |---------|-------------|
 | `just deploy-zone <name> [<tip20>]` | One-shot: keygen → fund → create → genesis → start node |
-| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`) |
+| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, `ZONE_FACTORY`) |
 | `just deploy-router <name>` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal` | Approve portal to spend tokens on L1 |

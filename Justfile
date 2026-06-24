@@ -108,12 +108,13 @@ send-deposit-encrypted amount="1000000" to="" memo="0x00000000000000000000000000
     cargo run -p tempo-xtask -- encrypted-deposit --private-key "$PK" $ARGS
 
 [group('zone')]
-[doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...).')]
+[doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...). Requires ZONE_FACTORY env var.')]
 zone-info identifier:
-    cargo run -p tempo-xtask -- zone-info {{identifier}}
+    ZONE_FACTORY="${ZONE_FACTORY:?Set ZONE_FACTORY env var}"
+    cargo run -p tempo-xtask -- zone-info {{identifier}} --zone-factory "$ZONE_FACTORY"
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, SEQUENCER_KEY, and ZONE_FACTORY env vars.')]
 create-zone name token="":
     #!/bin/bash
     set -euo pipefail
@@ -133,6 +134,7 @@ create-zone name token="":
             ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000002" ;;
     esac
     SEQ_KEY="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}"
+    ZONE_FACTORY="${ZONE_FACTORY:?Set ZONE_FACTORY env var}"
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     SEQUENCER_ADDR=$(cast wallet address "$SEQ_KEY")
@@ -147,6 +149,7 @@ create-zone name token="":
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
+        --zone-factory "$ZONE_FACTORY" \
         --initial-token "$ZONE_TOKEN_L1" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$PK"

@@ -16,13 +16,6 @@ use tempo_contracts::precompiles::ITIP20 as TIP20Token;
 use zone::abi::{ZoneInbox, ZonePortal};
 
 pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
-/// Shared ZoneFactory deployed on Moderato Tempo L1.
-/// `create-zone`, `deploy-router`, and `zone-info` use this as their default
-/// factory unless the caller overrides `--zone-factory` or `zone.json` already
-/// provides a zone-specific value.
-/// Explorer: https://explore.moderato.tempo.xyz/address/0xC73b446C0768bc315Be7741D60B4e494E3ebc0dC
-pub(crate) const MODERATO_ZONE_FACTORY: Address =
-    address!("0xC73b446C0768bc315Be7741D60B4e494E3ebc0dC");
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;

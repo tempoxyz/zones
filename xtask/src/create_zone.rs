@@ -19,8 +19,6 @@ use tempo_alloy::TempoNetwork;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use zone_primitives::constants::zone_chain_id;
 
-use crate::zone_utils::MODERATO_ZONE_FACTORY;
-
 sol! {
     struct ZoneParams {
         bytes32 genesisBlockHash;
@@ -68,8 +66,7 @@ pub(crate) struct CreateZone {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    /// Defaults to `MODERATO_ZONE_FACTORY`, the shared Moderato deployment.
-    #[arg(long, default_value_t = MODERATO_ZONE_FACTORY)]
+    #[arg(long)]
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
