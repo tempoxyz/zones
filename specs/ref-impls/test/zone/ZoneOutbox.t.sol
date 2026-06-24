@@ -3,7 +3,9 @@ pragma solidity ^0.8.13;
 
 import {
     IZoneOutbox,
+    IZonePortal,
     LastBatch,
+    PORTAL_TOKEN_CONFIGS_SLOT,
     Withdrawal,
     ZONE_INBOX,
     ZONE_TX_CONTEXT
@@ -48,6 +50,7 @@ contract ZoneOutboxTest is Test {
         tempoState.setMockStorageValue(
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
+        _setTokenEnabled(address(zoneToken), true);
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         outbox = new ZoneOutbox(address(config));
 
@@ -64,6 +67,11 @@ contract ZoneOutboxTest is Test {
 
     function _senderTag(address sender, uint256 txSequence) internal view returns (bytes32) {
         return keccak256(abi.encodePacked(sender, txContext.txHashFor(txSequence)));
+    }
+
+    function _setTokenEnabled(address token, bool enabled) internal {
+        bytes32 configSlot = keccak256(abi.encode(token, PORTAL_TOKEN_CONFIGS_SLOT));
+        tempoState.setMockStorageValue(mockPortal, configSlot, bytes32(uint256(enabled ? 1 : 0)));
     }
 
     function _withdrawal(
@@ -174,6 +182,22 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         assertEq(outbox.pendingWithdrawalsCount(), 2);
+    }
+
+    function test_requestWithdrawal_revertsWhenTokenNotEnabled() public {
+        MockZoneToken disabledToken = new MockZoneToken("Disabled USD", "dUSD");
+        disabledToken.setMinter(address(this), true);
+        disabledToken.setBurner(address(outbox), true);
+        disabledToken.mint(alice, 1000e6);
+
+        vm.startPrank(alice);
+        disabledToken.approve(address(outbox), 500e6);
+        vm.expectRevert(IZonePortal.TokenNotEnabled.selector);
+        outbox.requestWithdrawal(address(disabledToken), bob, 500e6, bytes32(0), 0, alice, "");
+        vm.stopPrank();
+
+        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(disabledToken.balanceOf(alice), 1000e6);
     }
 
     /*//////////////////////////////////////////////////////////////

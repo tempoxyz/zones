@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import {
     IZoneConfig,
     IZoneOutbox,
+    IZonePortal,
     IZoneToken,
     IZoneTxContext,
     LastBatch,
@@ -245,6 +246,10 @@ contract ZoneOutbox is IZoneOutbox {
         // Always require a valid fallback recipient
         if (fallbackRecipient == address(0)) {
             revert InvalidFallbackRecipient();
+        }
+
+        if (!config.isEnabledToken(token)) {
+            revert IZonePortal.TokenNotEnabled();
         }
 
         _validateGasLimit(gasLimit);

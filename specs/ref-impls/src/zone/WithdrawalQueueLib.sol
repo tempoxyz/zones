@@ -46,14 +46,14 @@ library WithdrawalQueueLib {
     /// @param queue The withdrawal queue
     /// @param withdrawalQueueHash The hash chain of withdrawals for this batch (0 if none)
     function enqueue(WithdrawalQueue storage queue, bytes32 withdrawalQueueHash) internal {
+        if (withdrawalQueueHash == bytes32(0)) {
+            return;
+        }
+
         uint256 tail = queue.tail;
 
         if (tail - queue.head >= WITHDRAWAL_QUEUE_CAPACITY) {
             revert WithdrawalQueueFull();
-        }
-
-        if (withdrawalQueueHash == bytes32(0)) {
-            return;
         }
 
         queue.slots[tail % WITHDRAWAL_QUEUE_CAPACITY] = withdrawalQueueHash;
