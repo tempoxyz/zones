@@ -585,7 +585,7 @@ fee = (WITHDRAWAL_BASE_GAS + gasLimit) * tempoGasRate
     = (50,000 + gasLimit) * tempoGasRate
 ```
 
-`WITHDRAWAL_BASE_GAS` (50,000) covers the fixed overhead of processing a withdrawal on Tempo (queue dequeue, transfer, event emission). The user specifies `gasLimit` covering any additional Tempo L1 callback gas. `gasLimit` must be less than or equal to `MAX_WITHDRAWAL_GAS_LIMIT` (10,000,000), which keeps the outer `processWithdrawal` transaction below the Tempo L1 block gas limit after portal overhead and the EIP-150 cushion are added. For simple withdrawals with no callback, use `gasLimit = 0`. The fee is paid in the same token being withdrawn. On success, `amount` goes to the recipient and `fee` goes to the sequencer. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`. The sequencer keeps the fee regardless of outcome.
+`WITHDRAWAL_BASE_GAS` (50,000) covers the fixed overhead of processing a withdrawal on Tempo (queue dequeue, transfer, event emission). The user specifies `gasLimit` covering any additional Tempo L1 callback gas. `gasLimit` must be less than or equal to `MAX_WITHDRAWAL_GAS_LIMIT` (10,000,000), which keeps the outer `processWithdrawal` transaction below the Tempo L1 block gas limit after portal overhead and the EIP-150 cushion are added. For simple withdrawals with no callback, use `gasLimit = 0`. The fee is paid in the same token being withdrawn. `processWithdrawal` attempts to pay `fee` to the sequencer on Tempo, but if fee payment fails, the withdrawal processing continues and the unpaid fee remains in the portal. On success, `amount` goes to the recipient. On failure (bounce-back), only `amount` is re-deposited to `fallbackRecipient`. The sequencer keeps the fee only if the Tempo-side fee transfer succeeds.
 
 `tempoGasRate` lives on the zone-side `ZoneOutbox` (see [Gas Rate Configuration](#gas-rate-configuration)). The outbox reads it at request time and snapshots it onto the queued withdrawal.
 
@@ -635,6 +635,8 @@ Withdrawals can fail on the Tempo side for several reasons:
 - The token is paused
 - The callback reverts (out of gas, logic error)
 - The receiver returns the wrong selector
+
+Sequencer fee-transfer failure is not treated as a withdrawal failure. The portal forgoes the failed fee transfer and continues with the normal withdrawal path so as to not stall withdrawals.
 
 To make sure that all of these cases can be handled without loss of user funds, every withdrawal carries a `fallbackRecipient`: a zone address that receives a refund mint if Tempo-side processing fails.
 

@@ -726,9 +726,13 @@ contract ZonePortal is IZonePortal {
             return;
         }
 
-        // Transfer fee to sequencer (always, regardless of withdrawal success)
+        // Transfer fee to sequencer.
         if (withdrawal.fee > 0) {
-            ITIP20(_token).transfer(sequencer, withdrawal.fee);
+            try ITIP20(_token).transfer(sequencer, withdrawal.fee) returns (bool) { }
+                catch {
+                // Fee transfer can fail for eg. TIP-403 blacklist, in which case the sequencer
+                // will forgo the fee so as to not stall withdrawals.
+            }
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
