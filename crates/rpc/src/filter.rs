@@ -531,8 +531,10 @@ mod tests {
     #[test]
     fn scope_filter_addresses_allows_enabled_token_address() {
         let token = address!("0x00000000000000000000000000000000000000aa");
-        let mut filter = Filter::default();
-        filter.address = FilterSet::from(token);
+        let mut filter = Filter {
+            address: FilterSet::from(token),
+            ..Default::default()
+        };
 
         scope_filter_addresses(&mut filter, &[token]).unwrap();
 
@@ -543,8 +545,10 @@ mod tests {
     fn scope_filter_addresses_rejects_non_zone_token_address() {
         let token = address!("0x00000000000000000000000000000000000000aa");
         let other = address!("0x00000000000000000000000000000000000000cc");
-        let mut filter = Filter::default();
-        filter.address = FilterSet::from(vec![token, other]);
+        let mut filter = Filter {
+            address: FilterSet::from(vec![token, other]),
+            ..Default::default()
+        };
 
         let err = scope_filter_addresses(&mut filter, &[token]).unwrap_err();
 
