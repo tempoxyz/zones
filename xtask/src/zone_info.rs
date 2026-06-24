@@ -3,6 +3,8 @@ use eyre::eyre;
 use tempo_alloy::TempoNetwork;
 use zone::abi::{ZoneFactory, ZonePortal};
 
+use crate::zone_utils::MODERATO_ZONE_FACTORY;
+
 #[derive(Debug, clap::Parser)]
 pub(crate) struct ZoneInfoCmd {
     /// Zone ID (integer) or portal address (0x...) to look up.
@@ -13,7 +15,7 @@ pub(crate) struct ZoneInfoCmd {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    #[arg(long)]
+    #[arg(long, env = "ZONE_FACTORY", default_value_t = MODERATO_ZONE_FACTORY)]
     zone_factory: Address,
 }
 

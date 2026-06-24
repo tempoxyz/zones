@@ -11,7 +11,8 @@ use std::path::PathBuf;
 use tempo_alloy::TempoNetwork;
 
 use crate::zone_utils::{
-    L1_EXPLORER, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, normalize_http_rpc,
+    L1_EXPLORER, MODERATO_ZONE_FACTORY, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check,
+    normalize_http_rpc,
 };
 
 #[derive(Debug, clap::Parser)]
@@ -32,8 +33,8 @@ pub(crate) struct DeployRouter {
     #[arg(long, env = "PRIVATE_KEY")]
     private_key: String,
 
-    /// ZoneFactory contract address. Falls back to `zone.json`.
-    #[arg(long)]
+    /// ZoneFactory contract address. Falls back to `zone.json`, then the shared Moderato default.
+    #[arg(long, env = "ZONE_FACTORY")]
     zone_factory: Option<Address>,
 
     /// StablecoinDEX address passed to the router constructor.
@@ -51,11 +52,7 @@ impl DeployRouter {
         let zone_factory = self
             .zone_factory
             .or(zone_metadata.get_optional_address("zoneFactory")?)
-            .ok_or_else(|| {
-                eyre!(
-                    "zone factory missing; pass --zone-factory or record zoneFactory in zone.json"
-                )
-            })?;
+            .unwrap_or(MODERATO_ZONE_FACTORY);
 
         let key_str = self
             .private_key
