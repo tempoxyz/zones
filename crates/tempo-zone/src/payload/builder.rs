@@ -38,7 +38,7 @@ use reth_transaction_pool::{
 use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoNextBlockEnvAttributes;
-use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
+use tempo_payload_types::TempoBuiltPayload;
 use tempo_primitives::{
     TempoHeader, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
@@ -354,12 +354,9 @@ where
         // Finalize the withdrawal batch — must run after all user txs.
         // Calls ZoneOutbox.finalizeWithdrawalBatch(MAX, blockNumber) to build the
         // withdrawal hash chain and write batch state for proof generation.
-        let block_number: u64 = builder
-            .evm_mut()
-            .block
-            .number
-            .try_into()
-            .expect("block number fits u64");
+        let block_number: u64 = builder.evm_mut().block.number.try_into().map_err(|_| {
+            PayloadBuilderError::Internal(reth_errors::RethError::msg("block number exceeds u64"))
+        })?;
         let encrypted_senders = requested_withdrawals
             .iter()
             .map(|request| {
@@ -441,10 +438,6 @@ where
         );
 
         let recovered_block = Arc::new(block);
-        let execution_block_encoded = EncodedBlock::default();
-        let execution_block_size_estimate = execution_block_encoded
-            .get_or_encode(sealed_block.as_ref())
-            .len();
         let eth_payload = EthBuiltPayload::new(recovered_block.clone(), total_fees, requests, None);
 
         let execution_output = BlockExecutionOutput {
@@ -465,8 +458,6 @@ where
             Some(executed_block),
             std::time::Duration::ZERO,
             std::time::Duration::ZERO,
-            execution_block_size_estimate,
-            execution_block_encoded,
         );
 
         drop(db);
@@ -639,6 +630,7 @@ mod tests {
             to: address!("0x0000000000000000000000000000000000002000"),
             amount: 500_000,
             fee: 0,
+            bouncebackFee: 0,
             memo: B256::ZERO,
             gasLimit: 0,
             fallbackRecipient: sender,
@@ -692,6 +684,7 @@ mod tests {
                             to: recipient,
                             amount: 500_000,
                             bouncebackRecipient: recipient,
+                            bouncebackFee: 0,
                             memo: B256::ZERO,
                         }),
                     ),
@@ -705,6 +698,7 @@ mod tests {
                             sender,
                             amount: 300_000,
                             bouncebackRecipient: sender,
+                            bouncebackFee: 0,
                             keyIndex: U256::ZERO,
                             encrypted: abi::EncryptedDepositPayload {
                                 ephemeralPubkeyX: B256::with_last_byte(0xDD),
