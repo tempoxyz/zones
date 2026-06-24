@@ -13310,16 +13310,13 @@ dependencies = [
  "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
- "alloy-transport",
  "base64 0.22.1",
  "clap",
  "const-hex",
  "eyre",
  "futures",
  "k256",
- "metrics",
  "p256",
- "parking_lot",
  "rand 0.8.6",
  "reqwest 0.13.4",
  "reth-chainspec",
@@ -13327,7 +13324,6 @@ dependencies = [
  "reth-eth-wire-types",
  "reth-ethereum",
  "reth-evm",
- "reth-metrics",
  "reth-node-api",
  "reth-node-builder",
  "reth-node-core",
@@ -13369,6 +13365,7 @@ dependencies = [
  "zone-precompiles",
  "zone-primitives",
  "zone-rpc",
+ "zone-sequencer",
 ]
 
 [[package]]
@@ -13521,6 +13518,34 @@ dependencies = [
  "tokio-tungstenite 0.28.0",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "zone-sequencer"
+version = "0.1.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-network",
+ "alloy-primitives",
+ "alloy-provider",
+ "alloy-rlp",
+ "alloy-rpc-client",
+ "alloy-rpc-types-eth",
+ "alloy-signer-local",
+ "alloy-sol-types",
+ "alloy-transport",
+ "eyre",
+ "futures",
+ "metrics",
+ "parking_lot",
+ "reth-metrics",
+ "serde_json",
+ "tempo-alloy",
+ "tempo-primitives",
+ "tempo-zone-contracts",
+ "tokio",
+ "tokio-tungstenite 0.28.0",
+ "tracing",
 ]
 
 [[package]]

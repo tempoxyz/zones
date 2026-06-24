@@ -15,6 +15,7 @@ members = [
   "crates/primitives",
   "crates/tempo-zone",
   "crates/rpc",
+  "crates/sequencer",
   "xtask",
 ]
 
@@ -108,6 +109,7 @@ zone-payload = { path = "crates/payload" }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }
 zone-rpc = { path = "crates/rpc" }
+zone-sequencer = { path = "crates/sequencer" }
 
 # reth
 reth-basic-payload-builder = { git = "https://github.com/paradigmxyz/reth", rev = "f152114" }
