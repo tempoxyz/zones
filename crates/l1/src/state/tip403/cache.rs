@@ -5,7 +5,7 @@
 //! layout:
 //!
 //! - **Token → policy ID**: Each token address maps to a `transferPolicyId` via
-//!   [`HeightVersioned`](crate::l1_state::versioned::HeightVersioned), tracking the
+//!   [`HeightVersioned`](crate::state::versioned::HeightVersioned), tracking the
 //!   `TransferPolicyUpdate` event.
 //!
 //! - **Policy records**: Each policy ID maps to a [`CachedPolicy`] containing:
@@ -48,7 +48,7 @@ use tracing::info;
 
 use super::{builtin_authorization, events::PolicyEvent, policy_set::PolicySet};
 
-use crate::l1_state::versioned::HeightVersioned;
+use crate::state::versioned::HeightVersioned;
 
 /// Thread-safe TIP-403 policy cache backed by an `Arc<RwLock<PolicyCacheInner>>`.
 #[derive(Debug, Clone, Deref, Default)]

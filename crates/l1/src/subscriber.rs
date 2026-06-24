@@ -17,10 +17,10 @@ pub struct L1SubscriberConfig {
     /// Shared TIP-403 policy cache. The subscriber applies policy events
     /// extracted from L1 receipts directly into this cache before enqueuing
     /// blocks.
-    pub policy_cache: crate::l1_state::tip403::PolicyCache,
+    pub policy_cache: crate::state::tip403::PolicyCache,
     /// Shared L1 state cache. The subscriber updates the cache anchor on each
     /// confirmed block and clears it on reorgs.
-    pub l1_state_cache: crate::l1_state::cache::L1StateCache,
+    pub l1_state_cache: crate::state::cache::L1StateCache,
     /// Maximum number of concurrent L1 RPC receipt fetches. Used directly for
     /// the live stream and halved for backfill (which sends 2 requests per block).
     pub l1_fetch_concurrency: usize,
@@ -56,7 +56,7 @@ pub struct L1Subscriber {
     /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
     pub(crate) tracked_tokens: Vec<Address>,
     /// TIP-403 metrics (cache sizes, events applied).
-    pub(crate) tip403_metrics: crate::l1_state::tip403::Tip403Metrics,
+    pub(crate) tip403_metrics: crate::state::tip403::Tip403Metrics,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
 }

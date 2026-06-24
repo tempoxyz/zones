@@ -13,6 +13,9 @@
 //! - [`block`] — per-block deposit grouping and prepared payload types.
 //! - [`queue`] — the deposit hash-chain queue consumed by the engine.
 
+#![cfg_attr(not(test), warn(unused_crate_dependencies))]
+#![cfg_attr(docsrs, feature(doc_cfg))]
+
 use alloy_consensus::BlockHeader as _;
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
@@ -30,9 +33,33 @@ use tempo_alloy::TempoNetwork;
 use tempo_primitives::TempoHeader;
 use tracing::{debug, error, info, instrument, warn};
 
+pub mod abi {
+    pub use tempo_zone_contracts::*;
+}
+
+pub mod ext;
+mod metrics;
+pub mod state;
+
+pub(crate) mod precompiles {
+    pub(crate) use zone_precompiles::*;
+}
+
+pub(crate) mod rpc {
+    use std::time::Duration;
+
+    use alloy_rpc_client::ConnectionConfig;
+
+    pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> ConnectionConfig {
+        ConnectionConfig::new()
+            .with_max_retries(u32::MAX)
+            .with_retry_interval(retry_connection_interval)
+    }
+}
+
 use crate::{
     abi::{
-        self, EncryptedDeposit as AbiEncryptedDeposit,
+        EncryptedDeposit as AbiEncryptedDeposit,
         EncryptedDepositPayload as AbiEncryptedDepositPayload, PORTAL_PENDING_SEQUENCER_SLOT,
         PORTAL_SEQUENCER_SLOT,
         ZonePortal::{
@@ -40,8 +67,7 @@ use crate::{
             SequencerTransferred, TokenEnabled, WithdrawalBounceBack, ZonePortalEvents,
         },
     },
-    ext::TempoStateExt,
-    l1_state::{cache::L1StateCacheInner, tip403::PolicyEvent},
+    state::{cache::L1StateCacheInner, tip403::PolicyEvent},
 };
 
 mod block;
@@ -56,7 +82,9 @@ mod tests;
 pub use block::{L1BlockDeposits, PreparedL1Block};
 pub use deposit::{Deposit, EncryptedDeposit, L1Deposit};
 pub use event::{EnabledToken, L1PortalEvents, L1SequencerEvent};
+pub use ext::{ChainTempoStateExt, TempoStateExt};
 pub use queue::DepositQueue;
+pub use state::{L1StateCache, PolicyCache, PolicyProvider};
 pub use subscriber::{L1Subscriber, L1SubscriberConfig};
 
 pub(crate) use event::EnqueueOutcome;

@@ -241,7 +241,7 @@ fn assert_tempo_header_rejected(input: &[u8]) {
 
 #[test]
 fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
-    use crate::l1_state::tip403::AuthRole;
+    use crate::state::tip403::AuthRole;
     use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 
     let subscriber = test_subscriber(Arc::new(SequenceLocalTempoStateReader::new([0])), Some(0));

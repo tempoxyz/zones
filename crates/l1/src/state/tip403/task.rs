@@ -17,7 +17,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use super::{AuthRole, PolicyCache, metrics::Tip403Metrics};
-use crate::l1_state::PolicyProvider;
+use crate::state::PolicyProvider;
 
 /// Background task that processes [`PolicyTaskMessage`]s concurrently.
 ///
