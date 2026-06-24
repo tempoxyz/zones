@@ -3,7 +3,7 @@
 //! Run with: `cargo test -p zone --test advance_tempo -- --nocapture`
 
 use alloy_evm::{Evm, EvmEnv, EvmFactory};
-use alloy_primitives::{Address, Bytes, U256, address, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use alloy_sol_types::{SolCall, sol};
 use revm::{
     context::result::{ExecutionResult, Output},
@@ -23,16 +23,6 @@ const ZONE_OUTBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000
 const ZONE_CONFIG_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000003");
 
 const DEPLOYER: Address = address!("0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
-
-#[test]
-fn zone_portal_storage_slot_constants_match_solidity() {
-    assert_eq!(PORTAL_SEQUENCER_SLOT, zone::abi::PORTAL_SEQUENCER_SLOT);
-    assert_eq!(PORTAL_ADMIN_SLOT, zone::abi::PORTAL_ADMIN_SLOT);
-    assert_eq!(
-        PORTAL_PENDING_SEQUENCER_SLOT,
-        zone::abi::PORTAL_PENDING_SEQUENCER_SLOT
-    );
-}
 
 sol! {
     function advanceTempo(bytes calldata header, QueuedDeposit[] calldata deposits, DecryptionData[] calldata decryptions, EnabledToken[] calldata enabledTokens);
@@ -570,4 +560,20 @@ fn advance_tempo_repro() {
 
     // The test should not panic; we want to see the output
     println!("\n=== Test complete ===");
+}
+
+/// Pins the Rust portal storage-slot constants to the ZonePortal storage layout.
+#[test]
+fn zone_portal_storage_slot_constants_match_solidity() {
+    assert_eq!(PORTAL_SEQUENCER_SLOT, B256::ZERO, "sequencer is slot 0");
+    assert_eq!(
+        PORTAL_ADMIN_SLOT,
+        B256::from(U256::from(1)),
+        "admin is slot 1"
+    );
+    assert_eq!(
+        PORTAL_PENDING_SEQUENCER_SLOT,
+        B256::from(U256::from(2)),
+        "pendingSequencer is slot 2"
+    );
 }
