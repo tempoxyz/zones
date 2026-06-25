@@ -548,7 +548,11 @@ Withdrawals move tokens from a zone back to Tempo. The user requests a withdrawa
 
 ### Withdrawal Request
 
-A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token. The outbox requires `fallbackRecipient != address(0)` (reverts with `InvalidFallbackRecipient`). The outbox does **not** validate `fallbackRecipient` against the token's TIP-403 policy at request time; if the zone-side refund mint is later rejected by the policy, the funds are parked in a per-recipient refund registry on `ZoneInbox` and the recipient claims them via `ZoneInbox.claimRefund(token)` (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+A user withdraws by calling `requestWithdrawal(token, to, amount, memo, gasLimit, fallbackRecipient, data, revealTo)` on the `ZoneOutbox`. The user must first approve the outbox to spend `amount + fee` of the token. The outbox requires `fallbackRecipient != address(0)` (reverts with `InvalidFallbackRecipient`) and requires `token` to be enabled (reverts with `TokenNotEnabled`). The outbox does **not** validate `fallbackRecipient` against the token's TIP-403 policy at request time; if the zone-side refund mint is later rejected by the policy, the funds are parked in a per-recipient refund registry on `ZoneInbox` and the recipient claims them via `ZoneInbox.claimRefund(token)` (see [Withdrawal Failures and Bounce-Back](#withdrawal-failures-and-bounce-back)).
+
+Withdrawal requests are bounded before they enter the pending queue. `gasLimit` must be less than or equal to `MAX_WITHDRAWAL_GAS_LIMIT` or the request reverts with `GasLimitTooHigh`; `data.length` must be less than or equal to `MAX_CALLBACK_DATA_SIZE` (1,024 bytes) or the request reverts with `CallbackDataTooLarge`; and `revealTo`, when non-empty, must be a valid 33-byte compressed secp256k1 public key or the request reverts with `InvalidRevealTo`. The outbox reads the current zone transaction hash from `ZoneTxContext`; if it is zero, the request reverts with `InvalidCurrentTxHash`, because the transaction hash is part of the authenticated-withdrawal sender tag.
+
+The sequencer can additionally configure `maxWithdrawalsPerBlock` on the outbox. A value of `0` means unlimited. When nonzero, only that many `requestWithdrawal` calls can be accepted in a single zone block; further requests in the same block revert with `TooManyWithdrawalsThisBlock`. The counter resets when the zone block number changes.
 
 The outbox transfers `amount + fee` from the user via `transferFrom`, burns the tokens, and stores the withdrawal in a pending array. The `WithdrawalRequested` event is emitted with the plaintext sender (zone events are private).
 
@@ -611,7 +615,7 @@ When `submitBatch` includes a non-zero `withdrawalQueueHash`, it is written to `
 
 ### Withdrawal Processing
 
-The sequencer processes withdrawals on Tempo by calling `processWithdrawal(withdrawal, remainingQueue)` on the portal. The portal verifies `keccak256(abi.encode(withdrawal, remainingQueue)) == slots[head % 100]`, then executes the withdrawal.
+The sequencer processes withdrawals on Tempo by calling `processWithdrawal(withdrawal, remainingQueue)` on the portal. The external `remainingQueue` argument is `0x00` when it is the final withdrawal in the current slot. For hash verification, the portal substitutes `EMPTY_SENTINEL` for the zero value, so the final withdrawal verifies as `keccak256(abi.encode(withdrawal, EMPTY_SENTINEL)) == slots[head % 100]`. Otherwise it verifies `keccak256(abi.encode(withdrawal, remainingQueue)) == slots[head % 100]`, then executes the withdrawal.
 
 The withdrawal is popped unconditionally, regardless of success or failure. If `remainingQueue` is zero (last item in the slot), the slot is set to `EMPTY_SENTINEL` and `head` advances. Otherwise, the slot is updated to `remainingQueue`.
 
@@ -1528,25 +1532,45 @@ interface IZoneFactory {
 interface IZonePortal {
     // Events
     event DepositMade(
-        bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
-        address token, address to, uint128 netAmount, uint128 fee, bytes32 memo,
-        address bouncebackRecipient, uint64 depositNumber
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed sender,
+        address token,
+        address to,
+        uint128 netAmount,
+        uint128 fee,
+        bytes32 memo,
+        address bouncebackRecipient,
+        uint64 depositNumber
     );
     event EncryptedDepositMade(
-        bytes32 indexed newCurrentDepositQueueHash, address indexed sender,
-        address token, uint128 netAmount, uint128 fee, uint256 keyIndex,
-        bytes32 ephemeralPubkeyX, uint8 ephemeralPubkeyYParity,
-        bytes ciphertext, bytes12 nonce, bytes16 tag, uint64 depositNumber
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed sender,
+        address token,
+        uint128 netAmount,
+        uint128 fee,
+        uint256 keyIndex,
+        bytes32 ephemeralPubkeyX,
+        uint8 ephemeralPubkeyYParity,
+        bytes ciphertext,
+        bytes12 nonce,
+        bytes16 tag,
+        address bouncebackRecipient,
+        uint64 depositNumber
     );
     event BatchSubmitted(
-        uint64 indexed withdrawalBatchIndex, bytes32 nextProcessedDepositQueueHash,
-        bytes32 nextBlockHash, bytes32 withdrawalQueueHash,
+        uint64 indexed withdrawalBatchIndex,
+        bytes32 nextProcessedDepositQueueHash,
+        bytes32 nextBlockHash,
+        bytes32 withdrawalQueueHash,
         uint64 lastProcessedDepositNumber
     );
     event WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess);
     event WithdrawalBounceBack(
-        bytes32 indexed newCurrentDepositQueueHash, address indexed fallbackRecipient,
-        address token, uint128 amount, uint64 depositNumber
+        bytes32 indexed newCurrentDepositQueueHash,
+        address indexed fallbackRecipient,
+        address token,
+        uint128 amount,
+        uint64 depositNumber
     );
     event DepositBounceBack(
         address indexed bouncebackRecipient, address token,
@@ -1565,23 +1589,48 @@ interface IZonePortal {
     event DepositsPaused(address indexed token);
     event DepositsResumed(address indexed token);
 
+    error NotSequencer();
+    error NotAdmin();
+    error NotPendingSequencer();
+    error InvalidProof();
+    error InvalidTempoBlockNumber();
+    error CallbackRejected();
+    error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
+    error InvalidEncryptionKeyIndex(uint256 keyIndex);
+    error NoEncryptionKeySet();
+    error NoEncryptionKeyAtBlock(uint64 blockNumber);
+    error InvalidEphemeralPubkey();
+    error InvalidCiphertextLength(uint256 actual, uint256 expected);
+    error InvalidProofOfPossession();
+    error DepositTooSmall();
+    error GasFeeRateTooHigh();
+    error TokenNotEnabled();
+    error DepositsNotActive();
+    error TokenAlreadyEnabled();
+    error InvalidBouncebackRecipient();
+
+    function FIXED_DEPOSIT_GAS() external view returns (uint64);
+    function FIXED_BOUNCEBACK_GAS() external view returns (uint64);
+    function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
+    function MAX_GAS_FEE_RATE() external view returns (uint128);
+
     // Token management
     function enableToken(address token) external;
     function pauseDeposits(address token) external;
     function resumeDeposits(address token) external;
     function isTokenEnabled(address token) external view returns (bool);
     function areDepositsActive(address token) external view returns (bool);
+    function tokenConfig(address token) external view returns (TokenConfig memory);
     function enabledTokenCount() external view returns (uint256);
     function enabledTokenAt(uint256 index) external view returns (address);
 
-    // Zone RPC endpoint 
-    // Published on-chain so clients can discover how to reach the zone
+    // Zone RPC endpoint. Published on-chain so clients can discover how to reach the zone.
     event RpcUrlUpdated(string rpcUrl);
     function rpcUrl() external view returns (string memory);
     function setRpcUrl(string calldata rpcUrl) external; // sequencer-only
 
     // Deposits
-    /// @dev Reverts (`MissingBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
+    /// @dev Reverts (`InvalidBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
     ///      Every user-initiated deposit must carry a usable refund target so that a
     ///      failed mint can be recovered without stalling the deposit queue. The portal
     ///      validates the refund target against the token's TIP-403 recipient policy;
@@ -1591,7 +1640,7 @@ interface IZonePortal {
     function deposit(
         address token, address to, uint128 amount, bytes32 memo, address bouncebackRecipient
     ) external returns (bytes32 newCurrentDepositQueueHash);
-    /// @dev Reverts (`MissingBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
+    /// @dev Reverts (`InvalidBouncebackRecipient`) if `bouncebackRecipient == address(0)`.
     ///      A ciphertext that fails onchain decryption verification has no well-defined
     ///      recipient on the zone, so the bounce-back target must always be set.
     function depositEncrypted(
@@ -1630,15 +1679,30 @@ interface IZonePortal {
     // Encryption keys
     function setSequencerEncryptionKey(bytes32 x, uint8 yParity, uint8 popV, bytes32 popR, bytes32 popS) external;
     function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
+    
+    function encryptionKeyCount() external view returns (uint256);
+    function encryptionKeyAt(uint256 index) external view returns (EncryptionKeyEntry memory entry);
+    function encryptionKeyAtBlock(uint64 tempoBlockNumber)
+        external view returns (bytes32 x, uint8 yParity, uint256 keyIndex);
     function isEncryptionKeyValid(uint256 keyIndex) external view returns (bool valid, uint64 expiresAtBlock);
 
     // State
+    function zoneId() external view returns (uint32);
+    function messenger() external view returns (address);
     function sequencer() external view returns (address);
+    function admin() external view returns (address);
+    function pendingSequencer() external view returns (address);
+    
     function verifier() external view returns (address);
     function blockHash() external view returns (bytes32);
     function currentDepositQueueHash() external view returns (bytes32);
     function withdrawalBatchIndex() external view returns (uint64);
     function lastSyncedTempoBlockNumber() external view returns (uint64);
+    function withdrawalQueueHead() external view returns (uint256);
+    function withdrawalQueueTail() external view returns (uint256);
+    function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
+    function genesisTempoBlockNumber() external view returns (uint64);
+
 }
 ```
 
@@ -1775,6 +1839,10 @@ Address: `0x1c00000000000000000000000000000000000002`
 
 ```solidity
 interface IZoneOutbox {
+    function MAX_CALLBACK_DATA_SIZE() external view returns (uint256);
+    function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
+    function WITHDRAWAL_BASE_GAS() external view returns (uint64);
+
     event WithdrawalRequested(
         uint64 indexed withdrawalIndex, address indexed sender, address token, address to,
         uint128 amount, uint128 fee, bytes32 memo, uint64 gasLimit,
@@ -1784,10 +1852,31 @@ interface IZoneOutbox {
     event MaxWithdrawalsPerBlockUpdated(uint256 maxWithdrawalsPerBlock);
     event BatchFinalized(bytes32 indexed withdrawalQueueHash, uint64 withdrawalBatchIndex);
 
-    function lastBatch() external view returns (LastBatch memory);
-    function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
+    error InvalidFallbackRecipient();
+    error CallbackDataTooLarge();
+    error GasFeeRateTooHigh();
+    error TokenNotEnabled();
+    error TransferFailed();
+    error OnlySequencer();
+    error InvalidBlockNumber();
+    error TooManyWithdrawalsThisBlock();
+    error InvalidRevealTo();
+    error InvalidCurrentTxHash();
+    error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
+    error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
+    error GasLimitTooHigh();
+    error OnlyZoneInbox();
+
+    function config() external view returns (IZoneConfig);
     function tempoGasRate() external view returns (uint128);
+    function nextWithdrawalIndex() external view returns (uint64);
+    function withdrawalBatchIndex() external view returns (uint64);
+    function lastBatch() external view returns (LastBatch memory);
+    function pendingWithdrawalsCount() external view returns (uint256);
+    function maxWithdrawalsPerBlock() external view returns (uint256);
+
     function setTempoGasRate(uint128 _tempoGasRate) external;
+    function setMaxWithdrawalsPerBlock(uint256 _maxWithdrawalsPerBlock) external;
     /// @notice Compute the withdrawal fee for the current Tempo gas rate. Reads
     ///         zone-side `tempoGasRate` and snapshots it onto the queued withdrawal
     ///         at request time.
@@ -1801,6 +1890,10 @@ interface IZoneOutbox {
     function requestWithdrawal(
         address token, address to, uint128 amount, bytes32 memo,
         uint64 gasLimit, address fallbackRecipient, bytes calldata data, bytes calldata revealTo
+    ) external;
+
+    function enqueueDepositBounceBack(
+        address token, uint128 amount, address bouncebackRecipient
     ) external;
 
     function finalizeWithdrawalBatch(uint256 count, uint64 blockNumber, bytes[] calldata encryptedSenders)
