@@ -5,7 +5,7 @@
 
 use crate::{
     ZoneEngine,
-    rpc::{TempoZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
+    rpc::{ZoneRpc, ZoneRpcApi, rpc_connection_config, start_private_rpc},
 };
 use alloy_primitives::Address;
 use alloy_provider::Provider as _;
@@ -530,7 +530,7 @@ where
             zone_portal: portal_address,
         };
         let api: Arc<dyn ZoneRpcApi> =
-            Arc::new(TempoZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?);
+            Arc::new(ZoneRpc::new(eth_handlers, private_rpc_config.clone()).await?);
         let local_addr = start_private_rpc(private_rpc_config, api).await?;
         info!(target: "reth::cli", %local_addr, "Private zone RPC server started");
 

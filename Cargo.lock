@@ -13524,7 +13524,6 @@ dependencies = [
  "alloy-rpc-types-eth",
  "alloy-signer",
  "alloy-signer-local",
- "alloy-sol-types",
  "axum",
  "base64 0.22.1",
  "eyre",
