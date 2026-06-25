@@ -10,6 +10,7 @@ crate::sol! {
             address portal;
             address messenger;
             address initialToken;
+            address admin;
             address sequencer;
             address verifier;
             bytes32 genesisBlockHash;
@@ -23,7 +24,8 @@ crate::sol! {
             uint64 genesisTempoBlockNumber;
         }
         struct CreateZoneParams {
-            address token;
+            address initialToken;
+            address admin;
             address sequencer;
             address verifier;
             ZoneParams zoneParams;
@@ -33,7 +35,8 @@ crate::sol! {
             uint32 indexed zoneId,
             address indexed portal,
             address indexed messenger,
-            address token,
+            address initialToken,
+            address admin,
             address sequencer,
             address verifier,
             bytes32 genesisBlockHash,

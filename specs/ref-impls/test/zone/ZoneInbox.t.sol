@@ -106,7 +106,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("payment")
         });
 
@@ -132,7 +131,6 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         deposits[1] = Deposit({
@@ -141,7 +139,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
         deposits[2] = Deposit({
@@ -150,7 +147,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 300e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d3")
         });
 
@@ -183,7 +179,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("payment")
         });
 
@@ -211,7 +206,6 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         allDeposits[1] = Deposit({
@@ -220,7 +214,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
 
@@ -287,7 +280,6 @@ contract ZoneInboxTest is Test {
             to: alice,
             amount: 100e6,
             bouncebackRecipient: alice,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         batch1[1] = Deposit({
@@ -296,7 +288,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 200e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d2")
         });
 
@@ -319,7 +310,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 500e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d3")
         });
 
@@ -347,7 +337,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("payment")
         });
 
@@ -378,7 +367,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 1000e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("payment")
         });
 
@@ -408,7 +396,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 0,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("empty")
         });
 
@@ -451,7 +438,6 @@ contract ZoneInboxTest is Test {
                 to: bob,
                 amount: uint128(i + 1) * 1e6,
                 bouncebackRecipient: bob,
-                bouncebackFee: 0,
                 memo: bytes32(i)
             });
             currentHash = keccak256(abi.encode(DepositType.Regular, deposits[i], currentHash));
@@ -499,7 +485,6 @@ contract ZoneInboxTest is Test {
             sender: sender,
             amount: amount,
             bouncebackRecipient: sender,
-            bouncebackFee: 0,
             keyIndex: keyIndex,
             encrypted: EncryptedDepositPayload({
                 ephemeralPubkeyX: bytes32(uint256(0x1234)),
@@ -645,7 +630,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 100e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         QueuedDeposit memory qdRegular = QueuedDeposit({
@@ -713,7 +697,6 @@ contract ZoneInboxTest is Test {
             to: bob,
             amount: 100e6,
             bouncebackRecipient: bob,
-            bouncebackFee: 0,
             memo: bytes32("d1")
         });
         QueuedDeposit memory qd = QueuedDeposit({

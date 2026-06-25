@@ -3,6 +3,7 @@ pragma solidity ^0.8.13;
 
 import {
     IZoneOutbox,
+    IZonePortal,
     LastBatch,
     Withdrawal,
     ZONE_INBOX,
@@ -48,6 +49,7 @@ contract ZoneOutboxTest is Test {
         tempoState.setMockStorageValue(
             mockPortal, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
+        tempoState.setMockTokenEnabled(mockPortal, address(zoneToken), true);
         inbox = new ZoneInbox(address(config), mockPortal, address(tempoState));
         outbox = new ZoneOutbox(address(config));
 
@@ -86,7 +88,6 @@ contract ZoneOutboxTest is Test {
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
@@ -115,28 +116,16 @@ contract ZoneOutboxTest is Test {
         return _finalizeWithdrawalBatchAs(sequencer, count);
     }
 
-    function test_enqueueDepositBounceBack_finalizesZeroFeeWithdrawalWithBouncebackFee() public {
+    function test_enqueueDepositBounceBack_finalizesZeroFeeWithdrawal() public {
         uint128 amount = 1000e6;
-        uint128 bouncebackFee = 25e6;
 
         vm.expectEmit(true, true, false, true);
         emit IZoneOutbox.WithdrawalRequested(
-            0,
-            address(0),
-            address(zoneToken),
-            bob,
-            amount,
-            0,
-            bouncebackFee,
-            bytes32(0),
-            0,
-            address(0),
-            "",
-            ""
+            0, address(0), address(zoneToken), bob, amount, 0, bytes32(0), 0, address(0), "", ""
         );
 
         vm.prank(ZONE_INBOX);
-        outbox.enqueueDepositBounceBack(address(zoneToken), amount, bob, bouncebackFee);
+        outbox.enqueueDepositBounceBack(address(zoneToken), amount, bob);
 
         Withdrawal memory expected = Withdrawal({
             token: address(zoneToken),
@@ -144,7 +133,6 @@ contract ZoneOutboxTest is Test {
             to: bob,
             amount: amount,
             fee: 0,
-            bouncebackFee: bouncebackFee,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: address(0),
@@ -158,7 +146,7 @@ contract ZoneOutboxTest is Test {
 
     function test_enqueueDepositBounceBack_revertsUnlessInbox() public {
         vm.expectRevert(ZoneOutbox.OnlyZoneInbox.selector);
-        outbox.enqueueDepositBounceBack(address(zoneToken), 1000e6, bob, 25e6);
+        outbox.enqueueDepositBounceBack(address(zoneToken), 1000e6, bob);
     }
 
     function _finalizeWithdrawalBatchAs(address caller, uint256 count) internal returns (bytes32) {
@@ -188,6 +176,22 @@ contract ZoneOutboxTest is Test {
         vm.stopPrank();
 
         assertEq(outbox.pendingWithdrawalsCount(), 2);
+    }
+
+    function test_requestWithdrawal_revertsWhenTokenNotEnabled() public {
+        MockZoneToken disabledToken = new MockZoneToken("Disabled USD", "dUSD");
+        disabledToken.setMinter(address(this), true);
+        disabledToken.setBurner(address(outbox), true);
+        disabledToken.mint(alice, 1000e6);
+
+        vm.startPrank(alice);
+        disabledToken.approve(address(outbox), 500e6);
+        vm.expectRevert(IZonePortal.TokenNotEnabled.selector);
+        outbox.requestWithdrawal(address(disabledToken), bob, 500e6, bytes32(0), 0, alice, "");
+        vm.stopPrank();
+
+        assertEq(outbox.pendingWithdrawalsCount(), 0);
+        assertEq(disabledToken.balanceOf(alice), 1000e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -858,7 +862,6 @@ contract ZoneOutboxTest is Test {
             bob, // to
             500e6, // amount
             expectedFee, // fee
-            0, // bouncebackFee
             bytes32("memo"),
             50_000, // gasLimit
             charlie, // fallbackRecipient

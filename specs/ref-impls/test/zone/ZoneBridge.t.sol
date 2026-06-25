@@ -156,6 +156,7 @@ contract ZoneBridgeTest is BaseTest {
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
             address(messengerContract),
+            admin, // admin
             admin, // sequencer
             l1Factory.verifier(),
             GENESIS_BLOCK_HASH,
@@ -173,6 +174,7 @@ contract ZoneBridgeTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
         );
+        l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
 
         // Zone inbox (advances Tempo state and processes deposits)
         ZoneInbox inboxImpl =
@@ -215,7 +217,6 @@ contract ZoneBridgeTest is BaseTest {
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: memo,
             gasLimit: gasLimit,
             fallbackRecipient: fallbackRecipient,
@@ -266,7 +267,6 @@ contract ZoneBridgeTest is BaseTest {
             to: to,
             amount: amount,
             bouncebackRecipient: to,
-            bouncebackFee: l1Portal.calculateBouncebackFee(),
             memo: memo
         });
 
@@ -880,7 +880,6 @@ contract ZoneBridgeTest is BaseTest {
             sender: sender,
             amount: netAmount,
             bouncebackRecipient: sender,
-            bouncebackFee: l1Portal.calculateBouncebackFee(),
             keyIndex: keyIndex,
             encrypted: encrypted
         });
@@ -1138,7 +1137,6 @@ contract ZoneBridgeTest is BaseTest {
             to: alice,
             amount: netAmount,
             fee: 0,
-            bouncebackFee: bouncebackFee,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: address(0),
@@ -1200,7 +1198,6 @@ contract ZoneBridgeTest is BaseTest {
             to: alice,
             amount: depositAmount,
             bouncebackRecipient: alice,
-            bouncebackFee: bouncebackFee,
             memo: bytes32("regular")
         });
         bytes32 prevHash = l2Inbox.processedDepositQueueHash();
@@ -1213,7 +1210,6 @@ contract ZoneBridgeTest is BaseTest {
             sender: bob,
             amount: netAmount,
             bouncebackRecipient: bob,
-            bouncebackFee: bouncebackFee,
             keyIndex: 0,
             encrypted: payload
         });
@@ -1227,7 +1223,6 @@ contract ZoneBridgeTest is BaseTest {
             to: carol,
             amount: depositAmount,
             bouncebackRecipient: carol,
-            bouncebackFee: bouncebackFee,
             memo: bytes32("carol")
         });
         bytes32 hash3 = keccak256(abi.encode(DepositType.Regular, d3, hash2));
@@ -1335,7 +1330,6 @@ contract ZoneBridgeTest is BaseTest {
             sender: alice,
             amount: netAmount,
             bouncebackRecipient: alice,
-            bouncebackFee: bouncebackFee,
             keyIndex: 0,
             encrypted: payload1
         });
@@ -1347,7 +1341,6 @@ contract ZoneBridgeTest is BaseTest {
             sender: bob,
             amount: netAmount,
             bouncebackRecipient: bob,
-            bouncebackFee: bouncebackFee,
             keyIndex: 1,
             encrypted: payload2
         });

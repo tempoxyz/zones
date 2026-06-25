@@ -14,7 +14,7 @@ workspace = true
 
 [dependencies]
 # tempo
-zone = { path = "../../crates/tempo-zone", features = ["cli"] }
+zone-node = { workspace = true, features = ["cli"] }
 
 # reth
 reth-cli-util.workspace = true
@@ -29,4 +29,4 @@ path = "src/main.rs"
 [features]
 default = ["jemalloc"]
 
-jemalloc = ["reth-cli-util/jemalloc", "zone/jemalloc"]
+jemalloc = ["reth-cli-util/jemalloc", "zone-node/jemalloc"]

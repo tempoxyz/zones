@@ -227,8 +227,7 @@ contract ZoneInbox is IZoneInbox {
                         d.sender,
                         d.token,
                         d.amount,
-                        d.bouncebackRecipient,
-                        d.bouncebackFee
+                        d.bouncebackRecipient
                     );
                 } else {
                     try IZoneToken(d.token).mint(d.to, d.amount) {
@@ -236,9 +235,7 @@ contract ZoneInbox is IZoneInbox {
                             currentHash, d.sender, d.to, d.token, d.amount, d.memo
                         );
                     } catch {
-                        _enqueueDepositBounceBack(
-                            d.token, d.amount, d.bouncebackRecipient, d.bouncebackFee
-                        );
+                        _enqueueDepositBounceBack(d.token, d.amount, d.bouncebackRecipient);
                         emit DepositFailed(
                             currentHash, d.sender, d.to, d.token, d.amount, d.bouncebackRecipient
                         );
@@ -255,8 +252,7 @@ contract ZoneInbox is IZoneInbox {
                         ed.sender,
                         ed.token,
                         ed.amount,
-                        ed.bouncebackRecipient,
-                        ed.bouncebackFee
+                        ed.bouncebackRecipient
                     );
                     continue;
                 }
@@ -365,30 +361,27 @@ contract ZoneInbox is IZoneInbox {
         address sender,
         address token,
         uint128 amount,
-        address bouncebackRecipient,
-        uint128 bouncebackFee
+        address bouncebackRecipient
     )
         internal
     {
-        _enqueueDepositBounceBack(token, amount, bouncebackRecipient, bouncebackFee);
+        _enqueueDepositBounceBack(token, amount, bouncebackRecipient);
         emit DepositRejected(currentHash, sender, depositType, token, amount, bouncebackRecipient);
     }
 
     function _failEncryptedDeposit(bytes32 currentHash, EncryptedDeposit memory ed) internal {
-        _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient, ed.bouncebackFee);
+        _enqueueDepositBounceBack(ed.token, ed.amount, ed.bouncebackRecipient);
         emit EncryptedDepositFailed(currentHash, ed.sender, ed.token, ed.amount);
     }
 
     function _enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient,
-        uint128 bouncebackFee
+        address bouncebackRecipient
     )
         internal
     {
-        IZoneOutbox(ZONE_OUTBOX)
-            .enqueueDepositBounceBack(token, amount, bouncebackRecipient, bouncebackFee);
+        IZoneOutbox(ZONE_OUTBOX).enqueueDepositBounceBack(token, amount, bouncebackRecipient);
     }
 
     function _processWithdrawalBounceBack(Deposit memory d) internal {

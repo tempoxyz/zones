@@ -20,7 +20,6 @@ crate::sol! {
             address to;
             uint128 amount;
             uint128 fee;
-            uint128 bouncebackFee;
             bytes32 memo;
             uint64 gasLimit;
             address fallbackRecipient;
@@ -43,7 +42,6 @@ crate::sol! {
             address sender;
             uint128 amount;
             address bouncebackRecipient;
-            uint128 bouncebackFee;
             uint256 keyIndex;
             EncryptedDepositPayload encrypted;
         }
@@ -69,7 +67,6 @@ crate::sol! {
             address to,
             uint128 netAmount,
             uint128 fee,
-            uint128 bouncebackFee,
             bytes32 memo,
             address bouncebackRecipient,
             uint64 depositNumber
@@ -81,7 +78,6 @@ crate::sol! {
             address token,
             uint128 netAmount,
             uint128 fee,
-            uint128 bouncebackFee,
             uint256 keyIndex,
             bytes32 ephemeralPubkeyX,
             uint8 ephemeralPubkeyYParity,
@@ -143,14 +139,16 @@ crate::sol! {
         // -- Errors --
 
         error NotSequencer();
+        error NotAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
-        error DepositPolicyForbids();
+        error PolicyForbids();
         error InvalidBouncebackRecipient();
 
         // -- View functions --
 
         function zoneId() external view returns (uint32);
+        function admin() external view returns (address);
         function sequencer() external view returns (address);
         function verifier() external view returns (address);
         function sequencerPubkey() external view returns (bytes32);
@@ -160,7 +158,6 @@ crate::sol! {
         function lastSyncedTempoBlockNumber() external view returns (uint64);
         function withdrawalQueueHead() external view returns (uint256);
         function withdrawalQueueTail() external view returns (uint256);
-        function withdrawalQueueMaxSize() external view returns (uint256);
         function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
         function genesisTempoBlockNumber() external view returns (uint64);
         function calculateDepositFee() external view returns (uint128 fee);
@@ -194,6 +191,8 @@ crate::sol! {
         ) external;
 
         function enableToken(address token) external;
+        function pauseDeposits(address token) external;
+        function resumeDeposits(address token) external;
 
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;
@@ -291,9 +290,10 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
+            Self::NotAdmin(_) => f.write_str("NotAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
-            Self::DepositPolicyForbids(_) => f.write_str("DepositPolicyForbids"),
+            Self::PolicyForbids(_) => f.write_str("PolicyForbids"),
             Self::InvalidBouncebackRecipient(_) => f.write_str("InvalidBouncebackRecipient"),
         }
     }
@@ -331,7 +331,6 @@ impl Withdrawal {
             to: event.to,
             amount: event.amount,
             fee: event.fee,
-            bouncebackFee: event.bouncebackFee,
             memo: event.memo,
             gasLimit: event.gasLimit,
             fallbackRecipient: event.fallbackRecipient,

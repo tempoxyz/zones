@@ -80,12 +80,13 @@ send-deposit amount="1000000" to="" token="0x20C00000000000000000000000000000000
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
     PK="${PRIVATE_KEY:?Set PRIVATE_KEY env var}"
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
+    SENDER=$(cast wallet address "$PK")
     TO="{{to}}"
     if [[ -z "$TO" ]]; then
-        TO=$(cast wallet address "$PK")
+        TO="$SENDER"
     fi
     echo "Depositing {{amount}} to $TO..."
-    TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" \
+    TX_OUTPUT=$(cast send "$PORTAL" "deposit(address,address,uint128,bytes32,address)" "{{token}}" "$TO" "{{amount}}" "{{memo}}" "$SENDER" \
         --rpc-url "$RPC" --private-key "$PK" --json)
     TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
     L1_BLOCK=$(echo "$TX_OUTPUT" | jq -r '.blockNumber')
@@ -107,12 +108,12 @@ send-deposit-encrypted amount="1000000" to="" memo="0x00000000000000000000000000
     cargo run -p tempo-xtask -- encrypted-deposit --private-key "$PK" $ARGS
 
 [group('zone')]
-[doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...).')]
+[doc('Fetches and prints zone info from the ZoneFactory. Pass a zone ID (integer) or portal address (0x...). Set ZONE_FACTORY to override the Moderato default.')]
 zone-info identifier:
     cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars.')]
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars. Set ZONE_FACTORY to override the Moderato default.')]
 create-zone name token="":
     #!/bin/bash
     set -euo pipefail
@@ -315,14 +316,25 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     done
 
 [group('zone')]
-[doc('Enables a TIP-20 token on the ZonePortal for bridging. Token can be an address or alias (pathusd, alphausd, betausd). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and SEQUENCER_KEY env vars.')]
+[doc('Enables a TIP-20 token on the ZonePortal for bridging. Token can be an address or alias (pathusd, alphausd, betausd). Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY env vars. SEQUENCER_KEY works for legacy zones where admin == sequencer.')]
 enable-token token:
     #!/bin/bash
     set -euo pipefail
     RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
-    PK="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var (only the sequencer can enable tokens)}"
+    PK="${ADMIN_KEY:-${SEQUENCER_KEY:-}}"
+    if [[ -z "$PK" ]]; then
+        echo "Set ADMIN_KEY env var (or SEQUENCER_KEY for legacy zones where admin == sequencer)" >&2
+        exit 1
+    fi
     PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
     HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    # enableToken is onlyAdmin: reject the sequencer fallback unless it is the admin.
+    SIGNER_ADDR=$(cast wallet address "$PK" | tr '[:upper:]' '[:lower:]')
+    ONCHAIN_ADMIN=$(cast call "$PORTAL" "admin()(address)" --rpc-url "$HTTP_RPC" | tr '[:upper:]' '[:lower:]')
+    if [[ "$SIGNER_ADDR" != "$ONCHAIN_ADMIN" ]]; then
+        echo "Signer $SIGNER_ADDR is not the portal admin $ONCHAIN_ADMIN. Set ADMIN_KEY for this zone (SEQUENCER_KEY only works when admin == sequencer)." >&2
+        exit 1
+    fi
     TOKEN="{{token}}"
     # Resolve well-known aliases (lowercased for case-insensitive matching)
     TOKEN_LOWER=$(echo "$TOKEN" | tr '[:upper:]' '[:lower:]')
@@ -358,6 +370,55 @@ enable-token token:
         fi
         sleep 0.5
     done
+
+# Shared implementation for admin-only portal calls that take a single token
+# argument (pauseDeposits / resumeDeposits). Resolves the token alias, signs with
+# ADMIN_KEY (SEQUENCER_KEY fallback only when it is the on-chain admin).
+[private]
+_portal-admin-token-call action token:
+    #!/bin/bash
+    set -euo pipefail
+    RPC="${L1_RPC_URL:?Set L1_RPC_URL env var}"
+    PK="${ADMIN_KEY:-${SEQUENCER_KEY:-}}"
+    if [[ -z "$PK" ]]; then
+        echo "Set ADMIN_KEY env var (or SEQUENCER_KEY for legacy zones where admin == sequencer)" >&2
+        exit 1
+    fi
+    PORTAL="${L1_PORTAL_ADDRESS:?Set L1_PORTAL_ADDRESS env var}"
+    HTTP_RPC=$(echo "$RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
+    # {{action}} is onlyAdmin: reject the sequencer fallback unless it is the admin.
+    SIGNER_ADDR=$(cast wallet address "$PK" | tr '[:upper:]' '[:lower:]')
+    ONCHAIN_ADMIN=$(cast call "$PORTAL" "admin()(address)" --rpc-url "$HTTP_RPC" | tr '[:upper:]' '[:lower:]')
+    if [[ "$SIGNER_ADDR" != "$ONCHAIN_ADMIN" ]]; then
+        echo "Signer $SIGNER_ADDR is not the portal admin $ONCHAIN_ADMIN. Set ADMIN_KEY for this zone (SEQUENCER_KEY only works when admin == sequencer)." >&2
+        exit 1
+    fi
+    TOKEN="{{token}}"
+    TOKEN_LOWER=$(echo "$TOKEN" | tr '[:upper:]' '[:lower:]')
+    case "$TOKEN_LOWER" in
+        pathusd|path-usd|path_usd)
+            TOKEN="0x20C0000000000000000000000000000000000000" ;;
+        alphausd|alpha-usd|alpha_usd)
+            TOKEN="0x20c0000000000000000000000000000000000001" ;;
+        betausd|beta-usd|beta_usd)
+            TOKEN="0x20c0000000000000000000000000000000000002" ;;
+    esac
+    echo "Calling {{action}}($TOKEN) on portal $PORTAL..."
+    TX_OUTPUT=$(cast send "$PORTAL" "{{action}}(address)" "$TOKEN" \
+        --rpc-url "$HTTP_RPC" --private-key "$PK" --json)
+    TX_HASH=$(echo "$TX_OUTPUT" | jq -r '.transactionHash')
+    echo "L1 tx: $TX_HASH"
+    echo "Explorer: https://explore.moderato.tempo.xyz/tx/$TX_HASH"
+
+[group('zone')]
+[doc('Pauses deposits for an enabled TIP-20 on the ZonePortal (withdrawals unaffected). Token can be an address or alias. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY env vars.')]
+pause-deposits token:
+    just _portal-admin-token-call pauseDeposits {{token}}
+
+[group('zone')]
+[doc('Resumes deposits for a previously paused TIP-20 on the ZonePortal. Token can be an address or alias. Requires L1_RPC_URL, L1_PORTAL_ADDRESS, and ADMIN_KEY env vars.')]
+resume-deposits token:
+    just _portal-admin-token-call resumeDeposits {{token}}
 
 [group('zone')]
 [doc('Lists TIP-20 token addresses currently enabled on the ZonePortal. Pass a portal address or set L1_PORTAL_ADDRESS. Requires L1_RPC_URL.')]
@@ -613,10 +674,20 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     ACCOUNT=$(cast wallet address "$PK")
     TOKEN=$(just zone-auth-token {{name}})
     ACCOUNT_LOWER=$(echo "$ACCOUNT" | sed 's/0x//' | tr '[:upper:]' '[:lower:]')
-    RESULT=$(curl -s -X POST "{{rpc}}" \
+    RESPONSE=$(curl -sS -w '\n%{http_code}' -X POST "{{rpc}}" \
         -H "Content-Type: application/json" \
         -H "x-authorization-token: ${TOKEN}" \
-        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"from\":\"$ACCOUNT\",\"to\":\"{{token}}\",\"data\":\"0x70a08231000000000000000000000000${ACCOUNT_LOWER}\"}],\"id\":1}")
+        -d "{\"jsonrpc\":\"2.0\",\"method\":\"eth_call\",\"params\":[{\"from\":\"$ACCOUNT\",\"to\":\"{{token}}\",\"data\":\"0x70a08231000000000000000000000000${ACCOUNT_LOWER}\"}],\"id\":1}") || {
+            echo "Failed to reach private RPC at {{rpc}}"
+            exit 1
+        }
+    HTTP_STATUS=$(printf '%s' "$RESPONSE" | tail -n1)
+    RESULT=$(printf '%s' "$RESPONSE" | sed '$d')
+    if [[ "$HTTP_STATUS" != "200" ]]; then
+        echo "Private RPC HTTP $HTTP_STATUS"
+        echo "${RESULT:-<empty response>}"
+        exit 1
+    fi
     RAW=$(echo "$RESULT" | jq -r '.result // empty')
     ERROR=$(echo "$RESULT" | jq -r '.error.message // empty')
     if [[ -n "$ERROR" ]]; then
@@ -632,7 +703,7 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
-[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL env var.')]
+[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL. Set ZONE_FACTORY to override the Moderato default.')]
 deploy-zone name token="":
     #!/bin/bash
     set -euo pipefail
@@ -691,9 +762,10 @@ deploy-zone name token="":
         --private-key "$SEQUENCER_KEY"
     echo ""
 
-    # Save sequencer key into zone.json for later use
+    # Save generated keys into zone.json for later use. deploy-zone uses the
+    # sequencer as the portal admin unless --admin is added to create-zone.
     jq --arg sk "$SEQUENCER_KEY" --arg sa "$SEQUENCER_ADDR" \
-        '. + {sequencerKey: $sk, sequencerAddress: $sa}' "$OUTPUT/zone.json" > "$OUTPUT/zone.json.tmp" \
+        '. + {sequencerKey: $sk, sequencerAddress: $sa, adminKey: $sk, adminAddress: $sa}' "$OUTPUT/zone.json" > "$OUTPUT/zone.json.tmp" \
         && mv "$OUTPUT/zone.json.tmp" "$OUTPUT/zone.json"
 
     PORTAL=$(jq -r '.portal' "$OUTPUT/zone.json")
@@ -764,9 +836,15 @@ spam-deposits total="20" per-block="10" amount="1000000" encrypted="" token="0x2
     cargo run -p tempo-xtask -- spam-deposits --private-key "$PK" $ARGS
 
 [group('zone')]
-[doc('Runs the full TIP-20 + TIP-403 blacklist demo: creates token, enables on zone, blacklists address, shows deposit bounce, unblacklists, shows deposit success, withdraws. Requires PRIVATE_KEY (sequencer key) and L1_PORTAL_ADDRESS env vars.')]
-demo-blacklist amount="500000" rpc=zone_rpc:
-    cargo run -p tempo-xtask -- demo-blacklist --zone-rpc-url {{rpc}} --amount {{amount}}
+[doc('Runs the full TIP-20 + TIP-403 blacklist demo: creates token, enables on zone, blacklists address, shows deposit bounce, unblacklists, shows deposit success, withdraws. Requires PRIVATE_KEY for the token admin/depositor, L1_PORTAL_ADDRESS, and portal admin authority via ADMIN_KEY or matching generated/<name>/zone.json adminKey.')]
+demo-blacklist amount="500000" rpc=zone_rpc zone-dir="":
+    #!/bin/bash
+    set -euo pipefail
+    ARGS=(--zone-rpc-url "{{rpc}}" --amount "{{amount}}")
+    if [[ -n "{{zone-dir}}" ]]; then
+        ARGS+=(--zone-dir "{{zone-dir}}")
+    fi
+    cargo run -p tempo-xtask -- demo-blacklist "${ARGS[@]}"
 
 # Docs commands
 [group('docs')]

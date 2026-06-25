@@ -35,6 +35,8 @@ pub struct AuthContext {
     pub caller: Address,
     /// Token expiry timestamp (unix seconds).
     pub expires_at: u64,
+    /// Keychain key used for authentication, if this is a keychain token.
+    pub keychain_key_id: Option<Address>,
 }
 
 /// Parsed authorization token fields (before signature verification).

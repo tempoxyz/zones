@@ -17,7 +17,9 @@ use std::{
     sync::Arc,
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-use tempo_contracts::precompiles::account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType;
+use tempo_contracts::precompiles::account_keychain::IAccountKeychain::{
+    KeyInfo, SignatureType as KeyInfoSignatureType,
+};
 use tempo_primitives::transaction::{
     SignatureType as TempoSignatureType,
     tt_signature::{KeychainSignature, TempoSignature},
@@ -234,13 +236,16 @@ pub(crate) async fn authenticate_token(
         .recover_signer(&token.digest)
         .map_err(|_| AuthError::InvalidSignature)?;
 
-    if let TempoSignature::Keychain(keychain_signature) = &signature {
-        validate_keychain_signature(api, caller, keychain_signature, &token.digest).await?;
-    }
+    let keychain_key_id = if let TempoSignature::Keychain(keychain_signature) = &signature {
+        Some(validate_keychain_signature(api, caller, keychain_signature, &token.digest).await?)
+    } else {
+        None
+    };
 
     Ok(AuthContext {
         caller,
         expires_at: token.expires_at,
+        keychain_key_id,
     })
 }
 
@@ -249,21 +254,13 @@ async fn validate_keychain_signature(
     caller: alloy_primitives::Address,
     keychain_signature: &KeychainSignature,
     digest: &alloy_primitives::B256,
-) -> Result<(), AuthenticateError> {
+) -> Result<alloy_primitives::Address, AuthenticateError> {
     let key_id = keychain_signature
         .key_id(digest)
         .map_err(|_| AuthError::InvalidSignature)?;
     let key_info = api.get_keychain_key(caller, key_id).await?;
 
-    if key_info.isRevoked {
-        return Err(AuthError::RevokedKeychainKey.into());
-    }
-    if key_info.keyId.is_zero() {
-        return Err(AuthError::UnauthorizedKeychainKey.into());
-    }
-    if key_info.expiry <= now_unix_seconds() {
-        return Err(AuthError::ExpiredKeychainKey.into());
-    }
+    validate_keychain_key_info(&key_info)?;
 
     let expected_signature_type = match keychain_signature.signature.signature_type() {
         TempoSignatureType::Secp256k1 => KeyInfoSignatureType::Secp256k1,
@@ -275,10 +272,24 @@ async fn validate_keychain_signature(
         return Err(AuthError::KeychainSignatureTypeMismatch.into());
     }
 
+    Ok(key_id)
+}
+
+pub(crate) fn validate_keychain_key_info(key_info: &KeyInfo) -> Result<(), AuthenticateError> {
+    if key_info.isRevoked {
+        return Err(AuthError::RevokedKeychainKey.into());
+    }
+    if key_info.keyId.is_zero() {
+        return Err(AuthError::UnauthorizedKeychainKey.into());
+    }
+    if key_info.expiry <= now_unix_seconds() {
+        return Err(AuthError::ExpiredKeychainKey.into());
+    }
+
     Ok(())
 }
 
-fn now_unix_seconds() -> u64 {
+pub(crate) fn now_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
@@ -361,6 +372,8 @@ mod tests {
         stub!(block_number);
         stub!(chain_id);
         stub!(net_version);
+        stub!(syncing);
+        stub!(coinbase);
         stub!(gas_price);
         stub!(max_priority_fee_per_gas);
         stub!(fee_history, _a: u64, _b: alloy_rpc_types_eth::BlockNumberOrTag, _c: Option<Vec<f64>>);

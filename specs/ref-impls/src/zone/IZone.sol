@@ -23,6 +23,7 @@ struct ZoneInfo {
     address portal;
     address messenger;
     address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
+    address admin;
     address sequencer;
     address verifier;
     bytes32 genesisBlockHash;
@@ -72,7 +73,6 @@ struct Deposit {
     address to;
     uint128 amount;
     address bouncebackRecipient;
-    uint128 bouncebackFee;
     bytes32 memo;
 }
 
@@ -100,7 +100,6 @@ struct EncryptedDeposit {
     address sender; // Depositor (public, for refunds)
     uint128 amount; // Amount (public, for accounting)
     address bouncebackRecipient; // Tempo recipient for a failed-deposit refund
-    uint128 bouncebackFee; // Tempo-side refund processing fee snapshotted at deposit time
     uint256 keyIndex; // Index of encryption key used (specified by depositor)
     EncryptedDepositPayload encrypted; // Encrypted (to, memo)
 }
@@ -313,7 +312,6 @@ struct Withdrawal {
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     uint128 fee; // processing fee for sequencer (calculated at request time)
-    uint128 bouncebackFee; // deposit bounce-back fee reserved at deposit time (zero for user withdrawals)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient; // zone address for bounce-back if call fails
@@ -328,7 +326,6 @@ struct PendingWithdrawal {
     address to; // Tempo recipient
     uint128 amount; // amount to send to recipient (excludes fee)
     uint128 fee; // processing fee for sequencer (calculated at request time)
-    uint128 bouncebackFee; // deposit bounce-back fee reserved at deposit time (zero for user withdrawals)
     bytes32 memo; // user-provided context
     uint64 gasLimit; // max gas for IWithdrawalReceiver callback (0 = no callback)
     address fallbackRecipient; // zone address for bounce-back if call fails
@@ -373,30 +370,32 @@ interface IZoneTxContext {
 
 // ZonePortal storage layout (non-immutable variables only):
 //   slot 0: sequencer (address)
-//   slot 1: pendingSequencer (address)
-//   slot 2: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
-//   slot 3: blockHash (bytes32)
-//   slot 4: currentDepositQueueHash (bytes32)
-//   slot 5: depositCount (uint64) + lastProcessedDepositNumber (uint64) + lastSyncedTempoBlockNumber (uint64) [packed]
-//   slot 6: _encryptionKeys (EncryptionKeyEntry[])
-//   slot 7: _tokenConfigs (mapping(address => TokenConfig))
-//   slot 8: _enabledTokens (address[])
-//   slot 9: refunds (mapping(address => mapping(address => uint128)))
-//   slot 10: _withdrawalQueue.head
-//   slot 11: _withdrawalQueue.tail
-//   slot 12: _withdrawalQueue.slots (mapping(uint256 => bytes32))
-//   slot 13: rpcUrl (string)
+//   slot 1: admin (address)
+//   slot 2: pendingSequencer (address)
+//   slot 3: zoneGasRate (uint128) + withdrawalBatchIndex (uint64) [packed]
+//   slot 4: blockHash (bytes32)
+//   slot 5: currentDepositQueueHash (bytes32)
+//   slot 6: depositCount (uint64) + lastProcessedDepositNumber (uint64) + lastSyncedTempoBlockNumber (uint64) [packed]
+//   slot 7: _encryptionKeys (EncryptionKeyEntry[])
+//   slot 8: _tokenConfigs (mapping(address => TokenConfig))
+//   slot 9: _enabledTokens (address[])
+//   slot 10: refunds (mapping(address => mapping(address => uint128)))
+//   slot 11: _withdrawalQueue.head
+//   slot 12: _withdrawalQueue.tail
+//   slot 13: _withdrawalQueue.slots (mapping(uint256 => bytes32))
+//   slot 14: rpcUrl (string)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
 // TempoState.readTempoStorageSlot(). If the portal layout changes,
 // update these constants and the vm.load regression tests will catch mismatches.
 bytes32 constant PORTAL_SEQUENCER_SLOT = bytes32(uint256(0));
-bytes32 constant PORTAL_PENDING_SEQUENCER_SLOT = bytes32(uint256(1));
-bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(4));
-bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(6));
-bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(7));
-bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(8));
+bytes32 constant PORTAL_ADMIN_SLOT = bytes32(uint256(1));
+bytes32 constant PORTAL_PENDING_SEQUENCER_SLOT = bytes32(uint256(2));
+bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
+bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
+bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(8));
+bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(9));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -446,6 +445,7 @@ interface IZoneFactory {
 
     struct CreateZoneParams {
         address initialToken; // first TIP-20 to enable (sequencer can enable more later)
+        address admin;
         address sequencer;
         address verifier;
         ZoneParams zoneParams;
@@ -457,6 +457,7 @@ interface IZoneFactory {
         address indexed portal,
         address indexed messenger,
         address initialToken,
+        address admin,
         address sequencer,
         address verifier,
         bytes32 genesisBlockHash,
@@ -465,6 +466,7 @@ interface IZoneFactory {
     );
 
     error InvalidToken();
+    error InvalidAdmin();
     error InvalidSequencer();
     error InvalidVerifier();
     error InsufficientGas();
@@ -505,11 +507,11 @@ interface IZoneFactory {
 }
 
 /// @notice Per-token configuration in the portal's token registry
-/// @dev enabled is permanent (write-once true); depositsActive can be toggled by sequencer.
+/// @dev enabled is permanent (write-once true); depositsActive can be toggled by admin.
 ///      Once enabled, withdrawals can never be disabled (non-custodial guarantee).
 struct TokenConfig {
-    bool enabled; // true once sequencer enables this token (permanent, irreversible)
-    bool depositsActive; // sequencer can pause/unpause deposits; does not affect withdrawals
+    bool enabled; // true once admin enables this token (permanent, irreversible)
+    bool depositsActive; // admin can pause/unpause deposits; does not affect withdrawals
 }
 
 /// @title IZonePortal
@@ -523,7 +525,6 @@ interface IZonePortal {
         address to,
         uint128 netAmount,
         uint128 fee,
-        uint128 bouncebackFee,
         bytes32 memo,
         address bouncebackRecipient,
         uint64 depositNumber
@@ -561,7 +562,6 @@ interface IZonePortal {
         address token,
         uint128 netAmount,
         uint128 fee,
-        uint128 bouncebackFee,
         uint256 keyIndex,
         bytes32 ephemeralPubkeyX,
         uint8 ephemeralPubkeyYParity,
@@ -593,19 +593,20 @@ interface IZonePortal {
     );
     event ZoneGasRateUpdated(uint128 zoneGasRate);
 
-    /// @notice Emitted when sequencer enables a new TIP-20 token for bridging
+    /// @notice Emitted when admin enables a new TIP-20 token for bridging
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
-    /// @notice Emitted when sequencer pauses deposits for a token
+    /// @notice Emitted when admin pauses deposits for a token
     event DepositsPaused(address indexed token);
 
-    /// @notice Emitted when sequencer resumes deposits for a token
+    /// @notice Emitted when admin resumes deposits for a token
     event DepositsResumed(address indexed token);
 
     /// @notice Emitted when the sequencer updates the zone's public RPC endpoint
     event RpcUrlUpdated(string rpcUrl);
 
     error NotSequencer();
+    error NotAdmin();
     error NotPendingSequencer();
     error InvalidProof();
     error InvalidTempoBlockNumber();
@@ -617,7 +618,6 @@ interface IZonePortal {
     error InvalidEphemeralPubkey();
     error InvalidCiphertextLength(uint256 actual, uint256 expected);
     error InvalidProofOfPossession();
-    error DepositPolicyForbids();
     error DepositTooSmall();
     error GasFeeRateTooHigh();
     error TokenNotEnabled();
@@ -642,6 +642,8 @@ interface IZonePortal {
     function messenger() external view returns (address);
 
     function sequencer() external view returns (address);
+
+    function admin() external view returns (address);
 
     function pendingSequencer() external view returns (address);
 
@@ -684,16 +686,16 @@ interface IZonePortal {
     /// @notice Get an enabled token by index
     function enabledTokenAt(uint256 index) external view returns (address);
 
-    /// @notice Enable a new TIP-20 token for bridging. Only callable by sequencer.
+    /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
     ///      Validates the token is a TIP-20 and grants messenger max approval.
     function enableToken(address token) external;
 
-    /// @notice Pause deposits for a token. Only callable by sequencer.
+    /// @notice Pause deposits for a token. Only callable by admin.
     /// @dev Does not affect withdrawal processing (non-custodial guarantee).
     function pauseDeposits(address token) external;
 
-    /// @notice Resume deposits for a token. Only callable by sequencer.
+    /// @notice Resume deposits for a token. Only callable by admin.
     function resumeDeposits(address token) external;
 
     /// @notice The zone's public RPC endpoint
@@ -1079,7 +1081,6 @@ interface IZoneOutbox {
         address to,
         uint128 amount,
         uint128 fee,
-        uint128 bouncebackFee,
         bytes32 memo,
         uint64 gasLimit,
         address fallbackRecipient,
@@ -1150,8 +1151,7 @@ interface IZoneOutbox {
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient,
-        uint128 bouncebackFee
+        address bouncebackRecipient
     )
         external;
 

@@ -1,7 +1,7 @@
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
-use zone::abi::{ZoneFactory, ZonePortal};
+use tempo_zone_contracts::{ZoneFactory, ZonePortal};
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
 
@@ -15,8 +15,7 @@ pub(crate) struct ZoneInfoCmd {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    /// Defaults to `MODERATO_ZONE_FACTORY`, the shared Moderato deployment.
-    #[arg(long, default_value_t = MODERATO_ZONE_FACTORY)]
+    #[arg(long, env = "ZONE_FACTORY", default_value_t = MODERATO_ZONE_FACTORY)]
     zone_factory: Address,
 }
 

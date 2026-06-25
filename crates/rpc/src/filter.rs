@@ -10,6 +10,8 @@ use alloy_primitives::{Address, B256, b256};
 use alloy_rpc_types_eth::{Filter, FilterSet, Log};
 use tempo_alloy::rpc::TempoTransactionReceipt;
 
+use crate::types::JsonRpcError;
+
 /// `Transfer(address,address,uint256)`
 pub const TRANSFER_TOPIC: B256 =
     b256!("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef");
@@ -73,9 +75,6 @@ pub fn is_caller_eligible(log: &Log, caller: &Address) -> bool {
 /// A log is included only when **both** of the following hold:
 /// 1. Its topic0 is one of the [`WHITELISTED_TOPICS`].
 /// 2. The `caller` is eligible per [`is_caller_eligible`].
-///
-/// TODO: once the enabled-token registry is plumbed through, also filter
-/// by emitting contract address (only logs from enabled TIP-20 tokens).
 pub fn is_log_visible(log: &Log, caller: &Address) -> bool {
     log.topic0().is_some_and(|t| WHITELISTED_TOPICS.contains(t)) && is_caller_eligible(log, caller)
 }
@@ -96,6 +95,28 @@ pub fn filter_receipt_logs(mut receipt: TempoTransactionReceipt) -> TempoTransac
     receipt
 }
 
+/// Scopes a user-supplied filter to only match enabled zone token addresses.
+pub fn scope_filter_addresses(
+    filter: &mut Filter,
+    zone_tokens: &[Address],
+) -> Result<(), JsonRpcError> {
+    let requested_addresses: Vec<Address> = filter.address.iter().copied().collect();
+
+    if requested_addresses.is_empty() {
+        filter.address = FilterSet::from(zone_tokens.to_vec());
+        return Ok(());
+    }
+
+    if requested_addresses
+        .iter()
+        .all(|address| zone_tokens.contains(address))
+    {
+        Ok(())
+    } else {
+        Err(JsonRpcError::invalid_params("invalid filter address"))
+    }
+}
+
 /// Scopes a user-supplied filter to only match whitelisted TIP-20 event topics.
 ///
 /// Intersects the user's requested topic0 with [`WHITELISTED_TOPICS`].
@@ -104,9 +125,6 @@ pub fn filter_receipt_logs(mut receipt: TempoTransactionReceipt) -> TempoTransac
 ///
 /// The post-filter in [`filter_logs`] remains the actual privacy enforcement;
 /// this pre-filter reduces DB scan volume and timing side-channels.
-///
-/// TODO: once the enabled-token registry is plumbed through, also scope the
-/// filter's `address` field to only match enabled TIP-20 token addresses.
 pub fn scope_filter(filter: &mut Filter) {
     // --- Topic0 scoping ---
     let user_topic0: Vec<B256> = filter.topics[0].iter().copied().collect();
@@ -495,5 +513,46 @@ mod tests {
         filter.topics[0] = FilterSet::from(bogus);
         scope_filter(&mut filter);
         assert_eq!(filter.topics[0], FilterSet::from(B256::ZERO));
+    }
+
+    #[test]
+    fn scope_filter_addresses_scopes_omitted_address() {
+        let token_a = address!("0x00000000000000000000000000000000000000aa");
+        let token_b = address!("0x00000000000000000000000000000000000000bb");
+        let mut filter = Filter::default();
+
+        scope_filter_addresses(&mut filter, &[token_a, token_b]).unwrap();
+
+        assert!(filter.address.contains(&token_a));
+        assert!(filter.address.contains(&token_b));
+        assert_eq!(filter.address.len(), 2);
+    }
+
+    #[test]
+    fn scope_filter_addresses_allows_enabled_token_address() {
+        let token = address!("0x00000000000000000000000000000000000000aa");
+        let mut filter = Filter {
+            address: FilterSet::from(token),
+            ..Default::default()
+        };
+
+        scope_filter_addresses(&mut filter, &[token]).unwrap();
+
+        assert_eq!(filter.address, FilterSet::from(token));
+    }
+
+    #[test]
+    fn scope_filter_addresses_rejects_non_zone_token_address() {
+        let token = address!("0x00000000000000000000000000000000000000aa");
+        let other = address!("0x00000000000000000000000000000000000000cc");
+        let mut filter = Filter {
+            address: FilterSet::from(vec![token, other]),
+            ..Default::default()
+        };
+
+        let err = scope_filter_addresses(&mut filter, &[token]).unwrap_err();
+
+        assert_eq!(err.code, JsonRpcError::invalid_params("").code);
+        assert_eq!(err.message, "invalid filter address");
     }
 }

@@ -5,7 +5,7 @@
 
 use std::str::FromStr;
 
-use alloy_primitives::{Address, B256, Bytes, U64};
+use alloy_primitives::{Address, B256, Bytes, U64, keccak256};
 use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, Filter, FilterId, state::StateOverride};
 use serde_json::{Value, value::RawValue};
 use tempo_alloy::rpc::TempoTransactionRequest;
@@ -42,6 +42,12 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
 
     /// `net_version` — returns the network ID as a decimal string.
     fn net_version(&self) -> BoxFut<'_>;
+
+    /// `eth_syncing` — returns sync status from the upstream node.
+    fn syncing(&self) -> BoxFut<'_>;
+
+    /// `eth_coinbase` — returns the configured block beneficiary address.
+    fn coinbase(&self) -> BoxFut<'_>;
 
     /// `eth_gasPrice` — returns the current gas price.
     fn gas_price(&self) -> BoxFut<'_>;
@@ -169,16 +175,6 @@ pub trait ZoneRpcApi: Send + Sync + 'static {
         Box::pin(async { Err(JsonRpcError::method_disabled()) })
     }
 
-    /// `eth_subscribe("newPendingTransactions", full?)` — opens a stream of
-    /// pending transactions, returning either hashes or full transaction objects.
-    fn ws_subscribe_pending_transactions(
-        &self,
-        _full: bool,
-        _auth: AuthContext,
-    ) -> BoxWsSubscriptionFut<'_> {
-        Box::pin(async { Err(JsonRpcError::method_disabled()) })
-    }
-
     /// `zone_getAuthorizationTokenInfo()` — returns the authenticated account
     /// and token expiry.
     fn zone_get_authorization_token_info(&self, auth: AuthContext) -> BoxFut<'_>;
@@ -294,6 +290,9 @@ pub async fn dispatch(
         ),
         "net_version" => api_result(id, "net_version", api.net_version().await),
         "net_listening" => api_result(id, "net_listening", crate::types::to_raw(&true)),
+        "eth_syncing" => api_result(id, "eth_syncing", api.syncing().await),
+        "eth_coinbase" => api_result(id, "eth_coinbase", api.coinbase().await),
+        "web3_sha3" => handle_web3_sha3(id, raw).await,
         "web3_clientVersion" => api_result(
             id,
             "web3_clientVersion",
@@ -350,6 +349,16 @@ pub async fn dispatch(
             )
         }
     }
+}
+
+/// Handle `web3_sha3(data)` locally.
+async fn handle_web3_sha3(id: Value, raw: &str) -> JsonRpcResponse {
+    let (data,) = match parse_params::<(Bytes,)>(raw, &id, "expected [data]") {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+
+    api_result(id, "web3_sha3", crate::types::to_raw(&keccak256(data)))
 }
 
 /// Handle `eth_getBlockByNumber`. Rejects `full=true` for non-sequencer callers.
@@ -831,11 +840,20 @@ mod tests {
             })
         }
 
+        fn syncing(&self) -> BoxFut<'_> {
+            Box::pin(async move { to_raw(&false) })
+        }
+
+        fn coinbase(&self) -> BoxFut<'_> {
+            Box::pin(async move { to_raw(&Address::repeat_byte(0xbb)) })
+        }
+
         fn zone_get_zone_info(&self, _auth: AuthContext) -> BoxFut<'_> {
             Box::pin(async move {
                 to_raw(&json!({
                     "zoneId": "0x1",
                     "zoneTokens": [format!("{:#x}", Address::repeat_byte(0x11))],
+                    "sequencer": format!("{:#x}", Address::repeat_byte(0x22)),
                     "chainId": "0x2a",
                 }))
             })
@@ -863,6 +881,7 @@ mod tests {
         AuthContext {
             caller: Address::repeat_byte(0xaa),
             expires_at: 1_700_000_000,
+            keychain_key_id: None,
         }
     }
 
@@ -897,6 +916,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatches_allowed_compatibility_methods() {
+        let api = MockZoneRpcApi::default();
+
+        let syncing = dispatch(&request("eth_syncing", json!([])), &auth(), &api).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(syncing.result.as_ref().unwrap().get()).unwrap(),
+            false
+        );
+
+        let coinbase = dispatch(&request("eth_coinbase", json!([])), &auth(), &api).await;
+        assert_eq!(
+            serde_json::from_str::<Value>(coinbase.result.as_ref().unwrap().get()).unwrap(),
+            format!("{:#x}", Address::repeat_byte(0xbb))
+        );
+
+        let sha3 = dispatch(
+            &request("web3_sha3", json!(["0x68656c6c6f"])),
+            &auth(),
+            &api,
+        )
+        .await;
+        assert_eq!(
+            serde_json::from_str::<Value>(sha3.result.as_ref().unwrap().get()).unwrap(),
+            "0x1c8aff950685c2ed4bc3174f3472287b56d9517b9c948127319a09a7a36deac8"
+        );
+    }
+
+    #[tokio::test]
     async fn dispatches_zone_get_zone_info() {
         let api = MockZoneRpcApi::default();
         let resp = dispatch(&request("zone_getZoneInfo", json!([])), &auth(), &api).await;
@@ -908,6 +955,10 @@ mod tests {
         assert_eq!(
             body["zoneTokens"][0],
             format!("{:#x}", Address::repeat_byte(0x11))
+        );
+        assert_eq!(
+            body["sequencer"],
+            format!("{:#x}", Address::repeat_byte(0x22))
         );
         assert_eq!(body["chainId"], "0x2a");
     }
@@ -933,6 +984,21 @@ mod tests {
         let resp = dispatch(&request("zone_getDepositStatus", json!([7])), &auth(), &api).await;
         assert!(resp.result.is_none());
         assert_eq!(resp.error.as_ref().unwrap().code, -32602);
+    }
+
+    #[tokio::test]
+    async fn rejects_pending_transaction_filter_endpoint() {
+        let api = MockZoneRpcApi::default();
+
+        let resp = dispatch(
+            &request("eth_newPendingTransactionFilter", json!([])),
+            &auth(),
+            &api,
+        )
+        .await;
+
+        assert!(resp.result.is_none());
+        assert_eq!(resp.error.as_ref().unwrap().code, -32006);
     }
 
     #[tokio::test]
@@ -1003,5 +1069,29 @@ mod tests {
         let err = resp.error.expect("should reject extra simulation params");
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "expected [request, block?, stateOverride?]");
+    }
+    #[tokio::test]
+    async fn classifies_spec_disabled_and_restricted_methods() {
+        let api = MockZoneRpcApi::default();
+
+        for method in [
+            "eth_getProof",
+            "eth_newPendingTransactionFilter",
+            "eth_getUncleByBlockNumberAndIndex",
+            "eth_getUncleByBlockHashAndIndex",
+            "eth_getWork",
+        ] {
+            let resp = dispatch(&request(method, json!([])), &auth(), &api).await;
+            let err = resp.error.expect("method should be disabled");
+            assert_eq!(err.code, -32006);
+            assert_eq!(err.message, "Method disabled");
+        }
+
+        for method in ["debug_accountRange", "txpool_contentFrom", "admin_peers"] {
+            let resp = dispatch(&request(method, json!([])), &auth(), &api).await;
+            let err = resp.error.expect("method should be sequencer-only");
+            assert_eq!(err.code, -32005);
+            assert_eq!(err.message, "Sequencer only");
+        }
     }
 }

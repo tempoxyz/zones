@@ -14,7 +14,7 @@ use alloy::{
 use eyre::{WrapErr as _, eyre};
 use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
 use tempo_alloy::TempoNetwork;
-use zone::abi::ZonePortal;
+use tempo_zone_contracts::ZonePortal;
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct SetEncryptionKey {

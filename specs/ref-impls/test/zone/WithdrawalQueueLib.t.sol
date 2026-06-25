@@ -268,13 +268,19 @@ contract WithdrawalQueueLibTest is Test {
                       REVERT WHEN FULL TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_enqueue_revertsWhenFull_evenEmptyTransition() public {
+    function test_enqueue_emptyTransitionSucceedsWhenFull() public {
         for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
             harness.enqueue(keccak256(abi.encode("b", i)));
         }
+        assertEq(harness.head(), 0);
+        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
 
-        vm.expectRevert(WithdrawalQueueLib.WithdrawalQueueFull.selector);
         harness.enqueue(bytes32(0));
+
+        assertEq(harness.head(), 0);
+        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
     }
 
     function test_ringBuffer_multiCycleWraparound() public {
@@ -358,7 +364,6 @@ contract WithdrawalQueueLibTest is Test {
             to: to,
             amount: amount,
             fee: 0,
-            bouncebackFee: 0,
             memo: bytes32(0),
             gasLimit: 0,
             fallbackRecipient: sender,

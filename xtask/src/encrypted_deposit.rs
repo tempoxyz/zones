@@ -13,10 +13,8 @@ use alloy::{
 };
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
-use zone::{
-    abi::{EncryptedDepositPayload, ZoneInbox, ZonePortal},
-    precompiles::ecies::encrypt_deposit,
-};
+use tempo_zone_contracts::{EncryptedDepositPayload, ZoneInbox, ZonePortal};
+use zone_precompiles::ecies::encrypt_deposit;
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct EncryptedDeposit {
@@ -140,7 +138,7 @@ impl EncryptedDeposit {
         Ok(())
     }
 
-    /// Poll the zone L2 for the `EncryptedDepositProcessed` or `EncryptedDepositFailed` event.
+    /// Poll the zone L2 for the encrypted deposit terminal event.
     async fn wait_for_l2_processing(
         &self,
         zone_rpc: &str,
@@ -148,7 +146,7 @@ impl EncryptedDeposit {
         sender: Address,
         to: Address,
     ) -> eyre::Result<()> {
-        use zone::abi::ZONE_INBOX_ADDRESS;
+        use tempo_zone_contracts::ZONE_INBOX_ADDRESS;
 
         println!("Waiting for encrypted deposit to be processed on L2...");
         let l2 = ProviderBuilder::new().connect(zone_rpc).await?;
@@ -157,19 +155,19 @@ impl EncryptedDeposit {
             .address(ZONE_INBOX_ADDRESS)
             .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
             .from_block(from_block);
-
         let failed_filter = Filter::new()
             .address(ZONE_INBOX_ADDRESS)
             .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
             .from_block(from_block);
 
         loop {
-            // Check for successful processing
             let logs = l2.get_logs(&processed_filter).await.unwrap_or_default();
             for log in &logs {
                 if let Ok(event) = ZoneInbox::EncryptedDepositProcessed::decode_log(&log.inner)
                     && event.data.sender == sender
                     && event.data.to == to
+                    && event.data.token == self.token
+                    && event.data.amount == self.amount
                 {
                     let block = log.block_number.unwrap_or(0);
                     println!("Encrypted deposit processed on L2! (block {block})");
@@ -182,11 +180,12 @@ impl EncryptedDeposit {
                 }
             }
 
-            // Check for failure
-            let failed_logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
-            for log in &failed_logs {
+            let logs = l2.get_logs(&failed_filter).await.unwrap_or_default();
+            for log in &logs {
                 if let Ok(event) = ZoneInbox::EncryptedDepositFailed::decode_log(&log.inner)
                     && event.data.sender == sender
+                    && event.data.token == self.token
+                    && event.data.amount == self.amount
                 {
                     let block = log.block_number.unwrap_or(0);
                     println!(

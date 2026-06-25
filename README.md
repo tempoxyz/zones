@@ -57,6 +57,7 @@ just zone-up my-zone
 
 ```bash
 export L1_PORTAL_ADDRESS=$(jq -r '.portal' generated/my-zone/zone.json)
+export PRIVATE_KEY=$(jq -r '.sequencerKey' generated/my-zone/zone.json)
 just max-approve-portal
 
 # deposit into the zone

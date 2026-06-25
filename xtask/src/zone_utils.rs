@@ -13,16 +13,17 @@ use std::{
 };
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use zone::abi::{ZoneInbox, ZonePortal};
+use tempo_zone_contracts::{ZoneInbox, ZonePortal};
 
 pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
-/// Shared ZoneFactory deployed on Moderato Tempo L1.
+/// Shared Moderato ZoneFactory.
+///
 /// `create-zone`, `deploy-router`, and `zone-info` use this as their default
-/// factory unless the caller overrides `--zone-factory` or `zone.json` already
-/// provides a zone-specific value.
-/// Explorer: https://explore.moderato.tempo.xyz/address/0xC73b446C0768bc315Be7741D60B4e494E3ebc0dC
+/// factory unless the caller overrides `--zone-factory` or `ZONE_FACTORY`, or
+/// `zone.json` already provides a zone-specific value.
+/// Explorer: https://explore.moderato.tempo.xyz/address/0x3F07435187fB4B4d4A562138A93C0397D0734F2b
 pub(crate) const MODERATO_ZONE_FACTORY: Address =
-    address!("0xC73b446C0768bc315Be7741D60B4e494E3ebc0dC");
+    address!("0x3F07435187fB4B4d4A562138A93C0397D0734F2b");
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
 pub(crate) const ROUTER_CALLBACK_GAS_LIMIT: u64 = 2_000_000;
@@ -123,6 +124,31 @@ pub(crate) async fn fund_l1_wallet<P: Provider<TempoNetwork>>(
     Ok(())
 }
 
+/// Verifies that `resolved_admin` is the portal's on-chain admin.
+///
+/// Portal governance calls (`enableToken`, deposit pause/resume) are `onlyAdmin`,
+/// so a key resolved via the sequencer fallback only works on legacy zones where
+/// `admin == sequencer`. Checking against `portal.admin()` fails fast with a
+/// clear message instead of reverting on-chain with `NotAdmin`.
+pub(crate) async fn verify_portal_admin<P: Provider<TempoNetwork>>(
+    provider: &P,
+    portal: Address,
+    resolved_admin: Address,
+) -> eyre::Result<()> {
+    let onchain_admin = ZonePortal::new(portal, provider)
+        .admin()
+        .call()
+        .await
+        .wrap_err("failed to read portal admin")?;
+    if onchain_admin != resolved_admin {
+        return Err(eyre!(
+            "resolved admin {resolved_admin} is not the portal admin {onchain_admin}; \
+             set ADMIN_KEY/adminKey for this zone (SEQUENCER_KEY only works when admin == sequencer)"
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) async fn token_balance<P: Provider<TempoNetwork>>(
     provider: &P,
     token: Address,
@@ -141,7 +167,7 @@ pub(crate) async fn wait_for_token_enabled<P: Provider<TempoNetwork>>(
     token: Address,
 ) -> eyre::Result<u64> {
     let filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::TokenEnabled::SIGNATURE_HASH)
         .from_block(from_block);
 
@@ -168,7 +194,7 @@ pub(crate) async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
     token: Address,
 ) -> eyre::Result<u64> {
     let filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::DepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
 

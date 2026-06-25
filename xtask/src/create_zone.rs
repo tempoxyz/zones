@@ -30,6 +30,7 @@ sol! {
 
     struct CreateZoneParams {
         address initialToken;
+        address admin;
         address sequencer;
         address verifier;
         ZoneParams zoneParams;
@@ -43,6 +44,7 @@ sol! {
             address indexed portal,
             address indexed messenger,
             address initialToken,
+            address admin,
             address sequencer,
             address verifier,
             bytes32 genesisBlockHash,
@@ -66,8 +68,7 @@ pub(crate) struct CreateZone {
     l1_rpc_url: String,
 
     /// ZoneFactory contract address on Tempo L1.
-    /// Defaults to `MODERATO_ZONE_FACTORY`, the shared Moderato deployment.
-    #[arg(long, default_value_t = MODERATO_ZONE_FACTORY)]
+    #[arg(long, env = "ZONE_FACTORY", default_value_t = MODERATO_ZONE_FACTORY)]
     zone_factory: Address,
 
     /// Initial TIP-20 token address for the zone (additional tokens can be enabled later).
@@ -78,6 +79,11 @@ pub(crate) struct CreateZone {
     /// Sequencer address that will operate the zone.
     #[arg(long)]
     sequencer: Address,
+
+    /// Admin address that controls token enablement and deposit pause/resume.
+    /// Defaults to the sequencer address when omitted.
+    #[arg(long)]
+    admin: Option<Address>,
 
     /// Public RPC endpoint for the zone, published on-chain in the portal.
     /// Can be left empty and set later via `ZonePortal.setRpcUrl`.
@@ -125,8 +131,13 @@ impl CreateZone {
         // via --l1.genesis-block-number.
         let current_block = provider.get_block_number().await?;
 
+        let admin = self.admin.unwrap_or(self.sequencer);
+        println!("Admin: {admin}");
+        println!("Sequencer: {}", self.sequencer);
+
         let params = CreateZoneParams {
             initialToken: self.initial_token,
+            admin,
             sequencer: self.sequencer,
             verifier,
             zoneParams: ZoneParams {
@@ -212,6 +223,7 @@ impl CreateZone {
             "chainId": chain_id,
             "portal": format!("{portal}"),
             "initialToken": format!("{}", self.initial_token),
+            "admin": format!("{admin}"),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": confirm_header.inner.number,
             "zoneFactory": format!("{}", self.zone_factory),
@@ -229,6 +241,7 @@ impl CreateZone {
         println!("  Chain ID: {chain_id}");
         println!("  Portal: {portal}");
         println!("  Initial Token: {}", self.initial_token);
+        println!("  Admin: {admin}");
         println!("  Sequencer: {}", self.sequencer);
         println!("  ZoneFactory: {}", self.zone_factory);
         if !self.rpc_url.is_empty() {

@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import {
     IZoneConfig,
     IZoneOutbox,
+    IZonePortal,
     IZoneToken,
     IZoneTxContext,
     LastBatch,
@@ -240,6 +241,10 @@ contract ZoneOutbox is IZoneOutbox {
             revert InvalidFallbackRecipient();
         }
 
+        if (!config.isEnabledToken(token)) {
+            revert IZonePortal.TokenNotEnabled();
+        }
+
         _validateGasLimit(gasLimit);
 
         // Limit callback data size to prevent storage bloat and hash computation abuse
@@ -288,7 +293,6 @@ contract ZoneOutbox is IZoneOutbox {
                 to: to,
                 amount: amount,
                 fee: fee,
-                bouncebackFee: 0,
                 memo: memo,
                 gasLimit: gasLimit,
                 fallbackRecipient: fallbackRecipient,
@@ -307,7 +311,6 @@ contract ZoneOutbox is IZoneOutbox {
             to,
             amount,
             fee,
-            0,
             memo,
             gasLimit,
             fallbackRecipient,
@@ -321,8 +324,7 @@ contract ZoneOutbox is IZoneOutbox {
     function enqueueDepositBounceBack(
         address token,
         uint128 amount,
-        address bouncebackRecipient,
-        uint128 bouncebackFee
+        address bouncebackRecipient
     )
         external
     {
@@ -336,7 +338,6 @@ contract ZoneOutbox is IZoneOutbox {
                 to: bouncebackRecipient,
                 amount: amount,
                 fee: 0,
-                bouncebackFee: bouncebackFee,
                 memo: bytes32(0),
                 gasLimit: 0,
                 fallbackRecipient: address(0),
@@ -353,7 +354,6 @@ contract ZoneOutbox is IZoneOutbox {
             bouncebackRecipient,
             amount,
             0,
-            bouncebackFee,
             bytes32(0),
             0,
             address(0),
@@ -430,7 +430,6 @@ contract ZoneOutbox is IZoneOutbox {
                     to: pendingWithdrawal.to,
                     amount: pendingWithdrawal.amount,
                     fee: pendingWithdrawal.fee,
-                    bouncebackFee: pendingWithdrawal.bouncebackFee,
                     memo: pendingWithdrawal.memo,
                     gasLimit: pendingWithdrawal.gasLimit,
                     fallbackRecipient: pendingWithdrawal.fallbackRecipient,
