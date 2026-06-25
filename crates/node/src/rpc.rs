@@ -11,8 +11,8 @@ use std::{
     time::Duration,
 };
 
-use alloy_network::{ReceiptResponse, TransactionResponse};
-use alloy_primitives::{Address, B256, Bloom, Bytes, U64, U256};
+use alloy_network::{ReceiptResponse, TransactionBuilder, TransactionResponse};
+use alloy_primitives::{Address, B256, Bloom, Bytes, TxKind, U64, U256};
 use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rpc_types_eth::{
     Block, BlockId, BlockNumberOrTag, BlockTransactions, Filter, FilterChanges, FilterId,
@@ -315,6 +315,24 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .map_err(internal)
     }
 
+    async fn enforce_zone_inbox_refund_call_privacy(
+        &self,
+        request: &TempoTransactionRequest,
+        auth: &AuthContext,
+    ) -> Result<(), JsonRpcError> {
+        // Non-sequencer `eth_call` simulations may only read
+        // `ZoneInbox.refunds(token, owner)` for the authenticated owner.
+        if zone_inbox_refunds_mismatched_owner(request, auth.caller).is_none() {
+            return Ok(());
+        }
+
+        if self.zone_sequencer().await? == auth.caller {
+            return Ok(());
+        }
+
+        Err(JsonRpcError::account_mismatch())
+    }
+
     async fn terminal_event_for_deposit(
         &self,
         deposit_hash: B256,
@@ -598,6 +616,8 @@ where
 
             zone_rpc::policy::enforce_from(&mut request, &auth)?;
             zone_rpc::policy::enforce_no_contract_creation(&request)?;
+            self.enforce_zone_inbox_refund_call_privacy(&request, &auth)
+                .await?;
 
             let result = EthCall::call(
                 &self.eth.api,
@@ -974,6 +994,44 @@ where
     }
 }
 
+/// Finds a direct or nested `ZoneInbox.refunds(token, owner)` read where
+/// `owner` is not the authenticated caller.
+///
+/// Other calls, contract creations, and malformed calldata are ignored here.
+fn zone_inbox_refunds_mismatched_owner(
+    request: &TempoTransactionRequest,
+    caller: Address,
+) -> Option<Address> {
+    let refunds_owner_mismatch = |to: Option<Address>, input: Option<&Bytes>| {
+        if to != Some(ZONE_INBOX_ADDRESS) {
+            return None;
+        }
+
+        let input = input?;
+        if !input.starts_with(&ZoneInbox::refundsCall::SELECTOR) {
+            return None;
+        }
+
+        let owner = ZoneInbox::refundsCall::abi_decode(input).ok()?.owner;
+        (owner != caller).then_some(owner)
+    };
+
+    if let Some(owner) = refunds_owner_mismatch(
+        TransactionBuilder::to(request),
+        TransactionBuilder::input(request),
+    ) {
+        return Some(owner);
+    }
+
+    request.calls.iter().find_map(|call| {
+        let to = match call.to {
+            TxKind::Call(to) => Some(to),
+            TxKind::Create => None,
+        };
+        refunds_owner_mismatch(to, Some(&call.input))
+    })
+}
+
 #[derive(Debug, Clone)]
 enum PortalDepositRecord {
     Regular {
@@ -1066,6 +1124,26 @@ pub(crate) fn rpc_connection_config(retry_connection_interval: Duration) -> Conn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_rpc_types_eth::TransactionInput;
+    use tempo_primitives::transaction::Call;
+
+    fn zone_inbox_refunds_request(owner: Address) -> TempoTransactionRequest {
+        TempoTransactionRequest {
+            inner: TransactionRequest {
+                to: Some(TxKind::Call(ZONE_INBOX_ADDRESS)),
+                input: TransactionInput::new(
+                    ZoneInbox::refundsCall {
+                        token: ZONE_TOKEN_ADDRESS,
+                        owner,
+                    }
+                    .abi_encode()
+                    .into(),
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn regular_deposit_status_maps_terminal_events() {
@@ -1140,5 +1218,62 @@ mod tests {
         let stale_ids = stale_filter_owner_ids(Vec::new(), &HashSet::new());
 
         assert!(stale_ids.is_empty());
+    }
+
+    #[test]
+    fn zone_inbox_refunds_mismatched_owner_detects_outer_call() {
+        let caller = Address::repeat_byte(0x11);
+        let owner = Address::repeat_byte(0x22);
+        let request = zone_inbox_refunds_request(owner);
+
+        assert_eq!(
+            zone_inbox_refunds_mismatched_owner(&request, caller),
+            Some(owner)
+        );
+    }
+
+    #[test]
+    fn zone_inbox_refunds_mismatched_owner_allows_own_outer_call() {
+        let caller = Address::repeat_byte(0x11);
+        let request = zone_inbox_refunds_request(caller);
+
+        assert_eq!(zone_inbox_refunds_mismatched_owner(&request, caller), None);
+    }
+
+    #[test]
+    fn zone_inbox_refunds_mismatched_owner_detects_nested_tempo_call() {
+        let caller = Address::repeat_byte(0x11);
+        let owner = Address::repeat_byte(0x22);
+        let mut request = TempoTransactionRequest {
+            inner: TransactionRequest {
+                to: Some(TxKind::Call(Address::repeat_byte(0x33))),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        request.calls.push(Call {
+            to: TxKind::Call(ZONE_INBOX_ADDRESS),
+            value: U256::ZERO,
+            input: ZoneInbox::refundsCall {
+                token: ZONE_TOKEN_ADDRESS,
+                owner,
+            }
+            .abi_encode()
+            .into(),
+        });
+
+        assert_eq!(
+            zone_inbox_refunds_mismatched_owner(&request, caller),
+            Some(owner)
+        );
+    }
+
+    #[test]
+    fn zone_inbox_refunds_mismatched_owner_ignores_other_calls() {
+        let caller = Address::repeat_byte(0x11);
+        let mut request = zone_inbox_refunds_request(Address::repeat_byte(0x22));
+        request.inner.to = Some(TxKind::Call(Address::repeat_byte(0x33)));
+
+        assert_eq!(zone_inbox_refunds_mismatched_owner(&request, caller), None);
     }
 }
