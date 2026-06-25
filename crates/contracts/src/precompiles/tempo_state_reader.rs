@@ -7,6 +7,7 @@ crate::sol! {
     #[derive(Debug)]
     contract TempoStateReader {
         error DelegateCallNotAllowed();
+        error Unauthorized();
 
         function readStorageAt(address account, bytes32 slot, uint64 blockNumber) external view returns (bytes32);
         function readStorageBatchAt(address account, bytes32[] calldata slots, uint64 blockNumber) external view returns (bytes32[] memory);
