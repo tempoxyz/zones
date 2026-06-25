@@ -18,9 +18,10 @@ use alloy_sol_types::{SolCall, SolError, SolInterface};
 use revm::precompile::{
     PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
 };
+use tempo_contracts::precompiles::TIP20Error;
 use tempo_precompiles::{
-    DelegateCallNotAllowed, Precompile as TempoPrecompile,
-    storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
+    DelegateCallNotAllowed, Precompile as TempoPrecompile, Result as TempoResult,
+    storage::{ContractStorage, StorageCtx, evm::EvmPrecompileStorageProvider},
     tip20::{IRolesAuth, ITIP20, RolesAuthError, TIP20Token},
 };
 use tempo_zone_contracts::Unauthorized;
@@ -110,6 +111,15 @@ impl<P: PolicyCheck> ZoneTip20Token<P> {
                 Ok(output)
             }
             Err(err) => Err(err),
+        }
+    }
+
+    /// Enforce the vanilla TIP-20 initialized-token check before zone policy logic.
+    fn ensure_initialized(tip20: &TIP20Token) -> TempoResult<()> {
+        if tip20.is_initialized()? {
+            Ok(())
+        } else {
+            Err(TIP20Error::uninitialized().into())
         }
     }
 
@@ -340,11 +350,12 @@ where
     /// Create a [`DynPrecompile`] for a zone-side TIP-20 token at `address`.
     ///
     /// The returned precompile:
-    /// 1. Checks the 4-byte selector for transfer/mint calls.
-    /// 2. When a TIP-403 registry is configured, reads `transfer_policy_id`
+    /// 1. Rejects uninitialized TIP-20-prefix addresses.
+    /// 2. Checks the 4-byte selector for transfer/mint calls.
+    /// 3. When a TIP-403 registry is configured, reads `transfer_policy_id`
     ///    from EVM storage and checks authorization via the
     ///    [`ZoneTip403ProxyRegistry`].
-    /// 3. Delegates to the vanilla `TIP20Token::call()` for execution.
+    /// 4. Delegates to the vanilla `TIP20Token::call()` for execution.
     pub fn create(
         address: Address,
         cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
@@ -387,25 +398,30 @@ where
                 );
 
                 StorageCtx::enter(&mut storage, || {
+                    let storage = StorageCtx::default();
+                    let finish = |result| {
+                        if is_fixed_gas {
+                            Self::apply_fixed_gas(result)
+                        } else {
+                            result
+                        }
+                    };
+
+                    let mut tip20 =
+                        TIP20Token::from_address(address).expect("TIP20 prefix already verified");
+
+                    if let Err(err) = Self::ensure_initialized(&tip20) {
+                        return finish(storage.error_result(err));
+                    }
+
                     if let Some(selector) = selector
                         && let Some(revert) =
                             token.precheck(selector, address, input.data, input.caller)
                     {
-                        return if is_fixed_gas {
-                            Self::apply_fixed_gas(revert)
-                        } else {
-                            revert
-                        };
+                        return finish(revert);
                     }
 
-                    let mut tip20 =
-                        TIP20Token::from_address(address).expect("TIP20 prefix already verified");
-                    let result = tip20.call(input.data, input.caller);
-                    if is_fixed_gas {
-                        Self::apply_fixed_gas(result)
-                    } else {
-                        result
-                    }
+                    finish(tip20.call(input.data, input.caller))
                 })
             },
         )
@@ -774,6 +790,50 @@ mod tests {
         assert!(transfer.is_success());
         assert_eq!(transfer.gas_used, FIXED_TRANSFER_GAS);
         assert_eq!(harness.balance_of(harness.bob)?, U256::from(12_345u64));
+
+        Ok(())
+    }
+
+    #[test]
+    fn uninitialized_token_rejects_before_policy_precheck() -> TestResult {
+        let token = address!("20C0000000000000000000000000000000000999");
+        let caller = address!("0x00000000000000000000000000000000000000a2");
+        let to = address!("0x00000000000000000000000000000000000000a3");
+        let mut ctx: TestContext =
+            Context::new(CacheDB::new(EmptyDB::new()), TempoHardfork::default());
+        let precompile = ZoneTip20Token::create(
+            token,
+            &ctx.cfg,
+            Some(ZoneTip403ProxyRegistry::new(MockPolicyProvider::failing())),
+            Arc::new(MockSequencer { address: None }),
+        );
+        let calldata: Bytes = ITIP20::transferCall {
+            to,
+            amount: U256::from(1u64),
+        }
+        .abi_encode()
+        .into();
+
+        let result = AlloyEvmPrecompile::call(
+            &precompile,
+            PrecompileInput {
+                data: &calldata,
+                caller,
+                internals: EvmInternals::from_context(&mut ctx),
+                gas: FIXED_TRANSFER_GAS,
+                reservoir: 0,
+                value: U256::ZERO,
+                is_static: false,
+                target_address: token,
+                bytecode_address: token,
+            },
+        )?;
+
+        assert!(result.is_revert());
+        assert_eq!(
+            result.bytes,
+            Bytes::from(TIP20Error::uninitialized().selector().to_vec())
+        );
 
         Ok(())
     }
