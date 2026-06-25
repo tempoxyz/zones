@@ -39,7 +39,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
         with:
-          version: nightly-b2e7a6af8c6426a479057e0745614bfd13e7c02f
+          version: nightly
 
       - name: Show Forge version
         run: forge --version
@@ -60,7 +60,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
         with:
-          version: nightly-b2e7a6af8c6426a479057e0745614bfd13e7c02f
+          version: nightly
 
       - name: Run Forge fmt check
         working-directory: specs/ref-impls
