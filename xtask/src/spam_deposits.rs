@@ -20,10 +20,8 @@ use tempo_primitives::{
     TempoSignature,
     transaction::{Call, PrimitiveSignature},
 };
-use zone::{
-    abi::{EncryptedDepositPayload, ZonePortal},
-    precompiles::ecies::encrypt_deposit,
-};
+use tempo_zone_contracts::{EncryptedDepositPayload, ZonePortal};
+use zone_precompiles::ecies::encrypt_deposit;
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct SpamDeposits {

@@ -39,7 +39,7 @@ use tempo_precompiles::{
     tip403_registry::TIP403Registry,
 };
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
-use zone::precompiles::ZoneTokenFactory;
+use zone_precompiles::ZoneTokenFactory;
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");

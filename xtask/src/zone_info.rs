@@ -1,7 +1,7 @@
 use alloy::{primitives::Address, providers::ProviderBuilder};
 use eyre::eyre;
 use tempo_alloy::TempoNetwork;
-use zone::abi::{ZoneFactory, ZonePortal};
+use tempo_zone_contracts::{ZoneFactory, ZonePortal};
 
 use crate::zone_utils::MODERATO_ZONE_FACTORY;
 

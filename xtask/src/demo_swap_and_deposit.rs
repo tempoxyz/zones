@@ -14,13 +14,11 @@ use tempo_contracts::precompiles::{
     IRolesAuth, ITIP20 as TIP20Token, ITIP20Factory as TIP20Factory,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, tip20::ISSUER_ROLE};
-use zone::{
-    abi::{
-        EncryptedDepositPayload, SwapAndDepositRouterEncryptedCallback, ZONE_OUTBOX_ADDRESS,
-        ZoneOutbox, ZonePortal,
-    },
-    precompiles::ecies::encrypt_deposit,
+use tempo_zone_contracts::{
+    EncryptedDepositPayload, SwapAndDepositRouterEncryptedCallback, ZONE_OUTBOX_ADDRESS,
+    ZoneOutbox, ZonePortal,
 };
+use zone_precompiles::ecies::encrypt_deposit;
 
 use crate::zone_utils::{
     ROUTER_CALLBACK_GAS_LIMIT, STABLECOIN_DEX_ADDRESS, ZoneMetadata, check, fund_l1_wallet,

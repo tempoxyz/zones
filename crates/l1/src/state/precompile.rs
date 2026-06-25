@@ -1,9 +1,10 @@
 //! `DynPrecompile` implementation for the TempoStateReader.
 //!
 //! The TempoStateReader is a **standalone precompile** (separate from the TempoState contract)
-//! that allows zone system contracts to read Tempo L1 contract storage at a specific block height
-//! during EVM execution. The caller provides the L1 block number to query, making the precompile
-//! fully stateless.
+//! that reads Tempo L1 contract storage at a specific block height during EVM execution. The
+//! normal access path is through the TempoState wrapper, which validates its caller before
+//! forwarding to this precompile with the current Tempo L1 block number. The precompile only
+//! accepts calls from the TempoState wrapper and rejects all other callers.
 //!
 //! This precompile implements two functions:
 //!
@@ -25,10 +26,11 @@
 //! [`L1StateProvider`]: super::provider::L1StateProvider
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::Bytes;
+use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
 use tracing::{debug, error, warn};
+use zone_primitives::constants::TEMPO_STATE_ADDRESS;
 
 use super::provider::L1StateProvider;
 
@@ -41,6 +43,9 @@ alloy_sol_types::sol! {
 
     /// Returned when the precompile is invoked via `DELEGATECALL` instead of `CALL`.
     error DelegateCallNotAllowed();
+
+    /// Returned when the caller is not TempoState.
+    error Unauthorized();
 }
 
 /// Fixed gas cost charged on every call.
@@ -56,12 +61,14 @@ const PER_SLOT_GAS: u64 = 200;
 /// contract storage via an [`L1StateProvider`].
 ///
 /// The caller provides the L1 block number to query, making the precompile fully stateless.
-/// Zone system contracts (ZoneInbox, ZoneConfig) pass the `tempoBlockNumber` from the
-/// TempoState contract after `finalizeTempo` has been called.
+/// Contracts that need L1 state should call the TempoState wrapper, which forwards to this
+/// precompile after `finalizeTempo` has updated `tempoBlockNumber`.
 ///
 /// # Restrictions
 ///
 /// - Only direct `CALL`s are accepted; `DELEGATECALL` reverts with [`DelegateCallNotAllowed`].
+/// - Only TempoState may call this precompile directly. Caller authorization is handled by that
+///   wrapper, not by this reader.
 /// - The precompile is **view-only** — it never writes to EVM state.
 /// - On cache miss the provider retries the RPC fetch indefinitely with backoff, stalling
 ///   block production until L1 connectivity is restored.
@@ -83,6 +90,14 @@ impl TempoStateReader {
                     return Ok(PrecompileOutput::revert(
                         0,
                         DelegateCallNotAllowed {}.abi_encode().into(),
+                        input.reservoir,
+                    ));
+                }
+
+                if !Self::is_allowed_caller(input.caller) {
+                    return Ok(PrecompileOutput::revert(
+                        0,
+                        Unauthorized {}.abi_encode().into(),
                         input.reservoir,
                     ));
                 }
@@ -119,6 +134,11 @@ impl TempoStateReader {
                 result
             },
         )
+    }
+
+    /// Only the TempoState wrapper may call this reader directly.
+    fn is_allowed_caller(caller: Address) -> bool {
+        caller == TEMPO_STATE_ADDRESS
     }
 
     /// Handle a `readStorageAt(address, bytes32, uint64)` call.
@@ -185,5 +205,29 @@ impl TempoStateReader {
 
         let encoded = readStorageBatchAtCall::abi_encode_returns(&results);
         Ok(PrecompileOutput::new(gas, encoded.into(), reservoir))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TempoStateReader;
+    use alloy_primitives::{Address, address};
+    use zone_primitives::constants::{
+        TEMPO_STATE_ADDRESS, ZONE_CONFIG_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    };
+
+    fn outsider() -> Address {
+        address!("0x0000000000000000000000000000000000009999")
+    }
+
+    #[test]
+    fn only_tempo_state_wrapper_is_allowed() {
+        assert!(TempoStateReader::is_allowed_caller(TEMPO_STATE_ADDRESS));
+
+        for caller in [ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_CONFIG_ADDRESS] {
+            assert!(!TempoStateReader::is_allowed_caller(caller));
+        }
+
+        assert!(!TempoStateReader::is_allowed_caller(outsider()));
     }
 }

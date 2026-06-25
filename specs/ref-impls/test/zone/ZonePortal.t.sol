@@ -989,6 +989,89 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
     }
 
+    function test_withdrawal_feeTransferFailureForgoesFeeAndAdvancesQueue() public {
+        // Fund portal
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        bytes32 depositHash = portal.currentDepositQueueHash();
+
+        // Create two withdrawals in the same queue slot. The first has a fee that will fail
+        // to transfer; the second proves the queue can still keep moving afterward.
+        Withdrawal memory w1 =
+            _withdrawal(address(pathUSD), alice, bob, 300e6, bytes32(0), 0, alice, "");
+        w1.fee = 25e6;
+        Withdrawal memory w2 =
+            _withdrawal(address(pathUSD), alice, charlie, 400e6, bytes32(0), 0, alice, "");
+
+        // Build queue: w1 is oldest, w2 remains as the inner queue after w1 is processed.
+        bytes32 innerHash = keccak256(abi.encode(w2, EMPTY_SENTINEL));
+        bytes32 batchQueueHash = keccak256(abi.encode(w1, innerHash));
+
+        // Submit batch adding both withdrawals to slot 0.
+        vm.roll(block.number + 1);
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            batchQueueHash,
+            "",
+            ""
+        );
+
+        uint256 portalBalanceBefore = pathUSD.balanceOf(address(portal));
+        uint256 sequencerBalanceBefore = pathUSD.balanceOf(admin);
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+        uint256 charlieBalanceBefore = pathUSD.balanceOf(charlie);
+        uint64 depositCountBefore = portal.depositCount();
+
+        // Blacklist the sequencer as a token recipient while leaving everyone else allowed.
+        // This makes w1's fee transfer revert while leaving the user-facing transfer valid.
+        address[] memory blockedAccounts = new address[](1);
+        blockedAccounts[0] = admin;
+        uint64 policyId = registry.createPolicyWithAccounts(
+            admin, ITIP403Registry.PolicyType.BLACKLIST, blockedAccounts
+        );
+        vm.prank(pathUSDAdmin);
+        pathUSD.changeTransferPolicyId(policyId);
+
+        assertFalse(registry.isAuthorizedRecipient(policyId, admin));
+        assertTrue(registry.isAuthorizedRecipient(policyId, bob));
+        assertTrue(registry.isAuthorizedRecipient(policyId, charlie));
+
+        // Process w1. The fee is forgiven, bob receives the withdrawal amount, and no
+        // bounce-back deposit is created
+        portal.processWithdrawal(w1, innerHash);
+
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + w1.amount);
+        assertEq(pathUSD.balanceOf(admin), sequencerBalanceBefore);
+        assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore - w1.amount);
+        assertEq(portal.depositCount(), depositCountBefore);
+
+        // Slot 0 should now contain only w2, with the head still on the same slot.
+        assertEq(portal.withdrawalQueueSlot(0), innerHash);
+        assertEq(portal.withdrawalQueueHead(), 0);
+
+        // Process w2 to prove the failed fee transfer did not block later withdrawals.
+        portal.processWithdrawal(w2, bytes32(0));
+
+        assertEq(pathUSD.balanceOf(charlie), charlieBalanceBefore + w2.amount);
+        assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore - w1.amount - w2.amount);
+
+        // Slot 0 is exhausted, so it is cleared and the queue head advances.
+        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+        assertEq(portal.withdrawalQueueHead(), 1);
+    }
+
     /*//////////////////////////////////////////////////////////////
                      INVALID WITHDRAWAL TESTS
     //////////////////////////////////////////////////////////////*/

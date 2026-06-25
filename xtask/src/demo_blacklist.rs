@@ -74,10 +74,10 @@ use tempo_contracts::precompiles::{
 use tempo_precompiles::{
     PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS, TIP403_REGISTRY_ADDRESS, tip20::ISSUER_ROLE,
 };
-use zone::{
-    abi::{EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox, ZonePortal},
-    precompiles::ecies::encrypt_deposit,
+use tempo_zone_contracts::{
+    EncryptedDepositPayload, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox, ZonePortal,
 };
+use zone_precompiles::ecies::encrypt_deposit;
 
 const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 
@@ -736,7 +736,7 @@ async fn wait_for_token_enabled<P: Provider<TempoNetwork>>(
     token: Address,
 ) -> eyre::Result<()> {
     let filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::TokenEnabled::SIGNATURE_HASH)
         .from_block(1);
 
@@ -764,7 +764,7 @@ async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
     to: Address,
 ) -> eyre::Result<u64> {
     let filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::DepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
 
@@ -797,11 +797,11 @@ async fn wait_for_encrypted_result<P: Provider<TempoNetwork>>(
     to: Address,
 ) -> eyre::Result<bool> {
     let processed_filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::EncryptedDepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
     let failed_filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::EncryptedDepositFailed::SIGNATURE_HASH)
         .from_block(from_block);
 

@@ -13,10 +13,8 @@ use alloy::{
 };
 use eyre::{WrapErr as _, eyre};
 use tempo_alloy::TempoNetwork;
-use zone::{
-    abi::{EncryptedDepositPayload, ZoneInbox, ZonePortal},
-    precompiles::ecies::encrypt_deposit,
-};
+use tempo_zone_contracts::{EncryptedDepositPayload, ZoneInbox, ZonePortal};
+use zone_precompiles::ecies::encrypt_deposit;
 
 #[derive(Debug, clap::Parser)]
 pub(crate) struct EncryptedDeposit {
@@ -148,7 +146,7 @@ impl EncryptedDeposit {
         sender: Address,
         to: Address,
     ) -> eyre::Result<()> {
-        use zone::abi::ZONE_INBOX_ADDRESS;
+        use tempo_zone_contracts::ZONE_INBOX_ADDRESS;
 
         println!("Waiting for encrypted deposit to be processed on L2...");
         let l2 = ProviderBuilder::new().connect(zone_rpc).await?;

@@ -13,12 +13,13 @@ workspace = true
 [dependencies]
 tempo-alloy.workspace = true
 tempo-chainspec.workspace = true
-zone = { path = "../crates/tempo-zone" }
 tempo-contracts.workspace = true
 tempo-evm.workspace = true
 tempo-precompiles.workspace = true
 tempo-primitives.workspace = true
+tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-primitives.workspace = true
+zone-precompiles = { workspace = true, features = ["std"] }
 tempo-revm.workspace = true
 
 alloy = { workspace = true, features = [

@@ -323,6 +323,138 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.initialToken, address(0));
     }
 
+    /*//////////////////////////////////////////////////////////////
+                            SHARED HELPER
+    //////////////////////////////////////////////////////////////*/
+
+    function _defaultParams() internal view returns (IZoneFactory.CreateZoneParams memory) {
+        return IZoneFactory.CreateZoneParams({
+            initialToken: address(pathUSD),
+            admin: admin,
+            sequencer: admin,
+            verifier: zoneFactory.verifier(),
+            zoneParams: ZoneParams({
+                genesisBlockHash: GENESIS_BLOCK_HASH,
+                genesisTempoBlockHash: GENESIS_TEMPO_BLOCK_HASH,
+                genesisTempoBlockNumber: uint64(block.number)
+            }),
+            rpcUrl: ""
+        });
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              REVERT PATHS
+    //////////////////////////////////////////////////////////////*/
+
+    // Supply < ZONE_CREATION_GAS (15M) so the gasleft() check trips. 14M is high
+    // enough to reach the check (no OOG in the isTIP20 staticcall) and low enough
+    // that gasleft() < 15M at the check.
+    function test_createZone_revertsOnInsufficientGas() public {
+        IZoneFactory.CreateZoneParams memory p = _defaultParams();
+        vm.expectRevert(IZoneFactory.InsufficientGas.selector);
+        zoneFactory.createZone{ gas: 14_000_000 }(p);
+    }
+
+    // _nextZoneId is storage slot 0 (uint32, packed alone).
+    function test_createZone_revertsOnZoneIdOverflow() public {
+        IZoneFactory.CreateZoneParams memory p = _defaultParams();
+        vm.store(address(zoneFactory), bytes32(uint256(0)), bytes32(uint256(type(uint32).max)));
+        vm.expectRevert(IZoneFactory.ZoneIdOverflow.selector);
+        zoneFactory.createZone(p);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                       PORTAL PARAM PROPAGATION
+    //////////////////////////////////////////////////////////////*/
+
+    function test_createZone_propagatesAllParamsToPortal() public {
+        IZoneFactory.CreateZoneParams memory p = _defaultParams();
+        p.rpcUrl = "https://zone.example";
+        (uint32 id, address portal) = zoneFactory.createZone(p);
+        ZonePortal pc = ZonePortal(portal);
+
+        assertEq(pc.zoneId(), id);
+        assertEq(pc.admin(), p.admin);
+        assertEq(pc.sequencer(), p.sequencer);
+        assertEq(pc.verifier(), p.verifier);
+        assertEq(pc.messenger(), zoneFactory.zones(id).messenger);
+        assertEq(pc.blockHash(), p.zoneParams.genesisBlockHash);
+        assertEq(pc.genesisTempoBlockNumber(), p.zoneParams.genesisTempoBlockNumber);
+        assertEq(pc.rpcUrl(), p.rpcUrl);
+        assertTrue(pc.isTokenEnabled(address(pathUSD)));
+        assertEq(pathUSD.allowance(portal, pc.messenger()), type(uint256).max);
+    }
+
+    function test_createZone_registersMessenger() public {
+        (uint32 id,) = zoneFactory.createZone(_defaultParams());
+        assertTrue(zoneFactory.isZoneMessenger(zoneFactory.zones(id).messenger));
+        assertFalse(zoneFactory.isZoneMessenger(alice));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          METADATA ROTATION
+    //////////////////////////////////////////////////////////////*/
+
+    // Factory ZoneInfo.sequencer is a snapshot taken at creation and does not track
+    // later portal rotation; the portal remains the source of truth.
+    function test_zones_sequencerIsSnapshot_afterRotation() public {
+        (uint32 id, address portal) = zoneFactory.createZone(_defaultParams());
+        ZonePortal(portal).transferSequencer(alice);
+        vm.prank(alice);
+        ZonePortal(portal).acceptSequencer();
+
+        assertEq(ZonePortal(portal).sequencer(), alice); // portal: current
+        assertEq(zoneFactory.zones(id).sequencer, admin); // factory: snapshot at creation
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    CREATE-ADDRESS RLP BOUNDARIES
+    //////////////////////////////////////////////////////////////*/
+
+    function test_computeCreateAddress_matchesReference_atRlpBoundaries() public {
+        ZoneFactoryHarness h = new ZoneFactoryHarness();
+        uint256[10] memory nonces =
+            [uint256(0), 1, 0x7f, 0x80, 0xff, 0x100, 0xffff, 0x10000, 0xffffff, 0x1000000];
+        for (uint256 i; i < nonces.length; i++) {
+            assertEq(
+                h.computeCreateAddress_(address(h), nonces[i]),
+                vm.computeCreateAddress(address(h), nonces[i]),
+                "RLP nonce branch mismatch"
+            );
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                                 FUZZ
+    //////////////////////////////////////////////////////////////*/
+
+    function testFuzz_createZone_storesParams(
+        address adminAddr,
+        address seqAddr,
+        bytes32 gh,
+        bytes32 tgh,
+        uint64 tbn
+    )
+        public
+    {
+        vm.assume(adminAddr != address(0) && seqAddr != address(0));
+        IZoneFactory.CreateZoneParams memory p = _defaultParams();
+        p.admin = adminAddr;
+        p.sequencer = seqAddr;
+        p.zoneParams = ZoneParams(gh, tgh, tbn);
+
+        (uint32 id, address portal) = zoneFactory.createZone(p);
+        ZoneInfo memory info = zoneFactory.zones(id);
+
+        assertEq(info.admin, adminAddr);
+        assertEq(info.sequencer, seqAddr);
+        assertEq(info.genesisBlockHash, gh);
+        assertEq(info.genesisTempoBlockHash, tgh);
+        assertEq(info.genesisTempoBlockNumber, tbn);
+        assertTrue(zoneFactory.isZonePortal(portal));
+        assertEq(zoneFactory.zoneCount(), 1);
+    }
+
 }
 
 /// @notice A minimal contract that is NOT a TIP-20
@@ -330,6 +462,15 @@ contract NotATIP20 {
 
     function notATIP20Function() external pure returns (bool) {
         return true;
+    }
+
+}
+
+/// @notice Harness exposing the internal CREATE-address predictor for boundary testing.
+contract ZoneFactoryHarness is ZoneFactory {
+
+    function computeCreateAddress_(address d, uint256 n) external pure returns (address) {
+        return _computeCreateAddress(d, n);
     }
 
 }

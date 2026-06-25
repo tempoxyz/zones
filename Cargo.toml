@@ -11,10 +11,10 @@ members = [
   "crates/contracts",
   "crates/evm",
   "crates/l1",
+  "crates/node",
   "crates/payload",
   "crates/precompiles",
   "crates/primitives",
-  "crates/tempo-zone",
   "crates/rpc",
   "crates/sequencer",
   "xtask",
@@ -107,6 +107,7 @@ tempo-transaction-pool = { git = "https://github.com/tempoxyz/tempo", rev = "651
 tempo-zone-contracts = { path = "crates/contracts", default-features = false }
 zone-evm = { path = "crates/evm" }
 zone-l1 = { path = "crates/l1" }
+zone-node = { path = "crates/node" }
 zone-payload = { path = "crates/payload" }
 zone-precompiles = { path = "crates/precompiles", default-features = false }
 zone-primitives = { path = "crates/primitives", default-features = false }

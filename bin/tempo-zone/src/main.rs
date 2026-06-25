@@ -1,7 +1,7 @@
 //! Tempo Zone L2 Node.
 #![cfg_attr(not(test), warn(unused_crate_dependencies))]
 
-use zone::cli::ZoneCli;
+use zone_node::cli::ZoneCli;
 
 #[global_allocator]
 static ALLOC: reth_cli_util::allocator::Allocator = reth_cli_util::allocator::new_allocator();

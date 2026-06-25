@@ -13,7 +13,7 @@ use std::{
 };
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20 as TIP20Token;
-use zone::abi::{ZoneInbox, ZonePortal};
+use tempo_zone_contracts::{ZoneInbox, ZonePortal};
 
 pub(crate) const L1_EXPLORER: &str = "https://explore.moderato.tempo.xyz/tx";
 /// Shared Moderato ZoneFactory.
@@ -167,7 +167,7 @@ pub(crate) async fn wait_for_token_enabled<P: Provider<TempoNetwork>>(
     token: Address,
 ) -> eyre::Result<u64> {
     let filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::TokenEnabled::SIGNATURE_HASH)
         .from_block(from_block);
 
@@ -194,7 +194,7 @@ pub(crate) async fn wait_for_deposit_processed<P: Provider<TempoNetwork>>(
     token: Address,
 ) -> eyre::Result<u64> {
     let filter = Filter::new()
-        .address(zone::abi::ZONE_INBOX_ADDRESS)
+        .address(tempo_zone_contracts::ZONE_INBOX_ADDRESS)
         .event_signature(ZoneInbox::DepositProcessed::SIGNATURE_HASH)
         .from_block(from_block);
 
