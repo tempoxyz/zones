@@ -41,6 +41,10 @@ pub const WHITELISTED_TOPICS: [B256; 5] = [
     BURN_TOPIC,
 ];
 
+const TWO_PARTY_TOPICS: [B256; 3] = [TRANSFER_TOPIC, APPROVAL_TOPIC, TRANSFER_WITH_MEMO_TOPIC];
+const CALLER_SCOPED_FILTER_ERROR: &str =
+    "private log filter must include authenticated caller in topic1 or topic2";
+
 /// Returns `true` if `caller` appears in an eligible indexed-topic position
 /// for the log's event type.
 ///
@@ -146,6 +150,37 @@ pub fn scope_filter(filter: &mut Filter) {
     } else {
         filter.topics[0] = FilterSet::from(scoped_topic0);
     }
+}
+
+/// Scopes a user-supplied filter to whitelisted event topics and requires the
+/// authenticated caller to appear in an eligible indexed topic before backend
+/// log retrieval.
+pub fn scope_filter_for_caller(filter: &mut Filter, caller: &Address) -> Result<(), JsonRpcError> {
+    scope_filter(filter);
+    if filter.topics[0].len() == 1 && filter.topics[0].contains(&B256::ZERO) {
+        return Ok(());
+    }
+
+    let caller_word = B256::left_padding_from(caller.as_slice());
+    if filter.topics[1].contains(&caller_word) {
+        filter.topics[1] = FilterSet::from(caller_word);
+        return Ok(());
+    }
+
+    if filter.topics[2].contains(&caller_word) {
+        let topic0 = filter.topics[0]
+            .iter()
+            .copied()
+            .filter(|topic| TWO_PARTY_TOPICS.contains(topic))
+            .collect::<Vec<_>>();
+        if !topic0.is_empty() {
+            filter.topics[0] = FilterSet::from(topic0);
+            filter.topics[2] = FilterSet::from(caller_word);
+            return Ok(());
+        }
+    }
+
+    Err(JsonRpcError::invalid_params(CALLER_SCOPED_FILTER_ERROR))
 }
 
 #[cfg(test)]
@@ -513,6 +548,81 @@ mod tests {
         filter.topics[0] = FilterSet::from(bogus);
         scope_filter(&mut filter);
         assert_eq!(filter.topics[0], FilterSet::from(B256::ZERO));
+    }
+
+    #[test]
+    fn scope_filter_for_caller_rejects_broad_filter() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let mut filter = Filter::default();
+
+        let err = scope_filter_for_caller(&mut filter, &caller).unwrap_err();
+
+        assert_eq!(err.code, JsonRpcError::invalid_params("").code);
+        assert_eq!(err.message, CALLER_SCOPED_FILTER_ERROR);
+    }
+
+    #[test]
+    fn scope_filter_for_caller_scopes_topic1_caller() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller_topic = caller_word(&caller);
+        let other_topic = caller_word(&other);
+        let mut filter = Filter::default();
+        filter.topics[1] = FilterSet::from(vec![caller_topic, other_topic]);
+        filter.topics[2] = FilterSet::from(other_topic);
+
+        scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+        assert_eq!(filter.topics[0].len(), WHITELISTED_TOPICS.len());
+        assert_eq!(filter.topics[1], FilterSet::from(caller_topic));
+        assert_eq!(filter.topics[2], FilterSet::from(other_topic));
+    }
+
+    #[test]
+    fn scope_filter_for_caller_scopes_topic2_caller_for_two_party_events() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let other = address!("0x0000000000000000000000000000000000000002");
+        let caller_topic = caller_word(&caller);
+        let other_topic = caller_word(&other);
+        let mut filter = Filter::default();
+        filter.topics[0] = FilterSet::from(vec![TRANSFER_TOPIC, MINT_TOPIC]);
+        filter.topics[1] = FilterSet::from(other_topic);
+        filter.topics[2] = FilterSet::from(vec![caller_topic, caller_word(&other)]);
+
+        scope_filter_for_caller(&mut filter, &caller).unwrap();
+
+        assert_eq!(filter.topics[0], FilterSet::from(TRANSFER_TOPIC));
+        assert_eq!(filter.topics[1], FilterSet::from(other_topic));
+        assert_eq!(filter.topics[2], FilterSet::from(caller_topic));
+    }
+
+    #[test]
+    fn scope_filter_for_caller_rejects_wrong_caller() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let a = address!("0x0000000000000000000000000000000000000002");
+        let b = address!("0x0000000000000000000000000000000000000003");
+        let mut filter = Filter::default();
+        filter.topics[0] = FilterSet::from(TRANSFER_TOPIC);
+        filter.topics[1] = FilterSet::from(caller_word(&a));
+        filter.topics[2] = FilterSet::from(caller_word(&b));
+
+        let err = scope_filter_for_caller(&mut filter, &caller).unwrap_err();
+
+        assert_eq!(err.code, JsonRpcError::invalid_params("").code);
+        assert_eq!(err.message, CALLER_SCOPED_FILTER_ERROR);
+    }
+
+    #[test]
+    fn scope_filter_for_caller_rejects_topic2_only_for_one_party_events() {
+        let caller = address!("0x0000000000000000000000000000000000000001");
+        let mut filter = Filter::default();
+        filter.topics[0] = FilterSet::from(MINT_TOPIC);
+        filter.topics[2] = FilterSet::from(caller_word(&caller));
+
+        let err = scope_filter_for_caller(&mut filter, &caller).unwrap_err();
+
+        assert_eq!(err.code, JsonRpcError::invalid_params("").code);
+        assert_eq!(err.message, CALLER_SCOPED_FILTER_ERROR);
     }
 
     #[test]

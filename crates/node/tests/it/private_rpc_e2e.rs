@@ -42,6 +42,10 @@ fn corrupt_token_hex(token: &str) -> String {
     hex::encode(bytes)
 }
 
+fn address_topic(address: Address) -> String {
+    format!("{:#x}", B256::left_padding_from(address.as_slice()))
+}
+
 fn assert_filter_not_found_error(response: &serde_json::Value) {
     let error = response
         .get("error")
@@ -884,9 +888,33 @@ async fn test_ws_logs_subscription_is_sender_scoped() -> eyre::Result<()> {
     let owner_token = ctx.user_token(&owner_signer);
     let mut owner_ws = connect_private_rpc_ws(&ctx.private_rpc_url, &owner_token).await?;
 
+    owner_ws
+        .send(Message::Text(
+            jsonrpc_with_params(
+                "eth_subscribe",
+                json!(["logs", {"address": format!("{PATH_USD_ADDRESS:#x}")}]),
+                1,
+            )
+            .into(),
+        ))
+        .await?;
+    let broad_subscription = ws_next_json(&mut owner_ws).await?;
+    assert_eq!(broad_subscription["id"], 1);
+    assert_eq!(
+        broad_subscription["error"]["code"].as_i64().unwrap(),
+        -32602,
+        "broad private log subscriptions should be rejected"
+    );
+
     let owner_subscription = ws_subscribe(
         &mut owner_ws,
-        json!(["logs", {"address": format!("{PATH_USD_ADDRESS:#x}")}]),
+        json!([
+            "logs",
+            {
+                "address": format!("{PATH_USD_ADDRESS:#x}"),
+                "topics": [null, address_topic(owner_signer.address())],
+            }
+        ]),
     )
     .await?;
 
