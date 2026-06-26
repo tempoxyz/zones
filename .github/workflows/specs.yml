@@ -129,7 +129,7 @@ jobs:
         working-directory: specs/ref-impls
         run: |
           "$GITHUB_WORKSPACE/foundry/target/release/forge" coverage \
-            --ir-minimum --match-path "test/zone/**" --report summary | tee coverage.txt
+            --ir-minimum --match-path "test/zone/**" --exclude-tests --report summary | tee coverage.txt
           {
             echo '### Zone spec coverage'
             echo '```'
