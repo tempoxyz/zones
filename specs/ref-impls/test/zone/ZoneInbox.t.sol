@@ -14,11 +14,13 @@ import {
     EncryptedDepositPayload,
     IAesGcmDecrypt,
     IChaumPedersenVerify,
+    ITIP20ZoneFactory,
     IZoneConfig,
     IZoneInbox,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
     QueuedDeposit,
+    TIP20_FACTORY_ADDRESS,
     ZONE_OUTBOX
 } from "../../src/zone/IZone.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
@@ -988,6 +990,156 @@ contract ZoneInboxTest is Test {
         // Deposit should succeed — minted to the decrypted recipient
         assertEq(zoneToken.balanceOf(recipient), 1000e6, "recipient should receive funds");
         assertEq(zoneToken.balanceOf(alice), 0, "sender should get nothing (successful deposit)");
+    }
+
+    function _advanceTempoQueued(
+        QueuedDeposit[] memory deposits,
+        DecryptionData[] memory decryptions,
+        EnabledToken[] memory enabledTokens
+    )
+        internal
+    {
+        inbox.advanceTempo("", deposits, decryptions, enabledTokens);
+    }
+
+    /// @notice Advancing accepts an enabled token even if the portal has not enabled it.
+    function test_advanceTempo_enabledTokenNotPortalEnabled_accepts() public {
+        address token = address(0x777);
+        vm.etch(TIP20_FACTORY_ADDRESS, hex"00");
+        vm.mockCall(
+            TIP20_FACTORY_ADDRESS,
+            abi.encodeWithSelector(ITIP20ZoneFactory.enableToken.selector),
+            abi.encode()
+        );
+
+        EnabledToken[] memory enabledTokens = new EnabledToken[](1);
+        enabledTokens[0] =
+            EnabledToken({ token: token, name: "Token", symbol: "TOK", currency: "USD" });
+
+        vm.prank(sequencer);
+        _advanceTempoQueued(new QueuedDeposit[](0), new DecryptionData[](0), enabledTokens);
+    }
+
+    /// @notice Advancing accepts duplicate enabled token entries.
+    function test_advanceTempo_duplicateEnabledToken_accepts() public {
+        address token = address(0x777);
+        vm.etch(TIP20_FACTORY_ADDRESS, hex"00");
+        vm.mockCall(
+            TIP20_FACTORY_ADDRESS,
+            abi.encodeWithSelector(ITIP20ZoneFactory.enableToken.selector),
+            abi.encode()
+        );
+
+        EnabledToken[] memory enabledTokens = new EnabledToken[](2);
+        enabledTokens[0] =
+            EnabledToken({ token: token, name: "Token", symbol: "TOK", currency: "USD" });
+        enabledTokens[1] = enabledTokens[0];
+
+        vm.prank(sequencer);
+        _advanceTempoQueued(new QueuedDeposit[](0), new DecryptionData[](0), enabledTokens);
+    }
+
+    /// @notice Claiming with no refund returns zero and mints nothing.
+    function test_claimRefund_zeroAmount() public {
+        vm.prank(alice);
+        uint128 amount = inbox.claimRefund(address(zoneToken));
+
+        assertEq(amount, 0);
+        assertEq(zoneToken.balanceOf(alice), 0);
+    }
+
+    /// @notice Claiming pays a parked mint refund and clears it.
+    function test_claimRefund_success() public {
+        zoneToken.setMinter(address(inbox), false);
+        Deposit[] memory deposits = new Deposit[](1);
+        deposits[0] = Deposit({
+            token: address(zoneToken),
+            sender: alice,
+            to: bob,
+            amount: 100e6,
+            bouncebackRecipient: address(0),
+            memo: bytes32(0)
+        });
+        tempoState.setMockStorageValue(
+            mockPortal,
+            PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
+            keccak256(abi.encode(DepositType.Regular, deposits[0], bytes32(0)))
+        );
+
+        vm.prank(sequencer);
+        _advanceTempo(deposits);
+        assertEq(inbox.refunds(address(zoneToken), bob), 100e6);
+
+        zoneToken.setMinter(address(inbox), true);
+        vm.prank(bob);
+        uint128 amount = inbox.claimRefund(address(zoneToken));
+
+        assertEq(amount, 100e6);
+        assertEq(inbox.refunds(address(zoneToken), bob), 0);
+        assertEq(zoneToken.balanceOf(bob), 100e6);
+    }
+
+    /// @notice Credited supply plus parked refunds equals processed deposit value.
+    function testFuzz_advanceTempo_zoneSupplyInvariant(
+        uint8 rawRegular,
+        uint8 rawEncrypted
+    )
+        public
+    {
+        uint256 regularCount = bound(rawRegular, 0, 4);
+        uint256 encryptedCount = bound(rawEncrypted, 0, 4);
+        uint256 totalCount = regularCount + encryptedCount;
+        vm.assume(totalCount > 0);
+
+        address encryptedRecipient = address(0x500);
+        _setupEncryptionKeyMock(0, keccak256("seq-key"), 0x03);
+        _setupPrecompileMocks(encryptedRecipient, bytes32("memo"));
+
+        QueuedDeposit[] memory deposits = new QueuedDeposit[](totalCount);
+        DecryptionData[] memory decs = new DecryptionData[](encryptedCount);
+        uint128 netCredited;
+        bytes32 currentHash;
+
+        for (uint256 i = 0; i < regularCount; i++) {
+            Deposit memory d = Deposit({
+                token: address(zoneToken),
+                sender: alice,
+                to: bob,
+                amount: uint128((i + 1) * 10e6),
+                bouncebackRecipient: bob,
+                memo: bytes32(i)
+            });
+            deposits[i] = QueuedDeposit({
+                depositType: DepositType.Regular, depositData: abi.encode(d), rejected: false
+            });
+            currentHash = keccak256(abi.encode(DepositType.Regular, d, currentHash));
+            netCredited += d.amount;
+        }
+
+        for (uint256 i = 0; i < encryptedCount; i++) {
+            uint128 amount = uint128((i + 1) * 20e6);
+            (QueuedDeposit memory qd, EncryptedDeposit memory ed) =
+                _makeEncryptedDeposit(alice, amount, 0);
+            deposits[regularCount + i] = qd;
+            decs[i] = DecryptionData({
+                sharedSecret: bytes32(uint256(i + 1)),
+                sharedSecretYParity: 0x02,
+                cpProof: ChaumPedersenProof({ s: bytes32(uint256(1)), c: bytes32(uint256(2)) })
+            });
+            currentHash = keccak256(abi.encode(DepositType.Encrypted, ed, currentHash));
+            netCredited += amount;
+        }
+
+        tempoState.setMockStorageValue(
+            mockPortal, PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, currentHash
+        );
+
+        vm.prank(sequencer);
+        inbox.advanceTempo("", deposits, decs, new EnabledToken[](0));
+
+        uint256 parkedRefunds = inbox.refunds(address(zoneToken), bob)
+            + inbox.refunds(address(zoneToken), encryptedRecipient);
+        assertEq(zoneToken.totalSupply() + parkedRefunds, netCredited);
     }
 
 }

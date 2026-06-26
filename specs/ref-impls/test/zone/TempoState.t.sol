@@ -464,4 +464,71 @@ contract TempoStateTest is Test {
         new TempoState(malformedHeader);
     }
 
+    /// @notice Finalization rejects a later header with the wrong parent hash.
+    function test_finalizeTempo_revertsOnWrongParentHashAfterAdvance() public {
+        bytes memory header1 = _buildTempoHeader(
+            genesisBlockHash,
+            keccak256("stateRoot1"),
+            keccak256("receiptsRoot1"),
+            keccak256("txRoot1"),
+            address(0x1),
+            GENESIS_BLOCK_NUMBER + 1,
+            GENESIS_TIMESTAMP + 12
+        );
+
+        vm.prank(zoneInbox);
+        tempoState.finalizeTempo(header1);
+
+        bytes memory header2 = _buildTempoHeader(
+            genesisBlockHash,
+            keccak256("stateRoot2"),
+            keccak256("receiptsRoot2"),
+            keccak256("txRoot2"),
+            address(0x2),
+            GENESIS_BLOCK_NUMBER + 2,
+            GENESIS_TIMESTAMP + 24
+        );
+
+        vm.prank(zoneInbox);
+        vm.expectRevert(ITempoState.InvalidParentHash.selector);
+        tempoState.finalizeTempo(header2);
+    }
+
+    /// @notice Finalization rejects a later header with a skipped block number.
+    function test_finalizeTempo_revertsOnNonSequentialBlockNumberAfterAdvance() public {
+        bytes memory header1 = _buildTempoHeader(
+            genesisBlockHash,
+            keccak256("stateRoot1"),
+            keccak256("receiptsRoot1"),
+            keccak256("txRoot1"),
+            address(0x1),
+            GENESIS_BLOCK_NUMBER + 1,
+            GENESIS_TIMESTAMP + 12
+        );
+
+        vm.prank(zoneInbox);
+        tempoState.finalizeTempo(header1);
+
+        bytes memory header2 = _buildTempoHeader(
+            keccak256(header1),
+            keccak256("stateRoot2"),
+            keccak256("receiptsRoot2"),
+            keccak256("txRoot2"),
+            address(0x2),
+            GENESIS_BLOCK_NUMBER + 3,
+            GENESIS_TIMESTAMP + 24
+        );
+
+        vm.prank(zoneInbox);
+        vm.expectRevert(ITempoState.InvalidBlockNumber.selector);
+        tempoState.finalizeTempo(header2);
+    }
+
+    /// @notice Access control is enforced before malformed header decoding.
+    function test_finalizeTempo_revertsOnAccessControlBeforeDecodingHeader() public {
+        vm.prank(notZoneInbox);
+        vm.expectRevert(ITempoState.OnlyZoneInbox.selector);
+        tempoState.finalizeTempo(hex"01");
+    }
+
 }

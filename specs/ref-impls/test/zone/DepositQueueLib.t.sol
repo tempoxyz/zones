@@ -315,6 +315,70 @@ contract DepositQueueLibTest is Test {
         assertTrue(regularHash != encryptedHash);
     }
 
+    /// @notice Regular deposit hash chains are deterministic across replays.
+    function testFuzz_enqueue_hashChainDeterminism(uint8 rawCount, bytes32 seed) public pure {
+        uint256 count = (uint256(rawCount) % 32) + 1;
+        bytes32 firstRun = bytes32(0);
+        bytes32 secondRun = bytes32(0);
+
+        for (uint256 i = 0; i < count; i++) {
+            Deposit memory d = _makeDeposit(seed, i);
+            bytes32 prevHash = firstRun;
+            firstRun = DepositQueueLib.enqueue(firstRun, d);
+            secondRun = DepositQueueLib.enqueue(secondRun, d);
+
+            assertEq(firstRun, secondRun);
+            assertEq(firstRun, keccak256(abi.encode(DepositType.Regular, d, prevHash)));
+        }
+
+        bytes32 replay = bytes32(0);
+        for (uint256 i = 0; i < count; i++) {
+            replay = DepositQueueLib.enqueue(replay, _makeDeposit(seed, i));
+        }
+
+        assertEq(firstRun, replay);
+    }
+
+    /// @notice Regular and encrypted discriminators produce distinct queue hashes.
+    function testFuzz_enqueue_discriminatorsSeparateRegularAndEncrypted(
+        bytes32 prevHash,
+        bytes32 seed,
+        uint128 amount
+    )
+        public
+        pure
+    {
+        Deposit memory d = Deposit({
+            token: address(0x1000),
+            sender: address(0x200),
+            to: address(uint160(uint256(seed))),
+            amount: amount,
+            bouncebackRecipient: address(0x300),
+            memo: seed
+        });
+        EncryptedDeposit memory ed = EncryptedDeposit({
+            token: d.token,
+            sender: d.sender,
+            amount: d.amount,
+            bouncebackRecipient: d.bouncebackRecipient,
+            keyIndex: uint256(seed),
+            encrypted: EncryptedDepositPayload({
+                ephemeralPubkeyX: seed,
+                ephemeralPubkeyYParity: 0x02,
+                ciphertext: abi.encodePacked(seed, seed),
+                nonce: bytes12(seed),
+                tag: bytes16(seed)
+            })
+        });
+
+        bytes32 regularHash = DepositQueueLib.enqueue(prevHash, d);
+        bytes32 encryptedHash = DepositQueueLib.enqueueEncrypted(prevHash, ed);
+
+        assertEq(regularHash, keccak256(abi.encode(DepositType.Regular, d, prevHash)));
+        assertEq(encryptedHash, keccak256(abi.encode(DepositType.Encrypted, ed, prevHash)));
+        assertTrue(regularHash != encryptedHash);
+    }
+
     /*//////////////////////////////////////////////////////////////
                     PLAINTEXT ENCODE / DECODE TESTS
     //////////////////////////////////////////////////////////////*/
@@ -456,6 +520,19 @@ contract DepositQueueLibTest is Test {
         assembly {
             value := mload(add(raw, 32))
         }
+    }
+
+    function _makeDeposit(bytes32 seed, uint256 index) internal pure returns (Deposit memory) {
+        return Deposit({
+            token: address(uint160(uint256(keccak256(abi.encode(seed, "token", index))))),
+            sender: address(uint160(uint256(keccak256(abi.encode(seed, "sender", index))))),
+            to: address(uint160(uint256(keccak256(abi.encode(seed, "to", index))))),
+            amount: uint128(uint256(keccak256(abi.encode(seed, "amount", index)))),
+            bouncebackRecipient: address(
+                uint160(uint256(keccak256(abi.encode(seed, "bounceback", index))))
+            ),
+            memo: keccak256(abi.encode(seed, "memo", index))
+        });
     }
 
 }

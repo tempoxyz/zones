@@ -5,6 +5,7 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 import { ITIP403Registry } from "tempo-std/interfaces/ITIP403Registry.sol";
 
 import { BLOCKHASH_HISTORY_WINDOW } from "../../src/zone/BlockHashHistory.sol";
+import { DepositQueueLib } from "../../src/zone/DepositQueueLib.sol";
 import {
     BlockTransition,
     Deposit,
@@ -29,6 +30,7 @@ import {
     ZoneParams
 } from "../../src/zone/IZone.sol";
 import { EMPTY_SENTINEL, WithdrawalQueueLib } from "../../src/zone/WithdrawalQueueLib.sol";
+import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/zone/WithdrawalQueueLib.sol";
 import { ZoneFactory } from "../../src/zone/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/zone/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/zone/ZonePortal.sol";
@@ -2699,6 +2701,284 @@ contract ZonePortalTest is BaseTest {
             entry.yParity,
             "vm.load yParity != encryptionKeyAt(0).yParity"
         );
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                         ADDITIONAL COVERAGE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Records that false token transferFrom returns do not block deposits.
+    function test_deposit_tokenTransferFromReturnsFalse_currentlyNotChecked() public {
+        vm.fee(0);
+        uint128 amount = 500e6;
+
+        vm.mockCall(
+            address(pathUSD),
+            abi.encodeWithSelector(ITIP20.transferFrom.selector, alice, address(portal), amount),
+            abi.encode(false)
+        );
+
+        // Records current behavior: a false TIP-20 return value is not checked.
+        vm.prank(alice);
+        bytes32 depositHash = portal.deposit(address(pathUSD), bob, amount, bytes32("memo"), bob);
+
+        assertEq(portal.depositCount(), 1);
+        assertEq(portal.currentDepositQueueHash(), depositHash);
+    }
+
+    /// @notice Sequencer updates the zone gas rate and emits the new value.
+    function test_setZoneGasRate_updatesRateAndEmits() public {
+        uint128 newRate = 42;
+
+        vm.expectEmit(false, false, false, true, address(portal));
+        emit IZonePortal.ZoneGasRateUpdated(newRate);
+        portal.setZoneGasRate(newRate);
+
+        assertEq(portal.zoneGasRate(), newRate);
+    }
+
+    /// @notice Rejects zone gas rates above the configured maximum.
+    function test_setZoneGasRate_revertsWhenTooHigh() public {
+        uint128 tooHigh = uint128(1e18) + 1;
+
+        vm.expectRevert(IZonePortal.GasFeeRateTooHigh.selector);
+        portal.setZoneGasRate(tooHigh);
+    }
+
+    /// @notice Only the sequencer can update the zone gas rate.
+    function test_setZoneGasRate_revertsIfNotSequencer() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setZoneGasRate(1);
+    }
+
+    /// @notice Claiming with no refund emits and returns zero without changing state.
+    function test_claimRefund_zeroAmount() public {
+        vm.expectEmit(true, true, false, true, address(portal));
+        emit IZonePortal.RefundClaimed(alice, address(pathUSD), 0);
+
+        vm.prank(alice);
+        uint128 amount = portal.claimRefund(address(pathUSD));
+
+        assertEq(amount, 0);
+        assertEq(portal.refunds(address(pathUSD), alice), 0);
+    }
+
+    /// @notice Claiming pays out a refund parked by a failed bounced withdrawal.
+    function test_claimRefund_successAfterDepositBounceBackPending() public {
+        vm.fee(0);
+        uint128 depositAmount = 1000e6;
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), depositAmount);
+        portal.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 250e6, bytes32(0), 0, address(0), "");
+        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+
+        vm.roll(block.number + 1);
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("refund")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash(),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+            wHash,
+            "",
+            ""
+        );
+
+        vm.mockCall(
+            address(pathUSD),
+            abi.encodeWithSelector(ITIP20.transfer.selector, bob, w.amount),
+            abi.encode(false)
+        );
+        portal.processWithdrawal(w, bytes32(0));
+
+        assertEq(portal.refunds(address(pathUSD), bob), w.amount);
+
+        vm.clearMockedCalls();
+        uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
+
+        vm.prank(bob);
+        uint128 claimed = portal.claimRefund(address(pathUSD));
+
+        assertEq(claimed, w.amount);
+        assertEq(portal.refunds(address(pathUSD), bob), 0);
+        assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + w.amount);
+    }
+
+    /// @notice Submitting a batch reverts once the withdrawal queue is full.
+    function test_withdrawalQueue_revertsWhenFull() public {
+        vm.roll(genesisTempoBlockNumber + 1);
+        uint256 i;
+        while (
+            portal.withdrawalQueueTail() - portal.withdrawalQueueHead() < WITHDRAWAL_QUEUE_CAPACITY
+        ) {
+            portal.submitBatch(
+                genesisTempoBlockNumber,
+                0,
+                BlockTransition({
+                    prevBlockHash: portal.blockHash(), nextBlockHash: keccak256(abi.encode("s", i))
+                }),
+                DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: portal.currentDepositQueueHash(),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+                keccak256(abi.encode("w", i)),
+                "",
+                ""
+            );
+            i++;
+            assertLe(i, WITHDRAWAL_QUEUE_CAPACITY);
+        }
+        assertEq(
+            portal.withdrawalQueueTail() - portal.withdrawalQueueHead(), WITHDRAWAL_QUEUE_CAPACITY
+        );
+
+        bytes32 prevBlockHash = portal.blockHash();
+        bytes32 depositQueueHash = portal.currentDepositQueueHash();
+        vm.expectRevert(WithdrawalQueueLib.WithdrawalQueueFull.selector);
+        portal.submitBatch(
+            genesisTempoBlockNumber,
+            0,
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("full") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositQueueHash,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            keccak256("overflow"),
+            "",
+            ""
+        );
+    }
+
+    /// @notice Deposit fee equals fixed deposit gas multiplied by zone gas rate.
+    function testFuzz_calculateDepositFee(uint128 zoneGasRate) public {
+        zoneGasRate = uint128(bound(zoneGasRate, 0, portal.MAX_GAS_FEE_RATE()));
+
+        portal.setZoneGasRate(zoneGasRate);
+
+        uint128 fee = portal.calculateDepositFee();
+
+        assertEq(fee, uint128(100_000) * zoneGasRate);
+    }
+
+    /// @notice Bounceback fee rounds basefee gas cost up to token units.
+    function testFuzz_calculateBouncebackFee(uint256 basefee) public {
+        basefee = bound(basefee, 0, 1e18);
+        vm.fee(basefee);
+
+        uint256 expected = (uint256(300_000) * basefee + 1e12 - 1) / 1e12;
+        uint128 fee = portal.calculateBouncebackFee();
+
+        assertEq(fee, uint128(expected));
+    }
+
+    /// @notice Deposits below fees revert and valid amounts enqueue the net amount.
+    function testFuzz_deposit_amountBoundary(uint128 amount) public {
+        amount = uint128(bound(amount, 0, 1000e6));
+        vm.fee(1e12);
+        portal.setZoneGasRate(1);
+        uint128 minimum = portal.calculateDepositFee() + portal.calculateBouncebackFee();
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), amount);
+        if (amount < minimum) {
+            vm.expectRevert(IZonePortal.DepositTooSmall.selector);
+            portal.deposit(address(pathUSD), bob, amount, bytes32("memo"), bob);
+        } else {
+            bytes32 depositHash =
+                portal.deposit(address(pathUSD), bob, amount, bytes32("memo"), bob);
+            Deposit memory depositData = Deposit({
+                token: address(pathUSD),
+                sender: alice,
+                to: bob,
+                amount: amount - portal.calculateDepositFee(),
+                bouncebackRecipient: bob,
+                memo: bytes32("memo")
+            });
+            assertEq(depositHash, DepositQueueLib.enqueue(bytes32(0), depositData));
+        }
+        vm.stopPrank();
+    }
+
+    /// @notice Multiple deposits update the queue hash chain and count in order.
+    function testFuzz_deposit_hashChain(uint8 depositIterations) public {
+        uint256 iterations = bound(depositIterations, 1, 10);
+        uint128 amount = 1000e6;
+        bytes32 expectedHash;
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), amount * iterations);
+        for (uint256 i = 0; i < iterations; i++) {
+            bytes32 memo = bytes32(i);
+            bytes32 actualHash = portal.deposit(address(pathUSD), bob, amount, memo, bob);
+            Deposit memory depositData = Deposit({
+                token: address(pathUSD),
+                sender: alice,
+                to: bob,
+                amount: amount - portal.calculateDepositFee(),
+                bouncebackRecipient: bob,
+                memo: memo
+            });
+            expectedHash = DepositQueueLib.enqueue(expectedHash, depositData);
+            assertEq(actualHash, expectedHash);
+        }
+        vm.stopPrank();
+
+        assertEq(portal.currentDepositQueueHash(), expectedHash);
+        assertEq(portal.depositCount(), iterations);
+    }
+
+    /// @notice Key lookup returns the latest encryption key active at the query block.
+    function testFuzz_encryptionKeyAtBlock(
+        uint16 gap1,
+        uint16 gap2,
+        uint16 gap3,
+        uint16 queryOffset
+    )
+        public
+    {
+        uint64[3] memory activationBlocks;
+        bytes32[3] memory xs;
+        uint8[3] memory yParities;
+
+        activationBlocks[0] = uint64(bound(gap1, 1, 100));
+        vm.roll(activationBlocks[0]);
+        (xs[0], yParities[0]) = _setEncKeyWithPoP(ENC_KEY_1);
+
+        activationBlocks[1] = activationBlocks[0] + uint64(bound(gap2, 1, 100));
+        vm.roll(activationBlocks[1]);
+        (xs[1], yParities[1]) = _setEncKeyWithPoP(ENC_KEY_2);
+
+        activationBlocks[2] = activationBlocks[1] + uint64(bound(gap3, 1, 100));
+        vm.roll(activationBlocks[2]);
+        (xs[2], yParities[2]) = _setEncKeyWithPoP(ENC_KEY_3);
+
+        uint64 queryBlock = activationBlocks[0] + uint64(bound(queryOffset, 0, 300));
+        uint256 expectedIndex;
+        for (uint256 i = 0; i < activationBlocks.length; i++) {
+            if (activationBlocks[i] <= queryBlock) {
+                expectedIndex = i;
+            }
+        }
+
+        (bytes32 x, uint8 yParity, uint256 keyIndex) = portal.encryptionKeyAtBlock(queryBlock);
+        assertEq(x, xs[expectedIndex]);
+        assertEq(yParity, yParities[expectedIndex]);
+        assertEq(keyIndex, expectedIndex);
     }
 
 }

@@ -324,6 +324,73 @@ contract WithdrawalQueueLibTest is Test {
         assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
     }
 
+    /// @notice A full queue dequeues every withdrawal in FIFO order and empties.
+    function test_enqueueDequeue_fullCapacityInFifoOrder() public {
+        Withdrawal[] memory withdrawals = new Withdrawal[](WITHDRAWAL_QUEUE_CAPACITY);
+
+        for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+            withdrawals[i] = _makeWithdrawal(alice, bob, uint128(i + 1));
+            harness.enqueue(keccak256(abi.encode(withdrawals[i], EMPTY_SENTINEL)));
+            assertEq(harness.length(), i + 1);
+        }
+
+        assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
+
+        for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+            harness.dequeue(withdrawals[i], bytes32(0));
+            assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY - i - 1);
+        }
+
+        assertFalse(harness.hasWithdrawals());
+        assertEq(harness.head(), WITHDRAWAL_QUEUE_CAPACITY);
+        assertEq(harness.tail(), WITHDRAWAL_QUEUE_CAPACITY);
+    }
+
+    /// @notice Dequeuing the last item marks the exhausted slot empty.
+    function test_dequeue_setsEmptySentinelWhenSlotExhausted() public {
+        Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
+
+        harness.enqueue(keccak256(abi.encode(w, EMPTY_SENTINEL)));
+        harness.dequeue(w, bytes32(0));
+
+        assertEq(harness.slots(0), EMPTY_SENTINEL);
+        assertEq(harness.head(), 1);
+        assertEq(harness.length(), 0);
+    }
+
+    /// @notice Fuzzed enqueues and dequeues preserve FIFO position and length.
+    function testFuzz_enqueueDequeue_preservesFifoAndLength(bytes32 seed) public {
+        uint256 count = (uint256(seed) % WITHDRAWAL_QUEUE_CAPACITY) + 1;
+        Withdrawal[] memory withdrawals = new Withdrawal[](count);
+
+        for (uint256 i = 0; i < count; i++) {
+            uint128 amount = uint128(uint256(keccak256(abi.encode(seed, "amount", i))));
+            if (amount == 0) amount = 1;
+            withdrawals[i] = _makeWithdrawal(
+                address(uint160(uint256(keccak256(abi.encode(seed, "sender", i))))),
+                address(uint160(uint256(keccak256(abi.encode(seed, "to", i))))),
+                amount
+            );
+            harness.enqueue(keccak256(abi.encode(withdrawals[i], EMPTY_SENTINEL)));
+            assertEq(harness.length(), i + 1);
+        }
+
+        uint256 dequeues = uint256(keccak256(abi.encode(seed, "dequeues"))) % (count + 1);
+        for (uint256 i = 0; i < dequeues; i++) {
+            harness.dequeue(withdrawals[i], bytes32(0));
+            assertEq(harness.length(), count - i - 1);
+            assertEq(harness.head(), i + 1);
+        }
+
+        if (dequeues == count) {
+            assertFalse(harness.hasWithdrawals());
+        } else {
+            assertTrue(harness.hasWithdrawals());
+            assertEq(harness.head(), dequeues);
+            assertEq(harness.tail(), count);
+        }
+    }
+
     /*//////////////////////////////////////////////////////////////
                         LENGTH & HAS WITHDRAWALS
     //////////////////////////////////////////////////////////////*/
