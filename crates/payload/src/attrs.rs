@@ -38,13 +38,6 @@ pub struct ZonePayloadAttributes {
     /// processes exactly one L1 block via `advanceTempo`. Decryption and
     /// TIP-403 policy checks have already been performed by the engine.
     pub l1_block: PreparedL1Block,
-
-    /// Whether this zone block closes the current withdrawal batch.
-    ///
-    /// Finalizing blocks append `ZoneOutbox.finalizeWithdrawalBatch` after user
-    /// transactions. Intermediate blocks omit it so withdrawals remain pending
-    /// until the batch boundary.
-    pub finalize_withdrawal_batch: bool,
 }
 
 impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
@@ -73,11 +66,6 @@ impl ZonePayloadAttributes {
     /// Returns a reference to the prepared L1 block data.
     pub fn l1_block(&self) -> &PreparedL1Block {
         &self.l1_block
-    }
-
-    /// Returns true when this payload should finalize the open withdrawal batch.
-    pub const fn finalize_withdrawal_batch(&self) -> bool {
-        self.finalize_withdrawal_batch
     }
 
     /// Returns the extra data for the block header (always empty for zones).

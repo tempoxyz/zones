@@ -30,13 +30,17 @@ use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
 use reth_storage_api::{
-    BlockReader, ReceiptProvider, StateProvider, StateProviderFactory, TransactionsProvider,
+    BlockReader, HeaderProvider, ReceiptProvider, StateProvider, StateProviderFactory,
+    TransactionsProvider,
 };
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool,
     error::InvalidPoolTransactionError,
 };
-use std::{sync::Arc, time::Instant};
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
@@ -56,10 +60,33 @@ struct RequestedWithdrawalContext {
     tx_hash: B256,
 }
 
+struct OpenBatchRequestedWithdrawals {
+    previous_boundary_block: u64,
+    requested_withdrawals: Vec<RequestedWithdrawalContext>,
+}
+
+const DEFAULT_WITHDRAWAL_BATCH_INTERVAL: Duration = Duration::from_secs(60);
+
 /// Factory for constructing the zone payload builder.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
-pub struct ZonePayloadFactory;
+pub struct ZonePayloadFactory {
+    withdrawal_batch_interval: Duration,
+}
+
+impl ZonePayloadFactory {
+    pub fn new(withdrawal_batch_interval: Duration) -> Self {
+        Self {
+            withdrawal_batch_interval,
+        }
+    }
+}
+
+impl Default for ZonePayloadFactory {
+    fn default() -> Self {
+        Self::new(DEFAULT_WITHDRAWAL_BATCH_INTERVAL)
+    }
+}
 
 impl<Node, EvmConfig> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Provider>, EvmConfig>
     for ZonePayloadFactory
@@ -90,6 +117,7 @@ where
             pool,
             provider: ctx.provider().clone(),
             evm_config,
+            withdrawal_batch_interval: self.withdrawal_batch_interval,
         })
     }
 }
@@ -103,12 +131,15 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
     evm_config: EvmConfig,
+    /// Maximum chain-time duration between withdrawal batch finalizations.
+    withdrawal_batch_interval: Duration,
 }
 
 impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
 where
     Provider: StateProviderFactory
         + ChainSpecProvider<ChainSpec = TempoChainSpec>
+        + HeaderProvider<Header = TempoHeader>
         + BlockReader<
             Block = tempo_primitives::Block,
             Transaction = TempoTxEnvelope,
@@ -384,13 +415,23 @@ where
             }
         }
 
-        // Finalize the withdrawal batch only at builder-selected batch boundaries.
-        // Intermediate blocks leave requests pending in ZoneOutbox storage. On the
-        // final block, sweep all pending withdrawals and provide metadata for the
-        // whole open batch, not just this block.
-        if attributes.finalize_withdrawal_batch() {
-            let mut batch_withdrawals =
-                load_open_batch_requested_withdrawals(&self.provider, parent_header.number())?;
+        let open_batch =
+            load_open_batch_requested_withdrawals(&self.provider, parent_header.number())?;
+        let has_prior_withdrawals = !open_batch.requested_withdrawals.is_empty();
+        let has_current_withdrawals = !requested_withdrawals.is_empty();
+        let batch_interval_elapsed = withdrawal_batch_interval_elapsed(
+            &self.provider,
+            open_batch.previous_boundary_block,
+            parent_header.header(),
+            attributes.timestamp(),
+            self.withdrawal_batch_interval,
+        )?;
+
+        // Finalize the withdrawal batch when there is withdrawal work to make
+        // visible on L1, or when the configured empty-batch interval elapses so
+        // the L2 and L1 batch indexes remain in lockstep.
+        if has_prior_withdrawals || has_current_withdrawals || batch_interval_elapsed {
+            let mut batch_withdrawals = open_batch.requested_withdrawals;
             batch_withdrawals.extend(requested_withdrawals);
 
             let encrypted_senders = batch_withdrawals
@@ -533,7 +574,7 @@ where
 
 /// Build the `finalizeWithdrawalBatch(count)` system transaction.
 ///
-/// This must be the **last** transaction in every zone block. It calls
+/// This must be the **last** transaction in each finalizing zone block. It calls
 /// [`ZoneOutbox.finalizeWithdrawalBatch`](crate::abi::ZoneOutbox) which:
 /// - Collects up to `count` pending withdrawals
 /// - Builds the withdrawal hash chain (oldest outermost)
@@ -571,8 +612,8 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     )
 }
 
-/// Reconstruct withdrawal requests for the currently open batch from canonical
-/// history.
+/// Reconstruct withdrawal requests and boundary metadata for the currently open
+/// batch from canonical history.
 ///
 /// Scans committed blocks after the most recent `BatchFinalized` boundary up to
 /// `parent_block_number`, collecting successful `WithdrawalRequested` logs in
@@ -581,19 +622,24 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
 fn load_open_batch_requested_withdrawals<Provider>(
     provider: &Provider,
     parent_block_number: u64,
-) -> Result<Vec<RequestedWithdrawalContext>, PayloadBuilderError>
+) -> Result<OpenBatchRequestedWithdrawals, PayloadBuilderError>
 where
     Provider: ReceiptProvider<Receipt = TempoReceipt>
         + TransactionsProvider<Transaction = TempoTxEnvelope>,
 {
+    let empty_batch = |previous_boundary_block| OpenBatchRequestedWithdrawals {
+        previous_boundary_block,
+        requested_withdrawals: Vec::new(),
+    };
+
     if parent_block_number == 0 {
-        return Ok(Vec::new());
+        return Ok(empty_batch(0));
     }
 
     let previous_boundary = find_previous_batch_finalized_block(provider, parent_block_number)?;
     let from = previous_boundary.saturating_add(1);
     if from > parent_block_number {
-        return Ok(Vec::new());
+        return Ok(empty_batch(previous_boundary));
     }
 
     let mut requested = Vec::new();
@@ -601,11 +647,42 @@ where
         collect_requested_withdrawals_from_canonical_block(provider, block_number, &mut requested)?;
     }
 
-    Ok(requested)
+    Ok(OpenBatchRequestedWithdrawals {
+        previous_boundary_block: previous_boundary,
+        requested_withdrawals: requested,
+    })
+}
+
+fn withdrawal_batch_interval_elapsed<Provider>(
+    provider: &Provider,
+    previous_boundary_block: u64,
+    parent_header: &TempoHeader,
+    current_timestamp: u64,
+    withdrawal_batch_interval: Duration,
+) -> Result<bool, PayloadBuilderError>
+where
+    Provider: HeaderProvider<Header = TempoHeader>,
+{
+    let previous_boundary_timestamp = if previous_boundary_block == parent_header.number() {
+        parent_header.timestamp()
+    } else {
+        provider
+            .header_by_number(previous_boundary_block)
+            .map_err(|err| PayloadBuilderError::Internal(err.into()))?
+            .ok_or_else(|| {
+                PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                    "missing header for canonical zone block {previous_boundary_block}"
+                )))
+            })?
+            .timestamp()
+    };
+
+    Ok(current_timestamp
+        >= previous_boundary_timestamp.saturating_add(withdrawal_batch_interval.as_secs()))
 }
 
 /// Walk backwards from the `parent_block_number` and find the most recent
-/// canonical block that emitted a `BatchFinalized`
+/// canonical block that emitted a successful `BatchFinalized` log.
 fn find_previous_batch_finalized_block<Provider>(
     provider: &Provider,
     parent_block_number: u64,
@@ -623,20 +700,7 @@ where
                 )))
             })?;
 
-        // Find a `BatchFinalzied`
-        if receipts.iter().any(|receipt| {
-            if !receipt.status() {
-                return false;
-            }
-
-            receipt.logs().iter().any(|log| {
-                log.address == ZONE_OUTBOX_ADDRESS
-                    && log.topics().first().copied().is_some_and(|topic| {
-                        topic == abi::ZoneOutbox::BatchFinalized::SIGNATURE_HASH
-                    })
-            })
-        }) {
-            // If we found a `BatchFinalized` in any of the logs, return the block number
+        if receipts.iter().any(receipt_has_batch_finalized) {
             return Ok(block_number);
         }
     }
@@ -690,6 +754,21 @@ where
     }
 
     Ok(())
+}
+
+fn receipt_has_batch_finalized(receipt: &TempoReceipt) -> bool {
+    if !receipt.status() {
+        return false;
+    }
+
+    receipt.logs().iter().any(|log| {
+        log.address == ZONE_OUTBOX_ADDRESS
+            && log
+                .topics()
+                .first()
+                .copied()
+                .is_some_and(|topic| topic == abi::ZoneOutbox::BatchFinalized::SIGNATURE_HASH)
+    })
 }
 
 fn collect_requested_withdrawals(

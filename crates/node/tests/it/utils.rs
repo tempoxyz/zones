@@ -522,6 +522,7 @@ impl ZoneTestNode {
             4,
             std::time::Duration::from_millis(100),
         )
+        .with_withdrawal_batch_interval(std::time::Duration::from_secs(4))
         .with_initial_tokens(vec![]);
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
