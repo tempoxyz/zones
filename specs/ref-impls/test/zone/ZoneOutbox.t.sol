@@ -497,6 +497,83 @@ contract ZoneOutboxTest is Test {
                       TOKEN TRANSFER TESTS
     //////////////////////////////////////////////////////////////*/
 
+    /// @notice Verifies the sender is debited `amount + fee` when a gas rate is configured.
+    /// @dev With the default zero gas rate the fee is always zero, so `amount + fee` reads
+    ///      the same as `amount`; a non-zero rate and gas limit make the fee observable.
+    ///      The expected fee hardcodes WITHDRAWAL_BASE_GAS (50_000) so a mutated base-gas
+    ///      constant is also caught.
+    function test_requestWithdrawal_burnsAmountPlusFee() public {
+        uint128 rate = 3;
+        uint64 gasLimit = 100_000;
+        vm.prank(sequencer);
+        outbox.setTempoGasRate(rate);
+
+        uint128 amount = 500e6;
+        uint128 expectedFee = uint128(50_000 + gasLimit) * rate;
+        assertGt(expectedFee, 0);
+
+        uint256 aliceBefore = zoneToken.balanceOf(alice);
+        uint256 supplyBefore = zoneToken.totalSupply();
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), amount + expectedFee);
+        outbox.requestWithdrawal(address(zoneToken), bob, amount, bytes32(0), gasLimit, alice, "");
+        vm.stopPrank();
+
+        assertEq(zoneToken.balanceOf(alice), aliceBefore - amount - expectedFee);
+        assertEq(zoneToken.totalSupply(), supplyBefore - amount - expectedFee);
+    }
+
+    /// @notice Callback data exactly at the maximum size is accepted (boundary is inclusive).
+    /// @dev Guards `data.length > MAX` against `>=`/`==` mutants, which would reject MAX bytes.
+    function test_requestWithdrawal_callbackDataAtMaxSize_succeeds() public {
+        bytes memory data = new bytes(outbox.MAX_CALLBACK_DATA_SIZE());
+
+        uint256 supplyBefore = zoneToken.totalSupply();
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
+        outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, data);
+        vm.stopPrank();
+
+        assertEq(zoneToken.totalSupply(), supplyBefore - 500e6);
+    }
+
+    /// @notice Callback data one byte over the maximum reverts.
+    function test_requestWithdrawal_callbackDataAboveMax_reverts() public {
+        bytes memory data = new bytes(outbox.MAX_CALLBACK_DATA_SIZE() + 1);
+
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 500e6);
+        vm.expectRevert(ZoneOutbox.CallbackDataTooLarge.selector);
+        outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, data);
+        vm.stopPrank();
+    }
+
+    /// @notice Finalizing with a count above the true pending count clamps via length - head.
+    /// @dev After the queue head advances, pending must subtract the head. `+`/`^`/`|` mutants
+    ///      over-report pending, so an over-large count would escape clamping and the
+    ///      encrypted-sender length check would mismatch and revert.
+    function test_finalizeWithdrawalBatch_clampsUsingLengthMinusHead() public {
+        vm.startPrank(alice);
+        zoneToken.approve(address(outbox), 4 * 500e6);
+        for (uint256 i = 0; i < 4; i++) {
+            outbox.requestWithdrawal(address(zoneToken), bob, 500e6, bytes32(0), 0, alice, "");
+        }
+        vm.stopPrank();
+
+        // Finalize the first two, advancing the head to 2 (two remain pending).
+        _finalizeWithdrawalBatch(2);
+        assertEq(outbox.pendingWithdrawalsCount(), 2);
+
+        // Request count = 4 (> real pending 2) but supply only the 2 valid encrypted senders.
+        // Correct code clamps to 2 and succeeds; an additive-head mutant expects 4 and reverts.
+        // Build the senders array before the prank: the getter call would consume it otherwise.
+        bytes[] memory senders = _emptyEncryptedSenders(4);
+        vm.prank(sequencer);
+        outbox.finalizeWithdrawalBatch(4, uint64(block.number), senders);
+        assertEq(outbox.pendingWithdrawalsCount(), 0);
+    }
+
     function test_requestWithdrawal_transfersFromSender() public {
         uint256 aliceBalanceBefore = zoneToken.balanceOf(alice);
 

@@ -2053,6 +2053,17 @@ contract ZonePortalTest is BaseTest {
         portal.encryptionKeyAt(0);
     }
 
+    /// @notice Reverts with InvalidEncryptionKeyIndex when the index is strictly past the end.
+    /// @dev With one key set, the empty-array test cannot tell `index >= length` from
+    ///      `index == length`. Querying index 2 (length 1) distinguishes them: the `==` mutant
+    ///      would fall through to an out-of-bounds array access (a panic, not this revert).
+    function test_encryptionKeyAt_revertsWhenIndexAboveLength() public {
+        _setEncKeyWithPoP(ENC_KEY_1);
+
+        vm.expectRevert(abi.encodeWithSelector(IZonePortal.InvalidEncryptionKeyIndex.selector, 2));
+        portal.encryptionKeyAt(2);
+    }
+
     function test_encryptionKeyAtBlock_binarySearch() public {
         // Set key1 at block 10
         vm.roll(10);
@@ -2743,6 +2754,15 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(IZonePortal.GasFeeRateTooHigh.selector);
         portal.setZoneGasRate(tooHigh);
+    }
+
+    /// @notice A gas rate exactly at the maximum is accepted (the bound is inclusive).
+    /// @dev Guards `_zoneGasRate > MAX` against a `>=` mutant, which would reject the maximum.
+    function test_setZoneGasRate_acceptsExactMaximum() public {
+        uint128 maxRate = portal.MAX_GAS_FEE_RATE();
+
+        portal.setZoneGasRate(maxRate);
+        assertEq(portal.zoneGasRate(), maxRate);
     }
 
     /// @notice Only the sequencer can update the zone gas rate.

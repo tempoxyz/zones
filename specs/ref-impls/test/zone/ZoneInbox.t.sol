@@ -29,6 +29,24 @@ import { MockTempoState } from "./mocks/MockTempoState.sol";
 import { MockZoneToken } from "./mocks/MockZoneToken.sol";
 import { Test } from "forge-std/Test.sol";
 
+/// @dev Exposes ZoneInbox's internal helpers for direct unit testing. The encrypted-deposit
+///      suite reaches them only through the mocked AES-GCM precompile, so their outputs are
+///      otherwise unobserved. `_hmacSha256` only uses the SHA256 precompile (collaborator
+///      addresses irrelevant); `_readEncryptionKey` reads portal storage via TempoState.
+contract ZoneInboxHarness is ZoneInbox {
+
+    constructor(address portal, address state) ZoneInbox(address(0), portal, state) { }
+
+    function hmacSha256(bytes memory key, bytes memory message) external view returns (bytes32) {
+        return _hmacSha256(key, message);
+    }
+
+    function readEncryptionKey(uint256 keyIndex) external view returns (bytes32 x, uint8 yParity) {
+        return _readEncryptionKey(keyIndex);
+    }
+
+}
+
 /// @title ZoneInboxTest
 /// @notice Tests for ZoneInbox covering edge cases
 contract ZoneInboxTest is Test {
@@ -470,6 +488,87 @@ contract ZoneInboxTest is Test {
         uint256 slotMeta = slotX + 1;
         tempoState.setMockStorageValue(mockPortal, bytes32(slotX), keyX);
         tempoState.setMockStorageValue(mockPortal, bytes32(slotMeta), bytes32(uint256(keyYParity)));
+    }
+
+    function _rep(bytes1 b, uint256 n) internal pure returns (bytes memory out) {
+        out = new bytes(n);
+        for (uint256 i = 0; i < n; i++) {
+            out[i] = b;
+        }
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      INTERNAL HELPER UNIT TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Known-answer tests for the internal word-level HMAC-SHA256.
+    /// @dev The encrypted-deposit suite mocks the AES-GCM precompile, so the HMAC output is
+    ///      never observed there. These golden vectors (RFC 4231 cases 1-2 plus offline-computed
+    ///      cases) exercise every key-length branch: < 32 bytes (first-word masking), == 32,
+    ///      32-64 (second-word masking), == 64, and > 64 (key is hashed first).
+    function test_hmac_knownAnswerVectors() public {
+        ZoneInboxHarness h = new ZoneInboxHarness(mockPortal, address(tempoState));
+
+        assertEq(
+            h.hmacSha256(hex"4a656665", "what do ya want for nothing?"),
+            0x5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+        );
+        assertEq(
+            h.hmacSha256(_rep(0x0b, 20), "Hi There"),
+            0xb0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7
+        );
+        assertEq(
+            h.hmacSha256(_rep(0xaa, 32), "msg-32byte-key"),
+            0xf7a62f1ceb146c3e9f1562ed8133a36fb13c7f4c3e2ad8e3d5df5ebbd72e520e
+        );
+        assertEq(
+            h.hmacSha256(_rep(0xbb, 48), "msg-48byte-key"),
+            0x827ae58dc9bf44ebb5ee7a2375b84a947400c0833665104c46d2879a4c91cf30
+        );
+        assertEq(
+            h.hmacSha256(_rep(0xcc, 63), "msg-63byte-key"),
+            0xb2b5e90568a216eb95fe94169e69fc4a18897e15e0b5922d41c5d5183c7c8afe
+        );
+        assertEq(
+            h.hmacSha256(_rep(0xdd, 64), "msg-64byte-key"),
+            0x84ff5b758d4d9e4eebc0a4f611e464a1afd7845c0fd0cb2b517a930faeb2ddaa
+        );
+        assertEq(
+            h.hmacSha256(_rep(0xee, 65), "msg-65byte-key"),
+            0x7265d8f20eba414e2ca620c3135b691818b2864ebfa513c801682e32fabc2884
+        );
+    }
+
+    /// @notice Reads the encryption key at a high index to exercise the per-entry slot math.
+    /// @dev base + index*2 for x and +1 for the meta word; a large activationBlock packed
+    ///      above the y-parity ensures the low-byte parity extraction is exercised correctly.
+    ///      Index 3 (not 0/1) exposes index*2 vs index/2/shift mutants.
+    function test_readEncryptionKey_highIndex_readsCorrectSlots() public {
+        ZoneInboxHarness h = new ZoneInboxHarness(mockPortal, address(tempoState));
+
+        uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
+        uint256 slotX = base + (3 * 2);
+        bytes32 keyX = keccak256("key-at-index-3");
+        bytes32 meta = bytes32(uint256(0x02) | (uint256(123_456) << 8));
+        tempoState.setMockStorageValue(mockPortal, bytes32(slotX), keyX);
+        tempoState.setMockStorageValue(mockPortal, bytes32(slotX + 1), meta);
+
+        (bytes32 readX, uint8 readYParity) = h.readEncryptionKey(3);
+        assertEq(readX, keyX);
+        assertEq(readYParity, 0x02);
+    }
+
+    /// @notice An empty x slot reverts even when the meta slot is populated, proving x is read
+    ///         from base + index*2 (not the meta slot at +1).
+    function test_readEncryptionKey_emptyXSlot_reverts() public {
+        ZoneInboxHarness h = new ZoneInboxHarness(mockPortal, address(tempoState));
+
+        uint256 base = uint256(keccak256(abi.encode(uint256(PORTAL_ENCRYPTION_KEYS_SLOT))));
+        uint256 slotX = base + (2 * 2);
+        tempoState.setMockStorageValue(mockPortal, bytes32(slotX + 1), bytes32(uint256(0x03)));
+
+        vm.expectRevert();
+        h.readEncryptionKey(2);
     }
 
     /// @notice Build an EncryptedDeposit and its QueuedDeposit wrapper

@@ -87,6 +87,17 @@ contract ZoneConfigTest is BaseTest {
         portal.setSequencerEncryptionKey(x, yParity, v, r, s);
     }
 
+    /// @dev Finds the first private key >= `start` whose public key has the requested
+    ///      y-parity (0x02 even / 0x03 odd), so a test can pin distinct parities per entry.
+    function _pkWithParity(uint8 wantParity, uint256 start) internal returns (uint256) {
+        for (uint256 pk = start; pk < start + 100; pk++) {
+            Vm.Wallet memory w = vm.createWallet(pk);
+            uint8 p = w.publicKeyY % 2 == 0 ? 0x02 : 0x03;
+            if (p == wantParity) return pk;
+        }
+        revert("no key with requested parity");
+    }
+
     /// @notice Verifies the config reads the current sequencer from the portal.
     function test_sequencer_returnsPortalSequencer() public view {
         assertEq(config.sequencer(), portal.sequencer());
@@ -120,6 +131,35 @@ contract ZoneConfigTest is BaseTest {
         (bytes32 storedX, uint8 storedYParity) = config.sequencerEncryptionKey();
         assertEq(storedX, x);
         assertEq(storedYParity, yParity);
+    }
+
+    /// @notice Verifies the latest entry is read from the correct array slots with 3+ keys.
+    /// @dev With only two entries `length - 1` equals `length >> 1`, so the last-index math
+    ///      goes untested; three entries force index 2 and expose off-by-one / shift mutants.
+    ///      The last two entries are pinned to different y-parities so reading the wrong meta
+    ///      slot (slotX - 1 instead of slotX + 1) returns the wrong parity.
+    function test_sequencerEncryptionKey_threeKeys_readsLastEntry() public {
+        _setEncKeyWithPoP(_pkWithParity(0x02, 1));
+        vm.roll(block.number + 1);
+        _setEncKeyWithPoP(_pkWithParity(0x03, 2));
+        // Roll far ahead so the last entry's activationBlock differs from its y-parity,
+        // which kills the `metaSlot & 0xff -> metaSlot / 0xff` extraction mutant.
+        vm.roll(block.number + 100);
+        (bytes32 x, uint8 yParity) = _setEncKeyWithPoP(_pkWithParity(0x02, 3));
+        assertEq(yParity, 0x02);
+        _syncEncryptionKeys(3);
+
+        (bytes32 storedX, uint8 storedYParity) = config.sequencerEncryptionKey();
+        assertEq(storedX, x);
+        assertEq(storedYParity, yParity);
+    }
+
+    /// @notice Verifies membership is false for an address strictly greater than the sequencer.
+    /// @dev Guards the `==` check against `>=`/`>` mutants: the max address compares greater
+    ///      than any real sequencer, so an ordering operator would wrongly report membership.
+    function test_isSequencer_falseForAddressAboveSequencer() public view {
+        assertTrue(uint160(address(type(uint160).max)) > uint160(config.sequencer()));
+        assertFalse(config.isSequencer(address(type(uint160).max)));
     }
 
     /// @notice Verifies the config reads the pending sequencer from portal storage.
