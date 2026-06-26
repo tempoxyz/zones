@@ -58,24 +58,16 @@ jobs:
       pull-requests: write
     environment: pr-audit
     steps:
-      - name: Check org membership
+      - name: Check commenter permission
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          github-token: ${{ secrets.DEREK_BENCH_ACK_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
-            const org = 'tempoxyz';
-            const checkMembership = async (username) => {
-              try {
-                const { status } = await github.rest.orgs.checkMembershipForUser({ org, username });
-                return status === 204 || status === 302;
-              } catch {
-                return false;
-              }
-            };
-
+            const allowed = new Set(['OWNER', 'MEMBER', 'COLLABORATOR']);
             const commenter = context.payload.comment.user.login;
-            if (!await checkMembership(commenter)) {
-              core.setFailed(`@${commenter} is not a member of ${org}`);
+            const commenterAssociation = context.payload.comment.author_association;
+            if (!allowed.has(commenterAssociation)) {
+              core.setFailed(`@${commenter} is not allowed to trigger Cyclops audits (${commenterAssociation})`);
               return;
             }
 
@@ -85,15 +77,15 @@ jobs:
               pull_number: context.issue.number,
             });
             const prAuthor = pr.user.login;
-            if (!await checkMembership(prAuthor)) {
-              core.setFailed(`PR author @${prAuthor} is not a member of ${org}`);
+            if (!allowed.has(pr.author_association)) {
+              core.setFailed(`PR author @${prAuthor} is not allowed to trigger Cyclops audits (${pr.author_association})`);
             }
 
       - name: Parse arguments
         id: args
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
-          github-token: ${{ secrets.DEREK_BENCH_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             const usage = [
               '**Usage:** `cyclops audit [fast] [iterations=N] [hours=N] [config=pr-review.yaml] ',
@@ -236,7 +228,7 @@ jobs:
           ACTOR: ${{ steps.args.outputs.actor }}
           SUMMARY: ${{ steps.args.outputs.summary }}
         with:
-          github-token: ${{ secrets.DEREK_BENCH_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             try {
               await github.rest.reactions.createForIssueComment({
@@ -289,7 +281,7 @@ jobs:
           ACTOR: ${{ steps.args.outputs.actor }}
           SUMMARY: ${{ steps.args.outputs.summary }}
         with:
-          github-token: ${{ secrets.DEREK_BENCH_TOKEN }}
+          github-token: ${{ github.token }}
           script: |
             if (!process.env.COMMENT_ID) {
               core.setFailed('Missing acknowledgement comment id');
