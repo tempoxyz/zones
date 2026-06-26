@@ -4,6 +4,11 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    labels:
+      - "A-dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 7
     groups:
@@ -16,6 +21,12 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    labels:
+      - "A-dependencies"
+      - "A-ci"
+    commit-message:
+      prefix: "chore(ci)"
+    open-pull-requests-limit: 1
     cooldown:
       default-days: 7
     groups:
@@ -23,3 +34,15 @@ updates:
         applies-to: "version-updates"
         patterns: ["*"]
         update-types: ["minor", "patch"]
+
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    labels:
+      - "A-dependencies"
+    commit-message:
+      prefix: "chore(docker)"
+    open-pull-requests-limit: 1
+    cooldown:
+      default-days: 7
