@@ -6,14 +6,17 @@
 //! exercised via queue injection (with the L1 state cache seeded for precompile reads).
 
 use alloy::primitives::{Address, B256, Bytes, U256, address};
+use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
-use alloy_provider::ProviderBuilder;
+use alloy_provider::{Provider, ProviderBuilder};
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use alloy_sol_types::SolCall;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, TempoState, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZoneInbox, ZoneOutbox,
+    TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
+    ZoneInbox, ZoneOutbox,
 };
 use zone_l1::ChainTempoStateExt;
 
@@ -368,10 +371,11 @@ async fn test_large_deposit_batch() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verify the ZoneOutbox withdrawal batch finalization occurs in every block.
+/// Verify the ZoneOutbox withdrawal batch finalization occurs at batch boundaries.
 ///
-/// After injecting L1 blocks, each zone block should call finalizeWithdrawalBatch,
-/// incrementing the withdrawalBatchIndex even when no withdrawals are pending.
+/// Intermediate zone blocks should not call finalizeWithdrawalBatch. The final
+/// block of the batch should call it once, incrementing the withdrawalBatchIndex
+/// even when no withdrawals are pending.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -380,13 +384,40 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
 
     let zone_outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
 
-    // Check initial batch index
     let initial_batch_index = zone_outbox.withdrawalBatchIndex().call().await?;
+    let initial_zone_block = zone.provider().get_block_number().await?;
+    let blocks_until_boundary = 4 - (initial_zone_block % 4);
 
-    // Inject 3 empty L1 blocks — each should trigger a finalizeWithdrawalBatch
-    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+    if blocks_until_boundary > 1 {
+        fixture.inject_empty_blocks(zone.deposit_queue(), blocks_until_boundary - 1);
 
-    // Wait for batch index to advance by at least 3
+        poll_until(
+            DEFAULT_TIMEOUT,
+            DEFAULT_POLL,
+            "intermediate zone blocks produced",
+            || {
+                let provider = zone.provider();
+                async move {
+                    let number = provider.get_block_number().await?;
+                    if number >= initial_zone_block + blocks_until_boundary - 1 {
+                        Ok(Some(number))
+                    } else {
+                        Ok(None)
+                    }
+                }
+            },
+        )
+        .await?;
+
+        let intermediate_batch_index = zone_outbox.withdrawalBatchIndex().call().await?;
+        assert_eq!(
+            intermediate_batch_index, initial_batch_index,
+            "withdrawalBatchIndex should not advance before the batch-final block"
+        );
+    }
+
+    fixture.inject_empty_blocks(zone.deposit_queue(), 1);
+
     let final_batch_index = poll_until(
         DEFAULT_TIMEOUT,
         DEFAULT_POLL,
@@ -395,7 +426,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
             let zone_outbox = &zone_outbox;
             async move {
                 let idx = zone_outbox.withdrawalBatchIndex().call().await?;
-                if idx >= initial_batch_index + 3 {
+                if idx == initial_batch_index + 1 {
                     Ok(Some(idx))
                 } else {
                     Ok(None)
@@ -405,9 +436,10 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     )
     .await?;
 
-    assert!(
-        final_batch_index >= initial_batch_index + 3,
-        "withdrawalBatchIndex should advance by at least 3 (got {initial_batch_index} -> {final_batch_index})"
+    assert_eq!(
+        final_batch_index,
+        initial_batch_index + 1,
+        "withdrawalBatchIndex should advance exactly once at the batch boundary"
     );
 
     // lastBatch should have zero withdrawalQueueHash (no withdrawals requested)
@@ -417,6 +449,213 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
         B256::ZERO,
         "lastBatch.withdrawalQueueHash should be zero with no withdrawals"
     );
+
+    Ok(())
+}
+
+/// Verify withdrawals requested in intermediate blocks are finalized as one
+/// on-chain batch at the next boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_multiblock_withdrawals_finalize_as_single_batch() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+
+    let dev_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let dev_address = dev_signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(dev_signer)
+        .connect_http(zone.http_url().clone());
+    let zone_token = ITIP20::new(PATH_USD_ADDRESS, &provider);
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+
+    let deposit_amount: u128 = 2_000_000;
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
+    fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
+
+    zone.wait_for_balance(
+        PATH_USD_ADDRESS,
+        dev_address,
+        U256::from(deposit_amount),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    let approve_pending = zone_token
+        .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    let approve_receipt = approve_pending.get_receipt().await?;
+    assert!(approve_receipt.status(), "approve should succeed");
+
+    let current_block = zone.provider().get_block_number().await?;
+    let blocks_to_boundary = (4 - (current_block % 4)) % 4;
+    if blocks_to_boundary > 0 {
+        fixture.inject_empty_blocks(zone.deposit_queue(), blocks_to_boundary);
+        let target_block = current_block + blocks_to_boundary;
+        poll_until(
+            DEFAULT_TIMEOUT,
+            DEFAULT_POLL,
+            "aligned to batch boundary",
+            || {
+                let provider = zone.provider();
+                async move {
+                    let number = provider.get_block_number().await?;
+                    if number >= target_block {
+                        Ok(Some(number))
+                    } else {
+                        Ok(None)
+                    }
+                }
+            },
+        )
+        .await?;
+    }
+
+    let boundary_start = zone.provider().get_block_number().await?;
+    assert_eq!(
+        boundary_start % 4,
+        0,
+        "test should start immediately after a finalized boundary"
+    );
+    let initial_batch_index = outbox.withdrawalBatchIndex().call().await?;
+
+    let withdrawal_amounts = [250_000u128, 350_000u128];
+    for (idx, amount) in withdrawal_amounts.into_iter().enumerate() {
+        let pending = outbox
+            .requestWithdrawal(
+                PATH_USD_ADDRESS,
+                dev_address,
+                amount,
+                B256::ZERO,
+                0,
+                dev_address,
+                Bytes::new(),
+                Bytes::new(),
+            )
+            .gas_price(TEMPO_T0_BASE_FEE as u128)
+            .gas(WITHDRAWAL_TX_GAS)
+            .send()
+            .await?;
+        fixture.inject_empty_block(zone.deposit_queue());
+        let receipt = pending.get_receipt().await?;
+        assert!(receipt.status(), "withdrawal {idx} should succeed");
+
+        let pending_count = outbox.pendingWithdrawalsCount().call().await?;
+        assert_eq!(
+            pending_count,
+            U256::from(idx + 1),
+            "withdrawals should remain pending before the batch boundary"
+        );
+        assert_eq!(
+            outbox.withdrawalBatchIndex().call().await?,
+            initial_batch_index,
+            "intermediate withdrawal blocks must not finalize the batch"
+        );
+    }
+
+    fixture.inject_empty_blocks(zone.deposit_queue(), 2);
+    let final_block = boundary_start + 4;
+    poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "multi-block withdrawal batch finalized",
+        || {
+            let outbox = &outbox;
+            async move {
+                let index = outbox.withdrawalBatchIndex().call().await?;
+                if index == initial_batch_index + 1 {
+                    Ok(Some(index))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
+
+    assert_eq!(
+        outbox.pendingWithdrawalsCount().call().await?,
+        U256::ZERO,
+        "batch finalization should sweep all pending withdrawals"
+    );
+
+    let mut requested_logs = outbox
+        .WithdrawalRequested_filter()
+        .from_block(boundary_start + 1)
+        .to_block(final_block)
+        .query()
+        .await?;
+    requested_logs.sort_by_key(|(_, log)| {
+        (
+            log.block_number.unwrap_or(0),
+            log.transaction_index.unwrap_or(0),
+            log.log_index.unwrap_or(0),
+        )
+    });
+    assert_eq!(
+        requested_logs.len(),
+        withdrawal_amounts.len(),
+        "test should have two withdrawal request logs in the open batch"
+    );
+    let withdrawals = requested_logs
+        .iter()
+        .map(|(event, log)| {
+            let tx_hash = log
+                .transaction_hash
+                .ok_or_else(|| eyre::eyre!("WithdrawalRequested log missing transaction hash"))?;
+            Ok(Withdrawal::from_requested_event(
+                event,
+                tx_hash,
+                Bytes::new(),
+            ))
+        })
+        .collect::<eyre::Result<Vec<_>>>()?;
+    let expected_hash = Withdrawal::queue_hash(&withdrawals);
+
+    let finalized_logs = outbox
+        .BatchFinalized_filter()
+        .from_block(final_block)
+        .to_block(final_block)
+        .query()
+        .await?;
+    assert_eq!(
+        finalized_logs.len(),
+        1,
+        "final boundary block should emit one BatchFinalized event"
+    );
+    let (finalized, log) = &finalized_logs[0];
+    assert_eq!(finalized.withdrawalQueueHash, expected_hash);
+    assert_eq!(finalized.withdrawalBatchIndex, initial_batch_index + 1);
+
+    let tx_hash = log
+        .transaction_hash
+        .ok_or_else(|| eyre::eyre!("BatchFinalized log missing transaction hash"))?;
+    let finalize_tx = provider
+        .get_transaction_by_hash(tx_hash)
+        .await?
+        .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
+    let finalize_call =
+        ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
+    assert_eq!(
+        finalize_call.count,
+        U256::MAX,
+        "builder should sweep the full pending batch"
+    );
+    assert_eq!(
+        finalize_call.encryptedSenders.len(),
+        withdrawals.len(),
+        "encrypted sender metadata should cover the whole batch"
+    );
+
+    let last_batch = outbox.lastBatch().call().await?;
+    assert_eq!(last_batch.withdrawalQueueHash, expected_hash);
+    assert_eq!(last_batch.withdrawalBatchIndex, initial_batch_index + 1);
 
     Ok(())
 }

@@ -1,9 +1,9 @@
 //! Extended-gap batch submission E2E test.
 //!
-//! When a zone node goes down for long enough that even the first stepping
-//! boundary is outside the EIP-2935 history window, the sequencer must still
-//! submit batches successfully once it comes back. This exercises the
-//! long-downtime ancestry path instead of the simpler direct-mode case.
+//! When a zone node goes down long enough that finalized batch boundaries fall
+//! outside the EIP-2935 history window, the sequencer must still submit each
+//! boundary successfully once it comes back. This exercises the long-downtime
+//! ancestry path instead of the simpler direct-mode case.
 
 use crate::utils::{
     L1TestNode, ZoneTestNode, poll_until, spawn_sequencer, spawn_sequencer_with_anchor_config,
@@ -25,13 +25,13 @@ const SHORT_EIP2935_EFFECTIVE_WINDOW: u64 =
     SHORT_EIP2935_HISTORY_WINDOW - SHORT_EIP2935_SAFETY_MARGIN;
 const SHORT_EXTENDED_GAP_BLOCKS: u64 =
     SHORT_EIP2935_HISTORY_WINDOW + SHORT_EIP2935_EFFECTIVE_WINDOW + 1;
-const SHORT_MULTI_STEP_BATCH_COUNT: u64 = 3;
-const SHORT_MULTI_STEP_GAP_BLOCKS: u64 = SHORT_EIP2935_HISTORY_WINDOW
-    + SHORT_EIP2935_EFFECTIVE_WINDOW * SHORT_MULTI_STEP_BATCH_COUNT
+const SHORT_MULTI_BOUNDARY_BATCH_COUNT: u64 = 3;
+const SHORT_MULTI_BOUNDARY_GAP_BLOCKS: u64 = SHORT_EIP2935_HISTORY_WINDOW
+    + SHORT_EIP2935_EFFECTIVE_WINDOW * SHORT_MULTI_BOUNDARY_BATCH_COUNT
     + 1;
 
-/// Extended timeout for stepping tests — the L1 needs to mine >16k blocks and
-/// the zone must replay enough history to cross the first stepping boundary.
+/// Extended timeout for ancestry tests — the L1 needs to mine >16k blocks and
+/// the zone must replay enough history to cross the first out-of-window boundary.
 const STEPPING_TIMEOUT: Duration = Duration::from_secs(300);
 const BATCH_TIMEOUT: Duration = Duration::from_secs(90);
 const SHORT_STEPPING_TIMEOUT: Duration = Duration::from_secs(60);
@@ -96,15 +96,15 @@ async fn fetch_submit_batch_call(
 }
 
 /// Test that batch submission works after the zone's `tempoBlockNumber` has
-/// fallen far enough behind L1 that the first stepped sub-batch still lands
+/// fallen far enough behind L1 that the first finalized batch boundary lands
 /// outside the EIP-2935 history window.
 ///
 /// 1. Start L1 with 10ms block time to mine blocks quickly.
 /// 2. Deploy zone portal on L1.
 /// 3. Wait for L1 to advance past `history + effective window`, so the first
-///    stepping boundary is still outside the history window.
+///    submitted boundary is still outside the history window.
 /// 4. Start zone node connected to L1, anchored at the portal genesis.
-/// 5. Wait for the zone to replay up to the first stepping boundary.
+/// 5. Wait for the zone to replay up to the first out-of-window boundary.
 /// 6. Spawn sequencer while the zone is still far behind L1.
 /// 7. Assert a `BatchSubmitted` event appears.
 #[tokio::test(flavor = "multi_thread")]
@@ -157,7 +157,7 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
         ZoneTestNode::start_from_l1_portal_genesis(l1.http_url(), l1.ws_url(), portal_address)
             .await?;
 
-    // --- Step 5: Wait for the zone to replay to the first stepping boundary ---
+    // --- Step 5: Wait for the zone to replay to the first out-of-window boundary ---
     let first_step_tempo = genesis_block + EIP2935_EFFECTIVE_WINDOW;
     zone.wait_for_tempo_block_number(first_step_tempo, STEPPING_TIMEOUT)
         .await?;
@@ -165,7 +165,7 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     let l1_tip = l1.provider().get_block_number().await?;
     eyre::ensure!(
         l1_tip.saturating_sub(first_step_tempo) > EIP2935_HISTORY_WINDOW,
-        "test precondition not met: first step tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
+        "test precondition not met: first boundary tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
         l1_tip.saturating_sub(first_step_tempo),
     );
 
@@ -212,7 +212,7 @@ async fn test_batch_submission_after_extended_l1_gap() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Same stepping scenario as the ignored long-gap test, but with a 10-block
+/// Same ancestry scenario as the ignored long-gap test, but with a 10-block
 /// configured EIP-2935 window so it runs in regular integration test time.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<()> {
@@ -260,7 +260,7 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
     let l1_tip = l1.provider().get_block_number().await?;
     eyre::ensure!(
         l1_tip.saturating_sub(first_step_tempo) > SHORT_EIP2935_HISTORY_WINDOW,
-        "test precondition not met: first configured step tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
+        "test precondition not met: first configured boundary tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
         l1_tip.saturating_sub(first_step_tempo),
     );
 
@@ -303,10 +303,10 @@ async fn test_batch_submission_after_configured_short_l1_gap() -> eyre::Result<(
     Ok(())
 }
 
-/// Verifies that a larger configured-window gap is split into multiple
-/// `submitBatch` L1 transactions before the sequencer catches up.
+/// Verifies that a larger configured-window gap submits multiple finalized
+/// batch boundaries before the sequencer catches up.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_configured_short_l1_gap_requires_multiple_stepping_batches() -> eyre::Result<()> {
+async fn test_configured_short_l1_gap_submits_multiple_batch_boundaries() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let anchor_config =
@@ -321,13 +321,13 @@ async fn test_configured_short_l1_gap_requires_multiple_stepping_batches() -> ey
     let portal_address = l1.deploy_zone().await?;
     let portal = ZonePortal::new(portal_address, l1.provider());
     let genesis_block = portal.genesisTempoBlockNumber().call().await?;
-    let target_block = genesis_block + SHORT_MULTI_STEP_GAP_BLOCKS;
+    let target_block = genesis_block + SHORT_MULTI_BOUNDARY_GAP_BLOCKS;
 
-    // Mine enough L1 blocks that catching up requires several configured steps.
+    // Mine enough L1 blocks that catching up requires several ancestry batches.
     poll_until(
         SHORT_STEPPING_TIMEOUT,
         Duration::from_millis(50),
-        "L1 advanced far enough to require multiple configured stepping batches",
+        "L1 advanced far enough to require multiple configured ancestry batches",
         || {
             let provider = l1.provider();
             async move {
@@ -348,21 +348,21 @@ async fn test_configured_short_l1_gap_requires_multiple_stepping_batches() -> ey
 
     // Let the zone replay far enough to have multiple valid split boundaries.
     let multi_step_tempo =
-        genesis_block + SHORT_EIP2935_EFFECTIVE_WINDOW * SHORT_MULTI_STEP_BATCH_COUNT;
+        genesis_block + SHORT_EIP2935_EFFECTIVE_WINDOW * SHORT_MULTI_BOUNDARY_BATCH_COUNT;
     zone.wait_for_tempo_block_number(multi_step_tempo, SHORT_STEPPING_TIMEOUT)
         .await?;
 
-    // Assert the first step is genuinely outside the configured history window.
+    // Assert the first submitted boundary is genuinely outside the configured history window.
     let first_step_tempo = genesis_block + SHORT_EIP2935_EFFECTIVE_WINDOW;
     let l1_tip = l1.provider().get_block_number().await?;
     eyre::ensure!(
         l1_tip.saturating_sub(first_step_tempo) > SHORT_EIP2935_HISTORY_WINDOW,
-        "test precondition not met: first configured step tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
+        "test precondition not met: first configured boundary tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
         l1_tip.saturating_sub(first_step_tempo),
     );
     eyre::ensure!(
         multi_step_tempo < l1_tip.saturating_sub(SHORT_EIP2935_SAFETY_MARGIN),
-        "test precondition not met: multi-step tempo {multi_step_tempo} is not below the safe L1 anchor tip {l1_tip}",
+        "test precondition not met: multi-boundary tempo {multi_step_tempo} is not below the safe L1 anchor tip {l1_tip}",
     );
 
     // Start the sequencer only after the backlog has accumulated.
@@ -375,31 +375,34 @@ async fn test_configured_short_l1_gap_requires_multiple_stepping_batches() -> ey
     )
     .await;
 
-    // Wait for the stepping loop to submit the first configured catch-up batches.
+    // Wait for the boundary walk to submit the first configured catch-up batches.
     let calls = poll_until(
         SHORT_STEPPING_TIMEOUT,
         Duration::from_millis(250),
-        "multiple stepping BatchSubmitted events",
+        "multiple boundary BatchSubmitted events",
         || {
             let portal = &portal;
             let seq = &seq;
             let l1 = &l1;
             async move {
                 if seq.monitor_handle.is_finished() {
-                    eyre::bail!("monitor task exited before submitting stepping batches");
+                    eyre::bail!("monitor task exited before submitting boundary batches");
                 }
 
                 if seq.withdrawal_handle.is_finished() {
-                    eyre::bail!("withdrawal processor exited before stepping batches completed");
+                    eyre::bail!("withdrawal processor exited before boundary batches completed");
                 }
 
                 let events = portal.BatchSubmitted_filter().from_block(0).query().await?;
-                if events.len() < SHORT_MULTI_STEP_BATCH_COUNT as usize {
+                if events.len() < SHORT_MULTI_BOUNDARY_BATCH_COUNT as usize {
                     return Ok(None);
                 }
 
-                let mut calls = Vec::with_capacity(SHORT_MULTI_STEP_BATCH_COUNT as usize);
-                for (_, log) in events.iter().take(SHORT_MULTI_STEP_BATCH_COUNT as usize) {
+                let mut calls = Vec::with_capacity(SHORT_MULTI_BOUNDARY_BATCH_COUNT as usize);
+                for (_, log) in events
+                    .iter()
+                    .take(SHORT_MULTI_BOUNDARY_BATCH_COUNT as usize)
+                {
                     let tx_hash = log.transaction_hash.ok_or_else(|| {
                         eyre::eyre!("BatchSubmitted log missing transaction hash")
                     })?;
@@ -417,34 +420,34 @@ async fn test_configured_short_l1_gap_requires_multiple_stepping_batches() -> ey
         .iter()
         .map(|call| call.tempoBlockNumber)
         .collect::<Vec<_>>();
-    // Each stepping submission should move the portal anchor forward.
+    // Each boundary submission should move the portal anchor forward.
     eyre::ensure!(
         tempo_block_numbers
             .windows(2)
             .all(|window| window[0] < window[1]),
-        "stepping submissions should advance tempoBlockNumber monotonically: {tempo_block_numbers:?}"
+        "boundary submissions should advance tempoBlockNumber monotonically: {tempo_block_numbers:?}"
     );
-    // Since these steps are still out of the short direct window, they use ancestry mode.
+    // Since these boundaries are still out of the short direct window, they use ancestry mode.
     eyre::ensure!(
         calls
             .iter()
             .all(|call| call.recentTempoBlockNumber > call.tempoBlockNumber),
-        "stepping catch-up submissions should use ancestry anchors: {tempo_block_numbers:?}"
+        "boundary catch-up submissions should use ancestry anchors: {tempo_block_numbers:?}"
     );
     // Proof bytes stay empty until real proof generation is wired in.
     eyre::ensure!(
         calls.iter().all(|call| call.proof.is_empty()),
-        "stepping catch-up submissions should keep proof bytes empty for now"
+        "boundary catch-up submissions should keep proof bytes empty for now"
     );
 
     Ok(())
 }
 
-/// Verifies that the fast configured-window stepping path submits ancestry-mode
+/// Verifies that the fast configured-window ancestry path submits ancestry-mode
 /// calldata, not a direct `tempoBlockNumber` lookup, while proof bytes remain
 /// empty until real proof generation is implemented.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_stepping_ancestry_submission_uses_recent_anchor() -> eyre::Result<()> {
+async fn test_boundary_ancestry_submission_uses_recent_anchor() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let anchor_config =
@@ -489,7 +492,7 @@ async fn test_stepping_ancestry_submission_uses_recent_anchor() -> eyre::Result<
     let l1_tip = l1.provider().get_block_number().await?;
     eyre::ensure!(
         l1_tip.saturating_sub(first_step_tempo) > SHORT_EIP2935_HISTORY_WINDOW,
-        "test precondition not met: first configured step tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
+        "test precondition not met: first configured boundary tempo {first_step_tempo} is only {} blocks behind L1 tip {l1_tip}",
         l1_tip.saturating_sub(first_step_tempo),
     );
 

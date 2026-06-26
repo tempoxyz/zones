@@ -54,6 +54,15 @@ use tracing::{error, warn};
 use zone_l1::{DepositQueue, L1BlockDeposits, PolicyProvider, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
+/// Short deterministic withdrawal-batch cadence.
+///
+/// The spec targets roughly 250ms batches. The zone engine processes one L1
+/// block per zone block and can catch up faster than wall-clock time, so the
+/// boundary must be chain-derived rather than timer-derived. Four blocks keeps
+/// batches well below the EIP-2935 window while giving the builder real
+/// multi-block batches.
+const WITHDRAWAL_BATCH_BLOCKS: u64 = 4;
+
 /// Engine that drives L2 block production from L1 events.
 ///
 /// Waits for L1 blocks in the [`DepositQueue`], then for each block:
@@ -211,6 +220,7 @@ impl ZoneEngine {
         let timestamp_millis_part = l1_block.header.timestamp_millis_part;
 
         let l1_block = self.prepare_l1_block(l1_block).await?;
+        let next_zone_block_number = self.last_header.number() + 1;
 
         let attributes = ZonePayloadAttributes {
             inner: EthPayloadAttributes {
@@ -230,6 +240,7 @@ impl ZoneEngine {
             },
             timestamp_millis_part,
             l1_block,
+            finalize_withdrawal_batch: next_zone_block_number % WITHDRAWAL_BATCH_BLOCKS == 0,
         };
 
         // Send FCU with payload attributes through the engine API to trigger

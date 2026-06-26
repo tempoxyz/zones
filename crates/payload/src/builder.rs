@@ -5,7 +5,7 @@
 
 use crate::abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 use alloy_consensus::{Signed, Transaction, TxLegacy, TxReceipt, transaction::TxHashRef};
-use alloy_eips::eip4895::Withdrawals;
+use alloy_eips::{BlockHashOrNumber, eip4895::Withdrawals};
 use alloy_evm::{
     EvmFactory,
     block::{BlockExecutor, BlockExecutorFactory, TxResult},
@@ -29,7 +29,9 @@ use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
-use reth_storage_api::{StateProvider, StateProviderFactory};
+use reth_storage_api::{
+    BlockReader, ReceiptProvider, StateProvider, StateProviderFactory, TransactionsProvider,
+};
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool,
     error::InvalidPoolTransactionError,
@@ -39,7 +41,7 @@ use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
 use tempo_primitives::{
-    TempoHeader, TempoTxEnvelope,
+    TempoHeader, TempoReceipt, TempoTxEnvelope,
     transaction::envelope::{TEMPO_SYSTEM_TX_SENDER, TEMPO_SYSTEM_TX_SIGNATURE},
 };
 use tempo_transaction_pool::TempoTransactionPool;
@@ -63,7 +65,11 @@ impl<Node, EvmConfig> PayloadBuilderBuilder<Node, TempoTransactionPool<Node::Pro
     for ZonePayloadFactory
 where
     Node: FullNodeTypes,
-    Node::Types: NodeTypes<ChainSpec = TempoChainSpec, Payload = ZonePayloadTypes>,
+    Node::Types: NodeTypes<
+            Primitives = tempo_primitives::TempoPrimitives,
+            ChainSpec = TempoChainSpec,
+            Payload = ZonePayloadTypes,
+        >,
     EvmConfig: ConfigureEvm<
             Primitives = tempo_primitives::TempoPrimitives,
             NextBlockEnvCtx = TempoNextBlockEnvAttributes,
@@ -101,8 +107,14 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
 
 impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
 where
-    Provider:
-        StateProviderFactory + ChainSpecProvider<ChainSpec = TempoChainSpec> + Clone + 'static,
+    Provider: StateProviderFactory
+        + ChainSpecProvider<ChainSpec = TempoChainSpec>
+        + BlockReader<
+            Block = tempo_primitives::Block,
+            Transaction = TempoTxEnvelope,
+            Receipt = TempoReceipt,
+        > + Clone
+        + 'static,
     EvmConfig: ConfigureEvm<
             Primitives = tempo_primitives::TempoPrimitives,
             NextBlockEnvCtx = TempoNextBlockEnvAttributes,
@@ -372,59 +384,63 @@ where
             }
         }
 
-        // Finalize the withdrawal batch — must run after all user txs.
-        // Calls ZoneOutbox.finalizeWithdrawalBatch(MAX, blockNumber) to build the
-        // withdrawal hash chain and write batch state for proof generation.
-        let encrypted_senders = requested_withdrawals
-            .iter()
-            .map(|request| {
-                if request.event.revealTo.is_empty() {
-                    Ok(Bytes::new())
-                } else {
-                    zone_precompiles::ecies::encrypt_authenticated_withdrawal(
-                        request.event.revealTo.as_ref(),
-                        request.event.sender,
-                        request.tx_hash,
-                    )
-                    .map(Bytes::from)
-                    .ok_or_else(|| {
-                        PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                            "failed to encrypt authenticated sender reveal for tx {}",
-                            request.tx_hash
-                        )))
-                    })
+        // Finalize the withdrawal batch only at builder-selected batch boundaries.
+        // Intermediate blocks leave requests pending in ZoneOutbox storage. On the
+        // final block, sweep all pending withdrawals and provide metadata for the
+        // whole open batch, not just this block.
+        if attributes.finalize_withdrawal_batch() {
+            let mut batch_withdrawals =
+                load_open_batch_requested_withdrawals(&self.provider, parent_header.number())?;
+            batch_withdrawals.extend(requested_withdrawals);
+
+            let encrypted_senders = batch_withdrawals
+                .iter()
+                .map(|request| {
+                    if request.event.revealTo.is_empty() {
+                        Ok(Bytes::new())
+                    } else {
+                        zone_precompiles::ecies::encrypt_authenticated_withdrawal(
+                            request.event.revealTo.as_ref(),
+                            request.event.sender,
+                            request.tx_hash,
+                        )
+                        .map(Bytes::from)
+                        .ok_or_else(|| {
+                            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                                "failed to encrypt authenticated sender reveal for tx {}",
+                                request.tx_hash
+                            )))
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let finalize_tx =
+                build_finalize_withdrawal_batch_tx(U256::MAX, block_number, encrypted_senders);
+            let mut finalize_reverted = false;
+            match builder.execute_transaction_with_result_closure(finalize_tx, |result| {
+                let evm_result = result.result();
+                if !evm_result.result.is_success() {
+                    let revert_data = evm_result.result.output().cloned().unwrap_or_default();
+                    error!(
+                        target: "zone::payload",
+                        block_number,
+                        is_halt = evm_result.result.is_halt(),
+                        revert_data = %revert_data,
+                        "finalizeWithdrawalBatch system tx reverted on-chain"
+                    );
+                    finalize_reverted = true;
                 }
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let finalize_tx = build_finalize_withdrawal_batch_tx(
-            U256::from(requested_withdrawals.len()),
-            block_number,
-            encrypted_senders,
-        );
-        let mut finalize_reverted = false;
-        match builder.execute_transaction_with_result_closure(finalize_tx, |result| {
-            let evm_result = result.result();
-            if !evm_result.result.is_success() {
-                let revert_data = evm_result.result.output().cloned().unwrap_or_default();
-                error!(
-                    target: "zone::payload",
-                    block_number,
-                    is_halt = evm_result.result.is_halt(),
-                    revert_data = %revert_data,
-                    "finalizeWithdrawalBatch system tx reverted on-chain"
-                );
-                finalize_reverted = true;
-            }
-        }) {
-            Ok(_) if finalize_reverted => {
-                return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-                    format!("finalizeWithdrawalBatch reverted at zone block {block_number}"),
-                )));
-            }
-            Ok(_) => {}
-            Err(err) => {
-                error!(?err, "finalizeWithdrawalBatch system tx failed");
-                return Err(PayloadBuilderError::evm(err));
+            }) {
+                Ok(_) if finalize_reverted => {
+                    return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                        format!("finalizeWithdrawalBatch reverted at zone block {block_number}"),
+                    )));
+                }
+                Ok(_) => {}
+                Err(err) => {
+                    error!(?err, "finalizeWithdrawalBatch system tx failed");
+                    return Err(PayloadBuilderError::evm(err));
+                }
             }
         }
 
@@ -553,6 +569,127 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
         TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
         TEMPO_SYSTEM_TX_SENDER,
     )
+}
+
+/// Reconstruct withdrawal requests for the currently open batch from canonical
+/// history.
+///
+/// Scans committed blocks after the most recent `BatchFinalized` boundary up to
+/// `parent_block_number`, collecting successful `WithdrawalRequested` logs in
+/// block/transaction/log order. The block currently being built is not included;
+/// callers append its newly executed requests before finalizing.
+fn load_open_batch_requested_withdrawals<Provider>(
+    provider: &Provider,
+    parent_block_number: u64,
+) -> Result<Vec<RequestedWithdrawalContext>, PayloadBuilderError>
+where
+    Provider: ReceiptProvider<Receipt = TempoReceipt>
+        + TransactionsProvider<Transaction = TempoTxEnvelope>,
+{
+    if parent_block_number == 0 {
+        return Ok(Vec::new());
+    }
+
+    let previous_boundary = find_previous_batch_finalized_block(provider, parent_block_number)?;
+    let from = previous_boundary.saturating_add(1);
+    if from > parent_block_number {
+        return Ok(Vec::new());
+    }
+
+    let mut requested = Vec::new();
+    for block_number in from..=parent_block_number {
+        collect_requested_withdrawals_from_canonical_block(provider, block_number, &mut requested)?;
+    }
+
+    Ok(requested)
+}
+
+/// Walk backwards from the `parent_block_number` and find the most recent
+/// canonical block that emitted a `BatchFinalized`
+fn find_previous_batch_finalized_block<Provider>(
+    provider: &Provider,
+    parent_block_number: u64,
+) -> Result<u64, PayloadBuilderError>
+where
+    Provider: ReceiptProvider<Receipt = TempoReceipt>,
+{
+    for block_number in (1..=parent_block_number).rev() {
+        let receipts = provider
+            .receipts_by_block(BlockHashOrNumber::Number(block_number))
+            .map_err(|err| PayloadBuilderError::Internal(err.into()))?
+            .ok_or_else(|| {
+                PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                    "missing receipts for canonical zone block {block_number}"
+                )))
+            })?;
+
+        // Find a `BatchFinalzied`
+        if receipts.iter().any(|receipt| {
+            if !receipt.status() {
+                return false;
+            }
+
+            receipt.logs().iter().any(|log| {
+                log.address == ZONE_OUTBOX_ADDRESS
+                    && log.topics().first().copied().is_some_and(|topic| {
+                        topic == abi::ZoneOutbox::BatchFinalized::SIGNATURE_HASH
+                    })
+            })
+        }) {
+            // If we found a `BatchFinalized` in any of the logs, return the block number
+            return Ok(block_number);
+        }
+    }
+
+    Ok(0)
+}
+
+/// Collect successful `WithdrawalRequested` logs from one canonical block.
+///
+/// Loads the block's receipts and transactions, pairs each receipt with its
+/// transaction hash, and appends any successful `WithdrawalRequested` events to
+/// `requested_withdrawals` in transaction/log order.
+fn collect_requested_withdrawals_from_canonical_block<Provider>(
+    provider: &Provider,
+    block_number: u64,
+    requested_withdrawals: &mut Vec<RequestedWithdrawalContext>,
+) -> Result<(), PayloadBuilderError>
+where
+    Provider: ReceiptProvider<Receipt = TempoReceipt>
+        + TransactionsProvider<Transaction = TempoTxEnvelope>,
+{
+    let receipts = provider
+        .receipts_by_block(BlockHashOrNumber::Number(block_number))
+        .map_err(|err| PayloadBuilderError::Internal(err.into()))?
+        .ok_or_else(|| {
+            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                "missing receipts for canonical zone block {block_number}"
+            )))
+        })?;
+    let transactions = provider
+        .transactions_by_block(BlockHashOrNumber::Number(block_number))
+        .map_err(|err| PayloadBuilderError::Internal(err.into()))?
+        .ok_or_else(|| {
+            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                "missing transactions for canonical zone block {block_number}"
+            )))
+        })?;
+
+    if receipts.len() != transactions.len() {
+        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            format!(
+                "canonical zone block {block_number} has {} receipts for {} transactions",
+                receipts.len(),
+                transactions.len()
+            ),
+        )));
+    }
+
+    for (receipt, tx) in receipts.iter().zip(transactions.iter()) {
+        collect_requested_withdrawals(receipt, *tx.tx_hash(), requested_withdrawals)?;
+    }
+
+    Ok(())
 }
 
 fn collect_requested_withdrawals(

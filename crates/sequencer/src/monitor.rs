@@ -1,18 +1,15 @@
 //! Zone L2 block monitor with integrated batch submission.
 //!
 //! Watches the **Zone L2** chain for new blocks, collecting withdrawal events and
-//! reading on-chain state to produce [`BatchData`]. Aggregates multiple zone blocks
-//! into a single L1 batch submission to minimize L1 transactions.
+//! reading on-chain state to produce [`BatchData`]. Emits one L1 batch
+//! submission for each L2 `BatchFinalized` boundary.
 //!
-//! ## Multi-block batching
+//! ## Batch boundaries
 //!
-//! Instead of submitting one L1 transaction per zone block, the monitor scans all
-//! available zone blocks and submits a single `submitBatch` call covering the entire
-//! range. This dramatically reduces L1 transaction count during catch-up and keeps
-//! the monitor in sync with the zone tip.
-//!
-//! Withdrawals from all blocks in the range are combined into a single hash chain
-//! and stored under one portal queue slot.
+//! The payload builder records batch boundaries by appending
+//! `ZoneOutbox.finalizeWithdrawalBatch` to final blocks only. The monitor treats
+//! those `BatchFinalized` events as authoritative and emits exactly one
+//! `submitBatch` per boundary, in order.
 //!
 //! ## EIP-2935 and ancestry mode
 //!
@@ -20,9 +17,9 @@
 //! block hashes. When `tempoBlockNumber` is within this window the batch submitter
 //! uses **direct mode** (reading the hash straight from EIP-2935). If the zone
 //! falls behind (e.g. sequencer downtime >2 hours), the submitter automatically
-//! switches to **ancestry mode**: it supplies a recent L1 block number that IS
-//! within the EIP-2935 window, and the proof must include a block header chain
-//! linking that anchor back to `tempoBlockNumber`.
+//! switches to **ancestry mode** for that batch: it supplies a recent L1 block
+//! number that IS within the EIP-2935 window, and the proof must include a
+//! block header chain linking that anchor back to `tempoBlockNumber`.
 
 use std::{sync::Arc, time::Duration};
 
@@ -41,8 +38,8 @@ use crate::{
     abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
     rpc::rpc_connection_config,
     settlement::{
-        AnchorGapKind, BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot,
-        fetch_slot_withdrawals, log_query_ranges,
+        BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_finalized_batch,
+        fetch_finalized_batch_boundaries, log_query_ranges,
     },
     withdrawals::SharedWithdrawalStore,
 };
@@ -68,9 +65,9 @@ pub struct ZoneMonitorConfig {
     pub retry_connection_interval: Duration,
     /// How often to poll the zone L2 for new blocks (cheap RPC call).
     pub poll_interval: Duration,
-    /// Maximum time to accumulate zone blocks before submitting a batch to L1.
-    /// Blocks are aggregated during this window to reduce L1 tx count.
-    /// A batch is submitted early if pending withdrawals are detected.
+    /// Maximum time to wait before submitting available finalized L2 batches.
+    /// A non-empty finalized withdrawal batch is submitted early for user
+    /// experience.
     pub batch_interval: Duration,
     /// ZonePortal contract address on Tempo L1.
     pub portal_address: Address,
@@ -78,13 +75,11 @@ pub struct ZoneMonitorConfig {
     pub batch_anchor_config: BatchAnchorConfig,
 }
 
-/// Monitors the Zone L2 chain for new blocks, aggregates them into batches, and
-/// submits to the ZonePortal on L1.
+/// Monitors the Zone L2 chain for new finalized batch boundaries and submits
+/// them to the ZonePortal on L1.
 ///
-/// Multiple zone blocks are combined into a single `submitBatch` call whenever
-/// possible, reducing L1 transaction count. Local state only advances after a
-/// successful L1 submission. On repeated failures the monitor resyncs from the
-/// portal's on-chain `blockHash()`.
+/// Local state only advances after a successful L1 submission. On repeated
+/// failures the monitor resyncs from the portal's on-chain `blockHash()`.
 pub struct ZoneMonitor {
     config: ZoneMonitorConfig,
     /// Metrics for zone observation and L1 batch submission.
@@ -309,12 +304,16 @@ impl ZoneMonitor {
             }
 
             let from = self.last_submitted_zone_block + 1;
-            if let Err(e) = self.process_block_range(from, latest_zone_block).await {
-                error!(from, to = latest_zone_block, error = %e, "Failed to process zone block range");
-                continue;
+            match self.process_block_range(from, latest_zone_block).await {
+                Ok(true) => {
+                    batch_deadline = tokio::time::Instant::now() + self.config.batch_interval;
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    error!(from, to = latest_zone_block, error = %e, "Failed to process zone block range");
+                    continue;
+                }
             }
-
-            batch_deadline = tokio::time::Instant::now() + self.config.batch_interval;
         }
     }
 
@@ -384,12 +383,12 @@ impl ZoneMonitor {
         self.resync_from_portal().await;
     }
 
-    /// Check if any zone blocks since `last_submitted_zone_block` contain finalized
-    /// withdrawal batches that need to be submitted to L1.
+    /// Check if any unsubmitted zone blocks contain finalized non-empty
+    /// withdrawal batches.
     ///
-    /// `pendingWithdrawalsCount()` is always 0 on committed blocks because
-    /// `finalizeWithdrawalBatch` runs as the last tx in every zone block. The
-    /// correct signal is `BatchFinalized` events with non-zero withdrawal hashes.
+    /// Empty finalized batches still need to be submitted, but they are handled
+    /// by the normal deadline path. This signal only flushes user withdrawals
+    /// early.
     async fn has_pending_withdrawals(&self, latest_block: u64) -> bool {
         let from = self.last_submitted_zone_block + 1;
         for (chunk_from, chunk_to) in log_query_ranges(from, latest_block) {
@@ -424,69 +423,83 @@ impl ZoneMonitor {
         false
     }
 
-    /// Process a range of zone blocks as a single batch, or split into multiple
-    /// sub-range submissions if stepping mode is required.
+    /// Process finalized batch boundaries in `[from, to]`.
     ///
-    /// Scans all blocks in `[from, to]`, collects withdrawal events, reads end-of-range
-    /// state, and submits `submitBatch` calls to L1.
-    ///
-    /// ## Stepping mode
-    ///
-    /// When the zone's `tempoBlockNumber` has fallen outside the configured
-    /// direct-submission window, the monitor splits the range into multiple
-    /// submissions at intermediate zone blocks whose `tempoBlockNumber` reduces
-    /// the gap toward the current L1 tip.
-    ///
-    /// ## Withdrawal handling
-    ///
-    /// The `withdrawalQueueHash` submitted to the portal must match the hash chain
-    /// produced by `finalizeWithdrawalBatch` on L2. We collect all `WithdrawalRequested`
-    /// events across the range and build a combined hash chain. The L2 outbox finalizes
-    /// withdrawals per-block, but across a multi-block range we combine all withdrawals
-    /// into a single portal queue slot.
-    ///
-    /// The `BatchFinalized` event's `withdrawalQueueHash` is used as the authoritative
-    /// hash for single-block ranges (common case). For multi-block ranges with
-    /// withdrawals, we recompute the combined hash from the collected withdrawal structs.
+    /// The builder records each batch boundary with one `BatchFinalized` event.
+    /// The monitor must walk those boundaries one at a time so the L2 outbox
+    /// index and L1 portal index advance in lockstep.
     #[instrument(skip(self), fields(from, to))]
-    async fn process_block_range(&mut self, from: u64, to: u64) -> Result<()> {
+    async fn process_block_range(&mut self, from: u64, to: u64) -> Result<bool> {
         let block_count = to - from + 1;
         info!(from, to, block_count, "Processing zone block range");
 
-        // Read end-of-range state to check the anchor gap class.
-        let end_state = self.fetch_block_snapshot(to).await?;
+        let boundaries = fetch_finalized_batch_boundaries(&self.outbox, from, to).await?;
+        if boundaries.is_empty() {
+            info!(from, to, "No finalized batch boundaries ready to submit");
+            return Ok(false);
+        }
 
-        // Lightweight gap check — no header fetching, just arithmetic.
-        let gap_kind = self
-            .batch_submitter
-            .classify_anchor_gap(end_state.tempo_block_number)
-            .await?;
+        info!(
+            boundary_count = boundaries.len(),
+            from,
+            to,
+            first_boundary = boundaries[0],
+            last_boundary = boundaries[boundaries.len() - 1],
+            "Submitting finalized zone batches"
+        );
 
-        match gap_kind {
-            AnchorGapKind::Direct => self.process_block_range_single(from, to, end_state).await,
-            AnchorGapKind::Ancestry { step_size } => {
-                self.process_block_range_stepping(from, to, step_size).await
+        for (idx, boundary) in boundaries.into_iter().enumerate() {
+            if boundary <= self.last_submitted_zone_block {
+                continue;
+            }
+            let range_start = self.last_submitted_zone_block + 1;
+            info!(
+                batch = idx + 1,
+                zone_from = range_start,
+                zone_to = boundary,
+                "Submitting finalized zone batch"
+            );
+            let before_submit = self.last_submitted_zone_block;
+            self.process_finalized_batch(range_start, boundary).await?;
+            if self.last_submitted_zone_block <= before_submit {
+                warn!(
+                    before_submit,
+                    boundary,
+                    current_last_submitted = self.last_submitted_zone_block,
+                    "Batch submission did not advance local state; stopping boundary walk"
+                );
+                break;
             }
         }
+
+        Ok(true)
     }
 
-    /// Process a block range as a single batch submission (direct or ancestry mode).
-    async fn process_block_range_single(
-        &mut self,
-        from: u64,
-        to: u64,
-        end_state: ZoneBlockSnapshot,
-    ) -> Result<()> {
-        let all_withdrawals =
-            fetch_slot_withdrawals(&self.outbox, &self.provider, from, to).await?;
-        let withdrawal_queue_hash = abi::Withdrawal::queue_hash(&all_withdrawals);
+    /// Process one boundary-aligned finalized batch.
+    async fn process_finalized_batch(&mut self, from: u64, to: u64) -> Result<()> {
+        let finalized_batch = fetch_finalized_batch(&self.outbox, &self.provider, from, to).await?;
+        let end_state = self.fetch_block_snapshot(to).await?;
 
-        if !all_withdrawals.is_empty() {
+        let expected_l2_index = self
+            .batch_submitter
+            .read_portal_withdrawal_batch_index()
+            .await?
+            .checked_add(1)
+            .ok_or_else(|| eyre::eyre!("portal withdrawal batch index overflow"))?;
+        if finalized_batch.finalized_index != expected_l2_index {
+            eyre::bail!(
+                "withdrawal batch index mismatch for zone block {to}: L2 finalized index {}, expected portal index + 1 ({expected_l2_index})",
+                finalized_batch.finalized_index
+            );
+        }
+
+        if !finalized_batch.withdrawals.is_empty() {
             info!(
                 from,
                 to,
-                count = all_withdrawals.len(),
-                withdrawal_queue_hash = %withdrawal_queue_hash,
+                count = finalized_batch.withdrawals.len(),
+                withdrawal_queue_hash = %finalized_batch.finalized_hash,
+                withdrawal_batch_index = finalized_batch.finalized_index,
                 "Collected finalized withdrawals from zone"
             );
         }
@@ -499,102 +512,11 @@ impl ZoneMonitor {
             next_processed_deposit_hash: end_state.processed_deposit_hash,
             prev_deposit_number: self.prev_processed_deposit_number,
             next_deposit_number: end_state.processed_deposit_number,
-            withdrawal_queue_hash,
+            withdrawal_queue_hash: finalized_batch.finalized_hash,
         };
 
-        self.submit_batch_with_retry(&batch_data, to, all_withdrawals)
-            .await?;
-
-        Ok(())
-    }
-
-    /// Process a block range using stepping mode: split into multiple sub-range
-    /// submissions.
-    async fn process_block_range_stepping(
-        &mut self,
-        from: u64,
-        to: u64,
-        step_size: u64,
-    ) -> Result<()> {
-        // Read the tempo_block_number from the start of the range — this is the
-        // oldest value that needs to be anchored.
-        let start_state = self.fetch_block_snapshot(from).await?;
-        let current_l1_block = self
-            .batch_submitter
-            .l1_provider()
-            .get_block_number()
-            .await?;
-
-        let step_points = BatchSubmitter::compute_step_points(
-            from,
-            start_state.tempo_block_number,
-            current_l1_block,
-            step_size,
-            to,
-            self.batch_submitter.anchor_config().safety_margin(),
-        );
-
-        if step_points.is_empty() {
-            return Err(eyre::eyre!(
-                "stepping mode required (tempo_block_number {} is outside EIP-2935 window) \
-                 but no valid step points found — zone may not have produced enough blocks yet",
-                start_state.tempo_block_number,
-            ));
-        }
-
-        // Collect all step zone block numbers, plus the final block.
-        // Sort + dedup defensively in case step points are not perfectly ordered.
-        let mut boundaries: Vec<u64> = step_points.iter().map(|sp| sp.zone_block).collect();
-        boundaries.push(to);
-        boundaries.sort_unstable();
-        boundaries.dedup();
-
-        let total_steps = boundaries.len();
-        info!(
-            total_steps,
-            from,
-            to,
-            first_step_zone_block = boundaries[0],
-            "Stepping mode: splitting batch into {} sub-range submissions",
-            total_steps
-        );
-
-        let mut range_start = from;
-
-        for (step_idx, &step_end) in boundaries.iter().enumerate() {
-            let step_state = self.fetch_block_snapshot(step_end).await?;
-
-            let step_withdrawals =
-                fetch_slot_withdrawals(&self.outbox, &self.provider, range_start, step_end).await?;
-            let withdrawal_queue_hash = abi::Withdrawal::queue_hash(&step_withdrawals);
-
-            let batch_data = BatchData {
-                tempo_block_number: step_state.tempo_block_number,
-                prev_block_hash: self.prev_zone_block_hash,
-                next_block_hash: step_state.block_hash,
-                prev_processed_deposit_hash: self.prev_processed_deposit_hash,
-                next_processed_deposit_hash: step_state.processed_deposit_hash,
-                prev_deposit_number: self.prev_processed_deposit_number,
-                next_deposit_number: step_state.processed_deposit_number,
-                withdrawal_queue_hash,
-            };
-
-            info!(
-                step = step_idx + 1,
-                total_steps,
-                zone_from = range_start,
-                zone_to = step_end,
-                tempo_block_number = step_state.tempo_block_number,
-                "Submitting stepping sub-batch"
-            );
-
-            self.submit_batch_with_retry(&batch_data, step_end, step_withdrawals)
-                .await?;
-
-            range_start = step_end + 1;
-        }
-
-        Ok(())
+        self.submit_batch_with_retry(&batch_data, to, finalized_batch.withdrawals)
+            .await
     }
 
     /// Read the zone state at block `to`: tempo block number, processed deposit
@@ -947,9 +869,9 @@ impl ZoneMonitor {
 
 /// Spawn the zone monitor as a background task.
 ///
-/// The monitor polls the Zone L2 for new blocks, aggregates them into batches,
-/// and submits each batch to the ZonePortal on Tempo L1. Local state only
-/// advances on successful submission.
+/// The monitor polls the Zone L2 for finalized batch boundaries and submits
+/// each batch to the ZonePortal on Tempo L1. Local state only advances on
+/// successful submission.
 ///
 /// The `l1_provider` must already include the sequencer wallet for signing L1 transactions.
 pub fn spawn_zone_monitor(
