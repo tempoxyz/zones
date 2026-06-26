@@ -112,6 +112,30 @@ contract ZonePortalGasLimitTest is Test {
         assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
     }
 
+    function test_processWithdrawal_depositBounceBack_feeTransferFailureForgoesFeeAndClearsQueue()
+        public
+    {
+        vm.fee(1e12);
+        token.mint(address(portal), 1000e6);
+        token.setBlockedRecipient(address(this), true);
+
+        uint128 bouncebackFee = portal.calculateBouncebackFee();
+        uint128 refundAmount = 1000e6 - bouncebackFee;
+
+        Withdrawal memory w = _depositBounceBackWithdrawal(1000e6);
+        _storeSingleWithdrawal(w);
+
+        vm.expectEmit(true, false, false, true, address(portal));
+        emit IZonePortal.DepositBounceBack(recipient, address(token), refundAmount, bouncebackFee);
+        portal.processWithdrawal(w, bytes32(0));
+
+        assertEq(token.balanceOf(address(this)), 0);
+        assertEq(token.balanceOf(recipient), refundAmount);
+        assertEq(token.balanceOf(address(portal)), bouncebackFee);
+        assertEq(portal.withdrawalQueueHead(), 1);
+        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+    }
+
     function test_processWithdrawal_depositBounceBack_parksRefundWhenTransferFails() public {
         token.mint(address(portal), 1000e6);
         token.setBlockedRecipient(recipient, true);

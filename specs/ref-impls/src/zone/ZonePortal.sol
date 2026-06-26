@@ -644,8 +644,8 @@ contract ZonePortal is IZonePortal {
     //////////////////////////////////////////////////////////////*/
 
     /// @notice Process the next withdrawal from the queue. Only callable by the sequencer.
-    /// @dev Fee is always paid to sequencer regardless of success/failure.
-    ///      On failure, only the amount (not fee) is bounced back.
+    /// @dev Fee transfer to the sequencer is best-effort.
+    ///      On withdrawal failure, only the amount (not fee) is bounced back.
     ///      The token to transfer is read from the withdrawal struct.
     function processWithdrawal(
         Withdrawal calldata withdrawal,
@@ -722,7 +722,11 @@ contract ZonePortal is IZonePortal {
         uint128 refundAmount = withdrawal.amount - bouncebackFee;
 
         if (bouncebackFee > 0) {
-            ITIP20(_token).transfer(sequencer, bouncebackFee);
+            try ITIP20(_token).transfer(sequencer, bouncebackFee) returns (bool) { }
+                catch {
+                // Fee transfer can fail for eg. TIP-403 blacklist, in which case the sequencer
+                // will forgo the fee so as to not stall deposit bounce-backs.
+            }
         }
 
         bool success;
