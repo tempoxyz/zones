@@ -476,11 +476,7 @@ impl BatchSubmitter {
 
     /// Read the current withdrawal batch index from the ZonePortal on L1.
     pub async fn read_portal_withdrawal_batch_index(&self) -> Result<u64> {
-        let index = self.portal.withdrawalBatchIndex().call().await?;
-        let index: u64 = index
-            .try_into()
-            .map_err(|_| eyre::eyre!("withdrawal batch index overflow"))?;
-        Ok(index)
+        Ok(self.portal.withdrawalBatchIndex().call().await?)
     }
 
     /// Read the current withdrawal queue head from the ZonePortal on L1.
