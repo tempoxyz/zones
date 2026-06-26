@@ -24,7 +24,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTC_WRAPPER: "sccache"
 
 jobs:
   build:
@@ -67,8 +66,12 @@ jobs:
         run: forge fmt --check src test
 
   test:
-    name: Forge Test
+    name: Forge Test & Coverage
     runs-on: ubuntu-latest
+    env:
+      RUSTC_WRAPPER: "sccache"
+      MIN_LINES: "85"
+      MIN_BRANCHES: "58"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -107,10 +110,62 @@ jobs:
         working-directory: foundry
         run: cargo build --bin forge --profile release --no-default-features
 
+      - name: Install z3 (symbolic solver)
+        run: sudo apt-get update && sudo apt-get install -y z3
+
       - name: Run Forge tests (zone-only)
         working-directory: specs/ref-impls
         run: |
           "$GITHUB_WORKSPACE/foundry/target/release/forge" test -vvv --match-path "test/zone/**"
+
+      - name: Run symbolic (symex) property tests
+        working-directory: specs/ref-impls
+        run: |
+          "$GITHUB_WORKSPACE/foundry/target/release/forge" test \
+            --symbolic --match-test "check_" \
+            --symbolic-solver z3 --symbolic-timeout 180 -vvv
+
+      - name: Forge coverage (zone)
+        working-directory: specs/ref-impls
+        run: |
+          "$GITHUB_WORKSPACE/foundry/target/release/forge" coverage \
+            --ir-minimum --match-path "test/zone/**" --report summary | tee coverage.txt
+          {
+            echo '### Zone spec coverage'
+            echo '```'
+            cat coverage.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Coverage gate (production src/zone)
+        working-directory: specs/ref-impls
+        run: |
+          python3 - <<'PY'
+          import os, re, sys
+          ln = ld = bn = bd = 0
+          for line in open("coverage.txt"):
+              if "| src/zone/" in line:
+                  c = line.split("|")
+                  lm = re.search(r"\((\d+)/(\d+)\)", c[2])
+                  bm = re.search(r"\((\d+)/(\d+)\)", c[4])
+                  if lm:
+                      ln += int(lm.group(1)); ld += int(lm.group(2))
+                  if bm:
+                      bn += int(bm.group(1)); bd += int(bm.group(2))
+          lines = 100 * ln / ld
+          branches = 100 * bn / bd
+          min_l = float(os.environ["MIN_LINES"])
+          min_b = float(os.environ["MIN_BRANCHES"])
+          print(f"src/zone: lines={lines:.2f}% (min {min_l}), branches={branches:.2f}% (min {min_b})")
+          failed = []
+          if lines < min_l:
+              failed.append(f"lines {lines:.2f}% < {min_l}%")
+          if branches < min_b:
+              failed.append(f"branches {branches:.2f}% < {min_b}%")
+          if failed:
+              sys.exit("Coverage gate failed: " + "; ".join(failed))
+          print("Coverage gate passed.")
+          PY
 
   specs-success:
     name: specs success
