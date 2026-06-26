@@ -81,6 +81,15 @@ inherits = "release"
 lto = "fat"
 codegen-units = 1
 
+[profile.reproducible]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "none"
+debug = "none"
+panic = "abort"
+incremental = false
+
 [workspace.dependencies]
 # tempo (from upstream)
 tempo-alloy = { git = "https://github.com/tempoxyz/tempo", rev = "65185565b01bc9f406a06c522357954d75ce7cb7" }

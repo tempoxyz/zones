@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+#
+# Reproducible build of the `tempo-zone` binary for x86_64-unknown-linux-gnu.
+# This is verification-only for now; release.yml and docker.yml still publish
+# through the existing release paths.
+
+ARG RUST_TOOLCHAIN=1.96.0
+FROM rust:${RUST_TOOLCHAIN}-bookworm@sha256:64d9b7f60e3abb08d477cad983d0a3743acc53a19369ba4482510184c9c807e5 AS builder
+
+ARG SOURCE_DATE_EPOCH
+ARG VERSION
+ARG DEBIAN_SNAPSHOT=20260501T000000Z
+
+RUN echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bookworm main" \
+        > /etc/apt/sources.list && \
+    echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT}/ bookworm-security main" \
+        >> /etc/apt/sources.list && \
+    echo "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT}/ bookworm-updates main" \
+        >> /etc/apt/sources.list && \
+    rm -f /etc/apt/sources.list.d/debian.sources
+
+RUN apt-get -o Acquire::Check-Valid-Until=false update && \
+    apt-get install -y --no-install-recommends \
+        libjemalloc-dev \
+        libclang-dev \
+        clang \
+        libssl-dev \
+        pkg-config \
+        mold && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY . .
+
+ENV SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH} \
+    LC_ALL=C \
+    TZ=UTC \
+    JEMALLOC_OVERRIDE=/usr/lib/x86_64-linux-gnu/libjemalloc.a \
+    RUSTFLAGS="-C symbol-mangling-version=v0 -C strip=none -C link-arg=-Wl,--build-id=none -C link-arg=-fuse-ld=mold -C metadata= --remap-path-prefix /app=. --remap-path-prefix /usr/local/cargo/registry=/registry --remap-path-prefix /usr/local/rustup=/rustup"
+
+RUN cargo build --locked --bin tempo-zone \
+        --features jemalloc \
+        --profile reproducible \
+        --target x86_64-unknown-linux-gnu
+
+FROM scratch AS artifacts
+COPY --from=builder /app/target/x86_64-unknown-linux-gnu/reproducible/tempo-zone /tempo-zone

@@ -9,12 +9,12 @@ install-cross:
     cargo install cross --git https://github.com/cross-rs/cross
 
 [group('build')]
-[doc('Builds all tempo binaries in cargo release mode')]
-build-all-release extra_args="": (build-release "tempo" extra_args)
+[doc('Builds all zone binaries in cargo release mode')]
+build-all-release extra_args="": (build-release "tempo-zone" extra_args)
 
 [group('build')]
-[doc('Builds all tempo binaries')]
-build-all extra_args="": (build "tempo" extra_args)
+[doc('Builds all zone binaries')]
+build-all extra_args="": (build "tempo-zone" extra_args)
 
 build-release binary extra_args="": (build binary "-r " + extra_args)
 
