@@ -65,7 +65,7 @@ struct OpenBatchRequestedWithdrawals {
     requested_withdrawals: Vec<RequestedWithdrawalContext>,
 }
 
-const DEFAULT_WITHDRAWAL_BATCH_INTERVAL: Duration = Duration::from_secs(60);
+pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
@@ -700,7 +700,18 @@ where
                 )))
             })?;
 
-        if receipts.iter().any(receipt_has_batch_finalized) {
+        if receipts.iter().any(|receipt| {
+            if !receipt.status() {
+                return false;
+            }
+
+            receipt.logs().iter().any(|log| {
+                log.address == ZONE_OUTBOX_ADDRESS
+                    && log.topics().first().copied().is_some_and(|topic| {
+                        topic == abi::ZoneOutbox::BatchFinalized::SIGNATURE_HASH
+                    })
+            })
+        }) {
             return Ok(block_number);
         }
     }
@@ -754,21 +765,6 @@ where
     }
 
     Ok(())
-}
-
-fn receipt_has_batch_finalized(receipt: &TempoReceipt) -> bool {
-    if !receipt.status() {
-        return false;
-    }
-
-    receipt.logs().iter().any(|log| {
-        log.address == ZONE_OUTBOX_ADDRESS
-            && log
-                .topics()
-                .first()
-                .copied()
-                .is_some_and(|topic| topic == abi::ZoneOutbox::BatchFinalized::SIGNATURE_HASH)
-    })
 }
 
 fn collect_requested_withdrawals(

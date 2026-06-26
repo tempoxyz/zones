@@ -65,7 +65,9 @@ use zone_l1::{
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
 };
-use zone_payload::{ZonePayloadAttributes, ZonePayloadFactory, ZonePayloadTypes};
+use zone_payload::{
+    DEFAULT_WITHDRAWAL_BATCH_INTERVAL, ZonePayloadAttributes, ZonePayloadFactory, ZonePayloadTypes,
+};
 use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequencer};
 
 /// Network primitives for Zone Nodes
@@ -165,7 +167,7 @@ impl ZoneNode {
             policy_cache,
             portal_address,
             initial_tokens: None,
-            withdrawal_batch_interval: Duration::from_secs(60),
+            withdrawal_batch_interval: DEFAULT_WITHDRAWAL_BATCH_INTERVAL,
             private_rpc_config: ZonePrivateRpcConfig::default(),
             sequencer_config: None,
         }

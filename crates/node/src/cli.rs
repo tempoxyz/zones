@@ -10,6 +10,7 @@ use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone_evm::ZoneEvmConfig;
+use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL;
 
 use crate::{
     ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig,
@@ -135,7 +136,7 @@ pub struct ZoneArgs {
     #[arg(
         long = "zone.batch-interval-secs",
         env = "ZONE_BATCH_INTERVAL_SECS",
-        default_value_t = 60
+        default_value_t = DEFAULT_WITHDRAWAL_BATCH_INTERVAL.as_secs()
     )]
     pub zone_batch_interval_secs: u64,
 
