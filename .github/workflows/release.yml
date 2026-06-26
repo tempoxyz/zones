@@ -41,11 +41,13 @@ jobs:
     steps:
       - name: Get version from tag
         id: get_version
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ inputs.tag }}" >> $GITHUB_OUTPUT
+            echo "version=${INPUT_TAG}" >> "$GITHUB_OUTPUT"
           else
-            echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
   check-version:
     name: check version
@@ -60,8 +62,10 @@ jobs:
       - name: Verify crate version matches tag
         # Check that the Cargo version starts with the tag,
         # so that Cargo version 1.4.8 can be matched against both v1.4.8 and v1.4.8-rc.1
+        env:
+          VERSION: ${{ needs.get-version.outputs.version }}
         run: |
-          tag="${{ needs.get-version.outputs.version }}"
+          tag="$VERSION"
           tag=${tag#v}
           cargo_ver=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
           [[ "$tag" == "$cargo_ver"* ]] || { echo "Tag $tag doesn’t match the Cargo version $cargo_ver"; exit 1; }
@@ -100,33 +104,43 @@ jobs:
 
       - name: Get build profile
         id: profile
+        env:
+          INPUT_PROFILE: ${{ inputs.profile }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "profile=${{ inputs.profile }}" >> $GITHUB_OUTPUT
+            echo "profile=${INPUT_PROFILE}" >> "$GITHUB_OUTPUT"
           else
-            echo "profile=maxperf" >> $GITHUB_OUTPUT
+            echo "profile=maxperf" >> "$GITHUB_OUTPUT"
           fi
         shell: bash
 
       - name: Build binary
-        run: cargo build --bin ${{ matrix.binary.name }} --features "${{ matrix.binary.features }}" --profile ${{ steps.profile.outputs.profile }} --target ${{ matrix.platform.target }}
         env:
           CARGO_TARGET_DIR: target
+          BINARY_NAME: ${{ matrix.binary.name }}
+          FEATURES: ${{ matrix.binary.features }}
+          PROFILE: ${{ steps.profile.outputs.profile }}
+          TARGET: ${{ matrix.platform.target }}
+        run: cargo build --bin "$BINARY_NAME" --features "$FEATURES" --profile "$PROFILE" --target "$TARGET"
 
       - name: Prepare binary
         id: prepare
         shell: bash
+        env:
+          BINARY: ${{ matrix.binary.name }}
+          TARGET: ${{ matrix.platform.target }}
+          PROFILE: ${{ steps.profile.outputs.profile }}
+          VERSION: ${{ needs.get-version.outputs.version }}
         run: |
-          PROFILE="${{ steps.profile.outputs.profile }}"
           if [ "$PROFILE" = "dev" ]; then
             PROFILE_DIR="debug"
           else
             PROFILE_DIR="$PROFILE"
           fi
 
-          BINARY_PATH="target/${{ matrix.platform.target }}/${PROFILE_DIR}/${{ matrix.binary.name }}"
-          BINARY_NAME="${{ matrix.binary.name }}-${{ needs.get-version.outputs.version }}-${{ matrix.platform.target }}"
-          ARCHIVE_NAME="${{ matrix.binary.name }}-${{ needs.get-version.outputs.version }}-${{ matrix.platform.target }}.tar.gz"
+          BINARY_PATH="target/${TARGET}/${PROFILE_DIR}/${BINARY}"
+          BINARY_NAME="${BINARY}-${VERSION}-${TARGET}"
+          ARCHIVE_NAME="${BINARY}-${VERSION}-${TARGET}.tar.gz"
 
           cp "$BINARY_PATH" "$BINARY_NAME"
           tar czf "$ARCHIVE_NAME" "$BINARY_NAME"
@@ -136,8 +150,11 @@ jobs:
 
       - name: Generate checksums
         shell: bash
+        env:
+          ARCHIVE_PATH: ${{ steps.prepare.outputs.archive_path }}
+          ARCHIVE_NAME: ${{ steps.prepare.outputs.archive_name }}
         run: |
-          shasum -a 256 "${{ steps.prepare.outputs.archive_path }}" > "${{ steps.prepare.outputs.archive_name }}.sha256"
+          shasum -a 256 "$ARCHIVE_PATH" > "${ARCHIVE_NAME}.sha256"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

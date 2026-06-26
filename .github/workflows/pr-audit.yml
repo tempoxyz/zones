@@ -12,16 +12,24 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' && (github.event.label.name == 'cyclops' || github.event.label.name == 'agentic-audit')
+    environment: pr-audit
+    permissions: {}
     steps:
       - name: Publish event
+        env:
+          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
+          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
+          EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
 
-          echo "${{ secrets.EVENTS_KEY }}" > ${{ runner.temp }}/key
-          echo "${{ secrets.EVENTS_CERT }}" > ${{ runner.temp }}/cert
+          echo "$EVENTS_KEY" > "${{ runner.temp }}/key"
+          echo "$EVENTS_CERT" > "${{ runner.temp }}/cert"
 
           # EVENTS_ARGS may contain additional curl arguments, not just a URL.
-          curl -sf -o /dev/null -X POST ${{ secrets.EVENTS_ARGS }} \
+          curl -sf -o /dev/null -X POST $EVENTS_ARGS \
             -H "Content-Type: application/json" \
             --key "${{ runner.temp }}/key" \
             --cert "${{ runner.temp }}/cert" \
@@ -29,8 +37,8 @@ jobs:
               "repository": "${{ github.repository }}",
               "event": "pr_audit",
               "data": {
-                "pr_number": ${{ github.event.pull_request.number }},
-                "sha": "${{ github.event.pull_request.head.sha }}"
+                "pr_number": '"$PR_NUMBER"',
+                "sha": "'"$PR_SHA"'"
               }
             }'
 
@@ -48,6 +56,7 @@ jobs:
       contents: read
       issues: write
       pull-requests: write
+    environment: pr-audit
     steps:
       - name: Check org membership
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
@@ -253,16 +262,19 @@ jobs:
         id: publish
         continue-on-error: true
         env:
+          EVENTS_KEY: ${{ secrets.EVENTS_KEY }}
+          EVENTS_CERT: ${{ secrets.EVENTS_CERT }}
+          EVENTS_ARGS: ${{ secrets.EVENTS_ARGS }}
           PAYLOAD_B64: ${{ steps.args.outputs.payload-b64 }}
         run: |
           set -euo pipefail
 
-          printf '%s' '${{ secrets.EVENTS_KEY }}' > "${RUNNER_TEMP}/key"
-          printf '%s' '${{ secrets.EVENTS_CERT }}' > "${RUNNER_TEMP}/cert"
+          printf '%s' "$EVENTS_KEY" > "${RUNNER_TEMP}/key"
+          printf '%s' "$EVENTS_CERT" > "${RUNNER_TEMP}/cert"
           printf '%s' "$PAYLOAD_B64" | base64 --decode > "${RUNNER_TEMP}/pr-audit-event.json"
 
           # EVENTS_ARGS may contain additional curl arguments, not just a URL.
-          curl -sf -o /dev/null -X POST ${{ secrets.EVENTS_ARGS }} \
+          curl -sf -o /dev/null -X POST $EVENTS_ARGS \
             -H "Content-Type: application/json" \
             --key "${RUNNER_TEMP}/key" \
             --cert "${RUNNER_TEMP}/cert" \
