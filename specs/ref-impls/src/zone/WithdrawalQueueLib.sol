@@ -12,7 +12,9 @@ uint256 constant WITHDRAWAL_QUEUE_CAPACITY = 100;
 
 /// @title WithdrawalQueue
 /// @notice Fixed-size ring buffer for zone→Tempo withdrawals
-/// @dev Each batch gets its own slot. Head points to the oldest unprocessed batch,
+/// @dev Each batch with a non-zero withdrawal hash chain gets its own slot; empty
+///      batches (withdrawalQueueHash == 0) advance the batch index but do not consume
+///      a slot. Head points to the oldest unprocessed batch,
 ///      tail points to where the next batch will write. Slots contain hash chains
 ///      of withdrawals for that batch. Head and tail are raw uint256 values that
 ///      never wrap; modular arithmetic (head % WITHDRAWAL_QUEUE_CAPACITY) is used
