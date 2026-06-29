@@ -65,7 +65,9 @@ use zone_l1::{
         spawn_policy_resolution_task, spawn_pool_prefetch_task,
     },
 };
-use zone_payload::{ZonePayloadAttributes, ZonePayloadFactory, ZonePayloadTypes};
+use zone_payload::{
+    DEFAULT_WITHDRAWAL_BATCH_INTERVAL, ZonePayloadAttributes, ZonePayloadFactory, ZonePayloadTypes,
+};
 use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequencer};
 
 /// Network primitives for Zone Nodes
@@ -80,7 +82,7 @@ pub struct ZoneSequencerAddOnsConfig {
     pub zone_id: u32,
     /// How often the zone monitor polls for new L2 blocks.
     pub zone_poll_interval: Duration,
-    /// Maximum time to accumulate zone blocks before batch submission.
+    /// Maximum time between withdrawal batch boundaries/submissions.
     pub batch_interval: Duration,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
@@ -119,6 +121,8 @@ pub struct ZoneNode {
     /// Optional pre-configured list of enabled token addresses. When set, the
     /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
     initial_tokens: Option<Vec<Address>>,
+    /// Maximum chain-time duration between withdrawal batch finalizations.
+    withdrawal_batch_interval: Duration,
     /// Private RPC config.
     private_rpc_config: ZonePrivateRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
@@ -163,6 +167,7 @@ impl ZoneNode {
             policy_cache,
             portal_address,
             initial_tokens: None,
+            withdrawal_batch_interval: DEFAULT_WITHDRAWAL_BATCH_INTERVAL,
             private_rpc_config: ZonePrivateRpcConfig::default(),
             sequencer_config: None,
         }
@@ -185,6 +190,13 @@ impl ZoneNode {
     /// When set, the startup L1 RPC query for enabled tokens is skipped.
     pub fn with_initial_tokens(mut self, tokens: Vec<Address>) -> Self {
         self.initial_tokens = Some(tokens);
+        self
+    }
+
+    /// Set the chain-time interval used by the payload builder for empty
+    /// withdrawal batch finalization.
+    pub fn with_withdrawal_batch_interval(mut self, interval: Duration) -> Self {
+        self.withdrawal_batch_interval = interval;
         self
     }
 
@@ -217,13 +229,28 @@ impl ZoneNode {
     where
         N: FullNodeTypes<Types = Self>,
     {
+        Self::components_with_payload_factory(executor_builder, ZonePayloadFactory::default())
+    }
+
+    fn components_with_payload_factory<N>(
+        executor_builder: ZoneExecutorBuilder,
+        payload_factory: ZonePayloadFactory,
+    ) -> ComponentsBuilder<
+        N,
+        ZonePoolBuilder,
+        BasicPayloadServiceBuilder<ZonePayloadFactory>,
+        NoopNetworkBuilder<ZoneNetworkPrimitives>,
+        ZoneExecutorBuilder,
+        NoopConsensusBuilder,
+    >
+    where
+        N: FullNodeTypes<Types = Self>,
+    {
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(ZonePoolBuilder)
             .executor(executor_builder)
-            .payload(BasicPayloadServiceBuilder::new(
-                ZonePayloadFactory::default(),
-            ))
+            .payload(BasicPayloadServiceBuilder::new(payload_factory))
             .network(NoopNetworkBuilder::<ZoneNetworkPrimitives>::default())
             .noop_consensus()
     }
@@ -664,7 +691,8 @@ where
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
         );
-        Self::components(executor_builder)
+        let payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval);
+        Self::components_with_payload_factory(executor_builder, payload_factory)
     }
 
     fn add_ons(&self) -> Self::AddOns {

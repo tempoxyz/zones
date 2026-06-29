@@ -10,6 +10,7 @@ use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone_evm::ZoneEvmConfig;
+use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL;
 
 use crate::{
     ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig,
@@ -68,6 +69,7 @@ impl ZoneCli {
                 args.l1_fetch_concurrency,
                 Duration::from_millis(args.l1_retry_connection_interval_ms),
             )
+            .with_withdrawal_batch_interval(Duration::from_secs(args.zone_batch_interval_secs))
             .with_private_rpc(ZonePrivateRpcConfig {
                 private_rpc_port: args.private_rpc_port,
                 zone_id: args.zone_id,
@@ -130,11 +132,11 @@ pub struct ZoneArgs {
     )]
     pub zone_poll_interval_secs: u64,
 
-    /// Maximum time (in seconds) to accumulate zone blocks before submitting a batch to L1.
+    /// Maximum time (in seconds) between withdrawal batch boundaries.
     #[arg(
         long = "zone.batch-interval-secs",
         env = "ZONE_BATCH_INTERVAL_SECS",
-        default_value_t = 60
+        default_value_t = DEFAULT_WITHDRAWAL_BATCH_INTERVAL.as_secs()
     )]
     pub zone_batch_interval_secs: u64,
 

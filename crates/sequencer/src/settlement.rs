@@ -18,13 +18,11 @@
 //! | Gap | Mode | Description |
 //! |-----|------|-------------|
 //! | < configured effective window | Direct | Portal reads hash from EIP-2935. |
-//! | ≥ configured effective window | Stepping | Split into smaller submissions; each submission may still use ancestry if needed. |
+//! | ≥ configured effective window | Ancestry | Use a recent anchor and collect ancestry headers for the batch. |
 //!
-//! [`AnchorGapKind`] classifies the gap in the zone monitor before
-//! `submit_batch` is called. Inside `submit_batch`, [`AnchorMode`] handles
-//! submissions whose `tempoBlockNumber` is still outside the configured direct
-//! window by falling back to ancestry mode — a recent anchor block plus a
-//! locally validated parent-hash header chain.
+//! [`AnchorMode`] handles submissions whose `tempoBlockNumber` is outside the
+//! configured direct window by falling back to ancestry mode — a recent anchor
+//! block plus a locally validated parent-hash header chain.
 
 use std::collections::BTreeMap;
 
@@ -53,8 +51,8 @@ const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 ///
 /// Production uses the real 8192-block EIP-2935 history window with a safety
 /// margin. This type exists primarily so tests can shrink that otherwise large
-/// window and exercise stepping/ancestry behavior without mining thousands of
-/// L1 blocks. Production code should normally use [`Default`].
+/// window and exercise ancestry behavior without mining thousands of L1 blocks.
+/// Production code should normally use [`Default`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatchAnchorConfig {
     /// Total L1 block-hash history window to treat as available for EIP-2935
@@ -141,6 +139,17 @@ pub struct BatchData {
     pub withdrawal_queue_hash: B256,
 }
 
+/// One L2 withdrawal batch finalized by `ZoneOutbox`.
+#[derive(Debug, Clone)]
+pub(crate) struct FinalizedBatch {
+    /// Authoritative hash emitted by `BatchFinalized` and stored in `lastBatch()`.
+    pub finalized_hash: B256,
+    /// Authoritative L2 withdrawal batch index emitted by `BatchFinalized`.
+    pub finalized_index: u64,
+    /// Reconstructed withdrawal payloads for the off-chain processor store.
+    pub withdrawals: Vec<abi::Withdrawal>,
+}
+
 /// Submits zone batches to the ZonePortal contract on Tempo L1.
 ///
 /// Holds a contract instance pointing at the portal, backed by a shared
@@ -208,10 +217,6 @@ impl BatchSubmitter {
     /// - **Ancestry** — `tempo_block_number` is outside the effective window. A
     ///   recent anchor block is used and ancestry headers are collected (for
     ///   future prover integration).
-    ///
-    /// Callers should use [`classify_anchor_gap`](Self::classify_anchor_gap)
-    /// first so large gaps can be split into stepping submissions before this
-    /// method performs ancestry header fetching.
     ///
     /// `verifierConfig` and `proof` are empty until real proof generation is
     /// implemented.
@@ -331,39 +336,6 @@ impl BatchSubmitter {
         Ok(tx_hash)
     }
 
-    /// Classify whether `tempo_block_number` can be submitted directly or
-    /// requires stepping (splitting into sub-batches).
-    ///
-    /// Only performs a single `get_block_number` RPC call — no header fetching
-    /// or contract reads.
-    ///
-    /// Returns an error if `tempo_block_number` is not yet confirmed on L1
-    /// (i.e. it equals or exceeds the current L1 tip).
-    pub(crate) async fn classify_anchor_gap(
-        &self,
-        tempo_block_number: u64,
-    ) -> Result<AnchorGapKind> {
-        let current_l1_block = self.l1_provider.get_block_number().await?;
-
-        if tempo_block_number >= current_l1_block {
-            return Err(eyre::eyre!(
-                "tempo_block_number ({tempo_block_number}) is not yet confirmed on L1 (tip={current_l1_block}), \
-                 will retry after L1 advances"
-            ));
-        }
-
-        let gap = current_l1_block.saturating_sub(tempo_block_number);
-
-        let effective_window = self.anchor_config.effective_window();
-        if gap < effective_window {
-            Ok(AnchorGapKind::Direct)
-        } else {
-            Ok(AnchorGapKind::Ancestry {
-                step_size: effective_window,
-            })
-        }
-    }
-
     /// Resolve the anchor mode for the given `tempo_block_number`.
     ///
     /// - **Direct** (gap < configured effective window): the portal reads the
@@ -475,57 +447,6 @@ impl BatchSubmitter {
         Ok(headers)
     }
 
-    /// Compute zone L2 block numbers that serve as split points for stepping mode.
-    ///
-    /// Zone blocks and L1 blocks have a 1:1 mapping (each zone block processes
-    /// exactly one L1 block via `advanceTempo`), so the zone block for a target
-    /// `tempoBlockNumber` can be computed arithmetically:
-    ///
-    /// ```text
-    /// zone_block = from_zone_block + (target_tempo - from_tempo)
-    /// ```
-    ///
-    /// Returns split points in ascending order, all within `[from_zone_block, max_zone_block]`.
-    pub(crate) fn compute_step_points(
-        from_zone_block: u64,
-        from_tempo: u64,
-        current_l1_block: u64,
-        step_size: u64,
-        max_zone_block: u64,
-        safety_margin: u64,
-    ) -> Vec<StepPoint> {
-        let mut step_points = Vec::new();
-        if step_size == 0 {
-            return step_points;
-        }
-
-        let mut target = from_tempo + step_size;
-
-        while target < current_l1_block.saturating_sub(safety_margin) {
-            let zone_block = from_zone_block + (target - from_tempo);
-            if zone_block > max_zone_block {
-                break;
-            }
-            step_points.push(StepPoint {
-                zone_block,
-                target_tempo_block: target,
-            });
-            target += step_size;
-        }
-
-        step_points
-    }
-
-    /// Returns a reference to the L1 provider.
-    pub(crate) fn l1_provider(&self) -> &DynProvider<TempoNetwork> {
-        &self.l1_provider
-    }
-
-    /// Return the configured EIP-2935 anchor limits.
-    pub(crate) const fn anchor_config(&self) -> BatchAnchorConfig {
-        self.anchor_config
-    }
-
     /// Read the portal's `genesisTempoBlockNumber` from L1.
     pub async fn read_genesis_tempo_block_number(&self) -> Result<u64> {
         Ok(self.portal.genesisTempoBlockNumber().call().await?)
@@ -551,6 +472,11 @@ impl BatchSubmitter {
             .try_into()
             .map_err(|_| eyre::eyre!("withdrawal queue tail overflow"))?;
         Ok(tail)
+    }
+
+    /// Read the current withdrawal batch index from the ZonePortal on L1.
+    pub async fn read_portal_withdrawal_batch_index(&self) -> Result<u64> {
+        Ok(self.portal.withdrawalBatchIndex().call().await?)
     }
 
     /// Read the current withdrawal queue head from the ZonePortal on L1.
@@ -859,29 +785,179 @@ fn find_processed_offset(
     None
 }
 
-/// Fetch `WithdrawalRequested` events from zone L2 in the given block range,
-/// sorted by log order, and convert to [`abi::Withdrawal`] structs.
+#[derive(Debug)]
+struct RequestedWithdrawalLog {
+    block_number: u64,
+    tx_index: u64,
+    log_index: u64,
+    tx_hash: B256,
+    event: abi::ZoneOutbox::WithdrawalRequested,
+}
+
+#[derive(Debug, Clone)]
+struct FinalizedBatchLog {
+    block_number: u64,
+    tx_index: u64,
+    log_index: u64,
+    tx_hash: B256,
+    withdrawal_queue_hash: B256,
+    withdrawal_batch_index: u64,
+}
+
+/// Fetch all zone block numbers in `[from, to]` that finalized a withdrawal batch.
+///
+/// This includes zero-withdrawal batches because they still advance the L2
+/// withdrawal batch index and therefore require a matching L1 `submitBatch`.
+pub(crate) async fn fetch_finalized_batch_boundaries(
+    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    from: u64,
+    to: u64,
+) -> Result<Vec<u64>> {
+    if from > to {
+        return Ok(Vec::new());
+    }
+
+    let mut boundaries: Vec<_> = outbox
+        .BatchFinalized_filter()
+        .from_block(from)
+        .to_block(to)
+        .chunked()
+        .chunk_size(LOG_QUERY_BLOCK_CHUNK)
+        .concurrent(2)
+        .query()
+        .await?
+        .into_iter()
+        .map(|(_, log)| log.block_number.unwrap_or(0))
+        .collect();
+
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    Ok(boundaries)
+}
+
+/// Fetch one finalized L2 withdrawal batch for a range ending at `to`.
+///
+/// The submitted hash and index come from the batch's `BatchFinalized` event.
+/// Withdrawal structs are reconstructed from `WithdrawalRequested` logs since
+/// the immediately preceding batch boundary so the off-chain processor can
+/// service the portal queue.
+pub(crate) async fn fetch_finalized_batch(
+    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    zone_provider: &DynProvider<TempoNetwork>,
+    from: u64,
+    to: u64,
+) -> Result<FinalizedBatch> {
+    let mut finalized_batches = fetch_finalized_batch_logs(outbox, from, to).await?;
+
+    if finalized_batches.is_empty() {
+        return Err(eyre::eyre!(
+            "range {from}..={to} does not contain a BatchFinalized boundary"
+        ));
+    }
+
+    finalized_batches.sort_by_key(|batch| (batch.block_number, batch.tx_index, batch.log_index));
+    let target_position = finalized_batches
+        .iter()
+        .rposition(|batch| batch.block_number == to)
+        .ok_or_else(|| {
+            eyre::eyre!("range {from}..={to} does not end on a BatchFinalized boundary")
+        })?;
+
+    if finalized_batches
+        .iter()
+        .filter(|batch| batch.block_number == to)
+        .count()
+        != 1
+    {
+        return Err(eyre::eyre!(
+            "zone block {to} contains more than one BatchFinalized event"
+        ));
+    }
+
+    let target = finalized_batches[target_position].clone();
+    let previous_boundary = finalized_batches[..target_position]
+        .last()
+        .map(|batch| batch.block_number)
+        .unwrap_or(from.saturating_sub(1));
+    let request_from = previous_boundary.saturating_add(1);
+
+    let requests = if request_from <= to {
+        fetch_requested_withdrawal_logs(outbox, request_from, to).await?
+    } else {
+        Vec::new()
+    };
+
+    let finalize_tx = zone_provider
+        .get_transaction_by_hash(target.tx_hash)
+        .await?
+        .ok_or_else(|| {
+            eyre::eyre!(
+                "missing finalizeWithdrawalBatch tx {} for zone block {}",
+                target.tx_hash,
+                target.block_number
+            )
+        })?;
+    let encrypted_senders =
+        abi::ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
+            .map_err(|err| {
+                eyre::eyre!(
+                    "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
+                    target.tx_hash
+                )
+            })?
+            .encryptedSenders;
+
+    if encrypted_senders.len() != requests.len() {
+        return Err(eyre::eyre!(
+            "encrypted sender count mismatch for batch ending at zone block {}: {} encrypted senders for {} requests",
+            target.block_number,
+            encrypted_senders.len(),
+            requests.len()
+        ));
+    }
+
+    let withdrawals = requests
+        .into_iter()
+        .zip(encrypted_senders)
+        .map(|(request, encrypted_sender)| {
+            abi::Withdrawal::from_requested_event(&request.event, request.tx_hash, encrypted_sender)
+        })
+        .collect::<Vec<_>>();
+
+    let recomputed_hash = abi::Withdrawal::queue_hash(&withdrawals);
+    if recomputed_hash != target.withdrawal_queue_hash {
+        return Err(eyre::eyre!(
+            "withdrawal hash mismatch for batch ending at zone block {}: event hash {}, reconstructed hash {}",
+            target.block_number,
+            target.withdrawal_queue_hash,
+            recomputed_hash
+        ));
+    }
+
+    Ok(FinalizedBatch {
+        finalized_hash: target.withdrawal_queue_hash,
+        finalized_index: target.withdrawal_batch_index,
+        withdrawals,
+    })
+}
+
+/// Fetch `WithdrawalRequested` events for one portal queue slot.
 pub(crate) async fn fetch_slot_withdrawals(
     outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
     zone_provider: &DynProvider<TempoNetwork>,
     from: u64,
     to: u64,
 ) -> Result<Vec<abi::Withdrawal>> {
-    struct RequestedWithdrawalLog {
-        block_number: u64,
-        tx_index: u64,
-        log_index: u64,
-        tx_hash: B256,
-        event: abi::ZoneOutbox::WithdrawalRequested,
-    }
+    Ok(fetch_finalized_batch(outbox, zone_provider, from, to)
+        .await?
+        .withdrawals)
+}
 
-    struct FinalizedBatchLog {
-        block_number: u64,
-        tx_index: u64,
-        log_index: u64,
-        tx_hash: B256,
-    }
-
+async fn fetch_requested_withdrawal_logs(
+    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    from: u64,
+    to: u64,
+) -> Result<Vec<RequestedWithdrawalLog>> {
     let mut requests: Vec<_> = outbox
         .WithdrawalRequested_filter()
         .from_block(from)
@@ -906,6 +982,14 @@ pub(crate) async fn fetch_slot_withdrawals(
         .collect::<Result<Vec<_>>>()?;
     requests.sort_by_key(|request| (request.block_number, request.tx_index, request.log_index));
 
+    Ok(requests)
+}
+
+async fn fetch_finalized_batch_logs(
+    outbox: &ZoneOutbox::ZoneOutboxInstance<DynProvider<TempoNetwork>, TempoNetwork>,
+    from: u64,
+    to: u64,
+) -> Result<Vec<FinalizedBatchLog>> {
     let mut finalized_batches: Vec<_> = outbox
         .BatchFinalized_filter()
         .from_block(from)
@@ -916,8 +1000,7 @@ pub(crate) async fn fetch_slot_withdrawals(
         .query()
         .await?
         .into_iter()
-        .filter(|(event, _)| !event.withdrawalQueueHash.is_zero())
-        .map(|(_, log)| -> Result<_> {
+        .map(|(event, log)| -> Result<_> {
             Ok(FinalizedBatchLog {
                 block_number: log.block_number.unwrap_or(0),
                 tx_index: log.transaction_index.unwrap_or(0),
@@ -925,78 +1008,13 @@ pub(crate) async fn fetch_slot_withdrawals(
                 tx_hash: log
                     .transaction_hash
                     .ok_or_else(|| eyre::eyre!("BatchFinalized log missing transaction hash"))?,
+                withdrawal_queue_hash: event.withdrawalQueueHash,
+                withdrawal_batch_index: event.withdrawalBatchIndex,
             })
         })
         .collect::<Result<Vec<_>>>()?;
     finalized_batches.sort_by_key(|batch| (batch.block_number, batch.tx_index, batch.log_index));
-
-    let mut requests_by_block: BTreeMap<u64, Vec<RequestedWithdrawalLog>> = BTreeMap::new();
-    for request in requests {
-        requests_by_block
-            .entry(request.block_number)
-            .or_default()
-            .push(request);
-    }
-
-    let mut withdrawals = Vec::new();
-    for finalized_batch in finalized_batches {
-        let requests = requests_by_block
-            .remove(&finalized_batch.block_number)
-            .unwrap_or_default();
-        if requests.is_empty() {
-            return Err(eyre::eyre!(
-                "BatchFinalized at zone block {} has no matching WithdrawalRequested events",
-                finalized_batch.block_number
-            ));
-        }
-
-        let finalize_tx = zone_provider
-            .get_transaction_by_hash(finalized_batch.tx_hash)
-            .await?
-            .ok_or_else(|| {
-                eyre::eyre!(
-                    "missing finalizeWithdrawalBatch tx {} for zone block {}",
-                    finalized_batch.tx_hash,
-                    finalized_batch.block_number
-                )
-            })?;
-        let encrypted_senders =
-            abi::ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())
-                .map_err(|err| {
-                    eyre::eyre!(
-                        "failed to decode finalizeWithdrawalBatch calldata for {}: {err}",
-                        finalized_batch.tx_hash
-                    )
-                })?
-                .encryptedSenders;
-
-        if encrypted_senders.len() != requests.len() {
-            return Err(eyre::eyre!(
-                "encrypted sender count mismatch at zone block {}: {} encrypted senders for {} requests",
-                finalized_batch.block_number,
-                encrypted_senders.len(),
-                requests.len()
-            ));
-        }
-
-        withdrawals.extend(requests.into_iter().zip(encrypted_senders).map(
-            |(request, encrypted_sender)| {
-                abi::Withdrawal::from_requested_event(
-                    &request.event,
-                    request.tx_hash,
-                    encrypted_sender,
-                )
-            },
-        ));
-    }
-
-    if !requests_by_block.is_empty() {
-        return Err(eyre::eyre!(
-            "found WithdrawalRequested events without matching non-zero BatchFinalized events in range {from}..={to}"
-        ));
-    }
-
-    Ok(withdrawals)
+    Ok(finalized_batches)
 }
 
 /// Lazily split an inclusive block range into bounded query windows.
@@ -1013,28 +1031,12 @@ pub(crate) fn log_query_ranges(from: u64, to: u64) -> impl Iterator<Item = (u64,
     })
 }
 
-/// Classification of the EIP-2935 gap, returned by
-/// [`BatchSubmitter::classify_anchor_gap`].
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum AnchorGapKind {
-    /// Gap < configured effective window — the portal can read the block hash
-    /// directly from EIP-2935. No extra proof data needed.
-    Direct,
-    /// Gap ≥ configured effective window — `tempo_block_number` is too old
-    /// for a direct EIP-2935 lookup. The batch must be split into smaller
-    /// sub-range submissions (stepping).
-    Ancestry {
-        /// Each sub-batch covers at most this many L1 blocks.
-        step_size: u64,
-    },
-}
-
 /// How the batch submitter anchors `tempoBlockNumber` for EIP-2935 verification.
 ///
 /// Resolved by [`BatchSubmitter::resolve_anchor_mode`] inside `submit_batch`.
-/// Stepping is handled at a higher level by [`AnchorGapKind`]. `submit_batch`
-/// can still use ancestry mode when the original `tempoBlockNumber` has fallen
-/// outside the configured direct-submission window.
+/// `submit_batch` can use ancestry mode when the batch-final block's
+/// `tempoBlockNumber` has fallen outside the configured direct-submission
+/// window.
 #[derive(Debug)]
 #[allow(dead_code)] // Ancestry::ancestry_headers is collected but not yet consumed — available for prover integration
 enum AnchorMode {
@@ -1063,17 +1065,6 @@ impl AnchorMode {
             Self::Ancestry { anchor_block, .. } => *anchor_block,
         }
     }
-}
-
-/// A step split point for stepping mode: identifies a zone L2 block at which
-/// to cut an intermediate batch submission.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
-pub(crate) struct StepPoint {
-    /// Zone L2 block number at which to cut the intermediate batch.
-    pub zone_block: u64,
-    /// Target `tempoBlockNumber` value at this split point.
-    pub target_tempo_block: u64,
 }
 
 /// Zone L2 state read at a specific block, used to populate [`BatchData`].
@@ -1119,39 +1110,6 @@ mod tests {
         assert!(BatchAnchorConfig::new(0, 0).is_err());
         assert!(BatchAnchorConfig::new(10, 10).is_err());
         assert!(BatchAnchorConfig::new(10, 11).is_err());
-    }
-
-    #[test]
-    fn compute_step_points_respects_custom_safety_margin() {
-        let config = BatchAnchorConfig::new(10, 4).unwrap();
-        let points = BatchSubmitter::compute_step_points(
-            1,
-            100,
-            119,
-            config.effective_window(),
-            20,
-            config.safety_margin(),
-        );
-
-        assert_eq!(
-            points,
-            vec![
-                StepPoint {
-                    zone_block: 7,
-                    target_tempo_block: 106,
-                },
-                StepPoint {
-                    zone_block: 13,
-                    target_tempo_block: 112,
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn compute_step_points_handles_zero_step_size() {
-        let points = BatchSubmitter::compute_step_points(1, 100, 119, 0, 20, 4);
-        assert!(points.is_empty());
     }
 
     #[test]
