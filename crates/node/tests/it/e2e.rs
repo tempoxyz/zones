@@ -8,11 +8,9 @@
 use alloy::primitives::{Address, B256, Bytes, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
-use alloy_provider::{Provider, ProviderBuilder};
-use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
+use alloy_provider::{DynProvider, Provider};
 use alloy_sol_types::SolCall;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
-use tempo_contracts::precompiles::ITIP20;
 use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, TempoState, Withdrawal, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS,
@@ -21,8 +19,8 @@ use tempo_zone_contracts::{
 use zone_l1::ChainTempoStateExt;
 
 use crate::utils::{
-    DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, TEST_MNEMONIC, WITHDRAWAL_TX_GAS, ZoneTestNode,
-    poll_until, seed_fixture_for_zone, start_local_zone_with_fixture,
+    DEFAULT_POLL, DEFAULT_TIMEOUT, L1Fixture, WITHDRAWAL_TX_GAS, ZoneTestNode, approve_outbox,
+    local_dev_zone_account, poll_until, seed_fixture_for_zone, start_local_zone_with_fixture,
 };
 
 /// Self-contained test: inject a deposit via the queue and verify the zone
@@ -469,27 +467,49 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verify withdrawal requests finalize in the block that creates them.
+async fn submit_withdrawal(
+    fixture: &mut L1Fixture,
+    zone: &ZoneTestNode,
+    provider: &DynProvider,
+    dev_address: Address,
+    amount: u128,
+) -> eyre::Result<u64> {
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
+    let pending = outbox
+        .requestWithdrawal(
+            PATH_USD_ADDRESS,
+            dev_address,
+            amount,
+            B256::ZERO,
+            0,
+            dev_address,
+            Bytes::new(),
+            Bytes::new(),
+        )
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(WITHDRAWAL_TX_GAS)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    let receipt = pending.get_receipt().await?;
+    assert!(receipt.status(), "withdrawal should succeed");
+    receipt
+        .block_number
+        .ok_or_else(|| eyre::eyre!("withdrawal receipt missing block number"))
+}
+
+/// Verify a lone withdrawal in a current-only block is deferred to the next block.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_withdrawal_requests_finalize_immediately() -> eyre::Result<()> {
+async fn test_withdrawal_requests_finalize_next_block() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
-
-    let dev_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
-    let dev_address = dev_signer.address();
-    let provider = ProviderBuilder::new()
-        .wallet(dev_signer)
-        .connect_http(zone.http_url().clone());
-    let zone_token = ITIP20::new(PATH_USD_ADDRESS, &provider);
-    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
     let deposit_amount: u128 = 2_000_000;
     let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, deposit_amount);
     fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
-
     zone.wait_for_balance(
         PATH_USD_ADDRESS,
         dev_address,
@@ -497,124 +517,342 @@ async fn test_withdrawal_requests_finalize_immediately() -> eyre::Result<()> {
         DEFAULT_TIMEOUT,
     )
     .await?;
+    approve_outbox(&mut fixture, &zone, &provider).await?;
 
-    let approve_pending = zone_token
-        .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
-        .send()
+    let batch_index_before = outbox.withdrawalBatchIndex().call().await?;
+    let withdrawal_block =
+        submit_withdrawal(&mut fixture, &zone, &provider, dev_address, 250_000).await?;
+
+    // Current-only block defers finalization — no BatchFinalized yet.
+    let deferred_logs = outbox
+        .BatchFinalized_filter()
+        .from_block(withdrawal_block)
+        .to_block(withdrawal_block)
+        .query()
         .await?;
+    assert!(
+        deferred_logs.is_empty(),
+        "withdrawal block {withdrawal_block} should defer BatchFinalized"
+    );
+    assert_eq!(
+        outbox.withdrawalBatchIndex().call().await?,
+        batch_index_before,
+        "withdrawalBatchIndex should not advance on deferred block"
+    );
+    assert!(
+        outbox.pendingWithdrawalsCount().call().await? > U256::ZERO,
+        "withdrawal should remain pending after deferred block"
+    );
+
+    // Next quiet block finalizes the deferred withdrawal via the prior path.
     fixture.inject_empty_block(zone.deposit_queue());
-    let approve_receipt = approve_pending.get_receipt().await?;
-    assert!(approve_receipt.status(), "approve should succeed");
-
-    let withdrawal_amounts = [250_000u128, 350_000u128];
-    for (idx, amount) in withdrawal_amounts.into_iter().enumerate() {
-        let batch_index_before = outbox.withdrawalBatchIndex().call().await?;
-        let pending = outbox
-            .requestWithdrawal(
-                PATH_USD_ADDRESS,
-                dev_address,
-                amount,
-                B256::ZERO,
-                0,
-                dev_address,
-                Bytes::new(),
-                Bytes::new(),
-            )
-            .gas_price(TEMPO_T0_BASE_FEE as u128)
-            .gas(WITHDRAWAL_TX_GAS)
-            .send()
-            .await?;
-        fixture.inject_empty_block(zone.deposit_queue());
-        let receipt = pending.get_receipt().await?;
-        assert!(receipt.status(), "withdrawal {idx} should succeed");
-        let withdrawal_block = receipt
-            .block_number
-            .ok_or_else(|| eyre::eyre!("withdrawal receipt missing block number"))?;
-
-        poll_until(
-            DEFAULT_TIMEOUT,
-            DEFAULT_POLL,
-            "withdrawal batch finalized",
-            || {
-                let outbox = &outbox;
-                async move {
-                    let index = outbox.withdrawalBatchIndex().call().await?;
-                    if index == batch_index_before + 1 {
-                        Ok(Some(index))
-                    } else {
-                        Ok(None)
-                    }
+    let quiet_block = withdrawal_block + 1;
+    let finalized_batch_index = poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "withdrawal batch finalized on next block",
+        || {
+            let outbox = &outbox;
+            async move {
+                let index = outbox.withdrawalBatchIndex().call().await?;
+                if index == batch_index_before + 1 {
+                    Ok(Some(index))
+                } else {
+                    Ok(None)
                 }
-            },
-        )
-        .await?;
+            }
+        },
+    )
+    .await?;
 
-        assert_eq!(
-            outbox.pendingWithdrawalsCount().call().await?,
-            U256::ZERO,
-            "withdrawal block should finalize and sweep pending withdrawals"
-        );
-
-        let requested_logs = outbox
+    assert_eq!(
+        outbox.pendingWithdrawalsCount().call().await?,
+        U256::ZERO,
+        "finalize block should sweep pending withdrawals"
+    );
+    assert!(
+        outbox
             .WithdrawalRequested_filter()
-            .from_block(withdrawal_block)
-            .to_block(withdrawal_block)
+            .from_block(quiet_block)
+            .to_block(quiet_block)
             .query()
-            .await?;
-        assert_eq!(
-            requested_logs.len(),
-            1,
-            "withdrawal block should have one WithdrawalRequested log"
-        );
-        let (requested, requested_log) = &requested_logs[0];
-        let withdrawal_tx_hash = requested_log
-            .transaction_hash
-            .ok_or_else(|| eyre::eyre!("WithdrawalRequested log missing transaction hash"))?;
-        let withdrawal =
-            Withdrawal::from_requested_event(requested, withdrawal_tx_hash, Bytes::new());
-        let expected_hash = Withdrawal::queue_hash(&[withdrawal]);
+            .await?
+            .is_empty(),
+        "quiet boundary block should carry no WithdrawalRequested logs"
+    );
 
-        let finalized_logs = outbox
-            .BatchFinalized_filter()
-            .from_block(withdrawal_block)
-            .to_block(withdrawal_block)
-            .query()
-            .await?;
-        assert_eq!(
-            finalized_logs.len(),
-            1,
-            "withdrawal block should emit one BatchFinalized event"
-        );
-        let (finalized, log) = &finalized_logs[0];
-        assert_eq!(finalized.withdrawalQueueHash, expected_hash);
-        assert_eq!(finalized.withdrawalBatchIndex, batch_index_before + 1);
+    let requested_logs = outbox
+        .WithdrawalRequested_filter()
+        .from_block(withdrawal_block)
+        .to_block(withdrawal_block)
+        .query()
+        .await?;
+    assert_eq!(requested_logs.len(), 1);
+    let (requested, requested_log) = &requested_logs[0];
+    let withdrawal_tx_hash = requested_log
+        .transaction_hash
+        .ok_or_else(|| eyre::eyre!("WithdrawalRequested log missing transaction hash"))?;
+    let withdrawal = Withdrawal::from_requested_event(requested, withdrawal_tx_hash, Bytes::new());
+    let expected_hash = Withdrawal::queue_hash(&[withdrawal]);
 
+    let finalized_logs = outbox
+        .BatchFinalized_filter()
+        .from_block(quiet_block)
+        .to_block(quiet_block)
+        .query()
+        .await?;
+    assert_eq!(
+        finalized_logs.len(),
+        1,
+        "exactly one BatchFinalized should follow deferred withdrawal"
+    );
+    let (finalized, log) = &finalized_logs[0];
+    assert_eq!(finalized.withdrawalQueueHash, expected_hash);
+    assert_eq!(finalized.withdrawalBatchIndex, finalized_batch_index);
+
+    let tx_hash = log
+        .transaction_hash
+        .ok_or_else(|| eyre::eyre!("BatchFinalized log missing transaction hash"))?;
+    let finalize_tx = provider
+        .get_transaction_by_hash(tx_hash)
+        .await?
+        .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
+    let finalize_call =
+        ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
+    assert_eq!(
+        finalize_call.count,
+        U256::from(1),
+        "builder should finalize exactly the deferred withdrawal"
+    );
+    assert_eq!(finalize_call.encryptedSenders.len(), 1);
+
+    let last_batch = outbox.lastBatch().call().await?;
+    assert_eq!(last_batch.withdrawalQueueHash, expected_hash);
+    assert_eq!(last_batch.withdrawalBatchIndex, finalized_batch_index);
+
+    Ok(())
+}
+
+/// Two consecutive withdrawal blocks are joined into a single batch at block N+1.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_consecutive_withdrawal_blocks_joined_into_one_batch() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
+
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 2_000_000);
+    fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
+    zone.wait_for_balance(
+        PATH_USD_ADDRESS,
+        dev_address,
+        U256::from(2_000_000u128),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    approve_outbox(&mut fixture, &zone, &provider).await?;
+
+    let batch_index_before = outbox.withdrawalBatchIndex().call().await?;
+    let block_n = submit_withdrawal(&mut fixture, &zone, &provider, dev_address, 250_000).await?;
+    let deferred_logs = outbox
+        .BatchFinalized_filter()
+        .from_block(block_n)
+        .to_block(block_n)
+        .query()
+        .await?;
+    assert!(
+        deferred_logs.is_empty(),
+        "block N should defer finalization"
+    );
+
+    let block_n_plus_1 =
+        submit_withdrawal(&mut fixture, &zone, &provider, dev_address, 350_000).await?;
+
+    poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "joined withdrawal batch finalized",
+        || {
+            let outbox = &outbox;
+            async move {
+                let index = outbox.withdrawalBatchIndex().call().await?;
+                if index == batch_index_before + 1 {
+                    Ok(Some(index))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
+
+    let finalized_logs = outbox
+        .BatchFinalized_filter()
+        .from_block(block_n_plus_1)
+        .to_block(block_n_plus_1)
+        .query()
+        .await?;
+    assert_eq!(
+        finalized_logs.len(),
+        1,
+        "block N+1 should emit exactly one BatchFinalized covering both withdrawals"
+    );
+
+    let requested_n = outbox
+        .WithdrawalRequested_filter()
+        .from_block(block_n)
+        .to_block(block_n)
+        .query()
+        .await?;
+    let requested_n1 = outbox
+        .WithdrawalRequested_filter()
+        .from_block(block_n_plus_1)
+        .to_block(block_n_plus_1)
+        .query()
+        .await?;
+    assert_eq!(requested_n.len(), 1);
+    assert_eq!(requested_n1.len(), 1);
+
+    let mut withdrawals = Vec::new();
+    for (requested, log) in requested_n.iter().chain(requested_n1.iter()) {
         let tx_hash = log
             .transaction_hash
-            .ok_or_else(|| eyre::eyre!("BatchFinalized log missing transaction hash"))?;
-        let finalize_tx = provider
-            .get_transaction_by_hash(tx_hash)
-            .await?
-            .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
-        let finalize_call =
-            ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
-        assert_eq!(
-            finalize_call.count,
-            U256::MAX,
-            "builder should sweep the full pending batch"
-        );
-        assert_eq!(
-            finalize_call.encryptedSenders.len(),
-            1,
-            "encrypted sender metadata should cover the withdrawal"
-        );
-
-        let last_batch = outbox.lastBatch().call().await?;
-        assert_eq!(last_batch.withdrawalQueueHash, expected_hash);
-        assert_eq!(last_batch.withdrawalBatchIndex, batch_index_before + 1);
+            .ok_or_else(|| eyre::eyre!("WithdrawalRequested log missing transaction hash"))?;
+        withdrawals.push(Withdrawal::from_requested_event(
+            requested,
+            tx_hash,
+            Bytes::new(),
+        ));
     }
+    let expected_hash = Withdrawal::queue_hash(&withdrawals);
+    let (finalized, log) = &finalized_logs[0];
+    assert_eq!(finalized.withdrawalQueueHash, expected_hash);
+
+    let tx_hash = log
+        .transaction_hash
+        .ok_or_else(|| eyre::eyre!("BatchFinalized log missing transaction hash"))?;
+    let finalize_tx = provider
+        .get_transaction_by_hash(tx_hash)
+        .await?
+        .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
+    let finalize_call =
+        ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
+    assert_eq!(
+        finalize_call.count,
+        U256::from(2),
+        "joined batch should cover both withdrawal blocks"
+    );
+    assert_eq!(finalize_call.encryptedSenders.len(), 2);
+
+    Ok(())
+}
+
+/// Current-only block with interval elapsed finalizes that block's withdrawals.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_current_only_block_finalizes_when_interval_elapsed() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
+    let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
+
+    let batch_index = outbox.withdrawalBatchIndex().call().await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "genesis empty batch closed",
+        || {
+            let outbox = &outbox;
+            async move {
+                let idx = outbox.withdrawalBatchIndex().call().await?;
+                if idx == batch_index + 1 {
+                    Ok(Some(idx))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
+
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 1_000_000);
+    fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
+    zone.wait_for_balance(
+        PATH_USD_ADDRESS,
+        dev_address,
+        U256::from(1_000_000u128),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+    approve_outbox(&mut fixture, &zone, &provider).await?;
+
+    // Advance 3 quiet blocks (3s < 4s interval) after the boundary.
+    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+
+    let batch_index_before = outbox.withdrawalBatchIndex().call().await?;
+    // 4th block after the boundary: interval elapsed, current-only block should finalize.
+    let withdrawal_block =
+        submit_withdrawal(&mut fixture, &zone, &provider, dev_address, 250_000).await?;
+
+    poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "interval-elapsed current-only block finalized",
+        || {
+            let outbox = &outbox;
+            async move {
+                let index = outbox.withdrawalBatchIndex().call().await?;
+                if index == batch_index_before + 1 {
+                    Ok(Some(index))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
+
+    let finalized_logs = outbox
+        .BatchFinalized_filter()
+        .from_block(withdrawal_block)
+        .to_block(withdrawal_block)
+        .query()
+        .await?;
+    assert_eq!(
+        finalized_logs.len(),
+        1,
+        "interval-elapsed current-only block should finalize in the same block"
+    );
+
+    let requested_logs = outbox
+        .WithdrawalRequested_filter()
+        .from_block(withdrawal_block)
+        .to_block(withdrawal_block)
+        .query()
+        .await?;
+    let (requested, requested_log) = &requested_logs[0];
+    let withdrawal_tx_hash = requested_log
+        .transaction_hash
+        .ok_or_else(|| eyre::eyre!("WithdrawalRequested log missing transaction hash"))?;
+    let withdrawal = Withdrawal::from_requested_event(requested, withdrawal_tx_hash, Bytes::new());
+    assert_eq!(
+        finalized_logs[0].0.withdrawalQueueHash,
+        Withdrawal::queue_hash(&[withdrawal])
+    );
+
+    let tx_hash = finalized_logs[0]
+        .1
+        .transaction_hash
+        .ok_or_else(|| eyre::eyre!("BatchFinalized log missing transaction hash"))?;
+    let finalize_tx = provider
+        .get_transaction_by_hash(tx_hash)
+        .await?
+        .ok_or_else(|| eyre::eyre!("finalizeWithdrawalBatch tx {tx_hash} not found"))?;
+    let finalize_call =
+        ZoneOutbox::finalizeWithdrawalBatchCall::abi_decode(finalize_tx.input().as_ref())?;
+    assert_eq!(finalize_call.count, U256::from(1));
 
     Ok(())
 }
@@ -630,15 +868,7 @@ async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
-    let dev_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
-    let dev_address = dev_signer.address();
-
-    let provider = ProviderBuilder::new()
-        .wallet(dev_signer)
-        .connect_http(zone.http_url().clone());
-    let zone_token = ITIP20::new(PATH_USD_ADDRESS, &provider);
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
 
     let deposit_amount: u128 = 1_000_000;
@@ -653,15 +883,7 @@ async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result
     )
     .await?;
 
-    let approve_pending = zone_token
-        .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
-        .send()
-        .await?;
-    fixture.inject_empty_block(zone.deposit_queue());
-    let approve_receipt = approve_pending.get_receipt().await?;
-    assert!(approve_receipt.status(), "approve should succeed");
+    approve_outbox(&mut fixture, &zone, &provider).await?;
 
     let pending_before = outbox.pendingWithdrawalsCount().call().await?;
     let max_callback_gas = outbox.MAX_WITHDRAWAL_GAS_LIMIT().call().await?;

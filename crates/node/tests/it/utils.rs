@@ -2,7 +2,7 @@ use alloy::genesis::Genesis;
 use alloy_consensus::Header;
 use alloy_eips::NumHash;
 use alloy_primitives::{Address, B256, U256, address, keccak256};
-use alloy_provider::{Provider, ProviderBuilder};
+use alloy_provider::{DynProvider, Provider, ProviderBuilder};
 use alloy_rlp::Encodable;
 use alloy_rpc_types_eth::{BlockNumberOrTag, Filter};
 use alloy_signer_local::{MnemonicBuilder, coins_bip39::English};
@@ -27,15 +27,16 @@ use std::{
     time::Duration,
 };
 use tempo_alloy::TempoNetwork;
-use tempo_chainspec::spec::TempoChainSpec;
+use tempo_chainspec::spec::{TEMPO_T0_BASE_FEE, TempoChainSpec};
 use tempo_contracts::precompiles::{
-    ACCOUNT_KEYCHAIN_ADDRESS,
+    ACCOUNT_KEYCHAIN_ADDRESS, ITIP20,
     account_keychain::IAccountKeychain::{
         IAccountKeychainInstance, SignatureType as KeyInfoSignatureType,
     },
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
+use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
@@ -81,6 +82,39 @@ pub(crate) const TEST_MNEMONIC: &str =
 
 pub(crate) const STABLECOIN_DEX_ADDRESS: Address =
     address!("0xDEc0000000000000000000000000000000000000");
+
+pub(crate) fn local_dev_zone_account(zone: &ZoneTestNode) -> eyre::Result<(DynProvider, Address)> {
+    let dev_signer = MnemonicBuilder::<English>::default()
+        .phrase(TEST_MNEMONIC)
+        .build()?;
+    let dev_address = dev_signer.address();
+    let provider = ProviderBuilder::new()
+        .wallet(dev_signer)
+        .connect_http(zone.http_url().clone())
+        .erased();
+    Ok((provider, dev_address))
+}
+
+pub(crate) async fn approve_outbox<P>(
+    fixture: &mut L1Fixture,
+    zone: &ZoneTestNode,
+    provider: P,
+) -> eyre::Result<()>
+where
+    P: Provider + Clone,
+{
+    let zone_token = ITIP20::new(PATH_USD_ADDRESS, provider);
+    let approve_pending = zone_token
+        .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
+        .gas_price(TEMPO_T0_BASE_FEE as u128)
+        .gas(150_000)
+        .send()
+        .await?;
+    fixture.inject_empty_block(zone.deposit_queue());
+    let approve_receipt = approve_pending.get_receipt().await?;
+    assert!(approve_receipt.status(), "approve should succeed");
+    Ok(())
+}
 
 fn portal_token_config_slot(token: Address) -> B256 {
     let portal_token_configs_slot = B256::with_last_byte(8);
@@ -421,6 +455,28 @@ impl ZoneTestNode {
         .await
     }
 
+    pub(crate) async fn start_from_l1_with_withdrawal_batch_interval(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+        withdrawal_batch_interval: Duration,
+    ) -> eyre::Result<Self> {
+        let (genesis, genesis_block_number) =
+            build_l1_anchored_genesis(l1_http_url, portal_address).await?;
+
+        let signer = l1_dev_signer();
+        Self::launch_with_genesis_and_withdrawal_batch_interval(
+            l1_ws_url.to_string(),
+            portal_address,
+            Some(genesis_block_number),
+            next_unique_chain_id(),
+            Some(genesis),
+            signer,
+            withdrawal_batch_interval,
+        )
+        .await
+    }
+
     /// Start a zone node connected to a real L1, anchoring genesis to the
     /// portal's on-chain `genesisTempoBlockNumber`.
     ///
@@ -504,6 +560,27 @@ impl ZoneTestNode {
         custom_genesis: Option<Genesis>,
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
     ) -> eyre::Result<Self> {
+        Self::launch_with_genesis_and_withdrawal_batch_interval(
+            l1_ws_url,
+            portal_address,
+            genesis_tempo_block_number,
+            chain_id,
+            custom_genesis,
+            sequencer_signer,
+            Duration::from_secs(4),
+        )
+        .await
+    }
+
+    async fn launch_with_genesis_and_withdrawal_batch_interval(
+        l1_ws_url: String,
+        portal_address: Address,
+        genesis_tempo_block_number: Option<u64>,
+        chain_id: u64,
+        custom_genesis: Option<Genesis>,
+        sequencer_signer: alloy_signer_local::PrivateKeySigner,
+        withdrawal_batch_interval: Duration,
+    ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
         let l1_provider_url = l1_ws_url.clone();
@@ -522,7 +599,7 @@ impl ZoneTestNode {
             4,
             std::time::Duration::from_millis(100),
         )
-        .with_withdrawal_batch_interval(std::time::Duration::from_secs(4))
+        .with_withdrawal_batch_interval(withdrawal_batch_interval)
         .with_initial_tokens(vec![]);
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.

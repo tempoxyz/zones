@@ -19,7 +19,8 @@ use tempo_precompiles::PATH_USD_ADDRESS;
 use tempo_zone_contracts::{ZONE_OUTBOX_ADDRESS, ZoneOutbox};
 
 use crate::utils::{
-    DEFAULT_TIMEOUT, TEST_MNEMONIC, WITHDRAWAL_TX_GAS, start_local_zone_with_fixture,
+    DEFAULT_TIMEOUT, TEST_MNEMONIC, WITHDRAWAL_TX_GAS, approve_outbox, local_dev_zone_account,
+    start_local_zone_with_fixture,
 };
 
 /// Deposit pathUSD to the dev account, then transfer a portion to Bob.
@@ -32,10 +33,7 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
-    let dev_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
-    let dev_address = dev_signer.address();
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
 
     let bob = address!("0x0000000000000000000000000000000000000B0B");
     let deposit_amount: u128 = 1_000_000;
@@ -55,9 +53,6 @@ async fn test_deposit_then_transfer() -> eyre::Result<()> {
     // Dev transfers 400,000 to Bob.
     // Submit the tx then inject an L1 block so the zone produces a block including it.
     let transfer_amount: u128 = 400_000;
-    let provider = ProviderBuilder::new()
-        .wallet(dev_signer)
-        .connect_http(zone.http_url().clone());
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
 
     let native_balance = provider.get_balance(dev_address).await?;
@@ -121,17 +116,10 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
 
     let (zone, mut fixture) = start_local_zone_with_fixture(20).await?;
 
-    let dev_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
-    let dev_address = dev_signer.address();
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
 
     let withdrawal_amount: u128 = 250_000;
 
-    let provider = ProviderBuilder::new()
-        .wallet(dev_signer)
-        .connect_http(zone.http_url().clone());
-    let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &provider);
 
     let withdrawal_fee = outbox.calculateWithdrawalFee(0).call().await?;
@@ -151,15 +139,7 @@ async fn test_deposit_then_request_withdrawal() -> eyre::Result<()> {
     )
     .await?;
 
-    let approve_pending = tip20
-        .approve(ZONE_OUTBOX_ADDRESS, U256::MAX)
-        .gas_price(TEMPO_T0_BASE_FEE as u128)
-        .gas(150_000)
-        .send()
-        .await?;
-    fixture.inject_empty_block(zone.deposit_queue());
-    let approve_receipt = approve_pending.get_receipt().await?;
-    assert!(approve_receipt.status(), "approve should succeed");
+    approve_outbox(&mut fixture, &zone, &provider).await?;
 
     let balance_before = zone.balance_of(PATH_USD_ADDRESS, dev_address).await?;
     assert_eq!(
@@ -347,10 +327,7 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
-    let dev_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
-    let dev_address = dev_signer.address();
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
 
     let bob = address!("0x0000000000000000000000000000000000000B0B");
     let deposit_amount: u128 = 1_000_000;
@@ -368,9 +345,6 @@ async fn test_transfer_emits_events() -> eyre::Result<()> {
     .await?;
 
     // Transfer to Bob
-    let provider = ProviderBuilder::new()
-        .wallet(dev_signer)
-        .connect_http(zone.http_url().clone());
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
 
     let pending = tip20
@@ -418,10 +392,7 @@ async fn test_transfer_with_memo() -> eyre::Result<()> {
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
 
-    let dev_signer = MnemonicBuilder::<English>::default()
-        .phrase(TEST_MNEMONIC)
-        .build()?;
-    let dev_address = dev_signer.address();
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
 
     let bob = address!("0x0000000000000000000000000000000000000B0B");
     let deposit_amount: u128 = 1_000_000;
@@ -440,9 +411,6 @@ async fn test_transfer_with_memo() -> eyre::Result<()> {
     .await?;
 
     // Transfer with memo
-    let provider = ProviderBuilder::new()
-        .wallet(dev_signer)
-        .connect_http(zone.http_url().clone());
     let tip20 = ITIP20::new(PATH_USD_ADDRESS, &provider);
 
     let pending = tip20

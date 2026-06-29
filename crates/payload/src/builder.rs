@@ -418,7 +418,6 @@ where
         let open_batch =
             load_open_batch_requested_withdrawals(&self.provider, parent_header.number())?;
         let has_prior_withdrawals = !open_batch.requested_withdrawals.is_empty();
-        let has_current_withdrawals = !requested_withdrawals.is_empty();
         let batch_interval_elapsed = withdrawal_batch_interval_elapsed(
             &self.provider,
             open_batch.previous_boundary_block,
@@ -427,10 +426,12 @@ where
             self.withdrawal_batch_interval,
         )?;
 
-        // Finalize the withdrawal batch when there is withdrawal work to make
-        // visible on L1, or when the configured empty-batch interval elapses so
-        // the L2 and L1 batch indexes remain in lockstep.
-        if has_prior_withdrawals || has_current_withdrawals || batch_interval_elapsed {
+        // Finalize when there are prior (un-finalized) withdrawals to make visible on
+        // L1 — folding in this block's withdrawals when present — or when the empty-batch
+        // interval elapses so the L2 and L1 batch indexes stay in lockstep. A block that
+        // has only current-block withdrawals and no prior defers them to the next block,
+        // which joins consecutive withdrawal blocks into one batch (max +1 block latency).
+        if has_prior_withdrawals || batch_interval_elapsed {
             let mut batch_withdrawals = open_batch.requested_withdrawals;
             batch_withdrawals.extend(requested_withdrawals);
 
@@ -455,8 +456,13 @@ where
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
+            // Finalize exactly the withdrawals we carry encrypted senders for. The contract
+            // processes the oldest `count` pending FIFO; `batch_withdrawals` (prior ++ current)
+            // equals all pending at this point, so this folds current in and leaves nothing
+            // stranded.
+            let count = U256::from(batch_withdrawals.len());
             let finalize_tx =
-                build_finalize_withdrawal_batch_tx(U256::MAX, block_number, encrypted_senders);
+                build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
             let mut finalize_reverted = false;
             match builder.execute_transaction_with_result_closure(finalize_tx, |result| {
                 let evm_result = result.result();
@@ -582,8 +588,8 @@ where
 /// - Writes `_lastBatch` to state for proof access
 /// - Emits `BatchFinalized`
 ///
-/// Pass `u256::MAX` to batch all pending withdrawals. `block_number` must match the current zone
-/// block number.
+/// `count` should match the number of withdrawals represented by `encrypted_senders`.
+/// `block_number` must match the current zone block number.
 pub(crate) fn build_finalize_withdrawal_batch_tx(
     count: U256,
     block_number: u64,
