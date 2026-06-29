@@ -1905,8 +1905,8 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        vm.expectEmit(true, false, false, true);
-        emit IZonePortal.WithdrawalProcessed(bob, address(pathUSD), 500e6, true);
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.WithdrawalProcessed(bob, w.senderTag, address(pathUSD), 500e6, true);
 
         portal.processWithdrawal(w, bytes32(0));
     }
@@ -1946,9 +1946,9 @@ contract ZonePortalTest is BaseTest {
             ""
         );
 
-        vm.expectEmit(true, false, false, true);
+        vm.expectEmit(true, true, false, true);
         emit IZonePortal.WithdrawalProcessed(
-            address(gasConsumingReceiver), address(pathUSD), 500e6, false
+            address(gasConsumingReceiver), w.senderTag, address(pathUSD), 500e6, false
         );
 
         portal.processWithdrawal(w, bytes32(0));

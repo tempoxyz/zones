@@ -85,8 +85,8 @@ contract ZonePortalGasLimitTest is Test {
         emit IZonePortal.WithdrawalBounceBack(
             bytes32(0), fallbackRecipient, address(token), 500e6, 1
         );
-        vm.expectEmit(true, false, false, true, address(portal));
-        emit IZonePortal.WithdrawalProcessed(recipient, address(token), 500e6, false);
+        vm.expectEmit(true, true, false, true, address(portal));
+        emit IZonePortal.WithdrawalProcessed(recipient, w.senderTag, address(token), 500e6, false);
         portal.processWithdrawal(w, bytes32(0));
 
         assertEq(portal.withdrawalQueueHead(), 1);

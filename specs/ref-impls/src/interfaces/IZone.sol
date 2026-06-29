@@ -539,7 +539,11 @@ interface IZonePortal {
     );
 
     event WithdrawalProcessed(
-        address indexed to, address token, uint128 amount, bool callbackSuccess
+        address indexed to,
+        bytes32 indexed senderTag,
+        address token,
+        uint128 amount,
+        bool callbackSuccess
     );
 
     event WithdrawalBounceBack(

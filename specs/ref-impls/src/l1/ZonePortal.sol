@@ -675,7 +675,9 @@ contract ZonePortal is IZonePortal {
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
             _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
-            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
+            emit WithdrawalProcessed(
+                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false
+            );
             return;
         }
 
@@ -707,9 +709,13 @@ contract ZonePortal is IZonePortal {
         if (!success) {
             // Callback failed: bounce back to zone (only amount, not fee)
             _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
-            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, false);
+            emit WithdrawalProcessed(
+                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false
+            );
         } else {
-            emit WithdrawalProcessed(withdrawal.to, _token, withdrawal.amount, true);
+            emit WithdrawalProcessed(
+                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, true
+            );
         }
     }
 

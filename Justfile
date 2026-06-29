@@ -302,7 +302,7 @@ send-withdrawal amount="1000000" to="" token="0x20C00000000000000000000000000000
     echo "Waiting for withdrawal to be processed on L1 (from block $FROM_BLOCK)..."
     while true; do
         LOGS=$(cast logs --address "$PORTAL" --from-block "$FROM_BLOCK" --rpc-url "$HTTP_RPC" \
-            "WithdrawalProcessed(address indexed to, address token, uint128 amount, bool callbackSuccess)" \
+            "WithdrawalProcessed(address indexed to, bytes32 indexed senderTag, address token, uint128 amount, bool callbackSuccess)" \
             "$TO" --json 2>/dev/null || echo "[]")
         if [[ "$LOGS" != "[]" && "$LOGS" != "" && "$LOGS" != "null" ]]; then
             L1_TX=$(echo "$LOGS" | jq -r '.[-1].transactionHash')
