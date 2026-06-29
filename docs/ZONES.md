@@ -538,7 +538,7 @@ export ETH_RPC_URL=https://rpc.moderato.tempo.xyz
 export PRIVATE_KEY=<deployer_private_key>
 
 forge build
-forge create --broadcast --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY" src/zone/ZoneFactory.sol:ZoneFactory
+forge create --broadcast --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY" src/l1/ZoneFactory.sol:ZoneFactory
 ```
 
 The `--private-key "$PRIVATE_KEY"` form is useful for controlled non-interactive deployments. For manual deployments, prefer replacing it with `--interactive` and paste the key at Foundry's prompt so the key is not written into shell history or process arguments.
