@@ -844,6 +844,20 @@ contract ZonePortal is IZonePortal {
 
         if (anchorBlockHash == bytes32(0)) revert InvalidTempoBlockNumber();
 
+        // These are strictly not necessary, but we'll assert them here since they are cheap while
+        // the prover doesn't (yet) enforce them.
+        //   - continuity:  prevDepositNumber must equal where we last left off
+        //   - monotonic:   the queue can only advance (nextDepositNumber >= prevDepositNumber)
+        //   - in-range:    cannot process more deposits than have been enqueued
+        if (
+            depositQueueTransition.prevDepositNumber != lastProcessedDepositNumber
+                || depositQueueTransition.nextDepositNumber
+                    < depositQueueTransition.prevDepositNumber
+                || depositQueueTransition.nextDepositNumber > depositCount
+        ) {
+            revert InvalidDepositTransition();
+        }
+
         // Verify proof (handles both direct and ancestry modes)
         bool valid = IVerifier(verifier)
             .verify(
