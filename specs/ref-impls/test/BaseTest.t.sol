@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { BLOCKHASH_HISTORY } from "../src/zone/BlockHashHistory.sol";
-import { ZONE_TX_CONTEXT } from "../src/zone/IZone.sol";
-import { MockEIP2935 } from "./zone/mocks/MockEIP2935.sol";
-import { MockZoneTxContext } from "./zone/mocks/MockZoneTxContext.sol";
+import { ZONE_TX_CONTEXT } from "../src/interfaces/IZone.sol";
+import { BLOCKHASH_HISTORY } from "../src/libraries/BlockHashHistory.sol";
+import { MockEIP2935 } from "./mocks/MockEIP2935.sol";
+import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
 import { IAccountKeychain } from "tempo-std/interfaces/IAccountKeychain.sol";
