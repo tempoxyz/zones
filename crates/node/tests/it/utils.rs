@@ -1200,6 +1200,21 @@ impl L1TestNode {
         portal_address: Address,
         encryption_key: &k256::SecretKey,
     ) -> eyre::Result<()> {
+        self.set_sequencer_encryption_key_with_signer(
+            portal_address,
+            encryption_key,
+            self.dev_signer(),
+        )
+        .await
+    }
+
+    /// Set the sequencer encryption key using an explicit portal sequencer signer.
+    pub(crate) async fn set_sequencer_encryption_key_with_signer(
+        &self,
+        portal_address: Address,
+        encryption_key: &k256::SecretKey,
+        sequencer_signer: alloy_signer_local::PrivateKeySigner,
+    ) -> eyre::Result<()> {
         use alloy_signer::SignerSync;
         use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
         use tempo_zone_contracts::ZonePortal;
@@ -1225,9 +1240,10 @@ impl L1TestNode {
         let pop_r = B256::from(sig.r().to_be_bytes::<32>());
         let pop_s = B256::from(sig.s().to_be_bytes::<32>());
 
-        // Call setSequencerEncryptionKey as the sequencer (dev account)
-        let dev_provider = self.dev_provider();
-        let portal = ZonePortal::new(portal_address, &dev_provider);
+        let sequencer_provider = ProviderBuilder::new()
+            .wallet(sequencer_signer)
+            .connect_http(self.http_url.clone());
+        let portal = ZonePortal::new(portal_address, &sequencer_provider);
         let receipt = portal
             .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
             .send()
@@ -1769,6 +1785,7 @@ impl WithdrawalArgs {
         token_out: Address,
         target_portal: Address,
         recipient: Address,
+        bounceback_recipient: Address,
         memo: B256,
         min_amount_out: u128,
     ) -> Self {
@@ -1778,6 +1795,7 @@ impl WithdrawalArgs {
             token_out,
             target_portal,
             recipient,
+            bounceback_recipient,
             memo,
             min_amount_out,
         }
@@ -1802,6 +1820,7 @@ impl WithdrawalArgs {
         target_portal: Address,
         key_index: U256,
         encrypted: tempo_zone_contracts::EncryptedDepositPayload,
+        bounceback_recipient: Address,
         min_amount_out: u128,
     ) -> Self {
         let callback_data = tempo_zone_contracts::SwapAndDepositRouterEncryptedCallback {
@@ -1809,6 +1828,7 @@ impl WithdrawalArgs {
             target_portal,
             key_index,
             encrypted,
+            bounceback_recipient,
             min_amount_out,
         }
         .abi_encode();
@@ -1835,6 +1855,7 @@ impl WithdrawalArgs {
         target_portal: Address,
         token: Address,
         recipient: Address,
+        bounceback_recipient: Address,
     ) -> Self {
         Self::swap_and_deposit_via_router(
             amount,
@@ -1842,6 +1863,7 @@ impl WithdrawalArgs {
             token,
             target_portal,
             recipient,
+            bounceback_recipient,
             B256::ZERO,
             0,
         )

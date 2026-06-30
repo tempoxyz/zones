@@ -29,6 +29,8 @@ pub struct SwapAndDepositRouterPlaintextCallback {
     pub target_portal: Address,
     /// Zone recipient for the downstream plaintext deposit.
     pub recipient: Address,
+    /// Tempo refund recipient if the downstream zone deposit later bounces.
+    pub bounceback_recipient: Address,
     /// Memo recorded on the downstream plaintext deposit.
     pub memo: B256,
     /// Minimum acceptable output from the optional swap.
@@ -45,6 +47,7 @@ impl SwapAndDepositRouterPlaintextCallback {
             self.token_out,
             self.target_portal,
             self.recipient,
+            self.bounceback_recipient,
             self.memo,
             self.min_amount_out,
         )
@@ -67,6 +70,8 @@ pub struct SwapAndDepositRouterEncryptedCallback {
     pub key_index: U256,
     /// ECIES-encrypted `(recipient, memo)` payload for `depositEncrypted`.
     pub encrypted: EncryptedDepositPayload,
+    /// Tempo refund recipient if the downstream encrypted deposit later bounces.
+    pub bounceback_recipient: Address,
     /// Minimum acceptable output from the optional swap.
     ///
     /// Ignored when `tokenIn == token_out` and the router can deposit directly.
@@ -82,6 +87,7 @@ impl SwapAndDepositRouterEncryptedCallback {
             self.target_portal,
             self.key_index,
             self.encrypted.clone(),
+            self.bounceback_recipient,
             self.min_amount_out,
         )
             .abi_encode_params()
