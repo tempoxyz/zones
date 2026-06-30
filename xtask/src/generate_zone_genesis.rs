@@ -74,6 +74,9 @@ pub(crate) struct GenerateZoneGenesis {
     pub(crate) tempo_genesis_header_rlp: String,
 
     #[arg(long)]
+    pub(crate) admin: Address,
+
+    #[arg(long)]
     pub(crate) sequencer: Option<Address>,
 
     #[arg(long, default_value = "specs/ref-impls/out")]
@@ -106,6 +109,10 @@ struct BytecodeField {
 
 impl GenerateZoneGenesis {
     pub(crate) async fn run(self) -> eyre::Result<()> {
+        if self.admin == Address::ZERO {
+            return Err(eyre!("--admin must not be the zero address"));
+        }
+
         let header_rlp = const_hex::decode(&self.tempo_genesis_header_rlp)
             .wrap_err("failed to decode hex string")?;
 
@@ -127,7 +134,7 @@ impl GenerateZoneGenesis {
 
         initialize_tip403_registry(&mut evm)?;
         initialize_tip20_factory(&mut evm)?;
-        create_path_usd_token(&mut evm)?;
+        create_path_usd_token(&mut evm, self.admin)?;
         initialize_fee_manager(&mut evm)?;
         initialize_stablecoin_dex(&mut evm)?;
         initialize_nonce_manager(&mut evm)?;
@@ -298,6 +305,8 @@ impl GenerateZoneGenesis {
             genesis_alloc.entry(sequencer).or_default().balance =
                 U256::from(1_000_000_000_000_000_000_000u128);
         }
+        genesis_alloc.entry(self.admin).or_default().balance =
+            U256::from(1_000_000_000_000_000_000_000u128);
 
         let chain_config = ChainConfig {
             chain_id: self.chain_id,
@@ -503,9 +512,7 @@ fn initialize_tip20_factory(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Resul
 /// This mirrors the L1 genesis setup: the Tempo EVM handler defaults to pathUSD
 /// (`0x20C0...`) as the fee token and validates its `currency == "USD"` storage.
 /// Without this, user transactions on the zone revert with `InvalidFeeToken`.
-fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
-    let admin = DEPLOYER;
-
+fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
         &mut ctx.journaled_state,

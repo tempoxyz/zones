@@ -82,26 +82,30 @@ export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
 export L1_RPC_URL="wss://rpc.devnet.tempoxyz.dev"
 ```
 
-### 2. Generate a Sequencer Key
+### 2. Generate Admin and Sequencer Keys
 
-The sequencer is the operator that builds zone blocks, processes deposits, and submits batch proofs back to L1.
+The admin controls portal governance such as token enablement and deposit pause/resume. The sequencer is the operator that builds zone blocks, processes deposits, and submits batch proofs back to L1. The same key may be used for both roles, but pass it explicitly as both `ADMIN_KEY` and `SEQUENCER_KEY` when that is intentional.
 
 ```bash
 cast wallet new
+cast wallet new
 ```
 
-Save both the **address** and **private key**.
+Save both **addresses** and **private keys**.
 
 ```bash
+export ADMIN_KEY="0x<admin-private-key>"
 export SEQUENCER_KEY="0x<your-private-key>"
+ADMIN_ADDR=$(cast wallet address "$ADMIN_KEY")
 SEQUENCER_ADDR=$(cast wallet address "$SEQUENCER_KEY")
 ```
 
-### 3. Fund the Sequencer on L1
+### 3. Fund the Admin and Sequencer on L1
 
-The sequencer needs pathUSD on L1 to pay for the `createZone` transaction and deposit fees.
+The sequencer needs pathUSD on L1 to pay for the `createZone` transaction and deposit fees. The admin needs funds for later governance calls.
 
 ```bash
+cast rpc tempo_fundAddress "$ADMIN_ADDR" --rpc-url "$L1_RPC_URL"
 cast rpc tempo_fundAddress "$SEQUENCER_ADDR" --rpc-url "$L1_RPC_URL"
 ```
 
@@ -142,11 +146,12 @@ You can also run the xtask directly for more control:
 cargo run -p tempo-xtask -- create-zone \
   --output generated/my-zone \
   --initial-token 0x20c0000000000000000000000000000000000001 \
+  --admin "$ADMIN_ADDR" \
   --sequencer "$SEQUENCER_ADDR" \
   --private-key "$SEQUENCER_KEY"
 ```
 
-By default, `create-zone` sets the portal admin to the sequencer. To separate the cold admin role from the hot sequencer role, pass `--admin "$ADMIN_ADDR"` to the direct xtask command and keep the matching `ADMIN_KEY` available for admin-only portal calls such as `enable-token`, `pause-deposits`, and `resume-deposits`.
+`create-zone` requires the admin address explicitly. Keep the matching `ADMIN_KEY` available for admin-only portal calls such as `enable-token`, `pause-deposits`, and `resume-deposits`.
 
 ### 5. Start the Zone Node
 
@@ -607,7 +612,7 @@ Current deployment:
 | Command | Description |
 |---------|-------------|
 | `just deploy-zone <name> [<tip20>]` | One-shot: keygen → fund → create → genesis → start node |
-| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`) |
+| `just create-zone <name> [<tip20>]` | Create zone on L1 + generate genesis (requires `PRIVATE_KEY`, `SEQUENCER_KEY`, and `ADMIN_KEY` or `ADMIN_ADDR`) |
 | `just deploy-router <name> [dex]` | Deploy `SwapAndDepositRouter` on L1 for the zone and save it to `zone.json` |
 | `just zone-up <name> [reset] [profile]` | Start the zone node. `reset=true` wipes datadir. `profile=release` for production. |
 | `just max-approve-portal [token]` | Approve portal to spend tokens on L1 |

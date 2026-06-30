@@ -168,12 +168,12 @@ contract SwapAndDepositRouterTest is BaseTest {
         pathUSD.mint(address(router), AMOUNT * 10);
         vm.stopPrank();
 
-        vm.prank(admin);
-        token1.grantRole(_ISSUER_ROLE, admin);
-        vm.prank(admin);
+        vm.prank(sequencer);
+        token1.grantRole(_ISSUER_ROLE, sequencer);
+        vm.prank(sequencer);
         token1.mint(address(router), AMOUNT * 10);
 
-        vm.prank(admin);
+        vm.prank(sequencer);
         token1.grantRole(_ISSUER_ROLE, address(mockDEX));
     }
 

@@ -1067,16 +1067,22 @@ impl L1TestNode {
     /// Create a zone on an existing ZoneFactory and return the portal address.
     ///
     /// Captures the current L1 header as the genesis anchor, then calls
-    /// `createZone()` with pathUSD as the token and the dev account as sequencer.
+    /// `createZone()` with pathUSD as the token and the dev account as both
+    /// explicit admin and sequencer.
     pub(crate) async fn create_zone(&self, factory_address: Address) -> eyre::Result<Address> {
-        self.create_zone_with_sequencer(factory_address, self.dev_address())
-            .await
+        self.create_zone_with_admin_and_sequencer(
+            factory_address,
+            self.dev_address(),
+            self.dev_address(),
+        )
+        .await
     }
 
-    /// Create a zone on an existing ZoneFactory with a custom sequencer address.
-    pub(crate) async fn create_zone_with_sequencer(
+    /// Create a zone on an existing ZoneFactory with explicit admin and sequencer addresses.
+    pub(crate) async fn create_zone_with_admin_and_sequencer(
         &self,
         factory_address: Address,
+        admin: Address,
         sequencer: Address,
     ) -> eyre::Result<Address> {
         use tempo_precompiles::PATH_USD_ADDRESS;
@@ -1101,7 +1107,7 @@ impl L1TestNode {
         let verifier_address = factory.verifier().call().await?;
         let receipt = factory
             .createZone(ZoneFactory::CreateZoneParams {
-                admin: sequencer,
+                admin,
                 initialToken: PATH_USD_ADDRESS,
                 sequencer,
                 verifier: verifier_address,
@@ -1178,10 +1184,18 @@ impl L1TestNode {
     ) -> eyre::Result<(Address, Address, Address)> {
         let factory = self.deploy_zone_factory().await?;
         let portal_a = self
-            .create_zone_with_sequencer(factory, sequencer_a.address())
+            .create_zone_with_admin_and_sequencer(
+                factory,
+                self.dev_address(),
+                sequencer_a.address(),
+            )
             .await?;
         let portal_b = self
-            .create_zone_with_sequencer(factory, sequencer_b.address())
+            .create_zone_with_admin_and_sequencer(
+                factory,
+                self.dev_address(),
+                sequencer_b.address(),
+            )
             .await?;
         let router = self.deploy_router(factory).await?;
         Ok((portal_a, portal_b, router))
