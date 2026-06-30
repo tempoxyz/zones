@@ -270,6 +270,53 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
     }
 
+    function test_sequencerGovernance_revertsIfAdmin() public {
+        // Inverse of test_tokenGovernance_revertsIfNotAdmin: the admin role must
+        // not be able to perform any sequencer-only action. Locks in the
+        // admin/sequencer separation from both directions. (onlySequencer reverts
+        // at the modifier, so the call arguments below are otherwise irrelevant.)
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
+        // Read state used as call args up front so the staticcall isn't mistaken
+        // for the call expectRevert is guarding.
+        bytes32 prevBlockHash = portal.blockHash();
+
+        vm.startPrank(admin);
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setZoneGasRate(1);
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setRpcUrl("https://rpc.example");
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setSequencerEncryptionKey(bytes32(uint256(1)), 0x02, 27, bytes32(0), bytes32(0));
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.transferSequencer(alice);
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.submitBatch(
+            uint64(block.number),
+            0,
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            bytes32(0),
+            "",
+            ""
+        );
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.processWithdrawal(w, bytes32(0));
+
+        vm.stopPrank();
+    }
+
     /*//////////////////////////////////////////////////////////////
                          DEPOSIT TESTS (L1 -> ZONE)
     //////////////////////////////////////////////////////////////*/
