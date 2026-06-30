@@ -315,6 +315,18 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
             .map_err(internal)
     }
 
+    async fn enforce_authorized(
+        &self,
+        request: &mut TempoTransactionRequest,
+        auth: &AuthContext,
+    ) -> Result<(), JsonRpcError> {
+        let caller = auth.caller;
+        zone_rpc::policy::enforce_authorized(request, auth, async {
+            Ok(self.zone_sequencer().await? == caller)
+        })
+        .await
+    }
+
     async fn terminal_event_for_deposit(
         &self,
         deposit_hash: B256,
@@ -596,8 +608,7 @@ where
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
-            zone_rpc::policy::enforce_from(&mut request, &auth)?;
-            zone_rpc::policy::enforce_no_contract_creation(&request)?;
+            self.enforce_authorized(&mut request, &auth).await?;
 
             let result = EthCall::call(
                 &self.eth.api,
@@ -623,9 +634,7 @@ where
                 return Err(JsonRpcError::invalid_params("state overrides not allowed"));
             }
 
-            zone_rpc::policy::enforce_from(&mut request, &auth)?;
-
-            zone_rpc::policy::enforce_no_contract_creation(&request)?;
+            self.enforce_authorized(&mut request, &auth).await?;
 
             let result = EthCall::estimate_gas_at(
                 &self.eth.api,
@@ -670,8 +679,7 @@ where
         auth: AuthContext,
     ) -> BoxFut<'_> {
         Box::pin(async move {
-            zone_rpc::policy::enforce_from(&mut request, &auth)?;
-            zone_rpc::policy::enforce_no_contract_creation(&request)?;
+            self.enforce_authorized(&mut request, &auth).await?;
 
             let result = EthTransactions::fill_transaction(&self.eth.api, request)
                 .await

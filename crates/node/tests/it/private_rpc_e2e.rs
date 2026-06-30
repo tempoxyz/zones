@@ -29,6 +29,7 @@ use tempo_contracts::precompiles::{
     account_keychain::IAccountKeychain::SignatureType as KeyInfoSignatureType,
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip20::ITIP20 as PrecompileTip20};
+use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox};
 use tokio::time::sleep;
 use tokio_tungstenite::{
     connect_async,
@@ -650,6 +651,75 @@ async fn test_tip20_eth_call_privacy() -> eyre::Result<()> {
     assert_eq!(
         PrecompileTip20::allowanceCall::abi_decode_returns(&sequencer_allowance_bytes)?,
         U256::from(allowance_amount)
+    );
+
+    Ok(())
+}
+
+/// `eth_call` against ZoneInbox refund balances is scoped to the authenticated
+/// owner, preventing arbitrary `refunds(token, owner)` reads.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_zone_inbox_refunds_eth_call_privacy() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let ctx = start_zone_with_private_rpc().await?;
+
+    let owner_signer = PrivateKeySigner::random();
+    let owner = owner_signer.address();
+    let outsider_signer = PrivateKeySigner::random();
+
+    let refunds_call = ZoneInbox::refundsCall {
+        token: ZONE_TOKEN_ADDRESS,
+        owner,
+    };
+    let refunds_data = format!("0x{}", hex::encode(refunds_call.abi_encode()));
+
+    let outsider_refunds = ctx
+        .call_as_user(
+            "eth_call",
+            json!([
+                {
+                    "to": format!("{ZONE_INBOX_ADDRESS:#x}"),
+                    "data": refunds_data,
+                },
+                "latest"
+            ]),
+            &outsider_signer,
+        )
+        .await?;
+    assert_eq!(
+        outsider_refunds["error"]["code"].as_i64().unwrap(),
+        -32004,
+        "non-owner refunds(token, owner) should be rejected"
+    );
+    assert_eq!(
+        outsider_refunds["error"]["message"].as_str().unwrap(),
+        "Account mismatch"
+    );
+
+    let owner_refunds = ctx
+        .call_as_user(
+            "eth_call",
+            json!([
+                {
+                    "to": format!("{ZONE_INBOX_ADDRESS:#x}"),
+                    "data": format!("0x{}", hex::encode(refunds_call.abi_encode())),
+                },
+                "latest"
+            ]),
+            &owner_signer,
+        )
+        .await?;
+    let owner_refunds_bytes = hex::decode(
+        owner_refunds["result"]
+            .as_str()
+            .expect("own refunds call should return hex")
+            .trim_start_matches("0x"),
+    )?;
+    assert_eq!(
+        ZoneInbox::refundsCall::abi_decode_returns(&owner_refunds_bytes)?,
+        0,
+        "own refunds(token, owner) read should retain normal eth_call behavior"
     );
 
     Ok(())
