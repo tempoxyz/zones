@@ -27,6 +27,24 @@ forge build
 forge create --broadcast --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY" src/l1/ZoneFactory.sol:ZoneFactory
 ```
 
+## Fresh Wallet and Faucet
+
+If no deployer key is available and the factory has no deployer-owned control path, create a one-use wallet and fund it on Moderato:
+
+```bash
+export ETH_RPC_URL=https://rpc.moderato.tempo.xyz
+
+cast wallet new
+# Save the printed address and private key securely.
+export DEPLOYER_ADDRESS=0x...
+export PRIVATE_KEY=0x...
+
+cast rpc tempo_fundAddress "$DEPLOYER_ADDRESS" -r "$ETH_RPC_URL"
+cast call 0x20C0000000000000000000000000000000000000 \
+  "balanceOf(address)(uint256)" "$DEPLOYER_ADDRESS" \
+  -r "$ETH_RPC_URL"
+```
+
 For manual deployments, prefer replacing `--private-key "$PRIVATE_KEY"` with `--interactive` so the key is not written into shell history or process arguments. If the user explicitly requires a non-interactive command and has already provided `PRIVATE_KEY` through the environment, use `--private-key "$PRIVATE_KEY"` without echoing the value.
 
 After deployment:
