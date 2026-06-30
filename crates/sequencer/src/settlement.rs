@@ -40,8 +40,8 @@ use tracing::{info, instrument, warn};
 
 use crate::nonce_keys::SUBMIT_BATCH_NONCE_KEY;
 
-/// EIP-2935 stores the last 8192 block hashes (~68 min at 500ms block time).
-const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192;
+/// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
+const DEFAULT_EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 
 /// Safety margin (~3 min at 500ms block time) to avoid race conditions where
 /// the block falls out of the window between our check and on-chain execution.
@@ -49,7 +49,7 @@ const DEFAULT_EIP2935_SAFETY_MARGIN: u64 = 360;
 
 /// EIP-2935 anchor limits used by the batch submitter.
 ///
-/// Production uses the real 8192-block EIP-2935 history window with a safety
+/// Production uses the real 8191-block EIP-2935 history window with a safety
 /// margin. This type exists primarily so tests can shrink that otherwise large
 /// window and exercise ancestry behavior without mining thousands of L1 blocks.
 /// Production code should normally use [`Default`].
