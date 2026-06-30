@@ -89,11 +89,10 @@ contract BaseTest is Test {
             revert MissingPrecompile("ValidatorConfig", _VALIDATOR_CONFIG);
         }
 
-        // Install EIP-2935 mock when absent so zone tests can still run
-        if (_BLOCKHASH_HISTORY.code.length == 0) {
-            MockEIP2935 mock2935 = new MockEIP2935();
-            vm.etch(_BLOCKHASH_HISTORY, address(mock2935).code);
-        }
+        // Always install the deterministic EIP-2935 mock. Some Forge builds expose
+        // native EIP-2935 code here, but the spec tests assert against mock hashes.
+        MockEIP2935 mock2935 = new MockEIP2935();
+        vm.etch(_BLOCKHASH_HISTORY, address(mock2935).code);
         if (_BLOCKHASH_HISTORY.code.length == 0) {
             revert MissingPrecompile("BlockHashHistory", _BLOCKHASH_HISTORY);
         }
