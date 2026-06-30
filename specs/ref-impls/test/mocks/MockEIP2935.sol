@@ -5,8 +5,9 @@ import { BLOCKHASH_HISTORY_WINDOW } from "../../src/libraries/BlockHashHistory.s
 
 /// @notice Mock EIP-2935 block hash history contract for tests.
 /// @dev EIP-2935 expects raw 32-byte calldata (block number, no function selector)
-///      and returns the block hash. This mock returns keccak256(abi.encode(blockNumber))
-///      for blocks within the history window, and bytes32(0) otherwise.
+///      and returns the block hash. This mock returns the EVM blockhash when available
+///      (eg running in CI), deterministic non-zero hashes for older served blocks,
+///      and bytes32(0) otherwise.
 contract MockEIP2935 {
 
     fallback(bytes calldata data) external returns (bytes memory) {
@@ -15,11 +16,16 @@ contract MockEIP2935 {
         if (blockNumber == 0 || blockNumber >= block.number) {
             return abi.encode(bytes32(0));
         }
-        // Respect EIP-2935 history window
-        if (block.number - blockNumber > BLOCKHASH_HISTORY_WINDOW) {
+        // EIP-2935 keeps a 8192-slot ring buffer, but the oldest served block is
+        // block.number - 8191. A gap of 8192 has already rotated out.
+        // See https://eips.ethereum.org/EIPS/eip-2935#specification
+        // HISTORY_SERVE_WINDOW = 8191
+        if (block.number - blockNumber >= BLOCKHASH_HISTORY_WINDOW) {
             return abi.encode(bytes32(0));
         }
-        return abi.encode(keccak256(abi.encode(blockNumber)));
+        bytes32 hash = blockhash(blockNumber);
+        if (hash == bytes32(0)) hash = keccak256(abi.encode(blockNumber));
+        return abi.encode(hash);
     }
 
 }

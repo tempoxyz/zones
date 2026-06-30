@@ -1264,8 +1264,8 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_submitBatch_revertsIfTempoBlockNumberTooOld() public {
-        // Advance beyond the EIP-2935 history window
-        vm.roll(block.number + BLOCKHASH_HISTORY_WINDOW + 1);
+        // A gap of BLOCKHASH_HISTORY_WINDOW has already rotated out of EIP-2935.
+        vm.roll(genesisTempoBlockNumber + BLOCKHASH_HISTORY_WINDOW);
 
         bytes32 prevBlockHash = portal.blockHash();
         vm.expectRevert(IZonePortal.InvalidTempoBlockNumber.selector);
@@ -1359,8 +1359,8 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_submitBatch_succeedsAtHistoryWindowBoundary() public {
-        // Advance exactly to the history window boundary
-        vm.roll(genesisTempoBlockNumber + BLOCKHASH_HISTORY_WINDOW);
+        // The oldest served block is block.number - (BLOCKHASH_HISTORY_WINDOW - 1).
+        vm.roll(genesisTempoBlockNumber + BLOCKHASH_HISTORY_WINDOW - 1);
 
         // Should still work at the window boundary
         portal.submitBatch(

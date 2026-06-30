@@ -13,13 +13,13 @@ contract BlockHashHistoryTest is BaseTest {
 
         bytes32 hash = getBlockHash(blockNumber);
 
-        assertEq(hash, keccak256(abi.encode(blockNumber)));
+        assertEq(hash, blockhash(blockNumber));
     }
 
     /// @notice Verifies blocks older than the history window return zero.
     function test_getBlockHash_returnsZeroForOutOfWindowBlock() public {
         vm.roll(20_000);
-        uint256 blockNumber = block.number - BLOCKHASH_HISTORY_WINDOW - 1;
+        uint256 blockNumber = block.number - BLOCKHASH_HISTORY_WINDOW;
 
         assertEq(getBlockHash(blockNumber), bytes32(0));
     }
