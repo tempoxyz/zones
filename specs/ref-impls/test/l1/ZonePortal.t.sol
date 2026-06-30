@@ -30,7 +30,6 @@ import {
 import { ZoneFactory } from "../../src/l1/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/l1/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/l1/ZonePortal.sol";
-import { BLOCKHASH_HISTORY_WINDOW } from "../../src/libraries/BlockHashHistory.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
 import { EMPTY_SENTINEL, WithdrawalQueueLib } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/libraries/WithdrawalQueueLib.sol";
@@ -1264,8 +1263,8 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_submitBatch_revertsIfTempoBlockNumberTooOld() public {
-        // A gap of BLOCKHASH_HISTORY_WINDOW has already rotated out of EIP-2935.
-        vm.roll(genesisTempoBlockNumber + BLOCKHASH_HISTORY_WINDOW);
+        // Advance beyond the EIP-2935 history window
+        vm.roll(block.number + BLOCKHASH_HISTORY_WINDOW + 1);
 
         bytes32 prevBlockHash = portal.blockHash();
         vm.expectRevert(IZonePortal.InvalidTempoBlockNumber.selector);
@@ -1359,8 +1358,8 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_submitBatch_succeedsAtHistoryWindowBoundary() public {
-        // The oldest served block is block.number - (BLOCKHASH_HISTORY_WINDOW - 1).
-        vm.roll(genesisTempoBlockNumber + BLOCKHASH_HISTORY_WINDOW - 1);
+        // Advance exactly to the history window boundary
+        vm.roll(genesisTempoBlockNumber + BLOCKHASH_HISTORY_WINDOW);
 
         // Should still work at the window boundary
         portal.submitBatch(

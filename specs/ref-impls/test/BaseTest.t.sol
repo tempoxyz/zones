@@ -2,8 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { ZONE_TX_CONTEXT } from "../src/interfaces/IZone.sol";
-import { BLOCKHASH_HISTORY } from "../src/libraries/BlockHashHistory.sol";
-import { MockEIP2935 } from "./mocks/MockEIP2935.sol";
+import { EIP2935 } from "../src/libraries/BlockHashHistory.sol";
 import { MockZoneTxContext } from "./mocks/MockZoneTxContext.sol";
 import { Test, console } from "forge-std/Test.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";
@@ -30,8 +29,12 @@ contract BaseTest is Test {
     address internal constant _FEE_AMM = StdPrecompiles.TIP_FEE_MANAGER_ADDRESS;
     address internal constant _NONCE = StdPrecompiles.NONCE_ADDRESS;
     address internal constant _VALIDATOR_CONFIG = StdPrecompiles.VALIDATOR_CONFIG_ADDRESS;
-    address internal constant _BLOCKHASH_HISTORY = BLOCKHASH_HISTORY;
+    address internal constant _BLOCKHASH_HISTORY = EIP2935;
     address internal constant _ZONE_TX_CONTEXT = ZONE_TX_CONTEXT;
+
+    // EIP-2935 serve window: hashes for the most recent 8191 blocks are available
+    // (block.number - 8191 ..= block.number - 1); reads outside that range return zero.
+    uint256 internal constant BLOCKHASH_HISTORY_WINDOW = 8191;
 
     // Role constants
     bytes32 internal constant _ISSUER_ROLE = keccak256("ISSUER_ROLE");
@@ -89,11 +92,6 @@ contract BaseTest is Test {
             revert MissingPrecompile("ValidatorConfig", _VALIDATOR_CONFIG);
         }
 
-        // Install EIP-2935 mock when absent so zone tests can still run
-        if (_BLOCKHASH_HISTORY.code.length == 0) {
-            MockEIP2935 mock2935 = new MockEIP2935();
-            vm.etch(_BLOCKHASH_HISTORY, address(mock2935).code);
-        }
         if (_BLOCKHASH_HISTORY.code.length == 0) {
             revert MissingPrecompile("BlockHashHistory", _BLOCKHASH_HISTORY);
         }
