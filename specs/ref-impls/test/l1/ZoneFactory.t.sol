@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IZoneFactory, ZoneInfo, ZoneParams } from "../../src/interfaces/IZone.sol";
+import { IZoneFactory, IZonePortal, ZoneInfo, ZoneParams } from "../../src/interfaces/IZone.sol";
 import { ZoneFactory } from "../../src/l1/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/l1/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/l1/ZonePortal.sol";
@@ -453,6 +453,49 @@ contract ZoneFactoryTest is BaseTest {
         assertEq(info.genesisTempoBlockNumber, tbn);
         assertTrue(zoneFactory.isZonePortal(portal));
         assertEq(zoneFactory.zoneCount(), 1);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      PORTAL ABI REGRESSION (#355)
+    //////////////////////////////////////////////////////////////*/
+
+    // Verify the factory deploys the post-#355 ZonePortal: depositCount and
+    // lastProcessedDepositNumber must exist on the interface and initialize to zero.
+    function test_createZone_deployedPortalExposes_depositCounters() public {
+        (, address portal) = zoneFactory.createZone(_defaultParams());
+        IZonePortal portalInterface = IZonePortal(portal);
+
+        assertEq(portalInterface.depositCount(), 0);
+        assertEq(portalInterface.lastProcessedDepositNumber(), 0);
+    }
+
+    // Verify the factory-deployed portal emits DepositMade with the new 9-arg
+    // signature that includes uint64 depositNumber as its last field.
+    function test_createZone_deployedPortalEmits_depositMadeWithDepositNumber() public {
+        (, address portal) = zoneFactory.createZone(_defaultParams());
+        ZonePortal portalContract = ZonePortal(portal);
+
+        vm.startPrank(pathUSDAdmin);
+        pathUSD.grantRole(_ISSUER_ROLE, pathUSDAdmin);
+        pathUSD.mint(alice, 100_000e6);
+        vm.stopPrank();
+
+        uint128 depositAmount = 1000e6;
+
+        vm.startPrank(alice);
+        pathUSD.approve(portal, depositAmount);
+
+        // vm.expectEmit checks topic[0] (event signature) always, plus topic[2] (sender).
+        // The 9-arg signature proves depositNumber is present in the ABI.
+        vm.expectEmit(false, true, false, false);
+        emit IZonePortal.DepositMade(
+            bytes32(0), alice, address(0), address(0), 0, 0, bytes32(0), address(0), 1
+        );
+
+        portalContract.deposit(address(pathUSD), alice, depositAmount, bytes32("memo"), alice);
+        vm.stopPrank();
+
+        assertEq(portalContract.depositCount(), 1);
     }
 
 }

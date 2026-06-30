@@ -662,6 +662,10 @@ interface IZonePortal {
 
     function currentDepositQueueHash() external view returns (bytes32);
 
+    function depositCount() external view returns (uint64);
+
+    function lastProcessedDepositNumber() external view returns (uint64);
+
     function lastSyncedTempoBlockNumber() external view returns (uint64);
 
     function withdrawalQueueHead() external view returns (uint256);
