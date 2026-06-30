@@ -5,7 +5,8 @@
 //! subscriber naturally receives blocks and deposits — no synthetic injection.
 
 use crate::utils::{
-    L1TestNode, STABLECOIN_DEX_ADDRESS, WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer,
+    EncryptedRouterCallbackArgs, L1TestNode, PlaintextRouterCallbackArgs, STABLECOIN_DEX_ADDRESS,
+    WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer,
 };
 use alloy::{
     primitives::{Address, B256, U256},
@@ -285,12 +286,14 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
 
     // --- Step 5: Cross-zone withdrawal: zone_a → router → zone_b ---
     let cross_amount: u128 = 400_000; // 0.4 pathUSD
+    let refund_burner_a_to_b = l1.signer_at(5).address();
     let args_a_to_b = WithdrawalArgs::cross_zone_via_router(
         cross_amount,
         router,
         portal_b,
         PATH_USD_ADDRESS,
         account_a.address(),
+        refund_burner_a_to_b,
     );
     account_a.withdraw_with(args_a_to_b).await?;
 
@@ -326,12 +329,14 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
     // --- Step 7: Cross-zone withdrawal: zone_b → router → zone_a ---
     let mut account_b = ZoneAccount::from_l1_and_zone(&l1, &zone_b, portal_b);
     let reverse_amount: u128 = 200_000; // 0.2 pathUSD
+    let refund_burner_b_to_a = l1.signer_at(6).address();
     let args_b_to_a = WithdrawalArgs::cross_zone_via_router(
         reverse_amount,
         router,
         portal_a,
         PATH_USD_ADDRESS,
         account_b.address(),
+        refund_burner_b_to_a,
     );
     account_b.withdraw_with(args_b_to_a).await?;
 
@@ -361,6 +366,125 @@ async fn test_cross_zone_withdrawal() -> eyre::Result<()> {
         final_zone_b < U256::from(cross_amount),
         "zone_b balance should decrease by at least the reverse amount (got {final_zone_b})"
     );
+
+    Ok(())
+}
+
+/// Cross-zone encrypted router deposit where Zone B accepts the L1 deposit but
+/// later bounces it because the decrypted recipient violates policy.
+///
+/// The refund must go to the bounceback recipient encoded in the router payload,
+/// not to the encrypted recipient and not to the router contract.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_cross_zone_encrypted_router_bounceback_recipient() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let seq_a_signer = l1.signer_at(2);
+    let seq_b_signer = l1.signer_at(3);
+    let blacklisted_recipient = l1.signer_at(4).address();
+    let refund_burner = l1.signer_at(5).address();
+
+    let (portal_a, portal_b, router) = l1
+        .deploy_two_zones_with_sequencers(seq_a_signer.clone(), seq_b_signer.clone())
+        .await?;
+
+    let policy_id = l1.create_blacklist_policy().await?;
+    l1.change_transfer_policy_id(PATH_USD_ADDRESS, policy_id)
+        .await?;
+    l1.blacklist_address(policy_id, blacklisted_recipient)
+        .await?;
+    assert!(
+        !l1.is_authorized(policy_id, blacklisted_recipient).await?,
+        "recipient should be blacklisted on L1"
+    );
+
+    let zone_a = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_a).await?;
+    let zone_b = ZoneTestNode::start_from_l1(l1.http_url(), l1.ws_url(), portal_b).await?;
+
+    zone_a.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+    zone_b.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;
+
+    let encryption_key = k256::SecretKey::from(seq_b_signer.credential());
+    l1.set_sequencer_encryption_key_with_signer(portal_b, &encryption_key, seq_b_signer.clone())
+        .await?;
+
+    {
+        use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
+
+        let l1_block = l1.provider().get_block_number().await?;
+        for policy_cache in [zone_a.policy_cache(), zone_b.policy_cache()] {
+            let mut cache = policy_cache.write();
+            cache.set_policy_type(policy_id, PolicyType::BLACKLIST);
+            cache.set_token_policy(PATH_USD_ADDRESS, l1_block, policy_id);
+            cache.set_policy_status(policy_id, blacklisted_recipient, l1_block, true);
+        }
+    }
+
+    let mut alice = ZoneAccount::from_l1_and_zone(&l1, &zone_a, portal_a);
+    let deposit_amount: u128 = 2_000_000;
+    let cross_amount: u128 = 1_000_000;
+    l1.fund_user(alice.address(), deposit_amount * 2).await?;
+    alice.deposit(deposit_amount, L1_TIMEOUT, &zone_a).await?;
+
+    let _seq_a = spawn_sequencer(&l1, &zone_a, portal_a, seq_a_signer.clone()).await;
+    let _seq_b = spawn_sequencer(&l1, &zone_b, portal_b, seq_b_signer.clone()).await;
+
+    let (key_index, encrypted) = l1
+        .encrypt_deposit_for_portal(portal_b, blacklisted_recipient, B256::ZERO)
+        .await?;
+
+    let refund_before = l1.balance_of(PATH_USD_ADDRESS, refund_burner).await?;
+    let router_before = l1.balance_of(PATH_USD_ADDRESS, router).await?;
+
+    let args = WithdrawalArgs::swap_and_deposit_encrypted_via_router(EncryptedRouterCallbackArgs {
+        amount: cross_amount,
+        router,
+        token_out: PATH_USD_ADDRESS,
+        target_portal: portal_b,
+        key_index,
+        encrypted,
+        bounceback_recipient: refund_burner,
+        min_amount_out: 0,
+    });
+    alice.withdraw_with(args).await?;
+
+    let refund_after = l1
+        .wait_for_balance(
+            PATH_USD_ADDRESS,
+            refund_burner,
+            refund_before + U256::from(1u64),
+            Duration::from_secs(90),
+        )
+        .await?;
+    assert!(
+        refund_after > refund_before,
+        "refund burner should receive the Zone B deposit bounce-back"
+    );
+
+    let router_after = l1.balance_of(PATH_USD_ADDRESS, router).await?;
+    assert_eq!(
+        router_after, router_before,
+        "router should not retain the bounced encrypted deposit refund"
+    );
+
+    let recipient_balance = zone_b
+        .balance_of(ZONE_TOKEN_ADDRESS, blacklisted_recipient)
+        .await?;
+    assert_eq!(
+        recipient_balance,
+        U256::ZERO,
+        "blacklisted recipient should not be minted on Zone B"
+    );
+
+    l1.assert_withdrawal_processed_with_status(
+        portal_a,
+        router,
+        PATH_USD_ADDRESS,
+        cross_amount,
+        true,
+    )
+    .await?;
 
     Ok(())
 }
@@ -400,15 +524,16 @@ async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
     )
     .await;
 
-    let args = WithdrawalArgs::swap_and_deposit_via_router(
-        fixture.swap_amount,
-        fixture.router,
-        fixture.beta,
-        fixture.portal_address,
-        fixture.account.address(),
-        B256::ZERO,
-        expected_beta,
-    );
+    let args = WithdrawalArgs::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
+        amount: fixture.swap_amount,
+        router: fixture.router,
+        token_out: fixture.beta,
+        target_portal: fixture.portal_address,
+        recipient: fixture.account.address(),
+        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        memo: B256::ZERO,
+        min_amount_out: expected_beta,
+    });
     fixture
         .account
         .withdraw_token_with(fixture.alpha, args)
@@ -497,15 +622,16 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_
     )
     .await;
 
-    let args = WithdrawalArgs::swap_and_deposit_via_router(
-        fixture.swap_amount,
-        fixture.router,
-        fixture.beta,
-        fixture.portal_address,
-        fixture.account.address(),
-        B256::ZERO,
-        expected_beta,
-    );
+    let args = WithdrawalArgs::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
+        amount: fixture.swap_amount,
+        router: fixture.router,
+        token_out: fixture.beta,
+        target_portal: fixture.portal_address,
+        recipient: fixture.account.address(),
+        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        memo: B256::ZERO,
+        min_amount_out: expected_beta,
+    });
     fixture
         .account
         .withdraw_token_with(fixture.alpha, args)
@@ -614,15 +740,16 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_
     )
     .await;
 
-    let args = WithdrawalArgs::swap_and_deposit_encrypted_via_router(
-        fixture.swap_amount,
-        fixture.router,
-        fixture.beta,
-        fixture.portal_address,
+    let args = WithdrawalArgs::swap_and_deposit_encrypted_via_router(EncryptedRouterCallbackArgs {
+        amount: fixture.swap_amount,
+        router: fixture.router,
+        token_out: fixture.beta,
+        target_portal: fixture.portal_address,
         key_index,
         encrypted,
-        expected_beta,
-    );
+        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        min_amount_out: expected_beta,
+    });
     fixture
         .account
         .withdraw_token_with(fixture.alpha, args)

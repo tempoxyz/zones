@@ -42,6 +42,7 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
     // Bob is a separate user (mnemonic index 4)
     let bob_signer = l1.signer_at(4);
     let bob_address = bob_signer.address();
+    let refund_burner = l1.signer_at(5).address();
 
     // --- Step 2: Deploy L1 infrastructure ---
     let (portal_a, portal_b, router) = l1
@@ -82,7 +83,8 @@ async fn test_cross_zone_send() -> eyre::Result<()> {
         router,
         portal_b,
         PATH_USD_ADDRESS,
-        bob_address, // recipient on zone_b is Bob
+        bob_address,   // recipient on zone_b is Bob
+        refund_burner, // Tempo refund target if Zone B later bounces the deposit
     );
     alice.withdraw_with(args).await?;
 

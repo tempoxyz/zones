@@ -641,6 +641,15 @@ Receiving contracts must implement `IWithdrawalReceiver` and return `onWithdrawa
 
 This enables composable withdrawals where funds flow directly into Tempo contracts (DEX swaps, staking, cross-zone deposits).
 
+#### SwapAndDepositRouter Callback Payloads
+
+`SwapAndDepositRouter` callback data explicitly carries the refund target for the downstream zone deposit:
+
+- Plaintext: `abi.encode(false, tokenOut, targetPortal, recipient, bouncebackRecipient, memo, minAmountOut)`
+- Encrypted: `abi.encode(true, tokenOut, targetPortal, keyIndex, encryptedPayload, bouncebackRecipient, minAmountOut)`
+
+The router validates the target portal and token, optionally swaps on Tempo, and then passes `bouncebackRecipient` through to `ZonePortal.deposit(...)` or `ZonePortal.depositEncrypted(...)`. For encrypted deposits this field is public, matching native `depositEncrypted`; callers that do not want a later Tempo-side refund to identify the encrypted zone recipient should use a controlled refund-specific or stealth address.
+
 ### Withdrawal Failures and Bounce-Back
 
 Withdrawals can fail on the Tempo side for several reasons:

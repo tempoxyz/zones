@@ -1277,6 +1277,21 @@ impl L1TestNode {
         portal_address: Address,
         encryption_key: &k256::SecretKey,
     ) -> eyre::Result<()> {
+        self.set_sequencer_encryption_key_with_signer(
+            portal_address,
+            encryption_key,
+            self.dev_signer(),
+        )
+        .await
+    }
+
+    /// Set the sequencer encryption key using an explicit portal sequencer signer.
+    pub(crate) async fn set_sequencer_encryption_key_with_signer(
+        &self,
+        portal_address: Address,
+        encryption_key: &k256::SecretKey,
+        sequencer_signer: alloy_signer_local::PrivateKeySigner,
+    ) -> eyre::Result<()> {
         use alloy_signer::SignerSync;
         use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
         use tempo_zone_contracts::ZonePortal;
@@ -1302,9 +1317,10 @@ impl L1TestNode {
         let pop_r = B256::from(sig.r().to_be_bytes::<32>());
         let pop_s = B256::from(sig.s().to_be_bytes::<32>());
 
-        // Call setSequencerEncryptionKey as the sequencer (dev account)
-        let dev_provider = self.dev_provider();
-        let portal = ZonePortal::new(portal_address, &dev_provider);
+        let sequencer_provider = ProviderBuilder::new()
+            .wallet(sequencer_signer)
+            .connect_http(self.http_url.clone());
+        let portal = ZonePortal::new(portal_address, &sequencer_provider);
         let receipt = portal
             .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
             .send()
@@ -1825,6 +1841,28 @@ pub(crate) struct WithdrawalArgs {
     pub reveal_to: alloy_primitives::Bytes,
 }
 
+pub(crate) struct PlaintextRouterCallbackArgs {
+    pub amount: u128,
+    pub router: Address,
+    pub token_out: Address,
+    pub target_portal: Address,
+    pub recipient: Address,
+    pub bounceback_recipient: Address,
+    pub memo: B256,
+    pub min_amount_out: u128,
+}
+
+pub(crate) struct EncryptedRouterCallbackArgs {
+    pub amount: u128,
+    pub router: Address,
+    pub token_out: Address,
+    pub target_portal: Address,
+    pub key_index: U256,
+    pub encrypted: tempo_zone_contracts::EncryptedDepositPayload,
+    pub bounceback_recipient: Address,
+    pub min_amount_out: u128,
+}
+
 impl WithdrawalArgs {
     /// Simple withdrawal: send `amount` back to self with no callback.
     pub(crate) fn new(amount: u128) -> Self {
@@ -1840,30 +1878,23 @@ impl WithdrawalArgs {
     }
 
     /// Plaintext router callback: optionally swap, then deposit into `target_portal`.
-    pub(crate) fn swap_and_deposit_via_router(
-        amount: u128,
-        router: Address,
-        token_out: Address,
-        target_portal: Address,
-        recipient: Address,
-        memo: B256,
-        min_amount_out: u128,
-    ) -> Self {
+    pub(crate) fn swap_and_deposit_via_router(args: PlaintextRouterCallbackArgs) -> Self {
         use tempo_zone_contracts::SwapAndDepositRouterPlaintextCallback;
 
         let callback_data = SwapAndDepositRouterPlaintextCallback {
-            token_out,
-            target_portal,
-            recipient,
-            memo,
-            min_amount_out,
+            token_out: args.token_out,
+            target_portal: args.target_portal,
+            recipient: args.recipient,
+            bounceback_recipient: args.bounceback_recipient,
+            memo: args.memo,
+            min_amount_out: args.min_amount_out,
         }
         .abi_encode();
 
         Self {
-            amount,
-            to: Some(router),
-            memo,
+            amount: args.amount,
+            to: Some(args.router),
+            memo: args.memo,
             gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
@@ -1872,27 +1903,20 @@ impl WithdrawalArgs {
     }
 
     /// Encrypted router callback: optionally swap, then deposit encrypted into `target_portal`.
-    pub(crate) fn swap_and_deposit_encrypted_via_router(
-        amount: u128,
-        router: Address,
-        token_out: Address,
-        target_portal: Address,
-        key_index: U256,
-        encrypted: tempo_zone_contracts::EncryptedDepositPayload,
-        min_amount_out: u128,
-    ) -> Self {
+    pub(crate) fn swap_and_deposit_encrypted_via_router(args: EncryptedRouterCallbackArgs) -> Self {
         let callback_data = tempo_zone_contracts::SwapAndDepositRouterEncryptedCallback {
-            token_out,
-            target_portal,
-            key_index,
-            encrypted,
-            min_amount_out,
+            token_out: args.token_out,
+            target_portal: args.target_portal,
+            key_index: args.key_index,
+            encrypted: args.encrypted,
+            bounceback_recipient: args.bounceback_recipient,
+            min_amount_out: args.min_amount_out,
         }
         .abi_encode();
 
         Self {
-            amount,
-            to: Some(router),
+            amount: args.amount,
+            to: Some(args.router),
             memo: B256::ZERO,
             gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
@@ -1912,16 +1936,18 @@ impl WithdrawalArgs {
         target_portal: Address,
         token: Address,
         recipient: Address,
+        bounceback_recipient: Address,
     ) -> Self {
-        Self::swap_and_deposit_via_router(
+        Self::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
             amount,
             router,
-            token,
+            token_out: token,
             target_portal,
             recipient,
-            B256::ZERO,
-            0,
-        )
+            bounceback_recipient,
+            memo: B256::ZERO,
+            min_amount_out: 0,
+        })
     }
 }
 

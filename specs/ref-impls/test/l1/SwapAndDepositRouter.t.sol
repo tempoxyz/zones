@@ -142,6 +142,7 @@ contract SwapAndDepositRouterTest is BaseTest {
     MockZonePortalForRouter public mockPortal2;
 
     bytes32 public senderTag = keccak256(abi.encodePacked(address(0x500)));
+    address public refundBurner = address(0xb000000000000000000000000000000000000123);
     uint128 public constant AMOUNT = 1000e6;
 
     function setUp() public override {
@@ -180,6 +181,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         address tokenOut,
         address targetPortal,
         address recipient,
+        address bouncebackRecipient,
         bytes32 memo,
         uint128 minAmountOut
     )
@@ -187,7 +189,9 @@ contract SwapAndDepositRouterTest is BaseTest {
         pure
         returns (bytes memory)
     {
-        return abi.encode(false, tokenOut, targetPortal, recipient, memo, minAmountOut);
+        return abi.encode(
+            false, tokenOut, targetPortal, recipient, bouncebackRecipient, memo, minAmountOut
+        );
     }
 
     function _buildEncryptedData(
@@ -195,13 +199,16 @@ contract SwapAndDepositRouterTest is BaseTest {
         address targetPortal,
         uint256 keyIndex,
         EncryptedDepositPayload memory encrypted,
+        address bouncebackRecipient,
         uint128 minAmountOut
     )
         internal
         pure
         returns (bytes memory)
     {
-        return abi.encode(true, tokenOut, targetPortal, keyIndex, encrypted, minAmountOut);
+        return abi.encode(
+            true, tokenOut, targetPortal, keyIndex, encrypted, bouncebackRecipient, minAmountOut
+        );
     }
 
     function _defaultEncryptedPayload() internal pure returns (EncryptedDepositPayload memory) {
@@ -215,8 +222,9 @@ contract SwapAndDepositRouterTest is BaseTest {
     }
 
     function test_revertUnauthorizedMessenger() public {
-        bytes memory data =
-            _buildPlaintextData(address(pathUSD), address(mockPortal), alice, bytes32("memo"), 0);
+        bytes memory data = _buildPlaintextData(
+            address(pathUSD), address(mockPortal), alice, refundBurner, bytes32("memo"), 0
+        );
 
         vm.prank(alice);
         vm.expectRevert(SwapAndDepositRouter.UnauthorizedMessenger.selector);
@@ -225,8 +233,9 @@ contract SwapAndDepositRouterTest is BaseTest {
 
     function test_revertInvalidTargetPortal() public {
         address fakePortal = address(0xFAFAFA);
-        bytes memory data =
-            _buildPlaintextData(address(pathUSD), fakePortal, alice, bytes32("memo"), 0);
+        bytes memory data = _buildPlaintextData(
+            address(pathUSD), fakePortal, alice, refundBurner, bytes32("memo"), 0
+        );
 
         vm.prank(address(mockMessenger));
         vm.expectRevert(SwapAndDepositRouter.InvalidTargetPortal.selector);
@@ -234,8 +243,9 @@ contract SwapAndDepositRouterTest is BaseTest {
     }
 
     function test_revertInvalidToken() public {
-        bytes memory data =
-            _buildPlaintextData(address(token1), address(mockPortal), alice, bytes32("memo"), 0);
+        bytes memory data = _buildPlaintextData(
+            address(token1), address(mockPortal), alice, refundBurner, bytes32("memo"), 0
+        );
 
         vm.prank(address(mockMessenger));
         vm.expectRevert(SwapAndDepositRouter.InvalidToken.selector);
@@ -243,8 +253,9 @@ contract SwapAndDepositRouterTest is BaseTest {
     }
 
     function test_plaintextDeposit_sameToken() public {
-        bytes memory data =
-            _buildPlaintextData(address(pathUSD), address(mockPortal), alice, bytes32("hello"), 0);
+        bytes memory data = _buildPlaintextData(
+            address(pathUSD), address(mockPortal), alice, refundBurner, bytes32("hello"), 0
+        );
 
         vm.prank(address(mockMessenger));
         bytes4 ret = router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
@@ -252,7 +263,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
         assertTrue(mockPortal.depositCalled());
         assertEq(mockPortal.lastDepositRecipient(), alice);
-        assertEq(mockPortal.lastDepositBouncebackRecipient(), alice);
+        assertEq(mockPortal.lastDepositBouncebackRecipient(), refundBurner);
         assertEq(mockPortal.lastDepositAmount(), AMOUNT);
         assertEq(mockPortal.lastDepositMemo(), bytes32("hello"));
     }
@@ -262,7 +273,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         mockDEX.setNextAmountOut(swapOut);
 
         bytes memory data = _buildPlaintextData(
-            address(token1), address(mockPortal2), alice, bytes32("swap"), 900e6
+            address(token1), address(mockPortal2), alice, refundBurner, bytes32("swap"), 900e6
         );
 
         vm.prank(address(mockMessenger));
@@ -271,7 +282,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertEq(ret, IWithdrawalReceiver.onWithdrawalReceived.selector);
         assertTrue(mockPortal2.depositCalled());
         assertEq(mockPortal2.lastDepositRecipient(), alice);
-        assertEq(mockPortal2.lastDepositBouncebackRecipient(), alice);
+        assertEq(mockPortal2.lastDepositBouncebackRecipient(), refundBurner);
         assertEq(mockPortal2.lastDepositAmount(), swapOut);
         assertEq(mockPortal2.lastDepositMemo(), bytes32("swap"));
     }
@@ -279,7 +290,7 @@ contract SwapAndDepositRouterTest is BaseTest {
     function test_encryptedDeposit_sameToken() public {
         EncryptedDepositPayload memory payload = _defaultEncryptedPayload();
         bytes memory data =
-            _buildEncryptedData(address(pathUSD), address(mockPortal), 0, payload, 0);
+            _buildEncryptedData(address(pathUSD), address(mockPortal), 0, payload, refundBurner, 0);
 
         vm.prank(address(mockMessenger));
         bytes4 ret = router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
@@ -288,7 +299,7 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertTrue(mockPortal.encryptedDepositCalled());
         assertEq(mockPortal.lastEncryptedAmount(), AMOUNT);
         assertEq(mockPortal.lastEncryptedKeyIndex(), 0);
-        assertEq(mockPortal.lastEncryptedBouncebackRecipient(), address(router));
+        assertEq(mockPortal.lastEncryptedBouncebackRecipient(), refundBurner);
     }
 
     function test_encryptedDeposit_withSwap() public {
@@ -296,8 +307,9 @@ contract SwapAndDepositRouterTest is BaseTest {
         mockDEX.setNextAmountOut(swapOut);
 
         EncryptedDepositPayload memory payload = _defaultEncryptedPayload();
-        bytes memory data =
-            _buildEncryptedData(address(token1), address(mockPortal2), 1, payload, 900e6);
+        bytes memory data = _buildEncryptedData(
+            address(token1), address(mockPortal2), 1, payload, refundBurner, 900e6
+        );
 
         vm.prank(address(mockMessenger));
         bytes4 ret = router.onWithdrawalReceived(senderTag, address(pathUSD), AMOUNT, data);
@@ -306,14 +318,14 @@ contract SwapAndDepositRouterTest is BaseTest {
         assertTrue(mockPortal2.encryptedDepositCalled());
         assertEq(mockPortal2.lastEncryptedAmount(), swapOut);
         assertEq(mockPortal2.lastEncryptedKeyIndex(), 1);
-        assertEq(mockPortal2.lastEncryptedBouncebackRecipient(), address(router));
+        assertEq(mockPortal2.lastEncryptedBouncebackRecipient(), refundBurner);
     }
 
     function test_swapSlippageReverts() public {
         mockDEX.setNextAmountOut(800e6);
 
         bytes memory data = _buildPlaintextData(
-            address(token1), address(mockPortal2), alice, bytes32("slip"), 900e6
+            address(token1), address(mockPortal2), alice, refundBurner, bytes32("slip"), 900e6
         );
 
         vm.prank(address(mockMessenger));

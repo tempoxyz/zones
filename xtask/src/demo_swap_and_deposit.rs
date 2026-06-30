@@ -77,6 +77,12 @@ pub(crate) struct DemoSwapAndDeposit {
     #[arg(long)]
     router: Option<Address>,
 
+    /// Tempo refund recipient for the routed ZonePortal.depositEncrypted call.
+    /// Defaults to the operator. Use a controlled burner or stealth address when
+    /// the zone recipient should stay unlinkable from a later bounce-back.
+    #[arg(long, env = "ROUTER_BOUNCEBACK_RECIPIENT")]
+    bounceback_recipient: Option<Address>,
+
     /// Demo swap amount in token base units (6 decimals for the demo tokens).
     #[arg(long, default_value_t = 100_000_000)]
     amount: u128,
@@ -115,6 +121,7 @@ impl DemoSwapAndDeposit {
 
         let operator_signer = parse_private_key(&self.private_key)?;
         let operator = operator_signer.address();
+        let bounceback_recipient = self.bounceback_recipient.unwrap_or(operator);
         let sequencer_signer = parse_private_key(&sequencer_key)?;
         let sequencer = sequencer_signer.address();
         let admin_signer = parse_private_key(&admin_key)?;
@@ -188,6 +195,7 @@ impl DemoSwapAndDeposit {
         println!("  Operator:         {operator}");
         println!("  Sequencer:        {sequencer}");
         println!("  Portal admin:     {portal_admin}");
+        println!("  Refund recipient: {bounceback_recipient}");
         println!("  Portal:           {portal}");
         println!("  Router:           {router}");
         println!("  L1 RPC:           {http_rpc}");
@@ -337,12 +345,15 @@ impl DemoSwapAndDeposit {
         let portal_contract_seq = ZonePortal::new(portal, &l1_seq);
         let callback_data = build_encrypted_router_callback(
             &portal_contract_seq,
-            portal,
-            beta,
-            operator,
-            B256::ZERO,
-            expected_beta,
-            &sequencer_key,
+            EncryptedRouterCallbackRequest {
+                target_portal: portal,
+                token_out: beta,
+                recipient: operator,
+                bounceback_recipient,
+                memo: B256::ZERO,
+                min_amount_out: expected_beta,
+                sequencer_private_key: &sequencer_key,
+            },
         )
         .await?;
         let l1_from_block = l1.get_block_number().await.unwrap_or(0);
@@ -576,17 +587,26 @@ fn parse_private_key(private_key: &str) -> eyre::Result<PrivateKeySigner> {
         .wrap_err("invalid private key")
 }
 
-async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(
-    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
-    portal_address: Address,
+struct EncryptedRouterCallbackRequest<'a> {
+    target_portal: Address,
     token_out: Address,
     recipient: Address,
+    bounceback_recipient: Address,
     memo: B256,
     min_amount_out: u128,
-    sequencer_private_key: &str,
+    sequencer_private_key: &'a str,
+}
+
+async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(
+    portal: &ZonePortal::ZonePortalInstance<&P, TempoNetwork>,
+    request: EncryptedRouterCallbackRequest<'_>,
 ) -> eyre::Result<Bytes> {
-    let (key, key_index) =
-        ensure_sequencer_encryption_key(portal, portal_address, sequencer_private_key).await?;
+    let (key, key_index) = ensure_sequencer_encryption_key(
+        portal,
+        request.target_portal,
+        request.sequencer_private_key,
+    )
+    .await?;
     let y_parity = key.normalized_y_parity().ok_or_else(|| {
         eyre!(
             "unexpected yParity {:#x}, expected 0/1 or 0x02/0x03",
@@ -594,13 +614,19 @@ async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(
         )
     })?;
 
-    let encrypted =
-        encrypt_deposit(&key.x, y_parity, recipient, memo, portal_address, key_index)
-            .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
+    let encrypted = encrypt_deposit(
+        &key.x,
+        y_parity,
+        request.recipient,
+        request.memo,
+        request.target_portal,
+        key_index,
+    )
+    .ok_or_else(|| eyre!("ECIES encryption failed — invalid sequencer public key?"))?;
 
     let callback = SwapAndDepositRouterEncryptedCallback {
-        token_out,
-        target_portal: portal_address,
+        token_out: request.token_out,
+        target_portal: request.target_portal,
         key_index,
         encrypted: EncryptedDepositPayload {
             ephemeralPubkeyX: encrypted.eph_pub_x,
@@ -609,7 +635,8 @@ async fn build_encrypted_router_callback<P: Provider<TempoNetwork>>(
             nonce: encrypted.nonce.into(),
             tag: encrypted.tag.into(),
         },
-        min_amount_out,
+        bounceback_recipient: request.bounceback_recipient,
+        min_amount_out: request.min_amount_out,
     };
 
     Ok(Bytes::from(callback.abi_encode()))
