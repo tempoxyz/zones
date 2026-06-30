@@ -14,7 +14,8 @@ use std::time::Duration;
 use tempo_zone_contracts::ZonePortal;
 use zone_sequencer::BatchAnchorConfig;
 
-const EIP2935_HISTORY_WINDOW: u64 = 8192;
+/// EIP-2935 stores the last 8192 block hashes, so the usable window is 8191 blocks.
+const EIP2935_HISTORY_WINDOW: u64 = 8192 - 1;
 const EIP2935_SAFETY_MARGIN: u64 = 360;
 const EIP2935_EFFECTIVE_WINDOW: u64 = EIP2935_HISTORY_WINDOW - EIP2935_SAFETY_MARGIN;
 const EXTENDED_GAP_BLOCKS: u64 = EIP2935_HISTORY_WINDOW + EIP2935_EFFECTIVE_WINDOW + 64;
