@@ -1764,6 +1764,28 @@ pub(crate) struct WithdrawalArgs {
     pub reveal_to: alloy_primitives::Bytes,
 }
 
+pub(crate) struct PlaintextRouterCallbackArgs {
+    pub amount: u128,
+    pub router: Address,
+    pub token_out: Address,
+    pub target_portal: Address,
+    pub recipient: Address,
+    pub bounceback_recipient: Address,
+    pub memo: B256,
+    pub min_amount_out: u128,
+}
+
+pub(crate) struct EncryptedRouterCallbackArgs {
+    pub amount: u128,
+    pub router: Address,
+    pub token_out: Address,
+    pub target_portal: Address,
+    pub key_index: U256,
+    pub encrypted: tempo_zone_contracts::EncryptedDepositPayload,
+    pub bounceback_recipient: Address,
+    pub min_amount_out: u128,
+}
+
 impl WithdrawalArgs {
     /// Simple withdrawal: send `amount` back to self with no callback.
     pub(crate) fn new(amount: u128) -> Self {
@@ -1779,32 +1801,23 @@ impl WithdrawalArgs {
     }
 
     /// Plaintext router callback: optionally swap, then deposit into `target_portal`.
-    pub(crate) fn swap_and_deposit_via_router(
-        amount: u128,
-        router: Address,
-        token_out: Address,
-        target_portal: Address,
-        recipient: Address,
-        bounceback_recipient: Address,
-        memo: B256,
-        min_amount_out: u128,
-    ) -> Self {
+    pub(crate) fn swap_and_deposit_via_router(args: PlaintextRouterCallbackArgs) -> Self {
         use tempo_zone_contracts::SwapAndDepositRouterPlaintextCallback;
 
         let callback_data = SwapAndDepositRouterPlaintextCallback {
-            token_out,
-            target_portal,
-            recipient,
-            bounceback_recipient,
-            memo,
-            min_amount_out,
+            token_out: args.token_out,
+            target_portal: args.target_portal,
+            recipient: args.recipient,
+            bounceback_recipient: args.bounceback_recipient,
+            memo: args.memo,
+            min_amount_out: args.min_amount_out,
         }
         .abi_encode();
 
         Self {
-            amount,
-            to: Some(router),
-            memo,
+            amount: args.amount,
+            to: Some(args.router),
+            memo: args.memo,
             gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
             data: alloy_primitives::Bytes::from(callback_data),
@@ -1813,29 +1826,20 @@ impl WithdrawalArgs {
     }
 
     /// Encrypted router callback: optionally swap, then deposit encrypted into `target_portal`.
-    pub(crate) fn swap_and_deposit_encrypted_via_router(
-        amount: u128,
-        router: Address,
-        token_out: Address,
-        target_portal: Address,
-        key_index: U256,
-        encrypted: tempo_zone_contracts::EncryptedDepositPayload,
-        bounceback_recipient: Address,
-        min_amount_out: u128,
-    ) -> Self {
+    pub(crate) fn swap_and_deposit_encrypted_via_router(args: EncryptedRouterCallbackArgs) -> Self {
         let callback_data = tempo_zone_contracts::SwapAndDepositRouterEncryptedCallback {
-            token_out,
-            target_portal,
-            key_index,
-            encrypted,
-            bounceback_recipient,
-            min_amount_out,
+            token_out: args.token_out,
+            target_portal: args.target_portal,
+            key_index: args.key_index,
+            encrypted: args.encrypted,
+            bounceback_recipient: args.bounceback_recipient,
+            min_amount_out: args.min_amount_out,
         }
         .abi_encode();
 
         Self {
-            amount,
-            to: Some(router),
+            amount: args.amount,
+            to: Some(args.router),
             memo: B256::ZERO,
             gas_limit: 2_000_000,
             fallback_recipient: None, // defaults to self
@@ -1857,16 +1861,16 @@ impl WithdrawalArgs {
         recipient: Address,
         bounceback_recipient: Address,
     ) -> Self {
-        Self::swap_and_deposit_via_router(
+        Self::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
             amount,
             router,
-            token,
+            token_out: token,
             target_portal,
             recipient,
             bounceback_recipient,
-            B256::ZERO,
-            0,
-        )
+            memo: B256::ZERO,
+            min_amount_out: 0,
+        })
     }
 }
 

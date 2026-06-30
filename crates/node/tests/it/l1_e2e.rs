@@ -5,7 +5,8 @@
 //! subscriber naturally receives blocks and deposits — no synthetic injection.
 
 use crate::utils::{
-    L1TestNode, STABLECOIN_DEX_ADDRESS, WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer,
+    EncryptedRouterCallbackArgs, L1TestNode, PlaintextRouterCallbackArgs, STABLECOIN_DEX_ADDRESS,
+    WithdrawalArgs, ZoneAccount, ZoneTestNode, spawn_sequencer,
 };
 use alloy::{
     primitives::{Address, B256, U256},
@@ -436,16 +437,16 @@ async fn test_cross_zone_encrypted_router_bounceback_recipient() -> eyre::Result
     let refund_before = l1.balance_of(PATH_USD_ADDRESS, refund_burner).await?;
     let router_before = l1.balance_of(PATH_USD_ADDRESS, router).await?;
 
-    let args = WithdrawalArgs::swap_and_deposit_encrypted_via_router(
-        cross_amount,
+    let args = WithdrawalArgs::swap_and_deposit_encrypted_via_router(EncryptedRouterCallbackArgs {
+        amount: cross_amount,
         router,
-        PATH_USD_ADDRESS,
-        portal_b,
+        token_out: PATH_USD_ADDRESS,
+        target_portal: portal_b,
         key_index,
         encrypted,
-        refund_burner,
-        0,
-    );
+        bounceback_recipient: refund_burner,
+        min_amount_out: 0,
+    });
     alice.withdraw_with(args).await?;
 
     let refund_after = l1
@@ -523,16 +524,16 @@ async fn test_swap_and_deposit_into_same_zone() -> eyre::Result<()> {
     )
     .await;
 
-    let args = WithdrawalArgs::swap_and_deposit_via_router(
-        fixture.swap_amount,
-        fixture.router,
-        fixture.beta,
-        fixture.portal_address,
-        fixture.account.address(),
-        fixture.l1.signer_at(5).address(),
-        B256::ZERO,
-        expected_beta,
-    );
+    let args = WithdrawalArgs::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
+        amount: fixture.swap_amount,
+        router: fixture.router,
+        token_out: fixture.beta,
+        target_portal: fixture.portal_address,
+        recipient: fixture.account.address(),
+        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        memo: B256::ZERO,
+        min_amount_out: expected_beta,
+    });
     fixture
         .account
         .withdraw_token_with(fixture.alpha, args)
@@ -621,16 +622,16 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_plaintext_deposit_
     )
     .await;
 
-    let args = WithdrawalArgs::swap_and_deposit_via_router(
-        fixture.swap_amount,
-        fixture.router,
-        fixture.beta,
-        fixture.portal_address,
-        fixture.account.address(),
-        fixture.l1.signer_at(5).address(),
-        B256::ZERO,
-        expected_beta,
-    );
+    let args = WithdrawalArgs::swap_and_deposit_via_router(PlaintextRouterCallbackArgs {
+        amount: fixture.swap_amount,
+        router: fixture.router,
+        token_out: fixture.beta,
+        target_portal: fixture.portal_address,
+        recipient: fixture.account.address(),
+        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        memo: B256::ZERO,
+        min_amount_out: expected_beta,
+    });
     fixture
         .account
         .withdraw_token_with(fixture.alpha, args)
@@ -739,16 +740,16 @@ async fn test_swap_and_deposit_into_same_zone_bounces_back_on_encrypted_deposit_
     )
     .await;
 
-    let args = WithdrawalArgs::swap_and_deposit_encrypted_via_router(
-        fixture.swap_amount,
-        fixture.router,
-        fixture.beta,
-        fixture.portal_address,
+    let args = WithdrawalArgs::swap_and_deposit_encrypted_via_router(EncryptedRouterCallbackArgs {
+        amount: fixture.swap_amount,
+        router: fixture.router,
+        token_out: fixture.beta,
+        target_portal: fixture.portal_address,
         key_index,
         encrypted,
-        fixture.l1.signer_at(5).address(),
-        expected_beta,
-    );
+        bounceback_recipient: fixture.l1.signer_at(5).address(),
+        min_amount_out: expected_beta,
+    });
     fixture
         .account
         .withdraw_token_with(fixture.alpha, args)
