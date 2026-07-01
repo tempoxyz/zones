@@ -156,6 +156,7 @@ crate::sol! {
 
         error NotSequencer();
         error NotAdmin();
+        error NotPendingSequencer();
         error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
@@ -210,6 +211,9 @@ crate::sol! {
         function enableToken(address token) external;
         function pauseDeposits(address token) external;
         function resumeDeposits(address token) external;
+
+        function transferSequencer(address newSequencer) external;
+        function acceptSequencer() external;
 
         function transferAdmin(address newAdmin) external;
         function acceptAdmin() external;
@@ -312,6 +316,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
+            Self::NotPendingSequencer(_) => f.write_str("NotPendingSequencer"),
             Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
