@@ -22,7 +22,7 @@ use crate::{policy::PolicyCheck, tip403_proxy::ZoneTip403ProxyRegistry};
 /// the zone policy layer.
 macro_rules! decode_or_revert {
     ($call_ty:ty, $args:expr) => {
-        match <$call_ty>::abi_decode_raw($args) {
+        match <$call_ty>::abi_decode_raw_validate($args) {
             Ok(c) => c,
             Err(_) => {
                 return Some(Ok(StorageCtx::default().revert_output(Bytes::new())));
