@@ -2765,6 +2765,7 @@ contract ZonePortalTest is BaseTest {
         // --- Slot 15: pendingAdmin ---
         // Nominate a new admin to get a non-zero pendingAdmin (rpcUrl at slot 14 is short,
         // so it stays inline and pendingAdmin lands at the next slot).
+        vm.prank(admin);
         portal.transferAdmin(bob);
         bytes32 slot15 = vm.load(address(portal), PORTAL_PENDING_ADMIN_SLOT);
         assertEq(

@@ -417,6 +417,7 @@ contract ZoneFactoryTest is BaseTest {
     // two-step transfer while the factory record still reflects the creation-time admin.
     function test_zones_adminIsSnapshot_afterRotation() public {
         (uint32 id, address portal) = zoneFactory.createZone(_defaultParams());
+        vm.prank(admin);
         ZonePortal(portal).transferAdmin(alice);
         vm.prank(alice);
         ZonePortal(portal).acceptAdmin();
