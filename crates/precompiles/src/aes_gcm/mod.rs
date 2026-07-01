@@ -131,7 +131,7 @@ mod tests {
     use tempo_chainspec::hardfork::TempoHardfork;
     use tempo_precompiles::{
         charge_input_cost,
-        storage::{StorageCtx, hashmap::HashMapStorageProvider},
+        storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
     };
 
     type TestContext = Context<
@@ -190,11 +190,22 @@ mod tests {
     }
 
     fn charged_input_gas(calldata: &[u8]) -> u64 {
-        let mut provider = HashMapStorageProvider::new(1);
+        let mut ctx = test_context();
+        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        let mut provider = EvmPrecompileStorageProvider::new(
+            EvmInternals::from_context(&mut ctx),
+            u64::MAX,
+            0,
+            cfg.spec,
+            cfg.enable_amsterdam_eip8037,
+            true,
+            cfg.gas_params.clone(),
+        );
         StorageCtx::enter(&mut provider, || {
             let mut storage = StorageCtx::default();
+            let gas_before = storage.gas_used();
             assert!(charge_input_cost(&mut storage, calldata).is_none());
-            storage.gas_used()
+            storage.gas_used().saturating_sub(gas_before)
         })
     }
 
