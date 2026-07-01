@@ -163,7 +163,7 @@ macro_rules! dispatch {
                 $(
                     if <$iface::$calls as alloy_sol_types::SolInterface>::valid_selector(selector) {
                         type Calls = $iface::$calls;
-                        return crate::dispatch::dispatch_call($calldata, <Calls as alloy_sol_types::SolInterface>::abi_decode, |$call| match $match_call {
+                        return crate::dispatch::dispatch_call($calldata, <Calls as alloy_sol_types::SolInterface>::abi_decode_validate, |$call| match $match_call {
                             $(Calls::$variant($binding) => $body,)*
                         });
                     }
