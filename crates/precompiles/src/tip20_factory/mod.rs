@@ -14,22 +14,27 @@
 //! Only [`ZONE_INBOX_ADDRESS`] may call this precompile; all other callers are
 //! reverted with `OnlyZoneInbox()`.
 
-use alloy_primitives::{Address, Bytes};
-use alloy_sol_types::{SolCall, SolError};
-use revm::precompile::PrecompileResult;
+mod dispatch;
+
+use alloy_primitives::Address;
+use alloy_sol_types::SolError;
 use tempo_precompiles::{
-    PATH_USD_ADDRESS, Precompile as TempoPrecompile, TIP20_FACTORY_ADDRESS,
+    PATH_USD_ADDRESS, TIP20_FACTORY_ADDRESS,
     tip20::{ISSUER_ROLE, TIP20Token},
 };
 use tempo_precompiles_macros::contract;
 use zone_primitives::constants::{ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
 
 alloy_sol_types::sol! {
-    /// Initialize a TIP20 token on the zone and grant issuer roles.
-    function enableToken(address token, string name, string symbol, string currency) external;
+    interface IZoneTokenFactory {
+        /// Initialize a TIP20 token on the zone and grant issuer roles.
+        function enableToken(address token, string name, string symbol, string currency) external;
+    }
 
     error OnlyZoneInbox();
 }
+
+pub use IZoneTokenFactory::enableTokenCall;
 
 /// Zone-specific TIP20 factory precompile address (same as the standard factory).
 pub const ZONE_TIP20_FACTORY_ADDRESS: Address = TIP20_FACTORY_ADDRESS;
@@ -117,26 +122,5 @@ impl ZoneTokenFactory {
                 StorageCtx::enter(&mut storage, || Self::new().call(input.data, input.caller))
             },
         )
-    }
-}
-
-impl TempoPrecompile for ZoneTokenFactory {
-    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        let storage = tempo_precompiles::storage::StorageCtx;
-
-        if msg_sender != ZONE_INBOX_ADDRESS {
-            return Ok(storage.revert_output(OnlyZoneInbox {}.abi_encode().into()));
-        }
-
-        let call = match enableTokenCall::abi_decode(calldata) {
-            Ok(call) => call,
-            Err(_) => return Ok(storage.revert_output(Bytes::new())),
-        };
-
-        if let Err(err) = self.enable_token(call) {
-            return storage.error_result(err);
-        }
-
-        Ok(storage.success_output(Bytes::new()))
     }
 }

@@ -13,11 +13,11 @@ use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, Payload},
 };
-use alloy_evm::precompiles::{DynPrecompile, Precompile, PrecompileInput};
-use alloy_primitives::{Address, Bytes, address};
-use alloy_sol_types::SolCall;
-use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
-use tracing::{debug, warn};
+mod dispatch;
+
+use alloy_evm::precompiles::{DynPrecompile, Precompile};
+use alloy_primitives::{Address, address};
+use revm::precompile::PrecompileId;
 
 /// AES-256-GCM Decrypt precompile address on Zone L2.
 pub const AES_GCM_DECRYPT_ADDRESS: Address = address!("0x1C00000000000000000000000000000000000101");
@@ -32,15 +32,19 @@ const AES_GCM_PER_BYTE_GAS: u64 = 3;
 static AES_GCM_PRECOMPILE_ID: PrecompileId = PrecompileId::Custom(Cow::Borrowed("AesGcmDecrypt"));
 
 alloy_sol_types::sol! {
-    /// Decrypt AES-256-GCM ciphertext and verify authentication tag.
-    function decrypt(
-        bytes32 key,
-        bytes12 nonce,
-        bytes ciphertext,
-        bytes aad,
-        bytes16 tag
-    ) external view returns (bytes plaintext, bool valid);
+    interface IAesGcmDecrypt {
+        /// Decrypt AES-256-GCM ciphertext and verify authentication tag.
+        function decrypt(
+            bytes32 key,
+            bytes12 nonce,
+            bytes ciphertext,
+            bytes aad,
+            bytes16 tag
+        ) external view returns (bytes plaintext, bool valid);
+    }
 }
+
+pub use IAesGcmDecrypt::{decryptCall, decryptReturn};
 
 /// AES-256-GCM decryption precompile.
 ///
@@ -48,50 +52,6 @@ alloy_sol_types::sol! {
 /// the GCM authentication tag. Returns `(plaintext, true)` on success or
 /// `(empty, false)` if tag verification fails.
 pub struct AesGcmDecrypt;
-
-impl Precompile for AesGcmDecrypt {
-    fn precompile_id(&self) -> &PrecompileId {
-        &AES_GCM_PRECOMPILE_ID
-    }
-
-    fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
-        let data = input.data;
-        if data.len() < 4 {
-            return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
-        }
-
-        let selector: [u8; 4] = data[..4].try_into().expect("len >= 4");
-        if selector != decryptCall::SELECTOR {
-            warn!(target: "zone::precompile", ?selector, "AesGcmDecrypt: unknown selector");
-            return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir));
-        }
-
-        debug!(target: "zone::precompile", "AesGcmDecrypt: decrypt");
-
-        let call = match decryptCall::abi_decode(data) {
-            Ok(call) => call,
-            Err(_) => return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir)),
-        };
-
-        let gas = AES_GCM_BASE_GAS
-            + AES_GCM_PER_BYTE_GAS * (call.ciphertext.len() + call.aad.len()) as u64;
-
-        let (plaintext, valid) = decrypt_aes_gcm(
-            &call.key.0,
-            &call.nonce.0,
-            &call.ciphertext,
-            &call.aad,
-            &call.tag.0,
-        );
-
-        let ret = decryptReturn {
-            plaintext: Bytes::from(plaintext),
-            valid,
-        };
-        let encoded = decryptCall::abi_encode_returns(&ret);
-        Ok(PrecompileOutput::new(gas, encoded.into(), input.reservoir))
-    }
-}
 
 impl AesGcmDecrypt {
     /// Convert into a [`DynPrecompile`] for registration in a [`PrecompilesMap`].
@@ -142,8 +102,9 @@ pub fn decrypt_aes_gcm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_evm::EvmInternals;
-    use alloy_primitives::U256;
+    use alloy_evm::{EvmInternals, precompiles::PrecompileInput};
+    use alloy_primitives::{Bytes, U256};
+    use alloy_sol_types::SolCall;
     use revm::{
         Context,
         database::{CacheDB, EmptyDB},
