@@ -33,7 +33,7 @@ macro_rules! decode_or_revert {
 
 impl<P: PolicyCheck> ZoneTip20Token<P> {
     fn selector(data: &[u8]) -> Option<[u8; 4]> {
-        crate::dispatch::selector_from_calldata(data)
+        tempo_precompiles::dispatch::selector_from_calldata(data)
     }
 
     fn is_fixed_gas_selector(selector: [u8; 4]) -> bool {

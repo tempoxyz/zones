@@ -27,7 +27,6 @@ pub(crate) use tempo_precompiles::{error, storage};
 
 pub mod aes_gcm;
 pub mod chaum_pedersen;
-mod dispatch;
 pub mod ecies;
 pub mod policy;
 pub mod tip20_factory;
@@ -39,8 +38,6 @@ pub use chaum_pedersen::{CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify};
 pub use tip20_factory::{ZONE_TIP20_FACTORY_ADDRESS, ZoneTokenFactory};
 pub use tip403_proxy::{ZONE_TIP403_PROXY_ADDRESS, ZoneTip403ProxyRegistry};
 pub use ztip20::{SequencerExt, ZoneTip20Token};
-
-pub(crate) use dispatch::*;
 
 use revm::precompile::PrecompileError;
 

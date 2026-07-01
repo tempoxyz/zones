@@ -1,8 +1,8 @@
 //! ABI dispatch for the [`ZoneTip403ProxyRegistry`] precompile.
 
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::Address;
-use alloy_sol_types::{SolCall, SolError};
+use alloy_primitives::{Address, Bytes};
+use alloy_sol_types::{SolCall, SolError, SolInterface};
 use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_contracts::precompiles::ITIP403Registry::{self, PolicyType};
 use tempo_precompiles::tip403_registry::{ALLOW_ALL_POLICY_ID, REJECT_ALL_POLICY_ID};
@@ -10,7 +10,7 @@ use tracing::{debug, warn};
 use zone_primitives::policy::AuthRole;
 
 use super::{POLICY_DATA_GAS, ReadOnlyRegistry, ZoneTip403ProxyRegistry};
-use crate::{dispatch, policy::PolicyCheck};
+use crate::policy::PolicyCheck;
 
 impl<P: PolicyCheck + Clone + Send + Sync + 'static> ZoneTip403ProxyRegistry<P> {
     /// Create a [`DynPrecompile`] that dispatches TIP-403 registry calls
@@ -41,41 +41,59 @@ impl<P: PolicyCheck + Clone + Send + Sync + 'static> ZoneTip403ProxyRegistry<P> 
 impl<P: PolicyCheck> ZoneTip403ProxyRegistry<P> {
     /// Dispatch based on the 4-byte selector.
     fn dispatch(&self, data: &[u8], reservoir: u64) -> PrecompileResult {
-        dispatch!(
-            data,
-            reservoir,
-            |call| match call {
-                ITIP403Registry::ITIP403RegistryCalls {
-                    policyIdCounter(_) => self.handle_policy_id_counter(reservoir),
-                    policyExists(call) => self.handle_policy_exists(call.policyId, reservoir),
-                    policyData(call) => self.handle_policy_data(call.policyId, reservoir),
-                    isAuthorized(call) => {
-                        self.handle_is_authorized(call.policyId, call.user, AuthRole::Transfer, reservoir)
-                    },
-                    isAuthorizedSender(call) => {
-                        self.handle_is_authorized(call.policyId, call.user, AuthRole::Sender, reservoir)
-                    },
-                    isAuthorizedRecipient(call) => {
-                        self.handle_is_authorized(call.policyId, call.user, AuthRole::Recipient, reservoir)
-                    },
-                    isAuthorizedMintRecipient(call) => {
-                        self.handle_is_authorized(call.policyId, call.user, AuthRole::MintRecipient, reservoir)
-                    },
-                    compoundPolicyData(call) => {
-                        self.handle_compound_policy_data(call.policyId, reservoir)
-                    },
-                    createPolicy(_) => self.read_only_revert(reservoir),
-                    createPolicyWithAccounts(_) => self.read_only_revert(reservoir),
-                    setPolicyAdmin(_) => self.read_only_revert(reservoir),
-                    modifyPolicyWhitelist(_) => self.read_only_revert(reservoir),
-                    modifyPolicyBlacklist(_) => self.read_only_revert(reservoir),
-                    createCompoundPolicy(_) => self.read_only_revert(reservoir),
-                    receivePolicy(_) => crate::dispatch::unknown_selector_stateless_result(reservoir),
-                    validateReceivePolicy(_) => crate::dispatch::unknown_selector_stateless_result(reservoir),
-                    setReceivePolicy(_) => crate::dispatch::unknown_selector_stateless_result(reservoir),
-                }
-            },
-        )
+        let call = match ITIP403Registry::ITIP403RegistryCalls::abi_decode(data) {
+            Ok(call) => call,
+            Err(_) => return Ok(PrecompileOutput::revert(0, Bytes::new(), reservoir)),
+        };
+
+        match call {
+            ITIP403Registry::ITIP403RegistryCalls::policyIdCounter(_) => {
+                self.handle_policy_id_counter(reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::policyExists(call) => {
+                self.handle_policy_exists(call.policyId, reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::policyData(call) => {
+                self.handle_policy_data(call.policyId, reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::isAuthorized(call) => {
+                self.handle_is_authorized(call.policyId, call.user, AuthRole::Transfer, reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::isAuthorizedSender(call) => {
+                self.handle_is_authorized(call.policyId, call.user, AuthRole::Sender, reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::isAuthorizedRecipient(call) => {
+                self.handle_is_authorized(call.policyId, call.user, AuthRole::Recipient, reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::isAuthorizedMintRecipient(call) => self
+                .handle_is_authorized(call.policyId, call.user, AuthRole::MintRecipient, reservoir),
+            ITIP403Registry::ITIP403RegistryCalls::compoundPolicyData(call) => {
+                self.handle_compound_policy_data(call.policyId, reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::createPolicy(_) => {
+                self.read_only_revert(reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::createPolicyWithAccounts(_) => {
+                self.read_only_revert(reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::setPolicyAdmin(_) => {
+                self.read_only_revert(reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::modifyPolicyWhitelist(_) => {
+                self.read_only_revert(reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::modifyPolicyBlacklist(_) => {
+                self.read_only_revert(reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::createCompoundPolicy(_) => {
+                self.read_only_revert(reservoir)
+            }
+            ITIP403Registry::ITIP403RegistryCalls::receivePolicy(_)
+            | ITIP403Registry::ITIP403RegistryCalls::validateReceivePolicy(_)
+            | ITIP403Registry::ITIP403RegistryCalls::setReceivePolicy(_) => {
+                Ok(PrecompileOutput::revert(0, Bytes::new(), reservoir))
+            }
+        }
     }
 
     fn read_only_revert(&self, reservoir: u64) -> PrecompileResult {

@@ -3,11 +3,12 @@
 use alloy_primitives::Address;
 use alloy_sol_types::SolError;
 use revm::precompile::PrecompileResult;
-use tempo_precompiles::{Precompile as TempoPrecompile, storage::StorageCtx};
+use tempo_precompiles::{
+    Precompile as TempoPrecompile, charge_input_cost, dispatch, mutate_void, storage::StorageCtx,
+};
 use zone_primitives::constants::ZONE_INBOX_ADDRESS;
 
 use super::{IZoneTokenFactory, OnlyZoneInbox, ZoneTokenFactory};
-use crate::{charge_input_cost, dispatch, mutate_void};
 
 impl TempoPrecompile for ZoneTokenFactory {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
