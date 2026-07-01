@@ -44,7 +44,8 @@ contract BaseTest is Test {
     bytes32 internal constant _RECEIVE_WITH_MEMO_ROLE = keccak256("RECEIVE_WITH_MEMO_ROLE");
 
     // Common test addresses
-    address public admin = address(this);
+    address public admin = address(0x500);
+    address public sequencer = address(this);
     address public alice = address(0x200);
     address public bob = address(0x300);
     address public charlie = address(0x400);
@@ -104,18 +105,9 @@ contract BaseTest is Test {
             revert MissingPrecompile("ZoneTxContext", _ZONE_TX_CONTEXT);
         }
 
-        // Set ValidatorConfig owner to admin via direct storage write
+        // Set ValidatorConfig owner to sequencer via direct storage write
         // owner is at slot 0 in ValidatorConfig
-        vm.store(_VALIDATOR_CONFIG, bytes32(uint256(0)), bytes32(uint256(uint160(admin))));
-
-        // Grant DEFAULT_ADMIN_ROLE to admin for pathUSD via direct storage write
-        bytes32 adminRoleSlot = keccak256(
-            abi.encode(
-                bytes32(0), // DEFAULT_ADMIN_ROLE
-                keccak256(abi.encode(admin, uint256(0)))
-            )
-        );
-        vm.store(_PATH_USD, adminRoleSlot, bytes32(uint256(1)));
+        vm.store(_VALIDATOR_CONFIG, bytes32(uint256(0)), bytes32(uint256(uint160(sequencer))));
 
         // Grant DEFAULT_ADMIN_ROLE to pathUSDAdmin
         bytes32 tempoAdminRoleSlot = keccak256(
@@ -127,10 +119,14 @@ contract BaseTest is Test {
         vm.store(_PATH_USD, tempoAdminRoleSlot, bytes32(uint256(1)));
 
         token1 = ITIP20Token(
-            factory.createToken("TOKEN1", "T1", "USD", ITIP20(_PATH_USD), admin, bytes32("token1"))
+            factory.createToken(
+                "TOKEN1", "T1", "USD", ITIP20(_PATH_USD), sequencer, bytes32("token1")
+            )
         );
         token2 = ITIP20Token(
-            factory.createToken("TOKEN2", "T2", "USD", ITIP20(_PATH_USD), admin, bytes32("token2"))
+            factory.createToken(
+                "TOKEN2", "T2", "USD", ITIP20(_PATH_USD), sequencer, bytes32("token2")
+            )
         );
     }
 

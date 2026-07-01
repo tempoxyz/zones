@@ -81,9 +81,9 @@ pub(crate) struct CreateZone {
     sequencer: Address,
 
     /// Admin address that controls token enablement and deposit pause/resume.
-    /// Defaults to the sequencer address when omitted.
+    /// Pass the sequencer address explicitly when both roles should use the same key.
     #[arg(long)]
-    admin: Option<Address>,
+    admin: Address,
 
     /// Public RPC endpoint for the zone, published on-chain in the portal.
     /// Can be left empty and set later via `ZonePortal.setRpcUrl`.
@@ -131,13 +131,12 @@ impl CreateZone {
         // via --l1.genesis-block-number.
         let current_block = provider.get_block_number().await?;
 
-        let admin = self.admin.unwrap_or(self.sequencer);
-        println!("Admin: {admin}");
+        println!("Admin: {}", self.admin);
         println!("Sequencer: {}", self.sequencer);
 
         let params = CreateZoneParams {
             initialToken: self.initial_token,
-            admin,
+            admin: self.admin,
             sequencer: self.sequencer,
             verifier,
             zoneParams: ZoneParams {
@@ -209,6 +208,7 @@ impl CreateZone {
             gas_limit: self.gas_limit,
             tempo_portal: portal,
             tempo_genesis_header_rlp: header_rlp_hex,
+            admin: self.admin,
             sequencer: Some(self.sequencer),
             specs_out: self.specs_out.clone(),
             with_createx: true,
@@ -223,7 +223,7 @@ impl CreateZone {
             "chainId": chain_id,
             "portal": format!("{portal}"),
             "initialToken": format!("{}", self.initial_token),
-            "admin": format!("{admin}"),
+            "admin": format!("{}", self.admin),
             "sequencer": format!("{}", self.sequencer),
             "tempoAnchorBlock": confirm_header.inner.number,
             "zoneFactory": format!("{}", self.zone_factory),
@@ -241,7 +241,7 @@ impl CreateZone {
         println!("  Chain ID: {chain_id}");
         println!("  Portal: {portal}");
         println!("  Initial Token: {}", self.initial_token);
-        println!("  Admin: {admin}");
+        println!("  Admin: {}", self.admin);
         println!("  Sequencer: {}", self.sequencer);
         println!("  ZoneFactory: {}", self.zone_factory);
         if !self.rpc_url.is_empty() {

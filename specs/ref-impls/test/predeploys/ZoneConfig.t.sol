@@ -38,7 +38,7 @@ contract ZoneConfigTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -50,7 +50,8 @@ contract ZoneConfigTest is BaseTest {
 
         (, address portalAddr) = zoneFactory.createZone(params);
         portal = ZonePortal(portalAddr);
-        tempoState = new MockTempoState(admin, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
+        tempoState =
+            new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
         config = new ZoneConfig(address(portal), address(tempoState));
 
         _syncPortalSlot(PORTAL_SEQUENCER_SLOT);
@@ -103,9 +104,9 @@ contract ZoneConfigTest is BaseTest {
         assertEq(config.sequencer(), portal.sequencer());
     }
 
-    /// @notice Verifies sequencer membership is true for admin and false otherwise.
+    /// @notice Verifies sequencer membership is true for the portal sequencer and false otherwise.
     function test_isSequencer_trueAndFalse() public view {
-        assertTrue(config.isSequencer(admin));
+        assertTrue(config.isSequencer(sequencer));
         assertFalse(config.isSequencer(alice));
     }
 
@@ -164,7 +165,7 @@ contract ZoneConfigTest is BaseTest {
 
     /// @notice Verifies the config reads the pending sequencer from portal storage.
     function test_pendingSequencer() public {
-        vm.prank(admin);
+        vm.prank(sequencer);
         portal.transferSequencer(alice);
         _syncPortalSlot(PORTAL_PENDING_SEQUENCER_SLOT);
 
@@ -173,7 +174,7 @@ contract ZoneConfigTest is BaseTest {
 
     /// @notice Verifies sequencer slot reads stay correct after sequencer rotation.
     function test_storageSlotRegression_readsSequencerAfterRotation() public {
-        vm.prank(admin);
+        vm.prank(sequencer);
         portal.transferSequencer(alice);
         vm.prank(alice);
         portal.acceptSequencer();
