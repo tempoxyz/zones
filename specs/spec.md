@@ -19,6 +19,7 @@
     - [Gas Rate Configuration](#gas-rate-configuration)
     - [Encryption Key Management](#encryption-key-management)
     - [Sequencer Transfer](#sequencer-transfer)
+    - [Admin Transfer](#admin-transfer)
   - [Deposits](#deposits)
     - [Regular Deposits](#regular-deposits)
     - [Deposit Fees](#deposit-fees)
@@ -177,12 +178,15 @@ Each zone has two privileged roles registered on the [`ZonePortal`](#izoneportal
 - Holds governance powers over the zone (token enablement, deposit pause/resume).
 - Expected to be a cold key, multisig, or governance contract.
 - Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
-- Cannot be renounced. The zero address is never a valid admin.
+- Rotatable via a two-step transfer (see [Admin Transfer](#admin-transfer)), so a lost or compromised admin key can be moved to a new cold key or multisig.
+- Cannot be renounced. 
 
 **Sequencer.**
 
 - Operates the zone: collects transactions, produces blocks, advances Tempo, processes deposits and withdrawals, and submits batches with proofs.
 - Expected to be an online operational key.
+- Rotatable via a two-step transfer. (see [Sequencer Transfer](#sequencer-transfer))
+- Cannot be renounced.
 - Set at zone creation via [`IZoneFactory.createZone`](#izonefactory).
 - Holds the encryption private key used to decrypt [encrypted deposits](#encrypted-deposits).
 
@@ -197,6 +201,10 @@ The following table lists every privileged action and the role authorized to inv
 | `enableToken(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `pauseDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
 | `resumeDeposits(token)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `transferAdmin(newAdmin)` | [`ZonePortal`](#izoneportal) | **admin** |
+| `acceptAdmin()` | [`ZonePortal`](#izoneportal) | **pending admin** |
+| `transferSequencer(newSequencer)` | [`ZonePortal`](#izoneportal) | **sequencer** |
+| `acceptSequencer()` | [`ZonePortal`](#izoneportal) | **pending sequencer** |
 | `setZoneGasRate(rate)` | [`ZonePortal`](#izoneportal) | **sequencer** |
 | `setSequencerEncryptionKey(...)` | [`ZonePortal`](#izoneportal) | **sequencer** |
 | `setRpcUrl(url)` | [`ZonePortal`](#izoneportal) | **sequencer** |
@@ -319,10 +327,19 @@ When a new key is set, the previous key remains valid for `ENCRYPTION_KEY_GRACE_
 
 The sequencer can transfer control to a new address via a two-step process on Tempo:
 
-1. Current sequencer calls `ZonePortal.transferSequencer(newSequencer)` to nominate a new sequencer.
+1. Current sequencer calls `ZonePortal.transferSequencer(newSequencer)` to nominate a new sequencer. Calling it with `address(0)` cancels a pending transfer.
 2. New sequencer calls `ZonePortal.acceptSequencer()` to accept the transfer.
 
 Sequencer management happens exclusively on Tempo. Zone-side contracts read the sequencer address from the portal via `ZoneConfig`, so the transfer takes effect on the zone once `advanceTempo` imports the Tempo block containing the accepted transfer. The two-step pattern prevents accidental transfers to incorrect addresses.
+
+### Admin Transfer
+
+The admin can transfer the governance role to a new address via the same two-step process, allowing an operator to rotate to a new cold key or multisig after a planned governance change or a suspected key compromise:
+
+1. Current admin calls `ZonePortal.transferAdmin(newAdmin)` to nominate a new admin. Calling it with `address(0)` cancels a pending transfer.
+2. New admin calls `ZonePortal.acceptAdmin()` to accept the transfer.
+
+Until `acceptAdmin()` is called the current admin retains all governance powers, so a nomination to a wrong or unreachable address cannot strand the role. Because only a non-zero pending admin can accept, the transfer can never set the admin to `address(0)` — the admin still cannot be renounced.
 
 <br>
 
@@ -1636,6 +1653,8 @@ interface IZonePortal {
     event RefundClaimed(address indexed recipient, address indexed token, uint128 amount);
     event SequencerTransferStarted(address indexed currentSequencer, address indexed pendingSequencer);
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+    event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
+    event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
     event SequencerEncryptionKeyUpdated(bytes32 x, uint8 yParity, uint256 keyIndex, uint64 activationBlock);
     event ZoneGasRateUpdated(uint128 zoneGasRate);
     event TokenEnabled(address indexed token, string name, string symbol, string currency);
@@ -1645,6 +1664,7 @@ interface IZonePortal {
     error NotSequencer();
     error NotAdmin();
     error NotPendingSequencer();
+    error NotPendingAdmin();
     error InvalidProof();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
@@ -1727,6 +1747,11 @@ interface IZonePortal {
     // Sequencer management
     function transferSequencer(address newSequencer) external;
     function acceptSequencer() external;
+
+    // Admin management
+    function transferAdmin(address newAdmin) external;
+    function acceptAdmin() external;
+
     function setZoneGasRate(uint128 _zoneGasRate) external;
     function zoneGasRate() external view returns (uint128);
 
@@ -1746,6 +1771,7 @@ interface IZonePortal {
     function sequencer() external view returns (address);
     function admin() external view returns (address);
     function pendingSequencer() external view returns (address);
+    function pendingAdmin() external view returns (address);
     
     function verifier() external view returns (address);
     function blockHash() external view returns (bytes32);

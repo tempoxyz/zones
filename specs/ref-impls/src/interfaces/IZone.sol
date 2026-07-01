@@ -384,6 +384,7 @@ interface IZoneTxContext {
 //   slot 12: _withdrawalQueue.tail
 //   slot 13: _withdrawalQueue.slots (mapping(uint256 => bytes32))
 //   slot 14: rpcUrl (string)
+//   slot 15: pendingAdmin (address)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -396,6 +397,7 @@ bytes32 constant PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT = bytes32(uint256(5));
 bytes32 constant PORTAL_ENCRYPTION_KEYS_SLOT = bytes32(uint256(7));
 bytes32 constant PORTAL_TOKEN_CONFIGS_SLOT = bytes32(uint256(8));
 bytes32 constant PORTAL_ENABLED_TOKENS_SLOT = bytes32(uint256(9));
+bytes32 constant PORTAL_PENDING_ADMIN_SLOT = bytes32(uint256(15));
 
 /// @title IVerifier
 /// @notice Interface for zone proof/attestation verification
@@ -554,10 +556,19 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
+    /// @notice Emitted when the current sequencer nominates a new sequencer (two-step transfer).
+    /// @dev A `pendingSequencer` of address(0) signals cancellation of a pending transfer.
     event SequencerTransferStarted(
         address indexed currentSequencer, address indexed pendingSequencer
     );
+    /// @notice Emitted when a pending sequencer accepts and the sequencer role is handed over.
     event SequencerTransferred(address indexed previousSequencer, address indexed newSequencer);
+
+    /// @notice Emitted when the current admin nominates a new admin (two-step transfer).
+    /// @dev A `newAdmin` of address(0) signals cancellation of a pending transfer.
+    event AdminTransferStarted(address indexed currentAdmin, address indexed pendingAdmin);
+    /// @notice Emitted when a pending admin accepts and the admin role is handed over.
+    event AdminTransferred(address indexed previousAdmin, address indexed newAdmin);
 
     /// @notice Emitted when an encrypted deposit is made (recipient/memo not revealed)
     event EncryptedDepositMade(
@@ -612,6 +623,7 @@ interface IZonePortal {
     error NotSequencer();
     error NotAdmin();
     error NotPendingSequencer();
+    error NotPendingAdmin();
     error InvalidProof();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
@@ -651,6 +663,8 @@ interface IZonePortal {
     function admin() external view returns (address);
 
     function pendingSequencer() external view returns (address);
+
+    function pendingAdmin() external view returns (address);
 
     function zoneGasRate() external view returns (uint128);
 
@@ -717,6 +731,13 @@ interface IZonePortal {
 
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
     function acceptSequencer() external;
+
+    /// @notice Start an admin transfer. Only callable by the current admin.
+    /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
+    function transferAdmin(address newAdmin) external;
+
+    /// @notice Accept a pending admin transfer. Only callable by the pending admin.
+    function acceptAdmin() external;
 
     /// @notice Get the sequencer's current encryption public key for encrypted deposits
     /// @return x The X coordinate of the secp256k1 public key

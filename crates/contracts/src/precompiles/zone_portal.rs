@@ -142,10 +142,21 @@ crate::sol! {
             address indexed newSequencer
         );
 
+        event AdminTransferStarted(
+            address indexed currentAdmin,
+            address indexed pendingAdmin
+        );
+
+        event AdminTransferred(
+            address indexed previousAdmin,
+            address indexed newAdmin
+        );
+
         // -- Errors --
 
         error NotSequencer();
         error NotAdmin();
+        error NotPendingAdmin();
         error InvalidProof();
         error InvalidTempoBlockNumber();
         error PolicyForbids();
@@ -200,6 +211,9 @@ crate::sol! {
         function pauseDeposits(address token) external;
         function resumeDeposits(address token) external;
 
+        function transferAdmin(address newAdmin) external;
+        function acceptAdmin() external;
+
         function rpcUrl() external view returns (string memory);
         function setRpcUrl(string calldata rpcUrl) external;
 
@@ -226,6 +240,7 @@ crate::sol! {
         function enabledTokenAt(uint256 index) external view returns (address);
         function zoneGasRate() external view returns (uint128);
         function pendingSequencer() external view returns (address);
+        function pendingAdmin() external view returns (address);
         function refunds(address token, address owner) external view returns (uint128);
 
         function sequencerEncryptionKey() external view returns (bytes32 x, uint8 yParity);
@@ -297,6 +312,7 @@ impl core::fmt::Display for ZonePortal::ZonePortalErrors {
         match self {
             Self::NotSequencer(_) => f.write_str("NotSequencer"),
             Self::NotAdmin(_) => f.write_str("NotAdmin"),
+            Self::NotPendingAdmin(_) => f.write_str("NotPendingAdmin"),
             Self::InvalidProof(_) => f.write_str("InvalidProof"),
             Self::InvalidTempoBlockNumber(_) => f.write_str("InvalidTempoBlockNumber"),
             Self::PolicyForbids(_) => f.write_str("PolicyForbids"),

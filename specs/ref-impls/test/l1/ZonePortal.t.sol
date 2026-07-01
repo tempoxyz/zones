@@ -21,6 +21,7 @@ import {
     PORTAL_ADMIN_SLOT,
     PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT,
     PORTAL_ENCRYPTION_KEYS_SLOT,
+    PORTAL_PENDING_ADMIN_SLOT,
     PORTAL_PENDING_SEQUENCER_SLOT,
     PORTAL_SEQUENCER_SLOT,
     Withdrawal,
@@ -267,6 +268,130 @@ contract ZonePortalTest is BaseTest {
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.enableToken(address(pathUSD));
         vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          ADMIN TRANSFER TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_transferAdmin_twoStep() public {
+        assertEq(portal.admin(), admin);
+        assertEq(portal.pendingAdmin(), address(0));
+
+        // Step 1: current admin nominates a new admin.
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.AdminTransferStarted(admin, alice);
+        vm.prank(admin);
+        portal.transferAdmin(alice);
+
+        // Role does not move until acceptance.
+        assertEq(portal.admin(), admin);
+        assertEq(portal.pendingAdmin(), alice);
+
+        // Step 2: pending admin accepts and the role hands over.
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.AdminTransferred(admin, alice);
+        vm.prank(alice);
+        portal.acceptAdmin();
+
+        assertEq(portal.admin(), alice);
+        assertEq(portal.pendingAdmin(), address(0));
+    }
+
+    function test_transferAdmin_movesGovernancePowers() public {
+        vm.prank(admin);
+        portal.transferAdmin(alice);
+        vm.prank(alice);
+        portal.acceptAdmin();
+
+        // New admin can exercise governance powers.
+        vm.prank(alice);
+        portal.pauseDeposits(address(pathUSD));
+        assertFalse(portal.areDepositsActive(address(pathUSD)));
+
+        // Old admin can no longer exercise them.
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.resumeDeposits(address(pathUSD));
+    }
+
+    function test_transferAdmin_revertsIfNotAdmin() public {
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotAdmin.selector);
+        portal.transferAdmin(alice);
+    }
+
+    function test_acceptAdmin_revertsIfNotPendingAdmin() public {
+        vm.prank(admin);
+        portal.transferAdmin(alice);
+
+        // Neither a random caller nor the current admin can accept.
+        vm.prank(bob);
+        vm.expectRevert(IZonePortal.NotPendingAdmin.selector);
+        portal.acceptAdmin();
+
+        vm.prank(admin);
+        vm.expectRevert(IZonePortal.NotPendingAdmin.selector);
+        portal.acceptAdmin();
+
+        assertEq(portal.admin(), admin);
+    }
+
+    function test_acceptAdmin_revertsWhenNoPendingAdmin() public {
+        // pendingAdmin defaults to address(0); acceptAdmin must never let anyone
+        // (including a zero-address caller, which is unreachable in practice) take over.
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotPendingAdmin.selector);
+        portal.acceptAdmin();
+    }
+
+    function test_transferAdmin_cancelViaZeroAddress() public {
+        vm.prank(admin);
+        portal.transferAdmin(alice);
+        assertEq(portal.pendingAdmin(), alice);
+
+        // Nominating address(0) cancels the pending transfer.
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.AdminTransferStarted(admin, address(0));
+        vm.prank(admin);
+        portal.transferAdmin(address(0));
+        assertEq(portal.pendingAdmin(), address(0));
+
+        // The previously-pending admin can no longer accept.
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotPendingAdmin.selector);
+        portal.acceptAdmin();
+        assertEq(portal.admin(), admin);
+    }
+
+    function test_transferAdmin_renomination() public {
+        vm.prank(admin);
+        portal.transferAdmin(alice);
+
+        // Re-nominating a different address overwrites the pending admin.
+        vm.prank(admin);
+        portal.transferAdmin(bob);
+        assertEq(portal.pendingAdmin(), bob);
+
+        // The stale nominee cannot accept; the current nominee can.
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotPendingAdmin.selector);
+        portal.acceptAdmin();
+
+        vm.prank(bob);
+        portal.acceptAdmin();
+        assertEq(portal.admin(), bob);
+        assertEq(portal.pendingAdmin(), address(0));
+    }
+
+    function test_acceptSequencer_revertsWhenNoPendingSequencer() public {
+        // With no pending sequencer, acceptSequencer must always revert so the role can
+        // never be handed to (or accepted as) address(0). Guards against the theoretical
+        // zero-sender system-transaction path on the portal.
+        assertEq(portal.pendingSequencer(), address(0));
+        vm.prank(alice);
+        vm.expectRevert(IZonePortal.NotPendingSequencer.selector);
+        portal.acceptSequencer();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -2588,6 +2713,17 @@ contract ZonePortalTest is BaseTest {
         // Before adding keys, length should be 0
         bytes32 slot7keys = vm.load(address(portal), PORTAL_ENCRYPTION_KEYS_SLOT);
         assertEq(uint256(slot7keys), 0, "slot 7: _encryptionKeys length should be 0 initially");
+
+        // --- Slot 15: pendingAdmin ---
+        // Nominate a new admin to get a non-zero pendingAdmin (rpcUrl at slot 14 is short,
+        // so it stays inline and pendingAdmin lands at the next slot).
+        portal.transferAdmin(bob);
+        bytes32 slot15 = vm.load(address(portal), PORTAL_PENDING_ADMIN_SLOT);
+        assertEq(
+            address(uint160(uint256(slot15))),
+            portal.pendingAdmin(),
+            "slot 15: pendingAdmin mismatch"
+        );
     }
 
     /// @notice Verify that the _encryptionKeys dynamic array uses the expected slot layout.

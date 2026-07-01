@@ -125,6 +125,9 @@ contract ZonePortal is IZonePortal {
     /// @notice Public RPC endpoint for the zone
     string public rpcUrl;
 
+    /// @notice Pending admin for two-step admin transfer
+    address public pendingAdmin;
+
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
     //////////////////////////////////////////////////////////////*/
@@ -179,10 +182,16 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Accept a pending sequencer transfer. Only callable by pending sequencer.
+    /// @dev The explicit `pendingSequencer == address(0)` check because it is technically
+    ///      possible to make a system tx on L1 with msg.sender == 0.
+    ///      The Sequencer key can only be rotated, never renounced.
     function acceptSequencer() external {
-        if (msg.sender != pendingSequencer) revert NotPendingSequencer();
+        address newSequencer = pendingSequencer;
+        if (newSequencer == address(0) || msg.sender != newSequencer) {
+            revert NotPendingSequencer();
+        }
         address previousSequencer = sequencer;
-        sequencer = pendingSequencer;
+        sequencer = newSequencer;
         pendingSequencer = address(0);
         emit SequencerTransferred(previousSequencer, sequencer);
     }
@@ -196,6 +205,33 @@ contract ZonePortal is IZonePortal {
         if (_zoneGasRate > MAX_GAS_FEE_RATE) revert GasFeeRateTooHigh();
         zoneGasRate = _zoneGasRate;
         emit ZoneGasRateUpdated(_zoneGasRate);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                             ADMIN MANAGEMENT
+    //////////////////////////////////////////////////////////////*/
+
+    /// @notice Start an admin transfer. Only callable by the current admin.
+    /// @dev Two-step handoff: the new admin only takes over once it calls
+    ///      {acceptAdmin}, which prevents fat-fingered transfers.
+    ///      Passing address(0) cancels a pending transfer.
+    /// @param newAdmin The address that will become admin after accepting (address(0) cancels).
+    function transferAdmin(address newAdmin) external onlyAdmin {
+        pendingAdmin = newAdmin;
+        emit AdminTransferStarted(admin, newAdmin);
+    }
+
+    /// @notice Accept a pending admin transfer. Only callable by the pending admin.
+    /// @dev The explicit `newAdmin == address(0)` check because it is technically
+    ///      possible to make a system tx on L1 with msg.sender == 0.
+    ///      The Admin key can only be rotated, never renounced.
+    function acceptAdmin() external {
+        address newAdmin = pendingAdmin;
+        if (newAdmin == address(0) || msg.sender != newAdmin) revert NotPendingAdmin();
+        address previousAdmin = admin;
+        admin = newAdmin;
+        pendingAdmin = address(0);
+        emit AdminTransferred(previousAdmin, admin);
     }
 
     /*//////////////////////////////////////////////////////////////
