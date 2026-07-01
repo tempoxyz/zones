@@ -39,7 +39,7 @@ use tempo_precompiles::{
     tip403_registry::TIP403Registry,
 };
 use tempo_revm::{TempoBlockEnv, TempoTxEnv};
-use zone_precompiles::ZoneTokenFactory;
+use zone_precompiles::{TempoState as NativeTempoState, ZoneTokenFactory};
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
 const ZONE_INBOX_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000001");
@@ -140,20 +140,9 @@ impl GenerateZoneGenesis {
         initialize_nonce_manager(&mut evm)?;
         initialize_account_keychain(&mut evm)?;
 
-        let tempo_state_bytecode = load_artifact(&self.specs_out, "TempoState")?;
-        let tempo_state_args = (Bytes::from(header_rlp),).abi_encode_params();
         let mut nonce = 0u64;
 
-        deploy_contract(
-            &mut evm,
-            &tempo_state_bytecode,
-            &tempo_state_args,
-            TEMPO_STATE_ADDRESS,
-            "TempoState",
-            self.chain_id,
-            nonce,
-        )?;
-        nonce += 1;
+        initialize_tempo_state(&mut evm, &header_rlp)?;
 
         let zone_config_bytecode = load_artifact(&self.specs_out, "ZoneConfig")?;
         let zone_config_args = (self.tempo_portal, TEMPO_STATE_ADDRESS).abi_encode_params();
@@ -474,6 +463,24 @@ fn deploy_permit2(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     }
     evm.db_mut().commit(result.state);
     println!("Permit2 deployed successfully at {PERMIT2_ADDRESS}");
+    Ok(())
+}
+
+/// Initialize the native TempoState precompile storage from the L1 genesis header.
+fn initialize_tempo_state(
+    evm: &mut TempoEvm<CacheDB<EmptyDB>>,
+    header_rlp: &[u8],
+) -> eyre::Result<()> {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || NativeTempoState::<()>::initialize_genesis(header_rlp),
+    )?;
+    println!("Initialized native TempoState at {TEMPO_STATE_ADDRESS}");
     Ok(())
 }
 

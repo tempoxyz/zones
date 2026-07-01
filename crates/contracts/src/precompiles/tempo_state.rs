@@ -26,5 +26,7 @@ crate::sol! {
         function sharedGasLimit() external view returns (uint64);
 
         function finalizeTempo(bytes calldata header) external;
+        function readTempoStorageSlot(address account, bytes32 slot) external view returns (bytes32);
+        function readTempoStorageSlots(address account, bytes32[] calldata slots) external view returns (bytes32[] memory);
     }
 }

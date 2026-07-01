@@ -16,8 +16,8 @@ use crate::{
     executor::ZoneBlockExecutor,
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
-        SequencerExt, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS, ZoneTip20Token,
-        ZoneTip403ProxyRegistry, ZoneTokenFactory,
+        SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS,
+        ZoneTip20Token, ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
     tx_context::ZoneTxContext,
 };
@@ -53,7 +53,9 @@ use tempo_precompiles::{
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
-use tempo_zone_contracts::{TEMPO_STATE_READER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
+use tempo_zone_contracts::{
+    TEMPO_STATE_ADDRESS, TEMPO_STATE_READER_ADDRESS, ZONE_TX_CONTEXT_ADDRESS,
+};
 use zone_l1::state::{
     L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider, TempoStateReader,
 };
@@ -89,6 +91,9 @@ impl ZoneEvmFactory {
     ) -> TempoEvm<DB, I> {
         let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
+        precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
+            Some(TempoState::create(self.l1_provider.clone(), &cfg))
+        });
         precompiles.apply_precompile(&TEMPO_STATE_READER_ADDRESS, |_| {
             Some(TempoStateReader::create(self.l1_provider.clone()))
         });
