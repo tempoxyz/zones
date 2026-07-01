@@ -663,7 +663,7 @@ where
         Box::pin(async move {
             zone_rpc::policy::verify_raw_tx_sender(&data, &auth)?;
 
-            let mut receipt = EthTransactions::send_raw_transaction_sync(&self.eth.api, data)
+            let mut receipt = EthTransactions::send_raw_transaction_sync(&self.eth.api, data, None)
                 .await
                 .map_err(internal)?;
 
