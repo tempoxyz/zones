@@ -129,6 +129,10 @@ mod tests {
         precompile::PrecompileOutput,
     };
     use tempo_chainspec::hardfork::TempoHardfork;
+    use tempo_precompiles::{
+        charge_input_cost,
+        storage::{StorageCtx, hashmap::HashMapStorageProvider},
+    };
 
     type TestContext = Context<
         revm::context::BlockEnv,
@@ -183,6 +187,15 @@ mod tests {
                 internals: EvmInternals::from_context(&mut ctx),
             })
             .expect("precompile call succeeds")
+    }
+
+    fn charged_input_gas(calldata: &[u8]) -> u64 {
+        let mut provider = HashMapStorageProvider::new(1);
+        StorageCtx::enter(&mut provider, || {
+            let mut storage = StorageCtx::default();
+            assert!(charge_input_cost(&mut storage, calldata).is_none());
+            storage.gas_used()
+        })
     }
 
     #[test]
@@ -255,16 +268,17 @@ mod tests {
         let call = encrypt(plaintext, &aad);
         let ciphertext_len = call.ciphertext.len();
         let aad_len = call.aad.len();
+        let calldata = call.abi_encode();
+        let expected_gas = charged_input_gas(&calldata)
+            + AES_GCM_BASE_GAS
+            + AES_GCM_PER_BYTE_GAS * (ciphertext_len + aad_len) as u64;
 
-        let output = call_precompile(call.abi_encode().into());
+        let output = call_precompile(calldata.into());
         let decoded = decryptCall::abi_decode_returns(&output.bytes).expect("decode return");
 
         assert!(decoded.valid);
         assert_eq!(decoded.plaintext, Bytes::copy_from_slice(plaintext));
-        assert_eq!(
-            output.gas_used,
-            AES_GCM_BASE_GAS + AES_GCM_PER_BYTE_GAS * (ciphertext_len + aad_len) as u64
-        );
+        assert_eq!(output.gas_used, expected_gas);
     }
 
     #[test]
@@ -272,16 +286,17 @@ mod tests {
         let plaintext = b"normal precompile path";
         let call = encrypt(plaintext, &[]);
         let ciphertext_len = call.ciphertext.len();
+        let calldata = call.abi_encode();
+        let expected_gas = charged_input_gas(&calldata)
+            + AES_GCM_BASE_GAS
+            + AES_GCM_PER_BYTE_GAS * ciphertext_len as u64;
 
-        let output = call_precompile(call.abi_encode().into());
+        let output = call_precompile(calldata.into());
         let decoded = decryptCall::abi_decode_returns(&output.bytes).expect("decode return");
 
         assert!(decoded.valid);
         assert_eq!(decoded.plaintext, Bytes::copy_from_slice(plaintext));
-        assert_eq!(
-            output.gas_used,
-            AES_GCM_BASE_GAS + AES_GCM_PER_BYTE_GAS * ciphertext_len as u64
-        );
+        assert_eq!(output.gas_used, expected_gas);
     }
 
     #[test]

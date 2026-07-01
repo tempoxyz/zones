@@ -6,7 +6,7 @@ use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_contracts::precompiles::ITIP403Registry::{self, PolicyType};
 use tempo_precompiles::{
-    Precompile as TempoPrecompile, dispatch,
+    Precompile as TempoPrecompile, charge_input_cost, dispatch,
     storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
     tip403_registry::{ALLOW_ALL_POLICY_ID, REJECT_ALL_POLICY_ID},
 };
@@ -64,6 +64,11 @@ impl<P: PolicyCheck + Clone + Send + Sync + 'static> ZoneTip403ProxyRegistry<P> 
 impl<P: PolicyCheck> TempoPrecompile for ZoneTip403ProxyRegistry<P> {
     /// Dispatch based on the 4-byte selector.
     fn call(&mut self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
+        let mut storage = StorageCtx::default();
+        if let Some(err) = charge_input_cost(&mut storage, calldata) {
+            return err;
+        }
+
         dispatch!(
             calldata,
             |call| match call {

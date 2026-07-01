@@ -3,7 +3,9 @@
 use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::SolCall;
 use revm::precompile::{PrecompileHalt, PrecompileResult};
-use tempo_precompiles::{Precompile as TempoPrecompile, dispatch, storage::StorageCtx};
+use tempo_precompiles::{
+    Precompile as TempoPrecompile, charge_input_cost, dispatch, storage::StorageCtx,
+};
 use tracing::debug;
 
 use super::{
@@ -13,6 +15,11 @@ use super::{
 
 impl TempoPrecompile for AesGcmDecrypt {
     fn call(&mut self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
+        let mut storage = StorageCtx::default();
+        if let Some(err) = charge_input_cost(&mut storage, calldata) {
+            return err;
+        }
+
         dispatch!(
             calldata,
             |call| match call {

@@ -7,7 +7,7 @@ use alloy_primitives::{Address, Bytes};
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_precompiles::{
-    DelegateCallNotAllowed, Precompile as TempoPrecompile,
+    DelegateCallNotAllowed, Precompile as TempoPrecompile, charge_input_cost,
     storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
     tip20::{IRolesAuth, ITIP20, TIP20Token},
 };
@@ -32,6 +32,20 @@ macro_rules! decode_or_revert {
 }
 
 impl<P: PolicyCheck> ZoneTip20Token<P> {
+    fn add_input_cost(calldata: &[u8], result: PrecompileResult) -> PrecompileResult {
+        let mut storage = StorageCtx::default();
+        let gas_before = storage.gas_used();
+        if let Some(err) = charge_input_cost(&mut storage, calldata) {
+            return err;
+        }
+        let input_gas = storage.gas_used().saturating_sub(gas_before);
+
+        result.map(|mut output| {
+            output.gas_used = output.gas_used.saturating_add(input_gas);
+            output
+        })
+    }
+
     fn selector(data: &[u8]) -> Option<[u8; 4]> {
         tempo_precompiles::dispatch::selector_from_calldata(data)
     }
@@ -197,14 +211,14 @@ where
                         TIP20Token::from_address(address).expect("TIP20 prefix already verified");
 
                     if let Err(err) = Self::ensure_initialized(&tip20) {
-                        return finish(storage.error_result(err));
+                        return finish(Self::add_input_cost(input.data, storage.error_result(err)));
                     }
 
                     if let Some(selector) = selector
                         && let Some(revert) =
                             token.precheck(selector, address, input.data, input.caller)
                     {
-                        return finish(revert);
+                        return finish(Self::add_input_cost(input.data, revert));
                     }
 
                     finish(tip20.call(input.data, input.caller))
