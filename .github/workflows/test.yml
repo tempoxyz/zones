@@ -5,11 +5,7 @@ permissions: {}
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - ".github/workflows/specs.yml"
   pull_request:
-    paths-ignore:
-      - ".github/workflows/specs.yml"
   merge_group:
 
 concurrency:
