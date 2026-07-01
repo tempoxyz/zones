@@ -101,7 +101,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(l2ZoneToken),
             address(messengerContract),
             admin,
-            admin,
+            sequencer,
             l1Factory.verifier(),
             GENESIS_BLOCK_HASH,
             genesisTempoBlockNumber,
@@ -110,10 +110,11 @@ contract ZoneIntegrationTest is BaseTest {
         zoneId = 1;
 
         // L2 setup
-        l2TempoState = new MockTempoState(admin, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
+        l2TempoState =
+            new MockTempoState(sequencer, GENESIS_TEMPO_BLOCK_HASH, genesisTempoBlockNumber);
         l2Config = new ZoneConfig(address(l1Portal), address(l2TempoState));
         l2TempoState.setMockStorageValue(
-            address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(admin)))
+            address(l1Portal), bytes32(uint256(0)), bytes32(uint256(uint160(sequencer)))
         );
         l2TempoState.setMockTokenEnabled(address(l1Portal), address(l2ZoneToken), true);
         l2Inbox = new ZoneInbox(address(l2Config), address(l1Portal), address(l2TempoState));
@@ -189,7 +190,7 @@ contract ZoneIntegrationTest is BaseTest {
     }
 
     function _finalizeWithdrawalBatch(uint256 count) internal returns (bytes32) {
-        vm.startPrank(admin);
+        vm.startPrank(sequencer);
         bytes32 hash = l2Outbox.finalizeWithdrawalBatch(
             count, uint64(block.number), _emptyEncryptedSenders(count)
         );
@@ -271,7 +272,7 @@ contract ZoneIntegrationTest is BaseTest {
         uint256 supplyPre = l2ZoneToken.totalSupply();
 
         // Process on L2
-        vm.prank(admin);
+        vm.prank(sequencer);
         _advanceTempo(deposits);
 
         // Verify L2 minting: each user receives their deposited amounts
@@ -310,7 +311,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash1
         );
         uint256 alicePreBatch1 = l2ZoneToken.balanceOf(alice);
-        vm.prank(admin);
+        vm.prank(sequencer);
         _advanceTempo(batch1);
 
         assertEq(l2ZoneToken.balanceOf(alice), alicePreBatch1 + 1000e6);
@@ -368,7 +369,7 @@ contract ZoneIntegrationTest is BaseTest {
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, l2Hash3
         );
         uint256 alicePreBatch2 = l2ZoneToken.balanceOf(alice);
-        vm.prank(admin);
+        vm.prank(sequencer);
         _advanceTempo(batch2);
 
         assertEq(l2ZoneToken.balanceOf(alice), alicePreBatch2 + 5000e6);
@@ -399,7 +400,7 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
         );
-        vm.prank(admin);
+        vm.prank(sequencer);
         _advanceTempo(deposits);
 
         // Alice requests withdrawal with callback
@@ -475,7 +476,7 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, depositHash
         );
-        vm.prank(admin);
+        vm.prank(sequencer);
         _advanceTempo(deposits);
 
         // First batch: Alice withdraws to Bob
@@ -630,7 +631,7 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d2
         );
-        vm.prank(admin);
+        vm.prank(sequencer);
         _advanceTempo(deposits1);
 
         // Phase 2: Withdrawals
@@ -685,7 +686,7 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d3
         );
-        vm.prank(admin);
+        vm.prank(sequencer);
         _advanceTempo(deposits2);
 
         // Verify all L2 balances (initial 1M - deposited + minted - burned)
@@ -734,7 +735,7 @@ contract ZoneIntegrationTest is BaseTest {
         l2TempoState.setMockStorageValue(
             address(l1Portal), PORTAL_CURRENT_DEPOSIT_QUEUE_HASH_SLOT, d1
         );
-        vm.prank(admin);
+        vm.prank(sequencer);
         _advanceTempo(deposits);
 
         assertEq(l2ZoneToken.totalSupply(), initialSupply + 10_000e6);

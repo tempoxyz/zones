@@ -26,7 +26,7 @@ import { Test } from "forge-std/Test.sol";
 ///         pass.
 ///
 ///         Inherits ZonePortalTest to reuse its concrete setUp (a real ZonePortal deployed via
-///         ZoneFactory, with `admin` acting as the sequencer).
+///         ZoneFactory, with separate portal admin and sequencer roles).
 contract ZonePortalSymbolic is ZonePortalTest {
 
     /// @notice Deposit fee never overflows uint128 for any rate within the enforced cap, so
@@ -34,7 +34,7 @@ contract ZonePortalSymbolic is ZonePortalTest {
     function check_depositFeeNeverOverflows(uint128 rate) external {
         vm.assume(rate <= portal.MAX_GAS_FEE_RATE());
 
-        vm.prank(admin); // admin is the sequencer in this harness
+        vm.prank(sequencer);
         portal.setZoneGasRate(rate);
 
         uint128 fee = portal.calculateDepositFee();
@@ -45,7 +45,7 @@ contract ZonePortalSymbolic is ZonePortalTest {
     ///         for any input (over-cap inputs revert and are pruned). Encodes the MAX_GAS_FEE_RATE
     ///         invariant.
     function check_gasRateAlwaysWithinCap(uint128 rate) external {
-        vm.prank(admin);
+        vm.prank(sequencer);
         try portal.setZoneGasRate(rate) {
             assertLe(uint256(portal.zoneGasRate()), uint256(portal.MAX_GAS_FEE_RATE()));
         } catch { }

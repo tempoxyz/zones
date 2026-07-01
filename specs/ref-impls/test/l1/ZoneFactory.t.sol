@@ -31,7 +31,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -54,7 +54,7 @@ contract ZoneFactoryTest is BaseTest {
         assertTrue(info.messenger != address(0));
         assertEq(info.initialToken, address(pathUSD));
         assertEq(info.admin, admin);
-        assertEq(info.sequencer, admin);
+        assertEq(info.sequencer, sequencer);
         assertEq(info.verifier, zoneFactory.verifier());
         assertEq(info.genesisBlockHash, GENESIS_BLOCK_HASH);
         assertEq(info.genesisTempoBlockHash, GENESIS_TEMPO_BLOCK_HASH);
@@ -64,7 +64,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -92,7 +92,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params1 = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -104,10 +104,11 @@ contract ZoneFactoryTest is BaseTest {
 
         (uint32 zoneId1, address portal1) = zoneFactory.createZone(params1);
 
+        address secondSequencer = alice;
         IZoneFactory.CreateZoneParams memory params2 = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: alice,
+            sequencer: secondSequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: keccak256("genesis2"),
@@ -129,6 +130,8 @@ contract ZoneFactoryTest is BaseTest {
         // Each zone should have its own messenger
         ZoneInfo memory info1 = zoneFactory.zones(zoneId1);
         ZoneInfo memory info2 = zoneFactory.zones(zoneId2);
+        assertEq(info1.sequencer, sequencer);
+        assertEq(info2.sequencer, secondSequencer);
         assertTrue(info1.messenger != info2.messenger);
     }
 
@@ -136,7 +139,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -182,7 +185,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(0),
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -203,7 +206,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: notTip20,
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -221,7 +224,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: alice, // EOA, not a contract
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -243,7 +246,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: address(0),
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -287,7 +290,7 @@ contract ZoneFactoryTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: address(0xdead),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -331,7 +334,7 @@ contract ZoneFactoryTest is BaseTest {
         return IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: admin,
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -399,12 +402,15 @@ contract ZoneFactoryTest is BaseTest {
     // later portal rotation; the portal remains the source of truth.
     function test_zones_sequencerIsSnapshot_afterRotation() public {
         (uint32 id, address portal) = zoneFactory.createZone(_defaultParams());
-        ZonePortal(portal).transferSequencer(alice);
-        vm.prank(alice);
+        address nextSequencer = alice;
+
+        vm.prank(sequencer);
+        ZonePortal(portal).transferSequencer(nextSequencer);
+        vm.prank(nextSequencer);
         ZonePortal(portal).acceptSequencer();
 
-        assertEq(ZonePortal(portal).sequencer(), alice); // portal: current
-        assertEq(zoneFactory.zones(id).sequencer, admin); // factory: snapshot at creation
+        assertEq(ZonePortal(portal).sequencer(), nextSequencer); // portal: current
+        assertEq(zoneFactory.zones(id).sequencer, sequencer); // factory: snapshot at creation
     }
 
     /*//////////////////////////////////////////////////////////////

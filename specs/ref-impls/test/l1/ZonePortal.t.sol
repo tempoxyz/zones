@@ -153,7 +153,7 @@ contract ZonePortalTest is BaseTest {
         // Grant issuer role and mint tokens for tests
         vm.startPrank(pathUSDAdmin);
         pathUSD.grantRole(_ISSUER_ROLE, pathUSDAdmin);
-        pathUSD.mint(admin, 1_000_000e6);
+        pathUSD.mint(sequencer, 1_000_000e6);
         pathUSD.mint(alice, 100_000e6);
         pathUSD.mint(bob, 100_000e6);
         vm.stopPrank();
@@ -165,7 +165,7 @@ contract ZonePortalTest is BaseTest {
         IZoneFactory.CreateZoneParams memory params = IZoneFactory.CreateZoneParams({
             initialToken: address(pathUSD),
             admin: admin,
-            sequencer: admin, // admin is the sequencer for tests
+            sequencer: sequencer,
             verifier: zoneFactory.verifier(),
             zoneParams: ZoneParams({
                 genesisBlockHash: GENESIS_BLOCK_HASH,
@@ -226,7 +226,7 @@ contract ZonePortalTest is BaseTest {
     function test_zoneCreation() public view {
         assertEq(portal.zoneId(), testZoneId);
         assertTrue(portal.isTokenEnabled(address(pathUSD)));
-        assertEq(portal.sequencer(), admin);
+        assertEq(portal.sequencer(), sequencer);
         assertEq(portal.admin(), admin);
         assertEq(portal.verifier(), zoneFactory.verifier());
         assertEq(portal.blockHash(), GENESIS_BLOCK_HASH);
@@ -244,6 +244,7 @@ contract ZonePortalTest is BaseTest {
         assertEq(info.messenger, address(messenger));
         assertEq(info.initialToken, address(pathUSD));
         assertEq(info.admin, admin);
+        assertEq(info.sequencer, sequencer);
     }
 
     function test_adminCanPauseAndResumeDeposits() public {
@@ -257,7 +258,7 @@ contract ZonePortalTest is BaseTest {
     }
 
     function test_tokenGovernance_revertsIfNotAdmin() public {
-        vm.startPrank(alice);
+        vm.startPrank(sequencer);
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.pauseDeposits(address(pathUSD));
 
@@ -266,6 +267,53 @@ contract ZonePortalTest is BaseTest {
 
         vm.expectRevert(IZonePortal.NotAdmin.selector);
         portal.enableToken(address(pathUSD));
+        vm.stopPrank();
+    }
+
+    function test_sequencerGovernance_revertsIfAdmin() public {
+        // Inverse of test_tokenGovernance_revertsIfNotAdmin: the admin role must
+        // not be able to perform any sequencer-only action. Locks in the
+        // admin/sequencer separation from both directions. (onlySequencer reverts
+        // at the modifier, so the call arguments below are otherwise irrelevant.)
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
+        // Read state used as call args up front so the staticcall isn't mistaken
+        // for the call expectRevert is guarding.
+        bytes32 prevBlockHash = portal.blockHash();
+
+        vm.startPrank(admin);
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setZoneGasRate(1);
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setRpcUrl("https://rpc.example");
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.setSequencerEncryptionKey(bytes32(uint256(1)), 0x02, 27, bytes32(0), bytes32(0));
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.transferSequencer(alice);
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.submitBatch(
+            uint64(block.number),
+            0,
+            BlockTransition({ prevBlockHash: prevBlockHash, nextBlockHash: keccak256("state") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            bytes32(0),
+            "",
+            ""
+        );
+
+        vm.expectRevert(IZonePortal.NotSequencer.selector);
+        portal.processWithdrawal(w, bytes32(0));
+
         vm.stopPrank();
     }
 
@@ -353,7 +401,7 @@ contract ZonePortalTest is BaseTest {
         senderAccounts[0] = alice;
         senderAccounts[1] = address(portal);
         uint64 senderPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, senderAccounts
+            sequencer, ITIP403Registry.PolicyType.WHITELIST, senderAccounts
         );
 
         address[] memory recipientAccounts = new address[](3);
@@ -361,13 +409,13 @@ contract ZonePortalTest is BaseTest {
         recipientAccounts[1] = address(portal);
         recipientAccounts[2] = bob;
         uint64 recipientPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, recipientAccounts
+            sequencer, ITIP403Registry.PolicyType.WHITELIST, recipientAccounts
         );
 
         address[] memory mintRecipientAccounts = new address[](1);
         mintRecipientAccounts[0] = charlie;
         uint64 mintRecipientPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
+            sequencer, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
         );
 
         uint64 compoundPolicyId =
@@ -389,7 +437,7 @@ contract ZonePortalTest is BaseTest {
         accounts[0] = alice;
         accounts[1] = address(portal);
         uint64 policyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, accounts
+            sequencer, ITIP403Registry.PolicyType.WHITELIST, accounts
         );
         vm.prank(pathUSDAdmin);
         pathUSD.changeTransferPolicyId(policyId);
@@ -408,7 +456,7 @@ contract ZonePortalTest is BaseTest {
         senderAccounts[0] = alice;
         senderAccounts[1] = address(portal);
         uint64 senderPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, senderAccounts
+            sequencer, ITIP403Registry.PolicyType.WHITELIST, senderAccounts
         );
 
         address[] memory recipientAccounts = new address[](3);
@@ -416,13 +464,13 @@ contract ZonePortalTest is BaseTest {
         recipientAccounts[1] = address(portal);
         recipientAccounts[2] = bob;
         uint64 recipientPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, recipientAccounts
+            sequencer, ITIP403Registry.PolicyType.WHITELIST, recipientAccounts
         );
 
         address[] memory mintRecipientAccounts = new address[](1);
         mintRecipientAccounts[0] = bob;
         uint64 mintRecipientPolicyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
+            sequencer, ITIP403Registry.PolicyType.WHITELIST, mintRecipientAccounts
         );
 
         uint64 compoundPolicyId =
@@ -1030,7 +1078,7 @@ contract ZonePortalTest is BaseTest {
         );
 
         uint256 portalBalanceBefore = pathUSD.balanceOf(address(portal));
-        uint256 sequencerBalanceBefore = pathUSD.balanceOf(admin);
+        uint256 sequencerBalanceBefore = pathUSD.balanceOf(sequencer);
         uint256 bobBalanceBefore = pathUSD.balanceOf(bob);
         uint256 charlieBalanceBefore = pathUSD.balanceOf(charlie);
         uint64 depositCountBefore = portal.depositCount();
@@ -1038,14 +1086,14 @@ contract ZonePortalTest is BaseTest {
         // Blacklist the sequencer as a token recipient while leaving everyone else allowed.
         // This makes w1's fee transfer revert while leaving the user-facing transfer valid.
         address[] memory blockedAccounts = new address[](1);
-        blockedAccounts[0] = admin;
+        blockedAccounts[0] = sequencer;
         uint64 policyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.BLACKLIST, blockedAccounts
+            sequencer, ITIP403Registry.PolicyType.BLACKLIST, blockedAccounts
         );
         vm.prank(pathUSDAdmin);
         pathUSD.changeTransferPolicyId(policyId);
 
-        assertFalse(registry.isAuthorizedRecipient(policyId, admin));
+        assertFalse(registry.isAuthorizedRecipient(policyId, sequencer));
         assertTrue(registry.isAuthorizedRecipient(policyId, bob));
         assertTrue(registry.isAuthorizedRecipient(policyId, charlie));
 
@@ -1054,7 +1102,7 @@ contract ZonePortalTest is BaseTest {
         portal.processWithdrawal(w1, innerHash);
 
         assertEq(pathUSD.balanceOf(bob), bobBalanceBefore + w1.amount);
-        assertEq(pathUSD.balanceOf(admin), sequencerBalanceBefore);
+        assertEq(pathUSD.balanceOf(sequencer), sequencerBalanceBefore);
         assertEq(pathUSD.balanceOf(address(portal)), portalBalanceBefore - w1.amount);
         assertEq(portal.depositCount(), depositCountBefore);
 
@@ -1959,7 +2007,7 @@ contract ZonePortalTest is BaseTest {
 
     function test_immutableGetters() public view {
         assertEq(portal.zoneId(), testZoneId);
-        assertEq(portal.sequencer(), admin);
+        assertEq(portal.sequencer(), sequencer);
         assertEq(portal.verifier(), zoneFactory.verifier());
         assertEq(portal.genesisTempoBlockNumber(), genesisTempoBlockNumber);
     }
@@ -2266,7 +2314,7 @@ contract ZonePortalTest is BaseTest {
         uint128 depositAmount = 1000e6;
         uint128 expectedFee = uint128(100_000) * 1; // FIXED_DEPOSIT_GAS * zoneGasRate
         uint256 aliceBefore = pathUSD.balanceOf(alice);
-        uint256 seqBefore = pathUSD.balanceOf(admin);
+        uint256 seqBefore = pathUSD.balanceOf(sequencer);
         uint256 portalBefore = pathUSD.balanceOf(address(portal));
 
         vm.startPrank(alice);
@@ -2275,7 +2323,7 @@ contract ZonePortalTest is BaseTest {
         vm.stopPrank();
 
         assertEq(pathUSD.balanceOf(alice), aliceBefore - depositAmount);
-        assertEq(pathUSD.balanceOf(admin), seqBefore + expectedFee);
+        assertEq(pathUSD.balanceOf(sequencer), seqBefore + expectedFee);
         assertEq(pathUSD.balanceOf(address(portal)), portalBefore + depositAmount - expectedFee);
     }
 
@@ -2414,7 +2462,7 @@ contract ZonePortalTest is BaseTest {
         accounts[0] = alice;
         accounts[1] = address(portal);
         uint64 policyId = registry.createPolicyWithAccounts(
-            admin, ITIP403Registry.PolicyType.WHITELIST, accounts
+            sequencer, ITIP403Registry.PolicyType.WHITELIST, accounts
         );
         vm.prank(pathUSDAdmin);
         pathUSD.changeTransferPolicyId(policyId);

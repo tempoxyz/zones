@@ -113,7 +113,7 @@ zone-info identifier:
     cargo run -p tempo-xtask -- zone-info {{identifier}}
 
 [group('zone')]
-[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, and SEQUENCER_KEY env vars. Set ZONE_FACTORY to override the Moderato default.')]
+[doc('Creates a new zone on L1 via ZoneFactory and generates genesis + zone.json in generated/<name>/. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL, PRIVATE_KEY, SEQUENCER_KEY, and ADMIN_KEY or ADMIN_ADDR env vars. Set ZONE_FACTORY to override the Moderato default.')]
 create-zone name token="":
     #!/bin/bash
     set -euo pipefail
@@ -133,6 +133,11 @@ create-zone name token="":
             ZONE_TOKEN_L1="0x20c0000000000000000000000000000000000002" ;;
     esac
     SEQ_KEY="${SEQUENCER_KEY:?Set SEQUENCER_KEY env var}"
+    ADMIN_ADDR="${ADMIN_ADDR:-}"
+    if [[ -z "$ADMIN_ADDR" ]]; then
+        ADMIN_KEY="${ADMIN_KEY:?Set ADMIN_KEY env var or ADMIN_ADDR env var}"
+        ADMIN_ADDR=$(cast wallet address "$ADMIN_KEY")
+    fi
     L1_RPC="${L1_RPC_URL:?Set L1_RPC_URL env var (wss://...)}"
     HTTP_RPC=$(echo "$L1_RPC" | sed 's|^wss://|https://|' | sed 's|^ws://|http://|')
     SEQUENCER_ADDR=$(cast wallet address "$SEQ_KEY")
@@ -144,10 +149,13 @@ create-zone name token="":
     cargo build -p tempo-xtask
     echo "Creating zone '{{name}}' on L1 and generating genesis..."
     echo "Initial portal token: $ZONE_TOKEN_L1"
+    echo "Admin: $ADMIN_ADDR"
+    echo "Sequencer: $SEQUENCER_ADDR"
     cargo run -p tempo-xtask -- create-zone \
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
+        --admin "$ADMIN_ADDR" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$PK"
     echo "Zone '{{name}}' created. Artifacts in $OUTPUT/"
@@ -703,7 +711,7 @@ check-balance-private name token="0x20C0000000000000000000000000000000000000" rp
     echo "Balance of $ACCOUNT: $BALANCE"
 
 [group('zone')]
-[doc('End-to-end: generates a sequencer key, funds it on L1, creates a zone on-chain, generates genesis, and starts the zone node. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL. Set ZONE_FACTORY to override the Moderato default.')]
+[doc('End-to-end: generates admin and sequencer keys, funds them on L1, creates a zone on-chain, generates genesis, and starts the zone node. Optional second positional argument selects the initial TIP-20 enabled on the portal; defaults to pathUSD. Requires L1_RPC_URL. Set ADMIN_KEY or ADMIN_ADDR to choose the portal admin. Set ZONE_FACTORY to override the Moderato default.')]
 deploy-zone name token="":
     #!/bin/bash
     set -euo pipefail
@@ -732,18 +740,32 @@ deploy-zone name token="":
     echo "  Initial portal token: $ZONE_TOKEN_L1"
     echo ""
 
-    # Step 1: Generate a new sequencer keypair
-    echo "Step 1: Generating sequencer keypair..."
+    # Step 1: Resolve the admin key/address and generate a new sequencer keypair
+    echo "Step 1: Resolving admin and generating sequencer keypairs..."
+    ADMIN_KEY="${ADMIN_KEY:-}"
+    ADMIN_ADDR="${ADMIN_ADDR:-}"
+    if [[ -n "$ADMIN_KEY" ]]; then
+        ADMIN_ADDR=$(cast wallet address "$ADMIN_KEY")
+    elif [[ -z "$ADMIN_ADDR" ]]; then
+        ADMIN_OUTPUT=$(cast wallet new 2>/dev/null)
+        ADMIN_ADDR=$(echo "$ADMIN_OUTPUT" | grep 'Address:' | awk '{print $2}')
+        ADMIN_KEY=$(echo "$ADMIN_OUTPUT" | grep 'Private key:' | awk '{print $3}')
+    fi
     KEY_OUTPUT=$(cast wallet new 2>/dev/null)
     SEQUENCER_ADDR=$(echo "$KEY_OUTPUT" | grep 'Address:' | awk '{print $2}')
     SEQUENCER_KEY=$(echo "$KEY_OUTPUT" | grep 'Private key:' | awk '{print $3}')
+    echo "  Admin address:    $ADMIN_ADDR"
     echo "  Sequencer address: $SEQUENCER_ADDR"
     echo ""
 
-    # Step 2: Fund the sequencer on L1
-    echo "Step 2: Funding sequencer on L1 (via tempo_fundAddress)..."
+    # Step 2: Fund the admin and sequencer on L1
+    echo "Step 2: Funding admin and sequencer on L1 (via tempo_fundAddress)..."
     cast rpc tempo_fundAddress "$SEQUENCER_ADDR" --rpc-url "$HTTP_RPC" > /dev/null 2>&1
-    echo "  Funded! Check: https://explore.moderato.tempo.xyz/address/$SEQUENCER_ADDR"
+    if [[ "$(echo "$ADMIN_ADDR" | tr '[:upper:]' '[:lower:]')" != "$(echo "$SEQUENCER_ADDR" | tr '[:upper:]' '[:lower:]')" ]]; then
+        cast rpc tempo_fundAddress "$ADMIN_ADDR" --rpc-url "$HTTP_RPC" > /dev/null 2>&1
+    fi
+    echo "  Admin funded:    https://explore.moderato.tempo.xyz/address/$ADMIN_ADDR"
+    echo "  Sequencer funded: https://explore.moderato.tempo.xyz/address/$SEQUENCER_ADDR"
     echo ""
 
     # Step 3: Build Solidity specs
@@ -758,15 +780,21 @@ deploy-zone name token="":
         --output "$OUTPUT" \
         --l1-rpc-url "$HTTP_RPC" \
         --initial-token "$ZONE_TOKEN_L1" \
+        --admin "$ADMIN_ADDR" \
         --sequencer "$SEQUENCER_ADDR" \
         --private-key "$SEQUENCER_KEY"
     echo ""
 
-    # Save generated keys into zone.json for later use. deploy-zone uses the
-    # sequencer as the portal admin unless --admin is added to create-zone.
-    jq --arg sk "$SEQUENCER_KEY" --arg sa "$SEQUENCER_ADDR" \
-        '. + {sequencerKey: $sk, sequencerAddress: $sa, adminKey: $sk, adminAddress: $sa}' "$OUTPUT/zone.json" > "$OUTPUT/zone.json.tmp" \
-        && mv "$OUTPUT/zone.json.tmp" "$OUTPUT/zone.json"
+    # Save generated keys into zone.json for later use.
+    if [[ -n "$ADMIN_KEY" ]]; then
+        jq --arg sk "$SEQUENCER_KEY" --arg sa "$SEQUENCER_ADDR" --arg ak "$ADMIN_KEY" --arg aa "$ADMIN_ADDR" \
+            '. + {sequencerKey: $sk, sequencerAddress: $sa, adminKey: $ak, adminAddress: $aa}' "$OUTPUT/zone.json" > "$OUTPUT/zone.json.tmp" \
+            && mv "$OUTPUT/zone.json.tmp" "$OUTPUT/zone.json"
+    else
+        jq --arg sk "$SEQUENCER_KEY" --arg sa "$SEQUENCER_ADDR" --arg aa "$ADMIN_ADDR" \
+            '. + {sequencerKey: $sk, sequencerAddress: $sa, adminAddress: $aa}' "$OUTPUT/zone.json" > "$OUTPUT/zone.json.tmp" \
+            && mv "$OUTPUT/zone.json.tmp" "$OUTPUT/zone.json"
+    fi
 
     PORTAL=$(jq -r '.portal' "$OUTPUT/zone.json")
     ZONE_ID=$(jq -r '.zoneId' "$OUTPUT/zone.json")
@@ -789,6 +817,7 @@ deploy-zone name token="":
     echo "  Zone Name:       {{name}}"
     echo "  Portal:          $PORTAL"
     echo "  Initial Token:   $ZONE_TOKEN_L1"
+    echo "  Admin:           $ADMIN_ADDR"
     echo "  Sequencer:       $SEQUENCER_ADDR"
     echo "  Anchor Block:    $ANCHOR_BLOCK"
     echo ""
@@ -798,6 +827,11 @@ deploy-zone name token="":
     echo ""
     echo "  Explorer:        https://explore.moderato.tempo.xyz/address/$PORTAL"
     echo ""
+    if [[ -n "$ADMIN_KEY" ]]; then
+        echo "  Admin key saved to $OUTPUT/zone.json"
+    else
+        echo "  Admin key not saved (ADMIN_ADDR was provided without ADMIN_KEY)"
+    fi
     echo "  Sequencer key saved to $OUTPUT/zone.json"
     echo ""
 

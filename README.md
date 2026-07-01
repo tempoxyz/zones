@@ -46,7 +46,7 @@ export L1_RPC_URL="wss://rpc.moderato.tempo.xyz"
 just deploy-zone my-zone
 ```
 
-The `deploy-zone` command generates a sequencer keypair, funds it on L1, deploys the portal via `ZoneFactory`, generates genesis, and starts the node.
+The `deploy-zone` command generates admin and sequencer keypairs, funds them on L1, deploys the portal via `ZoneFactory`, generates genesis, and starts the node.
 
 ```bash
 # Start/restart a zone after initial deployment

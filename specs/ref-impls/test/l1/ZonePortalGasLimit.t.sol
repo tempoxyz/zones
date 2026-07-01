@@ -45,6 +45,7 @@ contract ZonePortalGasLimitTest is Test {
     ZonePortal public portal;
     MockPortalToken public token;
 
+    address public admin = address(0x500);
     address public fallbackRecipient = address(0x200);
     address public recipient = address(0x300);
 
@@ -54,7 +55,7 @@ contract ZonePortalGasLimitTest is Test {
             1,
             address(token),
             address(0x400),
-            address(this),
+            admin,
             address(this),
             address(0),
             keccak256("genesis"),
