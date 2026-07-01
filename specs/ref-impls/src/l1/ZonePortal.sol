@@ -186,12 +186,11 @@ contract ZonePortal is IZonePortal {
     ///      possible to make a system tx on L1 with msg.sender == 0.
     ///      The Sequencer key can only be rotated, never renounced.
     function acceptSequencer() external {
-        address newSequencer = pendingSequencer;
-        if (newSequencer == address(0) || msg.sender != newSequencer) {
+        if (pendingSequencer == address(0) || msg.sender != pendingSequencer) {
             revert NotPendingSequencer();
         }
         address previousSequencer = sequencer;
-        sequencer = newSequencer;
+        sequencer = pendingSequencer;
         pendingSequencer = address(0);
         emit SequencerTransferred(previousSequencer, sequencer);
     }
@@ -222,14 +221,13 @@ contract ZonePortal is IZonePortal {
     }
 
     /// @notice Accept a pending admin transfer. Only callable by the pending admin.
-    /// @dev The explicit `newAdmin == address(0)` check because it is technically
+    /// @dev The explicit `pendingAdmin == address(0)` check because it is technically
     ///      possible to make a system tx on L1 with msg.sender == 0.
     ///      The Admin key can only be rotated, never renounced.
     function acceptAdmin() external {
-        address newAdmin = pendingAdmin;
-        if (newAdmin == address(0) || msg.sender != newAdmin) revert NotPendingAdmin();
+        if (pendingAdmin == address(0) || msg.sender != pendingAdmin) revert NotPendingAdmin();
         address previousAdmin = admin;
-        admin = newAdmin;
+        admin = pendingAdmin;
         pendingAdmin = address(0);
         emit AdminTransferred(previousAdmin, admin);
     }
