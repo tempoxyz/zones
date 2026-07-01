@@ -8,11 +8,11 @@
 //!
 //! Uses the NCC-audited [`k256`] crate (v0.13.4) for secp256k1 operations.
 
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::vec::Vec;
 
 mod dispatch;
 
-use alloy_evm::precompiles::{DynPrecompile, Precompile};
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, address};
 use k256::{
     AffinePoint, ProjectivePoint, Scalar,
@@ -29,9 +29,6 @@ pub const CHAUM_PEDERSEN_VERIFY_ADDRESS: Address =
 
 /// Gas cost for Chaum-Pedersen proof verification (two EC muls + hashing).
 const CP_VERIFY_GAS: u64 = 6_000;
-
-/// Precompile identifier.
-static CP_PRECOMPILE_ID: PrecompileId = PrecompileId::Custom(Cow::Borrowed("ChaumPedersenVerify"));
 
 alloy_sol_types::sol! {
     /// Chaum-Pedersen proof for ECDH shared secret derivation.
@@ -70,18 +67,38 @@ pub use IChaumPedersenVerify::verifyProofCall;
 pub struct ChaumPedersenVerify;
 
 impl ChaumPedersenVerify {
-    /// Convert into a [`DynPrecompile`] for registration in a [`PrecompilesMap`].
-    pub fn into_dyn(self) -> DynPrecompile {
-        DynPrecompile::new(
-            PrecompileId::Custom("ChaumPedersenVerify".into()),
-            |input| Self.call(input),
-        )
-    }
-}
+    /// Wrap this precompile in a [`DynPrecompile`] with the Tempo storage context
+    /// required by the upstream dispatch macro.
+    pub fn create(
+        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
+    ) -> DynPrecompile {
+        use tempo_precompiles::{
+            Precompile as _,
+            storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
+        };
 
-impl From<ChaumPedersenVerify> for DynPrecompile {
-    fn from(value: ChaumPedersenVerify) -> Self {
-        value.into_dyn()
+        let spec = cfg.spec;
+        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
+        let gas_params = cfg.gas_params.clone();
+        DynPrecompile::new_stateful(
+            PrecompileId::Custom("ChaumPedersenVerify".into()),
+            move |input| {
+                let mut storage = EvmPrecompileStorageProvider::new(
+                    input.internals,
+                    input.gas,
+                    input.reservoir,
+                    spec,
+                    amsterdam_eip8037_enabled,
+                    input.is_static,
+                    gas_params.clone(),
+                );
+
+                StorageCtx::enter(&mut storage, || {
+                    let mut precompile = Self;
+                    precompile.call(input.data, input.caller)
+                })
+            },
+        )
     }
 }
 

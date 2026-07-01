@@ -94,9 +94,11 @@ impl ZoneEvmFactory {
         });
         precompiles.apply_precompile(&ZONE_TX_CONTEXT_ADDRESS, |_| Some(ZoneTxContext::create()));
         precompiles.apply_precompile(&CHAUM_PEDERSEN_VERIFY_ADDRESS, |_| {
-            Some(ChaumPedersenVerify.into())
+            Some(ChaumPedersenVerify::create(&cfg))
         });
-        precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| Some(AesGcmDecrypt.into()));
+        precompiles.apply_precompile(&AES_GCM_DECRYPT_ADDRESS, |_| {
+            Some(AesGcmDecrypt::create(&cfg))
+        });
         precompiles.apply_precompile(&ZONE_TIP20_FACTORY_ADDRESS, |_| {
             Some(ZoneTokenFactory::create(&cfg))
         });
@@ -108,7 +110,7 @@ impl ZoneEvmFactory {
 
         if let Some(provider) = self.policy_provider.clone() {
             precompiles.apply_precompile(&ZONE_TIP403_PROXY_ADDRESS, |_| {
-                Some(ZoneTip403ProxyRegistry::create(provider.clone()))
+                Some(ZoneTip403ProxyRegistry::create(provider.clone(), &cfg))
             });
         }
 

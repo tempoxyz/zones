@@ -7,7 +7,7 @@
 //!
 //! Uses the NCC-audited [`aes-gcm`] crate (v0.10.3).
 
-use alloc::{borrow::Cow, vec::Vec};
+use alloc::vec::Vec;
 
 use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
@@ -15,7 +15,7 @@ use aes_gcm::{
 };
 mod dispatch;
 
-use alloy_evm::precompiles::{DynPrecompile, Precompile};
+use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, address};
 use revm::precompile::PrecompileId;
 
@@ -27,9 +27,6 @@ const AES_GCM_BASE_GAS: u64 = 1_000;
 
 /// Additional gas per byte of authenticated AES-GCM input.
 const AES_GCM_PER_BYTE_GAS: u64 = 3;
-
-/// Precompile identifier.
-static AES_GCM_PRECOMPILE_ID: PrecompileId = PrecompileId::Custom(Cow::Borrowed("AesGcmDecrypt"));
 
 alloy_sol_types::sol! {
     interface IAesGcmDecrypt {
@@ -54,17 +51,35 @@ pub use IAesGcmDecrypt::{decryptCall, decryptReturn};
 pub struct AesGcmDecrypt;
 
 impl AesGcmDecrypt {
-    /// Convert into a [`DynPrecompile`] for registration in a [`PrecompilesMap`].
-    pub fn into_dyn(self) -> DynPrecompile {
-        DynPrecompile::new(PrecompileId::Custom("AesGcmDecrypt".into()), |input| {
-            Self.call(input)
-        })
-    }
-}
+    /// Wrap this precompile in a [`DynPrecompile`] with the Tempo storage context
+    /// required by the upstream dispatch macro.
+    pub fn create(
+        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
+    ) -> DynPrecompile {
+        use tempo_precompiles::{
+            Precompile as _,
+            storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
+        };
 
-impl From<AesGcmDecrypt> for DynPrecompile {
-    fn from(value: AesGcmDecrypt) -> Self {
-        value.into_dyn()
+        let spec = cfg.spec;
+        let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
+        let gas_params = cfg.gas_params.clone();
+        DynPrecompile::new_stateful(PrecompileId::Custom("AesGcmDecrypt".into()), move |input| {
+            let mut storage = EvmPrecompileStorageProvider::new(
+                input.internals,
+                input.gas,
+                input.reservoir,
+                spec,
+                amsterdam_eip8037_enabled,
+                input.is_static,
+                gas_params.clone(),
+            );
+
+            StorageCtx::enter(&mut storage, || {
+                let mut precompile = Self;
+                precompile.call(input.data, input.caller)
+            })
+        })
     }
 }
 
@@ -102,7 +117,10 @@ pub fn decrypt_aes_gcm(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use alloy_evm::{EvmInternals, precompiles::PrecompileInput};
+    use alloy_evm::{
+        EvmInternals,
+        precompiles::{Precompile, PrecompileInput},
+    };
     use alloy_primitives::{Bytes, U256};
     use alloy_sol_types::SolCall;
     use revm::{
@@ -151,7 +169,8 @@ mod tests {
 
     fn call_precompile(calldata: Bytes) -> PrecompileOutput {
         let mut ctx = test_context();
-        AesGcmDecrypt
+        let cfg = revm::context::CfgEnv::<TempoHardfork>::default();
+        AesGcmDecrypt::create(&cfg)
             .call(PrecompileInput {
                 data: &calldata,
                 gas: u64::MAX,

@@ -1,45 +1,46 @@
 //! ABI dispatch for the [`ChaumPedersenVerify`] precompile.
 
-use alloy_evm::precompiles::{Precompile, PrecompileInput};
-use alloy_primitives::Bytes;
-use alloy_sol_types::{SolCall, SolInterface};
-use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
+use alloy_primitives::Address;
+use alloy_sol_types::SolCall;
+use revm::precompile::{PrecompileHalt, PrecompileResult};
+use tempo_precompiles::{Precompile as TempoPrecompile, dispatch, storage::StorageCtx};
 use tracing::debug;
 
 use super::{
-    CP_PRECOMPILE_ID, CP_VERIFY_GAS, ChaumPedersenVerify, IChaumPedersenVerify,
-    verify_chaum_pedersen, verifyProofCall,
+    CP_VERIFY_GAS, ChaumPedersenVerify, IChaumPedersenVerify, verify_chaum_pedersen,
+    verifyProofCall,
 };
 
-impl Precompile for ChaumPedersenVerify {
-    fn precompile_id(&self) -> &PrecompileId {
-        &CP_PRECOMPILE_ID
-    }
+impl TempoPrecompile for ChaumPedersenVerify {
+    fn call(&mut self, calldata: &[u8], _msg_sender: Address) -> PrecompileResult {
+        dispatch!(
+            calldata,
+            |call| match call {
+                IChaumPedersenVerify::IChaumPedersenVerifyCalls {
+                    verifyProof(call) => {
+                        debug!(target: "zone::precompile", "ChaumPedersenVerify: verifyProof");
 
-    fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
-        let call = match IChaumPedersenVerify::IChaumPedersenVerifyCalls::abi_decode(input.data) {
-            Ok(IChaumPedersenVerify::IChaumPedersenVerifyCalls::verifyProof(call)) => call,
-            Err(_) => return Ok(PrecompileOutput::revert(0, Bytes::new(), input.reservoir)),
-        };
+                        let mut storage = StorageCtx::default();
+                        if storage.deduct_gas(CP_VERIFY_GAS).is_err() {
+                            return Ok(storage.halt_output(PrecompileHalt::OutOfGas));
+                        }
 
-        debug!(target: "zone::precompile", "ChaumPedersenVerify: verifyProof");
+                        let valid = verify_chaum_pedersen(
+                            &call.ephemeralPubX.0,
+                            call.ephemeralPubYParity,
+                            &call.sharedSecret.0,
+                            call.sharedSecretYParity,
+                            &call.sequencerPubX.0,
+                            call.sequencerPubYParity,
+                            &call.proof.s.0,
+                            &call.proof.c.0,
+                        );
 
-        let valid = verify_chaum_pedersen(
-            &call.ephemeralPubX.0,
-            call.ephemeralPubYParity,
-            &call.sharedSecret.0,
-            call.sharedSecretYParity,
-            &call.sequencerPubX.0,
-            call.sequencerPubYParity,
-            &call.proof.s.0,
-            &call.proof.c.0,
-        );
-
-        let encoded = verifyProofCall::abi_encode_returns(&valid);
-        Ok(PrecompileOutput::new(
-            CP_VERIFY_GAS,
-            encoded.into(),
-            input.reservoir,
-        ))
+                        let encoded = verifyProofCall::abi_encode_returns(&valid);
+                        Ok(storage.success_output(encoded.into()))
+                    },
+                }
+            },
+        )
     }
 }
