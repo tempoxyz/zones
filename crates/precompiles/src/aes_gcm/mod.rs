@@ -199,7 +199,7 @@ mod tests {
             cfg.spec,
             cfg.enable_amsterdam_eip8037,
             true,
-            cfg.gas_params.clone(),
+            cfg.gas_params,
         );
         StorageCtx::enter(&mut provider, || {
             let mut storage = StorageCtx::default();
