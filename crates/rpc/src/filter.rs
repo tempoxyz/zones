@@ -659,7 +659,7 @@ mod tests {
             ],
         ));
 
-        let mut expected_visible = visible.clone();
+        let mut expected_visible = visible;
         expected_visible.transaction_index = Some(0);
         expected_visible.log_index = Some(0);
 
