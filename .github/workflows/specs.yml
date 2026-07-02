@@ -6,7 +6,7 @@ on:
     paths:
       - "specs/ref-impls/src/**"
       - "specs/ref-impls/test/**"
-      - "specs/ref-impls/foundry.toml"
+      - "specs/ref-impls/foundry.*"
       - "crates/node/**"
       - ".github/workflows/specs.yml"
   merge_group:
@@ -15,7 +15,7 @@ on:
     paths:
       - "specs/ref-impls/src/**"
       - "specs/ref-impls/test/**"
-      - "specs/ref-impls/foundry.toml"
+      - "specs/ref-impls/foundry.*"
       - "crates/node/**"
       - ".github/workflows/specs.yml"
 
