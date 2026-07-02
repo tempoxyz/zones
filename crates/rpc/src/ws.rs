@@ -52,13 +52,6 @@ const MAX_WS_SUBSCRIPTIONS: usize = 32;
 type NotificationTx = mpsc::Sender<String>;
 type CloseSessionTx = watch::Sender<bool>;
 
-/// Per-subscription redaction applied before sending notifications.
-#[derive(Clone, Copy)]
-enum SubscriptionRedaction {
-    None,
-    NewHeads,
-}
-
 /// Query parameters for the WebSocket upgrade endpoint.
 #[derive(serde::Deserialize, Default)]
 pub(crate) struct WsQuery {
@@ -74,7 +67,6 @@ struct ActiveSubscription {
 struct PendingSubscription {
     id: FilterId,
     stream: WsSubscriptionStream,
-    redaction: SubscriptionRedaction,
 }
 
 struct WsSession {
@@ -178,42 +170,12 @@ fn subscription_notification_raw(subscription_id: &FilterId, result: &RawValue) 
     .expect("subscription notification serialization is infallible")
 }
 
-/// Redact a subscription payload, returning `None` if redaction fails so the
-/// caller can drop the item rather than forwarding unredacted data.
-fn redacted_subscription_result(
-    result: Box<RawValue>,
-    redaction: SubscriptionRedaction,
-) -> Option<Box<RawValue>> {
-    match redaction {
-        SubscriptionRedaction::None => Some(result),
-        SubscriptionRedaction::NewHeads => redact_new_head_result(&result),
-    }
-}
-
-/// Apply block-header privacy rules to `eth_subscribe("newHeads")` payloads.
-///
-/// Fails closed: returns `None` on any parse/serialize error instead of leaking
-/// the original, potentially unredacted payload.
-fn redact_new_head_result(result: &RawValue) -> Option<Box<RawValue>> {
-    let mut header = serde_json::from_str::<Value>(result.get()).ok()?;
-    let header = header.as_object_mut()?;
-
-    header.insert(
-        "logsBloom".to_string(),
-        Value::String(format!("0x{}", "0".repeat(512))),
-    );
-    header.remove("transactions");
-
-    to_raw(header).ok()
-}
-
 /// Forward subscription stream items into the session outbound queue.
 fn spawn_subscription(
     subscription_id: FilterId,
     mut subscription: WsSubscriptionStream,
     notifications: NotificationTx,
     close_session: CloseSessionTx,
-    redaction: SubscriptionRedaction,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(item) = subscription.next().await {
@@ -228,14 +190,6 @@ fn spawn_subscription(
                     );
                     break;
                 }
-            };
-            let Some(result) = redacted_subscription_result(result, redaction) else {
-                warn!(
-                    target: "zone::rpc",
-                    subscription = ?subscription_id,
-                    "ws subscription redaction failed; closing subscription"
-                );
-                break;
             };
 
             if !try_queue_notification(
@@ -314,7 +268,7 @@ async fn handle_subscribe(
             }
 
             match state.api.ws_subscribe_new_heads(auth.clone()).await {
-                Ok(subscription) => (subscription, SubscriptionRedaction::NewHeads),
+                Ok(subscription) => subscription,
                 Err(err) => {
                     return WsDispatchResult::response_only(JsonRpcResponse::error(
                         req.id.clone(),
@@ -336,7 +290,7 @@ async fn handle_subscribe(
             };
 
             match state.api.ws_subscribe_logs(filter, auth.clone()).await {
-                Ok(subscription) => (subscription, SubscriptionRedaction::None),
+                Ok(subscription) => subscription,
                 Err(err) => {
                     return WsDispatchResult::response_only(JsonRpcResponse::error(
                         req.id.clone(),
@@ -375,8 +329,7 @@ async fn handle_subscribe(
         response: success_response(req.id.clone(), &subscription_id),
         pending_subscriptions: vec![PendingSubscription {
             id: subscription_id,
-            stream: subscription.0,
-            redaction: subscription.1,
+            stream: subscription,
         }],
     }
 }
@@ -497,7 +450,6 @@ fn activate_pending_subscriptions(
             pending.stream,
             notifications.clone(),
             close_session.clone(),
-            pending.redaction,
         );
         session.activate_subscription(pending.id, task);
     }
