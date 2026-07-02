@@ -1,24 +1,22 @@
 //! Native `TempoState` precompile.
 //!
 //! Replaces the Solidity TempoState predeploy at `0x1c00...0000` while
-//! preserving the same ABI and storage layout.
+//! preserving the same ABI.
 
 use alloc::vec::Vec;
 
 use alloy_consensus::BlockHeader;
 use alloy_evm::precompiles::DynPrecompile;
-use alloy_primitives::{Address, B256, Bytes, U256, keccak256};
+use alloy_primitives::{Address, B256, Bytes, keccak256};
 use alloy_rlp::Decodable as _;
-use alloy_sol_types::{SolCall, SolError, SolEvent};
-use revm::{
-    precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult},
-    state::Bytecode,
-};
+use alloy_sol_types::{SolCall, SolError};
+use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_precompiles::{
     DelegateCallNotAllowed, Precompile as TempoPrecompile, charge_input_cost, dispatch,
-    storage::{StorageCtx, evm::EvmPrecompileStorageProvider},
+    storage::{Handler, StorageCtx, evm::EvmPrecompileStorageProvider},
     view,
 };
+use tempo_precompiles_macros::contract;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::TempoState as TempoStateAbi;
 use zone_primitives::constants::{
@@ -29,17 +27,6 @@ alloy_sol_types::sol! {
     error Error(string);
     error StaticCallNotAllowed();
 }
-
-const SLOT_TEMPO_BLOCK_HASH: U256 = U256::ZERO;
-const SLOT_GAS_LIMITS: U256 = U256::from_limbs([1, 0, 0, 0]);
-const SLOT_TEMPO_PARENT_HASH: U256 = U256::from_limbs([2, 0, 0, 0]);
-const SLOT_TEMPO_BENEFICIARY: U256 = U256::from_limbs([3, 0, 0, 0]);
-const SLOT_TEMPO_STATE_ROOT: U256 = U256::from_limbs([4, 0, 0, 0]);
-const SLOT_TEMPO_TRANSACTIONS_ROOT: U256 = U256::from_limbs([5, 0, 0, 0]);
-const SLOT_TEMPO_RECEIPTS_ROOT: U256 = U256::from_limbs([6, 0, 0, 0]);
-const SLOT_TEMPO_PACKED: U256 = U256::from_limbs([7, 0, 0, 0]);
-const SLOT_TEMPO_TIMESTAMP_MILLIS: U256 = U256::from_limbs([8, 0, 0, 0]);
-const SLOT_TEMPO_PREV_RANDAO: U256 = U256::from_limbs([9, 0, 0, 0]);
 
 /// L1 storage access needed by `readTempoStorageSlot(s)`.
 pub trait L1StorageReader: Clone + Send + Sync + 'static {
@@ -52,11 +39,28 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
     ) -> Result<B256, PrecompileError>;
 }
 
+#[contract(addr = TEMPO_STATE_ADDRESS)]
+struct TempoStateStorage {
+    tempo_block_hash: B256,
+    general_gas_limit: u64,
+    shared_gas_limit: u64,
+    tempo_parent_hash: B256,
+    tempo_beneficiary: Address,
+    tempo_state_root: B256,
+    tempo_transactions_root: B256,
+    tempo_receipts_root: B256,
+    tempo_block_number: u64,
+    tempo_gas_limit: u64,
+    tempo_gas_used: u64,
+    tempo_timestamp: u64,
+    tempo_timestamp_millis: u64,
+    tempo_prev_randao: B256,
+}
+
 /// Native TempoState precompile.
-#[derive(Clone)]
 pub struct TempoState<P> {
     provider: P,
-    storage: StorageCtx,
+    state: TempoStateStorage,
 }
 
 impl<P> TempoState<P> {
@@ -64,18 +68,15 @@ impl<P> TempoState<P> {
     pub fn new(provider: P) -> Self {
         Self {
             provider,
-            storage: StorageCtx,
+            state: TempoStateStorage::new(),
         }
     }
 
     /// Initialize the predeploy account code and storage from the genesis Tempo header.
     pub fn initialize_genesis(header: &[u8]) -> tempo_precompiles::Result<()> {
-        let mut storage = StorageCtx;
-        storage.set_code(
-            TEMPO_STATE_ADDRESS,
-            Bytecode::new_raw(Bytes::from_static(&[0xFE])),
-        )?;
-        Self::decode_and_store_header(&mut storage, header)?;
+        let mut state = TempoStateStorage::new();
+        state.__initialize()?;
+        Self::decode_and_store_header(&mut state, header)?;
         Ok(())
     }
 
@@ -89,7 +90,7 @@ impl<P> TempoState<P> {
     }
 
     fn decode_and_store_header(
-        storage: &mut StorageCtx,
+        state: &mut TempoStateStorage,
         header_rlp: &[u8],
     ) -> tempo_precompiles::Result<TempoHeader> {
         let header = Self::decode_header(header_rlp).map_err(|_| {
@@ -97,156 +98,92 @@ impl<P> TempoState<P> {
                 "invalid Tempo genesis header RLP".into(),
             )
         })?;
-        Self::store_header(storage, header_rlp, &header)?;
+        Self::store_header(state, header_rlp, &header)?;
         Ok(header)
     }
 
     fn store_header(
-        storage: &mut StorageCtx,
+        state: &mut TempoStateStorage,
         header_rlp: &[u8],
         header: &TempoHeader,
     ) -> tempo_precompiles::Result<()> {
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_BLOCK_HASH,
-            u256_from_b256(keccak256(header_rlp)),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_GAS_LIMITS,
-            pack_two_u64(header.general_gas_limit, header.shared_gas_limit),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_PARENT_HASH,
-            u256_from_b256(header.parent_hash()),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_BENEFICIARY,
-            U256::from_be_slice(header.beneficiary().as_slice()),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_STATE_ROOT,
-            u256_from_b256(header.state_root()),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_TRANSACTIONS_ROOT,
-            u256_from_b256(header.transactions_root()),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_RECEIPTS_ROOT,
-            u256_from_b256(header.receipts_root()),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_PACKED,
-            pack_four_u64(
-                header.number(),
-                header.gas_limit(),
-                header.gas_used(),
-                header.timestamp(),
-            ),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_TIMESTAMP_MILLIS,
-            U256::from(header.timestamp_millis_part),
-        )?;
-        storage.sstore(
-            TEMPO_STATE_ADDRESS,
-            SLOT_TEMPO_PREV_RANDAO,
-            u256_from_b256(header.mix_hash().unwrap_or_default()),
-        )?;
+        state.tempo_block_hash.write(keccak256(header_rlp))?;
+        state.general_gas_limit.write(header.general_gas_limit)?;
+        state.shared_gas_limit.write(header.shared_gas_limit)?;
+        state.tempo_parent_hash.write(header.parent_hash())?;
+        state.tempo_beneficiary.write(header.beneficiary())?;
+        state.tempo_state_root.write(header.state_root())?;
+        state
+            .tempo_transactions_root
+            .write(header.transactions_root())?;
+        state.tempo_receipts_root.write(header.receipts_root())?;
+        state.tempo_block_number.write(header.number())?;
+        state.tempo_gas_limit.write(header.gas_limit())?;
+        state.tempo_gas_used.write(header.gas_used())?;
+        state.tempo_timestamp.write(header.timestamp())?;
+        state
+            .tempo_timestamp_millis
+            .write(header.timestamp_millis_part)?;
+        state
+            .tempo_prev_randao
+            .write(header.mix_hash().unwrap_or_default())?;
         Ok(())
     }
 
     fn tempo_block_hash(&self) -> tempo_precompiles::Result<B256> {
-        self.load_b256(SLOT_TEMPO_BLOCK_HASH)
+        self.state.tempo_block_hash.read()
     }
 
     fn general_gas_limit(&self) -> tempo_precompiles::Result<u64> {
-        Ok(low_u64(
-            self.storage.sload(TEMPO_STATE_ADDRESS, SLOT_GAS_LIMITS)?,
-        ))
+        self.state.general_gas_limit.read()
     }
 
     fn shared_gas_limit(&self) -> tempo_precompiles::Result<u64> {
-        Ok(u64_at(
-            self.storage.sload(TEMPO_STATE_ADDRESS, SLOT_GAS_LIMITS)?,
-            1,
-        ))
+        self.state.shared_gas_limit.read()
     }
 
     fn tempo_parent_hash(&self) -> tempo_precompiles::Result<B256> {
-        self.load_b256(SLOT_TEMPO_PARENT_HASH)
+        self.state.tempo_parent_hash.read()
     }
 
     fn tempo_beneficiary(&self) -> tempo_precompiles::Result<Address> {
-        let value = self
-            .storage
-            .sload(TEMPO_STATE_ADDRESS, SLOT_TEMPO_BENEFICIARY)?;
-        let bytes = value.to_be_bytes::<32>();
-        Ok(Address::from_slice(&bytes[12..]))
+        self.state.tempo_beneficiary.read()
     }
 
     fn tempo_state_root(&self) -> tempo_precompiles::Result<B256> {
-        self.load_b256(SLOT_TEMPO_STATE_ROOT)
+        self.state.tempo_state_root.read()
     }
 
     fn tempo_transactions_root(&self) -> tempo_precompiles::Result<B256> {
-        self.load_b256(SLOT_TEMPO_TRANSACTIONS_ROOT)
+        self.state.tempo_transactions_root.read()
     }
 
     fn tempo_receipts_root(&self) -> tempo_precompiles::Result<B256> {
-        self.load_b256(SLOT_TEMPO_RECEIPTS_ROOT)
+        self.state.tempo_receipts_root.read()
     }
 
     fn tempo_block_number(&self) -> tempo_precompiles::Result<u64> {
-        Ok(low_u64(
-            self.storage.sload(TEMPO_STATE_ADDRESS, SLOT_TEMPO_PACKED)?,
-        ))
+        self.state.tempo_block_number.read()
     }
 
     fn tempo_gas_limit(&self) -> tempo_precompiles::Result<u64> {
-        Ok(u64_at(
-            self.storage.sload(TEMPO_STATE_ADDRESS, SLOT_TEMPO_PACKED)?,
-            1,
-        ))
+        self.state.tempo_gas_limit.read()
     }
 
     fn tempo_gas_used(&self) -> tempo_precompiles::Result<u64> {
-        Ok(u64_at(
-            self.storage.sload(TEMPO_STATE_ADDRESS, SLOT_TEMPO_PACKED)?,
-            2,
-        ))
+        self.state.tempo_gas_used.read()
     }
 
     fn tempo_timestamp(&self) -> tempo_precompiles::Result<u64> {
-        Ok(u64_at(
-            self.storage.sload(TEMPO_STATE_ADDRESS, SLOT_TEMPO_PACKED)?,
-            3,
-        ))
+        self.state.tempo_timestamp.read()
     }
 
     fn tempo_timestamp_millis(&self) -> tempo_precompiles::Result<u64> {
-        Ok(low_u64(
-            self.storage
-                .sload(TEMPO_STATE_ADDRESS, SLOT_TEMPO_TIMESTAMP_MILLIS)?,
-        ))
+        self.state.tempo_timestamp_millis.read()
     }
 
     fn tempo_prev_randao(&self) -> tempo_precompiles::Result<B256> {
-        self.load_b256(SLOT_TEMPO_PREV_RANDAO)
-    }
-
-    fn load_b256(&self, slot: U256) -> tempo_precompiles::Result<B256> {
-        Ok(b256_from_u256(
-            self.storage.sload(TEMPO_STATE_ADDRESS, slot)?,
-        ))
+        self.state.tempo_prev_randao.read()
     }
 
     fn is_system_caller(caller: Address) -> bool {
@@ -257,11 +194,12 @@ impl<P> TempoState<P> {
     }
 
     fn revert_error<E: SolError>(&self, error: E) -> PrecompileResult {
-        Ok(self.storage.revert_output(error.abi_encode().into()))
+        Ok(self.state.storage.revert_output(error.abi_encode().into()))
     }
 
     fn revert_string(&self, message: &str) -> PrecompileResult {
         Ok(self
+            .state
             .storage
             .revert_output(Error(message.into()).abi_encode().into()))
     }
@@ -277,7 +215,7 @@ impl<P: L1StorageReader> TempoState<P> {
         sender: Address,
         call: TempoStateAbi::finalizeTempoCall,
     ) -> PrecompileResult {
-        if self.storage.is_static() {
+        if self.state.storage.is_static() {
             return self.revert_error(StaticCallNotAllowed {});
         }
         if sender != ZONE_INBOX_ADDRESS {
@@ -286,11 +224,11 @@ impl<P: L1StorageReader> TempoState<P> {
 
         let prev_block_hash = match self.tempo_block_hash() {
             Ok(hash) => hash,
-            Err(err) => return self.storage.error_result(err),
+            Err(err) => return self.state.storage.error_result(err),
         };
         let prev_block_number = match self.tempo_block_number() {
             Ok(number) => number,
-            Err(err) => return self.storage.error_result(err),
+            Err(err) => return self.state.storage.error_result(err),
         };
 
         let header = match Self::decode_header(&call.header) {
@@ -306,22 +244,18 @@ impl<P: L1StorageReader> TempoState<P> {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
-        if let Err(err) = Self::store_header(&mut self.storage, &call.header, &header) {
-            return self.storage.error_result(err);
+        if let Err(err) = Self::store_header(&mut self.state, &call.header, &header) {
+            return self.state.storage.error_result(err);
         }
-        if let Err(err) = self.storage.emit_event(
-            TEMPO_STATE_ADDRESS,
-            TempoStateAbi::TempoBlockFinalized {
-                blockHash: tempo_block_hash,
-                blockNumber: header.number(),
-                stateRoot: header.state_root(),
-            }
-            .encode_log_data(),
-        ) {
-            return self.storage.error_result(err);
+        if let Err(err) = self.state.emit_event(TempoStateAbi::TempoBlockFinalized {
+            blockHash: tempo_block_hash,
+            blockNumber: header.number(),
+            stateRoot: header.state_root(),
+        }) {
+            return self.state.storage.error_result(err);
         }
 
-        Ok(self.storage.success_output(Bytes::new()))
+        Ok(self.state.storage.success_output(Bytes::new()))
     }
 
     fn read_tempo_storage_slot(
@@ -336,12 +270,12 @@ impl<P: L1StorageReader> TempoState<P> {
 
         let block_number = match self.tempo_block_number() {
             Ok(number) => number,
-            Err(err) => return self.storage.error_result(err),
+            Err(err) => return self.state.storage.error_result(err),
         };
         let value = self
             .provider
             .read_l1_storage(call.account, call.slot, block_number)?;
-        Ok(self.storage.success_output(
+        Ok(self.state.storage.success_output(
             TempoStateAbi::readTempoStorageSlotCall::abi_encode_returns(&value).into(),
         ))
     }
@@ -358,7 +292,7 @@ impl<P: L1StorageReader> TempoState<P> {
 
         let block_number = match self.tempo_block_number() {
             Ok(number) => number,
-            Err(err) => return self.storage.error_result(err),
+            Err(err) => return self.state.storage.error_result(err),
         };
         let mut values = Vec::with_capacity(call.slots.len());
         for slot in call.slots {
@@ -367,7 +301,7 @@ impl<P: L1StorageReader> TempoState<P> {
                     .read_l1_storage(call.account, slot, block_number)?,
             );
         }
-        Ok(self.storage.success_output(
+        Ok(self.state.storage.success_output(
             TempoStateAbi::readTempoStorageSlotsCall::abi_encode_returns(&values).into(),
         ))
     }
@@ -409,7 +343,7 @@ impl<P: L1StorageReader> TempoState<P> {
 
 impl<P: L1StorageReader> TempoPrecompile for TempoState<P> {
     fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
+        if let Some(err) = charge_input_cost(&mut self.state.storage, calldata) {
             return err;
         }
 
@@ -440,30 +374,6 @@ impl<P: L1StorageReader> TempoPrecompile for TempoState<P> {
     }
 }
 
-fn u256_from_b256(value: B256) -> U256 {
-    U256::from_be_bytes(value.0)
-}
-
-fn b256_from_u256(value: U256) -> B256 {
-    B256::from(value.to_be_bytes::<32>())
-}
-
-fn low_u64(value: U256) -> u64 {
-    value.as_limbs()[0]
-}
-
-fn u64_at(value: U256, index: usize) -> u64 {
-    low_u64(value >> (index * 64))
-}
-
-fn pack_two_u64(a: u64, b: u64) -> U256 {
-    U256::from(a) | (U256::from(b) << 64)
-}
-
-fn pack_four_u64(a: u64, b: u64, c: u64, d: u64) -> U256 {
-    U256::from(a) | (U256::from(b) << 64) | (U256::from(c) << 128) | (U256::from(d) << 192)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,7 +382,7 @@ mod tests {
         EvmInternals,
         precompiles::{DynPrecompile, Precompile as AlloyEvmPrecompile, PrecompileInput},
     };
-    use alloy_primitives::{address, b256};
+    use alloy_primitives::{U256, address, b256};
     use alloy_rlp::Encodable as _;
     use alloy_sol_types::SolCall;
     use revm::{
