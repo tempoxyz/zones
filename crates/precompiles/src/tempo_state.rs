@@ -12,7 +12,7 @@ use alloy_rlp::Decodable as _;
 use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_precompiles::{
-    DelegateCallNotAllowed, Precompile as TempoPrecompile, charge_input_cost, dispatch,
+    DelegateCallNotAllowed, charge_input_cost, dispatch,
     storage::{Handler, StorageCtx, evm::EvmPrecompileStorageProvider},
     view,
 };
@@ -40,31 +40,17 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 }
 
 #[contract(addr = TEMPO_STATE_ADDRESS)]
-struct TempoStateStorage {
+pub struct TempoState {
     tempo_block_hash: B256,
     tempo_block_number: u64,
 }
 
-/// Native TempoState precompile.
-pub struct TempoState<P> {
-    provider: P,
-    state: TempoStateStorage,
-}
-
-impl<P> TempoState<P> {
-    /// Create a new native TempoState handler.
-    pub fn new(provider: P) -> Self {
-        Self {
-            provider,
-            state: TempoStateStorage::new(),
-        }
-    }
-
+impl TempoState {
     /// Initialize the predeploy account code and storage from the genesis Tempo header.
     pub fn initialize_genesis(header: &[u8]) -> tempo_precompiles::Result<()> {
-        let mut state = TempoStateStorage::new();
+        let mut state = Self::new();
         state.__initialize()?;
-        Self::decode_and_store_checkpoint(&mut state, header)?;
+        state.decode_and_store_checkpoint(header)?;
         Ok(())
     }
 
@@ -78,7 +64,7 @@ impl<P> TempoState<P> {
     }
 
     fn decode_and_store_checkpoint(
-        state: &mut TempoStateStorage,
+        &mut self,
         header_rlp: &[u8],
     ) -> tempo_precompiles::Result<TempoHeader> {
         let header = Self::decode_header(header_rlp).map_err(|_| {
@@ -86,26 +72,26 @@ impl<P> TempoState<P> {
                 "invalid Tempo genesis header RLP".into(),
             )
         })?;
-        Self::store_checkpoint(state, header_rlp, &header)?;
+        self.store_checkpoint(header_rlp, &header)?;
         Ok(header)
     }
 
     fn store_checkpoint(
-        state: &mut TempoStateStorage,
+        &mut self,
         header_rlp: &[u8],
         header: &TempoHeader,
     ) -> tempo_precompiles::Result<()> {
-        state.tempo_block_hash.write(keccak256(header_rlp))?;
-        state.tempo_block_number.write(header.number())?;
+        self.tempo_block_hash.write(keccak256(header_rlp))?;
+        self.tempo_block_number.write(header.number())?;
         Ok(())
     }
 
     fn tempo_block_hash(&self) -> tempo_precompiles::Result<B256> {
-        self.state.tempo_block_hash.read()
+        self.tempo_block_hash.read()
     }
 
     fn tempo_block_number(&self) -> tempo_precompiles::Result<u64> {
-        self.state.tempo_block_number.read()
+        self.tempo_block_number.read()
     }
 
     fn is_system_caller(caller: Address) -> bool {
@@ -116,12 +102,11 @@ impl<P> TempoState<P> {
     }
 
     fn revert_error<E: SolError>(&self, error: E) -> PrecompileResult {
-        Ok(self.state.storage.revert_output(error.abi_encode().into()))
+        Ok(self.storage.revert_output(error.abi_encode().into()))
     }
 
     fn revert_string(&self, message: &str) -> PrecompileResult {
         Ok(self
-            .state
             .storage
             .revert_output(Error(message.into()).abi_encode().into()))
     }
@@ -129,15 +114,13 @@ impl<P> TempoState<P> {
     fn invalid_rlp(&self) -> PrecompileResult {
         self.revert_error(TempoStateAbi::InvalidRlpData {})
     }
-}
 
-impl<P: L1StorageReader> TempoState<P> {
     fn finalize_tempo(
         &mut self,
         sender: Address,
         call: TempoStateAbi::finalizeTempoCall,
     ) -> PrecompileResult {
-        if self.state.storage.is_static() {
+        if self.storage.is_static() {
             return self.revert_error(StaticCallNotAllowed {});
         }
         if sender != ZONE_INBOX_ADDRESS {
@@ -146,11 +129,11 @@ impl<P: L1StorageReader> TempoState<P> {
 
         let prev_block_hash = match self.tempo_block_hash() {
             Ok(hash) => hash,
-            Err(err) => return self.state.storage.error_result(err),
+            Err(err) => return self.storage.error_result(err),
         };
         let prev_block_number = match self.tempo_block_number() {
             Ok(number) => number,
-            Err(err) => return self.state.storage.error_result(err),
+            Err(err) => return self.storage.error_result(err),
         };
 
         let header = match Self::decode_header(&call.header) {
@@ -166,22 +149,23 @@ impl<P: L1StorageReader> TempoState<P> {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
-        if let Err(err) = Self::store_checkpoint(&mut self.state, &call.header, &header) {
-            return self.state.storage.error_result(err);
+        if let Err(err) = self.store_checkpoint(&call.header, &header) {
+            return self.storage.error_result(err);
         }
-        if let Err(err) = self.state.emit_event(TempoStateAbi::TempoBlockFinalized {
+        if let Err(err) = self.emit_event(TempoStateAbi::TempoBlockFinalized {
             blockHash: tempo_block_hash,
             blockNumber: header.number(),
             stateRoot: header.state_root(),
         }) {
-            return self.state.storage.error_result(err);
+            return self.storage.error_result(err);
         }
 
-        Ok(self.state.storage.success_output(Bytes::new()))
+        Ok(self.storage.success_output(Bytes::new()))
     }
 
-    fn read_tempo_storage_slot(
+    fn read_tempo_storage_slot<P: L1StorageReader>(
         &mut self,
+        provider: &P,
         sender: Address,
         call: TempoStateAbi::readTempoStorageSlotCall,
     ) -> PrecompileResult {
@@ -192,18 +176,17 @@ impl<P: L1StorageReader> TempoState<P> {
 
         let block_number = match self.tempo_block_number() {
             Ok(number) => number,
-            Err(err) => return self.state.storage.error_result(err),
+            Err(err) => return self.storage.error_result(err),
         };
-        let value = self
-            .provider
-            .read_l1_storage(call.account, call.slot, block_number)?;
-        Ok(self.state.storage.success_output(
+        let value = provider.read_l1_storage(call.account, call.slot, block_number)?;
+        Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotCall::abi_encode_returns(&value).into(),
         ))
     }
 
-    fn read_tempo_storage_slots(
+    fn read_tempo_storage_slots<P: L1StorageReader>(
         &mut self,
+        provider: &P,
         sender: Address,
         call: TempoStateAbi::readTempoStorageSlotsCall,
     ) -> PrecompileResult {
@@ -214,22 +197,19 @@ impl<P: L1StorageReader> TempoState<P> {
 
         let block_number = match self.tempo_block_number() {
             Ok(number) => number,
-            Err(err) => return self.state.storage.error_result(err),
+            Err(err) => return self.storage.error_result(err),
         };
         let mut values = Vec::with_capacity(call.slots.len());
         for slot in call.slots {
-            values.push(
-                self.provider
-                    .read_l1_storage(call.account, slot, block_number)?,
-            );
+            values.push(provider.read_l1_storage(call.account, slot, block_number)?);
         }
-        Ok(self.state.storage.success_output(
+        Ok(self.storage.success_output(
             TempoStateAbi::readTempoStorageSlotsCall::abi_encode_returns(&values).into(),
         ))
     }
 
     /// Wraps this precompile for registration in the zone EVM.
-    pub fn create(
+    pub fn create<P: L1StorageReader>(
         provider: P,
         cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
     ) -> DynPrecompile {
@@ -257,15 +237,18 @@ impl<P: L1StorageReader> TempoState<P> {
             );
 
             StorageCtx::enter(&mut storage, || {
-                Self::new(provider.clone()).call(input.data, input.caller)
+                Self::new().call_with_provider(&provider, input.data, input.caller)
             })
         })
     }
-}
 
-impl<P: L1StorageReader> TempoPrecompile for TempoState<P> {
-    fn call(&mut self, calldata: &[u8], msg_sender: Address) -> PrecompileResult {
-        if let Some(err) = charge_input_cost(&mut self.state.storage, calldata) {
+    fn call_with_provider<P: L1StorageReader>(
+        &mut self,
+        provider: &P,
+        calldata: &[u8],
+        msg_sender: Address,
+    ) -> PrecompileResult {
+        if let Some(err) = charge_input_cost(&mut self.storage, calldata) {
             return err;
         }
 
@@ -276,8 +259,12 @@ impl<P: L1StorageReader> TempoPrecompile for TempoState<P> {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number()),
                     finalizeTempo(call) => self.finalize_tempo(msg_sender, call),
-                    readTempoStorageSlot(call) => self.read_tempo_storage_slot(msg_sender, call),
-                    readTempoStorageSlots(call) => self.read_tempo_storage_slots(msg_sender, call),
+                    readTempoStorageSlot(call) => {
+                        self.read_tempo_storage_slot(provider, msg_sender, call)
+                    },
+                    readTempoStorageSlots(call) => {
+                        self.read_tempo_storage_slots(provider, msg_sender, call)
+                    },
                 }
             },
         )
@@ -349,9 +336,7 @@ mod tests {
             gas_params,
         );
 
-        StorageCtx::enter(&mut storage, || {
-            TempoState::<MockL1Reader>::initialize_genesis(header)
-        })?;
+        StorageCtx::enter(&mut storage, || TempoState::initialize_genesis(header))?;
         Ok(())
     }
 
