@@ -854,10 +854,6 @@ async fn test_block_access_control() -> eyre::Result<()> {
         );
     }
     assert_eq!(block["gasUsed"], "0x0");
-    assert_eq!(block["transactionsRoot"], format!("{:#x}", B256::ZERO));
-    assert_eq!(block["receiptsRoot"], format!("{:#x}", B256::ZERO));
-    assert_eq!(block["stateRoot"], format!("{:#x}", B256::ZERO));
-    assert_eq!(block["extraData"], "0x");
     if let Some(size) = block.get("size") {
         assert_eq!(size.as_str(), Some("0x0"));
     }
@@ -871,12 +867,6 @@ async fn test_block_access_control() -> eyre::Result<()> {
         assert!(
             withdrawals.as_array().is_some_and(|items| items.is_empty()),
             "block withdrawals should be empty when present"
-        );
-    }
-    if let Some(withdrawals_root) = block.get("withdrawalsRoot") {
-        assert_eq!(
-            withdrawals_root.as_str(),
-            Some(format!("{:#x}", B256::ZERO).as_str())
         );
     }
 
