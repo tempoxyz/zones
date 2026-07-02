@@ -308,7 +308,7 @@ impl GenerateZoneGenesis {
         genesis_alloc.entry(self.admin).or_default().balance =
             U256::from(1_000_000_000_000_000_000_000u128);
 
-        let chain_config = ChainConfig {
+        let mut chain_config = ChainConfig {
             chain_id: self.chain_id,
             homestead_block: Some(0),
             eip150_block: Some(0),
@@ -330,6 +330,16 @@ impl GenerateZoneGenesis {
             deposit_contract_address: Some(Address::ZERO),
             ..Default::default()
         };
+
+        let tempo_fork_time_fields = [
+            "t0Time", "t1Time", "t1aTime", "t1bTime", "t1cTime", "t2Time", "t3Time", "t4Time",
+            "t5Time", "t6Time", "t7Time", "t8Time",
+        ];
+        for field in tempo_fork_time_fields {
+            chain_config
+                .extra_fields
+                .insert_value(field.to_string(), 0)?;
+        }
 
         let mut genesis = Genesis::default()
             .with_gas_limit(self.gas_limit)
