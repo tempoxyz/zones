@@ -13,6 +13,7 @@ use alloy_sol_types::{SolCall, SolError};
 use revm::precompile::{PrecompileError, PrecompileId, PrecompileOutput, PrecompileResult};
 use tempo_precompiles::{
     DelegateCallNotAllowed, charge_input_cost, dispatch,
+    error::TempoPrecompileError,
     storage::{Handler, StorageCtx, evm::EvmPrecompileStorageProvider},
     view,
 };
@@ -47,50 +48,30 @@ pub struct TempoState {
 
 impl TempoState {
     /// Initializes the predeploy account code and checkpoint from the genesis Tempo header.
-    pub fn initialize(&mut self, header: &[u8]) -> tempo_precompiles::Result<()> {
+    pub fn initialize(&mut self, header_rlp: &[u8]) -> tempo_precompiles::Result<()> {
         self.__initialize()?;
-        self.decode_and_store_checkpoint(header)?;
-        Ok(())
-    }
-
-    fn decode_header(header: &[u8]) -> Result<TempoHeader, ()> {
-        let mut cursor = header;
-        let decoded = TempoHeader::decode(&mut cursor).map_err(|_| ())?;
-        if !cursor.is_empty() {
-            return Err(());
-        }
-        Ok(decoded)
-    }
-
-    fn decode_and_store_checkpoint(
-        &mut self,
-        header_rlp: &[u8],
-    ) -> tempo_precompiles::Result<TempoHeader> {
-        let header = Self::decode_header(header_rlp).map_err(|_| {
-            tempo_precompiles::error::TempoPrecompileError::Fatal(
-                "invalid Tempo genesis header RLP".into(),
-            )
+        let mut cursor = header_rlp;
+        let header = TempoHeader::decode(&mut cursor).map_err(|err| {
+            TempoPrecompileError::Fatal(format!("invalid Tempo genesis header RLP: {err}"))
         })?;
-        self.store_checkpoint(header_rlp, &header)?;
-        Ok(header)
-    }
-
-    fn store_checkpoint(
-        &mut self,
-        header_rlp: &[u8],
-        header: &TempoHeader,
-    ) -> tempo_precompiles::Result<()> {
-        self.tempo_block_hash.write(keccak256(header_rlp))?;
-        self.tempo_block_number.write(header.number())?;
+        if !cursor.is_empty() {
+            return Err(TempoPrecompileError::Fatal(
+                "invalid Tempo genesis header RLP: trailing bytes after header".into(),
+            ));
+        }
+        self.write_checkpoint(header_rlp, header.number())?;
         Ok(())
     }
 
-    fn tempo_block_hash(&self) -> tempo_precompiles::Result<B256> {
-        self.tempo_block_hash.read()
-    }
-
-    fn tempo_block_number(&self) -> tempo_precompiles::Result<u64> {
-        self.tempo_block_number.read()
+    fn write_checkpoint(
+        &mut self,
+        header_rlp: &[u8],
+        block_number: u64,
+    ) -> tempo_precompiles::Result<B256> {
+        let block_hash = keccak256(header_rlp);
+        self.tempo_block_hash.write(block_hash)?;
+        self.tempo_block_number.write(block_number)?;
+        Ok(block_hash)
     }
 
     fn is_system_caller(caller: Address) -> bool {
@@ -110,11 +91,7 @@ impl TempoState {
             .revert_output(Error(message.into()).abi_encode().into()))
     }
 
-    fn invalid_rlp(&self) -> PrecompileResult {
-        self.revert_error(TempoStateAbi::InvalidRlpData {})
-    }
-
-    fn finalize_tempo(
+    fn apply_checkpoint(
         &mut self,
         sender: Address,
         call: TempoStateAbi::finalizeTempoCall,
@@ -126,34 +103,39 @@ impl TempoState {
             return self.revert_error(TempoStateAbi::OnlyZoneInbox {});
         }
 
-        let prev_block_hash = match self.tempo_block_hash() {
+        let prev_block_hash = match self.tempo_block_hash.read() {
             Ok(hash) => hash,
             Err(err) => return self.storage.error_result(err),
         };
-        let prev_block_number = match self.tempo_block_number() {
+        let prev_block_number = match self.tempo_block_number.read() {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
 
-        let header = match Self::decode_header(&call.header) {
+        let mut header_cursor = call.header.as_ref();
+        let header = match TempoHeader::decode(&mut header_cursor) {
             Ok(header) => header,
-            Err(_) => return self.invalid_rlp(),
+            Err(_) => return self.revert_error(TempoStateAbi::InvalidRlpData {}),
         };
-        let tempo_block_hash = keccak256(&call.header);
+        if !header_cursor.is_empty() {
+            return self.revert_error(TempoStateAbi::InvalidRlpData {});
+        }
 
         if header.parent_hash() != prev_block_hash {
             return self.revert_error(TempoStateAbi::InvalidParentHash {});
         }
-        if header.number() != prev_block_number.saturating_add(1) {
+        let block_number = header.number();
+        if block_number != prev_block_number.saturating_add(1) {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
-        if let Err(err) = self.store_checkpoint(&call.header, &header) {
-            return self.storage.error_result(err);
-        }
+        let tempo_block_hash = match self.write_checkpoint(&call.header, block_number) {
+            Ok(hash) => hash,
+            Err(err) => return self.storage.error_result(err),
+        };
         if let Err(err) = self.emit_event(TempoStateAbi::TempoBlockFinalized {
             blockHash: tempo_block_hash,
-            blockNumber: header.number(),
+            blockNumber: block_number,
             stateRoot: header.state_root(),
         }) {
             return self.storage.error_result(err);
@@ -173,7 +155,7 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number() {
+        let block_number = match self.tempo_block_number.read() {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
@@ -194,7 +176,7 @@ impl TempoState {
                 .revert_string("TempoState: only zone system contracts can read Tempo state");
         }
 
-        let block_number = match self.tempo_block_number() {
+        let block_number = match self.tempo_block_number.read() {
             Ok(number) => number,
             Err(err) => return self.storage.error_result(err),
         };
@@ -255,9 +237,9 @@ impl TempoState {
             calldata,
             |call| match call {
                 TempoStateAbi::TempoStateCalls {
-                    tempoBlockHash(call) => view(call, |_| self.tempo_block_hash()),
-                    tempoBlockNumber(call) => view(call, |_| self.tempo_block_number()),
-                    finalizeTempo(call) => self.finalize_tempo(msg_sender, call),
+                    tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
+                    tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
+                    finalizeTempo(call) => self.apply_checkpoint(msg_sender, call),
                     readTempoStorageSlot(call) => {
                         self.read_tempo_storage_slot(provider, msg_sender, call)
                     },
