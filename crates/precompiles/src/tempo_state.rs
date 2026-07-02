@@ -46,11 +46,10 @@ pub struct TempoState {
 }
 
 impl TempoState {
-    /// Initialize the predeploy account code and storage from the genesis Tempo header.
-    pub fn initialize_genesis(header: &[u8]) -> tempo_precompiles::Result<()> {
-        let mut state = Self::new();
-        state.__initialize()?;
-        state.decode_and_store_checkpoint(header)?;
+    /// Initializes the predeploy account code and checkpoint from the genesis Tempo header.
+    pub fn initialize(&mut self, header: &[u8]) -> tempo_precompiles::Result<()> {
+        self.__initialize()?;
+        self.decode_and_store_checkpoint(header)?;
         Ok(())
     }
 
@@ -336,7 +335,7 @@ mod tests {
             gas_params,
         );
 
-        StorageCtx::enter(&mut storage, || TempoState::initialize_genesis(header))?;
+        StorageCtx::enter(&mut storage, || TempoState::new().initialize(header))?;
         Ok(())
     }
 
