@@ -36,11 +36,12 @@ use tempo_contracts::precompiles::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::{TEMPO_BLOCK_HASH_SLOT, TEMPO_BLOCK_NUMBER_SLOT, ZONE_OUTBOX_ADDRESS};
+use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
 use zone_node::ZoneNode;
+use zone_precompiles::tempo_state::slots;
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -1784,9 +1785,12 @@ fn build_l1_anchored_genesis_from_header(
         .storage
         .get_or_insert_with(Default::default);
 
-    storage.insert(TEMPO_BLOCK_HASH_SLOT, l1_genesis_hash);
     storage.insert(
-        TEMPO_BLOCK_NUMBER_SLOT,
+        B256::from(slots::TEMPO_BLOCK_HASH.to_be_bytes()),
+        l1_genesis_hash,
+    );
+    storage.insert(
+        B256::from(slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
         B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
     );
 
