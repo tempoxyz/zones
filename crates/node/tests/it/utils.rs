@@ -36,7 +36,7 @@ use tempo_contracts::precompiles::{
 };
 use tempo_precompiles::{PATH_USD_ADDRESS, tip403_registry::ALLOW_ALL_POLICY_ID};
 use tempo_primitives::{TempoHeader, transaction::tt_signature::TempoSignature};
-use tempo_zone_contracts::ZONE_OUTBOX_ADDRESS;
+use tempo_zone_contracts::{TEMPO_BLOCK_HASH_SLOT, TEMPO_BLOCK_NUMBER_SLOT, ZONE_OUTBOX_ADDRESS};
 use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
@@ -1784,17 +1784,10 @@ fn build_l1_anchored_genesis_from_header(
         .storage
         .get_or_insert_with(Default::default);
 
-    // Slot 0 = tempoBlockHash
-    storage.insert(B256::ZERO, l1_genesis_hash);
-
-    // Slot 7 = packed (tempoBlockNumber:u64 | tempoGasLimit:u64 | tempoGasUsed:u64 | tempoTimestamp:u64)
-    let new_slot7: U256 = U256::from(l1_header.inner.number)
-        | (U256::from(l1_header.inner.gas_limit) << 64)
-        | (U256::from(l1_header.inner.gas_used) << 128)
-        | (U256::from(l1_header.inner.timestamp) << 192);
+    storage.insert(TEMPO_BLOCK_HASH_SLOT, l1_genesis_hash);
     storage.insert(
-        B256::from(U256::from(7).to_be_bytes()),
-        B256::from(new_slot7.to_be_bytes()),
+        TEMPO_BLOCK_NUMBER_SLOT,
+        B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
     );
 
     // --- Patch 2: Portal address immutables in ZoneInbox and ZoneConfig ---

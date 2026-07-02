@@ -473,7 +473,7 @@ fn advance_tempo_repro() {
     println!("\n=== Building child header ===");
 
     // Build a "next" header that's a child of the genesis.
-    // finalizeTempo requires: tempoParentHash == prev tempoBlockHash, tempoBlockNumber == prev + 1
+    // finalizeTempo requires parentHash == previous tempoBlockHash and number == previous + 1.
     let genesis_hash = {
         use alloy_rlp::Encodable;
         let genesis = tempo_primitives::TempoHeader::default();
