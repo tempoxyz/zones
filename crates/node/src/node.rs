@@ -56,7 +56,7 @@ use tempo_transaction_pool::{
 use tempo_zone_contracts::{
     TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use zone_evm::ZoneEvmConfig;
 use zone_l1::{
     DepositQueue, L1Subscriber, L1SubscriberConfig, PolicyCache, TempoStateExt,
@@ -438,16 +438,47 @@ where
             info!(target: "reth::cli", count = tokens.len(), ?tokens, "Using pre-configured initial tokens");
             tokens
         } else {
-            let tokens = ZonePortal::new(portal, l1_provider)
-                .enabled_tokens()
-                .await?;
-            info!(target: "reth::cli", count = tokens.len(), ?tokens, "Discovered enabled tokens from L1");
+            let block_number = self.policy_cache.last_l1_block();
+            let tokens = match ZonePortal::new(portal, l1_provider)
+                .enabled_tokens_at(alloy_rpc_types_eth::BlockId::number(block_number))
+                .await
+            {
+                Ok(tokens) => tokens,
+                Err(err) => {
+                    warn!(
+                        target: "reth::cli",
+                        %err,
+                        block_number,
+                        %portal,
+                        "Failed to discover enabled tokens from L1 for policy cache seeding; continuing without initial token policy seed"
+                    );
+                    return Ok(());
+                }
+            };
+            info!(
+                target: "reth::cli",
+                count = tokens.len(),
+                ?tokens,
+                block_number,
+                "Discovered enabled tokens from L1"
+            );
             tokens
         };
 
-        self.policy_cache
+        if let Err(err) = self
+            .policy_cache
             .seed_token_policies(portal, &tracked_tokens, l1_provider)
-            .await?;
+            .await
+        {
+            warn!(
+                target: "reth::cli",
+                %err,
+                count = tracked_tokens.len(),
+                %portal,
+                "Failed to seed token policies from L1; continuing with RPC fallback"
+            );
+            return Ok(());
+        }
         info!(target: "reth::cli", "Seeded token policies from L1");
         Ok(())
     }

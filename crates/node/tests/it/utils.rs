@@ -455,6 +455,33 @@ impl ZoneTestNode {
         .await
     }
 
+    /// Start a zone node connected to a real L1, anchoring genesis to a specific
+    /// L1 block and optionally overriding the initial token list used for
+    /// startup policy cache seeding.
+    pub(crate) async fn start_from_l1_at_block_with_initial_tokens(
+        l1_http_url: &url::Url,
+        l1_ws_url: &url::Url,
+        portal_address: Address,
+        block_number: u64,
+        initial_tokens: Option<Vec<Address>>,
+    ) -> eyre::Result<Self> {
+        let (genesis, genesis_block_number) =
+            build_l1_anchored_genesis_at_block(l1_http_url, portal_address, block_number).await?;
+
+        let signer = l1_dev_signer();
+        Self::launch_with_genesis_and_withdrawal_batch_interval(
+            l1_ws_url.to_string(),
+            portal_address,
+            Some(genesis_block_number),
+            next_unique_chain_id(),
+            Some(genesis),
+            signer,
+            Duration::from_secs(4),
+            initial_tokens,
+        )
+        .await
+    }
+
     pub(crate) async fn start_from_l1_with_withdrawal_batch_interval(
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,
@@ -473,6 +500,7 @@ impl ZoneTestNode {
             Some(genesis),
             signer,
             withdrawal_batch_interval,
+            Some(vec![]),
         )
         .await
     }
@@ -568,6 +596,7 @@ impl ZoneTestNode {
             custom_genesis,
             sequencer_signer,
             Duration::from_secs(4),
+            Some(vec![]),
         )
         .await
     }
@@ -580,6 +609,7 @@ impl ZoneTestNode {
         custom_genesis: Option<Genesis>,
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
         withdrawal_batch_interval: Duration,
+        initial_tokens: Option<Vec<Address>>,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
         let is_local_dummy_l1 = l1_ws_url == DUMMY_L1_URL;
@@ -592,15 +622,17 @@ impl ZoneTestNode {
         genesis.config.chain_id = chain_id;
         let chain_spec = TempoChainSpec::from_genesis(genesis);
 
-        let zone_node = ZoneNode::new(
+        let mut zone_node = ZoneNode::new(
             l1_ws_url,
             portal_address,
             genesis_tempo_block_number,
             4,
             std::time::Duration::from_millis(100),
         )
-        .with_withdrawal_batch_interval(withdrawal_batch_interval)
-        .with_initial_tokens(vec![]);
+        .with_withdrawal_batch_interval(withdrawal_batch_interval);
+        if let Some(initial_tokens) = initial_tokens {
+            zone_node = zone_node.with_initial_tokens(initial_tokens);
+        }
 
         // Don't use .dev() — it spawns a LocalMiner that conflicts with ZoneEngine.
         // The ZoneEngine is the sole block producer; it advances the chain when L1

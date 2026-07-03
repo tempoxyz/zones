@@ -11427,6 +11427,7 @@ dependencies = [
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
+ "alloy-rpc-types-eth",
  "alloy-sol-types",
  "const-hex",
  "futures",

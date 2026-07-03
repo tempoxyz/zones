@@ -12,7 +12,12 @@ use crate::utils::{DEFAULT_TIMEOUT, L1Fixture, start_local_zone_with_fixture};
 // Imports for real-L1 tests
 use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::B256;
-use alloy_provider::Provider;
+use alloy_provider::{Provider, ProviderBuilder};
+use alloy_rpc_types_eth::BlockId;
+use tempo_alloy::TempoNetwork;
+use tempo_precompiles::PATH_USD_ADDRESS;
+use tempo_zone_contracts::ZonePortal;
+use zone_l1::PolicyCache;
 
 /// Enable a new token (AlphaUSD) via a `TokenEnabled` event, then deposit it
 /// and verify the recipient receives the minted balance.
@@ -112,6 +117,92 @@ async fn test_enable_token_and_deposit_same_block() -> eyre::Result<()> {
 /// Longer timeout for real L1 tests — the L1 dev node produces blocks every
 /// 500ms and the L1Subscriber needs to connect, backfill, and subscribe.
 const L1_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_startup_discovers_enabled_tokens_at_local_l1_height() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let portal_address = l1.deploy_zone().await?;
+    let seed_block = l1.provider().get_block_number().await?;
+
+    let future_salt = B256::new([
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 42,
+    ]);
+    let future_token = l1.create_tip20("FutureUSD", "fUSD", future_salt).await?;
+    l1.enable_token_on_portal(portal_address, future_token)
+        .await?;
+
+    let portal = ZonePortal::new(portal_address, l1.provider());
+    let latest_tokens = portal.enabled_tokens().await?;
+    assert!(
+        latest_tokens.contains(&future_token),
+        "latest portal state should include the newly-enabled token"
+    );
+
+    let historical_tokens = portal
+        .enabled_tokens_at(BlockId::number(seed_block))
+        .await?;
+    assert_eq!(
+        historical_tokens,
+        vec![PATH_USD_ADDRESS],
+        "startup should discover only tokens enabled at the local L1 height"
+    );
+
+    let tempo_provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .connect_http(l1.http_url().clone())
+        .erased();
+
+    let latest_seed_cache = PolicyCache::default();
+    latest_seed_cache.set_last_l1_block(seed_block);
+    let err = latest_seed_cache
+        .seed_token_policies(portal_address, &latest_tokens, &tempo_provider)
+        .await
+        .expect_err("latest token discovery should include a future uninitialized token");
+    assert!(
+        err.to_string().contains("Uninitialized"),
+        "expected uninitialized future token error, got {err}"
+    );
+
+    let historical_seed_cache = PolicyCache::default();
+    historical_seed_cache.set_last_l1_block(seed_block);
+    historical_seed_cache
+        .seed_token_policies(portal_address, &historical_tokens, &tempo_provider)
+        .await?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_startup_policy_seed_errors_do_not_abort_launch() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let l1 = L1TestNode::start().await?;
+    let portal_address = l1.deploy_zone().await?;
+    let seed_block = l1.provider().get_block_number().await?;
+
+    let future_salt = B256::new([
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 43,
+    ]);
+    let future_token = l1
+        .create_tip20("FutureSeedUSD", "fsUSD", future_salt)
+        .await?;
+    l1.enable_token_on_portal(portal_address, future_token)
+        .await?;
+
+    let _zone = ZoneTestNode::start_from_l1_at_block_with_initial_tokens(
+        l1.http_url(),
+        l1.ws_url(),
+        portal_address,
+        seed_block,
+        Some(vec![future_token]),
+    )
+    .await?;
+
+    Ok(())
+}
 
 /// Full TokenEnabled pipeline with a real in-process L1 node:
 ///

@@ -246,10 +246,24 @@ impl<P: alloy_provider::Provider<N>, N: alloy_network::Network>
     pub async fn enabled_tokens(
         &self,
     ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
-        let count = self.enabledTokenCount().call().await?;
+        self.enabled_tokens_at(alloy_rpc_types_eth::BlockId::latest())
+            .await
+    }
+
+    /// Returns all token addresses enabled for bridging at `block_id`.
+    ///
+    /// Callers that pair the returned token list with other historical L1 reads
+    /// should use this instead of [`enabled_tokens`](Self::enabled_tokens), so
+    /// future `TokenEnabled` events are not mixed into older state snapshots.
+    pub async fn enabled_tokens_at(
+        &self,
+        block_id: alloy_rpc_types_eth::BlockId,
+    ) -> Result<alloc::vec::Vec<alloy_primitives::Address>, alloy_contract::Error> {
+        let count = self.enabledTokenCount().block(block_id).call().await?;
         let futs: alloc::vec::Vec<_> = (0..count.to::<u64>())
             .map(|i| async move {
                 self.enabledTokenAt(alloy_primitives::U256::from(i))
+                    .block(block_id)
                     .call()
                     .await
             })
