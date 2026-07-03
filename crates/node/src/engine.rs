@@ -46,13 +46,26 @@ use reth_node_builder::ConsensusEngineHandle;
 use reth_payload_builder::PayloadBuilderHandle;
 use reth_payload_primitives::{BuiltPayload, PayloadKind, PayloadTypes};
 use reth_primitives_traits::SealedHeader;
-use std::{sync::Arc, time::Duration};
+use std::{
+    sync::Arc,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
 use tracing::{error, warn};
 
 use zone_l1::{DepositQueue, L1BlockDeposits, PolicyProvider, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
+
+fn should_skip_tx_pool(
+    l1_timestamp_secs: u64,
+    now: SystemTime,
+    no_tx_pool_drift_threshold: Duration,
+) -> bool {
+    let l1_timestamp = UNIX_EPOCH + Duration::from_secs(l1_timestamp_secs);
+    now.duration_since(l1_timestamp)
+        .is_ok_and(|drift| drift > no_tx_pool_drift_threshold)
+}
 
 /// Engine that drives L2 block production from L1 events.
 ///
@@ -87,6 +100,8 @@ pub struct ZoneEngine {
     /// Cache-first, RPC-fallback TIP-403 policy provider for authorization checks
     /// on encrypted deposit recipients during preparation.
     policy_provider: PolicyProvider,
+    /// Maximum L1 timestamp drift before catch-up blocks skip txpool transactions.
+    no_tx_pool_drift_threshold: Duration,
 }
 
 impl ZoneEngine {
@@ -100,6 +115,7 @@ impl ZoneEngine {
         sequencer_key: k256::SecretKey,
         portal_address: Address,
         policy_provider: PolicyProvider,
+        no_tx_pool_drift_threshold: Duration,
     ) -> Self {
         Self {
             chain_spec,
@@ -111,6 +127,7 @@ impl ZoneEngine {
             sequencer_key,
             portal_address,
             policy_provider,
+            no_tx_pool_drift_threshold,
         }
     }
 
@@ -209,6 +226,11 @@ impl ZoneEngine {
         // two chains stay in lockstep.
         let timestamp_secs = l1_block.header.timestamp();
         let timestamp_millis_part = l1_block.header.timestamp_millis_part;
+        let no_tx_pool = should_skip_tx_pool(
+            timestamp_secs,
+            SystemTime::now(),
+            self.no_tx_pool_drift_threshold,
+        );
 
         let l1_block = self.prepare_l1_block(l1_block).await?;
 
@@ -230,6 +252,7 @@ impl ZoneEngine {
             },
             timestamp_millis_part,
             l1_block,
+            no_tx_pool,
         };
 
         // Send FCU with payload attributes through the engine API to trigger

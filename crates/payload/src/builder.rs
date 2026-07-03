@@ -346,72 +346,74 @@ where
             }
         }
 
-        // Execute pool transactions
-        // TODO: Use gas accounting from TempoPayloadBuilder (payment vs non-payment limits, etc.)
-        let mut best_txs = self
-            .pool
-            .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
+        if !attributes.no_tx_pool {
+            // Execute pool transactions
+            // TODO: Use gas accounting from TempoPayloadBuilder (payment vs non-payment limits, etc.)
+            let mut best_txs = self
+                .pool
+                .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
 
-        while let Some(pool_tx) = best_txs.next() {
-            // Contract creation (CREATE) transactions are not allowed on zones
-            if pool_tx.transaction.is_create() {
-                best_txs.mark_invalid(
-                    &pool_tx,
-                    InvalidPoolTransactionError::Consensus(
-                        reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
-                    ),
-                );
-                continue;
-            }
-            let gas_limit_left = block_gas_limit;
-            if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
-                best_txs.mark_invalid(
-                    &pool_tx,
-                    InvalidPoolTransactionError::ExceedsGasLimit(
-                        pool_tx.gas_limit(),
-                        gas_limit_left.saturating_sub(cumulative_gas_used),
-                    ),
-                );
-                continue;
-            }
-
-            if cancel.is_cancelled() {
-                return Ok(BuildOutcome::Cancelled);
-            }
-
-            let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
-            let tx_hash = *pool_tx.hash();
-            match builder.execute_transaction(tx_with_env) {
-                Ok(gas_used) => {
-                    cumulative_gas_used += gas_used.tx_gas_used();
-                    if let Some(receipt) = builder.executor().receipts().last() {
-                        collect_requested_withdrawals(
-                            receipt,
-                            tx_hash,
-                            &mut requested_withdrawals,
-                        )?;
-                    }
-                }
-                Err(reth_evm::block::BlockExecutionError::Validation(
-                    reth_evm::block::BlockValidationError::InvalidTx { error, .. },
-                )) => {
-                    if !error.is_nonce_too_low() {
-                        best_txs.mark_invalid(
-                            &pool_tx,
-                            InvalidPoolTransactionError::Consensus(
-                                reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
-                            ),
-                        );
-                    }
+            while let Some(pool_tx) = best_txs.next() {
+                // Contract creation (CREATE) transactions are not allowed on zones
+                if pool_tx.transaction.is_create() {
+                    best_txs.mark_invalid(
+                        &pool_tx,
+                        InvalidPoolTransactionError::Consensus(
+                            reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                        ),
+                    );
                     continue;
                 }
-                Err(reth_evm::block::BlockExecutionError::Internal(
-                    reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
-                )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
-                    warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
+                let gas_limit_left = block_gas_limit;
+                if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
+                    best_txs.mark_invalid(
+                        &pool_tx,
+                        InvalidPoolTransactionError::ExceedsGasLimit(
+                            pool_tx.gas_limit(),
+                            gas_limit_left.saturating_sub(cumulative_gas_used),
+                        ),
+                    );
                     continue;
                 }
-                Err(err) => return Err(PayloadBuilderError::evm(err)),
+
+                if cancel.is_cancelled() {
+                    return Ok(BuildOutcome::Cancelled);
+                }
+
+                let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
+                let tx_hash = *pool_tx.hash();
+                match builder.execute_transaction(tx_with_env) {
+                    Ok(gas_used) => {
+                        cumulative_gas_used += gas_used.tx_gas_used();
+                        if let Some(receipt) = builder.executor().receipts().last() {
+                            collect_requested_withdrawals(
+                                receipt,
+                                tx_hash,
+                                &mut requested_withdrawals,
+                            )?;
+                        }
+                    }
+                    Err(reth_evm::block::BlockExecutionError::Validation(
+                        reth_evm::block::BlockValidationError::InvalidTx { error, .. },
+                    )) => {
+                        if !error.is_nonce_too_low() {
+                            best_txs.mark_invalid(
+                                &pool_tx,
+                                InvalidPoolTransactionError::Consensus(
+                                    reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
+                                ),
+                            );
+                        }
+                        continue;
+                    }
+                    Err(reth_evm::block::BlockExecutionError::Internal(
+                        reth_evm::block::InternalBlockExecutionError::EVM { ref error, .. },
+                    )) if zone_precompiles::is_zone_rpc_error(&error.to_string()) => {
+                        warn!(target: "zone::payload", %error, ?pool_tx, "skipping pool tx due to transient RPC error");
+                        continue;
+                    }
+                    Err(err) => return Err(PayloadBuilderError::evm(err)),
+                }
             }
         }
 

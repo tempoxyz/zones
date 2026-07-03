@@ -13,7 +13,7 @@ use zone_evm::ZoneEvmConfig;
 use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL;
 
 use crate::{
-    ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig,
+    DEFAULT_NO_TX_POOL_DRIFT_THRESHOLD, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig,
     rpc::auth::DEFAULT_MAX_AUTH_TOKEN_VALIDITY_SECS,
 };
 use zone_sequencer::BatchAnchorConfig;
@@ -92,6 +92,9 @@ impl ZoneCli {
                     withdrawal_poll_interval: Duration::from_secs(
                         args.withdrawal_poll_interval_secs,
                     ),
+                    no_tx_pool_drift_threshold: Duration::from_secs(
+                        args.no_tx_pool_drift_threshold_secs,
+                    ),
                 });
             }
 
@@ -147,6 +150,14 @@ pub struct ZoneArgs {
         default_value_t = 5
     )]
     pub withdrawal_poll_interval_secs: u64,
+
+    /// Maximum L1 timestamp drift before catch-up blocks skip txpool transactions.
+    #[arg(
+        long = "zone.no-tx-pool-drift-threshold-secs",
+        env = "ZONE_NO_TX_POOL_DRIFT_THRESHOLD_SECS",
+        default_value_t = DEFAULT_NO_TX_POOL_DRIFT_THRESHOLD.as_secs()
+    )]
+    pub no_tx_pool_drift_threshold_secs: u64,
 
     /// Genesis Tempo L1 block number override.
     #[arg(long = "l1.genesis-block-number", env = "L1_GENESIS_BLOCK_NUMBER")]

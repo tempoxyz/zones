@@ -73,6 +73,9 @@ use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequence
 /// Network primitives for Zone Nodes
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 
+/// Default L1 timestamp drift before catch-up blocks skip txpool transactions.
+pub const DEFAULT_NO_TX_POOL_DRIFT_THRESHOLD: Duration = Duration::from_secs(1);
+
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
 pub struct ZoneSequencerAddOnsConfig {
@@ -88,6 +91,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub batch_anchor_config: BatchAnchorConfig,
     /// How often the withdrawal processor polls the L1 queue.
     pub withdrawal_poll_interval: Duration,
+    /// Maximum L1 timestamp drift before the engine skips txpool transactions.
+    pub no_tx_pool_drift_threshold: Duration,
 }
 
 /// Configuration for the Zone private RPC server extension.
@@ -375,7 +380,13 @@ where
         if let Some(ref config) = self.sequencer_config {
             let sequencer_addr = config.sequencer_signer.address();
             let sequencer_key = SecretKey::from(config.sequencer_signer.credential());
-            self.spawn_zone_engine(l1_provider, &ctx, sequencer_addr, sequencer_key)?;
+            self.spawn_zone_engine(
+                l1_provider,
+                &ctx,
+                sequencer_addr,
+                sequencer_key,
+                config.no_tx_pool_drift_threshold,
+            )?;
         }
 
         let task_executor = ctx.node.task_executor().clone();
@@ -491,6 +502,7 @@ where
         ctx: &AddOnsContext<'_, N>,
         fee_recipient: Address,
         sequencer_key: SecretKey,
+        no_tx_pool_drift_threshold: Duration,
     ) -> eyre::Result<()> {
         let policy_provider = PolicyProvider::new(
             self.policy_cache.clone(),
@@ -511,6 +523,7 @@ where
             sequencer_key,
             self.portal_address,
             policy_provider,
+            no_tx_pool_drift_threshold,
         );
         ctx.node
             .task_executor()

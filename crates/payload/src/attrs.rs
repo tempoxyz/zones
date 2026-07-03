@@ -38,6 +38,9 @@ pub struct ZonePayloadAttributes {
     /// processes exactly one L1 block via `advanceTempo`. Decryption and
     /// TIP-403 policy checks have already been performed by the engine.
     pub l1_block: PreparedL1Block,
+
+    /// Whether to skip user txpool transactions while building this payload.
+    pub no_tx_pool: bool,
 }
 
 impl reth_node_api::PayloadAttributes for ZonePayloadAttributes {
