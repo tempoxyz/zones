@@ -601,6 +601,7 @@ impl ZoneTestNode {
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn launch_with_genesis_and_withdrawal_batch_interval(
         l1_ws_url: String,
         portal_address: Address,
