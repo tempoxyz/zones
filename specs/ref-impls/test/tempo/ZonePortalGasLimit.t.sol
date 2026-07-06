@@ -2,8 +2,8 @@
 pragma solidity ^0.8.13;
 
 import { IZonePortal, Withdrawal } from "../../src/interfaces/IZone.sol";
-import { ZonePortal } from "../../src/l1/ZonePortal.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
+import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { Test } from "forge-std/Test.sol";
 
 contract MockPortalToken {

@@ -11,9 +11,9 @@ import {
     ZONE_TX_CONTEXT
 } from "../../src/interfaces/IZone.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneConfig } from "../../src/predeploys/ZoneConfig.sol";
-import { ZoneInbox } from "../../src/predeploys/ZoneInbox.sol";
-import { ZoneOutbox } from "../../src/predeploys/ZoneOutbox.sol";
+import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
+import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
+import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";
 import { MockZoneTxContext } from "../mocks/MockZoneTxContext.sol";

@@ -148,8 +148,8 @@ pub struct PolicyCacheInner {
     /// Highest L1 block number processed by the engine.
     ///
     /// This equals the last block height the engine has processed and
-    /// should advance in lockstep with the L1 head tracked by the
-    /// `TempoStateReader` contract. The
+    /// should advance in lockstep with the L1 head tracked by the `TempoState`
+    /// precompile. The
     /// [`PolicyResolutionTask`](super::PolicyResolutionTask) reads this to
     /// query L1 at the correct block height for cache-miss RPC fallback.
     last_l1_block: u64,

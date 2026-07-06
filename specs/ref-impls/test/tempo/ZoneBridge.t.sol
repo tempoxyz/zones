@@ -27,14 +27,14 @@ import {
     ZONE_OUTBOX,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
-import { ZoneFactory } from "../../src/l1/ZoneFactory.sol";
-import { ZoneMessenger } from "../../src/l1/ZoneMessenger.sol";
-import { ZonePortal } from "../../src/l1/ZonePortal.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
 import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZoneConfig } from "../../src/predeploys/ZoneConfig.sol";
-import { ZoneInbox } from "../../src/predeploys/ZoneInbox.sol";
-import { ZoneOutbox } from "../../src/predeploys/ZoneOutbox.sol";
+import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
+import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
+import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
+import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
+import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
+import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";

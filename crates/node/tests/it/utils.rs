@@ -236,7 +236,7 @@ where
 /// Wraps an in-process reth node configured as a Zone, providing:
 /// - An HTTP RPC endpoint for provider connections
 /// - A [`DepositQueue`] handle for injecting synthetic L1 blocks
-/// - A [`L1StateCache`] for seeding TempoStateReader precompile data
+/// - A [`L1StateCache`] for seeding TempoState storage-read data
 ///
 /// # Construction
 ///
@@ -542,7 +542,7 @@ impl ZoneTestNode {
     /// The L1Subscriber retries a dummy URL in the background, but the
     /// ZoneEngine is fully functional. Deposits and L1 headers are injected
     /// directly into the `deposit_queue`; the L1 state cache must be seeded
-    /// via [`L1Fixture::seed_l1_cache`] for TempoStateReader precompile reads.
+    /// via [`L1Fixture::seed_l1_cache`] for TempoState storage reads.
     pub(crate) async fn start_local() -> eyre::Result<Self> {
         Self::launch(
             DUMMY_L1_URL.to_string(),
@@ -3146,10 +3146,10 @@ impl L1Fixture {
     }
 
     /// Pre-populate the L1 state cache with values that `advanceTempo` will read
-    /// via the TempoStateReader precompile.
+    /// via the TempoState precompile.
     ///
     /// Without a real L1, the precompile would fail with a hard error on cache miss.
-    /// This seeds the cache so that `readStorageAt(portal, slot, blockNumber)` succeeds
+    /// This seeds the cache so that `readTempoStorageSlot(portal, slot)` succeeds
     /// for each block we plan to inject.
     pub(crate) fn seed_l1_cache(
         &self,

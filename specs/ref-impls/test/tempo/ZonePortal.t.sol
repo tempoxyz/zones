@@ -28,12 +28,12 @@ import {
     ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
-import { ZoneFactory } from "../../src/l1/ZoneFactory.sol";
-import { ZoneMessenger } from "../../src/l1/ZoneMessenger.sol";
-import { ZonePortal } from "../../src/l1/ZonePortal.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
 import { EMPTY_SENTINEL, WithdrawalQueueLib } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/libraries/WithdrawalQueueLib.sol";
+import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
+import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
+import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { Vm } from "forge-std/Vm.sol";
 

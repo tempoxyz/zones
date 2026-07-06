@@ -23,8 +23,8 @@ import {
     ZONE_OUTBOX
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
-import { ZoneConfig } from "../../src/predeploys/ZoneConfig.sol";
-import { ZoneInbox } from "../../src/predeploys/ZoneInbox.sol";
+import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
+import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";
 import { Test } from "forge-std/Test.sol";

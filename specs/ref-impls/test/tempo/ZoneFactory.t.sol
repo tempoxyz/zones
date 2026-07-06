@@ -2,9 +2,9 @@
 pragma solidity ^0.8.13;
 
 import { IZoneFactory, ZoneInfo, ZoneParams } from "../../src/interfaces/IZone.sol";
-import { ZoneFactory } from "../../src/l1/ZoneFactory.sol";
-import { ZoneMessenger } from "../../src/l1/ZoneMessenger.sol";
-import { ZonePortal } from "../../src/l1/ZonePortal.sol";
+import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
+import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
+import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { Vm } from "forge-std/Vm.sol";
 import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";

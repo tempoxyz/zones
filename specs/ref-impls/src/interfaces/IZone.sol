@@ -265,41 +265,6 @@ interface IAesGcmDecrypt {
 
 }
 
-/// @title ITempoStateReader
-/// @notice Low-level compatibility precompile for reading Tempo L1 contract storage at a given block height
-/// @dev Predeploy at 0x1c00000000000000000000000000000000000004
-interface ITempoStateReader {
-
-    /// @notice Read a single storage slot from a Tempo L1 contract
-    /// @param account The Tempo L1 contract address
-    /// @param slot The storage slot to read
-    /// @param blockNumber The L1 block number to query
-    /// @return value The storage value
-    function readStorageAt(
-        address account,
-        bytes32 slot,
-        uint64 blockNumber
-    )
-        external
-        view
-        returns (bytes32);
-
-    /// @notice Read multiple storage slots from a Tempo L1 contract
-    /// @param account The Tempo L1 contract address
-    /// @param slots The storage slots to read
-    /// @param blockNumber The L1 block number to query
-    /// @return values The storage values
-    function readStorageBatchAt(
-        address account,
-        bytes32[] calldata slots,
-        uint64 blockNumber
-    )
-        external
-        view
-        returns (bytes32[] memory);
-
-}
-
 // Maximum callback gas a withdrawal may request.
 // The processor adds fixed overhead plus an EIP-150 cushion, so this value
 // keeps the outer `processWithdrawal` transaction well below a 30M gas L1 block
@@ -348,9 +313,6 @@ address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 
 // ZoneConfig system contract address (0x1c00...0003)
 address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
-
-// TempoStateReader compatibility precompile address (0x1c00...0004)
-address constant TEMPO_STATE_READER = 0x1c00000000000000000000000000000000000004;
 
 // ZoneTxContext precompile address (0x1c00...0005)
 address constant ZONE_TX_CONTEXT = 0x1C00000000000000000000000000000000000005;

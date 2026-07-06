@@ -262,7 +262,7 @@ The portal gives the messenger max approval for each enabled token so that withd
 
 ### Zone Predeploys
 
-Each zone has six system contracts deployed at genesis at fixed addresses:
+Each zone has five system contracts deployed at genesis at fixed addresses:
 
 | Predeploy | Address | Purpose |
 |-----------|---------|---------|
@@ -270,7 +270,6 @@ Each zone has six system contracts deployed at genesis at fixed addresses:
 | [`ZoneInbox`](#izoneinbox) | `0x1c00...0001` | Advances the zone's view of Tempo and processes incoming deposits. Sole mint authority. |
 | [`ZoneOutbox`](#izoneoutbox) | `0x1c00...0002` | Handles withdrawal requests and batch finalization. Sole burn authority. |
 | [`ZoneConfig`](#izoneconfig) | `0x1c00...0003` | Central configuration. Reads the sequencer address and token registry from Tempo via `TempoState`. |
-| `TempoStateReader` | `0x1c00...0004` | Low-level compatibility precompile for explicit block-number Tempo L1 storage reads. System contracts should read through `TempoState`. |
 | `ZoneTxContext` | `0x1c00...0005` | Provides the current transaction hash to system contracts (used by `ZoneOutbox` for `senderTag` computation). |
 
 `ZoneConfig` reads the sequencer address and token registry from the portal on Tempo via `TempoState` storage reads, making Tempo the single source of truth for zone configuration. See [Tempo State Reads](#tempo-state-reads) for details.

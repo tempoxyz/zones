@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { ITempoState, ZONE_INBOX } from "../../src/interfaces/IZone.sol";
-import { TempoState } from "../../src/predeploys/TempoState.sol";
+import { TempoState } from "../../src/tempo/TempoState.sol";
 import { Test, stdJson } from "forge-std/Test.sol";
 
 contract TempoStateRlpHarness is TempoState {
@@ -247,13 +247,13 @@ contract TempoStateTest is Test {
                         STORAGE READING TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_readTempoStorageSlot_revertsWithoutPrecompile() public {
+    function test_readTempoStorageSlot_revertsInReferenceImpl() public {
         vm.prank(zoneInbox);
         vm.expectRevert();
         tempoState.readTempoStorageSlot(address(0x1234), bytes32(0));
     }
 
-    function test_readTempoStorageSlots_revertsWithoutPrecompile() public {
+    function test_readTempoStorageSlots_revertsInReferenceImpl() public {
         bytes32[] memory slots = new bytes32[](2);
         slots[0] = bytes32(uint256(1));
         slots[1] = bytes32(uint256(2));
