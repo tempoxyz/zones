@@ -6,7 +6,7 @@
 //!   accepts batch proofs, and processes withdrawals back to L1 recipients.
 //! - **ZoneOutbox** — deployed on the Zone L2. Collects user withdrawal requests, builds
 //!   withdrawal hash chains, and exposes `LastBatch` state for proof generation.
-//! - **ZoneInbox**, **TempoState**, **TempoStateReader**, **ZoneTxContext** — Zone L2 predeploys.
+//! - **ZoneInbox**, **TempoState**, **ZoneTxContext** — Zone L2 predeploys.
 //! - **ZoneFactory**, **SwapAndDepositRouter** — deployed on Tempo L1.
 
 #![cfg_attr(not(feature = "std"), no_std)]

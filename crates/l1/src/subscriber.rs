@@ -28,15 +28,15 @@ pub struct L1SubscriberConfig {
     pub retry_connection_interval: std::time::Duration,
 }
 
-pub(crate) trait LocalTempoStateReader: Send + Sync {
+pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
     fn latest_tempo_block_number(&self) -> eyre::Result<u64>;
 }
 
-struct ProviderLocalTempoStateReader<P> {
+struct ProviderLocalTempoCheckpointReader<P> {
     provider: P,
 }
 
-impl<P> LocalTempoStateReader for ProviderLocalTempoStateReader<P>
+impl<P> LocalTempoCheckpointReader for ProviderLocalTempoCheckpointReader<P>
 where
     P: StateProviderFactory + Clone + Send + Sync + 'static,
 {
@@ -50,7 +50,7 @@ where
 #[derive(Clone)]
 pub struct L1Subscriber {
     pub(crate) config: L1SubscriberConfig,
-    pub(crate) local_state: Arc<dyn LocalTempoStateReader>,
+    pub(crate) local_state: Arc<dyn LocalTempoCheckpointReader>,
     pub(crate) deposit_queue: DepositQueue,
     /// Mutable set of token addresses tracked for TIP-403 policy events.
     /// Initialized from config, grows dynamically when `TokenEnabled` events are seen.
@@ -78,7 +78,7 @@ impl L1Subscriber {
         let tracked_tokens = config.policy_cache.read().tracked_tokens();
         let subscriber = Self {
             config,
-            local_state: Arc::new(ProviderLocalTempoStateReader {
+            local_state: Arc::new(ProviderLocalTempoCheckpointReader {
                 provider: local_state_provider,
             }),
             deposit_queue,

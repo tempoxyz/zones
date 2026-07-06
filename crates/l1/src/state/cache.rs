@@ -1,10 +1,9 @@
 //! Block-versioned in-memory cache of Tempo L1 contract storage slots.
 //!
-//! The zone's [`TempoStateReader`](super::precompile::TempoStateReader) precompile reads
-//! Tempo L1 storage at a **specific L1 block height** (the `tempoBlockNumber` the zone committed
-//! to via `TempoState.finalizeTempo()` on Zone L2). Because the L1 chain may advance several
-//! blocks ahead of the zone's committed height, the cache must be able to serve historical
-//! values — not just "latest".
+//! The zone's `TempoState` precompile reads Tempo L1 storage at a **specific L1 block height**
+//! (the `tempoBlockNumber` the zone committed to via `TempoState.finalizeTempo()` on Zone L2).
+//! Because the L1 chain may advance several blocks ahead of the zone's committed height, the
+//! cache must be able to serve historical values — not just "latest".
 //!
 //! ## Storage model
 //!

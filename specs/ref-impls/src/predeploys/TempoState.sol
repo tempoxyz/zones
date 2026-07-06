@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { ITempoState, ITempoStateReader } from "../interfaces/IZone.sol";
+import { ITempoState } from "../interfaces/IZone.sol";
 
 /// @title TempoState
 /// @notice Zone-side predeploy for Tempo state verification
@@ -70,10 +70,6 @@ contract TempoState is ITempoState {
     address private constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
     address private constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
 
-    /// @notice TempoStateReader compatibility precompile address
-    /// @dev Low-level precompile that reads Tempo L1 contract storage at a given block height.
-    address private constant TEMPO_STATE_READER = 0x1c00000000000000000000000000000000000004;
-
     /// @notice Check if caller is a zone system contract
     modifier onlySystemContract() {
         if (msg.sender != ZONE_INBOX && msg.sender != ZONE_OUTBOX && msg.sender != ZONE_CONFIG) {
@@ -84,39 +80,32 @@ contract TempoState is ITempoState {
 
     /// @notice Read a storage slot from a Tempo L1 contract at the latest finalized block
     /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
-    ///      Forwards to the TempoStateReader precompile with the current tempoBlockNumber.
-    /// @param account The Tempo L1 contract address (ZonePortal or TIP-403)
-    /// @param slot The storage slot to read
-    /// @return value The storage value
+    ///      Implemented natively by the zone EVM.
     function readTempoStorageSlot(
-        address account,
-        bytes32 slot
+        address,
+        bytes32
     )
         external
         view
         onlySystemContract
-        returns (bytes32 value)
+        returns (bytes32)
     {
-        value = ITempoStateReader(TEMPO_STATE_READER).readStorageAt(account, slot, tempoBlockNumber);
+        revert("TempoState: native storage read");
     }
 
     /// @notice Read multiple storage slots from a Tempo L1 contract at the latest finalized block
     /// @dev RESTRICTED: Only callable by zone system contracts (ZoneInbox, ZoneOutbox, ZoneConfig).
-    ///      Forwards to the TempoStateReader precompile with the current tempoBlockNumber.
-    /// @param account The Tempo L1 contract address (ZonePortal or TIP-403)
-    /// @param slots The storage slots to read
-    /// @return values The storage values
+    ///      Implemented natively by the zone EVM.
     function readTempoStorageSlots(
-        address account,
-        bytes32[] calldata slots
+        address,
+        bytes32[] calldata
     )
         external
         view
         onlySystemContract
-        returns (bytes32[] memory values)
+        returns (bytes32[] memory)
     {
-        values = ITempoStateReader(TEMPO_STATE_READER)
-            .readStorageBatchAt(account, slots, tempoBlockNumber);
+        revert("TempoState: native storage read");
     }
 
     /*//////////////////////////////////////////////////////////////

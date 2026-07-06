@@ -262,7 +262,6 @@ just set-transfer-policy $TOKEN <M>
 
 | Address | Precompile | Purpose |
 |---------|-----------|---------|
-| `0x1C00…0004` | `TempoStateReader` | Read L1 contract storage from zone contracts |
 | `0x1C00…0100` | `ChaumPedersenVerify` | Verify DLOG equality proofs for ECDH |
 | `0x1C00…0101` | `AesGcmDecrypt` | AES-256-GCM authenticated decryption |
 | `0x20FC…0000` | `ZoneTokenFactory` | Initialize TIP-20 tokens on the zone |

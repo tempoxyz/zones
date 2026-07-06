@@ -43,7 +43,7 @@ The harness provides two independent testing paths:
 
 Uses `L1Fixture` to manually construct `TempoHeader` and `Deposit` objects,
 push them into the `DepositQueue`, and seed the `L1StateCache` for
-`TempoStateReader` precompile reads. Fast (~1s per test) and deterministic.
+`TempoState` storage reads. Fast (~1s per test) and deterministic.
 
 ```rust
 let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
@@ -56,7 +56,7 @@ fixture.inject_deposits(&zone.deposit_queue, vec![deposit]);
 - Chains `parent_hash = keccak256(rlp(prev_header))` to match `TempoState` verification
 - Monotonic block numbers starting from 1, timestamps from 1,000,000
 - `seed_l1_cache()` populates portal storage slots (sequencer=0, deposit_queue_hash=4)
-  so `TempoStateReader` precompile reads succeed without a real L1
+  so `TempoState` storage reads succeed without a real L1
 
 **Multi-zone support:** Use `next_block()` + `enqueue()` to broadcast the same
 `FixtureBlock` to multiple zone deposit queues:

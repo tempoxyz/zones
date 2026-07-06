@@ -113,12 +113,12 @@ impl EncryptedDepositFixture {
     }
 }
 
-struct SequenceLocalTempoStateReader {
+struct SequenceLocalTempoCheckpointReader {
     values: Mutex<VecDeque<u64>>,
     last_value: u64,
 }
 
-impl SequenceLocalTempoStateReader {
+impl SequenceLocalTempoCheckpointReader {
     fn new(values: impl Into<VecDeque<u64>>) -> Self {
         let values = values.into();
         let last_value = values.back().copied().unwrap_or_default();
@@ -129,7 +129,7 @@ impl SequenceLocalTempoStateReader {
     }
 }
 
-impl LocalTempoStateReader for SequenceLocalTempoStateReader {
+impl LocalTempoCheckpointReader for SequenceLocalTempoCheckpointReader {
     fn latest_tempo_block_number(&self) -> eyre::Result<u64> {
         let mut values = self.values.lock();
         Ok(values.pop_front().unwrap_or(self.last_value))
@@ -137,7 +137,7 @@ impl LocalTempoStateReader for SequenceLocalTempoStateReader {
 }
 
 fn test_subscriber(
-    local_state: Arc<dyn LocalTempoStateReader>,
+    local_state: Arc<dyn LocalTempoCheckpointReader>,
     genesis_tempo_block_number: Option<u64>,
 ) -> L1Subscriber {
     let portal_address = address!("0x0000000000000000000000000000000000000ABC");
@@ -403,7 +403,10 @@ fn update_l1_state_anchor_reorg_clears_stale_policy_state() {
     use crate::state::tip403::AuthRole;
     use tempo_contracts::precompiles::ITIP403Registry::PolicyType;
 
-    let subscriber = test_subscriber(Arc::new(SequenceLocalTempoStateReader::new([0])), Some(0));
+    let subscriber = test_subscriber(
+        Arc::new(SequenceLocalTempoCheckpointReader::new([0])),
+        Some(0),
+    );
     let token = address!("0x0000000000000000000000000000000000000011");
     let user = address!("0x0000000000000000000000000000000000000022");
 
@@ -479,7 +482,9 @@ fn make_portal_log<E: SolEvent>(portal_address: Address, event: E) -> Log {
 #[tokio::test]
 async fn test_resolve_start_block_reads_live_local_state_each_time() {
     let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoStateReader::new(VecDeque::from([10, 11]))),
+        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([
+            10, 11,
+        ]))),
         None,
     );
     let l1_provider =
@@ -498,7 +503,7 @@ async fn test_resolve_start_block_reads_live_local_state_each_time() {
 #[tokio::test]
 async fn test_resolve_start_block_falls_back_to_genesis_override_when_local_state_is_zero() {
     let subscriber = test_subscriber(
-        Arc::new(SequenceLocalTempoStateReader::new(VecDeque::from([0]))),
+        Arc::new(SequenceLocalTempoCheckpointReader::new(VecDeque::from([0]))),
         Some(42),
     );
     let l1_provider =

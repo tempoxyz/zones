@@ -94,6 +94,6 @@ pub(crate) use event::EnqueueOutcome;
 pub(crate) use queue::PendingDeposits;
 #[cfg(test)]
 pub(crate) use subscriber::{
-    LocalTempoStateReader, address_to_storage_value, apply_sequencer_events_to_cache,
+    LocalTempoCheckpointReader, address_to_storage_value, apply_sequencer_events_to_cache,
     verify_receipts,
 };

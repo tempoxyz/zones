@@ -826,7 +826,7 @@ where
 
         let policy_provider = PolicyProvider::new(self.policy_cache, policy_l1, runtime_handle);
         evm_config = evm_config.with_policy_provider(policy_provider);
-        info!(target: "reth::cli", "Zone EVM initialized with TempoStateReader + TIP-403 proxy precompiles");
+        info!(target: "reth::cli", "Zone EVM initialized with TempoState + TIP-403 proxy precompiles");
 
         Ok(evm_config)
     }
