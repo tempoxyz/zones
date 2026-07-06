@@ -108,7 +108,7 @@ impl Default for BatchAnchorConfig {
 }
 
 /// Maximum number of pending withdrawal queue slots in the portal ring buffer.
-const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
+pub(crate) const WITHDRAWAL_QUEUE_CAPACITY: u64 = 100;
 
 /// Maximum zone-block span for a single `eth_getLogs` request during catch-up.
 ///
@@ -772,7 +772,7 @@ fn resolve_pending_slots(
 /// found.
 ///
 /// Also checks `offset == len` (all consumed, hash chain = `B256::ZERO`).
-fn find_processed_offset(
+pub(crate) fn find_processed_offset(
     withdrawals: &[abi::Withdrawal],
     current_slot_hash: B256,
 ) -> Option<usize> {
