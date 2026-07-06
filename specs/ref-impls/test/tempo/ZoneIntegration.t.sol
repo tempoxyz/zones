@@ -16,10 +16,10 @@ import {
     Withdrawal,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
+import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
-import { EMPTY_SENTINEL } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { ZoneInbox } from "../../src/zone/ZoneInbox.sol";
 import { ZoneOutbox } from "../../src/zone/ZoneOutbox.sol";
