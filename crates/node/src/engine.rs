@@ -57,14 +57,39 @@ use tracing::{error, warn};
 use zone_l1::{DepositQueue, L1BlockDeposits, PolicyProvider, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
-fn should_skip_tx_pool(
+fn tx_pool_skip_drift(
     l1_timestamp_secs: u64,
+    l1_timestamp_millis_part: u64,
     now: SystemTime,
     no_tx_pool_drift_threshold: Duration,
-) -> bool {
-    let l1_timestamp = UNIX_EPOCH + Duration::from_secs(l1_timestamp_secs);
+) -> Option<Duration> {
+    let l1_timestamp = UNIX_EPOCH
+        + Duration::from_secs(l1_timestamp_secs)
+        + Duration::from_millis(l1_timestamp_millis_part);
     now.duration_since(l1_timestamp)
-        .is_ok_and(|drift| drift > no_tx_pool_drift_threshold)
+        .ok()
+        .filter(|drift| *drift > no_tx_pool_drift_threshold)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tx_pool_skip_drift_uses_millisecond_timestamp_part() {
+        let timestamp_secs = 1_700_000_000;
+        let threshold = Duration::from_secs(1);
+        let now = UNIX_EPOCH + Duration::from_secs(timestamp_secs) + Duration::from_millis(1400);
+
+        assert_eq!(
+            tx_pool_skip_drift(timestamp_secs, 500, now, threshold),
+            None
+        );
+        assert_eq!(
+            tx_pool_skip_drift(timestamp_secs, 0, now, threshold),
+            Some(Duration::from_millis(1400))
+        );
+    }
 }
 
 /// Engine that drives L2 block production from L1 events.
@@ -226,11 +251,28 @@ impl ZoneEngine {
         // two chains stay in lockstep.
         let timestamp_secs = l1_block.header.timestamp();
         let timestamp_millis_part = l1_block.header.timestamp_millis_part;
-        let no_tx_pool = should_skip_tx_pool(
+        let no_tx_pool_drift = tx_pool_skip_drift(
             timestamp_secs,
+            timestamp_millis_part,
             SystemTime::now(),
             self.no_tx_pool_drift_threshold,
         );
+        let no_tx_pool = no_tx_pool_drift.is_some();
+        if let Some(drift) = no_tx_pool_drift {
+            let drift_ms = drift.as_millis().min(u128::from(u64::MAX)) as u64;
+            let threshold_ms = self
+                .no_tx_pool_drift_threshold
+                .as_millis()
+                .min(u128::from(u64::MAX)) as u64;
+            warn!(
+                target: "zone::engine",
+                l1_block = l1_num_hash.number,
+                l1_hash = %l1_num_hash.hash,
+                drift_ms,
+                threshold_ms,
+                "skipping txpool transactions while catching up to L1"
+            );
+        }
 
         let l1_block = self.prepare_l1_block(l1_block).await?;
 

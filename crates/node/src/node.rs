@@ -74,7 +74,7 @@ use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequence
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
 
 /// Default L1 timestamp drift before catch-up blocks skip txpool transactions.
-pub const DEFAULT_NO_TX_POOL_DRIFT_THRESHOLD: Duration = Duration::from_secs(1);
+pub const DEFAULT_NO_TX_POOL_DRIFT_THRESHOLD: Duration = Duration::from_secs(1800);
 
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
