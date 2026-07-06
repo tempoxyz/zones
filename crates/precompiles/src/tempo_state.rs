@@ -564,9 +564,7 @@ mod tests {
             true,
         )?;
         assert_eq!(
-            TempoStateAbi::tempoTransactionsRootCall::abi_decode_returns(
-                &transactions_root.bytes
-            )?,
+            TempoStateAbi::tempoTransactionsRootCall::abi_decode_returns(&transactions_root.bytes)?,
             header.transactions_root()
         );
 
@@ -622,7 +620,9 @@ mod tests {
             ctx,
             precompile,
             Address::ZERO,
-            TempoStateAbi::tempoTimestampMillisCall {}.abi_encode().into(),
+            TempoStateAbi::tempoTimestampMillisCall {}
+                .abi_encode()
+                .into(),
             true,
         )?;
         assert_eq!(
