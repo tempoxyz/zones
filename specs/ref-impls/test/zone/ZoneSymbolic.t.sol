@@ -7,7 +7,7 @@ import {
     WithdrawalQueue,
     WithdrawalQueueLib
 } from "../../src/libraries/WithdrawalQueueLib.sol";
-import { ZonePortalTest } from "../l1/ZonePortal.t.sol";
+import { ZonePortalTest } from "../tempo/ZonePortal.t.sol";
 import { ZoneOutboxTest } from "./ZoneOutbox.t.sol";
 import { Test } from "forge-std/Test.sol";
 

@@ -11,9 +11,9 @@ import {
     PORTAL_TOKEN_CONFIGS_SLOT,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
-import { ZoneFactory } from "../../src/l1/ZoneFactory.sol";
-import { ZonePortal } from "../../src/l1/ZonePortal.sol";
-import { ZoneConfig } from "../../src/predeploys/ZoneConfig.sol";
+import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
+import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
+import { ZoneConfig } from "../../src/zone/ZoneConfig.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockTempoState } from "../mocks/MockTempoState.sol";
 import { Vm } from "forge-std/Vm.sol";

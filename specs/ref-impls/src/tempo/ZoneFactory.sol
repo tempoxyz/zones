@@ -2,7 +2,7 @@
 pragma solidity ^0.8.13;
 
 import { IZoneFactory, ZoneInfo } from "../interfaces/IZone.sol";
-import { Verifier } from "../verifier/Verifier.sol";
+import { Verifier } from "./Verifier.sol";
 import { ZoneMessenger } from "./ZoneMessenger.sol";
 import { ZonePortal } from "./ZonePortal.sol";
 import { StdPrecompiles } from "tempo-std/StdPrecompiles.sol";

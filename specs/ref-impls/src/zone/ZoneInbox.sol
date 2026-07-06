@@ -27,7 +27,7 @@ import {
     ENCRYPTED_PAYLOAD_PLAINTEXT_SIZE,
     EncryptedDepositLib
 } from "../libraries/EncryptedDeposit.sol";
-import { TempoState } from "./TempoState.sol";
+import { TempoState } from "../tempo/TempoState.sol";
 
 /// @title ZoneInbox
 /// @notice Zone-side system contract for advancing Tempo state and processing deposits
