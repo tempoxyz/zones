@@ -43,7 +43,19 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 #[contract(addr = TEMPO_STATE_ADDRESS)]
 pub struct TempoState {
     tempo_block_hash: B256,
+    general_gas_limit: u64,
+    shared_gas_limit: u64,
+    tempo_parent_hash: B256,
+    tempo_beneficiary: Address,
+    tempo_state_root: B256,
+    tempo_transactions_root: B256,
+    tempo_receipts_root: B256,
     tempo_block_number: u64,
+    tempo_gas_limit: u64,
+    tempo_gas_used: u64,
+    tempo_timestamp: u64,
+    tempo_timestamp_millis: u64,
+    tempo_prev_randao: B256,
 }
 
 impl TempoState {
@@ -59,18 +71,33 @@ impl TempoState {
                 "invalid Tempo genesis header RLP: trailing bytes after header".into(),
             ));
         }
-        self.write_checkpoint(header_rlp, header.number())?;
+        self.write_header(header_rlp, &header)?;
         Ok(())
     }
 
-    fn write_checkpoint(
+    fn write_header(
         &mut self,
         header_rlp: &[u8],
-        block_number: u64,
+        header: &TempoHeader,
     ) -> tempo_precompiles::Result<B256> {
         let block_hash = keccak256(header_rlp);
         self.tempo_block_hash.write(block_hash)?;
-        self.tempo_block_number.write(block_number)?;
+        self.general_gas_limit.write(header.general_gas_limit)?;
+        self.shared_gas_limit.write(header.shared_gas_limit)?;
+        self.tempo_parent_hash.write(header.parent_hash())?;
+        self.tempo_beneficiary.write(header.beneficiary())?;
+        self.tempo_state_root.write(header.state_root())?;
+        self.tempo_transactions_root
+            .write(header.transactions_root())?;
+        self.tempo_receipts_root.write(header.receipts_root())?;
+        self.tempo_block_number.write(header.number())?;
+        self.tempo_gas_limit.write(header.gas_limit())?;
+        self.tempo_gas_used.write(header.gas_used())?;
+        self.tempo_timestamp.write(header.timestamp())?;
+        self.tempo_timestamp_millis
+            .write(header.timestamp_millis_part)?;
+        self.tempo_prev_randao
+            .write(header.mix_hash().unwrap_or_default())?;
         Ok(block_hash)
     }
 
@@ -124,18 +151,17 @@ impl TempoState {
         if header.parent_hash() != prev_block_hash {
             return self.revert_error(TempoStateAbi::InvalidParentHash {});
         }
-        let block_number = header.number();
-        if block_number != prev_block_number.saturating_add(1) {
+        if header.number() != prev_block_number.saturating_add(1) {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
-        let tempo_block_hash = match self.write_checkpoint(&call.header, block_number) {
+        let tempo_block_hash = match self.write_header(&call.header, &header) {
             Ok(hash) => hash,
             Err(err) => return self.storage.error_result(err),
         };
         if let Err(err) = self.emit_event(TempoStateAbi::TempoBlockFinalized {
             blockHash: tempo_block_hash,
-            blockNumber: block_number,
+            blockNumber: header.number(),
             stateRoot: header.state_root(),
         }) {
             return self.storage.error_result(err);
@@ -239,6 +265,22 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
+                    tempoStateRoot(call) => view(call, |_| self.tempo_state_root.read()),
+                    tempoParentHash(call) => view(call, |_| self.tempo_parent_hash.read()),
+                    tempoBeneficiary(call) => view(call, |_| self.tempo_beneficiary.read()),
+                    tempoTransactionsRoot(call) => {
+                        view(call, |_| self.tempo_transactions_root.read())
+                    },
+                    tempoReceiptsRoot(call) => view(call, |_| self.tempo_receipts_root.read()),
+                    tempoGasLimit(call) => view(call, |_| self.tempo_gas_limit.read()),
+                    tempoGasUsed(call) => view(call, |_| self.tempo_gas_used.read()),
+                    tempoTimestamp(call) => view(call, |_| self.tempo_timestamp.read()),
+                    tempoTimestampMillis(call) => {
+                        view(call, |_| self.tempo_timestamp_millis.read())
+                    },
+                    tempoPrevRandao(call) => view(call, |_| self.tempo_prev_randao.read()),
+                    generalGasLimit(call) => view(call, |_| self.general_gas_limit.read()),
+                    sharedGasLimit(call) => view(call, |_| self.shared_gas_limit.read()),
                     finalizeTempo(call) => self.apply_checkpoint(msg_sender, call),
                     readTempoStorageSlot(call) => {
                         self.read_tempo_storage_slot(provider, msg_sender, call)
@@ -344,6 +386,74 @@ mod tests {
         )
     }
 
+    fn child_header(parent_hash: B256, number: u64) -> TempoHeader {
+        TempoHeader {
+            general_gas_limit: 1_000_000,
+            shared_gas_limit: 2_000_000,
+            timestamp_millis_part: 123,
+            inner: alloy_consensus::Header {
+                parent_hash,
+                beneficiary: address!("0x000000000000000000000000000000000000bEEF"),
+                state_root: b256!(
+                    "0x1111111111111111111111111111111111111111111111111111111111111111"
+                ),
+                transactions_root: b256!(
+                    "0x2222222222222222222222222222222222222222222222222222222222222222"
+                ),
+                receipts_root: b256!(
+                    "0x3333333333333333333333333333333333333333333333333333333333333333"
+                ),
+                number,
+                gas_limit: 30_000_000,
+                gas_used: 21_000,
+                timestamp: 1_700_000_000,
+                mix_hash: b256!(
+                    "0x4444444444444444444444444444444444444444444444444444444444444444"
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn finalize_calldata(header: Bytes) -> Bytes {
+        TempoStateAbi::finalizeTempoCall { header }
+            .abi_encode()
+            .into()
+    }
+
+    fn assert_checkpoint(
+        ctx: &mut TestContext,
+        precompile: &DynPrecompile,
+        expected_hash: B256,
+        expected_number: u64,
+    ) -> TestResult {
+        let block_hash = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoBlockHashCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoBlockHashCall::abi_decode_returns(&block_hash.bytes)?,
+            expected_hash
+        );
+
+        let block_number = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoBlockNumberCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoBlockNumberCall::abi_decode_returns(&block_number.bytes)?,
+            expected_number
+        );
+        Ok(())
+    }
+
     #[test]
     fn finalize_tempo_updates_checkpoint() -> TestResult {
         let genesis = TempoHeader::default();
@@ -352,17 +462,7 @@ mod tests {
         let mut ctx = test_context();
         initialize(&mut ctx, &genesis_rlp)?;
 
-        let child = TempoHeader {
-            inner: alloy_consensus::Header {
-                parent_hash: genesis_hash,
-                state_root: b256!(
-                    "0x1111111111111111111111111111111111111111111111111111111111111111"
-                ),
-                number: 1,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let child = child_header(genesis_hash, 1);
         let child_rlp = encode_header(&child);
         let child_hash = keccak256(&child_rlp);
         let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
@@ -371,36 +471,249 @@ mod tests {
             &mut ctx,
             &precompile,
             ZONE_INBOX_ADDRESS,
-            TempoStateAbi::finalizeTempoCall { header: child_rlp }
-                .abi_encode()
-                .into(),
+            finalize_calldata(child_rlp),
             false,
         )?;
         assert!(output.is_success());
+        assert_checkpoint(&mut ctx, &precompile, child_hash, 1)?;
+        assert_legacy_getters(&mut ctx, &precompile, genesis_hash)?;
 
-        let block_number = call(
-            &mut ctx,
-            &precompile,
+        Ok(())
+    }
+
+    fn assert_legacy_getters(
+        ctx: &mut TestContext,
+        precompile: &DynPrecompile,
+        parent_hash: B256,
+    ) -> TestResult {
+        let state_root = call(
+            ctx,
+            precompile,
             Address::ZERO,
-            TempoStateAbi::tempoBlockNumberCall {}.abi_encode().into(),
+            TempoStateAbi::tempoStateRootCall {}.abi_encode().into(),
             true,
         )?;
         assert_eq!(
-            TempoStateAbi::tempoBlockNumberCall::abi_decode_returns(&block_number.bytes)?,
-            1
+            TempoStateAbi::tempoStateRootCall::abi_decode_returns(&state_root.bytes)?,
+            b256!("0x1111111111111111111111111111111111111111111111111111111111111111")
         );
 
-        let block_hash = call(
-            &mut ctx,
-            &precompile,
+        let parent = call(
+            ctx,
+            precompile,
             Address::ZERO,
-            TempoStateAbi::tempoBlockHashCall {}.abi_encode().into(),
+            TempoStateAbi::tempoParentHashCall {}.abi_encode().into(),
             true,
         )?;
         assert_eq!(
-            TempoStateAbi::tempoBlockHashCall::abi_decode_returns(&block_hash.bytes)?,
-            child_hash
+            TempoStateAbi::tempoParentHashCall::abi_decode_returns(&parent.bytes)?,
+            parent_hash
         );
+
+        let gas_limit = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoGasLimitCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoGasLimitCall::abi_decode_returns(&gas_limit.bytes)?,
+            30_000_000
+        );
+
+        let timestamp = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoTimestampCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoTimestampCall::abi_decode_returns(&timestamp.bytes)?,
+            1_700_000_000
+        );
+
+        let timestamp_millis = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoTimestampMillisCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoTimestampMillisCall::abi_decode_returns(&timestamp_millis.bytes)?,
+            123
+        );
+
+        let general_gas_limit = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::generalGasLimitCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::generalGasLimitCall::abi_decode_returns(&general_gas_limit.bytes)?,
+            1_000_000
+        );
+
+        let shared_gas_limit = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::sharedGasLimitCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::sharedGasLimitCall::abi_decode_returns(&shared_gas_limit.bytes)?,
+            2_000_000
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_for_non_inbox_caller() -> TestResult {
+        let genesis = TempoHeader::default();
+        let genesis_rlp = encode_header(&genesis);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+
+        let child_rlp = encode_header(&child_header(genesis_hash, 1));
+        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let output = call(
+            &mut ctx,
+            &precompile,
+            Address::ZERO,
+            finalize_calldata(child_rlp),
+            false,
+        )?;
+
+        assert!(output.is_revert());
+        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_on_static_call() -> TestResult {
+        let genesis = TempoHeader::default();
+        let genesis_rlp = encode_header(&genesis);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+
+        let child_rlp = encode_header(&child_header(genesis_hash, 1));
+        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let output = call(
+            &mut ctx,
+            &precompile,
+            ZONE_INBOX_ADDRESS,
+            finalize_calldata(child_rlp),
+            true,
+        )?;
+
+        assert!(output.is_revert());
+        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_on_invalid_rlp() -> TestResult {
+        let genesis = TempoHeader::default();
+        let genesis_rlp = encode_header(&genesis);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+
+        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let output = call(
+            &mut ctx,
+            &precompile,
+            ZONE_INBOX_ADDRESS,
+            finalize_calldata(Bytes::from(vec![0xff])),
+            false,
+        )?;
+
+        assert!(output.is_revert());
+        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_on_trailing_header_bytes() -> TestResult {
+        let genesis = TempoHeader::default();
+        let genesis_rlp = encode_header(&genesis);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+
+        let child_rlp = encode_header(&child_header(genesis_hash, 1));
+        let mut malformed = child_rlp.to_vec();
+        malformed.push(0);
+        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let output = call(
+            &mut ctx,
+            &precompile,
+            ZONE_INBOX_ADDRESS,
+            finalize_calldata(Bytes::from(malformed)),
+            false,
+        )?;
+
+        assert!(output.is_revert());
+        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_on_invalid_parent_hash() -> TestResult {
+        let genesis = TempoHeader::default();
+        let genesis_rlp = encode_header(&genesis);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+
+        let child_rlp = encode_header(&child_header(B256::ZERO, 1));
+        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let output = call(
+            &mut ctx,
+            &precompile,
+            ZONE_INBOX_ADDRESS,
+            finalize_calldata(child_rlp),
+            false,
+        )?;
+
+        assert!(output.is_revert());
+        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn finalize_tempo_reverts_on_invalid_block_number() -> TestResult {
+        let genesis = TempoHeader::default();
+        let genesis_rlp = encode_header(&genesis);
+        let genesis_hash = keccak256(&genesis_rlp);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+
+        let child_rlp = encode_header(&child_header(genesis_hash, 2));
+        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let output = call(
+            &mut ctx,
+            &precompile,
+            ZONE_INBOX_ADDRESS,
+            finalize_calldata(child_rlp),
+            false,
+        )?;
+
+        assert!(output.is_revert());
+        assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
 
         Ok(())
     }
@@ -433,6 +746,35 @@ mod tests {
         assert_eq!(
             TempoStateAbi::readTempoStorageSlotCall::abi_decode_returns(&system.bytes)?,
             expected
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn read_tempo_storage_slots_returns_batch() -> TestResult {
+        let genesis_rlp = encode_header(&TempoHeader::default());
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+
+        let expected = b256!("0xcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd");
+        let precompile = TempoState::create(MockL1Reader { value: expected }, &ctx.cfg.clone());
+        let output = call(
+            &mut ctx,
+            &precompile,
+            ZONE_OUTBOX_ADDRESS,
+            TempoStateAbi::readTempoStorageSlotsCall {
+                account: address!("0x0000000000000000000000000000000000009999"),
+                slots: vec![B256::ZERO, B256::with_last_byte(1)],
+            }
+            .abi_encode()
+            .into(),
+            true,
+        )?;
+
+        assert_eq!(
+            TempoStateAbi::readTempoStorageSlotsCall::abi_decode_returns(&output.bytes)?,
+            vec![expected, expected]
         );
 
         Ok(())

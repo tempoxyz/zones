@@ -478,7 +478,7 @@ fn initialize_tempo_state(
         &ctx.cfg,
         &ctx.tx,
         StorageActions::disabled(),
-        || NativeTempoState::<()>::initialize_genesis(header_rlp),
+        || NativeTempoState::new().initialize(header_rlp),
     )?;
     println!("Initialized native TempoState at {TEMPO_STATE_ADDRESS}");
     Ok(())
