@@ -266,7 +266,7 @@ interface IAesGcmDecrypt {
 }
 
 /// @title ITempoStateReader
-/// @notice Standalone precompile for reading Tempo L1 contract storage at a given block height
+/// @notice Low-level compatibility precompile for reading Tempo L1 contract storage at a given block height
 /// @dev Predeploy at 0x1c00000000000000000000000000000000000004
 interface ITempoStateReader {
 
@@ -349,7 +349,7 @@ address constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
 // ZoneConfig system contract address (0x1c00...0003)
 address constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
 
-// TempoStateReader precompile address (0x1c00...0004)
+// TempoStateReader compatibility precompile address (0x1c00...0004)
 address constant TEMPO_STATE_READER = 0x1c00000000000000000000000000000000000004;
 
 // ZoneTxContext precompile address (0x1c00...0005)
@@ -920,33 +920,8 @@ interface ITempoState {
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     function tempoBlockHash() external view returns (bytes32);
 
-    // Tempo wrapper fields
-    function generalGasLimit() external view returns (uint64);
-
-    function sharedGasLimit() external view returns (uint64);
-
-    // Inner Ethereum header fields
-    function tempoParentHash() external view returns (bytes32);
-
-    function tempoBeneficiary() external view returns (address);
-
-    function tempoStateRoot() external view returns (bytes32);
-
-    function tempoTransactionsRoot() external view returns (bytes32);
-
-    function tempoReceiptsRoot() external view returns (bytes32);
-
+    /// @notice Current finalized Tempo block number
     function tempoBlockNumber() external view returns (uint64);
-
-    function tempoGasLimit() external view returns (uint64);
-
-    function tempoGasUsed() external view returns (uint64);
-
-    function tempoTimestamp() external view returns (uint64);
-
-    function tempoTimestampMillis() external view returns (uint64);
-
-    function tempoPrevRandao() external view returns (bytes32);
 
     /// @notice Finalize a Tempo block header. Only callable by ZoneInbox.
     /// @dev Validates chain continuity (parent hash must match, number must be +1).

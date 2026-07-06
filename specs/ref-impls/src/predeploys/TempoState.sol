@@ -6,8 +6,8 @@ import { ITempoState, ITempoStateReader } from "../interfaces/IZone.sol";
 /// @title TempoState
 /// @notice Zone-side predeploy for Tempo state verification
 /// @dev Deployed at 0x1c00000000000000000000000000000000000000
-///      Stores the latest finalized Tempo block info. Sequencer submits Tempo headers
-///      which are validated for chain continuity and decoded to update state.
+///      Stores the latest finalized Tempo checkpoint. Sequencer submits Tempo headers
+///      which are validated for chain continuity.
 contract TempoState is ITempoState {
 
     /*//////////////////////////////////////////////////////////////
@@ -17,52 +17,8 @@ contract TempoState is ITempoState {
     /// @notice Current finalized Tempo block hash (keccak256 of RLP-encoded header)
     bytes32 public tempoBlockHash;
 
-    /*//////////////////////////////////////////////////////////////
-                          TEMPO WRAPPER FIELDS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Tempo general gas limit (outer header field)
-    uint64 public generalGasLimit;
-
-    /// @notice Tempo shared gas limit (outer header field)
-    uint64 public sharedGasLimit;
-
-    /*//////////////////////////////////////////////////////////////
-                        INNER ETHEREUM HEADER FIELDS
-    //////////////////////////////////////////////////////////////*/
-
-    /// @notice Parent block hash
-    bytes32 public tempoParentHash;
-
-    /// @notice Block producer address
-    address public tempoBeneficiary;
-
-    /// @notice State root (for storage proofs)
-    bytes32 public tempoStateRoot;
-
-    /// @notice Transactions root (for audit trail)
-    bytes32 public tempoTransactionsRoot;
-
-    /// @notice Receipts root
-    bytes32 public tempoReceiptsRoot;
-
     /// @notice Block number
     uint64 public tempoBlockNumber;
-
-    /// @notice Gas limit
-    uint64 public tempoGasLimit;
-
-    /// @notice Gas used
-    uint64 public tempoGasUsed;
-
-    /// @notice Block timestamp (seconds, combined with millisPart for full precision)
-    uint64 public tempoTimestamp;
-
-    /// @notice Millisecond part of timestamp (from Tempo wrapper)
-    uint64 public tempoTimestampMillis;
-
-    /// @notice Previous RANDAO value (post-merge mixHash)
-    bytes32 public tempoPrevRandao;
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -71,8 +27,9 @@ contract TempoState is ITempoState {
     /// @notice Initialize with genesis Tempo block
     /// @param _genesisHeader RLP-encoded genesis Tempo header
     constructor(bytes memory _genesisHeader) {
-        // Decode and store genesis header
-        _decodeAndStoreHeader(_genesisHeader);
+        (,, uint64 blockNumber) = _decodeHeader(_genesisHeader);
+        tempoBlockHash = keccak256(_genesisHeader);
+        tempoBlockNumber = blockNumber;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -89,18 +46,18 @@ contract TempoState is ITempoState {
         // Only ZoneInbox can call this function
         if (msg.sender != ZONE_INBOX) revert OnlyZoneInbox();
 
-        // Store previous values for validation
         bytes32 prevBlockHash = tempoBlockHash;
         uint64 prevBlockNumber = tempoBlockNumber;
 
-        // Decode and store all header fields
-        _decodeAndStoreHeader(header);
+        (bytes32 parentHash, bytes32 stateRoot, uint64 blockNumber) = _decodeHeader(header);
 
-        // Validate chain continuity
-        if (tempoParentHash != prevBlockHash) revert InvalidParentHash();
-        if (tempoBlockNumber != prevBlockNumber + 1) revert InvalidBlockNumber();
+        if (parentHash != prevBlockHash) revert InvalidParentHash();
+        if (blockNumber != prevBlockNumber + 1) revert InvalidBlockNumber();
 
-        emit TempoBlockFinalized(tempoBlockHash, tempoBlockNumber, tempoStateRoot);
+        tempoBlockHash = keccak256(header);
+        tempoBlockNumber = blockNumber;
+
+        emit TempoBlockFinalized(tempoBlockHash, tempoBlockNumber, stateRoot);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -113,8 +70,8 @@ contract TempoState is ITempoState {
     address private constant ZONE_OUTBOX = 0x1c00000000000000000000000000000000000002;
     address private constant ZONE_CONFIG = 0x1c00000000000000000000000000000000000003;
 
-    /// @notice TempoStateReader precompile address
-    /// @dev Standalone precompile that reads Tempo L1 contract storage at a given block height.
+    /// @notice TempoStateReader compatibility precompile address
+    /// @dev Low-level precompile that reads Tempo L1 contract storage at a given block height.
     address private constant TEMPO_STATE_READER = 0x1c00000000000000000000000000000000000004;
 
     /// @notice Check if caller is a zone system contract
@@ -166,18 +123,19 @@ contract TempoState is ITempoState {
                           RLP DECODING (INTERNAL)
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Decode a Tempo header and store fields used by the zone
+    /// @notice Decode the Tempo header fields used by the zone
     /// @dev Tempo header format: rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])
     ///      Inner Ethereum header fields (0-indexed):
     ///        0: parentHash, 1: ommersHash, 2: beneficiary, 3: stateRoot,
     ///        4: transactionsRoot, 5: receiptsRoot, 6: logsBloom, 7: difficulty,
     ///        8: number, 9: gasLimit, 10: gasUsed, 11: timestamp, 12: extraData,
     ///        13: mixHash (prevRandao), 14: nonce, remaining fields are optional and ignored
-    function _decodeAndStoreHeader(bytes memory header) internal {
+    function _decodeHeader(bytes memory header)
+        internal
+        pure
+        returns (bytes32 parentHash, bytes32 stateRoot, uint64 blockNumber)
+    {
         uint256 ptr = 0;
-
-        // Compute and store block hash
-        tempoBlockHash = keccak256(header);
 
         // Decode outer list header
         (uint256 outerListLen, uint256 outerListOffset) = _decodeListHeaderMem(header, ptr);
@@ -188,17 +146,14 @@ contract TempoState is ITempoState {
 
         // Field 0: general_gas_limit
         if (ptr >= outerListEnd) revert InvalidRlpData();
-        generalGasLimit = _decodeUint64Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, outerListEnd);
 
         // Field 1: shared_gas_limit
         if (ptr >= outerListEnd) revert InvalidRlpData();
-        sharedGasLimit = _decodeUint64Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, outerListEnd);
 
         // Field 2: timestamp_millis_part
         if (ptr >= outerListEnd) revert InvalidRlpData();
-        tempoTimestampMillis = _decodeUint64Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, outerListEnd);
 
         // Field 3: inner Ethereum header (a list)
@@ -211,7 +166,7 @@ contract TempoState is ITempoState {
 
         // Inner field 0: parentHash
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoParentHash = _decodeBytes32Mem(header, ptr);
+        parentHash = _decodeBytes32Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 1: ommersHash - skip
@@ -219,22 +174,19 @@ contract TempoState is ITempoState {
 
         // Inner field 2: beneficiary
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoBeneficiary = _decodeAddressMem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 3: stateRoot
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoStateRoot = _decodeBytes32Mem(header, ptr);
+        stateRoot = _decodeBytes32Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 4: transactionsRoot
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoTransactionsRoot = _decodeBytes32Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 5: receiptsRoot
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoReceiptsRoot = _decodeBytes32Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 6: logsBloom - skip
@@ -245,22 +197,19 @@ contract TempoState is ITempoState {
 
         // Inner field 8: number
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoBlockNumber = _decodeUint64Mem(header, ptr);
+        blockNumber = _decodeUint64Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 9: gasLimit
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoGasLimit = _decodeUint64Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 10: gasUsed
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoGasUsed = _decodeUint64Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 11: timestamp
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoTimestamp = _decodeUint64Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 12: extraData - skip
@@ -268,16 +217,18 @@ contract TempoState is ITempoState {
 
         // Inner field 13: mixHash (prevRandao)
         if (ptr >= innerListEnd) revert InvalidRlpData();
-        tempoPrevRandao = _decodeBytes32Mem(header, ptr);
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
         // Inner field 14: nonce - skip
         ptr = _skipRlpItemInList(header, ptr, innerListEnd);
 
-        // Skip any remaining optional fields we don't record.
-        while (ptr < innerListEnd) {
+        // Skip optional Ethereum header fields we don't record:
+        // baseFeePerGas, withdrawalsRoot, blobGasUsed, excessBlobGas,
+        // parentBeaconBlockRoot, requestsHash, blockAccessListHash, slotNumber.
+        for (uint256 i = 0; i < 8 && ptr < innerListEnd; i++) {
             ptr = _skipRlpItemInList(header, ptr, innerListEnd);
         }
+        if (ptr != innerListEnd) revert InvalidRlpData();
 
         ptr = innerListEnd;
 

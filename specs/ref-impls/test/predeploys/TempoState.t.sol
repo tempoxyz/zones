@@ -66,12 +66,6 @@ contract TempoStateTest is Test {
     function test_constructor_initializesState() public view {
         assertEq(tempoState.tempoBlockHash(), genesisBlockHash);
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER);
-        assertEq(tempoState.tempoTimestamp(), GENESIS_TIMESTAMP);
-        assertEq(tempoState.tempoStateRoot(), GENESIS_STATE_ROOT);
-        assertEq(tempoState.tempoReceiptsRoot(), GENESIS_RECEIPTS_ROOT);
-        assertEq(tempoState.tempoTransactionsRoot(), GENESIS_TX_ROOT);
-        assertEq(tempoState.tempoParentHash(), GENESIS_PARENT_HASH);
-        assertEq(tempoState.tempoBeneficiary(), GENESIS_BENEFICIARY);
     }
 
     function test_constructor_revertsOnTrailingBytesAfterOuterList() public {
@@ -125,12 +119,6 @@ contract TempoStateTest is Test {
         // Verify state was updated
         assertEq(tempoState.tempoBlockHash(), keccak256(header));
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER + 1);
-        assertEq(tempoState.tempoTimestamp(), GENESIS_TIMESTAMP + 12);
-        assertEq(tempoState.tempoStateRoot(), newStateRoot);
-        assertEq(tempoState.tempoReceiptsRoot(), newReceiptsRoot);
-        assertEq(tempoState.tempoTransactionsRoot(), newTxRoot);
-        assertEq(tempoState.tempoParentHash(), genesisBlockHash);
-        assertEq(tempoState.tempoBeneficiary(), newBeneficiary);
     }
 
     function test_finalizeTempo_multipleBlocks() public {
@@ -169,7 +157,6 @@ contract TempoStateTest is Test {
         bytes32 block102Hash = keccak256(header2);
         assertEq(tempoState.tempoBlockHash(), block102Hash);
         assertEq(tempoState.tempoBlockNumber(), GENESIS_BLOCK_NUMBER + 2);
-        assertEq(tempoState.tempoTimestamp(), GENESIS_TIMESTAMP + 24);
     }
 
     function test_finalizeTempo_revertsOnInvalidParentHash() public {

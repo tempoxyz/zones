@@ -41,6 +41,7 @@ use zone_l1::{
     Deposit, DepositQueue, EnabledToken, EncryptedDeposit, L1Deposit, L1PortalEvents, L1StateCache,
 };
 use zone_node::ZoneNode;
+use zone_precompiles::tempo_state::slots;
 
 #[path = "../../../rpc/test-utils/auth_tokens.rs"]
 mod auth_tokens;
@@ -1817,17 +1818,13 @@ fn build_l1_anchored_genesis_from_header(
         .storage
         .get_or_insert_with(Default::default);
 
-    // Slot 0 = tempoBlockHash
-    storage.insert(B256::ZERO, l1_genesis_hash);
-
-    // Slot 7 = packed (tempoBlockNumber:u64 | tempoGasLimit:u64 | tempoGasUsed:u64 | tempoTimestamp:u64)
-    let new_slot7: U256 = U256::from(l1_header.inner.number)
-        | (U256::from(l1_header.inner.gas_limit) << 64)
-        | (U256::from(l1_header.inner.gas_used) << 128)
-        | (U256::from(l1_header.inner.timestamp) << 192);
     storage.insert(
-        B256::from(U256::from(7).to_be_bytes()),
-        B256::from(new_slot7.to_be_bytes()),
+        B256::from(slots::TEMPO_BLOCK_HASH.to_be_bytes()),
+        l1_genesis_hash,
+    );
+    storage.insert(
+        B256::from(slots::TEMPO_BLOCK_NUMBER.to_be_bytes()),
+        B256::from(U256::from(l1_header.inner.number).to_be_bytes()),
     );
 
     // --- Patch 2: Portal address immutables in ZoneInbox and ZoneConfig ---

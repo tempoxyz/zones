@@ -1,7 +1,7 @@
 //! Native `TempoState` precompile.
 //!
 //! Replaces the Solidity TempoState predeploy at `0x1c00...0000` while
-//! preserving the zone-facing ABI.
+//! preserving the zone-facing checkpoint and Tempo storage read ABI.
 
 use alloc::vec::Vec;
 
@@ -43,19 +43,7 @@ pub trait L1StorageReader: Clone + Send + Sync + 'static {
 #[contract(addr = TEMPO_STATE_ADDRESS)]
 pub struct TempoState {
     tempo_block_hash: B256,
-    general_gas_limit: u64,
-    shared_gas_limit: u64,
-    tempo_parent_hash: B256,
-    tempo_beneficiary: Address,
-    tempo_state_root: B256,
-    tempo_transactions_root: B256,
-    tempo_receipts_root: B256,
     tempo_block_number: u64,
-    tempo_gas_limit: u64,
-    tempo_gas_used: u64,
-    tempo_timestamp: u64,
-    tempo_timestamp_millis: u64,
-    tempo_prev_randao: B256,
 }
 
 impl TempoState {
@@ -71,33 +59,18 @@ impl TempoState {
                 "invalid Tempo genesis header RLP: trailing bytes after header".into(),
             ));
         }
-        self.write_header(header_rlp, &header)?;
+        self.write_checkpoint(header_rlp, header.number())?;
         Ok(())
     }
 
-    fn write_header(
+    fn write_checkpoint(
         &mut self,
         header_rlp: &[u8],
-        header: &TempoHeader,
+        block_number: u64,
     ) -> tempo_precompiles::Result<B256> {
         let block_hash = keccak256(header_rlp);
         self.tempo_block_hash.write(block_hash)?;
-        self.general_gas_limit.write(header.general_gas_limit)?;
-        self.shared_gas_limit.write(header.shared_gas_limit)?;
-        self.tempo_parent_hash.write(header.parent_hash())?;
-        self.tempo_beneficiary.write(header.beneficiary())?;
-        self.tempo_state_root.write(header.state_root())?;
-        self.tempo_transactions_root
-            .write(header.transactions_root())?;
-        self.tempo_receipts_root.write(header.receipts_root())?;
-        self.tempo_block_number.write(header.number())?;
-        self.tempo_gas_limit.write(header.gas_limit())?;
-        self.tempo_gas_used.write(header.gas_used())?;
-        self.tempo_timestamp.write(header.timestamp())?;
-        self.tempo_timestamp_millis
-            .write(header.timestamp_millis_part)?;
-        self.tempo_prev_randao
-            .write(header.mix_hash().unwrap_or_default())?;
+        self.tempo_block_number.write(block_number)?;
         Ok(block_hash)
     }
 
@@ -155,7 +128,7 @@ impl TempoState {
             return self.revert_error(TempoStateAbi::InvalidBlockNumber {});
         }
 
-        let tempo_block_hash = match self.write_header(&call.header, &header) {
+        let tempo_block_hash = match self.write_checkpoint(&call.header, header.number()) {
             Ok(hash) => hash,
             Err(err) => return self.storage.error_result(err),
         };
@@ -265,22 +238,6 @@ impl TempoState {
                 TempoStateAbi::TempoStateCalls {
                     tempoBlockHash(call) => view(call, |_| self.tempo_block_hash.read()),
                     tempoBlockNumber(call) => view(call, |_| self.tempo_block_number.read()),
-                    tempoStateRoot(call) => view(call, |_| self.tempo_state_root.read()),
-                    tempoParentHash(call) => view(call, |_| self.tempo_parent_hash.read()),
-                    tempoBeneficiary(call) => view(call, |_| self.tempo_beneficiary.read()),
-                    tempoTransactionsRoot(call) => {
-                        view(call, |_| self.tempo_transactions_root.read())
-                    },
-                    tempoReceiptsRoot(call) => view(call, |_| self.tempo_receipts_root.read()),
-                    tempoGasLimit(call) => view(call, |_| self.tempo_gas_limit.read()),
-                    tempoGasUsed(call) => view(call, |_| self.tempo_gas_used.read()),
-                    tempoTimestamp(call) => view(call, |_| self.tempo_timestamp.read()),
-                    tempoTimestampMillis(call) => {
-                        view(call, |_| self.tempo_timestamp_millis.read())
-                    },
-                    tempoPrevRandao(call) => view(call, |_| self.tempo_prev_randao.read()),
-                    generalGasLimit(call) => view(call, |_| self.general_gas_limit.read()),
-                    sharedGasLimit(call) => view(call, |_| self.shared_gas_limit.read()),
                     finalizeTempo(call) => self.apply_checkpoint(msg_sender, call),
                     readTempoStorageSlot(call) => {
                         self.read_tempo_storage_slot(provider, msg_sender, call)
@@ -473,7 +430,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_sets_header_fields() -> TestResult {
+    fn initialize_sets_checkpoint() -> TestResult {
         let header = child_header(B256::repeat_byte(0xaa), 42);
         let header_rlp = encode_header(&header);
         let mut ctx = test_context();
@@ -481,7 +438,6 @@ mod tests {
 
         let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
         assert_checkpoint(&mut ctx, &precompile, keccak256(&header_rlp), 42)?;
-        assert_legacy_getters(&mut ctx, &precompile, &header)?;
 
         Ok(())
     }
@@ -508,163 +464,6 @@ mod tests {
         )?;
         assert!(output.is_success());
         assert_checkpoint(&mut ctx, &precompile, child_hash, 1)?;
-        assert_legacy_getters(&mut ctx, &precompile, &child)?;
-
-        Ok(())
-    }
-
-    fn assert_legacy_getters(
-        ctx: &mut TestContext,
-        precompile: &DynPrecompile,
-        header: &TempoHeader,
-    ) -> TestResult {
-        let state_root = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoStateRootCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoStateRootCall::abi_decode_returns(&state_root.bytes)?,
-            header.state_root()
-        );
-
-        let parent = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoParentHashCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoParentHashCall::abi_decode_returns(&parent.bytes)?,
-            header.parent_hash()
-        );
-
-        let beneficiary = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoBeneficiaryCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoBeneficiaryCall::abi_decode_returns(&beneficiary.bytes)?,
-            header.beneficiary()
-        );
-
-        let transactions_root = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoTransactionsRootCall {}
-                .abi_encode()
-                .into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoTransactionsRootCall::abi_decode_returns(&transactions_root.bytes)?,
-            header.transactions_root()
-        );
-
-        let receipts_root = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoReceiptsRootCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoReceiptsRootCall::abi_decode_returns(&receipts_root.bytes)?,
-            header.receipts_root()
-        );
-
-        let gas_limit = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoGasLimitCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoGasLimitCall::abi_decode_returns(&gas_limit.bytes)?,
-            header.gas_limit()
-        );
-
-        let gas_used = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoGasUsedCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoGasUsedCall::abi_decode_returns(&gas_used.bytes)?,
-            header.gas_used()
-        );
-
-        let timestamp = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoTimestampCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoTimestampCall::abi_decode_returns(&timestamp.bytes)?,
-            header.timestamp()
-        );
-
-        let timestamp_millis = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoTimestampMillisCall {}
-                .abi_encode()
-                .into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoTimestampMillisCall::abi_decode_returns(&timestamp_millis.bytes)?,
-            header.timestamp_millis_part
-        );
-
-        let prev_randao = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::tempoPrevRandaoCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::tempoPrevRandaoCall::abi_decode_returns(&prev_randao.bytes)?,
-            header.mix_hash().unwrap_or_default()
-        );
-
-        let general_gas_limit = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::generalGasLimitCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::generalGasLimitCall::abi_decode_returns(&general_gas_limit.bytes)?,
-            header.general_gas_limit
-        );
-
-        let shared_gas_limit = call(
-            ctx,
-            precompile,
-            Address::ZERO,
-            TempoStateAbi::sharedGasLimitCall {}.abi_encode().into(),
-            true,
-        )?;
-        assert_eq!(
-            TempoStateAbi::sharedGasLimitCall::abi_decode_returns(&shared_gas_limit.bytes)?,
-            header.shared_gas_limit
-        );
 
         Ok(())
     }
