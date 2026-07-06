@@ -55,7 +55,6 @@
     - [Method Access Control](#method-access-control)
     - [Block Responses](#block-responses)
     - [Event Filtering](#event-filtering)
-    - [Timing Side Channels](#timing-side-channels)
     - [WebSocket Subscriptions](#websocket-subscriptions)
     - [Zone-Specific Methods](#zone-specific-methods)
     - [Error Codes](#error-codes)
@@ -909,11 +908,6 @@ To avoid leaking how much activity occurred in a block, some fields of returned 
 - `transactionIndex` is set to `0` on every log, so the caller cannot infer its transaction's position among, or the number of, other transactions in the block.
 - `logIndex` is renumbered per transaction rather than exposing the log's global position in the block. `(transactionHash, logIndex)` is stable and consistent for a given log across `eth_getLogs`, `eth_getFilterLogs`, `eth_getFilterChanges`, `eth_getTransactionReceipt`, and `eth_subscribe("logs")`.
 
-### Timing Side Channels
-
-Scoped methods that fetch data before checking authorization leak existence via timing differences. The RPC server enforces a minimum response time of 100ms on `eth_getTransactionByHash`, `eth_getTransactionReceipt`, `eth_getLogs`, `eth_getFilterLogs`, and `eth_getFilterChanges`.
-
-Methods where authorization is checked before any data fetch (`eth_getBalance`, `eth_call`, `eth_sendRawTransaction`) do not need the speed bump.
 
 ### WebSocket Subscriptions
 
