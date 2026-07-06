@@ -91,6 +91,9 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Block number for tracking per-block withdrawal count
     uint256 internal _currentBlockNumber;
 
+    /// @notice Timestamp of the latest withdrawal batch finalization.
+    uint64 public lastFinalizedTimestamp;
+
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
     //////////////////////////////////////////////////////////////*/
@@ -104,6 +107,7 @@ contract ZoneOutbox is IZoneOutbox {
     error TooManyWithdrawalsThisBlock();
     error InvalidRevealTo();
     error InvalidCurrentTxHash();
+    error InvalidWithdrawalCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
     error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
     error GasLimitTooHigh();
@@ -369,10 +373,11 @@ contract ZoneOutbox is IZoneOutbox {
     /// @notice Finalize the batch at end of block - build withdrawal hash and emit proof inputs
     /// @dev Only callable by sequencer at the end of a block.
     ///      The proof enforces that this is the last call in the block and that a batch
-    ///      ends with exactly one finalizeWithdrawalBatch call (use count = 0 if no withdrawals).
+    ///      ends with exactly one finalizeWithdrawalBatch call. `count` must equal the
+    ///      current pending withdrawal count (including 0 if no withdrawals).
     ///      Protocol and proof enforce this runs at the end of the final block in the batch.
     ///      Emits BatchFinalized for observability (proof reads from state).
-    /// @param count Max number of withdrawals to process (avoids unbounded loops)
+    /// @param count Number of pending withdrawals to process
     /// @param encryptedSenders One ciphertext per finalized withdrawal (empty for plaintext withdrawals)
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(
@@ -399,10 +404,7 @@ contract ZoneOutbox is IZoneOutbox {
 
         uint256 pending = _pendingWithdrawals.length - _pendingWithdrawalsHead;
 
-        // Clamp to actual pending count
-        if (count > pending) {
-            count = pending;
-        }
+        if (count != pending) revert InvalidWithdrawalCount(count, pending);
         if (encryptedSenders.length != count) {
             revert InvalidEncryptedSenderCount(encryptedSenders.length, count);
         }
@@ -460,6 +462,7 @@ contract ZoneOutbox is IZoneOutbox {
             withdrawalQueueHash: withdrawalQueueHash,
             withdrawalBatchIndex: currentWithdrawalBatchIndex
         });
+        lastFinalizedTimestamp = uint64(block.timestamp);
 
         // Emit event for observability (proof reads from state, not events)
         emit BatchFinalized(withdrawalQueueHash, currentWithdrawalBatchIndex);
@@ -471,6 +474,22 @@ contract ZoneOutbox is IZoneOutbox {
             return 0;
         }
         return _pendingWithdrawals.length - _pendingWithdrawalsHead;
+    }
+
+    /// @notice Pending withdrawals in FIFO order.
+    function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory pending) {
+        if (_pendingWithdrawalsHead >= _pendingWithdrawals.length) {
+            return pending;
+        }
+
+        uint256 count = _pendingWithdrawals.length - _pendingWithdrawalsHead;
+        pending = new PendingWithdrawal[](count);
+        for (uint256 i = 0; i < count;) {
+            pending[i] = _pendingWithdrawals[_pendingWithdrawalsHead + i];
+            unchecked {
+                i++;
+            }
+        }
     }
 
     /// @notice Last finalized batch parameters (for proof access via state root)

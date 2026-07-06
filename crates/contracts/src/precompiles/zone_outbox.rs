@@ -12,6 +12,20 @@ crate::sol! {
             uint64 withdrawalBatchIndex;
         }
 
+        struct PendingWithdrawal {
+            address token;
+            address sender;
+            bytes32 txHash;
+            address to;
+            uint128 amount;
+            uint128 fee;
+            bytes32 memo;
+            uint64 gasLimit;
+            address fallbackRecipient;
+            bytes callbackData;
+            bytes revealTo;
+        }
+
         // -- Events --
 
         event WithdrawalRequested(
@@ -35,13 +49,18 @@ crate::sol! {
         error OnlySequencer();
         error GasLimitTooHigh();
         error OnlyZoneInbox();
+        error InvalidWithdrawalCount(uint256 actual, uint256 expected);
+        error InvalidEncryptedSenderCount(uint256 actual, uint256 expected);
+        error InvalidEncryptedSenderLength(uint256 actual, uint256 expected);
 
         // -- View functions --
 
         function lastBatch() external view returns (LastBatch memory);
         function withdrawalBatchIndex() external view returns (uint64);
+        function lastFinalizedTimestamp() external view returns (uint64);
         function nextWithdrawalIndex() external view returns (uint64);
         function pendingWithdrawalsCount() external view returns (uint256);
+        function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory);
         function calculateWithdrawalFee(uint64 gasLimit) external view returns (uint128 fee);
         function MAX_WITHDRAWAL_GAS_LIMIT() external view returns (uint64);
 

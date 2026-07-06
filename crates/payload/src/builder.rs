@@ -4,16 +4,16 @@
 //! followed by pool transactions and a withdrawal batch finalization.
 
 use crate::abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
-use alloy_consensus::{Signed, Transaction, TxLegacy, TxReceipt, transaction::TxHashRef};
-use alloy_eips::{BlockHashOrNumber, eip4895::Withdrawals};
+use alloy_consensus::{Signed, Transaction, TxLegacy};
+use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
     EvmFactory,
-    block::{BlockExecutor, BlockExecutorFactory, TxResult},
+    block::{BlockExecutorFactory, CommitChanges, TxResult},
     revm::context_interface::block::Block as RevmBlock,
 };
-use alloy_primitives::{B256, Bytes, U256};
+use alloy_primitives::{Bytes, U256};
 use alloy_rlp::Encodable;
-use alloy_sol_types::{SolCall, SolEvent};
+use alloy_sol_types::SolCall;
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -29,10 +29,7 @@ use reth_payload_builder::{EthBuiltPayload, PayloadBuilderError};
 use reth_payload_primitives::{BuiltPayloadExecutedBlock, PayloadAttributes};
 use reth_primitives_traits::{AlloyBlockHeader as _, Recovered};
 use reth_revm::{State, database::StateProviderDatabase};
-use reth_storage_api::{
-    BlockReader, HeaderProvider, ReceiptProvider, StateProvider, StateProviderFactory,
-    TransactionsProvider,
-};
+use reth_storage_api::{BlockReader, HeaderProvider, StateProvider, StateProviderFactory};
 use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool,
     error::InvalidPoolTransactionError,
@@ -53,17 +50,6 @@ use tracing::{error, info, warn};
 use zone_l1::{PreparedL1Block, TempoStateExt};
 
 use crate::{ZonePayloadAttributes, ZonePayloadTypes};
-
-#[derive(Clone)]
-struct RequestedWithdrawalContext {
-    event: abi::ZoneOutbox::WithdrawalRequested,
-    tx_hash: B256,
-}
-
-struct OpenBatchRequestedWithdrawals {
-    previous_boundary_block: u64,
-    requested_withdrawals: Vec<RequestedWithdrawalContext>,
-}
 
 pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL: Duration = Duration::from_secs(60);
 
@@ -256,7 +242,6 @@ where
 
         let mut cumulative_gas_used = 0u64;
         let total_fees = U256::ZERO;
-        let mut requested_withdrawals = Vec::new();
 
         let next_block_env_attributes = TempoNextBlockEnvAttributes {
             inner: NextBlockEnvAttributes {
@@ -298,10 +283,15 @@ where
             PayloadBuilderError::Internal(err.into())
         })?;
 
+        let pending_withdrawals_at_block_start =
+            read_pending_withdrawals_from_outbox(&mut builder, block_gas_limit, block_number)?;
+        let has_prior_withdrawals = !pending_withdrawals_at_block_start.is_empty();
+        let last_finalized_timestamp =
+            read_last_finalized_timestamp_from_outbox(&mut builder, block_gas_limit, block_number)?;
+
         // Execute advanceTempo system transaction — exactly one per zone block.
         {
             let advance_tx = build_advance_tempo_tx(prepared);
-            let advance_tx_hash = *advance_tx.tx_hash();
             let mut reverted = false;
             match builder.execute_transaction_with_result_closure(advance_tx, |result| {
                 let evm_result = result.result();
@@ -336,13 +326,6 @@ where
                     );
                     return Err(PayloadBuilderError::evm(err));
                 }
-            }
-            if let Some(receipt) = builder.executor().receipts().last() {
-                collect_requested_withdrawals(
-                    receipt,
-                    advance_tx_hash,
-                    &mut requested_withdrawals,
-                )?;
             }
         }
 
@@ -380,17 +363,9 @@ where
             }
 
             let tx_with_env = pool_tx.transaction.clone().into_with_tx_env();
-            let tx_hash = *pool_tx.hash();
             match builder.execute_transaction(tx_with_env) {
                 Ok(gas_used) => {
                     cumulative_gas_used += gas_used.tx_gas_used();
-                    if let Some(receipt) = builder.executor().receipts().last() {
-                        collect_requested_withdrawals(
-                            receipt,
-                            tx_hash,
-                            &mut requested_withdrawals,
-                        )?;
-                    }
                 }
                 Err(reth_evm::block::BlockExecutionError::Validation(
                     reth_evm::block::BlockValidationError::InvalidTx { error, .. },
@@ -415,52 +390,37 @@ where
             }
         }
 
-        let open_batch =
-            load_open_batch_requested_withdrawals(&self.provider, parent_header.number())?;
-        let has_prior_withdrawals = !open_batch.requested_withdrawals.is_empty();
-        let batch_interval_elapsed = withdrawal_batch_interval_elapsed(
-            &self.provider,
-            open_batch.previous_boundary_block,
-            parent_header.header(),
-            attributes.timestamp(),
-            self.withdrawal_batch_interval,
-        )?;
+        let batch_interval_elapsed = attributes.timestamp()
+            >= last_finalized_timestamp.saturating_add(self.withdrawal_batch_interval.as_secs());
 
-        // Finalize when there are prior (un-finalized) withdrawals to make visible on
-        // L1 — folding in this block's withdrawals when present — or when the empty-batch
-        // interval elapses so the L2 and L1 batch indexes stay in lockstep. A block that
-        // has only current-block withdrawals and no prior defers them to the next block,
-        // which joins consecutive withdrawal blocks into one batch (max +1 block latency).
+        // Finalize when this block started with pending withdrawals, folding in any
+        // withdrawals created by the current block, or when the empty-batch interval
+        // elapses so the L2 and L1 batch indexes stay in lockstep.
         if has_prior_withdrawals || batch_interval_elapsed {
-            let mut batch_withdrawals = open_batch.requested_withdrawals;
-            batch_withdrawals.extend(requested_withdrawals);
-
-            let encrypted_senders = batch_withdrawals
+            let pending_withdrawals =
+                read_pending_withdrawals_from_outbox(&mut builder, block_gas_limit, block_number)?;
+            let encrypted_senders = pending_withdrawals
                 .iter()
                 .map(|request| {
-                    if request.event.revealTo.is_empty() {
+                    if request.revealTo.is_empty() {
                         Ok(Bytes::new())
                     } else {
                         zone_precompiles::ecies::encrypt_authenticated_withdrawal(
-                            request.event.revealTo.as_ref(),
-                            request.event.sender,
-                            request.tx_hash,
+                            request.revealTo.as_ref(),
+                            request.sender,
+                            request.txHash,
                         )
                         .map(Bytes::from)
                         .ok_or_else(|| {
                             PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
                                 "failed to encrypt authenticated sender reveal for tx {}",
-                                request.tx_hash
+                                request.txHash
                             )))
                         })
                     }
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            // Finalize exactly the withdrawals we carry encrypted senders for. The contract
-            // processes the oldest `count` pending FIFO; `batch_withdrawals` (prior ++ current)
-            // equals all pending at this point, so this folds current in and leaves nothing
-            // stranded.
-            let count = U256::from(batch_withdrawals.len());
+            let count = U256::from(pending_withdrawals.len());
             let finalize_tx =
                 build_finalize_withdrawal_batch_tx(count, block_number, encrypted_senders);
             let mut finalize_reverted = false;
@@ -618,197 +578,112 @@ pub(crate) fn build_finalize_withdrawal_batch_tx(
     )
 }
 
-/// Reconstruct withdrawal requests and boundary metadata for the currently open
-/// batch from canonical history.
-///
-/// Scans committed blocks after the most recent `BatchFinalized` boundary up to
-/// `parent_block_number`, collecting successful `WithdrawalRequested` logs in
-/// block/transaction/log order. The block currently being built is not included;
-/// callers append its newly executed requests before finalizing.
-fn load_open_batch_requested_withdrawals<Provider>(
-    provider: &Provider,
-    parent_block_number: u64,
-) -> Result<OpenBatchRequestedWithdrawals, PayloadBuilderError>
+/// Read all pending withdrawals in the ZoneOutbox
+fn read_pending_withdrawals_from_outbox<B>(
+    builder: &mut B,
+    gas_limit: u64,
+    block_number: u64,
+) -> Result<Vec<abi::ZoneOutbox::PendingWithdrawal>, PayloadBuilderError>
 where
-    Provider: ReceiptProvider<Receipt = TempoReceipt>
-        + TransactionsProvider<Transaction = TempoTxEnvelope>,
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
 {
-    let empty_batch = |previous_boundary_block| OpenBatchRequestedWithdrawals {
-        previous_boundary_block,
-        requested_withdrawals: Vec::new(),
-    };
+    let calldata = abi::ZoneOutbox::getPendingWithdrawalsCall {}.abi_encode();
+    let output = execute_outbox_view_call(
+        builder,
+        calldata.into(),
+        gas_limit,
+        block_number,
+        "getPendingWithdrawals",
+    )?;
 
-    if parent_block_number == 0 {
-        return Ok(empty_batch(0));
-    }
-
-    let previous_boundary = find_previous_batch_finalized_block(provider, parent_block_number)?;
-    let from = previous_boundary.saturating_add(1);
-    if from > parent_block_number {
-        return Ok(empty_batch(previous_boundary));
-    }
-
-    let mut requested = Vec::new();
-    for block_number in from..=parent_block_number {
-        collect_requested_withdrawals_from_canonical_block(provider, block_number, &mut requested)?;
-    }
-
-    Ok(OpenBatchRequestedWithdrawals {
-        previous_boundary_block: previous_boundary,
-        requested_withdrawals: requested,
+    abi::ZoneOutbox::getPendingWithdrawalsCall::abi_decode_returns(&output).map_err(|err| {
+        PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+            "failed to decode getPendingWithdrawals return data: {err}"
+        )))
     })
 }
 
-fn withdrawal_batch_interval_elapsed<Provider>(
-    provider: &Provider,
-    previous_boundary_block: u64,
-    parent_header: &TempoHeader,
-    current_timestamp: u64,
-    withdrawal_batch_interval: Duration,
-) -> Result<bool, PayloadBuilderError>
-where
-    Provider: HeaderProvider<Header = TempoHeader>,
-{
-    let previous_boundary_timestamp = if previous_boundary_block == parent_header.number() {
-        parent_header.timestamp()
-    } else {
-        provider
-            .header_by_number(previous_boundary_block)
-            .map_err(|err| PayloadBuilderError::Internal(err.into()))?
-            .ok_or_else(|| {
-                PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                    "missing header for canonical zone block {previous_boundary_block}"
-                )))
-            })?
-            .timestamp()
-    };
-
-    Ok(current_timestamp
-        >= previous_boundary_timestamp.saturating_add(withdrawal_batch_interval.as_secs()))
-}
-
-/// Walk backwards from the `parent_block_number` and find the most recent
-/// canonical block that emitted a successful `BatchFinalized` log.
-fn find_previous_batch_finalized_block<Provider>(
-    provider: &Provider,
-    parent_block_number: u64,
+fn read_last_finalized_timestamp_from_outbox<B>(
+    builder: &mut B,
+    gas_limit: u64,
+    block_number: u64,
 ) -> Result<u64, PayloadBuilderError>
 where
-    Provider: ReceiptProvider<Receipt = TempoReceipt>,
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
 {
-    for block_number in (1..=parent_block_number).rev() {
-        let receipts = provider
-            .receipts_by_block(BlockHashOrNumber::Number(block_number))
-            .map_err(|err| PayloadBuilderError::Internal(err.into()))?
-            .ok_or_else(|| {
-                PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                    "missing receipts for canonical zone block {block_number}"
-                )))
-            })?;
+    let calldata = abi::ZoneOutbox::lastFinalizedTimestampCall {}.abi_encode();
+    let output = execute_outbox_view_call(
+        builder,
+        calldata.into(),
+        gas_limit,
+        block_number,
+        "lastFinalizedTimestamp",
+    )?;
 
-        if receipts.iter().any(|receipt| {
-            if !receipt.status() {
-                return false;
-            }
-
-            receipt.logs().iter().any(|log| {
-                log.address == ZONE_OUTBOX_ADDRESS
-                    && log.topics().first().copied().is_some_and(|topic| {
-                        topic == abi::ZoneOutbox::BatchFinalized::SIGNATURE_HASH
-                    })
-            })
-        }) {
-            return Ok(block_number);
-        }
-    }
-
-    Ok(0)
+    abi::ZoneOutbox::lastFinalizedTimestampCall::abi_decode_returns(&output).map_err(|err| {
+        PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+            "failed to decode lastFinalizedTimestamp return data: {err}"
+        )))
+    })
 }
 
-/// Collect successful `WithdrawalRequested` logs from one canonical block.
-///
-/// Loads the block's receipts and transactions, pairs each receipt with its
-/// transaction hash, and appends any successful `WithdrawalRequested` events to
-/// `requested_withdrawals` in transaction/log order.
-fn collect_requested_withdrawals_from_canonical_block<Provider>(
-    provider: &Provider,
+fn execute_outbox_view_call<B>(
+    builder: &mut B,
+    calldata: Bytes,
+    gas_limit: u64,
     block_number: u64,
-    requested_withdrawals: &mut Vec<RequestedWithdrawalContext>,
-) -> Result<(), PayloadBuilderError>
+    label: &str,
+) -> Result<Bytes, PayloadBuilderError>
 where
-    Provider: ReceiptProvider<Receipt = TempoReceipt>
-        + TransactionsProvider<Transaction = TempoTxEnvelope>,
+    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
 {
-    let receipts = provider
-        .receipts_by_block(BlockHashOrNumber::Number(block_number))
-        .map_err(|err| PayloadBuilderError::Internal(err.into()))?
-        .ok_or_else(|| {
-            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                "missing receipts for canonical zone block {block_number}"
-            )))
-        })?;
-    let transactions = provider
-        .transactions_by_block(BlockHashOrNumber::Number(block_number))
-        .map_err(|err| PayloadBuilderError::Internal(err.into()))?
-        .ok_or_else(|| {
-            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                "missing transactions for canonical zone block {block_number}"
-            )))
-        })?;
+    let tx = TxLegacy {
+        chain_id: None,
+        nonce: 0,
+        gas_price: 0,
+        gas_limit,
+        to: ZONE_OUTBOX_ADDRESS.into(),
+        value: U256::ZERO,
+        input: calldata,
+    };
+    let tx = Recovered::new_unchecked(
+        TempoTxEnvelope::Legacy(Signed::new_unhashed(tx, TEMPO_SYSTEM_TX_SIGNATURE)),
+        TEMPO_SYSTEM_TX_SENDER,
+    );
+    let mut output = None;
+    let mut reverted = false;
 
-    if receipts.len() != transactions.len() {
-        return Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
-            format!(
-                "canonical zone block {block_number} has {} receipts for {} transactions",
-                receipts.len(),
-                transactions.len()
-            ),
-        )));
-    }
-
-    for (receipt, tx) in receipts.iter().zip(transactions.iter()) {
-        collect_requested_withdrawals(receipt, *tx.tx_hash(), requested_withdrawals)?;
-    }
-
-    Ok(())
-}
-
-fn collect_requested_withdrawals(
-    receipt: &tempo_primitives::TempoReceipt,
-    tx_hash: B256,
-    requested_withdrawals: &mut Vec<RequestedWithdrawalContext>,
-) -> Result<(), PayloadBuilderError> {
-    // Zone execution preserves reverted logs in receipts for observability, but
-    // reverted `requestWithdrawal` calls roll back the outbox's pending storage.
-    // Only successful receipts should contribute to end-of-block finalization.
-    if !receipt.status() {
-        return Ok(());
-    }
-
-    for log in receipt.logs() {
-        if log.address != ZONE_OUTBOX_ADDRESS {
-            continue;
+    match builder.execute_transaction_with_commit_condition(tx, |result| {
+        let evm_result = result.result();
+        if evm_result.result.is_success() {
+            output = Some(evm_result.result.output().cloned().unwrap_or_default());
+        } else {
+            let revert_data = evm_result.result.output().cloned().unwrap_or_default();
+            error!(
+                target: "zone::payload",
+                block_number,
+                label,
+                is_halt = evm_result.result.is_halt(),
+                revert_data = %revert_data,
+                "ZoneOutbox view simulation reverted"
+            );
+            reverted = true;
         }
-
-        if log
-            .topics()
-            .first()
-            .copied()
-            .is_some_and(|topic| topic == abi::ZoneOutbox::WithdrawalRequested::SIGNATURE_HASH)
-        {
-            let event = abi::ZoneOutbox::WithdrawalRequested::decode_log(log).map_err(|err| {
-                PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-                    "failed to decode WithdrawalRequested log: {err}"
-                )))
-            })?;
-            requested_withdrawals.push(RequestedWithdrawalContext {
-                event: event.data,
-                tx_hash,
-            });
+        CommitChanges::No
+    }) {
+        Ok(_) if reverted => Err(PayloadBuilderError::Internal(reth_errors::RethError::msg(
+            format!("ZoneOutbox {label} view reverted at zone block {block_number}"),
+        ))),
+        Ok(_) => output.ok_or_else(|| {
+            PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
+                "ZoneOutbox {label} view returned no output at zone block {block_number}"
+            )))
+        }),
+        Err(err) => {
+            error!(?err, label, "ZoneOutbox view simulation failed");
+            Err(PayloadBuilderError::evm(err))
         }
     }
-
-    Ok(())
 }
 
 /// Build the `advanceTempo(header, deposits, decryptions, enabledTokens)` system transaction.
@@ -854,43 +729,13 @@ pub fn build_advance_tempo_tx(prepared: &PreparedL1Block) -> Recovered<TempoTxEn
 #[cfg(test)]
 mod tests {
     use alloy_consensus::Header;
-    use alloy_primitives::{B256, Bytes, Log, U256, address};
-    use alloy_sol_types::{SolCall, SolEvent};
+    use alloy_primitives::{B256, U256, address};
+    use alloy_sol_types::SolCall;
     use reth_primitives_traits::SealedHeader;
-    use tempo_primitives::{TempoHeader, TempoReceipt, TempoTxType};
+    use tempo_primitives::TempoHeader;
 
     use crate::abi::{self, DepositType, ZoneInbox};
     use zone_l1::PreparedL1Block;
-
-    fn make_withdrawal_requested_log(sender: alloy_primitives::Address) -> Log {
-        let event = abi::ZoneOutbox::WithdrawalRequested {
-            withdrawalIndex: 1,
-            sender,
-            token: address!("0x0000000000000000000000000000000000001000"),
-            to: address!("0x0000000000000000000000000000000000002000"),
-            amount: 500_000,
-            fee: 0,
-            memo: B256::ZERO,
-            gasLimit: 0,
-            fallbackRecipient: sender,
-            data: Bytes::new(),
-            revealTo: Bytes::new(),
-        };
-
-        Log {
-            address: super::ZONE_OUTBOX_ADDRESS,
-            data: event.encode_log_data(),
-        }
-    }
-
-    fn make_receipt(success: bool, logs: Vec<Log>) -> TempoReceipt {
-        TempoReceipt {
-            tx_type: TempoTxType::Legacy,
-            success,
-            cumulative_gas_used: 21_000,
-            logs,
-        }
-    }
 
     /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
     /// deposit types. The calldata should include `QueuedDeposit` entries with the
@@ -994,33 +839,5 @@ mod tests {
             1,
             "should have 1 DecryptionData for the encrypted deposit"
         );
-    }
-
-    #[test]
-    fn collect_requested_withdrawals_ignores_reverted_receipts() {
-        let sender = address!("0x0000000000000000000000000000000000001234");
-        let tx_hash = B256::with_last_byte(0x42);
-        let mut requested = Vec::new();
-
-        super::collect_requested_withdrawals(
-            &make_receipt(false, vec![make_withdrawal_requested_log(sender)]),
-            tx_hash,
-            &mut requested,
-        )
-        .expect("reverted receipt should be ignored");
-        assert!(
-            requested.is_empty(),
-            "reverted receipts must not add phantom withdrawals"
-        );
-
-        super::collect_requested_withdrawals(
-            &make_receipt(true, vec![make_withdrawal_requested_log(sender)]),
-            tx_hash,
-            &mut requested,
-        )
-        .expect("successful receipt should decode");
-        assert_eq!(requested.len(), 1, "successful receipt should be collected");
-        assert_eq!(requested[0].tx_hash, tx_hash);
-        assert_eq!(requested[0].event.sender, sender);
     }
 }

@@ -1120,6 +1120,12 @@ interface IZoneOutbox {
     /// @notice Number of pending withdrawals
     function pendingWithdrawalsCount() external view returns (uint256);
 
+    /// @notice Pending withdrawals waiting to be finalized
+    function getPendingWithdrawals() external view returns (PendingWithdrawal[] memory);
+
+    /// @notice Timestamp of the latest withdrawal batch finalization
+    function lastFinalizedTimestamp() external view returns (uint64);
+
     /// @notice Maximum number of withdrawal requests per zone block (0 = unlimited)
     function maxWithdrawalsPerBlock() external view returns (uint256);
 
@@ -1161,9 +1167,10 @@ interface IZoneOutbox {
         external;
 
     /// @notice Finalize batch at end of block - build withdrawal hash and write to state
-    /// @dev Only callable by sequencer. Required per batch (count may be 0).
+    /// @dev Only callable by sequencer. Required per batch. `count` must equal
+    ///      the current pending withdrawal count (including 0 for an empty batch).
     ///      Writes withdrawal batch parameters to lastBatch storage for proof access.
-    /// @param count Max number of withdrawals to process
+    /// @param count The number of pending withdrawals to process
     /// @return withdrawalQueueHash The hash chain (0 if no withdrawals)
     function finalizeWithdrawalBatch(
         uint256 count,

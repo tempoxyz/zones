@@ -86,6 +86,10 @@ library WithdrawalQueueLib {
         uint256 slotIndex = head % WITHDRAWAL_QUEUE_CAPACITY;
         bytes32 currentSlot = queue.slots[slotIndex];
 
+        if (currentSlot == EMPTY_SENTINEL || remainingQueue == EMPTY_SENTINEL) {
+            revert InvalidWithdrawalHash();
+        }
+
         bytes32 expectedRemainingQueue =
             remainingQueue == bytes32(0) ? EMPTY_SENTINEL : remainingQueue;
         if (keccak256(abi.encode(withdrawal, expectedRemainingQueue)) != currentSlot) {

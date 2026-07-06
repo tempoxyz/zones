@@ -595,7 +595,7 @@ contract ZonePortal is IZonePortal {
         }
 
         // Validate encryption key
-        (bool valid, uint64 expiresAtBlock) = isEncryptionKeyValid(keyIndex);
+        (bool valid,) = isEncryptionKeyValid(keyIndex);
         if (!valid) {
             if (keyIndex >= _encryptionKeys.length) {
                 revert InvalidEncryptionKeyIndex(keyIndex);
@@ -666,11 +666,9 @@ contract ZonePortal is IZonePortal {
 
         // Transfer fee to sequencer.
         if (withdrawal.fee > 0) {
-            try ITIP20(_token).transfer(sequencer, withdrawal.fee) returns (bool) { }
-                catch {
-                // Fee transfer can fail for eg. TIP-403 blacklist, in which case the sequencer
-                // will forgo the fee so as to not stall withdrawals.
-            }
+            // Fee transfer can fail for e.g. TIP-403 blacklist. The sequencer
+            // forgoes the fee so the withdrawal itself does not stall.
+            _tryTransfer(_token, sequencer, withdrawal.fee);
         }
 
         if (withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT) {
@@ -681,17 +679,10 @@ contract ZonePortal is IZonePortal {
             return;
         }
 
-        bool success = false;
-        // Execute the withdrawal
+        bool success;
         if (withdrawal.gasLimit == 0) {
-            // Simple transfer, no callback
-            try ITIP20(_token).transfer(withdrawal.to, withdrawal.amount) returns (bool ok) {
-                success = ok;
-            } catch {
-                success = false;
-            }
+            success = _tryTransfer(_token, withdrawal.to, withdrawal.amount);
         } else {
-            // Try callback via messenger; revert is treated as failure
             try IZoneMessenger(messenger)
                 .relayMessage(
                     _token,
@@ -706,17 +697,14 @@ contract ZonePortal is IZonePortal {
                 success = false;
             }
         }
+
         if (!success) {
             // Callback failed: bounce back to zone (only amount, not fee)
             _enqueueBounceBack(_token, withdrawal.amount, withdrawal.fallbackRecipient);
-            emit WithdrawalProcessed(
-                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, false
-            );
-        } else {
-            emit WithdrawalProcessed(
-                withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, true
-            );
         }
+        emit WithdrawalProcessed(
+            withdrawal.to, withdrawal.senderTag, _token, withdrawal.amount, success
+        );
     }
 
     function _processDepositBounceBack(Withdrawal calldata withdrawal) internal {
@@ -728,19 +716,12 @@ contract ZonePortal is IZonePortal {
         uint128 refundAmount = withdrawal.amount - bouncebackFee;
 
         if (bouncebackFee > 0) {
-            try ITIP20(_token).transfer(sequencer, bouncebackFee) returns (bool) { }
-                catch {
-                // Fee transfer can fail for eg. TIP-403 blacklist, in which case the sequencer
-                // will forgo the fee so as to not stall deposit bounce-backs.
-            }
+            // If the fee transfer fails, (e.g. TIP-403 blacklist), the sequencer
+            // forgoes the fee so the bounce-back itself does not stall.
+            _tryTransfer(_token, sequencer, bouncebackFee); // ignore failure
         }
 
-        bool success;
-        try ITIP20(_token).transfer(withdrawal.to, refundAmount) returns (bool ok) {
-            success = ok;
-        } catch {
-            success = false;
-        }
+        bool success = _tryTransfer(_token, withdrawal.to, refundAmount);
 
         if (success) {
             emit DepositBounceBack(withdrawal.to, _token, refundAmount, bouncebackFee);
@@ -754,15 +735,31 @@ contract ZonePortal is IZonePortal {
         amount = refunds[token][msg.sender];
         refunds[token][msg.sender] = 0;
 
-        try ITIP20(token).transfer(msg.sender, amount) returns (bool ok) {
-            if (!ok) {
-                revert CallbackRejected();
-            }
-        } catch {
-            revert CallbackRejected();
-        }
+        if (!_tryTransfer(token, msg.sender, amount)) revert CallbackRejected();
 
         emit RefundClaimed(msg.sender, token, amount);
+    }
+
+    /// @notice Attempt a TIP-20 transfer without bubbling recipient/policy reverts.
+    /// @dev Returns false if the token transfer reverts or returns false. Callers decide
+    ///      whether a failed transfer should be ignored, parked for refund, or reverted.
+    /// @param token The TIP-20 token to transfer.
+    /// @param to The recipient address.
+    /// @param amount The token amount to transfer.
+    /// @return success True if the transfer completed and returned true.
+    function _tryTransfer(
+        address token,
+        address to,
+        uint128 amount
+    )
+        internal
+        returns (bool success)
+    {
+        try ITIP20(token).transfer(to, amount) returns (bool ok) {
+            return ok;
+        } catch {
+            return false;
+        }
     }
 
     /// @notice Enqueue a bounce-back deposit for failed callback

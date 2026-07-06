@@ -46,6 +46,12 @@ contract WithdrawalQueueHarness {
         return queue.slots[index];
     }
 
+    function setRawState(uint256 head, uint256 tail, uint256 slot, bytes32 value) external {
+        queue.head = head;
+        queue.tail = tail;
+        queue.slots[slot] = value;
+    }
+
 }
 
 /// @title WithdrawalQueueLibTest
@@ -262,6 +268,29 @@ contract WithdrawalQueueLibTest is Test {
         // Try to dequeue with wrong remaining queue
         vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
         harness.dequeue(w1, keccak256("wrongHash"));
+    }
+
+    function test_dequeue_revertsIfRemainingQueueIsEmptySentinel() public {
+        Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
+        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+        harness.enqueue(wHash);
+
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        harness.dequeue(w, EMPTY_SENTINEL);
+
+        assertEq(harness.head(), 0);
+        assertEq(harness.slots(0), wHash);
+    }
+
+    function test_dequeue_revertsIfCurrentSlotIsEmptySentinel() public {
+        Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
+        harness.setRawState(0, 1, 0, EMPTY_SENTINEL);
+
+        vm.expectRevert(WithdrawalQueueLib.InvalidWithdrawalHash.selector);
+        harness.dequeue(w, bytes32(0));
+
+        assertEq(harness.head(), 0);
+        assertEq(harness.slots(0), EMPTY_SENTINEL);
     }
 
     /*//////////////////////////////////////////////////////////////

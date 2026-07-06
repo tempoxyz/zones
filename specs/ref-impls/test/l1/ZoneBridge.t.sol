@@ -231,14 +231,13 @@ contract ZoneBridgeTest is BaseTest {
         view
         returns (bytes[] memory encryptedSenders)
     {
-        uint256 pending = l2Outbox.pendingWithdrawalsCount();
-        if (count > pending) {
-            count = pending;
-        }
         encryptedSenders = new bytes[](count);
     }
 
     function _finalizeWithdrawalBatch(uint256 count) internal returns (bytes32) {
+        if (count == type(uint256).max) {
+            count = l2Outbox.pendingWithdrawalsCount();
+        }
         vm.startPrank(sequencer);
         bytes32 hash = l2Outbox.finalizeWithdrawalBatch(
             count, uint64(block.number), _emptyEncryptedSenders(count)
