@@ -57,6 +57,10 @@ use tracing::{error, warn};
 use zone_l1::{DepositQueue, L1BlockDeposits, PolicyProvider, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
 
+/// Returns the wall-clock drift that should disable txpool inclusion, if any.
+///
+/// The comparison uses the full Tempo L1 block timestamp, including its millisecond
+/// part, so live sub-second blocks are not treated as older than they are.
 fn tx_pool_skip_drift(
     l1_timestamp_secs: u64,
     l1_timestamp_millis_part: u64,
