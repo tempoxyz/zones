@@ -341,7 +341,7 @@ impl WithdrawalProcessor {
     /// For each head slot the processor reads the slot's current on-chain hash
     /// and trims withdrawals the portal has already consumed
     /// ([`find_processed_offset`]), so a crash, timeout, or restart mid-slot
-    /// resumes exactly where the portal is — no reverted resubmissions.
+    /// resumes exactly where the portal is.
     #[instrument(skip_all)]
     async fn process_queue(&mut self) -> eyre::Result<()> {
         // loop through all the slots
