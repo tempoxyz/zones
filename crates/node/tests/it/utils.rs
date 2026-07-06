@@ -654,6 +654,7 @@ impl ZoneTestNode {
             SecretKey::from(sequencer_signer.credential()),
             portal_address,
             policy_provider,
+            zone_node::DEFAULT_NO_TX_POOL_DRIFT_THRESHOLD,
         );
         node_handle
             .node

@@ -13,4 +13,7 @@ pub mod node;
 pub mod rpc;
 
 pub use engine::ZoneEngine;
-pub use node::{ZoneExecutorBuilder, ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig};
+pub use node::{
+    DEFAULT_NO_TX_POOL_DRIFT_THRESHOLD, ZoneExecutorBuilder, ZoneNode, ZonePrivateRpcConfig,
+    ZoneSequencerAddOnsConfig,
+};

@@ -152,6 +152,8 @@ pub struct ZoneArgs {
     pub withdrawal_poll_interval_secs: u64,
 
     /// Maximum L1 timestamp drift before catch-up blocks skip txpool transactions.
+    ///
+    /// Set to zero to disable the catch-up no-txpool heuristic.
     #[arg(
         long = "zone.no-tx-pool-drift-threshold-secs",
         env = "ZONE_NO_TX_POOL_DRIFT_THRESHOLD_SECS",

@@ -52,49 +52,10 @@ use std::{
 };
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_primitives::TempoHeader;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 use zone_l1::{DepositQueue, L1BlockDeposits, PolicyProvider, PreparedL1Block};
 use zone_payload::{ZonePayloadAttributes, ZonePayloadTypes};
-
-/// Returns the wall-clock drift that should disable txpool inclusion, if any.
-///
-/// The comparison uses the full Tempo L1 block timestamp, including its millisecond
-/// part, so live sub-second blocks are not treated as older than they are.
-fn tx_pool_skip_drift(
-    l1_timestamp_secs: u64,
-    l1_timestamp_millis_part: u64,
-    now: SystemTime,
-    no_tx_pool_drift_threshold: Duration,
-) -> Option<Duration> {
-    let l1_timestamp = UNIX_EPOCH
-        + Duration::from_secs(l1_timestamp_secs)
-        + Duration::from_millis(l1_timestamp_millis_part);
-    now.duration_since(l1_timestamp)
-        .ok()
-        .filter(|drift| *drift > no_tx_pool_drift_threshold)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tx_pool_skip_drift_uses_millisecond_timestamp_part() {
-        let timestamp_secs = 1_700_000_000;
-        let threshold = Duration::from_secs(1);
-        let now = UNIX_EPOCH + Duration::from_secs(timestamp_secs) + Duration::from_millis(1400);
-
-        assert_eq!(
-            tx_pool_skip_drift(timestamp_secs, 500, now, threshold),
-            None
-        );
-        assert_eq!(
-            tx_pool_skip_drift(timestamp_secs, 0, now, threshold),
-            Some(Duration::from_millis(1400))
-        );
-    }
-}
 
 /// Engine that drives L2 block production from L1 events.
 ///
@@ -131,6 +92,8 @@ pub struct ZoneEngine {
     policy_provider: PolicyProvider,
     /// Maximum L1 timestamp drift before catch-up blocks skip txpool transactions.
     no_tx_pool_drift_threshold: Duration,
+    /// Consecutive blocks built without txpool transactions due to L1 catch-up drift.
+    no_tx_pool_skip_streak: u64,
 }
 
 impl ZoneEngine {
@@ -157,6 +120,7 @@ impl ZoneEngine {
             portal_address,
             policy_provider,
             no_tx_pool_drift_threshold,
+            no_tx_pool_skip_streak: 0,
         }
     }
 
@@ -256,26 +220,30 @@ impl ZoneEngine {
         let timestamp_secs = l1_block.header.timestamp();
         let timestamp_millis_part = l1_block.header.timestamp_millis_part;
         let no_tx_pool_drift = tx_pool_skip_drift(
-            timestamp_secs,
-            timestamp_millis_part,
+            l1_block.header.header().timestamp_millis(),
             SystemTime::now(),
             self.no_tx_pool_drift_threshold,
         );
-        let no_tx_pool = no_tx_pool_drift.is_some();
-        if let Some(drift) = no_tx_pool_drift {
-            let drift_ms = drift.as_millis().min(u128::from(u64::MAX)) as u64;
-            let threshold_ms = self
-                .no_tx_pool_drift_threshold
-                .as_millis()
-                .min(u128::from(u64::MAX)) as u64;
-            warn!(
+        if let Some(drift_ms) = no_tx_pool_drift {
+            self.no_tx_pool_skip_streak = self.no_tx_pool_skip_streak.saturating_add(1);
+            if self.no_tx_pool_skip_streak == 1 || self.no_tx_pool_skip_streak.is_multiple_of(100) {
+                warn!(
+                    target: "zone::engine",
+                    l1_block = l1_num_hash.number,
+                    l1_hash = %l1_num_hash.hash,
+                    skipped_blocks = self.no_tx_pool_skip_streak,
+                    drift_ms = %drift_ms,
+                    threshold_ms = %self.no_tx_pool_drift_threshold.as_millis(),
+                    "skipping txpool transactions while catching up to L1"
+                );
+            }
+        } else if self.no_tx_pool_skip_streak > 0 {
+            info!(
                 target: "zone::engine",
-                l1_block = l1_num_hash.number,
-                l1_hash = %l1_num_hash.hash,
-                drift_ms,
-                threshold_ms,
-                "skipping txpool transactions while catching up to L1"
+                skipped_blocks = self.no_tx_pool_skip_streak,
+                "resuming txpool transactions after L1 catch-up"
             );
+            self.no_tx_pool_skip_streak = 0;
         }
 
         let l1_block = self.prepare_l1_block(l1_block).await?;
@@ -298,7 +266,7 @@ impl ZoneEngine {
             },
             timestamp_millis_part,
             l1_block,
-            no_tx_pool,
+            no_tx_pool: no_tx_pool_drift.is_some(),
         };
 
         // Send FCU with payload attributes through the engine API to trigger
@@ -356,5 +324,61 @@ impl ZoneEngine {
         }
 
         Ok(())
+    }
+}
+
+/// Returns the wall-clock drift in milliseconds that should disable txpool inclusion, if any.
+///
+/// A zero threshold disables the no-txpool catch-up heuristic. The comparison
+/// expects a full Tempo L1 timestamp in milliseconds, so sub-second blocks are
+/// not treated as older than they are.
+fn tx_pool_skip_drift(
+    l1_timestamp_millis: u64,
+    now: SystemTime,
+    no_tx_pool_drift_threshold: Duration,
+) -> Option<u128> {
+    if no_tx_pool_drift_threshold.is_zero() {
+        return None;
+    }
+
+    let now_millis = now.duration_since(UNIX_EPOCH).ok()?.as_millis();
+    let drift_millis = now_millis.checked_sub(u128::from(l1_timestamp_millis))?;
+    (drift_millis > no_tx_pool_drift_threshold.as_millis()).then_some(drift_millis)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_consensus::Header;
+
+    #[test]
+    fn tx_pool_skip_drift_uses_millisecond_timestamp() {
+        let header = TempoHeader {
+            timestamp_millis_part: 500,
+            inner: Header {
+                timestamp: 1_700_000_000,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let threshold = Duration::from_secs(1);
+        let now = UNIX_EPOCH
+            + Duration::from_millis(header.timestamp_millis())
+            + Duration::from_millis(900);
+
+        assert_eq!(
+            tx_pool_skip_drift(header.timestamp_millis(), now, threshold),
+            None
+        );
+        assert_eq!(
+            tx_pool_skip_drift(header.inner.timestamp * 1000, now, threshold),
+            Some(1400)
+        );
+    }
+
+    #[test]
+    fn tx_pool_skip_drift_zero_threshold_disables_skip() {
+        let now = UNIX_EPOCH + Duration::from_secs(1);
+        assert_eq!(tx_pool_skip_drift(0, now, Duration::ZERO), None);
     }
 }
