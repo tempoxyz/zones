@@ -25,11 +25,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "$EVENTS_KEY" > "${{ runner.temp }}/key"
-          echo "$EVENTS_CERT" > "${{ runner.temp }}/cert"
+          printf '%s' "$EVENTS_KEY" > "${{ runner.temp }}/key"
+          printf '%s' "$EVENTS_CERT" > "${{ runner.temp }}/cert"
+          EVENTS_ARGS="${EVENTS_ARGS//$'\r'/}"
 
           # EVENTS_ARGS may contain additional curl arguments, not just a URL.
-          curl -sf -o /dev/null -X POST $EVENTS_ARGS \
+          curl --show-error --fail -o /dev/null -X POST $EVENTS_ARGS \
             -H "Content-Type: application/json" \
             --key "${{ runner.temp }}/key" \
             --cert "${{ runner.temp }}/cert" \
@@ -264,9 +265,10 @@ jobs:
           printf '%s' "$EVENTS_KEY" > "${RUNNER_TEMP}/key"
           printf '%s' "$EVENTS_CERT" > "${RUNNER_TEMP}/cert"
           printf '%s' "$PAYLOAD_B64" | base64 --decode > "${RUNNER_TEMP}/pr-audit-event.json"
+          EVENTS_ARGS="${EVENTS_ARGS//$'\r'/}"
 
           # EVENTS_ARGS may contain additional curl arguments, not just a URL.
-          curl -sf -o /dev/null -X POST $EVENTS_ARGS \
+          curl --show-error --fail -o /dev/null -X POST $EVENTS_ARGS \
             -H "Content-Type: application/json" \
             --key "${RUNNER_TEMP}/key" \
             --cert "${RUNNER_TEMP}/cert" \
