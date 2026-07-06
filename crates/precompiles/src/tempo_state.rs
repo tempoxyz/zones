@@ -370,6 +370,24 @@ mod tests {
         calldata: Bytes,
         is_static: bool,
     ) -> PrecompileResult {
+        call_with_bytecode_address(
+            ctx,
+            precompile,
+            caller,
+            calldata,
+            is_static,
+            TEMPO_STATE_ADDRESS,
+        )
+    }
+
+    fn call_with_bytecode_address(
+        ctx: &mut TestContext,
+        precompile: &DynPrecompile,
+        caller: Address,
+        calldata: Bytes,
+        is_static: bool,
+        bytecode_address: Address,
+    ) -> PrecompileResult {
         AlloyEvmPrecompile::call(
             precompile,
             PrecompileInput {
@@ -380,7 +398,7 @@ mod tests {
                 value: U256::ZERO,
                 target_address: TEMPO_STATE_ADDRESS,
                 is_static,
-                bytecode_address: TEMPO_STATE_ADDRESS,
+                bytecode_address,
                 internals: EvmInternals::from_context(ctx),
             },
         )
@@ -455,6 +473,20 @@ mod tests {
     }
 
     #[test]
+    fn initialize_sets_header_fields() -> TestResult {
+        let header = child_header(B256::repeat_byte(0xaa), 42);
+        let header_rlp = encode_header(&header);
+        let mut ctx = test_context();
+        initialize(&mut ctx, &header_rlp)?;
+
+        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        assert_checkpoint(&mut ctx, &precompile, keccak256(&header_rlp), 42)?;
+        assert_legacy_getters(&mut ctx, &precompile, &header)?;
+
+        Ok(())
+    }
+
+    #[test]
     fn finalize_tempo_updates_checkpoint() -> TestResult {
         let genesis = TempoHeader::default();
         let genesis_rlp = encode_header(&genesis);
@@ -476,7 +508,7 @@ mod tests {
         )?;
         assert!(output.is_success());
         assert_checkpoint(&mut ctx, &precompile, child_hash, 1)?;
-        assert_legacy_getters(&mut ctx, &precompile, genesis_hash)?;
+        assert_legacy_getters(&mut ctx, &precompile, &child)?;
 
         Ok(())
     }
@@ -484,7 +516,7 @@ mod tests {
     fn assert_legacy_getters(
         ctx: &mut TestContext,
         precompile: &DynPrecompile,
-        parent_hash: B256,
+        header: &TempoHeader,
     ) -> TestResult {
         let state_root = call(
             ctx,
@@ -495,7 +527,7 @@ mod tests {
         )?;
         assert_eq!(
             TempoStateAbi::tempoStateRootCall::abi_decode_returns(&state_root.bytes)?,
-            b256!("0x1111111111111111111111111111111111111111111111111111111111111111")
+            header.state_root()
         );
 
         let parent = call(
@@ -507,7 +539,47 @@ mod tests {
         )?;
         assert_eq!(
             TempoStateAbi::tempoParentHashCall::abi_decode_returns(&parent.bytes)?,
-            parent_hash
+            header.parent_hash()
+        );
+
+        let beneficiary = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoBeneficiaryCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoBeneficiaryCall::abi_decode_returns(&beneficiary.bytes)?,
+            header.beneficiary()
+        );
+
+        let transactions_root = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoTransactionsRootCall {}
+                .abi_encode()
+                .into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoTransactionsRootCall::abi_decode_returns(
+                &transactions_root.bytes
+            )?,
+            header.transactions_root()
+        );
+
+        let receipts_root = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoReceiptsRootCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoReceiptsRootCall::abi_decode_returns(&receipts_root.bytes)?,
+            header.receipts_root()
         );
 
         let gas_limit = call(
@@ -519,7 +591,19 @@ mod tests {
         )?;
         assert_eq!(
             TempoStateAbi::tempoGasLimitCall::abi_decode_returns(&gas_limit.bytes)?,
-            30_000_000
+            header.gas_limit()
+        );
+
+        let gas_used = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoGasUsedCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoGasUsedCall::abi_decode_returns(&gas_used.bytes)?,
+            header.gas_used()
         );
 
         let timestamp = call(
@@ -531,7 +615,7 @@ mod tests {
         )?;
         assert_eq!(
             TempoStateAbi::tempoTimestampCall::abi_decode_returns(&timestamp.bytes)?,
-            1_700_000_000
+            header.timestamp()
         );
 
         let timestamp_millis = call(
@@ -543,7 +627,19 @@ mod tests {
         )?;
         assert_eq!(
             TempoStateAbi::tempoTimestampMillisCall::abi_decode_returns(&timestamp_millis.bytes)?,
-            123
+            header.timestamp_millis_part
+        );
+
+        let prev_randao = call(
+            ctx,
+            precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoPrevRandaoCall {}.abi_encode().into(),
+            true,
+        )?;
+        assert_eq!(
+            TempoStateAbi::tempoPrevRandaoCall::abi_decode_returns(&prev_randao.bytes)?,
+            header.mix_hash().unwrap_or_default()
         );
 
         let general_gas_limit = call(
@@ -555,7 +651,7 @@ mod tests {
         )?;
         assert_eq!(
             TempoStateAbi::generalGasLimitCall::abi_decode_returns(&general_gas_limit.bytes)?,
-            1_000_000
+            header.general_gas_limit
         );
 
         let shared_gas_limit = call(
@@ -567,7 +663,7 @@ mod tests {
         )?;
         assert_eq!(
             TempoStateAbi::sharedGasLimitCall::abi_decode_returns(&shared_gas_limit.bytes)?,
-            2_000_000
+            header.shared_gas_limit
         );
 
         Ok(())
@@ -593,6 +689,27 @@ mod tests {
 
         assert!(output.is_revert());
         assert_checkpoint(&mut ctx, &precompile, genesis_hash, genesis.number())?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn delegate_call_reverts() -> TestResult {
+        let genesis_rlp = encode_header(&TempoHeader::default());
+        let mut ctx = test_context();
+        initialize(&mut ctx, &genesis_rlp)?;
+
+        let precompile = TempoState::create(MockL1Reader { value: B256::ZERO }, &ctx.cfg.clone());
+        let output = call_with_bytecode_address(
+            &mut ctx,
+            &precompile,
+            Address::ZERO,
+            TempoStateAbi::tempoBlockHashCall {}.abi_encode().into(),
+            true,
+            address!("0x000000000000000000000000000000000000dEaD"),
+        )?;
+
+        assert!(output.is_revert());
 
         Ok(())
     }
