@@ -7,17 +7,21 @@
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolError, SolValue};
-use core::fmt::Debug;
+use core::{cell::RefCell, fmt::Debug};
 use revm::{
     Database,
+    context::CfgEnv,
     precompile::{PrecompileId, PrecompileOutput, PrecompileResult},
 };
+use std::rc::Rc;
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::{FeeManagerError, IFeeManager, ITIPFeeAMM};
 use tempo_precompiles::{
     DelegateCallNotAllowed, Precompile as TempoPrecompile, charge_input_cost, dispatch,
     error::Result as TempoResult,
     mutate_void,
-    storage::{Handler, StorageCtx, evm::EvmPrecompileStorageProvider},
+    storage::{Handler, StorageActions, StorageCtx, evm::EvmPrecompileStorageProvider},
+    storage_credits::NonCreditableSlots,
     tip20::{TIP20Token, validate_usd_currency},
     tip20_factory::TIP20Factory,
     view,
@@ -190,7 +194,9 @@ impl<P: ZonePortalReader> ZoneFeeManager<P> {
     /// Create a [`DynPrecompile`] for the zone fee-manager ABI.
     pub fn create(
         provider: P,
-        cfg: &revm::context::CfgEnv<tempo_chainspec::hardfork::TempoHardfork>,
+        cfg: &CfgEnv<TempoHardfork>,
+        actions: StorageActions,
+        non_creditable_slots: Rc<RefCell<NonCreditableSlots>>,
     ) -> DynPrecompile
     where
         P: Clone + Send + Sync + 'static,
@@ -199,7 +205,6 @@ impl<P: ZonePortalReader> ZoneFeeManager<P> {
         let spec = cfg.spec;
         let amsterdam_eip8037_enabled = cfg.enable_amsterdam_eip8037;
         let gas_params = cfg.gas_params.clone();
-
         DynPrecompile::new_stateful(
             PrecompileId::Custom("ZoneFeeManager".into()),
             move |input| {
@@ -219,7 +224,9 @@ impl<P: ZonePortalReader> ZoneFeeManager<P> {
                     amsterdam_eip8037_enabled,
                     input.is_static,
                     gas_params.clone(),
-                );
+                )
+                .with_actions(actions.clone())
+                .with_non_creditable_slots(non_creditable_slots.clone());
 
                 StorageCtx::enter(&mut storage, || {
                     let mut manager = manager.clone();

@@ -123,10 +123,12 @@ impl ZoneEvmFactory {
         // Zone-specific overrides (TIP20Factory, TIP403Proxy) are in the
         // static map via `apply_precompile` and take priority over this.
         let zone_cfg = cfg.clone();
+        let zone_actions = StorageActions::disabled();
+        let zone_non_creditable_slots = Rc::new(RefCell::new(NonCreditableSlots::empty()));
         let zone_env = PrecompileEnv::new(
             &cfg,
-            StorageActions::disabled(),
-            Rc::new(RefCell::new(NonCreditableSlots::empty())),
+            zone_actions.clone(),
+            zone_non_creditable_slots.clone(),
         );
         let fee_provider = self.l1_provider.clone();
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
@@ -138,7 +140,12 @@ impl ZoneEvmFactory {
                     sequencer.clone(),
                 ))
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
-                Some(ZoneFeeManager::create(fee_provider.clone(), &zone_cfg))
+                Some(ZoneFeeManager::create(
+                    fee_provider.clone(),
+                    &zone_cfg,
+                    zone_actions.clone(),
+                    zone_non_creditable_slots.clone(),
+                ))
             } else if *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
