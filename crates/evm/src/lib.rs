@@ -8,13 +8,11 @@
 #![allow(unnameable_types)]
 
 mod executor;
-mod fee_manager;
 pub mod precompiles;
 mod tx_context;
 
 use crate::{
     executor::ZoneBlockExecutor,
-    fee_manager::ZoneProtocolFeeManager,
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS,
@@ -86,7 +84,7 @@ impl ZoneEvmFactory {
         &self,
         evm: TempoEvm<DB, I>,
     ) -> TempoEvm<DB, I> {
-        let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new(self.l1_provider.clone()));
+        let mut evm = evm.with_fee_manager(ZoneFeeManager::new(self.l1_provider.clone()));
         let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {

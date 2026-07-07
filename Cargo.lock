@@ -13447,6 +13447,7 @@ dependencies = [
  "tempo-precompiles",
  "tempo-precompiles-macros",
  "tempo-primitives",
+ "tempo-revm",
  "tempo-zone-contracts",
  "tracing",
  "zone-primitives",

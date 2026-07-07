@@ -7,16 +7,24 @@
 use alloy_evm::precompiles::DynPrecompile;
 use alloy_primitives::{Address, B256, U256, keccak256};
 use alloy_sol_types::{SolError, SolValue};
-use revm::precompile::{PrecompileId, PrecompileOutput, PrecompileResult};
+use core::fmt::Debug;
+use revm::{
+    Database,
+    context::Journal,
+    precompile::{PrecompileId, PrecompileOutput, PrecompileResult},
+};
+use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::{FeeManagerError, IFeeManager, ITIPFeeAMM};
 use tempo_precompiles::{
     DelegateCallNotAllowed, Precompile as TempoPrecompile, charge_input_cost, dispatch,
+    error::Result as TempoResult,
     mutate_void,
-    storage::{Handler, StorageCtx, evm::EvmPrecompileStorageProvider},
+    storage::{Handler, StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
     tip20::{TIP20Token, validate_usd_currency},
     tip20_factory::TIP20Factory,
     view,
 };
+use tempo_revm::{ProtocolFeeManager, TempoStateAccess, TempoTxEnv};
 use zone_primitives::constants::PORTAL_TOKEN_CONFIGS_SLOT;
 
 use crate::{L1StorageReader, TempoState};
@@ -272,6 +280,74 @@ impl<P: ZonePortalReader> TempoPrecompile for ZoneFeeManager<P> {
                     rebalanceSwap(_) => self.fee_amm_disabled(),
                 }
             }
+        )
+    }
+}
+
+impl<DB, P> ProtocolFeeManager<DB> for ZoneFeeManager<P>
+where
+    DB: Database,
+    P: ZonePortalReader + Debug,
+{
+    fn get_fee_token(
+        &self,
+        journal: &mut Journal<DB>,
+        tx: &TempoTxEnv,
+        fee_payer: Address,
+        spec: TempoHardfork,
+        actions: StorageActions,
+    ) -> TempoResult<Address> {
+        let fee_token = <Journal<DB> as TempoStateAccess<((), ())>>::get_fee_token(
+            journal,
+            tx,
+            fee_payer,
+            spec,
+            actions.clone(),
+        )?;
+
+        <Journal<DB> as TempoStateAccess<((), ())>>::with_read_only_storage_ctx(
+            journal,
+            spec,
+            actions,
+            || self.ensure_token_enabled_current(fee_token),
+        )?;
+
+        Ok(fee_token)
+    }
+
+    fn collect_fee_pre_tx(
+        &self,
+        fee_payer: Address,
+        user_token: Address,
+        max_amount: U256,
+        beneficiary: Address,
+        skip_liquidity_check: bool,
+    ) -> TempoResult<Address> {
+        ZoneFeeManager::collect_fee_pre_tx(
+            self,
+            fee_payer,
+            user_token,
+            max_amount,
+            beneficiary,
+            skip_liquidity_check,
+        )
+    }
+
+    fn collect_fee_post_tx(
+        &self,
+        fee_payer: Address,
+        actual_spending: U256,
+        refund_amount: U256,
+        fee_token: Address,
+        beneficiary: Address,
+    ) -> TempoResult<U256> {
+        ZoneFeeManager::collect_fee_post_tx(
+            self,
+            fee_payer,
+            actual_spending,
+            refund_amount,
+            fee_token,
+            beneficiary,
         )
     }
 }
