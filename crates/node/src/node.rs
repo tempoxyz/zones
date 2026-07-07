@@ -54,7 +54,7 @@ use tempo_transaction_pool::{
     validator::{DEFAULT_MAX_TEMPO_AUTHORIZATIONS, TempoTransactionValidator},
 };
 use tempo_zone_contracts::{
-    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZonePortal,
+    TEMPO_STATE_ADDRESS, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZonePortal,
 };
 use tracing::{debug, info, warn};
 use zone_evm::ZoneEvmConfig;
@@ -189,6 +189,9 @@ impl ZoneNode {
     /// Set the initial list of enabled token addresses.
     /// When set, the startup L1 RPC query for enabled tokens is skipped.
     pub fn with_initial_tokens(mut self, tokens: Vec<Address>) -> Self {
+        self.l1_state_cache
+            .write()
+            .set_enabled_tokens(tokens.iter().copied());
         self.initial_tokens = Some(tokens);
         self
     }
@@ -464,6 +467,11 @@ where
             );
             tokens
         };
+
+        self.l1_config
+            .l1_state_cache
+            .write()
+            .set_enabled_tokens(tracked_tokens.iter().copied());
 
         if let Err(err) = self
             .policy_cache
@@ -862,7 +870,7 @@ where
     async fn build_pool(
         self,
         ctx: &BuilderContext<Node>,
-        _evm_config: ZoneEvmConfig,
+        evm_config: ZoneEvmConfig,
     ) -> eyre::Result<Self::Pool> {
         let mut pool_config = ctx.pool_config();
         pool_config.max_inflight_delegated_slot_limit = pool_config.max_account_slots;
@@ -908,7 +916,11 @@ where
         };
         let aa_2d_pool = AA2dPool::new(aa_2d_config);
         let amm_liquidity_cache = AmmLiquidityCache::new(ctx.provider())?;
-
+        spawn_zone_fee_token_tracker(
+            ctx.task_executor(),
+            evm_config.l1_provider().clone(),
+            amm_liquidity_cache.clone(),
+        );
         let validator = validator.map(|v| {
             TempoTransactionValidator::new(
                 v,
@@ -940,4 +952,41 @@ where
 
         Ok(transaction_pool)
     }
+}
+
+fn spawn_zone_fee_token_tracker(
+    task_executor: &reth_tasks::TaskExecutor,
+    l1_provider: L1StateProvider,
+    amm_liquidity_cache: AmmLiquidityCache,
+) {
+    task_executor.spawn_critical_task("zone fee token tracker", async move {
+        let portal_address = l1_provider.portal_address();
+        let mut interval = tokio::time::interval(Duration::from_millis(50));
+        let mut ticks_until_refresh = 0u64;
+        loop {
+            interval.tick().await;
+
+            let mut tokens = l1_provider.cached_enabled_tokens();
+            if tokens.is_empty() && ticks_until_refresh == 0 {
+                match l1_provider.refresh_enabled_tokens_cache().await {
+                    Ok(refreshed) => tokens = refreshed,
+                    Err(err) => warn!(%err, "failed to refresh zone fee tokens for txpool"),
+                }
+                ticks_until_refresh = 100;
+            } else if ticks_until_refresh > 0 {
+                ticks_until_refresh -= 1;
+            }
+
+            if tokens.is_empty() && portal_address.is_zero() {
+                tokens.push(ZONE_TOKEN_ADDRESS);
+            }
+            if tokens.is_empty() {
+                continue;
+            }
+
+            if amm_liquidity_cache.track_tokens(&tokens) {
+                debug!(count = tokens.len(), "tracked zone fee tokens for txpool");
+            }
+        }
+    });
 }

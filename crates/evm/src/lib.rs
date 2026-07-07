@@ -8,11 +8,13 @@
 #![allow(unnameable_types)]
 
 mod executor;
+mod fee_manager;
 pub mod precompiles;
 mod tx_context;
 
 use crate::{
     executor::ZoneBlockExecutor,
+    fee_manager::ZoneProtocolFeeManager,
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS,
@@ -46,14 +48,14 @@ use tempo_payload_types::TempoExecutionData;
 use tempo_precompiles::{
     ACCOUNT_KEYCHAIN_ADDRESS, NONCE_PRECOMPILE_ADDRESS, PrecompileEnv, STABLECOIN_DEX_ADDRESS,
     TIP_FEE_MANAGER_ADDRESS, account_keychain::AccountKeychain, nonce::NonceManager,
-    storage::actions::StorageActions, storage_credits::NonCreditableSlots,
-    tip_fee_manager::TipFeeManager, tip20::is_tip20_prefix,
+    storage::actions::StorageActions, storage_credits::NonCreditableSlots, tip20::is_tip20_prefix,
 };
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider};
+use zone_precompiles::ZoneFeeManager;
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
 
@@ -82,8 +84,9 @@ impl ZoneEvmFactory {
 
     fn register_precompiles<DB: Database, I: Inspector<TempoCtx<DB>>>(
         &self,
-        mut evm: TempoEvm<DB, I>,
+        evm: TempoEvm<DB, I>,
     ) -> TempoEvm<DB, I> {
+        let mut evm = evm.with_fee_manager(ZoneProtocolFeeManager::new(self.l1_provider.clone()));
         let cfg = evm.ctx().cfg.clone();
         let (_, _, precompiles) = evm.components_mut();
         precompiles.apply_precompile(&TEMPO_STATE_ADDRESS, |_| {
@@ -127,6 +130,7 @@ impl ZoneEvmFactory {
             StorageActions::disabled(),
             Rc::new(RefCell::new(NonCreditableSlots::empty())),
         );
+        let fee_provider = self.l1_provider.clone();
         precompiles.set_precompile_lookup(move |address: &alloy_primitives::Address| {
             if is_tip20_prefix(*address) {
                 Some(ZoneTip20Token::create(
@@ -136,7 +140,7 @@ impl ZoneEvmFactory {
                     sequencer.clone(),
                 ))
             } else if *address == TIP_FEE_MANAGER_ADDRESS {
-                Some(TipFeeManager::create_precompile(&zone_env))
+                Some(ZoneFeeManager::create(fee_provider.clone(), &zone_cfg))
             } else if *address == STABLECOIN_DEX_ADDRESS {
                 None
             } else if *address == NONCE_PRECOMPILE_ADDRESS {
@@ -282,6 +286,11 @@ impl ZoneEvmConfig {
     /// Returns the chain spec.
     pub fn chain_spec(&self) -> &Arc<TempoChainSpec> {
         self.inner.chain_spec()
+    }
+
+    /// Returns the L1 state provider backing zone precompiles.
+    pub fn l1_provider(&self) -> &L1StateProvider {
+        &self.zone_factory.l1_provider
     }
 }
 

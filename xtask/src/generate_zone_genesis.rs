@@ -535,7 +535,7 @@ fn create_path_usd_token(evm: &mut TempoEvm<CacheDB<EmptyDB>>, admin: Address) -
     Ok(())
 }
 
-/// Initialize the TipFeeManager precompile.
+/// Initialize the ZoneFeeManager storage at the fee-manager precompile address.
 fn initialize_fee_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<()> {
     let ctx = evm.ctx_mut();
     StorageCtx::enter_evm(
@@ -551,7 +551,7 @@ fn initialize_fee_manager(evm: &mut TempoEvm<CacheDB<EmptyDB>>) -> eyre::Result<
                 .expect("Could not init fee manager");
         },
     );
-    println!("Initialized TipFeeManager");
+    println!("Initialized ZoneFeeManager");
     Ok(())
 }
 

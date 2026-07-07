@@ -4,7 +4,10 @@
 //! `TokenEnabled` events from L1, and that deposits of the newly-enabled
 //! tokens are correctly minted.
 
-use alloy::primitives::{U256, address};
+use alloy::{
+    network::ReceiptResponse,
+    primitives::{Address, U256, address},
+};
 use zone_l1::{EnabledToken, L1Deposit, L1PortalEvents};
 
 use crate::utils::{DEFAULT_TIMEOUT, L1Fixture, start_local_zone_with_fixture};
@@ -14,8 +17,13 @@ use crate::utils::{L1TestNode, ZoneAccount, ZoneTestNode, spawn_sequencer};
 use alloy::primitives::B256;
 use alloy_provider::{Provider, ProviderBuilder};
 use alloy_rpc_types_eth::BlockId;
-use tempo_alloy::TempoNetwork;
-use tempo_precompiles::PATH_USD_ADDRESS;
+use tempo_alloy::{
+    TempoNetwork,
+    rpc::{TempoCallBuilderExt, TempoTransactionReceipt},
+};
+use tempo_contracts::precompiles::ITIP20;
+use tempo_precompiles::{PATH_USD_ADDRESS, TIP_FEE_MANAGER_ADDRESS};
+use tempo_primitives::transaction::calc_gas_balance_spending;
 use tempo_zone_contracts::ZonePortal;
 use zone_l1::PolicyCache;
 
@@ -218,14 +226,16 @@ async fn test_startup_policy_seed_errors_do_not_abort_launch() -> eyre::Result<(
 ///  8. Fund user with pathUSD (for L2 gas) and AlphaUSD on L1.
 ///  9. Deposit pathUSD first (for L2 gas), then deposit AlphaUSD.
 /// 10. Verify AlphaUSD balance on L2.
-/// 11. Spawn sequencer, withdraw AlphaUSD back to L1.
-/// 12. Wait for the withdrawal to be processed on L1.
+/// 11. Send an L2 AlphaUSD transaction that pays fees in AlphaUSD.
+/// 12. Spawn sequencer, withdraw AlphaUSD back to L1.
+/// 13. Wait for the withdrawal to be processed on L1.
 ///
 /// ```text
 ///  L1 (TokenEnabled + deposit)          Zone L2
 ///    |--- enableToken("AlphaUSD") ---->|  ✓ token initialized via builder
 ///    |--- deposit pathUSD ------------>|  ✓ pathUSD minted (gas)
 ///    |--- deposit AlphaUSD ----------->|  ✓ AlphaUSD minted
+///    |--- transfer AlphaUSD ---------->|  ✓ feeToken = AlphaUSD
 ///    |<-- withdraw AlphaUSD -----------|  ✓ AlphaUSD burned
 /// ```
 ///
@@ -303,7 +313,15 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
         "AlphaUSD minted balance should equal deposit amount"
     );
 
-    // --- Step 11: Spawn sequencer and withdraw AlphaUSD ---
+    // --- Step 11: Pay L2 fees directly in AlphaUSD ---
+    let bob = Address::with_last_byte(0xb0);
+    let alpha_fee_payment = send_alpha_fee_transfer(&l1, &zone, l2_alpha_usd, bob).await?;
+    assert!(
+        !alpha_fee_payment.is_zero(),
+        "AlphaUSD fee payment should be non-zero"
+    );
+
+    // --- Step 12: Spawn sequencer and withdraw AlphaUSD ---
     let _sequencer_handle = spawn_sequencer(&l1, &zone, portal_address, l1.dev_signer()).await;
     let withdrawal_timeout = std::time::Duration::from_secs(60);
 
@@ -312,7 +330,7 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
         .withdraw_token(l2_alpha_usd, alpha_withdrawal)
         .await?;
 
-    // --- Step 12: Wait for the withdrawal to be processed on L1 ---
+    // --- Step 13: Wait for the withdrawal to be processed on L1 ---
     l1.wait_for_withdrawal_on_l1_token(
         portal_address,
         l1_alpha_usd,
@@ -330,4 +348,71 @@ async fn test_enable_token_via_real_l1() -> eyre::Result<()> {
     );
 
     Ok(())
+}
+
+async fn send_alpha_fee_transfer(
+    l1: &L1TestNode,
+    zone: &ZoneTestNode,
+    alpha: Address,
+    recipient: Address,
+) -> eyre::Result<U256> {
+    let signer = l1.user_signer();
+    let sender = signer.address();
+    let provider = ProviderBuilder::new_with_network::<TempoNetwork>()
+        .wallet(signer)
+        .connect_http(zone.http_url().clone());
+
+    let token = ITIP20::new(alpha, provider.clone());
+    let fee_manager =
+        tempo_contracts::precompiles::IFeeManager::new(TIP_FEE_MANAGER_ADDRESS, provider.clone());
+    let sequencer = l1.dev_address();
+
+    let sender_before = token.balanceOf(sender).from(sender).call().await?;
+    let recipient_before = token.balanceOf(recipient).from(recipient).call().await?;
+    let collected_before = fee_manager.collectedFees(sequencer, alpha).call().await?;
+
+    let transfer_amount = U256::from(100_000u64);
+    let pending = token
+        .transfer(recipient, transfer_amount)
+        .fee_token(alpha)
+        .gas(150_000)
+        .send()
+        .await?;
+    let tx_hash = pending.watch().await?;
+    let receipt = provider
+        .raw_request::<_, TempoTransactionReceipt>("eth_getTransactionReceipt".into(), (tx_hash,))
+        .await?;
+
+    eyre::ensure!(receipt.status(), "AlphaUSD fee-token transfer failed");
+    assert_eq!(
+        receipt.fee_token,
+        Some(alpha),
+        "receipt should report AlphaUSD as the fee token"
+    );
+
+    let fee_payment = U256::from(calc_gas_balance_spending(
+        receipt.gas_used,
+        receipt.effective_gas_price(),
+    ));
+    let sender_after = token.balanceOf(sender).from(sender).call().await?;
+    let recipient_after = token.balanceOf(recipient).from(recipient).call().await?;
+    let collected_after = fee_manager.collectedFees(sequencer, alpha).call().await?;
+
+    assert_eq!(
+        recipient_after,
+        recipient_before + transfer_amount,
+        "recipient should receive the AlphaUSD transfer"
+    );
+    assert_eq!(
+        sender_after,
+        sender_before - transfer_amount - fee_payment,
+        "sender should pay transfer amount and gas in AlphaUSD"
+    );
+    assert_eq!(
+        collected_after,
+        collected_before + fee_payment,
+        "validator fees should be credited in AlphaUSD"
+    );
+
+    Ok(fee_payment)
 }

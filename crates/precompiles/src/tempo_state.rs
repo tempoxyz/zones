@@ -74,6 +74,11 @@ impl TempoState {
         Ok(block_hash)
     }
 
+    /// Return the Tempo block number currently bound to this zone state.
+    pub fn current_tempo_block_number(&self) -> tempo_precompiles::Result<u64> {
+        self.tempo_block_number.read()
+    }
+
     fn is_system_caller(caller: Address) -> bool {
         matches!(
             caller,

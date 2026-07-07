@@ -664,17 +664,27 @@ impl L1Subscriber {
     /// Write decoded portal state changes into the shared L1 cache at the
     /// confirmed block height.
     fn apply_portal_state_events(&self, block_number: u64, portal_events: &L1PortalEvents) {
-        if portal_events.sequencer_events.is_empty() {
+        if portal_events.sequencer_events.is_empty() && portal_events.enabled_tokens.is_empty() {
             return;
         }
 
         let mut cache = self.config.l1_state_cache.write();
-        apply_sequencer_events_to_cache(
-            &mut cache,
-            self.config.portal_address,
-            block_number,
-            &portal_events.sequencer_events,
-        );
+        if !portal_events.sequencer_events.is_empty() {
+            apply_sequencer_events_to_cache(
+                &mut cache,
+                self.config.portal_address,
+                block_number,
+                &portal_events.sequencer_events,
+            );
+        }
+        if cache.extend_enabled_tokens(portal_events.enabled_tokens.iter().map(|event| event.token))
+        {
+            debug!(
+                block_number,
+                count = portal_events.enabled_tokens.len(),
+                "cached enabled zone tokens from portal events"
+            );
+        }
     }
 
     /// Update the L1 state cache anchor. Detects reorgs by comparing

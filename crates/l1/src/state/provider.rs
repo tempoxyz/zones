@@ -17,8 +17,9 @@ use alloy_rpc_types_eth::BlockId;
 use alloy_transport::layers::RetryBackoffLayer;
 use eyre::Result;
 use tempo_alloy::TempoNetwork;
+use tempo_zone_contracts::ZonePortal;
 use tracing::{debug, info, warn};
-use zone_precompiles::{L1StorageReader, SequencerExt};
+use zone_precompiles::{L1StorageReader, SequencerExt, ZonePortalReader};
 
 use super::cache::L1StateCache;
 use crate::{abi::PORTAL_SEQUENCER_SLOT, rpc::rpc_connection_config};
@@ -248,6 +249,37 @@ impl L1StateProvider {
         &self.cache
     }
 
+    /// Return the ZonePortal address this provider reads from.
+    pub fn portal_address(&self) -> Address {
+        self.portal_address
+    }
+
+    /// Return the currently cached enabled zone tokens.
+    pub fn cached_enabled_tokens(&self) -> Vec<Address> {
+        self.cache.read().enabled_tokens()
+    }
+
+    /// Return all tokens currently enabled on this zone's L1 portal.
+    pub async fn enabled_tokens(&self) -> Result<Vec<Address>> {
+        if self.portal_address.is_zero() {
+            return Ok(Vec::new());
+        }
+
+        ZonePortal::new(self.portal_address, &self.provider)
+            .enabled_tokens()
+            .await
+            .map_err(|err| eyre::eyre!("failed to fetch enabled portal tokens: {err}"))
+    }
+
+    /// Refresh the enabled-token cache from L1 and return the fetched tokens.
+    pub async fn refresh_enabled_tokens_cache(&self) -> Result<Vec<Address>> {
+        let tokens = self.enabled_tokens().await?;
+        self.cache
+            .write()
+            .set_enabled_tokens(tokens.iter().copied());
+        Ok(tokens)
+    }
+
     /// Fetch a single storage slot from L1 at a specific block via the shared HTTP provider.
     async fn fetch_slot(&self, address: Address, slot: B256, block_number: u64) -> Result<B256> {
         let key = U256::from_be_bytes(slot.0);
@@ -281,5 +313,11 @@ impl L1StorageReader for L1StateProvider {
 impl SequencerExt for L1StateProvider {
     fn latest_sequencer(&self) -> Option<Address> {
         self.get_latest_sequencer().ok()
+    }
+}
+
+impl ZonePortalReader for L1StateProvider {
+    fn portal_address(&self) -> Address {
+        self.portal_address
     }
 }

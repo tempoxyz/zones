@@ -57,6 +57,13 @@ pub const PORTAL_PENDING_SEQUENCER_SLOT: B256 = {
     B256::new(bytes)
 };
 
+/// ZonePortal storage slot 8: `_tokenConfigs` mapping.
+pub const PORTAL_TOKEN_CONFIGS_SLOT: B256 = {
+    let mut bytes = [0u8; 32];
+    bytes[31] = 8;
+    B256::new(bytes)
+};
+
 // ---------------------------------------------------------------------------
 //  Storage slot constants for the proof system
 // ---------------------------------------------------------------------------

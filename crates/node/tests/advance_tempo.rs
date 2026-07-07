@@ -14,7 +14,8 @@ use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
 use tempo_revm::TempoBlockEnv;
 use zone_primitives::constants::{
-    PORTAL_ADMIN_SLOT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, zone_chain_id,
+    PORTAL_ADMIN_SLOT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT, zone_chain_id,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -575,5 +576,10 @@ fn zone_portal_storage_slot_constants_match_solidity() {
         PORTAL_PENDING_SEQUENCER_SLOT,
         B256::from(U256::from(2)),
         "pendingSequencer is slot 2"
+    );
+    assert_eq!(
+        PORTAL_TOKEN_CONFIGS_SLOT,
+        B256::from(U256::from(8)),
+        "_tokenConfigs is slot 8"
     );
 }

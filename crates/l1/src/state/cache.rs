@@ -60,6 +60,8 @@ impl L1StateCache {
 #[derive(Debug, Default)]
 pub struct L1StateCacheInner {
     tracked_contracts: HashSet<Address>,
+    /// Zone portal tokens that are enabled for fees and deposits.
+    enabled_tokens: Vec<Address>,
     /// Per-slot value history: `(address, slot) → { block_number → value }`.
     /// The `BTreeMap` enables efficient range lookups for "latest value at or before block N".
     slots: HashMap<(Address, B256), BTreeMap<u64, B256>>,
@@ -109,8 +111,42 @@ impl L1StateCacheInner {
         self.tracked_contracts.contains(address)
     }
 
+    /// Returns the currently cached enabled zone tokens.
+    pub fn enabled_tokens(&self) -> Vec<Address> {
+        self.enabled_tokens.clone()
+    }
+
+    /// Replaces the cached enabled-token set.
+    pub fn set_enabled_tokens(&mut self, tokens: impl IntoIterator<Item = Address>) {
+        self.enabled_tokens.clear();
+        self.extend_enabled_tokens(tokens);
+    }
+
+    /// Adds one enabled token to the cache.
+    ///
+    /// Returns `true` if the token was newly inserted.
+    pub fn add_enabled_token(&mut self, token: Address) -> bool {
+        if self.enabled_tokens.contains(&token) {
+            return false;
+        }
+        self.enabled_tokens.push(token);
+        true
+    }
+
+    /// Adds enabled tokens to the cache.
+    ///
+    /// Returns `true` if at least one token was newly inserted.
+    pub fn extend_enabled_tokens(&mut self, tokens: impl IntoIterator<Item = Address>) -> bool {
+        let mut changed = false;
+        for token in tokens {
+            changed |= self.add_enabled_token(token);
+        }
+        changed
+    }
+
     /// Clears all cached slot values but retains the tracked-contract set.
     pub fn clear(&mut self) {
+        self.enabled_tokens.clear();
         self.slots.clear();
         self.anchor = NumHash::default();
     }
@@ -198,6 +234,7 @@ mod tests {
         let mut cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
 
         cache.set(PORTAL, B256::ZERO, 100, B256::with_last_byte(1));
+        cache.add_enabled_token(address!("0x00000000000000000000000000000000000000aa"));
         cache.update_anchor(NumHash {
             number: 100,
             hash: B256::with_last_byte(0xab),
@@ -206,6 +243,7 @@ mod tests {
         cache.clear();
 
         assert_eq!(cache.get(PORTAL, B256::ZERO, 100), None);
+        assert!(cache.enabled_tokens().is_empty());
         assert_eq!(cache.anchor(), NumHash::default());
     }
 
@@ -278,5 +316,19 @@ mod tests {
             cache.get(PORTAL, slot, 20),
             Some(B256::with_last_byte(0x14))
         );
+    }
+
+    #[test]
+    fn enabled_tokens_are_deduped_in_insertion_order() {
+        let mut cache = L1StateCacheInner::new(HashSet::from([PORTAL]));
+        let token_a = address!("0x00000000000000000000000000000000000000aa");
+        let token_b = address!("0x00000000000000000000000000000000000000bb");
+
+        assert!(cache.extend_enabled_tokens([token_a, token_b, token_a]));
+        assert_eq!(cache.enabled_tokens(), vec![token_a, token_b]);
+        assert!(!cache.add_enabled_token(token_b));
+
+        cache.set_enabled_tokens([token_b, token_b, token_a]);
+        assert_eq!(cache.enabled_tokens(), vec![token_b, token_a]);
     }
 }
