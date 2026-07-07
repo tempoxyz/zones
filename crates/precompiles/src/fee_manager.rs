@@ -10,21 +10,19 @@ use alloy_sol_types::{SolError, SolValue};
 use core::fmt::Debug;
 use revm::{
     Database,
-    context::Journal,
     precompile::{PrecompileId, PrecompileOutput, PrecompileResult},
 };
-use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_contracts::precompiles::{FeeManagerError, IFeeManager, ITIPFeeAMM};
 use tempo_precompiles::{
     DelegateCallNotAllowed, Precompile as TempoPrecompile, charge_input_cost, dispatch,
     error::Result as TempoResult,
     mutate_void,
-    storage::{Handler, StorageCtx, actions::StorageActions, evm::EvmPrecompileStorageProvider},
+    storage::{Handler, StorageCtx, evm::EvmPrecompileStorageProvider},
     tip20::{TIP20Token, validate_usd_currency},
     tip20_factory::TIP20Factory,
     view,
 };
-use tempo_revm::{ProtocolFeeManager, TempoStateAccess, TempoTxEnv};
+use tempo_revm::ProtocolFeeManager;
 use zone_primitives::constants::PORTAL_TOKEN_CONFIGS_SLOT;
 
 use crate::{L1StorageReader, TempoState};
@@ -289,32 +287,6 @@ where
     DB: Database,
     P: ZonePortalReader + Debug,
 {
-    fn get_fee_token(
-        &self,
-        journal: &mut Journal<DB>,
-        tx: &TempoTxEnv,
-        fee_payer: Address,
-        spec: TempoHardfork,
-        actions: StorageActions,
-    ) -> TempoResult<Address> {
-        let fee_token = <Journal<DB> as TempoStateAccess<((), ())>>::get_fee_token(
-            journal,
-            tx,
-            fee_payer,
-            spec,
-            actions.clone(),
-        )?;
-
-        <Journal<DB> as TempoStateAccess<((), ())>>::with_read_only_storage_ctx(
-            journal,
-            spec,
-            actions,
-            || self.ensure_token_enabled_current(fee_token),
-        )?;
-
-        Ok(fee_token)
-    }
-
     fn collect_fee_pre_tx(
         &self,
         fee_payer: Address,
@@ -323,7 +295,7 @@ where
         beneficiary: Address,
         skip_liquidity_check: bool,
     ) -> TempoResult<Address> {
-        ZoneFeeManager::collect_fee_pre_tx(
+        Self::collect_fee_pre_tx(
             self,
             fee_payer,
             user_token,
@@ -341,7 +313,7 @@ where
         fee_token: Address,
         beneficiary: Address,
     ) -> TempoResult<U256> {
-        ZoneFeeManager::collect_fee_post_tx(
+        Self::collect_fee_post_tx(
             self,
             fee_payer,
             actual_spending,

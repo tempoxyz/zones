@@ -973,8 +973,8 @@ fn spawn_zone_fee_token_tracker(
                     Err(err) => warn!(%err, "failed to refresh zone fee tokens for txpool"),
                 }
                 ticks_until_refresh = 100;
-            } else if ticks_until_refresh > 0 {
-                ticks_until_refresh -= 1;
+            } else {
+                ticks_until_refresh = ticks_until_refresh.saturating_sub(1);
             }
 
             if tokens.is_empty() && portal_address.is_zero() {
