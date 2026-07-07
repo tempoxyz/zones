@@ -282,9 +282,8 @@ impl<P: ZonePortalReader> TempoPrecompile for ZoneFeeManager<P> {
     }
 }
 
-impl<DB, P> ProtocolFeeManager<DB> for ZoneFeeManager<P>
+impl<DB: Database, P> ProtocolFeeManager<DB> for ZoneFeeManager<P>
 where
-    DB: Database,
     P: ZonePortalReader + Debug,
 {
     fn collect_fee_pre_tx(
@@ -295,8 +294,7 @@ where
         beneficiary: Address,
         skip_liquidity_check: bool,
     ) -> TempoResult<Address> {
-        Self::collect_fee_pre_tx(
-            self,
+        self.collect_fee_pre_tx(
             fee_payer,
             user_token,
             max_amount,
@@ -313,8 +311,7 @@ where
         fee_token: Address,
         beneficiary: Address,
     ) -> TempoResult<U256> {
-        Self::collect_fee_post_tx(
-            self,
+        self.collect_fee_post_tx(
             fee_payer,
             actual_spending,
             refund_amount,
