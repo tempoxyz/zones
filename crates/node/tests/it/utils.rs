@@ -2421,7 +2421,7 @@ impl ZoneAccount {
 
         let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &self.l2_provider);
         let receipt = outbox
-            .requestWithdrawal(
+            .requestWithdrawal_1(
                 token,
                 to,
                 args.amount,

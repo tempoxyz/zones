@@ -16,9 +16,9 @@ use crate::{
     precompiles::{
         AES_GCM_DECRYPT_ADDRESS, AesGcmDecrypt, CHAUM_PEDERSEN_VERIFY_ADDRESS, ChaumPedersenVerify,
         SequencerExt, TempoState, ZONE_TIP20_FACTORY_ADDRESS, ZONE_TIP403_PROXY_ADDRESS,
-        ZoneTip20Token, ZoneTip403ProxyRegistry, ZoneTokenFactory,
+        ZoneOutbox, ZoneTip20Token, ZoneTip403ProxyRegistry, ZoneTokenFactory,
     },
-    tx_context::ZoneTxContext,
+    tx_context::{ZoneTxContext, current_or_synthetic_tx_hash},
 };
 use alloy_evm::{
     Database, Evm, EvmEnv, EvmFactory,
@@ -52,7 +52,7 @@ use tempo_precompiles::{
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
-use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
+use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_OUTBOX_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
@@ -103,6 +103,14 @@ impl ZoneEvmFactory {
             .policy_provider
             .clone()
             .map(ZoneTip403ProxyRegistry::new);
+        precompiles.apply_precompile(&ZONE_OUTBOX_ADDRESS, |_| {
+            Some(ZoneOutbox::create(
+                self.l1_provider.clone(),
+                registry.clone(),
+                current_or_synthetic_tx_hash,
+                &cfg,
+            ))
+        });
         let sequencer: Arc<dyn SequencerExt> = Arc::new(self.l1_provider.clone());
 
         if let Some(provider) = self.policy_provider.clone() {

@@ -358,7 +358,7 @@ impl DemoSwapAndDeposit {
         .await?;
         let l1_from_block = l1.get_block_number().await.unwrap_or(0);
         let receipt = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, &l2_operator)
-            .requestWithdrawal(
+            .requestWithdrawal_1(
                 alpha,
                 router,
                 self.amount,

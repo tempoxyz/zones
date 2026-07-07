@@ -12,9 +12,12 @@ use revm::{
 };
 use tempo_chainspec::hardfork::TempoHardfork;
 use tempo_evm::evm::{TempoEvm, TempoEvmFactory};
+use tempo_precompiles::storage::{StorageActions, StorageCtx};
 use tempo_revm::TempoBlockEnv;
+use zone_precompiles::ZoneOutbox as NativeZoneOutbox;
 use zone_primitives::constants::{
-    PORTAL_ADMIN_SLOT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT, zone_chain_id,
+    PORTAL_ADMIN_SLOT, PORTAL_PENDING_SEQUENCER_SLOT, PORTAL_SEQUENCER_SLOT,
+    PORTAL_TOKEN_CONFIGS_SLOT, zone_chain_id,
 };
 
 const TEMPO_STATE_ADDRESS: Address = address!("0x1c00000000000000000000000000000000000000");
@@ -185,6 +188,8 @@ fn setup_zone_evm_with_contracts_for_portal(
     );
     nonce += 1;
 
+    initialize_zone_outbox(&mut evm);
+
     // 2. ZoneConfig(address tempoPortal, address tempoState)
     let zone_config_bytecode = load_artifact("ZoneConfig");
     let zone_config_args =
@@ -216,23 +221,24 @@ fn setup_zone_evm_with_contracts_for_portal(
         chain_id,
         nonce,
     );
-    nonce += 1;
 
-    // 4. ZoneOutbox(address config)
-    let zone_outbox_bytecode = load_artifact("ZoneOutbox");
-    let zone_outbox_args = alloy_sol_types::SolValue::abi_encode_params(&(ZONE_CONFIG_ADDRESS,));
-    deploy_contract(
-        &mut evm,
-        &zone_outbox_bytecode,
-        &zone_outbox_args,
-        ZONE_OUTBOX_ADDRESS,
-        "ZoneOutbox",
-        chain_id,
-        nonce,
-    );
-
-    println!("All zone contracts deployed successfully");
+    println!("All zone contracts/precompiles initialized successfully");
     evm
+}
+
+fn initialize_zone_outbox(evm: &mut TempoEvm<CacheDB<EmptyDB>>) {
+    let ctx = evm.ctx_mut();
+    StorageCtx::enter_evm(
+        &mut ctx.journaled_state,
+        &ctx.block,
+        &ctx.cfg,
+        &ctx.tx,
+        StorageActions::disabled(),
+        || NativeZoneOutbox::new().initialize(),
+    )
+    .expect("initialize native ZoneOutbox");
+
+    println!("Initialized native ZoneOutbox at {ZONE_OUTBOX_ADDRESS}");
 }
 
 fn genesis_predeploy_code(addr: Address) -> Vec<u8> {
@@ -337,12 +343,12 @@ fn zone_test_genesis_predeploy_bytecode_matches_foundry_artifacts() {
             let first_diff = first_diff_index(actual_view.compared, expected_view.compared)
                 .map_or_else(|| "none".to_string(), |index| index.to_string());
             panic!(
-                "{name} bytecode in zone-test-genesis.json does not match the freshly deployed \
-                 Foundry artifact at {addr:#x}\n\
+                "{name} bytecode in zone-test-genesis.json does not match the freshly generated \
+                 EVM state at {addr:#x}\n\
                  first compared-byte difference: {first_diff}\n\
                  genesis: raw_len={} compared_len={} metadata_footer={} raw_keccak={} \
                  compared_keccak={}\n\
-                 Foundry artifact: raw_len={} compared_len={} metadata_footer={} raw_keccak={} \
+                 generated state: raw_len={} compared_len={} metadata_footer={} raw_keccak={} \
                  compared_keccak={}\n\
                  Compared bytecode excludes Solidity's CBOR metadata footer when present, because \
                  that metadata hash can vary by build environment. A mismatch here means the \
@@ -575,5 +581,10 @@ fn zone_portal_storage_slot_constants_match_solidity() {
         PORTAL_PENDING_SEQUENCER_SLOT,
         B256::from(U256::from(2)),
         "pendingSequencer is slot 2"
+    );
+    assert_eq!(
+        PORTAL_TOKEN_CONFIGS_SLOT,
+        B256::from(U256::from(8)),
+        "_tokenConfigs is slot 8"
     );
 }

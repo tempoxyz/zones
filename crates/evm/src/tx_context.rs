@@ -45,11 +45,11 @@ fn clear_current_tx_hash() {
     });
 }
 
-fn current_tx_hash() -> Option<B256> {
+pub(crate) fn current_tx_hash() -> Option<B256> {
     CURRENT_TX_HASH.with(|slot| *slot.borrow())
 }
 
-fn synthetic_tx_hash(input: &PrecompileInput<'_>) -> B256 {
+pub(crate) fn synthetic_tx_hash(input: &PrecompileInput<'_>) -> B256 {
     let mut bytes = Vec::with_capacity(16 + 20 + 20 + 32 + 32 + 32 + input.data.len());
     bytes.extend_from_slice(b"zone-tx-context");
     bytes.extend_from_slice(input.caller.as_slice());
@@ -59,6 +59,10 @@ fn synthetic_tx_hash(input: &PrecompileInput<'_>) -> B256 {
     bytes.extend_from_slice(&input.internals.block_timestamp().to_be_bytes::<32>());
     bytes.extend_from_slice(input.data);
     keccak256(bytes)
+}
+
+pub(crate) fn current_or_synthetic_tx_hash(input: &PrecompileInput<'_>) -> B256 {
+    current_tx_hash().unwrap_or_else(|| synthetic_tx_hash(input))
 }
 
 /// `DynPrecompile` implementation that returns the currently executing zone tx hash.
@@ -101,7 +105,7 @@ impl ZoneTxContext {
 
             debug!(target: "zone::precompile", "ZoneTxContext: currentTxHash");
 
-            let tx_hash = current_tx_hash().unwrap_or_else(|| synthetic_tx_hash(&input));
+            let tx_hash = current_or_synthetic_tx_hash(&input);
             let encoded = currentTxHashCall::abi_encode_returns(&tx_hash);
             Ok(PrecompileOutput::new(20, encoded.into(), input.reservoir))
         })
