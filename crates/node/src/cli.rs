@@ -57,6 +57,8 @@ impl ZoneCli {
         cli.run_with_components::<ZoneNode>(components, async move |mut builder, args| {
             info!(target: "reth::cli", "Launching Tempo Zone node");
 
+            validate_l1_rpc_url(&args.l1_rpc_url)?;
+
             builder.config_mut().network.discovery.disable_discovery = true;
             builder.config_mut().rpc.disable_auth_server = true;
             builder.config_mut().rpc.rpc_max_logs_per_response = MAX_LOGS_PER_RESPONSE.into();
@@ -104,7 +106,7 @@ impl ZoneCli {
 /// Tempo Zone CLI arguments.
 #[derive(Debug, Clone, Args)]
 pub struct ZoneArgs {
-    /// L1 WebSocket RPC URL for subscribing to deposit events and chain notifications.
+    /// Certified Tempo follower WebSocket RPC URL for finalized L1 state, deposit events, and chain notifications.
     #[arg(long = "l1.rpc-url", env = "L1_RPC_URL")]
     pub l1_rpc_url: String,
 
@@ -199,5 +201,34 @@ fn prepend_log_filter(filter: &mut String, directives: &str) {
         *filter = directives.to_owned();
     } else {
         *filter = format!("{directives},{filter}");
+    }
+}
+
+fn validate_l1_rpc_url(l1_rpc_url: &str) -> eyre::Result<()> {
+    let url: url::Url = l1_rpc_url
+        .parse()
+        .map_err(|err| eyre::eyre!("failed parsing --l1.rpc-url as URL: {err}"))?;
+    eyre::ensure!(
+        matches!(url.scheme(), "ws" | "wss"),
+        "--l1.rpc-url must use ws:// or wss://, got `{}`",
+        url.scheme()
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_l1_rpc_url;
+
+    #[test]
+    fn l1_rpc_url_accepts_websocket_schemes() {
+        validate_l1_rpc_url("ws://localhost:8546").unwrap();
+        validate_l1_rpc_url("wss://rpc.moderato.tempo.xyz").unwrap();
+    }
+
+    #[test]
+    fn l1_rpc_url_rejects_non_websocket_schemes() {
+        assert!(validate_l1_rpc_url("http://localhost:8545").is_err());
+        assert!(validate_l1_rpc_url("https://rpc.moderato.tempo.xyz").is_err());
     }
 }

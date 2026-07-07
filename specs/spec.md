@@ -44,6 +44,7 @@
     - [Privacy Modifications](#privacy-modifications)
   - [Tempo State Reads](#tempo-state-reads)
     - [TempoState Predeploy](#tempostate-predeploy)
+    - [Tempo Follower Mode](#tempo-follower-mode)
     - [Header Finalization](#header-finalization)
     - [Storage Reads](#storage-reads)
     - [Staleness and Finality](#staleness-and-finality)
@@ -784,6 +785,12 @@ The zone reads all of its configuration from Tempo: the sequencer address, the t
 The durable onchain checkpoint is `tempoBlockHash` and `tempoBlockNumber`. The `tempoBlockHash` is always `keccak256(RLP(TempoHeader))`, committing to the complete header contents without persisting every decoded header field.
 
 Tempo headers are RLP-encoded as `rlp([general_gas_limit, shared_gas_limit, timestamp_millis_part, inner])`, where `inner` is a standard Ethereum header.
+
+### Tempo Follower Mode
+
+Zone sequencers MUST run their Tempo L1 provider in Tempo follower mode with consensus certification enabled. The follower stack syncs finalized Tempo consensus state from an upstream node and drives the execution layer from those finalized certificates.
+
+Sequencers MUST NOT use uncertified follow mode (`--follow.nocertify`) or a generic execution-only RPC as the source for `advanceTempo` headers or Tempo state reads. Certified follower mode is required so the zone only imports Tempo headers that have reached deterministic finality; this prevents zone proofs from anchoring deposits, token configuration, sequencer rotation, or TIP-403 policy reads to state that could be reorged.
 
 ### Header Finalization
 

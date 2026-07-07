@@ -579,7 +579,7 @@ Current deployment:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--l1.rpc-url` | (required) | L1 WebSocket RPC URL |
+| `--l1.rpc-url` | (required) | Certified Tempo follower WebSocket RPC URL |
 | `--l1.portal-address` | (from zone.json) | ZonePortal contract on L1 |
 | `--l1.genesis-block-number` | (from zone.json) | L1 block when the zone was created |
 | `--zone.id` | 0 | Zone ID from ZoneFactory (for private RPC auth). The zone's chain ID is derived as `421700000 + (zone_id % 1002610000)` (mainnet) or `1424310000 + (zone_id % 723173648)` (testnet). |
@@ -597,7 +597,7 @@ Current deployment:
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `L1_RPC_URL` | Yes | L1 WebSocket URL (`wss://...`) |
+| `L1_RPC_URL` | Yes | Certified Tempo follower WebSocket RPC URL (`wss://...`) |
 | `SEQUENCER_KEY` | For sequencing | Sequencer private key |
 | `ADMIN_KEY` | For portal governance | Portal admin private key for `enableToken` / deposit pause controls. `SEQUENCER_KEY` only works for legacy zones where admin == sequencer. |
 | `PRIVATE_KEY` | For transactions | Key for L1 transactions (deposits, approvals) |
