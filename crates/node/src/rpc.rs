@@ -273,6 +273,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
                         deposit_hash: event.newCurrentDepositQueueHash,
                         sender: event.sender,
                         recipient: event.to,
+                        bounceback_recipient: event.bouncebackRecipient,
                         token: event.token,
                         amount: event.netAmount,
                         memo: event.memo,
@@ -282,6 +283,7 @@ impl<Api: EthApiTypes + 'static> ZoneRpc<Api> {
                     deposits.push(PortalDepositRecord::Encrypted {
                         deposit_hash: event.newCurrentDepositQueueHash,
                         sender: event.sender,
+                        bounceback_recipient: event.bouncebackRecipient,
                         token: event.token,
                         amount: event.netAmount,
                     });
@@ -924,11 +926,15 @@ where
                         deposit_hash,
                         sender,
                         recipient,
+                        bounceback_recipient,
                         token,
                         amount,
                         memo,
                     } => {
-                        if sender != auth.caller && recipient != auth.caller {
+                        if sender != auth.caller
+                            && recipient != auth.caller
+                            && bounceback_recipient != auth.caller
+                        {
                             continue;
                         }
 
@@ -949,12 +955,16 @@ where
                     PortalDepositRecord::Encrypted {
                         deposit_hash,
                         sender,
+                        bounceback_recipient,
                         token,
                         amount,
                     } => {
                         let terminal = self.terminal_event_for_deposit(deposit_hash).await?;
 
-                        let include = match (&terminal, sender == auth.caller) {
+                        let include = match (
+                            &terminal,
+                            sender == auth.caller || bounceback_recipient == auth.caller,
+                        ) {
                             (_, true) => true,
                             (
                                 Some(TerminalDepositEvent::EncryptedProcessed {
@@ -1006,6 +1016,7 @@ enum PortalDepositRecord {
         deposit_hash: B256,
         sender: Address,
         recipient: Address,
+        bounceback_recipient: Address,
         token: Address,
         amount: u128,
         memo: B256,
@@ -1013,6 +1024,7 @@ enum PortalDepositRecord {
     Encrypted {
         deposit_hash: B256,
         sender: Address,
+        bounceback_recipient: Address,
         token: Address,
         amount: u128,
     },
