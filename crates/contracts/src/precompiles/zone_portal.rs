@@ -92,8 +92,12 @@ crate::sol! {
         /// Includes token metadata so the zone can create a matching TIP-20.
         event TokenEnabled(address indexed token, string name, string symbol, string currency);
 
+        /// `withdrawalQueueSlot` is the logical withdrawal queue index the batch's hash
+        /// chain was enqueued under, or `NO_QUEUE_SLOT` when the batch
+        /// carried no withdrawals.
         event BatchSubmitted(
             uint64 indexed withdrawalBatchIndex,
+            uint256 indexed withdrawalQueueSlot,
             bytes32 nextProcessedDepositQueueHash,
             bytes32 nextBlockHash,
             bytes32 withdrawalQueueHash,

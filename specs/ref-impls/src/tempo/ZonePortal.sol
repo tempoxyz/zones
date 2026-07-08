@@ -917,11 +917,12 @@ contract ZonePortal is IZonePortal {
         lastSyncedTempoBlockNumber = tempoBlockNumber;
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
 
-        _withdrawalQueue.enqueue(withdrawalQueueHash);
+        uint256 assignedQueueSlot = _withdrawalQueue.enqueue(withdrawalQueueHash);
 
         // Emit event after state updates
         emit BatchSubmitted(
             withdrawalBatchIndex,
+            assignedQueueSlot,
             depositQueueTransition.nextProcessedHash,
             blockHash,
             withdrawalQueueHash,

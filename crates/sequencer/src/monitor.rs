@@ -35,7 +35,7 @@ use tracing::{error, info, instrument, warn};
 use alloy_sol_types::{ContractError, SolInterface as _};
 
 use crate::{
-    abi::{self, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
+    abi::{self, NO_QUEUE_SLOT, TempoState, ZoneInbox, ZoneOutbox, ZonePortal},
     rpc::rpc_connection_config,
     settlement::{
         BatchAnchorConfig, BatchData, BatchSubmitter, ZoneBlockSnapshot, fetch_finalized_batch,
@@ -557,8 +557,9 @@ impl ZoneMonitor {
     /// On success:
     /// - Advances `prev_zone_block_hash`, `prev_processed_deposit_hash`, and
     ///   `last_submitted_zone_block` to reflect the submitted range.
-    /// - Increments `portal_withdrawal_queue_tail` if the batch included withdrawals.
-    /// - Notifies the [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor)
+    /// - Stores withdrawals under the receipt's assigned portal queue slot when
+    ///   the batch included withdrawals.
+    /// - Signals the [`WithdrawalProcessor`](crate::withdrawals::WithdrawalProcessor)
     ///   so it can finalize newly enqueued withdrawal slots.
     ///
     /// On failure (after [`MAX_RETRIES`] attempts with [`INITIAL_RETRY_DELAY`]
@@ -593,7 +594,7 @@ impl ZoneMonitor {
         for attempt in 1..=MAX_RETRIES {
             let submit_started = std::time::Instant::now();
             match self.batch_submitter.submit_batch(batch_data).await {
-                Ok(tx_hash) => {
+                Ok(event) => {
                     self.metrics
                         .batch_submit_latency_seconds
                         .record(submit_started.elapsed().as_secs_f64());
@@ -602,7 +603,8 @@ impl ZoneMonitor {
                         last_zone_block,
                         blocks_in_batch,
                         tempo_block_number = batch_data.tempo_block_number,
-                        %tx_hash,
+                        withdrawal_batch_index = event.withdrawalBatchIndex,
+                        withdrawal_queue_slot = %event.withdrawalQueueSlot,
                         withdrawal_queue_hash = %batch_data.withdrawal_queue_hash,
                         "Batch successfully submitted to L1"
                     );
@@ -624,10 +626,21 @@ impl ZoneMonitor {
                         .set(last_zone_block as f64);
                     self.update_submission_lag();
 
-                    // Store withdrawals and advance portal queue tail if this batch had withdrawals.
-                    if !batch_data.withdrawal_queue_hash.is_zero() {
+                    // Store withdrawals under the portal queue slot assigned on-chain.
+                    if event.withdrawalQueueSlot == NO_QUEUE_SLOT {
+                        if !batch_data.withdrawal_queue_hash.is_zero() || !withdrawals.is_empty() {
+                            warn!(
+                                withdrawal_queue_hash = %batch_data.withdrawal_queue_hash,
+                                withdrawal_count = withdrawals.len(),
+                                "submitBatch emitted NO_QUEUE_SLOT for a batch that locally had withdrawals"
+                            );
+                        }
+                    } else {
+                        let portal_slot: u64 =
+                            event.withdrawalQueueSlot.try_into().map_err(|_| {
+                                eyre::eyre!("withdrawal queue slot overflow in BatchSubmitted")
+                            })?;
                         if !withdrawals.is_empty() {
-                            let portal_slot = self.portal_withdrawal_queue_tail;
                             let count = withdrawals.len();
                             let mut store = self.withdrawal_store.lock();
                             store.add_batch(portal_slot, withdrawals);
@@ -636,10 +649,10 @@ impl ZoneMonitor {
                                 count, "Stored withdrawals for portal queue slot"
                             );
                         }
-                        self.portal_withdrawal_queue_tail += 1;
+                        self.portal_withdrawal_queue_tail =
+                            self.portal_withdrawal_queue_tail.max(portal_slot + 1);
                     }
 
-                    // Signal the withdrawal processor.
                     self.withdrawal_notify.notify_one();
 
                     return Ok(());

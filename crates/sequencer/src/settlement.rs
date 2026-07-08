@@ -4,8 +4,7 @@
 //! [`ZonePortal`](crate::abi::ZonePortal) contract deployed on L1. The sequencer
 //! signing key is used for every L1 transaction.
 //!
-//! [`BatchData`] is produced by the zone block builder (not implemented here) and
-//! sent to the submitter via a `tokio::sync::mpsc` channel.
+//! [`BatchData`] is produced by the zone monitor and passed to the submitter.
 //!
 //! # POC limitations
 //!
@@ -32,7 +31,7 @@ use alloy_network::ReceiptResponse;
 use alloy_primitives::{Address, B256, Bytes, U256};
 use alloy_provider::{DynProvider, Provider};
 use alloy_rlp::Encodable;
-use alloy_sol_types::SolCall;
+use alloy_sol_types::{SolCall, SolEvent};
 use eyre::Result;
 use futures::{StreamExt, TryStreamExt};
 use tempo_alloy::{TempoNetwork, rpc::TempoCallBuilderExt};
@@ -220,6 +219,10 @@ impl BatchSubmitter {
     ///
     /// `verifierConfig` and `proof` are empty until real proof generation is
     /// implemented.
+    ///
+    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt —
+    /// the authoritative record of the portal state this batch produced,
+    /// including the assigned withdrawal queue slot.
     // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
@@ -228,7 +231,7 @@ impl BatchSubmitter {
         next_block_hash = %batch.next_block_hash,
         withdrawal_queue_hash = %batch.withdrawal_queue_hash,
     ))]
-    pub async fn submit_batch(&self, batch: &BatchData) -> Result<B256> {
+    pub async fn submit_batch(&self, batch: &BatchData) -> Result<ZonePortal::BatchSubmitted> {
         if batch.tempo_block_number < self.genesis_tempo_block_number {
             return Err(eyre::eyre!(
                 "tempo_block_number ({}) is below genesis ({})",
@@ -331,9 +334,30 @@ impl BatchSubmitter {
             ));
         }
 
-        info!(%tx_hash, "Batch submitted to L1");
+        let event = self.decode_batch_submitted(receipt.logs())?;
 
-        Ok(tx_hash)
+        info!(
+            %tx_hash,
+            withdrawal_batch_index = event.withdrawalBatchIndex,
+            withdrawal_queue_slot = %event.withdrawalQueueSlot,
+            "Batch submitted to L1"
+        );
+
+        Ok(event)
+    }
+
+    /// Decode the `BatchSubmitted` event from a confirmed `submitBatch` receipt's logs.
+    fn decode_batch_submitted(
+        &self,
+        logs: &[alloy_rpc_types_eth::Log],
+    ) -> Result<ZonePortal::BatchSubmitted> {
+        logs.iter()
+            .filter(|log| log.address() == self.portal_address)
+            .find_map(|log| ZonePortal::BatchSubmitted::decode_log(&log.inner).ok())
+            .map(|log| log.data)
+            .ok_or_else(|| {
+                eyre::eyre!("confirmed submitBatch receipt is missing the BatchSubmitted event")
+            })
     }
 
     /// Resolve the anchor mode for the given `tempo_block_number`.
@@ -515,9 +539,9 @@ impl BatchSubmitter {
     ///
     /// 1. Reading `withdrawalQueueHead` / `withdrawalQueueTail` from the **L1 portal**
     ///    to determine which slots are still pending.
-    /// 2. Walking **L1** backwards from the chain tip to find the `BatchSubmitted`
-    ///    event for each pending slot (plus the predecessor for zone block range
-    ///    boundaries).
+    /// 2. Querying the `BatchSubmitted` event for each pending slot (plus the
+    ///    predecessor for zone block range boundaries) via the indexed
+    ///    `withdrawalQueueSlot` topic.
     /// 3. Resolving each event's `nextBlockHash` to a **zone L2** block number.
     /// 4. Fetching `WithdrawalRequested` events from the **zone L2** outbox in
     ///    the corresponding block range.
@@ -550,10 +574,11 @@ impl BatchSubmitter {
             "Restoring pending withdrawals"
         );
 
-        // Step 2: walk L1 backwards from the L1 tip to find BatchSubmitted
-        // events for pending slots [head, tail) plus the predecessor (head-1).
-        let l1_tip = self.l1_provider.get_block_number().await?;
-        let events = self.find_batch_events_backwards(l1_tip, head, tail).await?;
+        // Step 2: query BatchSubmitted events for pending slots [head, tail)
+        // plus the predecessor (head-1) by their indexed withdrawalQueueSlot.
+        let events = self
+            .find_batch_events_by_slot(head.saturating_sub(1), tail)
+            .await?;
 
         // Step 3: resolve each L1 event's nextBlockHash to a zone L2 block number.
         // Maps portal_slot → last zone L2 block in that batch.
@@ -622,84 +647,44 @@ impl BatchSubmitter {
         resolve_pending_slots(head, tail, &events, &slot_withdrawals, head_slot_hash)
     }
 
-    /// Walk **L1** backwards from `l1_tip` in 10k-block chunks to find
-    /// `BatchSubmitted` events for portal slots `[head, tail)` plus the
-    /// predecessor slot `head - 1` (used to determine the zone L2 block
-    /// range start of the first pending slot). When `head == 0` the
-    /// predecessor does not exist and is omitted; the caller falls back to
-    /// zone block 1.
+    /// Fetch `BatchSubmitted` events for portal queue slots `[first_slot, tail)`
+    /// with a single log query filtered by the indexed `withdrawalQueueSlot`
+    /// topic. Logical slot indices never repeat (head/tail are non-wrapping
+    /// counters), so the topic filter identifies each batch exactly.
     ///
-    /// Portal queue slots are assigned by position: the n-th non-zero-hash
-    /// `BatchSubmitted` event (0-indexed, chronologically) corresponds to
-    /// portal queue slot n. This is because the L1 portal increments
-    /// `withdrawalBatchIndex` on every `submitBatch` call, but only advances
-    /// the withdrawal queue `tail` for batches with non-zero
-    /// `withdrawalQueueHash`. The two counters diverge whenever a batch has
-    /// no withdrawals, so we cannot use `withdrawalBatchIndex` as the slot
-    /// index.
-    ///
-    /// Stops as soon as enough events are found — pending slots are recent,
-    /// so the first chunk typically covers them all.
-    async fn find_batch_events_backwards(
+    /// The caller passes `first_slot = head - 1` so the predecessor batch is
+    /// included (its `nextBlockHash` bounds the zone block range of the first
+    /// pending slot). When `head == 0` the predecessor does not exist; the
+    /// caller falls back to zone block 1.
+    async fn find_batch_events_by_slot(
         &self,
-        l1_tip: u64,
-        head: u64,
+        first_slot: u64,
         tail: u64,
     ) -> Result<BTreeMap<u64, abi::ZonePortal::BatchSubmitted>> {
-        let start = head.saturating_sub(1);
-        let needed = (tail - start) as usize;
-        if needed == 0 {
+        if first_slot >= tail {
             return Ok(BTreeMap::new());
         }
 
-        let mut all_events: Vec<abi::ZonePortal::BatchSubmitted> = Vec::new();
-        let mut hi = l1_tip;
+        let slot_topics: Vec<B256> = (first_slot..tail)
+            .map(|slot| B256::from(U256::from(slot)))
+            .collect();
 
-        while hi >= self.genesis_tempo_block_number {
-            let lo = hi
-                .saturating_sub(10_000)
-                .max(self.genesis_tempo_block_number);
-
-            let chunk: Vec<_> = self
-                .portal
-                .BatchSubmitted_filter()
-                .from_block(lo)
-                .to_block(hi)
-                .query()
-                .await?
-                .into_iter()
-                .filter(|(event, _)| !event.withdrawalQueueHash.is_zero())
-                .map(|(event, _)| event)
-                .collect();
-
-            all_events.extend(chunk);
-
-            if all_events.len() >= needed {
-                break;
-            }
-            if lo == self.genesis_tempo_block_number {
-                break;
-            }
-            hi = lo - 1;
-        }
-
-        // Sort chronologically — the n-th event = portal queue slot n.
-        all_events.sort_by_key(|e| e.withdrawalBatchIndex);
-
-        // Assign portal slots: if we found M events total, the last M
-        // correspond to slots [tail - M, tail). Keep only [start, tail).
-        // Truncate to at most `needed` events (the most recent ones) to
-        // guard against extra events from race conditions.
-        if all_events.len() > needed {
-            all_events.drain(..all_events.len() - needed);
-        }
+        let events = self
+            .portal
+            .BatchSubmitted_filter()
+            .topic2(slot_topics)
+            .from_block(self.genesis_tempo_block_number)
+            .query()
+            .await?;
 
         let mut found = BTreeMap::new();
-        let first_slot = tail.saturating_sub(all_events.len() as u64);
-        for (i, event) in all_events.into_iter().enumerate() {
-            let portal_slot = first_slot + i as u64;
-            if portal_slot >= start && portal_slot < tail {
-                found.insert(portal_slot, event);
+        for (event, _) in events {
+            let slot: u64 = event
+                .withdrawalQueueSlot
+                .try_into()
+                .map_err(|_| eyre::eyre!("withdrawal queue slot overflow in BatchSubmitted"))?;
+            if found.insert(slot, event).is_some() {
+                eyre::bail!("duplicate BatchSubmitted event for portal queue slot {slot}");
             }
         }
 
@@ -1184,11 +1169,56 @@ mod tests {
     fn test_batch_event(withdrawal_queue_hash: B256) -> abi::ZonePortal::BatchSubmitted {
         abi::ZonePortal::BatchSubmitted {
             withdrawalBatchIndex: 0,
+            withdrawalQueueSlot: U256::ZERO,
             nextProcessedDepositQueueHash: B256::ZERO,
             nextBlockHash: B256::ZERO,
             withdrawalQueueHash: withdrawal_queue_hash,
             lastProcessedDepositNumber: 0,
         }
+    }
+
+    #[test]
+    fn decode_batch_submitted_from_receipt_logs() {
+        use alloy_provider::ProviderBuilder;
+        use alloy_transport::mock::Asserter;
+
+        let portal_address = address!("0x7069DeC4E64Fd07334A0933eDe836C17259c9B23");
+        let provider = ProviderBuilder::new_with_network::<tempo_alloy::TempoNetwork>()
+            .connect_mocked_client(Asserter::new())
+            .erased();
+        let submitter = BatchSubmitter::new(portal_address, provider, 0);
+
+        let event = abi::ZonePortal::BatchSubmitted {
+            withdrawalBatchIndex: 7,
+            withdrawalQueueSlot: U256::from(3),
+            nextProcessedDepositQueueHash: B256::repeat_byte(0x11),
+            nextBlockHash: B256::repeat_byte(0x22),
+            withdrawalQueueHash: B256::repeat_byte(0x33),
+            lastProcessedDepositNumber: 9,
+        };
+        let log = alloy_rpc_types_eth::Log {
+            inner: alloy_primitives::Log {
+                address: portal_address,
+                data: event.encode_log_data(),
+            },
+            ..Default::default()
+        };
+        let unrelated = alloy_rpc_types_eth::Log {
+            inner: alloy_primitives::Log {
+                address: Address::repeat_byte(0x99),
+                data: event.encode_log_data(),
+            },
+            ..Default::default()
+        };
+
+        let decoded = submitter
+            .decode_batch_submitted(&[unrelated.clone(), log])
+            .unwrap();
+        assert_eq!(decoded.withdrawalBatchIndex, 7);
+        assert_eq!(decoded.withdrawalQueueSlot, U256::from(3));
+        assert_eq!(decoded.nextBlockHash, B256::repeat_byte(0x22));
+
+        assert!(submitter.decode_batch_submitted(&[unrelated]).is_err());
     }
 
     #[test]

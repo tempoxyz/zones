@@ -1363,7 +1363,7 @@ On success, the portal:
 2. Updates `lastSyncedTempoBlockNumber` to `tempoBlockNumber` and `lastProcessedDepositNumber` to `depositQueueTransition.nextDepositNumber`.
 3. Advances `withdrawalBatchIndex`.
 4. Adds the withdrawal hash chain to the next slot in the withdrawal queue ring buffer (if `withdrawalQueueHash` is non-zero).
-5. Emits `BatchSubmitted`.
+5. Emits `BatchSubmitted`, including the logical withdrawal queue index the hash chain was enqueued under (`withdrawalQueueSlot`, indexed; `type(uint256).max` when the batch carried no withdrawals). This lets off-chain recovery look up the batch for a given queue slot with a filtered event query instead of counting non-empty batches positionally.
 
 ### Verifier Interface
 
@@ -1638,6 +1638,7 @@ interface IZonePortal {
     );
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex,
+        uint256 indexed withdrawalQueueSlot,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
         bytes32 withdrawalQueueHash,
