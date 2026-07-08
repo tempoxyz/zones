@@ -39,6 +39,16 @@ const REVEAL_TO_KEY_LENGTH: usize = 33;
 alloy_sol_types::sol! {
     error StaticCallNotAllowed();
 
+    function requestWithdrawal(
+        address token,
+        address to,
+        uint128 amount,
+        bytes32 memo,
+        uint64 gasLimit,
+        address fallbackRecipient,
+        bytes data
+    ) external;
+
     struct Withdrawal {
         address token;
         bytes32 senderTag;
@@ -687,6 +697,30 @@ impl ZoneOutbox {
             return err;
         }
 
+        if tempo_precompiles::dispatch::selector_from_calldata(calldata)
+            == Some(requestWithdrawalCall::SELECTOR)
+        {
+            let Ok(call) = requestWithdrawalCall::abi_decode_raw_validate(&calldata[4..]) else {
+                return Ok(self.storage.revert_output(Bytes::new()));
+            };
+            return self.request_withdrawal(
+                provider,
+                registry,
+                msg_sender,
+                current_tx_hash,
+                RequestWithdrawalArgs {
+                    token: call.token,
+                    to: call.to,
+                    amount: call.amount,
+                    memo: call.memo,
+                    gas_limit: call.gasLimit,
+                    fallback_recipient: call.fallbackRecipient,
+                    callback_data: call.data,
+                    reveal_to: Bytes::new(),
+                },
+            );
+        }
+
         dispatch!(
             calldata,
             |call| match call {
@@ -733,25 +767,7 @@ impl ZoneOutbox {
                     setMaxWithdrawalsPerBlock(call) => {
                         self.set_max_withdrawals_per_block(provider, msg_sender, call)
                     },
-                    requestWithdrawal_0(call) => {
-                        self.request_withdrawal(
-                            provider,
-                            registry,
-                            msg_sender,
-                            current_tx_hash,
-                            RequestWithdrawalArgs {
-                                token: call.token,
-                                to: call.to,
-                                amount: call.amount,
-                                memo: call.memo,
-                                gas_limit: call.gasLimit,
-                                fallback_recipient: call.fallbackRecipient,
-                                callback_data: call.data,
-                                reveal_to: Bytes::new(),
-                            },
-                        )
-                    },
-                    requestWithdrawal_1(call) => {
+                    requestWithdrawal(call) => {
                         self.request_withdrawal(
                             provider,
                             registry,

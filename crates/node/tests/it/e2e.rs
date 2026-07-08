@@ -476,7 +476,7 @@ async fn submit_withdrawal(
 ) -> eyre::Result<u64> {
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
     let pending = outbox
-        .requestWithdrawal_1(
+        .requestWithdrawal(
             PATH_USD_ADDRESS,
             dev_address,
             amount,
@@ -889,7 +889,7 @@ async fn test_withdrawal_request_rejects_over_max_callback_gas() -> eyre::Result
     let max_callback_gas = outbox.MAX_WITHDRAWAL_GAS_LIMIT().call().await?;
 
     let withdrawal_pending = outbox
-        .requestWithdrawal_1(
+        .requestWithdrawal(
             PATH_USD_ADDRESS,
             dev_address,
             250_000,

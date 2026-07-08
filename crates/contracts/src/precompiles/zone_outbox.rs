@@ -96,15 +96,6 @@ crate::sol! {
             bytes32 memo,
             uint64 gasLimit,
             address fallbackRecipient,
-            bytes calldata data
-        ) external;
-        function requestWithdrawal(
-            address token,
-            address to,
-            uint128 amount,
-            bytes32 memo,
-            uint64 gasLimit,
-            address fallbackRecipient,
             bytes calldata data,
             bytes calldata revealTo
         ) external;
