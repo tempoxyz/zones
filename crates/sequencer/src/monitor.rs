@@ -649,6 +649,8 @@ impl ZoneMonitor {
                                 count, "Stored withdrawals for portal queue slot"
                             );
                         }
+
+                        // Make sure tail never goes backwards
                         self.portal_withdrawal_queue_tail =
                             self.portal_withdrawal_queue_tail.max(portal_slot + 1);
                     }

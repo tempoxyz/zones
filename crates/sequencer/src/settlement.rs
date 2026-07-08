@@ -220,9 +220,7 @@ impl BatchSubmitter {
     /// `verifierConfig` and `proof` are empty until real proof generation is
     /// implemented.
     ///
-    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt —
-    /// the authoritative record of the portal state this batch produced,
-    /// including the assigned withdrawal queue slot.
+    /// Returns the `BatchSubmitted` event decoded from the confirmed receipt.
     // TODO: pass real proof bytes once proof generation is implemented.
     #[instrument(skip_all, fields(
         portal = %self.portal_address,
@@ -648,9 +646,10 @@ impl BatchSubmitter {
     }
 
     /// Fetch `BatchSubmitted` events for portal queue slots `[first_slot, tail)`
-    /// with a single log query filtered by the indexed `withdrawalQueueSlot`
-    /// topic. Logical slot indices never repeat (head/tail are non-wrapping
-    /// counters), so the topic filter identifies each batch exactly.
+    /// by walking L1 backwards in chunks while filtering by the indexed
+    /// `withdrawalQueueSlot` topic. Logical slot indices never repeat
+    /// (head/tail are non-wrapping counters), so the topic filter identifies
+    /// each batch exactly without positional counting.
     ///
     /// The caller passes `first_slot = head - 1` so the predecessor batch is
     /// included (its `nextBlockHash` bounds the zone block range of the first
@@ -668,24 +667,39 @@ impl BatchSubmitter {
         let slot_topics: Vec<B256> = (first_slot..tail)
             .map(|slot| B256::from(U256::from(slot)))
             .collect();
-
-        let events = self
-            .portal
-            .BatchSubmitted_filter()
-            .topic2(slot_topics)
-            .from_block(self.genesis_tempo_block_number)
-            .query()
-            .await?;
+        let needed = slot_topics.len();
 
         let mut found = BTreeMap::new();
-        for (event, _) in events {
-            let slot: u64 = event
-                .withdrawalQueueSlot
-                .try_into()
-                .map_err(|_| eyre::eyre!("withdrawal queue slot overflow in BatchSubmitted"))?;
-            if found.insert(slot, event).is_some() {
-                eyre::bail!("duplicate BatchSubmitted event for portal queue slot {slot}");
+        let mut hi = self.l1_provider.get_block_number().await?;
+
+        while hi >= self.genesis_tempo_block_number && found.len() < needed {
+            let lo = hi
+                .saturating_sub(LOG_QUERY_BLOCK_CHUNK)
+                .max(self.genesis_tempo_block_number);
+
+            let events = self
+                .portal
+                .BatchSubmitted_filter()
+                .topic2(slot_topics.clone())
+                .from_block(lo)
+                .to_block(hi)
+                .query()
+                .await?;
+
+            for (event, _) in events {
+                let slot: u64 = event
+                    .withdrawalQueueSlot
+                    .try_into()
+                    .map_err(|_| eyre::eyre!("withdrawal queue slot overflow in BatchSubmitted"))?;
+                if found.insert(slot, event).is_some() {
+                    eyre::bail!("duplicate BatchSubmitted event for portal queue slot {slot}");
+                }
             }
+
+            if lo == self.genesis_tempo_block_number {
+                break;
+            }
+            hi = lo - 1;
         }
 
         Ok(found)
