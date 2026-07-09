@@ -21,7 +21,6 @@ interface IZoneToken {
 struct ZoneInfo {
     uint32 zoneId;
     address portal;
-    address messenger;
     address initialToken; // first TIP-20 enabled at zone creation (additional tokens enabled via enableToken)
     address admin;
     address sequencer;
@@ -347,6 +346,7 @@ interface IZoneTxContext {
 //   slot 13: _withdrawalQueue.slots (mapping(uint256 => bytes32))
 //   slot 14: rpcUrl (string)
 //   slot 15: pendingAdmin (address)
+//   slot 16: _withdrawalReentrancyStatus (uint256)
 //
 // These constants are the single source of truth for cross-domain reads.
 // ZoneConfig and ZoneInbox use them to read portal state via
@@ -421,7 +421,6 @@ interface IZoneFactory {
     event ZoneCreated(
         uint32 indexed zoneId,
         address indexed portal,
-        address indexed messenger,
         address initialToken,
         address admin,
         address sequencer,
@@ -443,7 +442,11 @@ interface IZoneFactory {
     /// @return valid True if `verifier` can be passed to `createZone`.
     function isValidVerifier(address verifier) external view returns (bool);
 
-    /// @notice Creates a new zone and deploys its portal and messenger contracts.
+    /// @notice Returns the default verifier deployed by the factory.
+    /// @return verifier The default verifier contract address.
+    function verifier() external view returns (address);
+
+    /// @notice Creates a new zone and deploys its portal contract.
     /// @param params The initial token, sequencer, verifier, and genesis parameters for the zone.
     /// @return zoneId The newly assigned zone ID.
     /// @return portal The deployed portal address for the new zone.
@@ -465,10 +468,9 @@ interface IZoneFactory {
     /// @return isPortal True if `portal` was created by this factory.
     function isZonePortal(address portal) external view returns (bool);
 
-    /// @notice Returns whether an address is a messenger deployed by this factory.
-    /// @param messenger The messenger address to check.
-    /// @return isMessenger True if `messenger` was created by this factory.
-    function isZoneMessenger(address messenger) external view returns (bool);
+    /// @notice Returns the shared messenger used for withdrawal callbacks.
+    /// @return messenger The shared messenger contract address.
+    function messenger() external view returns (address);
 
 }
 
@@ -597,6 +599,9 @@ interface IZonePortal {
     error InvalidProof();
     error InvalidTempoBlockNumber();
     error CallbackRejected();
+    error TransferFailed();
+    error NotSelf();
+    error ReentrantWithdrawal();
     error EncryptionKeyExpired(uint256 keyIndex, uint64 activationBlock, uint64 supersededAtBlock);
     error InvalidEncryptionKeyIndex(uint256 keyIndex);
     error NoEncryptionKeySet();
@@ -677,7 +682,7 @@ interface IZonePortal {
 
     /// @notice Enable a new TIP-20 token for bridging. Only callable by admin.
     /// @dev Irreversible: once enabled, a token cannot be disabled.
-    ///      Validates the token is a TIP-20 and grants messenger max approval.
+    ///      Validates the token is a TIP-20.
     function enableToken(address token) external;
 
     /// @notice Pause deposits for a token. Only callable by admin.
@@ -803,6 +808,16 @@ interface IZonePortal {
 
     function processWithdrawal(Withdrawal calldata withdrawal, bytes32 remainingQueue) external;
 
+    function deliverWithdrawal(
+        address token,
+        address target,
+        uint128 amount,
+        bytes32 senderTag,
+        uint64 gasLimit,
+        bytes calldata data
+    )
+        external;
+
     function refunds(address token, address owner) external view returns (uint128);
 
     function claimRefund(address token) external returns (uint128 amount);
@@ -821,15 +836,13 @@ interface IZonePortal {
 }
 
 /// @title IZoneMessenger
-/// @notice Interface for zone messenger on Tempo (handles withdrawal callbacks)
+/// @notice Interface for the shared zone messenger on Tempo (handles withdrawal callbacks)
 interface IZoneMessenger {
 
-    /// @notice Returns the zone's portal address
-    function portal() external view returns (address);
-
-    /// @notice Relay a withdrawal message. Only callable by the portal.
-    /// @dev Transfers tokens from portal to target via transferFrom, then executes callback.
+    /// @notice Relay a withdrawal message. Only callable by the registered portal for `zoneId`.
+    /// @dev Transfers tokens it received from the portal to target, then executes callback.
     ///      If callback reverts, the entire call reverts (including the transfer).
+    /// @param zoneId The source zone ID.
     /// @param token The TIP-20 token to transfer
     /// @param senderTag The authenticated sender commitment from the zone
     /// @param target The Tempo recipient
@@ -837,6 +850,7 @@ interface IZoneMessenger {
     /// @param gasLimit Max gas for the callback
     /// @param data Calldata for the target
     function relayMessage(
+        uint32 zoneId,
         address token,
         bytes32 senderTag,
         address target,
@@ -853,6 +867,8 @@ interface IZoneMessenger {
 interface IWithdrawalReceiver {
 
     function onWithdrawalReceived(
+        uint32 zoneId,
+        address sourcePortal,
         bytes32 senderTag,
         address token,
         uint128 amount,

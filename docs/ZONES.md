@@ -141,7 +141,7 @@ View on explorer: `https://explore.moderato.tempo.xyz/address/<SEQUENCER_ADDR>`
 
 ### 4. Create the Zone on L1
 
-This deploys a ZonePortal + ZoneMessenger on L1 and generates the zone's genesis file:
+This deploys a ZonePortal on L1, wired to the factory's shared ZoneMessenger, and generates the zone's genesis file:
 
 ```bash
 export PRIVATE_KEY="$SEQUENCER_KEY"

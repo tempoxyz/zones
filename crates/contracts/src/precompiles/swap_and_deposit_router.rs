@@ -9,6 +9,8 @@ crate::sol! {
     #[derive(Debug)]
     contract SwapAndDepositRouter {
         function onWithdrawalReceived(
+            uint32 sourceZoneId,
+            address sourcePortal,
             bytes32 senderTag,
             address tokenIn,
             uint128 amount,

@@ -534,7 +534,7 @@ impl WithdrawalProcessor {
         // 1. `gasLimit`          — gas the user requested for their callback.
         // 2. `CALLBACK_OVERHEAD` — fixed cost for the portal + messenger
         //    logic that runs *around* the callback: queue dequeue & hash
-        //    verification, TIP-20 transferFrom (~500k), messenger relay
+        //    verification, TIP-20 transfers, messenger relay
         //    setup, fee payment, event emission, and the bounce-back path
         //    if the callback reverts.
         // 3. EIP-150 cushion     — the 63/64 forwarding rule means the

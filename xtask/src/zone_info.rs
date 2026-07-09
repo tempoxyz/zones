@@ -51,10 +51,11 @@ impl ZoneInfoCmd {
         if info.portal == Address::ZERO {
             return Err(eyre!("zone {zone_id} does not exist"));
         }
+        let messenger = factory.messenger().call().await?;
 
         println!("Zone {}", info.zoneId);
         println!("  Portal:                {}", info.portal);
-        println!("  Messenger:             {}", info.messenger);
+        println!("  Messenger:             {}", messenger);
         println!("  Initial Token:         {}", info.initialToken);
         println!("  Sequencer:             {}", info.sequencer);
         println!("  Verifier:              {}", info.verifier);

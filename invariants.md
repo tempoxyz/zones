@@ -18,7 +18,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 | ID | Assertion | Crit | Impact |
 |---|---|---|---|
 | `TEMPO-ZONE-CHAIN-ID-UNIQUE` | Each live zone uses the chain ID derived from its zone ID, and no two live zones share a chain ID | 🟡 | Cross-zone replay protection fails; signed transactions may be valid on more than one zone |
-| `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal and messenger pair | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
+| `TEMPO-ZONE-PORTAL-PAIRING` | A `ZoneFactory` registry entry maps one zone ID to exactly one portal, and that portal uses the factory's shared messenger | 🟡 | Deposits, withdrawals, callbacks, and config reads can target different trust domains |
 | `TEMPO-ZONE-GENESIS-BINDING` | Portal `blockHash`, `genesisTempoBlockNumber`, and emitted zone creation parameters match the zone genesis file | 🔴 | The zone may prove batches from a different genesis state than the portal expects |
 | `TEMPO-ZONE-PREDEPLOY-ADDRESSES` | `TempoState`, `ZoneInbox`, `ZoneOutbox`, `ZoneConfig`, `TempoStateReader`, and `ZoneTxContext` exist at their fixed addresses | 🔴 | System calls can be redirected or missing, invalidating mint/burn, proofs, and Tempo reads |
 
@@ -38,7 +38,7 @@ for auditors, invariant/fuzz test authors, and production monitoring.
 |---|---|---|---|
 | `TEMPO-ZONE-TOKEN-ENABLEMENT-APPEND-ONLY` | Once enabled, a token remains enabled and remains in the append-only enabled token list | 🔴 | Withdrawals can be disabled after deposits, breaking the non-custodial bridge guarantee |
 | `TEMPO-ZONE-TOKEN-DEPOSIT-PAUSE-ONLY` | Pausing a token only disables new deposits; withdrawals for enabled tokens remain requestable and processable | 🔴 | Admin can lock users inside the zone by pausing deposits |
-| `TEMPO-ZONE-MESSENGER-APPROVAL` | For every enabled token, the portal approves the zone messenger for callback withdrawals | 🟡 | Callback withdrawals can fail even when the portal holds enough funds |
+| `TEMPO-ZONE-MESSENGER-AUTH` | The shared messenger only relays when `msg.sender == ZoneFactory.zones(zoneId).portal` | 🟡 | A caller can spoof a source zone or invoke receiver callbacks outside the portal-controlled withdrawal path |
 | `TEMPO-ZONE-SUPPLY-SOLVENCY` | For each token, zone-side total supply equals accepted deposits plus withdrawal bounce-backs minus requested withdrawals minus deposit bounce-backs | 🔴 | The zone can mint unbacked tokens or burn user funds without matching L1 release |
 | `TEMPO-ZONE-PORTAL-SOLVENCY` | Portal token balance plus paid-out/parked refunds is sufficient for all unwithdrawn zone supply and pending withdrawals | 🔴 | Portal cannot honor exits, causing direct loss or insolvency |
 | `TEMPO-ZONE-MINT-BURN-AUTHORITY` | Only `ZoneInbox` can mint zone tokens and only `ZoneOutbox` can burn zone tokens | 🔴 | Unauthorized mint or burn breaks bridge accounting and can steal or destroy funds |

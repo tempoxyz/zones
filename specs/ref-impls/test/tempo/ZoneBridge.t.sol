@@ -25,6 +25,7 @@ import {
     Withdrawal,
     ZONE_INBOX,
     ZONE_OUTBOX,
+    ZoneInfo,
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
 import { EncryptedDepositLib } from "../../src/libraries/EncryptedDeposit.sol";
@@ -45,6 +46,8 @@ import { ITIP20 } from "tempo-std/interfaces/ITIP20.sol";
 contract MockWithdrawalReceiver is IWithdrawalReceiver {
 
     bool public shouldAccept = true;
+    uint32 public lastZoneId;
+    address public lastSourcePortal;
     bytes32 public lastSenderTag;
     address public lastToken;
     uint128 public lastAmount;
@@ -55,6 +58,8 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     }
 
     function onWithdrawalReceived(
+        uint32 zoneId,
+        address sourcePortal,
         bytes32 senderTag,
         address token,
         uint128 amount,
@@ -63,11 +68,28 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         external
         returns (bytes4)
     {
+        lastZoneId = zoneId;
+        lastSourcePortal = sourcePortal;
         lastSenderTag = senderTag;
         lastToken = token;
         lastAmount = amount;
         lastCallbackData = callbackData;
         return shouldAccept ? IWithdrawalReceiver.onWithdrawalReceived.selector : bytes4(0);
+    }
+
+}
+
+contract MockZoneFactoryForBridgeMessenger {
+
+    mapping(uint32 => ZoneInfo) internal _zones;
+
+    function setPortal(uint32 zoneId, address portal) external {
+        _zones[zoneId].zoneId = zoneId;
+        _zones[zoneId].portal = portal;
+    }
+
+    function zones(uint32 zoneId) external view returns (ZoneInfo memory) {
+        return _zones[zoneId];
     }
 
 }
@@ -147,11 +169,10 @@ contract ZoneBridgeTest is BaseTest {
         // Record genesis block number for Tempo
         genesisTempoBlockNumber = uint64(block.number);
 
-        // Deploy messenger and portal directly (bypass factory to avoid TIP20 prefix check).
-        // Predict portal address so messenger can reference it in its constructor.
-        uint256 currentNonce = vm.getNonce(address(this));
-        address predictedPortal = vm.computeCreateAddress(address(this), currentNonce + 1);
-        ZoneMessenger messengerContract = new ZoneMessenger(predictedPortal);
+        // Deploy portal directly (bypass factory to avoid TIP20 prefix check), but use a
+        // mock factory registry so the shared messenger can authenticate the source portal.
+        MockZoneFactoryForBridgeMessenger messengerFactory = new MockZoneFactoryForBridgeMessenger();
+        ZoneMessenger messengerContract = new ZoneMessenger(address(messengerFactory));
         l1Portal = new ZonePortal(
             1, // zoneId
             address(l2ZoneToken), // initialToken = MockZoneToken (NOT pathUSD)
@@ -164,6 +185,7 @@ contract ZoneBridgeTest is BaseTest {
             ""
         );
         zoneId = 1;
+        messengerFactory.setPortal(zoneId, address(l1Portal));
 
         // === Deploy zone contracts ===
         // TempoState mock for testing

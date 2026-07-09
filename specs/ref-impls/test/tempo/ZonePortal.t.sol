@@ -48,6 +48,8 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     bool public shouldRevert = false;
 
     bytes32 public lastSenderTag;
+    uint32 public lastZoneId;
+    address public lastSourcePortal;
     address public lastToken;
     uint128 public lastAmount;
     bytes public lastCallbackData;
@@ -66,6 +68,8 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
     }
 
     function onWithdrawalReceived(
+        uint32 zoneId,
+        address sourcePortal,
         bytes32 senderTag,
         address token,
         uint128 amount,
@@ -74,10 +78,16 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
         external
         returns (bytes4)
     {
+        lastZoneId = zoneId;
+        lastSourcePortal = sourcePortal;
         lastSenderTag = senderTag;
         lastToken = token;
         lastAmount = amount;
         lastCallbackData = callbackData;
+
+        if (expectedMessenger != address(0) && msg.sender != expectedMessenger) {
+            revert("MockWithdrawalReceiver: unexpected messenger");
+        }
 
         if (shouldRevert) {
             revert("MockWithdrawalReceiver: intentional revert");
@@ -96,6 +106,8 @@ contract MockWithdrawalReceiver is IWithdrawalReceiver {
 contract GasConsumingReceiver is IWithdrawalReceiver {
 
     function onWithdrawalReceived(
+        uint32,
+        address,
         bytes32,
         address,
         uint128,
@@ -117,6 +129,8 @@ contract SuccessfulReceiver is IWithdrawalReceiver {
     uint256 public callCount;
 
     function onWithdrawalReceived(
+        uint32,
+        address,
         bytes32,
         address,
         uint128,
@@ -184,9 +198,8 @@ contract ZonePortalTest is BaseTest {
         (testZoneId, portalAddr) = zoneFactory.createZone(params);
         portal = ZonePortal(portalAddr);
 
-        // Get the messenger
-        ZoneInfo memory info = zoneFactory.zones(testZoneId);
-        messenger = ZoneMessenger(info.messenger);
+        // Get the shared messenger
+        messenger = ZoneMessenger(zoneFactory.messenger());
 
         // Set expected messenger for withdrawal receiver
         withdrawalReceiver.setExpectedMessenger(address(messenger));
@@ -246,7 +259,6 @@ contract ZonePortalTest is BaseTest {
         ZoneInfo memory info = zoneFactory.zones(testZoneId);
         assertEq(info.zoneId, testZoneId);
         assertEq(info.portal, address(portal));
-        assertEq(info.messenger, address(messenger));
         assertEq(info.initialToken, address(pathUSD));
         assertEq(info.admin, admin);
         assertEq(info.sequencer, sequencer);
