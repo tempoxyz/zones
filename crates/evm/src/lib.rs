@@ -143,8 +143,8 @@ where
                 .as_ref()
                 .is_some_and(|aa| aa.aa_calls.iter().any(|call| call.to.is_create()))
         {
-            return Err(EVMError::Custom(
-                "contract creation not supported on zones".to_string(),
+            return Err(EVMError::Transaction(
+                TempoInvalidTransaction::CallsValidation("contract creation is not supported"),
             ));
         }
         self.inner.transact_raw(tx)
@@ -569,9 +569,10 @@ mod tests {
             })
             .expect_err("top-level create must be rejected");
 
-        assert!(
-            matches!(err, EVMError::Custom(message) if message == "contract creation not supported on zones")
-        );
+        assert!(matches!(
+            err,
+            EVMError::Transaction(TempoInvalidTransaction::CallsValidation(..))
+        ));
     }
 
     #[test]
