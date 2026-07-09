@@ -23,6 +23,7 @@ use tempo_precompiles::{
     storage::{ContractStorage, StorageCtx},
     tip20::{RolesAuthError, TIP20Token},
 };
+use tempo_primitives::TempoAddressExt;
 use tempo_zone_contracts::Unauthorized;
 use tracing::{trace, warn};
 use zone_primitives::{
@@ -54,146 +55,179 @@ pub trait SequencerExt: Send + Sync {
 /// `balanceOf`/`allowance`, fixed gas for transfer-family calls and `approve`,
 /// and operation-specific bridge auth for mint/burn selectors.
 pub struct ZoneTip20Token<P> {
+    /// Address of the TIP-20 token this wrapper represents.
+    address: Address,
     /// Optional TIP-403 registry wrapper used for transfer and mint-recipient policy checks.
     registry: Option<ZoneTip403ProxyRegistry<P>>,
     /// Sequencer-capable backend used to authorize private reads for the active sequencer.
     sequencer: Arc<dyn SequencerExt>,
 }
 
+/// Concrete precompile result returned by a zone TIP-20 precheck.
+///
+/// Used for policy/privacy reverts and fatal policy-provider errors before
+/// delegating to the underlying [`TIP20Token`].
+struct PrecheckErr(PrecompileResult);
+
+type PrecheckResult = core::result::Result<(), PrecheckErr>;
+
+impl PrecheckErr {
+    fn revert(output: PrecompileOutput) -> Self {
+        Self(Ok(output))
+    }
+
+    fn error(error: PrecompileError) -> Self {
+        Self(Err(error))
+    }
+}
+
+impl From<PrecheckErr> for PrecompileResult {
+    fn from(err: PrecheckErr) -> Self {
+        err.0
+    }
+}
+
 impl<P: PolicyCheck> ZoneTip20Token<P> {
-    /// Create a new wrapper with the given registry.
+    /// Create a new wrapper for the token at `address` with the given registry.
     pub fn new(
+        address: Address,
         registry: Option<ZoneTip403ProxyRegistry<P>>,
         sequencer: Arc<dyn SequencerExt>,
     ) -> Self {
+        debug_assert!(
+            address.is_tip20(),
+            "TIP20 prefix should already be verified"
+        );
+
         Self {
+            address,
             registry,
             sequencer,
         }
     }
 
+    fn tip20(&self) -> TIP20Token {
+        TIP20Token::from_address_unchecked(self.address)
+    }
+
     /// Enforce the vanilla TIP-20 initialized-token check before zone policy logic.
-    fn ensure_initialized(tip20: &TIP20Token) -> TempoResult<()> {
-        if tip20.is_initialized()? {
+    fn ensure_initialized(&self) -> TempoResult<()> {
+        if self.tip20().is_initialized()? {
             Ok(())
         } else {
             Err(TIP20Error::uninitialized().into())
         }
     }
 
-    fn enforce_balance_of(&self, account: Address, caller: Address) -> Option<PrecompileResult> {
+    fn check_balance_read(&self, account: Address, caller: Address) -> PrecheckResult {
         if caller == account || self.is_sequencer(caller) {
-            None
+            Ok(())
         } else {
-            Some(Ok(Self::unauthorized_output()))
+            Err(PrecheckErr::revert(Self::unauthorized_output()))
         }
     }
 
-    fn enforce_allowance(
+    fn check_allowance_read(
         &self,
         owner: Address,
         spender: Address,
         caller: Address,
-    ) -> Option<PrecompileResult> {
+    ) -> PrecheckResult {
         if caller == owner || caller == spender || self.is_sequencer(caller) {
-            None
+            Ok(())
         } else {
-            Some(Ok(Self::unauthorized_output()))
+            Err(PrecheckErr::revert(Self::unauthorized_output()))
         }
     }
 
     /// Check sender + recipient authorization for a transfer.
-    ///
-    /// Returns `Some(revert)` if forbidden, `None` if allowed.
-    fn enforce_transfer(
-        &self,
-        token: Address,
-        from: Address,
-        to: Address,
-    ) -> Option<PrecompileResult> {
-        let registry = self.registry.as_ref()?;
-        let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
+    fn check_transfer_policy(&self, from: Address, to: Address) -> PrecheckResult {
+        let Some(registry) = self.registry.as_ref() else {
+            return Ok(());
+        };
+
+        let policy_id = match Self::resolve_transfer_policy_id(registry, self.address) {
             Ok(id) => id,
             Err(e) => {
                 warn!(
                     target: "zone::precompile",
-                    %token, error = %e,
+                    token = %self.address, error = %e,
                     "failed to resolve transfer_policy_id, rejecting transfer"
                 );
-                return Some(Err(e));
+                return Err(PrecheckErr::error(e));
             }
         };
 
         trace!(
             target: "zone::precompile",
-            %token, %from, %to, policy_id,
+            token = %self.address, %from, %to, policy_id,
             "ZoneTip20Token: checking transfer authorization"
         );
 
         match registry.is_transfer_authorized(policy_id, from, to) {
-            Ok(true) => None,
+            Ok(true) => Ok(()),
             Ok(false) => {
                 trace!(
                     target: "zone::precompile",
                     %from, %to, policy_id, "transfer not authorized"
                 );
-                Some(Ok(Self::policy_forbids_output()))
+                Err(PrecheckErr::revert(Self::policy_forbids_output()))
             }
-            Err(e) => Some(Err(e)),
+            Err(e) => Err(PrecheckErr::error(e)),
         }
     }
 
     /// Check mint recipient authorization.
     ///
-    /// Returns `Some(revert)` if forbidden, `None` if allowed.
     /// Resolution errors are treated as allow because mints are triggered by
     /// deposit system transactions whose policy is already enforced on L1.
-    fn enforce_mint(&self, token: Address, to: Address) -> Option<PrecompileResult> {
-        let registry = self.registry.as_ref()?;
-        let policy_id = match Self::resolve_transfer_policy_id(registry, token) {
+    fn check_mint_recipient_policy(&self, to: Address) -> PrecheckResult {
+        let Some(registry) = self.registry.as_ref() else {
+            return Ok(());
+        };
+
+        let policy_id = match Self::resolve_transfer_policy_id(registry, self.address) {
             Ok(id) => id,
             Err(e) => {
                 warn!(
                     target: "zone::precompile",
-                    %token, error = %e,
+                    token = %self.address, error = %e,
                     "failed to resolve transfer_policy_id for mint, deferring to L1 enforcement"
                 );
-                return None;
+                return Ok(());
             }
         };
 
         trace!(
             target: "zone::precompile",
-            %token, %to, policy_id,
+            token = %self.address, %to, policy_id,
             "ZoneTip20Token: checking mint recipient authorization"
         );
 
         match registry.is_authorized(policy_id, to, AuthRole::MintRecipient) {
-            Ok(true) => None,
+            Ok(true) => Ok(()),
             Ok(false) => {
                 trace!(target: "zone::precompile", %to, policy_id, "mint recipient not authorized");
-                Some(Ok(Self::policy_forbids_output()))
+                Err(PrecheckErr::revert(Self::policy_forbids_output()))
             }
-            Err(e) => Some(Err(e)),
+            Err(e) => Err(PrecheckErr::error(e)),
         }
     }
 
     /// Reject the system caller that is only allowed on the opposite bridge path.
-    fn reject_crossed_mint_caller(&self, caller: Address) -> Option<PrecompileResult> {
-        if caller == ZONE_OUTBOX_ADDRESS {
-            Some(Ok(Self::roles_unauthorized_output()))
-        } else {
-            None
+    fn check_mint_auth(&self, caller: Address) -> PrecheckResult {
+        if caller != ZONE_INBOX_ADDRESS {
+            return Err(PrecheckErr::revert(Self::roles_unauthorized_output()));
         }
+        Ok(())
     }
 
     /// Reject the system caller that is only allowed on the opposite bridge path.
-    fn reject_crossed_burn_caller(&self, caller: Address) -> Option<PrecompileResult> {
-        if caller == ZONE_INBOX_ADDRESS {
-            Some(Ok(Self::roles_unauthorized_output()))
-        } else {
-            None
+    fn check_burn_auth(&self, caller: Address) -> PrecheckResult {
+        if caller != ZONE_OUTBOX_ADDRESS {
+            return Err(PrecheckErr::revert(Self::roles_unauthorized_output()));
         }
+        Ok(())
     }
 
     /// Resolve the `transfer_policy_id` for a token.
@@ -637,6 +671,32 @@ mod tests {
             result.bytes,
             Bytes::from(TIP20Error::uninitialized().selector().to_vec())
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_intercepted_calldata_reverts_without_delegating() -> TestResult {
+        let mut harness = PrecompileHarness::new(MockPolicyProvider::allow_all())?;
+
+        let balance_of = harness.call(
+            harness.alice,
+            Bytes::from(ITIP20::balanceOfCall::SELECTOR.to_vec()),
+            100_000,
+            true,
+        )?;
+        assert!(balance_of.is_revert());
+        assert_eq!(balance_of.bytes, Bytes::new());
+
+        let transfer = harness.call(
+            harness.alice,
+            Bytes::from(ITIP20::transferCall::SELECTOR.to_vec()),
+            FIXED_TRANSFER_GAS,
+            false,
+        )?;
+        assert!(transfer.is_revert());
+        assert_eq!(transfer.bytes, Bytes::new());
+        assert_eq!(transfer.gas_used, FIXED_TRANSFER_GAS);
 
         Ok(())
     }
