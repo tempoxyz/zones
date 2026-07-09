@@ -34,6 +34,16 @@ use reth_evm::{
     execute::{BlockAssembler, BlockAssemblerInput},
 };
 use reth_primitives_traits::{SealedBlock, SealedHeader};
+use revm::{
+    bytecode::opcode::{CREATE, CREATE2},
+    context::{
+        Transaction,
+        result::{EVMError, ResultAndState},
+    },
+    interpreter::{
+        Instruction, InstructionContext, InstructionResult, interpreter::EthInterpreter,
+    },
+};
 use std::{cell::RefCell, rc::Rc, sync::Arc};
 use tempo_alloy::TempoNetwork;
 use tempo_chainspec::TempoChainSpec;
@@ -52,10 +62,119 @@ use tempo_precompiles::{
 use tempo_primitives::{
     Block, TempoHeader, TempoPrimitives, TempoReceipt, TempoTxEnvelope, TempoTxType,
 };
+use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
 use tempo_zone_contracts::{TEMPO_STATE_ADDRESS, ZONE_TX_CONTEXT_ADDRESS};
 use zone_l1::state::{L1StateCache, L1StateProvider, L1StateProviderConfig, PolicyProvider};
 
 type TempoCtx<DB> = <TempoEvmFactory as EvmFactory>::Context<DB>;
+type ZoneInstructionCtx<'a, DB> = InstructionContext<'a, TempoCtx<DB>, EthInterpreter>;
+
+/// Zone runtime EVM.
+///
+/// Wraps Tempo (L1) EVM to enforce Zone-specific rules, like disabling contract creation.
+pub struct ZoneEvm<DB: Database, I> {
+    inner: TempoEvm<DB, I>,
+}
+
+impl<DB: Database, I> ZoneEvm<DB, I> {
+    /// Creates a new `ZoneEvm` by disabling `CREATE` and `CREATE2` opcodes.
+    fn new(mut evm: TempoEvm<DB, I>) -> Self {
+        fn disabled<DB: Database>(_: ZoneInstructionCtx<'_, DB>) -> Result<(), InstructionResult> {
+            Err(InstructionResult::NotActivated)
+        }
+
+        let instructions = &mut evm.inner_mut().inner.instruction;
+        instructions.insert_instruction(CREATE, Instruction::new(disabled::<DB>), 0);
+        instructions.insert_instruction(CREATE2, Instruction::new(disabled::<DB>), 0);
+
+        Self { inner: evm }
+    }
+
+    /// Provides a reference to the EVM context.
+    pub fn ctx(&self) -> &TempoCtx<DB> {
+        self.inner.ctx()
+    }
+
+    /// Provides a mutable reference to the EVM context.
+    pub fn ctx_mut(&mut self) -> &mut TempoCtx<DB> {
+        self.inner.ctx_mut()
+    }
+
+    /// Provides a mutable reference to the inner Tempo EVM.
+    pub fn inner_mut(&mut self) -> &mut TempoEvm<DB, I> {
+        &mut self.inner
+    }
+}
+
+impl<DB, I> Evm for ZoneEvm<DB, I>
+where
+    DB: Database,
+    I: Inspector<TempoCtx<DB>>,
+{
+    type DB = DB;
+    type Tx = TempoTxEnv;
+    type Error = EVMError<DB::Error, TempoInvalidTransaction>;
+    type HaltReason = TempoHaltReason;
+    type Spec = tempo_chainspec::hardfork::TempoHardfork;
+    type BlockEnv = TempoBlockEnv;
+    type Precompiles = PrecompilesMap;
+    type Inspector = I;
+
+    fn block(&self) -> &Self::BlockEnv {
+        self.inner.block()
+    }
+
+    fn cfg_env(&self) -> &revm::context::CfgEnv<Self::Spec> {
+        self.inner.cfg_env()
+    }
+
+    fn chain_id(&self) -> u64 {
+        self.inner.chain_id()
+    }
+
+    fn transact_raw(
+        &mut self,
+        tx: Self::Tx,
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        // Ensure that none of the transaction top-level calls attempt contract creation.
+        if tx.kind().is_create()
+            || tx
+                .tempo_tx_env
+                .as_ref()
+                .is_some_and(|aa| aa.aa_calls.iter().any(|call| call.to.is_create()))
+        {
+            return Err(EVMError::Custom(
+                "contract creation not supported on zones".to_string(),
+            ));
+        }
+        self.inner.transact_raw(tx)
+    }
+
+    fn transact_system_call(
+        &mut self,
+        caller: alloy_primitives::Address,
+        contract: alloy_primitives::Address,
+        data: alloy_primitives::Bytes,
+    ) -> Result<ResultAndState<Self::HaltReason>, Self::Error> {
+        self.inner.transact_system_call(caller, contract, data)
+    }
+
+    fn finish(self) -> (Self::DB, EvmEnv<Self::Spec, Self::BlockEnv>) {
+        self.inner.finish()
+    }
+
+    fn set_inspector_enabled(&mut self, enabled: bool) {
+        self.inner.set_inspector_enabled(enabled);
+    }
+
+    fn components(&self) -> (&Self::DB, &Self::Inspector, &Self::Precompiles) {
+        self.inner.components()
+    }
+
+    fn components_mut(&mut self) -> (&mut Self::DB, &mut Self::Inspector, &mut Self::Precompiles) {
+        self.inner.components_mut()
+    }
+}
 
 /// Zone EVM factory — wraps [`TempoEvmFactory`] and registers the
 /// zone-native precompiles.
@@ -152,7 +271,7 @@ impl ZoneEvmFactory {
 }
 
 impl EvmFactory for ZoneEvmFactory {
-    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = TempoEvm<DB, I>;
+    type Evm<DB: Database, I: Inspector<Self::Context<DB>>> = ZoneEvm<DB, I>;
     type Context<DB: Database> = TempoCtx<DB>;
     type Tx = <TempoEvmFactory as EvmFactory>::Tx;
     type Error<DBError: DBErrorMarker> = <TempoEvmFactory as EvmFactory>::Error<DBError>;
@@ -167,7 +286,7 @@ impl EvmFactory for ZoneEvmFactory {
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
         let evm = TempoEvm::new(db, input);
-        self.register_precompiles(evm)
+        ZoneEvm::new(self.register_precompiles(evm))
     }
 
     fn create_evm_with_inspector<DB: Database, I: Inspector<Self::Context<DB>>>(
@@ -177,7 +296,7 @@ impl EvmFactory for ZoneEvmFactory {
         inspector: I,
     ) -> Self::Evm<DB, I> {
         let evm = TempoEvm::new(db, input).with_inspector(inspector);
-        self.register_precompiles(evm)
+        ZoneEvm::new(self.register_precompiles(evm))
     }
 }
 
@@ -299,7 +418,7 @@ impl BlockExecutorFactory for ZoneEvmConfig {
 
     fn create_executor<'a, DB, I>(
         &'a self,
-        evm: TempoEvm<DB, I>,
+        evm: ZoneEvm<DB, I>,
         ctx: Self::ExecutionCtx<'a>,
     ) -> Self::Executor<'a, DB, I>
     where
@@ -398,5 +517,96 @@ impl ConfigureEngineEvm<TempoExecutionData> for ZoneEvmConfig {
         payload: &TempoExecutionData,
     ) -> Result<impl ExecutableTxIterator<Self>, Self::Error> {
         self.inner.tx_iterator_for_payload(payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use alloy_primitives::{Address, Bytes, bytes};
+    use revm::{
+        bytecode::Bytecode,
+        context::{TxEnv, result::ExecutionResult},
+        database::{EmptyDB, in_memory_db::CacheDB},
+        inspector::NoOpInspector,
+        state::AccountInfo,
+    };
+    use tempo_evm::TempoBlockEnv;
+    use tempo_revm::TempoTxEnv;
+
+    fn evm_with_contract(addr: Address, code: &[u8]) -> ZoneEvm<CacheDB<EmptyDB>, NoOpInspector> {
+        let bytecode = Bytes::copy_from_slice(code);
+        let mut db = CacheDB::new(EmptyDB::default());
+        db.insert_account_info(
+            addr,
+            AccountInfo {
+                code_hash: alloy_primitives::keccak256(&bytecode),
+                code: Some(Bytecode::new_raw(bytecode)),
+                ..Default::default()
+            },
+        );
+
+        let input: EvmEnv<tempo_chainspec::hardfork::TempoHardfork, TempoBlockEnv> =
+            EvmEnv::default();
+        let evm = TempoEvm::new(db, input);
+        ZoneEvm::new(evm)
+    }
+
+    #[test]
+    fn top_level_create_transaction_is_disabled() {
+        let mut evm = evm_with_contract(Address::ZERO, &[]);
+        let err = evm
+            .transact_raw(TempoTxEnv {
+                inner: TxEnv {
+                    caller: Address::repeat_byte(0x01),
+                    gas_price: 0,
+                    gas_limit: 1_000_000,
+                    kind: alloy_primitives::TxKind::Create,
+                    data: Bytes::from_static(&[0x00]),
+                    ..Default::default()
+                },
+                ..Default::default()
+            })
+            .expect_err("top-level create must be rejected");
+
+        assert!(
+            matches!(err, EVMError::Custom(message) if message == "contract creation not supported on zones")
+        );
+    }
+
+    #[test]
+    fn runtime_create_opcodes_are_disabled() {
+        let (contract, caller) = (Address::random(), Address::random());
+        for bytecode in [
+            // PUSH0 PUSH0 PUSH0 CREATE STOP
+            bytes!("0x5f5f5ff000"),
+            // PUSH0 PUSH0 PUSH0 PUSH0 CREATE2 STOP
+            bytes!("0x5f5f5f5ff500"),
+        ] {
+            let mut evm = evm_with_contract(contract, &bytecode);
+            let result = evm
+                .transact_raw(TempoTxEnv {
+                    inner: TxEnv {
+                        caller,
+                        gas_price: 0,
+                        gas_limit: 1_000_000,
+                        kind: alloy_primitives::TxKind::Call(contract),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .expect("transaction should execute")
+                .result;
+
+            assert!(matches!(
+                result,
+                ExecutionResult::Halt {
+                    reason: TempoHaltReason::Ethereum(
+                        revm::context::result::HaltReason::NotActivated
+                    ),
+                    ..
+                }
+            ));
+        }
     }
 }
