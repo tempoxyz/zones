@@ -58,7 +58,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       - name: Verify crate version matches tag
         # Check that the Cargo version starts with the tag,
         # so that Cargo version 1.4.8 can be matched against both v1.4.8 and v1.4.8-rc.1
@@ -95,7 +95,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
         with:
           targets: ${{ matrix.platform.target }}
 
@@ -145,8 +145,10 @@ jobs:
           cp "$BINARY_PATH" "$BINARY_NAME"
           tar czf "$ARCHIVE_NAME" "$BINARY_NAME"
 
-          echo "archive_name=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
-          echo "archive_path=$ARCHIVE_NAME" >> $GITHUB_OUTPUT
+          {
+            echo "archive_name=$ARCHIVE_NAME"
+            echo "archive_path=$ARCHIVE_NAME"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Generate checksums
         shell: bash
