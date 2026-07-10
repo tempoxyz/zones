@@ -11,12 +11,10 @@ use alloy_primitives::{Address, Bytes, TxKind};
 use alloy_sol_types::SolCall;
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tempo_primitives::TempoTxEnvelope;
-use tempo_zone_contracts::{CONTRACT_DEPLOYER_ALLOWLIST, ZONE_INBOX_ADDRESS, ZoneInbox};
+use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZoneInbox};
+use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 use crate::{auth::AuthContext, types::JsonRpcError};
-
-const CONTRACT_CREATION_NOT_SUPPORTED: &str = "contract creation not supported on zones";
-const CODE_AUTHORIZATION_NOT_SUPPORTED: &str = "code authorization not supported on zones";
 
 /// Enforce all private RPC authorization rules for simulation-style requests.
 ///
@@ -54,41 +52,10 @@ pub fn enforce_from(
     }
 }
 
-fn requests_contract_creation(request: &TempoTransactionRequest) -> bool {
-    let outer_create = request.inner.to.is_some_and(|to| to.is_create());
-    let implicit_plain_create = request.calls.is_empty() && request.inner.to.is_none();
-    let tempo_create = request.calls.iter().any(|call| call.to.is_create());
-    outer_create || implicit_plain_create || tempo_create
-}
-
-fn requests_code_authorization(request: &TempoTransactionRequest) -> bool {
-    request
-        .inner
-        .authorization_list
-        .as_ref()
-        .is_some_and(|authorizations| !authorizations.is_empty())
-        || !request.tempo_authorization_list.is_empty()
-}
-
-fn enforce_contract_creation_with_allowlist(
-    request: &TempoTransactionRequest,
-    caller: Address,
-    allowlist: &[Address],
-) -> Result<(), JsonRpcError> {
-    if requests_contract_creation(request) && !allowlist.contains(&caller) {
-        return Err(JsonRpcError::invalid_params(
-            CONTRACT_CREATION_NOT_SUPPORTED,
-        ));
-    }
-
-    Ok(())
-}
-
 /// Apply the protocol contract-deployer allowlist to create-style transaction requests.
 ///
-/// Plain Ethereum-style create requests (`to = null`) and Tempo AA calls targeting
-/// `TxKind::Create` are rejected with `-32602 Invalid params` unless the authenticated caller is an
-/// explicitly designated deployer.
+/// Plain Ethereum-style create requests (`to = null`) and Tempo AA calls to `TxKind::Create`
+/// are rejected with `-32602 Invalid params` unless the caller is a protocol-allowed deployer.
 pub fn enforce_contract_creation(
     request: &TempoTransactionRequest,
     caller: Address,
@@ -96,13 +63,41 @@ pub fn enforce_contract_creation(
     enforce_contract_creation_with_allowlist(request, caller, CONTRACT_DEPLOYER_ALLOWLIST)
 }
 
+fn enforce_contract_creation_with_allowlist(
+    request: &TempoTransactionRequest,
+    caller: Address,
+    allowlist: &[Address],
+) -> Result<(), JsonRpcError> {
+    if allowlist.contains(&caller) {
+        return Ok(());
+    }
+
+    let outer_create = request.inner.to.is_some_and(|to| to.is_create());
+    let implicit_plain_create = request.calls.is_empty() && request.inner.to.is_none();
+    let tempo_create = request.calls.iter().any(|call| call.to.is_create());
+    if outer_create || implicit_plain_create || tempo_create {
+        return Err(JsonRpcError::invalid_params(
+            "contract creation not supported on zones",
+        ));
+    }
+
+    Ok(())
+}
+
 /// Reject Ethereum and Tempo authorization lists that can mutate account code.
 pub fn enforce_no_code_authorization(
     request: &TempoTransactionRequest,
 ) -> Result<(), JsonRpcError> {
-    if requests_code_authorization(request) {
+    let empty_auth_list = request
+        .inner
+        .authorization_list
+        .as_ref()
+        .is_none_or(|auth| auth.is_empty());
+    let empty_tempo_auth_list = request.tempo_authorization_list.is_empty();
+
+    if !empty_auth_list || !empty_tempo_auth_list {
         return Err(JsonRpcError::invalid_params(
-            CODE_AUTHORIZATION_NOT_SUPPORTED,
+            "code authorization is not supported",
         ));
     }
 

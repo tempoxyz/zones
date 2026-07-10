@@ -29,7 +29,7 @@ pub const ZONE_CONFIG_ADDRESS: Address = address!("0x1c0000000000000000000000000
 
 /// Protocol-level contract deployers permitted to create contracts on Zones.
 ///
-/// WARNING: Changing this list is a consensus change.
+/// WARNING: Updating this list is a consensus change.
 pub const CONTRACT_DEPLOYER_ALLOWLIST: &[Address] = &[];
 
 /// ZoneTxContext precompile address on Zone L2.

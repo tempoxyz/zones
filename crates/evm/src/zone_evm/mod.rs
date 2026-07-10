@@ -8,7 +8,7 @@ use alloy_primitives::{Address, Bytes};
 use revm::context::result::{EVMError, ResultAndState};
 use tempo_evm::{TempoBlockEnv, TempoHaltReason, evm::TempoEvm};
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv};
-use tempo_zone_contracts::CONTRACT_DEPLOYER_ALLOWLIST;
+use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 /// Zone runtime EVM.
 ///

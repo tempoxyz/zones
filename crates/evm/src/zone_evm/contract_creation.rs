@@ -6,38 +6,56 @@ use revm::{
     bytecode::opcode::{CREATE, CREATE2},
     context::Transaction,
     interpreter::{
-        Instruction, InstructionContext, InstructionResult, instructions::contract::create,
-        interpreter::EthInterpreter, interpreter_types::InputsTr,
+        Instruction, InstructionContext, InstructionResult,
+        instructions::contract::create as revm_create, interpreter::EthInterpreter,
+        interpreter_types::InputsTr,
     },
 };
 use tempo_evm::evm::TempoEvm;
 use tempo_revm::{TempoInvalidTransaction, TempoTxEnv, evm::TempoContext};
-use tempo_zone_contracts::CONTRACT_DEPLOYER_ALLOWLIST;
-
-const CONTRACT_CREATION_NOT_SUPPORTED: &str = "contract creation is not supported";
-const CODE_AUTHORIZATION_NOT_SUPPORTED: &str = "code authorization is not supported";
+use zone_primitives::constants::CONTRACT_DEPLOYER_ALLOWLIST;
 
 type ZoneInstructionCtx<'a, DB> = InstructionContext<'a, TempoContext<DB>, EthInterpreter>;
 
-fn contract_creation_deployer(tx: &TempoTxEnv) -> Option<Address> {
-    let creates = match tx.tempo_tx_env.as_ref() {
-        Some(aa) => aa.aa_calls.iter().any(|call| call.to.is_create()),
-        None => tx.kind().is_create(),
-    };
-    creates.then_some(tx.caller)
+/// Installs the Zone contract-creation policy into the EVM instruction table.
+///
+/// The standard `CREATE` and `CREATE2` handlers are replaced with guarded variants that check the
+/// executing storage-context address against [`CONTRACT_DEPLOYER_ALLOWLIST`]. Allowed deployers
+/// delegate to revm's standard instruction implementation, preserving its gas accounting and
+/// execution semantics; unlisted deployers halt with [`InstructionResult::NotActivated`].
+pub(super) fn configure_runtime<DB: Database, I>(evm: &mut TempoEvm<DB, I>) {
+    let instructions = &mut evm.inner_mut().inner.instruction;
+    instructions.insert_instruction(
+        CREATE,
+        Instruction::new(|ctx| create::<false, DB>(ctx, CONTRACT_DEPLOYER_ALLOWLIST)),
+        0,
+    );
+    instructions.insert_instruction(
+        CREATE2,
+        Instruction::new(|ctx| create::<true, DB>(ctx, CONTRACT_DEPLOYER_ALLOWLIST)),
+        0,
+    );
+}
+
+fn create<const IS_CREATE2: bool, DB: Database>(
+    context: ZoneInstructionCtx<'_, DB>,
+    allowlist: &[Address],
+) -> Result<(), InstructionResult> {
+    if !allowlist.contains(&context.interpreter.input.target_address()) {
+        return Err(InstructionResult::NotActivated);
+    }
+
+    revm_create::<IS_CREATE2, EthInterpreter, TempoContext<DB>>(context)
 }
 
 /// Reject transaction-level code creation unless its deployer is explicitly allowed.
-///
-/// Tempo AA requests use a synthetic outer transaction kind, so only their actual calls determine
-/// whether the request creates a contract.
 pub(super) fn validate_transaction(
     tx: &TempoTxEnv,
     allowlist: &[Address],
 ) -> Result<(), TempoInvalidTransaction> {
     if contract_creation_deployer(tx).is_some_and(|deployer| !allowlist.contains(&deployer)) {
         return Err(TempoInvalidTransaction::CallsValidation(
-            CONTRACT_CREATION_NOT_SUPPORTED,
+            "contract creation is not supported",
         ));
     }
 
@@ -49,44 +67,19 @@ pub(super) fn validate_transaction(
 
     if has_code_authorization {
         return Err(TempoInvalidTransaction::CallsValidation(
-            CODE_AUTHORIZATION_NOT_SUPPORTED,
+            "code authorization is not supported",
         ));
     }
 
     Ok(())
 }
 
-fn create_with_allowlist<const IS_CREATE2: bool, DB: Database>(
-    context: ZoneInstructionCtx<'_, DB>,
-    allowlist: &[Address],
-) -> Result<(), InstructionResult> {
-    if !allowlist.contains(&context.interpreter.input.target_address()) {
-        return Err(InstructionResult::NotActivated);
-    }
-
-    create::<IS_CREATE2, EthInterpreter, TempoContext<DB>>(context)
-}
-
-fn guarded_create<const IS_CREATE2: bool, DB: Database>(
-    context: ZoneInstructionCtx<'_, DB>,
-) -> Result<(), InstructionResult> {
-    create_with_allowlist::<IS_CREATE2, DB>(context, CONTRACT_DEPLOYER_ALLOWLIST)
-}
-
-/// Installs the Zone contract-creation policy into the EVM instruction table.
-///
-/// The standard `CREATE` and `CREATE2` handlers are replaced with guarded variants that check the
-/// executing storage-context address against [`CONTRACT_DEPLOYER_ALLOWLIST`]. Allowed deployers
-/// delegate to revm's standard instruction implementation, preserving its gas accounting and
-/// execution semantics; unlisted deployers halt with [`InstructionResult::NotActivated`].
-///
-/// Because the guard uses the storage-context address, `DELEGATECALL` cannot borrow deployment
-/// permission from an allowlisted code address. The instruction-table override also applies to
-/// normal, inspected, and system-call execution.
-pub(super) fn configure_runtime<DB: Database, I>(evm: &mut TempoEvm<DB, I>) {
-    let instructions = &mut evm.inner_mut().inner.instruction;
-    instructions.insert_instruction(CREATE, Instruction::new(guarded_create::<false, DB>), 0);
-    instructions.insert_instruction(CREATE2, Instruction::new(guarded_create::<true, DB>), 0);
+fn contract_creation_deployer(tx: &TempoTxEnv) -> Option<Address> {
+    let creates = match tx.tempo_tx_env.as_ref() {
+        Some(aa) => aa.aa_calls.iter().any(|call| call.to.is_create()),
+        None => tx.kind().is_create(),
+    };
+    creates.then_some(tx.caller)
 }
 
 #[cfg(test)]
@@ -118,16 +111,16 @@ mod tests {
 
     const TEST_DEPLOYER: Address = Address::new([0x42; 20]);
 
-    fn test_guarded_create<const IS_CREATE2: bool>(
+    fn test_create<const IS_CREATE2: bool>(
         context: ZoneInstructionCtx<'_, TestDb>,
     ) -> Result<(), InstructionResult> {
-        create_with_allowlist::<IS_CREATE2, TestDb>(context, &[TEST_DEPLOYER])
+        create::<IS_CREATE2, TestDb>(context, &[TEST_DEPLOYER])
     }
 
     fn enable_test_deployer<I>(evm: &mut ZoneEvm<TestDb, I>) {
         let instructions = &mut evm.inner.inner_mut().inner.instruction;
-        instructions.insert_instruction(CREATE, Instruction::new(test_guarded_create::<false>), 0);
-        instructions.insert_instruction(CREATE2, Instruction::new(test_guarded_create::<true>), 0);
+        instructions.insert_instruction(CREATE, Instruction::new(test_create::<false>), 0);
+        instructions.insert_instruction(CREATE2, Instruction::new(test_create::<true>), 0);
     }
 
     fn test_db(contracts: impl IntoIterator<Item = (Address, Bytes)>) -> TestDb {
