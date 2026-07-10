@@ -369,7 +369,7 @@ async fn test_large_deposit_batch() -> eyre::Result<()> {
     Ok(())
 }
 
-/// Verify empty withdrawal batches finalize on the configured chain-time interval.
+/// Verify empty withdrawal batches finalize at deterministic block boundaries.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
@@ -379,13 +379,36 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     let zone_outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, zone.provider());
 
     let initial_batch_index = zone_outbox.withdrawalBatchIndex().call().await?;
-    let initial_zone_block = zone.provider().get_block_number().await?;
+    // Local test nodes finalize empty batches every eight zone blocks.
+    const BATCH_INTERVAL_BLOCKS: u64 = 8;
 
-    // The first fixture block has a large timestamp jump from genesis, so it
-    // closes the first empty batch immediately.
+    fixture.inject_empty_blocks(zone.deposit_queue(), BATCH_INTERVAL_BLOCKS - 1);
+
+    let before_first_boundary = poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "blocks before first empty withdrawal batch boundary",
+        || {
+            let provider = zone.provider();
+            async move {
+                let number = provider.get_block_number().await?;
+                if number >= BATCH_INTERVAL_BLOCKS - 1 {
+                    Ok(Some(number))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
+    assert_eq!(before_first_boundary, BATCH_INTERVAL_BLOCKS - 1);
+    assert_eq!(
+        zone_outbox.withdrawalBatchIndex().call().await?,
+        initial_batch_index,
+        "withdrawalBatchIndex should not advance before a block-number boundary"
+    );
+
     fixture.inject_empty_block(zone.deposit_queue());
-    let first_boundary_block = initial_zone_block + 1;
-
     poll_until(
         DEFAULT_TIMEOUT,
         DEFAULT_POLL,
@@ -404,7 +427,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     )
     .await?;
 
-    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+    fixture.inject_empty_blocks(zone.deposit_queue(), BATCH_INTERVAL_BLOCKS - 1);
     poll_until(
         DEFAULT_TIMEOUT,
         DEFAULT_POLL,
@@ -413,7 +436,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
             let provider = zone.provider();
             async move {
                 let number = provider.get_block_number().await?;
-                if number >= first_boundary_block + 3 {
+                if number >= (2 * BATCH_INTERVAL_BLOCKS) - 1 {
                     Ok(Some(number))
                 } else {
                     Ok(None)
@@ -427,7 +450,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     assert_eq!(
         intermediate_batch_index,
         initial_batch_index + 1,
-        "withdrawalBatchIndex should not advance before the configured interval elapses"
+        "withdrawalBatchIndex should not advance before the next block-number boundary"
     );
 
     fixture.inject_empty_blocks(zone.deposit_queue(), 1);
@@ -453,7 +476,7 @@ async fn test_withdrawal_batch_finalization() -> eyre::Result<()> {
     assert_eq!(
         final_batch_index,
         initial_batch_index + 2,
-        "withdrawalBatchIndex should advance when the configured interval elapses"
+        "withdrawalBatchIndex should advance at the next block-number boundary"
     );
 
     // lastBatch should have zero withdrawalQueueHash (no withdrawals requested)
@@ -748,21 +771,24 @@ async fn test_consecutive_withdrawal_blocks_joined_into_one_batch() -> eyre::Res
     Ok(())
 }
 
-/// Current-only block with interval elapsed finalizes that block's withdrawals.
+/// Current-only block at a batch boundary finalizes that block's withdrawals.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_current_only_block_finalizes_when_interval_elapsed() -> eyre::Result<()> {
+async fn test_current_only_block_finalizes_at_batch_boundary() -> eyre::Result<()> {
     reth_tracing::init_test_tracing();
 
     let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
     let (provider, dev_address) = local_dev_zone_account(&zone)?;
     let outbox = ZoneOutbox::new(ZONE_OUTBOX_ADDRESS, provider.clone());
 
+    // Local test nodes finalize empty batches every eight zone blocks.
+    const BATCH_INTERVAL_BLOCKS: u64 = 8;
+
     let batch_index = outbox.withdrawalBatchIndex().call().await?;
-    fixture.inject_empty_block(zone.deposit_queue());
+    fixture.inject_empty_blocks(zone.deposit_queue(), BATCH_INTERVAL_BLOCKS);
     poll_until(
         DEFAULT_TIMEOUT,
         DEFAULT_POLL,
-        "genesis empty batch closed",
+        "first empty batch boundary closed",
         || {
             let outbox = &outbox;
             async move {
@@ -788,18 +814,49 @@ async fn test_current_only_block_finalizes_when_interval_elapsed() -> eyre::Resu
     .await?;
     approve_outbox(&mut fixture, &zone, &provider).await?;
 
-    // Advance 3 quiet blocks (3s < 4s interval) after the boundary.
-    fixture.inject_empty_blocks(zone.deposit_queue(), 3);
+    // Advance to exactly one block before the next batch boundary, then wait
+    // for those quiet blocks to be built. `inject_empty_blocks` only enqueues
+    // L1 blocks; without this wait the withdrawal can race into one of those
+    // still-building quiet zone blocks.
+    let current_block = zone.provider().get_block_number().await?;
+    let quiet_blocks_until_pre_boundary =
+        (BATCH_INTERVAL_BLOCKS - 1) - (current_block % BATCH_INTERVAL_BLOCKS);
+    let pre_boundary_block = current_block + quiet_blocks_until_pre_boundary;
+    fixture.inject_empty_blocks(zone.deposit_queue(), quiet_blocks_until_pre_boundary);
+    let observed_pre_boundary = poll_until(
+        DEFAULT_TIMEOUT,
+        DEFAULT_POLL,
+        "quiet blocks before withdrawal boundary built",
+        || {
+            let provider = zone.provider();
+            async move {
+                let number = provider.get_block_number().await?;
+                if number >= pre_boundary_block {
+                    Ok(Some(number))
+                } else {
+                    Ok(None)
+                }
+            }
+        },
+    )
+    .await?;
+    assert_eq!(
+        observed_pre_boundary, pre_boundary_block,
+        "zone should be exactly one block before the withdrawal boundary"
+    );
+    assert_eq!((observed_pre_boundary + 1) % BATCH_INTERVAL_BLOCKS, 0);
 
     let batch_index_before = outbox.withdrawalBatchIndex().call().await?;
-    // 4th block after the boundary: interval elapsed, current-only block should finalize.
+    // The next block is a deterministic batch boundary, so it finalizes its
+    // own withdrawal rather than deferring it to the following block.
     let withdrawal_block =
         submit_withdrawal(&mut fixture, &zone, &provider, dev_address, 250_000).await?;
+    assert_eq!(withdrawal_block % BATCH_INTERVAL_BLOCKS, 0);
 
     poll_until(
         DEFAULT_TIMEOUT,
         DEFAULT_POLL,
-        "interval-elapsed current-only block finalized",
+        "batch-boundary current-only block finalized",
         || {
             let outbox = &outbox;
             async move {
@@ -823,7 +880,7 @@ async fn test_current_only_block_finalizes_when_interval_elapsed() -> eyre::Resu
     assert_eq!(
         finalized_logs.len(),
         1,
-        "interval-elapsed current-only block should finalize in the same block"
+        "batch-boundary current-only block should finalize in the same block"
     );
 
     let requested_logs = outbox

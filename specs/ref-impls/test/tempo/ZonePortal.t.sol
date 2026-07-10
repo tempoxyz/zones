@@ -29,7 +29,11 @@ import {
     ZoneParams
 } from "../../src/interfaces/IZone.sol";
 import { DepositQueueLib } from "../../src/libraries/DepositQueueLib.sol";
-import { EMPTY_SENTINEL, WithdrawalQueueLib } from "../../src/libraries/WithdrawalQueueLib.sol";
+import {
+    EMPTY_SENTINEL,
+    NO_QUEUE_INDEX,
+    WithdrawalQueueLib
+} from "../../src/libraries/WithdrawalQueueLib.sol";
 import { WITHDRAWAL_QUEUE_CAPACITY } from "../../src/libraries/WithdrawalQueueLib.sol";
 import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
@@ -651,6 +655,118 @@ contract ZonePortalTest is BaseTest {
         assertEq(portal.blockHash(), newStateRoot);
         assertEq(portal.withdrawalBatchIndex(), 1);
         assertEq(portal.lastSyncedTempoBlockNumber(), uint64(block.number - 1));
+    }
+
+    function test_submitBatch_emitsAssignedWithdrawalQueueIndex() public {
+        vm.roll(block.number + 1);
+
+        // Batch with no withdrawals: no queue slot consumed, sentinel emitted.
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.BatchSubmitted(
+            1, NO_QUEUE_INDEX, bytes32(0), keccak256("state1"), bytes32(0), 0
+        );
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("state1")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: bytes32(0),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+            bytes32(0),
+            "",
+            ""
+        );
+
+        // Batch with withdrawals: assigned the current logical tail (index 0).
+        Withdrawal memory w =
+            _withdrawal(address(pathUSD), alice, bob, 500e6, bytes32(0), 0, alice, "");
+        bytes32 withdrawalHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.BatchSubmitted(2, 0, bytes32(0), keccak256("state2"), withdrawalHash, 0);
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({
+                prevBlockHash: keccak256("state1"), nextBlockHash: keccak256("state2")
+            }),
+            DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: bytes32(0),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+            withdrawalHash,
+            "",
+            ""
+        );
+        assertEq(portal.withdrawalQueueTail(), 1);
+    }
+
+    function test_submitBatch_emitsLogicalWithdrawalQueueIndexAfterWrap() public {
+        Withdrawal memory firstWithdrawal =
+            _withdrawal(address(pathUSD), alice, bob, 0, bytes32(0), 0, alice, "");
+        bytes32 firstHash = keccak256(abi.encode(firstWithdrawal, EMPTY_SENTINEL));
+        bytes32 previousState = portal.blockHash();
+
+        vm.roll(block.number + 1);
+
+        for (uint256 i = 0; i < WITHDRAWAL_QUEUE_CAPACITY; i++) {
+            bytes32 nextState = keccak256(abi.encode("state", i));
+            bytes32 withdrawalHash = i == 0 ? firstHash : keccak256(abi.encode("batch", i));
+            portal.submitBatch(
+                uint64(block.number - 1),
+                0,
+                BlockTransition({ prevBlockHash: previousState, nextBlockHash: nextState }),
+                DepositQueueTransition({
+                    prevProcessedHash: bytes32(0),
+                    nextProcessedHash: bytes32(0),
+                    prevDepositNumber: 0,
+                    nextDepositNumber: 0
+                }),
+                withdrawalHash,
+                "",
+                ""
+            );
+            previousState = nextState;
+        }
+
+        portal.processWithdrawal(firstWithdrawal, bytes32(0));
+
+        bytes32 wrappedState = keccak256("wrapped-state");
+        bytes32 wrappedHash = keccak256("wrapped-batch");
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.BatchSubmitted(
+            uint64(WITHDRAWAL_QUEUE_CAPACITY + 1),
+            WITHDRAWAL_QUEUE_CAPACITY,
+            bytes32(0),
+            wrappedState,
+            wrappedHash,
+            0
+        );
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: previousState, nextBlockHash: wrappedState }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: bytes32(0),
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            wrappedHash,
+            "",
+            ""
+        );
+
+        assertEq(portal.withdrawalQueueHead(), 1);
+        assertEq(portal.withdrawalQueueTail(), WITHDRAWAL_QUEUE_CAPACITY + 1);
+        assertEq(portal.withdrawalQueueSlot(0), wrappedHash);
     }
 
     function test_submitBatch_revertsOnPrevBlockHashMismatch() public {

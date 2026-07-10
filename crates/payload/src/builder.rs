@@ -37,10 +37,7 @@ use reth_transaction_pool::{
     BestTransactions, BestTransactionsAttributes, TransactionPool,
     error::InvalidPoolTransactionError,
 };
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{sync::Arc, time::Instant};
 use tempo_chainspec::spec::TempoChainSpec;
 use tempo_evm::TempoNextBlockEnvAttributes;
 use tempo_payload_types::{EncodedBlock, TempoBuiltPayload};
@@ -54,20 +51,22 @@ use zone_l1::{PreparedL1Block, TempoStateExt};
 
 use crate::{ZonePayloadAttributes, ZonePayloadTypes};
 
-pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL: Duration = Duration::from_secs(60);
+/// Default empty-batch cadence: every 120 zone blocks (~60 sec at Tempo's 500 ms block time).
+pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS: u64 = 120;
 
 /// Factory for constructing the zone payload builder.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct ZonePayloadFactory {
-    withdrawal_batch_interval: Duration,
+    withdrawal_batch_interval_blocks: u64,
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
 }
 
 impl ZonePayloadFactory {
-    pub fn new(withdrawal_batch_interval: Duration) -> Self {
+    /// Create a factory that finalizes empty withdrawal batches every `interval_blocks` zone blocks.
+    pub fn new(withdrawal_batch_interval_blocks: u64) -> Self {
         Self {
-            withdrawal_batch_interval,
+            withdrawal_batch_interval_blocks: withdrawal_batch_interval_blocks.max(1),
             withdrawal_reveal_encryptor: None,
         }
     }
@@ -83,7 +82,7 @@ impl ZonePayloadFactory {
 
 impl Default for ZonePayloadFactory {
     fn default() -> Self {
-        Self::new(DEFAULT_WITHDRAWAL_BATCH_INTERVAL)
+        Self::new(DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS)
     }
 }
 
@@ -116,7 +115,7 @@ where
             pool,
             provider: ctx.provider().clone(),
             evm_config,
-            withdrawal_batch_interval: self.withdrawal_batch_interval,
+            withdrawal_batch_interval_blocks: self.withdrawal_batch_interval_blocks,
             withdrawal_reveal_encryptor: self.withdrawal_reveal_encryptor.clone(),
         })
     }
@@ -131,8 +130,8 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
     provider: Provider,
     /// Zone-specific EVM configuration (precompiles, hardfork spec, gas params).
     evm_config: EvmConfig,
-    /// Maximum chain-time duration between withdrawal batch finalizations.
-    withdrawal_batch_interval: Duration,
+    /// Number of zone blocks between withdrawal batch boundaries.
+    withdrawal_batch_interval_blocks: u64,
     /// Encrypts authenticated-withdrawal sender reveal data for batch finalization.
     withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
 }
@@ -302,8 +301,6 @@ where
         let pending_withdrawals_at_block_start =
             read_pending_withdrawals_from_outbox(&mut builder, block_gas_limit, block_number)?;
         let has_prior_withdrawals = !pending_withdrawals_at_block_start.is_empty();
-        let last_finalized_timestamp =
-            read_last_finalized_timestamp_from_outbox(&mut builder, block_gas_limit, block_number)?;
 
         // Execute advanceTempo system transaction — exactly one per zone block.
         {
@@ -406,13 +403,12 @@ where
             }
         }
 
-        let batch_interval_elapsed = attributes.timestamp()
-            >= last_finalized_timestamp.saturating_add(self.withdrawal_batch_interval.as_secs());
-
         // Finalize when this block started with pending withdrawals, folding in any
-        // withdrawals created by the current block, or when the empty-batch interval
-        // elapses so the L2 and L1 batch indexes stay in lockstep.
-        if has_prior_withdrawals || batch_interval_elapsed {
+        // withdrawals created by the current block, or at a empty-batch
+        // boundary so the L2 and L1 batch indexes stay in lockstep.
+        if has_prior_withdrawals
+            || block_number.is_multiple_of(self.withdrawal_batch_interval_blocks)
+        {
             let pending_withdrawals =
                 read_pending_withdrawals_from_outbox(&mut builder, block_gas_limit, block_number)?;
             let encrypted_senders = pending_withdrawals
@@ -622,30 +618,6 @@ where
     })
 }
 
-fn read_last_finalized_timestamp_from_outbox<B>(
-    builder: &mut B,
-    gas_limit: u64,
-    block_number: u64,
-) -> Result<u64, PayloadBuilderError>
-where
-    B: BlockBuilder<Primitives = tempo_primitives::TempoPrimitives>,
-{
-    let calldata = abi::ZoneOutbox::lastFinalizedTimestampCall {}.abi_encode();
-    let output = execute_outbox_view_call(
-        builder,
-        calldata.into(),
-        gas_limit,
-        block_number,
-        "lastFinalizedTimestamp",
-    )?;
-
-    abi::ZoneOutbox::lastFinalizedTimestampCall::abi_decode_returns(&output).map_err(|err| {
-        PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(
-            "failed to decode lastFinalizedTimestamp return data: {err}"
-        )))
-    })
-}
-
 fn execute_outbox_view_call<B>(
     builder: &mut B,
     calldata: Bytes,
@@ -755,6 +727,24 @@ mod tests {
 
     use crate::abi::{self, DepositType, ZoneInbox};
     use zone_l1::PreparedL1Block;
+
+    #[test]
+    fn withdrawal_batch_cadence_is_deterministic_from_block_number() {
+        let blocks = super::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
+
+        assert_eq!(blocks, 120);
+        assert_ne!(119 % blocks, 0);
+        assert_eq!(120 % blocks, 0);
+        assert_eq!(240 % blocks, 0);
+    }
+
+    #[test]
+    fn zero_batch_interval_finalizes_every_block() {
+        assert_eq!(
+            super::ZonePayloadFactory::new(0).withdrawal_batch_interval_blocks,
+            1
+        );
+    }
 
     /// Verify that `build_advance_tempo_tx` constructs valid calldata for mixed
     /// deposit types. The calldata should include `QueuedDeposit` entries with the

@@ -19,43 +19,13 @@ concurrency:
   group: build-${{ github.head_ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: full
-  RUSTC_WRAPPER: "sccache"
-
 jobs:
   build:
-    name: Build
-    runs-on: depot-ubuntu-latest-16
-    strategy:
-      matrix:
-        binary: [tempo-zone]
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-      - uses: taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5 # v2.82.0
-        with:
-          tool: just
-      - name: Build
-        env:
-          BINARY: ${{ matrix.binary }}
-          PROFILE: ${{ inputs.profile || 'dev' }}
-        run: just build "$BINARY" "--profile $PROFILE"
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        id: binary_upload
-        with:
-          if-no-files-found: "error"
-          name: ${{ matrix.binary }}
-          path: target/${{ inputs.profile || 'debug' }}/${{ matrix.binary }}
-      - uses: cloudposse/github-action-matrix-outputs-write@ed06cf3a6bf23b8dce36d1cf0d63123885bb8375 # 1.0.0
-        id: out
-        with:
-          matrix-step-name: ${{ github.job }}
-          matrix-key: ${{ matrix.binary }}
-          outputs: |-
-            artifact_id: ${{ steps.binary_upload.outputs.artifact-id }}
+    permissions:
+      contents: read
+    uses: tempoxyz/gh-actions/.github/workflows/rust-build-binaries.yml@512158c4e90e42eef8aa7fc3fc3186a79b5b4648
+    with:
+      binaries: tempo-zone
+      profile: ${{ inputs.profile || 'maxperf' }}
+      runs-on: depot-ubuntu-latest-16
+      retention-days: 90
