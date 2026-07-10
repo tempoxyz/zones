@@ -375,6 +375,7 @@ interface IVerifier {
     ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueHash
     ///      7. Zone block beneficiary matches sequencer
     ///      8. Deposit processing is correct (validated via Tempo state read inside proof)
+    /// @param zoneId Unique identifier of the zone whose batch is being verified
     /// @param tempoBlockNumber Block zone committed to (from TempoState)
     /// @param anchorBlockNumber Block whose hash is verified (tempoBlockNumber or recent block)
     /// @param anchorBlockHash Hash of anchorBlockNumber (from EIP-2935)
@@ -386,6 +387,7 @@ interface IVerifier {
     /// @param verifierConfig Opaque payload for verifier (TEE attestation envelope, etc.)
     /// @param proof Validity proof or TEE attestation
     function verify(
+        uint32 zoneId,
         uint64 tempoBlockNumber,
         uint64 anchorBlockNumber,
         bytes32 anchorBlockHash,
@@ -494,8 +496,14 @@ interface IZonePortal {
         uint64 depositNumber
     );
 
+    /// @notice Emitted after a batch is accepted by `submitBatch`.
+    /// @dev `withdrawalQueueIndex` is the logical (non-wrapping) withdrawal queue index the
+    ///      batch's hash chain was enqueued under, or `NO_QUEUE_INDEX` (`type(uint256).max`)
+    ///      when the batch carried no withdrawals. Indexed so off-chain recovery can query
+    ///      the event for a specific logical index instead of counting events positionally.
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex,
+        uint256 indexed withdrawalQueueIndex,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
         bytes32 withdrawalQueueHash,
@@ -644,7 +652,7 @@ interface IZonePortal {
 
     function withdrawalQueueTail() external view returns (uint256);
 
-    function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
+    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);
 

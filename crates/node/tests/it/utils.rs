@@ -476,7 +476,7 @@ impl ZoneTestNode {
             next_unique_chain_id(),
             Some(genesis),
             signer,
-            Duration::from_secs(4),
+            8,
             initial_tokens,
         )
         .await
@@ -486,7 +486,7 @@ impl ZoneTestNode {
         l1_http_url: &url::Url,
         l1_ws_url: &url::Url,
         portal_address: Address,
-        withdrawal_batch_interval: Duration,
+        withdrawal_batch_interval_blocks: u64,
     ) -> eyre::Result<Self> {
         let (genesis, genesis_block_number) =
             build_l1_anchored_genesis(l1_http_url, portal_address).await?;
@@ -499,7 +499,7 @@ impl ZoneTestNode {
             next_unique_chain_id(),
             Some(genesis),
             signer,
-            withdrawal_batch_interval,
+            withdrawal_batch_interval_blocks,
             Some(vec![]),
         )
         .await
@@ -595,7 +595,7 @@ impl ZoneTestNode {
             chain_id,
             custom_genesis,
             sequencer_signer,
-            Duration::from_secs(4),
+            8,
             Some(vec![]),
         )
         .await
@@ -609,7 +609,7 @@ impl ZoneTestNode {
         chain_id: u64,
         custom_genesis: Option<Genesis>,
         sequencer_signer: alloy_signer_local::PrivateKeySigner,
-        withdrawal_batch_interval: Duration,
+        withdrawal_batch_interval_blocks: u64,
         initial_tokens: Option<Vec<Address>>,
     ) -> eyre::Result<Self> {
         let tasks = Runtime::test();
@@ -630,7 +630,7 @@ impl ZoneTestNode {
             4,
             std::time::Duration::from_millis(100),
         )
-        .with_withdrawal_batch_interval(withdrawal_batch_interval);
+        .with_withdrawal_batch_interval_blocks(withdrawal_batch_interval_blocks);
         if let Some(initial_tokens) = initial_tokens {
             zone_node = zone_node.with_initial_tokens(initial_tokens);
         }
@@ -2374,7 +2374,7 @@ pub(crate) async fn spawn_sequencer_with_anchor_config(
         tempo_state_address: TEMPO_STATE_ADDRESS,
         zone_rpc_url: zone.http_url().to_string(),
         zone_poll_interval: Duration::from_millis(500),
-        batch_interval: Duration::from_millis(500),
+        batch_interval_blocks: 1,
         batch_anchor_config,
     };
 

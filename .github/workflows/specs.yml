@@ -7,7 +7,7 @@ on:
       - "specs/ref-impls/src/**"
       - "specs/ref-impls/test/**"
       - "specs/ref-impls/foundry.*"
-      - "crates/node/**"
+      - "crates/**"
       - ".github/workflows/specs.yml"
   merge_group:
   pull_request:
@@ -16,7 +16,7 @@ on:
       - "specs/ref-impls/src/**"
       - "specs/ref-impls/test/**"
       - "specs/ref-impls/foundry.*"
-      - "crates/node/**"
+      - "crates/**"
       - ".github/workflows/specs.yml"
 
 permissions:
@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
+        uses: tempoxyz/gh-actions/actions/setup-foundry@512158c4e90e42eef8aa7fc3fc3186a79b5b4648
         with:
           version: nightly
 
@@ -57,7 +57,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
+        uses: tempoxyz/gh-actions/actions/setup-foundry@512158c4e90e42eef8aa7fc3fc3186a79b5b4648
         with:
           version: nightly
 
@@ -95,10 +95,9 @@ jobs:
           persist-credentials: false
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
+        uses: tempoxyz/gh-actions/actions/setup-rust-build@512158c4e90e42eef8aa7fc3fc3186a79b5b4648
+        with:
+          toolchain: stable
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
           workspaces: foundry

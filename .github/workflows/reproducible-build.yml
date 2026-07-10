@@ -1,7 +1,7 @@
 name: Reproducible Build
 
-# Builds and hashes the byte-deterministic `tempo-zone` binary for
-# x86_64-unknown-linux-gnu from the pinned Dockerfile.reproducible recipe.
+# Builds and hashes the byte-deterministic `tempo-zone` binary via the shared
+# reusable workflow in tempoxyz/gh-actions.
 
 permissions: {}
 
@@ -23,72 +23,9 @@ on:
 
 jobs:
   build:
-    name: Build & hash
-    runs-on: depot-ubuntu-latest-16
+    uses: tempoxyz/gh-actions/.github/workflows/reproducible-build.yml@512158c4e90e42eef8aa7fc3fc3186a79b5b4648
     permissions:
       contents: read
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          ref: ${{ inputs.ref }}
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Resolve version + artifact name
-        id: cfg
-        run: |
-          set -euo pipefail
-          SHORT=$(git rev-parse --short=7 HEAD)
-          SHA=$(git rev-parse HEAD)
-          {
-            echo "version=sha-$SHORT"
-            echo "artifact=reproducible-hash-${SHA}"
-            echo "bin=tempo-zone-sha-${SHORT}-x86_64-unknown-linux-gnu"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
-
-      - name: Build reproducible binary
-        env:
-          VERSION: ${{ steps.cfg.outputs.version }}
-        run: |
-          set -euo pipefail
-          for attempt in 1 2 3; do
-            if ./scripts/reproducible-build.sh; then
-              exit 0
-            fi
-            echo "reproducible-build.sh failed (attempt $attempt/3); retrying after backoff"
-            sleep $((attempt * 30))
-          done
-          echo "reproducible build failed after 3 attempts" >&2
-          exit 1
-
-      - name: Compute reproducible sha256
-        id: hash
-        env:
-          BIN: ${{ steps.cfg.outputs.bin }}
-          REF_INPUT: ${{ inputs.ref }}
-          VERSION: ${{ steps.cfg.outputs.version }}
-        run: |
-          set -euo pipefail
-          mv out/tempo-zone "$BIN"
-          shasum -a 256 "$BIN" > "${BIN}.reproducible.sha256"
-          echo "::group::Reproducible verification result"
-          echo "ref_input         = $REF_INPUT"
-          echo "commit            = $(git rev-parse HEAD)"
-          echo "version           = $VERSION"
-          echo "binary            = $BIN"
-          echo "SOURCE_DATE_EPOCH = $(git log -1 --pretty=%ct)"
-          cat "${BIN}.reproducible.sha256"
-          echo "::endgroup::"
-          echo "checksum=${BIN}.reproducible.sha256" >> "$GITHUB_OUTPUT"
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: ${{ steps.cfg.outputs.artifact }}
-          path: ${{ steps.hash.outputs.checksum }}
-          retention-days: 7
-          if-no-files-found: error
+    with:
+      binary-name: tempo-zone
+      ref: ${{ inputs.ref }}

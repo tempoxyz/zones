@@ -12,74 +12,13 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: full
-  RUSTC_WRAPPER: "sccache"
-
 jobs:
-  clippy:
-    name: clippy
-    runs-on: depot-ubuntu-latest-4
-    timeout-minutes: 30
+  rust:
     permissions:
       contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-          submodules: recursive
-      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
-        with:
-          # Pin nightly to avoid breakage from str::as_str() stabilization
-          # which breaks shellexpand 3.1.1 method resolution.
-          toolchain: nightly-2026-02-21
-          components: clippy
-      - uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
-      - uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
-      - name: Install Foundry
-        uses: foundry-rs/foundry-toolchain@c7450ba673e133f5ee30098b3b54f444d3a2ca2d # v1.8.0
-        with:
-          version: nightly
-      - name: Build Solidity artifacts
-        working-directory: specs/ref-impls
-        run: forge build
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features --locked
-        env:
-          RUSTFLAGS: -D warnings
-
-  fmt:
-    name: fmt
-    runs-on: depot-ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@efcb852328a9f50117170cc43094fb6f09eaf1ae # nightly
-        with:
-          toolchain: nightly-2026-02-21
-          components: rustfmt
-      - run: cargo fmt --all --check
-
-  typos:
-    runs-on: depot-ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          persist-credentials: false
-      - uses: crate-ci/typos@37bb98842b0d8c4ffebdb75301a13db0267cef89 # v1.47.2
-
-  deny:
-    permissions:
-      contents: read
-    uses: tempoxyz/ci/.github/workflows/deny.yml@f7b868401133161610784f840fbf8ba5c45fdd4e # main
+    uses: tempoxyz/gh-actions/.github/workflows/rust-lint.yml@512158c4e90e42eef8aa7fc3fc3186a79b5b4648
+    with:
+      rust-toolchain: nightly-2026-02-21
 
   lint-success:
     name: lint success
@@ -87,10 +26,7 @@ jobs:
     if: always()
     permissions: {}
     needs:
-      - clippy
-      - fmt
-      - typos
-      - deny
+      - rust
     timeout-minutes: 30
     steps:
       - name: Decide whether the needed jobs succeeded or failed

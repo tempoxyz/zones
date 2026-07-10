@@ -58,7 +58,11 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      - uses: tempoxyz/gh-actions/actions/setup-rust-build@512158c4e90e42eef8aa7fc3fc3186a79b5b4648
+        with:
+          toolchain: stable
+          mold: "false"
+          sccache: "false"
       - name: Verify crate version matches tag
         # Check that the Cargo version starts with the tag,
         # so that Cargo version 1.4.8 can be matched against both v1.4.8 and v1.4.8-rc.1
@@ -95,12 +99,11 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+        uses: tempoxyz/gh-actions/actions/setup-rust-build@512158c4e90e42eef8aa7fc3fc3186a79b5b4648
         with:
+          toolchain: stable
           targets: ${{ matrix.platform.target }}
-
-      - name: Setup mold linker
-        uses: rui314/setup-mold@9c9c13bf4c3f1adef0cc596abc155580bcb04444 # v1
+          sccache: "false"
 
       - name: Get build profile
         id: profile

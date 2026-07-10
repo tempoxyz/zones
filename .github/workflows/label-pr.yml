@@ -4,22 +4,11 @@ on:
   pull_request:
     types: [opened]
 
+permissions: {}
+
 jobs:
-  label_prs:
-    runs-on: ubuntu-latest
+  label:
     permissions:
       contents: read
       issues: write
-      pull-requests: write
-    steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-
-      - name: Label PRs
-        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-        with:
-          script: |
-            const label_pr = require('./.github/assets/label_pr.js')
-            await label_pr({github, context})
+    uses: tempoxyz/gh-actions/.github/workflows/label-prs.yml@512158c4e90e42eef8aa7fc3fc3186a79b5b4648

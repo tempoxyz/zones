@@ -12,6 +12,6 @@ mod builder;
 
 pub use attrs::{ZonePayloadAttributes, ZonePayloadTypes};
 pub use builder::{
-    DEFAULT_WITHDRAWAL_BATCH_INTERVAL, ZonePayloadBuilder, ZonePayloadFactory,
+    DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, ZonePayloadBuilder, ZonePayloadFactory,
     build_advance_tempo_tx,
 };
