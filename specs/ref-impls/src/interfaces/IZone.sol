@@ -495,13 +495,13 @@ interface IZonePortal {
     );
 
     /// @notice Emitted after a batch is accepted by `submitBatch`.
-    /// @dev `withdrawalQueueSlot` is the logical (non-wrapping) withdrawal queue index the
-    ///      batch's hash chain was enqueued under, or `NO_QUEUE_SLOT` (`type(uint256).max`)
+    /// @dev `withdrawalQueueIndex` is the logical (non-wrapping) withdrawal queue index the
+    ///      batch's hash chain was enqueued under, or `NO_QUEUE_INDEX` (`type(uint256).max`)
     ///      when the batch carried no withdrawals. Indexed so off-chain recovery can query
-    ///      the event for a specific slot instead of counting events positionally.
+    ///      the event for a specific logical index instead of counting events positionally.
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex,
-        uint256 indexed withdrawalQueueSlot,
+        uint256 indexed withdrawalQueueIndex,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
         bytes32 withdrawalQueueHash,
@@ -650,7 +650,7 @@ interface IZonePortal {
 
     function withdrawalQueueTail() external view returns (uint256);
 
-    function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
+    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
 
     function genesisTempoBlockNumber() external view returns (uint64);
 

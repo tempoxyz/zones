@@ -8,9 +8,9 @@ import { Withdrawal } from "../interfaces/IZone.sol";
 bytes32 constant EMPTY_SENTINEL = bytes32(type(uint256).max);
 
 /// @dev Sentinel returned by `enqueue` (and emitted in `BatchSubmitted`) when a batch
-///      carries no withdrawals and therefore consumes no queue slot. Logical slot
+///      carries no withdrawals and therefore consumes no queue index. Logical queue
 ///      indices are monotonically increasing counters that can never reach this value.
-uint256 constant NO_QUEUE_SLOT = type(uint256).max;
+uint256 constant NO_QUEUE_INDEX = type(uint256).max;
 
 /// @dev Fixed capacity for the withdrawal ring buffer (number of batch slots).
 uint256 constant WITHDRAWAL_QUEUE_CAPACITY = 100;
@@ -52,17 +52,17 @@ library WithdrawalQueueLib {
     ///      the slot at tail % WITHDRAWAL_QUEUE_CAPACITY, then tail advances.
     /// @param queue The withdrawal queue
     /// @param withdrawalQueueHash The hash chain of withdrawals for this batch (0 if none)
-    /// @return assignedSlot The logical queue index the hash chain was stored under,
-    ///         or NO_QUEUE_SLOT if the batch had no withdrawals
+    /// @return assignedIndex The logical queue index the hash chain was stored under,
+    ///         or NO_QUEUE_INDEX if the batch had no withdrawals
     function enqueue(
         WithdrawalQueue storage queue,
         bytes32 withdrawalQueueHash
     )
         internal
-        returns (uint256 assignedSlot)
+        returns (uint256 assignedIndex)
     {
         if (withdrawalQueueHash == bytes32(0)) {
-            return NO_QUEUE_SLOT;
+            return NO_QUEUE_INDEX;
         }
 
         uint256 tail = queue.tail;

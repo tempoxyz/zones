@@ -244,8 +244,8 @@ contract ZonePortal is IZonePortal {
         return _withdrawalQueue.tail;
     }
 
-    function withdrawalQueueSlot(uint256 slot) external view returns (bytes32) {
-        return _withdrawalQueue.slots[slot];
+    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32) {
+        return _withdrawalQueue.slots[physicalSlot];
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -917,12 +917,12 @@ contract ZonePortal is IZonePortal {
         lastSyncedTempoBlockNumber = tempoBlockNumber;
         lastProcessedDepositNumber = depositQueueTransition.nextDepositNumber;
 
-        uint256 assignedQueueSlot = _withdrawalQueue.enqueue(withdrawalQueueHash);
+        uint256 assignedQueueIndex = _withdrawalQueue.enqueue(withdrawalQueueHash);
 
         // Emit event after state updates
         emit BatchSubmitted(
             withdrawalBatchIndex,
-            assignedQueueSlot,
+            assignedQueueIndex,
             depositQueueTransition.nextProcessedHash,
             blockHash,
             withdrawalQueueHash,
