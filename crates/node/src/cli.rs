@@ -10,7 +10,7 @@ use reth_ethereum::cli::Cli;
 use reth_tracing::tracing::info;
 use tempo_chainspec::spec::{TempoChainSpec, TempoChainSpecParser};
 use zone_evm::ZoneEvmConfig;
-use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL;
+use zone_payload::DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS;
 
 use crate::{
     ZoneNode, ZonePrivateRpcConfig, ZoneSequencerAddOnsConfig,
@@ -71,7 +71,7 @@ impl ZoneCli {
                 args.l1_fetch_concurrency,
                 Duration::from_millis(args.l1_retry_connection_interval_ms),
             )
-            .with_withdrawal_batch_interval(Duration::from_secs(args.zone_batch_interval_secs))
+            .with_withdrawal_batch_interval_blocks(args.zone_batch_interval_blocks)
             .with_private_rpc(ZonePrivateRpcConfig {
                 private_rpc_port: args.private_rpc_port,
                 zone_id: args.zone_id,
@@ -89,7 +89,7 @@ impl ZoneCli {
                     sequencer_signer,
                     zone_id: args.zone_id,
                     zone_poll_interval: Duration::from_secs(args.zone_poll_interval_secs),
-                    batch_interval: Duration::from_secs(args.zone_batch_interval_secs),
+                    batch_interval_blocks: args.zone_batch_interval_blocks,
                     batch_anchor_config: BatchAnchorConfig::default(),
                     withdrawal_poll_interval: Duration::from_secs(
                         args.withdrawal_poll_interval_secs,
@@ -134,13 +134,17 @@ pub struct ZoneArgs {
     )]
     pub zone_poll_interval_secs: u64,
 
-    /// Maximum time (in seconds) between withdrawal batch boundaries.
+    /// Number of zone blocks between withdrawal batch boundaries.
+    ///
+    /// Also used by the sequencer monitor to decide when enough chain progress has
+    /// occurred to look for empty finalized batches to submit to L1. Default 120 is
+    /// ~1 minute at Tempo's expected 500 ms block time.
     #[arg(
-        long = "zone.batch-interval-secs",
-        env = "ZONE_BATCH_INTERVAL_SECS",
-        default_value_t = DEFAULT_WITHDRAWAL_BATCH_INTERVAL.as_secs()
+        long = "zone.batch-interval-blocks",
+        env = "ZONE_BATCH_INTERVAL_BLOCKS",
+        default_value_t = DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS
     )]
-    pub zone_batch_interval_secs: u64,
+    pub zone_batch_interval_blocks: u64,
 
     /// How often (in seconds) the withdrawal processor polls the L1 queue.
     #[arg(

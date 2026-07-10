@@ -50,6 +50,15 @@ const MAX_RETRIES: u32 = 3;
 /// Initial delay between retries (doubles on each attempt).
 const INITIAL_RETRY_DELAY: Duration = Duration::from_secs(2);
 
+/// Returns true when `(last_submitted, latest]` contains a block-number batch boundary.
+///
+/// Boundaries occur at multiples of `interval_blocks`, matching the payload builder's
+/// `block_number % interval_blocks == 0` rule. A zero interval is treated as every block.
+fn crossed_batch_boundary(last_submitted: u64, latest: u64, interval_blocks: u64) -> bool {
+    let n = interval_blocks.max(1);
+    latest / n > last_submitted / n
+}
+
 /// Configuration for the [`ZoneMonitor`].
 #[derive(Debug, Clone)]
 pub struct ZoneMonitorConfig {
@@ -65,10 +74,11 @@ pub struct ZoneMonitorConfig {
     pub retry_connection_interval: Duration,
     /// How often to poll the zone L2 for new blocks (cheap RPC call).
     pub poll_interval: Duration,
-    /// Maximum time to wait before submitting available finalized L2 batches.
-    /// A non-empty finalized withdrawal batch is submitted early for user
-    /// experience.
-    pub batch_interval: Duration,
+    /// Number of zone blocks between empty withdrawal batch boundaries.
+    ///
+    /// Used to decide when enough chain progress has occurred to look for empty
+    /// finalized batches. Non-empty finalized batches are still flushed early.
+    pub batch_interval_blocks: u64,
     /// ZonePortal contract address on Tempo L1.
     pub portal_address: Address,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
@@ -263,7 +273,8 @@ impl ZoneMonitor {
     ///
     /// Polls the zone L2 frequently (`poll_interval`) but only submits a batch
     /// to L1 when:
-    /// - The `batch_interval` deadline has elapsed, OR
+    /// - Enough new zone blocks have accumulated to cross an empty-batch
+    ///   boundary (`batch_interval_blocks`), OR
     /// - Pending withdrawals are detected (flush immediately for user experience)
     #[instrument(skip_all, fields(
         outbox = %self.config.outbox_address,
@@ -272,13 +283,12 @@ impl ZoneMonitor {
     pub async fn run(&mut self) -> Result<()> {
         info!(
             zone_rpc = %self.config.zone_rpc_url,
-            batch_interval = ?self.config.batch_interval,
+            batch_interval_blocks = self.config.batch_interval_blocks,
             poll_interval = ?self.config.poll_interval,
             "Zone monitor started"
         );
 
         let mut poll = tokio::time::interval(self.config.poll_interval);
-        let mut batch_deadline = tokio::time::Instant::now();
 
         loop {
             tokio::select! {
@@ -297,18 +307,19 @@ impl ZoneMonitor {
                 continue;
             }
 
-            let deadline_elapsed = tokio::time::Instant::now() >= batch_deadline;
+            let boundary_crossed = crossed_batch_boundary(
+                self.last_submitted_zone_block,
+                latest_zone_block,
+                self.config.batch_interval_blocks,
+            );
             // Skip the eth_getLogs call when we'd submit anyway.
-            if !deadline_elapsed && !self.has_pending_withdrawals(latest_zone_block).await {
+            if !boundary_crossed && !self.has_pending_withdrawals(latest_zone_block).await {
                 continue;
             }
 
             let from = self.last_submitted_zone_block + 1;
             match self.process_block_range(from, latest_zone_block).await {
-                Ok(true) => {
-                    batch_deadline = tokio::time::Instant::now() + self.config.batch_interval;
-                }
-                Ok(false) => {}
+                Ok(_) => {}
                 Err(e) => {
                     error!(from, to = latest_zone_block, error = %e, "Failed to process zone block range");
                     continue;
@@ -387,8 +398,8 @@ impl ZoneMonitor {
     /// withdrawal batches.
     ///
     /// Empty finalized batches still need to be submitted, but they are handled
-    /// by the normal deadline path. This signal only flushes user withdrawals
-    /// early.
+    /// by the normal block-interval path. This signal only flushes user
+    /// withdrawals early.
     async fn has_pending_withdrawals(&self, latest_block: u64) -> bool {
         let from = self.last_submitted_zone_block + 1;
         for (chunk_from, chunk_to) in log_query_ranges(from, latest_block) {
@@ -933,6 +944,19 @@ mod tests {
     use tempo_alloy::rpc::TempoHeaderResponse;
     use tempo_primitives::TempoHeader;
 
+    #[test]
+    fn crossed_batch_boundary_matches_builder_modulo_boundaries() {
+        assert!(!crossed_batch_boundary(0, 119, 120));
+        assert!(crossed_batch_boundary(0, 120, 120));
+        assert!(!crossed_batch_boundary(120, 239, 120));
+        assert!(crossed_batch_boundary(120, 240, 120));
+        // A mid-interval withdrawal submit still discovers the next empty boundary.
+        assert!(crossed_batch_boundary(50, 120, 120));
+        assert!(!crossed_batch_boundary(50, 119, 120));
+        // Zero interval means every block.
+        assert!(crossed_batch_boundary(7, 8, 0));
+    }
+
     fn mock_provider(asserter: Asserter) -> DynProvider<TempoNetwork> {
         ProviderBuilder::new_with_network::<TempoNetwork>()
             .connect_mocked_client(asserter)
@@ -973,7 +997,7 @@ mod tests {
             zone_rpc_url: "http://unused.test".to_string(),
             retry_connection_interval: Duration::from_millis(100),
             poll_interval: Duration::from_secs(1),
-            batch_interval: Duration::from_secs(1),
+            batch_interval_blocks: 1,
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
         };
@@ -1012,7 +1036,7 @@ mod tests {
             zone_rpc_url: "http://unused.test".to_string(),
             retry_connection_interval: Duration::from_millis(100),
             poll_interval: Duration::from_secs(1),
-            batch_interval: Duration::from_secs(1),
+            batch_interval_blocks: 1,
             portal_address,
             batch_anchor_config: BatchAnchorConfig::default(),
         };
