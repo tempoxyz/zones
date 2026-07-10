@@ -20,13 +20,11 @@ Use release builds and isolated datadirs and ports. Keep every started process h
 
 ## Run with Anvil
 
-Require Foundry 1.8 or newer, or a nightly build from July 11, 2026 or later. Verify the RPC before starting the zone:
+Require Foundry 1.8 or newer, or a nightly build from July 11, 2026 or later. Start Anvil in Tempo mode:
 
 ```bash
 anvil --version
 anvil --network tempo --block-time 1 --host 127.0.0.1 --port 8545
-cast rpc --rpc-url http://127.0.0.1:8545 eth_getHeaderByNumber latest \
-  | jq -e '.timestampMillis != null'
 ```
 
 Start the zone in a second terminal:
@@ -49,8 +47,6 @@ cast rpc --rpc-url http://127.0.0.1:8545 \
 
 `anvil_dealTIP20` sets the account balance directly without changing total supply.
 
-`tempo-zone dev` rejects incompatible older Anvil builds with `canonical Tempo header hash`.
-
 ## Run with a native Tempo dev L1
 
 Prefer an existing Tempo dev endpoint when one is available:
@@ -58,8 +54,6 @@ Prefer an existing Tempo dev endpoint when one is available:
 ```bash
 export L1_RPC_URL=ws://127.0.0.1:8546
 cast rpc --rpc-url "$L1_RPC_URL" web3_clientVersion
-cast rpc --rpc-url "$L1_RPC_URL" eth_getHeaderByNumber latest \
-  | jq -e '.timestampMillis != null'
 target/release/tempo-zone dev \
   --l1.rpc-url "$L1_RPC_URL" \
   --datadir /tmp/tempo-zone-dev-native
@@ -101,13 +95,12 @@ cargo test -p zone-node --features cli --test it \
    ```
 
 3. Inspect the latest zone log. Require continued L1 ingestion and no repeating errors. For a full smoke test, wait for both `Submitting batch` and `Batch submitted to L1`.
-4. On Anvil, WebSocket ingestion must use the normal block subscription with no false reorg warnings. Historical and ancestry header fetches must use `eth_getHeaderByNumber`.
+4. On Anvil, require normal block ingestion with no false reorg warnings.
 
 ## Diagnose
 
 - Provisioning before funding receipts settle indicates a regression in `fund_dev_account`.
 - A missing custom initial token indicates the genesis anchor skipped the `createZone` block and its `TokenEnabled` event.
-- Missing Tempo fields from `eth_getHeaderByNumber` indicate an outdated Anvil build.
 - A `canonical Tempo header hash` error means the L1 reports a different block hash from `keccak256(rlp(TempoHeader))`. Upgrade Foundry first; never rewrite header parents in the Zone subscriber.
 - Repeated false reorgs where each new block's `parentHash` differs from the subscriber's sealed previous hash are the same canonical-hashing failure.
 - If the node appears stalled, compare the L1 tip, the zone's Tempo block number, and the latest subscriber log before restarting.
