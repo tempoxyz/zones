@@ -5,7 +5,7 @@ description: Run and validate `tempo-zone dev` against either Anvil in Tempo mod
 
 # Run Zone Dev
 
-Use release builds and isolated datadirs and ports. Keep every started process handle and stop only those processes during cleanup.
+Use release builds and isolated datadirs and ports. Keep every started process handle and stop only those processes during cleanup. Set the variables shown below in the shell where the zone runs so validation reuses the selected configuration.
 
 ## Prepare
 
@@ -27,25 +27,39 @@ anvil --version
 anvil --network tempo --block-time 1 --host 127.0.0.1 --port 8545
 ```
 
-Start the zone in a second terminal:
+In a second terminal, configure the zone:
 
 ```bash
-target/release/tempo-zone dev \
-  --l1.rpc-url ws://127.0.0.1:8545 \
-  --datadir /tmp/tempo-zone-dev-anvil
+export L1_HTTP_URL=http://127.0.0.1:8545
+export L1_RPC_URL=ws://127.0.0.1:8545
+export ZONE_DATADIR=/tmp/tempo-zone-dev-anvil
+export ZONE_HTTP_PORT=9545
+export ZONE_PRIVATE_RPC_PORT=8544
 ```
 
-`tempo_fundAddress` is absent on Anvil. The default dev key already has pathUSD. If another dev account needs funds, set its pathUSD balance before starting the zone:
+The default dev key already has pathUSD. When using another key, fund that same key before provisioning starts:
 
 ```bash
-cast rpc --rpc-url http://127.0.0.1:8545 \
+export DEV_KEY=0x...
+export DEV_ADDRESS="$(cast wallet address "$DEV_KEY")"
+cast rpc --rpc-url "$L1_HTTP_URL" \
   anvil_dealTIP20 \
   "$DEV_ADDRESS" \
   0x20C0000000000000000000000000000000000000 \
   1000000000
 ```
 
-`anvil_dealTIP20` sets the account balance directly without changing total supply.
+`DEV_KEY` is also the environment variable for `--dev.key`, so the zone uses the funded account. Start it after any required funding:
+
+```bash
+target/release/tempo-zone dev \
+  --l1.rpc-url "$L1_RPC_URL" \
+  --datadir "$ZONE_DATADIR" \
+  --http.port "$ZONE_HTTP_PORT" \
+  --private-rpc.port "$ZONE_PRIVATE_RPC_PORT"
+```
+
+`tempo_fundAddress` is absent on Anvil. `anvil_dealTIP20` sets the account balance directly without changing total supply.
 
 ## Run with a native Tempo dev L1
 
@@ -53,10 +67,15 @@ Prefer an existing Tempo dev endpoint when one is available:
 
 ```bash
 export L1_RPC_URL=ws://127.0.0.1:8546
+export ZONE_DATADIR=/tmp/tempo-zone-dev-native
+export ZONE_HTTP_PORT=9545
+export ZONE_PRIVATE_RPC_PORT=8544
 cast rpc --rpc-url "$L1_RPC_URL" web3_clientVersion
 target/release/tempo-zone dev \
   --l1.rpc-url "$L1_RPC_URL" \
-  --datadir /tmp/tempo-zone-dev-native
+  --datadir "$ZONE_DATADIR" \
+  --http.port "$ZONE_HTTP_PORT" \
+  --private-rpc.port "$ZONE_PRIVATE_RPC_PORT"
 ```
 
 When starting Tempo itself, require a valid Tempo L1 genesis and make the HTTP and WebSocket ports explicit:
@@ -80,18 +99,19 @@ cargo test -p zone-node --features cli --test it \
 
 ## Validate
 
-1. Read the generated metadata and derive the actual ports and portal:
+1. Read the generated metadata from the datadir selected above and derive the actual zone RPC URL:
 
    ```bash
-   jq . /tmp/tempo-zone-dev-anvil/zone.json
+   jq . "$ZONE_DATADIR/zone.json"
+   export ZONE_RPC_URL="$(jq -r .rpcUrl "$ZONE_DATADIR/zone.json")"
    ```
 
 2. Confirm the zone advances and pathUSD exists:
 
    ```bash
-   cast block-number --rpc-url http://127.0.0.1:9545
+   cast block-number --rpc-url "$ZONE_RPC_URL"
    cast code 0x20C0000000000000000000000000000000000000 \
-     --rpc-url http://127.0.0.1:9545
+     --rpc-url "$ZONE_RPC_URL"
    ```
 
 3. Inspect the latest zone log. Require continued L1 ingestion and no repeating errors. For a full smoke test, wait for both `Submitting batch` and `Batch submitted to L1`.
