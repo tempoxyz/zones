@@ -30,6 +30,10 @@ pub struct L1SubscriberConfig {
 
 pub(crate) trait LocalTempoCheckpointReader: Send + Sync {
     fn latest_tempo_block_number(&self) -> eyre::Result<u64>;
+
+    fn latest_tempo_block_hash(&self) -> eyre::Result<B256> {
+        Ok(B256::ZERO)
+    }
 }
 
 struct ProviderLocalTempoCheckpointReader<P> {
@@ -43,6 +47,11 @@ where
     fn latest_tempo_block_number(&self) -> eyre::Result<u64> {
         let state = self.provider.latest()?;
         Ok(state.tempo_block_number()?)
+    }
+
+    fn latest_tempo_block_hash(&self) -> eyre::Result<B256> {
+        let state = self.provider.latest()?;
+        Ok(state.tempo_block_hash()?)
     }
 }
 
@@ -59,6 +68,9 @@ pub struct L1Subscriber {
     pub(crate) tip403_metrics: crate::state::tip403::Tip403Metrics,
     /// L1 subscriber metrics for connection health, backfill, and event ingestion.
     pub(crate) subscriber_metrics: crate::metrics::L1SubscriberMetrics,
+    /// Anvil mines Ethereum headers even in Tempo mode. Rewrite their parent links
+    /// into a synthetic Tempo-header chain before enqueueing them.
+    pub(crate) normalize_anvil_headers: bool,
 }
 
 impl L1Subscriber {
@@ -85,6 +97,7 @@ impl L1Subscriber {
             tracked_tokens,
             tip403_metrics: Default::default(),
             subscriber_metrics: Default::default(),
+            normalize_anvil_headers: false,
         };
 
         task_executor.spawn_critical_task(
@@ -136,10 +149,9 @@ impl L1Subscriber {
     /// Returns a stream of new L1 block headers, abstracting over the transport.
     ///
     /// - **WebSocket**: uses `subscribe_blocks` for push-based delivery.
-    /// - **HTTP**: falls back to `watch_full_blocks` (filter-based polling via
-    ///   `eth_newBlockFilter` + `eth_getFilterChanges`), extracting the header
-    ///   from each block. The fallback is selected when `subscribe_blocks`
-    ///   returns `PubsubUnavailable`.
+    /// - **Polling**: uses `watch_full_blocks` (filter-based polling via
+    ///   `eth_newBlockFilter` + `eth_getFilterChanges`) when pubsub is unavailable
+    ///   or the client emits incomplete Tempo `newHeads` payloads.
     ///
     /// Both paths produce the same header payloads; transport-specific polling
     /// failures are surfaced as stream errors so [`run`](Self::run) can
@@ -159,27 +171,34 @@ impl L1Subscriber {
             >,
         >,
     > {
-        match provider.subscribe_blocks().await {
-            Ok(sub) => {
-                info!("Using WebSocket block subscription");
-                Ok(Box::pin(sub.into_stream().map(Ok)))
-            }
-            Err(e) => {
-                if e.as_transport_err()
-                    .is_some_and(|t| t.is_pubsub_unavailable())
-                {
-                    info!("Pubsub unavailable, falling back to HTTP polling");
-                    let mut watcher = provider.watch_full_blocks().await?;
-                    watcher.set_poll_interval(HTTP_POLL_INTERVAL);
-                    let stream = watcher
-                        .into_stream()
-                        .map(|res| res.map(|block| block.header).map_err(Into::into));
-                    Ok(Box::pin(stream))
-                } else {
-                    Err(e.into())
+        if !self.normalize_anvil_headers {
+            match provider.subscribe_blocks().await {
+                Ok(sub) => {
+                    info!("Using WebSocket block subscription");
+                    return Ok(Box::pin(sub.into_stream().map(Ok)));
+                }
+                Err(e) => {
+                    if !e
+                        .as_transport_err()
+                        .is_some_and(|t| t.is_pubsub_unavailable())
+                    {
+                        return Err(e.into());
+                    }
+                    info!("Pubsub unavailable, falling back to full-block polling");
                 }
             }
         }
+
+        // Anvil's Tempo `newHeads` notifications omit Tempo-specific fields such as
+        // `timestampMillis`, while `eth_getBlockBy*` includes them. Full-block polling
+        // keeps the subscriber on the same validated Tempo response type.
+        info!("Using full-block polling for L1 headers");
+        let mut watcher = provider.watch_full_blocks().await?;
+        watcher.set_poll_interval(HTTP_POLL_INTERVAL);
+        let stream = watcher
+            .into_stream()
+            .map(|res| res.map(|block| block.header).map_err(Into::into));
+        Ok(Box::pin(stream))
     }
 
     /// Build the live L1 block stream, fetching receipts for each new header
@@ -353,18 +372,19 @@ impl L1Subscriber {
                 async move {
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let header_resp = async {
+                    let block_resp = async {
                         provider
-                            .get_header_by_number(block_number.into())
+                            .get_block_by_number(block_number.into())
                             .await?
                             .ok_or_else(|| {
-                                eyre::eyre!("L1 header not found for block {block_number}")
+                                eyre::eyre!("L1 block not found for block {block_number}")
                             })
                     }
                     .await
                     .inspect_err(|_| {
                         fetch_failures.increment(1);
                     })?;
+                    let header_resp = block_resp.header;
                     let block_hash = header_resp.hash();
                     let block = NumHash::new(block_number, block_hash);
                     let expected_receipts_root = header_resp.receipts_root();
@@ -396,12 +416,19 @@ impl L1Subscriber {
         let mut enqueued = 0u64;
         let backfill_start = std::time::Instant::now();
 
-        while let Some((header, receipts)) = fetched.try_next().await? {
+        let mut normalized_parent = self.normalized_parent_hash(from)?;
+        while let Some((mut header, receipts)) = fetched.try_next().await? {
             let block_number = header.number();
             let (events, policy_events) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, to.saturating_sub(block_number));
 
+            if let Some(parent_hash) = normalized_parent {
+                header.inner.parent_hash = parent_hash;
+            }
             let sealed = SealedHeader::seal_slow(header);
+            if self.normalize_anvil_headers {
+                normalized_parent = Some(sealed.hash());
+            }
             self.update_l1_state_anchor(block_number, sealed.hash(), sealed.parent_hash());
             self.apply_policy_events(block_number, &policy_events);
             self.apply_portal_state_events(block_number, &events);
@@ -454,6 +481,16 @@ impl L1Subscriber {
         self.tracked_tokens = self.config.policy_cache.read().tracked_tokens();
 
         let provider = self.connect().await?;
+        let client_version = provider
+            .raw_request::<_, String>("web3_clientVersion".into(), ())
+            .await
+            .ok();
+        self.normalize_anvil_headers = client_version
+            .as_deref()
+            .is_some_and(requires_full_block_polling);
+        if self.normalize_anvil_headers {
+            info!(?client_version, "Enabled Anvil Tempo-header compatibility");
+        }
 
         // Backfill to the current tip before subscribing.
         // Backfilled blocks are historical and considered confirmed.
@@ -482,7 +519,22 @@ impl L1Subscriber {
                 break;
             };
             let block_number = header.number();
-            let sealed = SealedHeader::seal_slow(header.inner.into_consensus());
+
+            // Full-block filters may coalesce multiple Anvil blocks into one update.
+            // Backfill through the observed tip so every synthetic Tempo parent link is
+            // constructed in order. Anvil is a local dev chain, so these historical
+            // blocks do not need the live one-block confirmation buffer below.
+            if self.normalize_anvil_headers {
+                let checkpoint = self.normalized_checkpoint()?;
+                if block_number > checkpoint.number {
+                    self.backfill(&provider, checkpoint.number + 1, block_number)
+                        .await?;
+                }
+                continue;
+            }
+
+            let consensus_header = header.inner.into_consensus();
+            let sealed = SealedHeader::seal_slow(consensus_header);
             let (events, policy_events) = self.extract_events(block_number, &receipts);
             self.record_seen_block(block_number, 0);
 
@@ -540,6 +592,33 @@ impl L1Subscriber {
 
         warn!("L1 block subscription stream ended");
         Ok(())
+    }
+
+    fn normalized_parent_hash(&self, block_number: u64) -> eyre::Result<Option<B256>> {
+        if !self.normalize_anvil_headers {
+            return Ok(None);
+        }
+
+        let checkpoint = self.normalized_checkpoint()?;
+        eyre::ensure!(
+            block_number.checked_sub(1) == Some(checkpoint.number),
+            "Anvil compatibility expected synthetic anchor for block {}, found local block {}",
+            block_number,
+            checkpoint.number
+        );
+        Ok(Some(checkpoint.hash))
+    }
+
+    fn normalized_checkpoint(&self) -> eyre::Result<NumHash> {
+        let anchor = self.config.l1_state_cache.read().anchor();
+        if anchor.hash != B256::ZERO {
+            return Ok(anchor);
+        }
+
+        Ok(NumHash::new(
+            self.local_state.latest_tempo_block_number()?,
+            self.local_state.latest_tempo_block_hash()?,
+        ))
     }
 
     /// Extract portal and policy events from pre-fetched receipts (no RPC).
@@ -698,6 +777,12 @@ impl L1Subscriber {
     }
 }
 
+fn requires_full_block_polling(client_version: &str) -> bool {
+    client_version
+        .split_once('/')
+        .is_some_and(|(client, _)| client.eq_ignore_ascii_case("anvil"))
+}
+
 /// Fetch receipts for the L1 header by block hash and verify they match the
 /// header's receipts root and logs bloom before returning them.
 async fn fetch_and_verify_receipts_for_header(
@@ -806,4 +891,17 @@ pub(crate) fn address_to_storage_value(address: Address) -> B256 {
     let mut bytes = [0u8; 32];
     bytes[12..].copy_from_slice(address.as_slice());
     B256::new(bytes)
+}
+
+#[cfg(test)]
+mod client_compatibility_tests {
+    use super::requires_full_block_polling;
+
+    #[test]
+    fn anvil_uses_full_block_polling() {
+        assert!(requires_full_block_polling("anvil/v1.7.2"));
+        assert!(requires_full_block_polling("Anvil/v1.7.2"));
+        assert!(!requires_full_block_polling("tempo/v1.10.0"));
+        assert!(!requires_full_block_polling("reth/v1.10.0"));
+    }
 }

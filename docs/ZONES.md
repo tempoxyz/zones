@@ -53,6 +53,21 @@ just check-balance "$ADDR"
 
 See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and private RPC usage.
 
+For a fully local development stack, run a Tempo-enabled Anvil L1 and point the
+dev command at its WebSocket endpoint:
+
+```bash
+# Terminal 1
+anvil --network tempo --block-time 1
+
+# Terminal 2
+cargo run --release --bin tempo-zone -- dev \
+  --l1.rpc-url ws://127.0.0.1:8545
+```
+
+This provisions a new ZoneFactory and portal, writes the generated zone files to
+`/tmp/tempo-zone-dev`, and serves the zone HTTP RPC at `http://127.0.0.1:9545`.
+
 To restart the zone later:
 
 ```bash

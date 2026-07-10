@@ -37,6 +37,24 @@ You can get started today by [deploying a Zone](#getting-started) on Tempo testn
 
 Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/getting-started/installation), [`just`](https://github.com/casey/just#packages), [`jq`](https://jqlang.github.io/jq/download/)
 
+### Local Development with Anvil
+
+Run Anvil in Tempo mode in one terminal:
+
+```bash
+anvil --network tempo --block-time 1
+```
+
+Then provision and run a fresh zone against it:
+
+```bash
+cargo run --release --bin tempo-zone -- dev \
+  --l1.rpc-url ws://127.0.0.1:8545
+```
+
+The default Anvil dev key is used automatically. The zone HTTP RPC listens on
+`http://127.0.0.1:9545`; generated metadata and node data are written under
+`/tmp/tempo-zone-dev`.
 
 ### Deploying a Zone
 

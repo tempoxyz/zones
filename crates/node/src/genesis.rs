@@ -6,12 +6,12 @@
 //! template so the zone follows a real L1.
 
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, B256, U256, address, keccak256};
+use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
 use alloy_rlp::Encodable;
 use tempo_primitives::TempoHeader;
 use zone_precompiles::tempo_state::slots;
 
-/// Bundled zone genesis template (predeploys compiled from `specs/ref-impls`).
+/// Bundled zone dev artifact (genesis plus L1 `ZoneFactory` creation bytecode).
 pub const GENESIS_TEMPLATE_JSON: &str = include_str!("../assets/zone-dev-genesis.json");
 
 /// TempoState predeploy address.
@@ -29,6 +29,23 @@ const ZONE_CONFIG_PORTAL_IMMUTABLES: usize = 5;
 /// Parses the bundled zone genesis template.
 pub fn genesis_template() -> eyre::Result<Genesis> {
     serde_json::from_str(GENESIS_TEMPLATE_JSON).map_err(Into::into)
+}
+
+/// Returns the bundled `ZoneFactory` creation bytecode.
+pub fn zone_factory_bytecode() -> eyre::Result<Bytes> {
+    let artifact: serde_json::Value = serde_json::from_str(GENESIS_TEMPLATE_JSON)?;
+    let bytecode = artifact
+        .get("zoneFactoryBytecode")
+        .cloned()
+        .ok_or_else(|| eyre::eyre!("bundled dev artifact is missing zoneFactoryBytecode"))?;
+    serde_json::from_value(bytecode).map_err(Into::into)
+}
+
+/// Computes the canonical hash of a Tempo header.
+pub fn tempo_header_hash(header: &TempoHeader) -> B256 {
+    let mut rlp_buf = Vec::new();
+    header.encode(&mut rlp_buf);
+    keccak256(rlp_buf)
 }
 
 /// Builds a zone genesis anchored to a real L1 block.
@@ -51,9 +68,7 @@ pub fn l1_anchored_genesis(
 ) -> eyre::Result<(Genesis, u64)> {
     let genesis_block_number = l1_header.inner.number;
 
-    let mut rlp_buf = Vec::new();
-    l1_header.encode(&mut rlp_buf);
-    let l1_genesis_hash = keccak256(&rlp_buf);
+    let l1_genesis_hash = tempo_header_hash(l1_header);
 
     let mut genesis = genesis_template()?;
 
@@ -151,15 +166,13 @@ mod tests {
         let (genesis, genesis_block_number) = l1_anchored_genesis(&l1_header, portal).unwrap();
         assert_eq!(genesis_block_number, l1_header.inner.number);
 
-        let mut rlp_buf = Vec::new();
-        l1_header.encode(&mut rlp_buf);
         let storage = genesis.alloc[&TEMPO_STATE_ADDRESS]
             .storage
             .as_ref()
             .unwrap();
         assert_eq!(
             storage[&B256::from(slots::TEMPO_BLOCK_HASH.to_be_bytes())],
-            keccak256(&rlp_buf),
+            tempo_header_hash(&l1_header),
         );
 
         let mut expected = [0u8; 32];
@@ -171,5 +184,10 @@ mod tests {
                 "patched portal immutable missing in {addr}"
             );
         }
+    }
+
+    #[test]
+    fn factory_bytecode_is_bundled() {
+        assert!(!zone_factory_bytecode().unwrap().is_empty());
     }
 }

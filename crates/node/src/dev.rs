@@ -7,26 +7,19 @@
 
 use alloy_genesis::Genesis;
 use alloy_network::{EthereumWallet, ReceiptResponse as _};
-use alloy_primitives::{Address, B256, Bytes, TxKind, U256, address, keccak256};
-use alloy_provider::{Provider, ProviderBuilder};
+use alloy_primitives::{Address, B256, TxKind, U256, address, keccak256};
+use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
 use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolEvent, SolValue};
 use tempo_alloy::TempoNetwork;
+use tempo_contracts::precompiles::ITIP20;
 use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{ZoneFactory, ZonePortal};
 use zone_primitives::constants::zone_chain_id;
 
 /// pathUSD TIP-20 token address on Tempo L1.
 pub const PATH_USD_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
-
-/// `ZoneFactory` creation bytecode compiled from `specs/ref-impls`.
-pub const ZONE_FACTORY_BYTECODE_HEX: &str = include_str!("../assets/zone-factory-bytecode.hex");
-
-/// Decodes [`ZONE_FACTORY_BYTECODE_HEX`].
-pub fn zone_factory_bytecode() -> eyre::Result<Bytes> {
-    Ok(alloy_primitives::hex::decode(ZONE_FACTORY_BYTECODE_HEX.trim())?.into())
-}
 
 /// Provisioning options for [`provision_zone`].
 #[derive(Debug)]
@@ -54,7 +47,7 @@ pub struct ProvisionedZone {
     pub factory: Address,
     /// `ZonePortal` address on L1.
     pub portal: Address,
-    /// L1 anchor block number (the `createZone` confirmation block).
+    /// L1 anchor block number immediately before `createZone`.
     pub anchor_block_number: u64,
     /// Zone genesis anchored to the L1.
     pub genesis: Genesis,
@@ -62,10 +55,11 @@ pub struct ProvisionedZone {
 
 /// Provisions a fresh zone on a Tempo dev L1.
 ///
-/// Funds the dev account via `tempo_fundAddress` (best-effort), deploys the bundled
+/// Funds the dev account via `tempo_fundAddress` when needed, deploys the bundled
 /// `ZoneFactory` when no address is given, calls `createZone` with the dev account as
 /// both admin and sequencer, registers the sequencer encryption key on the portal, and
-/// builds a genesis anchored to the `createZone` confirmation block.
+/// builds a genesis anchored immediately before `createZone` so the zone replays the
+/// portal's initial `TokenEnabled` event.
 pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<ProvisionedZone> {
     let ProvisionConfig {
         l1_rpc_url,
@@ -82,14 +76,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .connect(&l1_rpc_url)
         .await?;
 
-    // Fund the dev account. Only dev L1s expose this RPC; assume the account is
-    // already funded when the request fails.
-    let funded: Result<Vec<B256>, _> = provider
-        .raw_request("tempo_fundAddress".into(), (dev_address,))
-        .await;
-    if let Err(err) = funded {
-        tracing::warn!(%err, %dev_address, "tempo_fundAddress failed; assuming the dev account is already funded");
-    }
+    fund_dev_account(&provider, dev_address).await?;
 
     let factory_address = match factory {
         Some(address) => address,
@@ -98,7 +85,17 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
 
     let factory = ZoneFactory::new(factory_address, &provider);
     let verifier = factory.verifier().call().await?;
-    let current_block = provider.get_block_number().await?;
+
+    // Anchor before createZone so the L1 subscriber replays the creation block,
+    // including the initial TokenEnabled event emitted by the portal constructor.
+    let anchor_block_number = provider.get_block_number().await?;
+    let anchor_block = provider
+        .get_block_by_number(anchor_block_number.into())
+        .await?
+        .ok_or_else(|| eyre::eyre!("anchor block {anchor_block_number} not found"))?;
+    let anchor_header: TempoHeader = anchor_block.header.as_ref().clone();
+    let anchor_block_hash = crate::genesis::tempo_header_hash(&anchor_header);
+
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
             initialToken: initial_token,
@@ -107,8 +104,8 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
             verifier,
             zoneParams: ZoneFactory::ZoneParams {
                 genesisBlockHash: B256::ZERO,
-                genesisTempoBlockHash: B256::ZERO,
-                genesisTempoBlockNumber: current_block,
+                genesisTempoBlockHash: anchor_block_hash,
+                genesisTempoBlockNumber: anchor_block_number,
             },
             rpcUrl: rpc_url,
         })
@@ -128,21 +125,10 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     let portal = zone_created.portal;
     let chain_id = zone_chain_id(zone_id);
 
-    // Anchor on the `createZone` confirmation block: the portal only exists from this
-    // block onward, so an earlier anchor would read empty portal state.
-    let anchor_block_number = receipt
-        .block_number
-        .ok_or_else(|| eyre::eyre!("createZone receipt missing block number"))?;
-    let anchor_block = provider
-        .get_block_by_number(anchor_block_number.into())
-        .await?
-        .ok_or_else(|| eyre::eyre!("anchor block {anchor_block_number} not found"))?;
-    let anchor_header: &TempoHeader = anchor_block.header.as_ref();
-
     register_encryption_key(&provider, portal, &dev_key).await?;
 
     let (mut genesis, anchor_block_number) =
-        crate::genesis::l1_anchored_genesis(anchor_header, portal)?;
+        crate::genesis::l1_anchored_genesis(&anchor_header, portal)?;
     genesis.config.chain_id = chain_id;
 
     Ok(ProvisionedZone {
@@ -153,6 +139,39 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         anchor_block_number,
         genesis,
     })
+}
+
+async fn fund_dev_account<P: Provider<TempoNetwork>>(
+    provider: &P,
+    dev_address: Address,
+) -> eyre::Result<()> {
+    let funding = provider
+        .raw_request::<_, Vec<B256>>("tempo_fundAddress".into(), (dev_address,))
+        .await;
+
+    match funding {
+        Ok(tx_hashes) => {
+            for tx_hash in tx_hashes {
+                let receipt = PendingTransactionBuilder::new(provider.root().clone(), tx_hash)
+                    .get_receipt()
+                    .await?;
+                eyre::ensure!(receipt.status(), "tempo_fundAddress transaction reverted");
+            }
+        }
+        Err(err) => {
+            tracing::debug!(%err, %dev_address, "tempo_fundAddress unavailable");
+        }
+    }
+
+    let fee_balance = ITIP20::new(PATH_USD_ADDRESS, provider)
+        .balanceOf(dev_address)
+        .call()
+        .await?;
+    eyre::ensure!(
+        !fee_balance.is_zero(),
+        "dev account {dev_address} has no pathUSD for L1 fees; enable tempo_fundAddress, pre-fund the account, or use the default Anvil dev key"
+    );
+    Ok(())
 }
 
 /// Deploys the bundled `ZoneFactory` on L1 and returns its address.
@@ -169,7 +188,8 @@ pub async fn deploy_zone_factory(
         .connect(l1_rpc_url)
         .await?;
 
-    let mut deploy_tx = TransactionRequest::default().input(zone_factory_bytecode()?.into());
+    let mut deploy_tx =
+        TransactionRequest::default().input(crate::genesis::zone_factory_bytecode()?.into());
     deploy_tx.to = Some(TxKind::Create);
     let receipt = provider
         .send_transaction(deploy_tx)
@@ -218,7 +238,7 @@ pub async fn register_encryption_key<P: Provider<TempoNetwork>>(
 }
 
 #[cfg(feature = "cli")]
-pub use command::{DevCommand, run};
+pub use command::DevCommand;
 
 #[cfg(feature = "cli")]
 mod command {
@@ -234,23 +254,10 @@ mod command {
     const DEFAULT_DEV_KEY: &str =
         "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
 
-    /// Parses `dev` arguments and runs the command.
-    ///
-    /// `args` must start with the `dev` token from the command line, which clap
-    /// treats as the binary name.
-    pub fn run<I, T>(args: I) -> eyre::Result<()>
-    where
-        I: IntoIterator<Item = T>,
-        T: Into<std::ffi::OsString> + Clone,
-    {
-        use clap::Parser as _;
-        DevCommand::parse_from(args).run()
-    }
-
     /// Provisions a fresh zone against a Tempo dev L1 and runs the zone node.
     #[derive(Debug, clap::Parser)]
     #[command(
-        name = "tempo-zone dev",
+        name = "dev",
         about = "Provision a fresh zone against a Tempo dev L1 and run the zone node"
     )]
     pub struct DevCommand {
@@ -475,15 +482,5 @@ mod command {
         fn ensure_ws_url_rejects_non_websocket_schemes() {
             assert!(ensure_ws_url("http://localhost:8545").is_err());
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::zone_factory_bytecode;
-
-    #[test]
-    fn factory_bytecode_decodes() {
-        assert!(!zone_factory_bytecode().unwrap().is_empty());
     }
 }

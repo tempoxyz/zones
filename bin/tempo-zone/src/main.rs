@@ -17,13 +17,7 @@ fn main() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
 
-    // `dev` is dispatched before the reth CLI: reth's `Cli` has a fixed set of
-    // subcommands, so the dev bootstrap is parsed separately.
-    let result = if std::env::args().nth(1).as_deref() == Some("dev") {
-        zone_node::dev::run(std::env::args_os().skip(1))
-    } else {
-        ZoneCli::parse().run()
-    };
+    let result = ZoneCli::parse().run();
 
     if let Err(err) = result {
         eprintln!("Error: {err:?}");
