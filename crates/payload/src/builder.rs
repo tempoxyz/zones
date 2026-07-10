@@ -3,7 +3,10 @@
 //! Builds zone blocks by executing `advanceTempo` system transactions (one per L1 block)
 //! followed by pool transactions and a withdrawal batch finalization.
 
-use crate::abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
+use crate::{
+    WithdrawalRevealEncryptor,
+    abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS},
+};
 use alloy_consensus::{Signed, Transaction, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
@@ -58,13 +61,23 @@ pub const DEFAULT_WITHDRAWAL_BATCH_INTERVAL: Duration = Duration::from_secs(60);
 #[non_exhaustive]
 pub struct ZonePayloadFactory {
     withdrawal_batch_interval: Duration,
+    withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
 }
 
 impl ZonePayloadFactory {
     pub fn new(withdrawal_batch_interval: Duration) -> Self {
         Self {
             withdrawal_batch_interval,
+            withdrawal_reveal_encryptor: None,
         }
+    }
+
+    pub fn with_withdrawal_reveal_encryptor(
+        mut self,
+        encryptor: Arc<dyn WithdrawalRevealEncryptor>,
+    ) -> Self {
+        self.withdrawal_reveal_encryptor = Some(encryptor);
+        self
     }
 }
 
@@ -104,6 +117,7 @@ where
             provider: ctx.provider().clone(),
             evm_config,
             withdrawal_batch_interval: self.withdrawal_batch_interval,
+            withdrawal_reveal_encryptor: self.withdrawal_reveal_encryptor.clone(),
         })
     }
 }
@@ -119,6 +133,8 @@ pub struct ZonePayloadBuilder<Provider, EvmConfig> {
     evm_config: EvmConfig,
     /// Maximum chain-time duration between withdrawal batch finalizations.
     withdrawal_batch_interval: Duration,
+    /// Encrypts authenticated-withdrawal sender reveal data for batch finalization.
+    withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
 }
 
 impl<Provider, EvmConfig> PayloadBuilder for ZonePayloadBuilder<Provider, EvmConfig>
@@ -405,11 +421,14 @@ where
                     if request.revealTo.is_empty() {
                         Ok(Bytes::new())
                     } else {
-                        zone_precompiles::ecies::encrypt_authenticated_withdrawal(
-                            request.revealTo.as_ref(),
-                            request.sender,
-                            request.txHash,
-                        )
+                        let encryptor =
+                            self.withdrawal_reveal_encryptor.as_ref().ok_or_else(|| {
+                                PayloadBuilderError::Internal(reth_errors::RethError::msg(
+                                    "withdrawal reveal encryption requested but no encryptor is configured",
+                                ))
+                            })?;
+                        encryptor
+                            .encrypt_sender(request.revealTo.as_ref(), request.sender, request.txHash)
                         .map(Bytes::from)
                         .ok_or_else(|| {
                             PayloadBuilderError::Internal(reth_errors::RethError::msg(format!(

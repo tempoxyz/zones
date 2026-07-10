@@ -66,12 +66,60 @@ use zone_l1::{
     },
 };
 use zone_payload::{
-    DEFAULT_WITHDRAWAL_BATCH_INTERVAL, ZonePayloadAttributes, ZonePayloadFactory, ZonePayloadTypes,
+    DEFAULT_WITHDRAWAL_BATCH_INTERVAL, WithdrawalRevealEncryptor, ZonePayloadAttributes,
+    ZonePayloadFactory, ZonePayloadTypes,
 };
 use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequencer};
 
 /// Network primitives for Zone Nodes
 type ZoneNetworkPrimitives = BasicNetworkPrimitives<TempoPrimitives, TempoTxEnvelope>;
+
+/// Sequencer-side sender reveal encryptor used while building
+/// `finalizeWithdrawalBatch` system transactions.
+///
+/// The encrypted sender payload is hashed into withdrawal data, so ECIES must
+/// not use fresh randomness here. This implementation derives reproducible
+/// encryption material from the sequencer encryption key, zone id, reveal key,
+/// sender, and withdrawal transaction hash, which keeps identical withdrawal
+/// batches byte-for-byte stable across sequencers.
+struct SequencerWithdrawalRevealEncryptor {
+    encryption_key: Arc<SecretKey>,
+    zone_id: u32,
+}
+
+impl SequencerWithdrawalRevealEncryptor {
+    fn new(encryption_key: SecretKey, zone_id: u32) -> Self {
+        Self {
+            encryption_key: Arc::new(encryption_key),
+            zone_id,
+        }
+    }
+}
+
+impl std::fmt::Debug for SequencerWithdrawalRevealEncryptor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SequencerWithdrawalRevealEncryptor")
+            .field("zone_id", &self.zone_id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl WithdrawalRevealEncryptor for SequencerWithdrawalRevealEncryptor {
+    fn encrypt_sender(
+        &self,
+        reveal_to: &[u8],
+        sender: Address,
+        tx_hash: alloy_primitives::B256,
+    ) -> Option<Vec<u8>> {
+        zone_precompiles::ecies::encrypt_authenticated_withdrawal_deterministic(
+            &self.encryption_key,
+            self.zone_id,
+            reveal_to,
+            sender,
+            tx_hash,
+        )
+    }
+}
 
 /// Configuration for the sequencer background tasks
 #[derive(Debug, Clone)]
@@ -123,6 +171,8 @@ pub struct ZoneNode {
     initial_tokens: Option<Vec<Address>>,
     /// Maximum chain-time duration between withdrawal batch finalizations.
     withdrawal_batch_interval: Duration,
+    /// Encrypts authenticated-withdrawal sender reveal data during payload construction.
+    withdrawal_reveal_encryptor: Option<Arc<dyn WithdrawalRevealEncryptor>>,
     /// Private RPC config.
     private_rpc_config: ZonePrivateRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
@@ -168,6 +218,7 @@ impl ZoneNode {
             portal_address,
             initial_tokens: None,
             withdrawal_batch_interval: DEFAULT_WITHDRAWAL_BATCH_INTERVAL,
+            withdrawal_reveal_encryptor: None,
             private_rpc_config: ZonePrivateRpcConfig::default(),
             sequencer_config: None,
         }
@@ -182,7 +233,21 @@ impl ZoneNode {
     /// Set the sequencer configuration. When set, batch submission and
     /// withdrawal processing tasks are spawned during node launch.
     pub fn with_sequencer(mut self, config: ZoneSequencerAddOnsConfig) -> Self {
+        let encryption_key = SecretKey::from(config.sequencer_signer.credential());
+        self.withdrawal_reveal_encryptor = Some(Arc::new(SequencerWithdrawalRevealEncryptor::new(
+            encryption_key,
+            config.zone_id,
+        )));
         self.sequencer_config = Some(config);
+        self
+    }
+
+    /// Set the encryptor used for authenticated-withdrawal sender reveal data.
+    pub fn with_withdrawal_reveal_encryptor(
+        mut self,
+        encryptor: Arc<dyn WithdrawalRevealEncryptor>,
+    ) -> Self {
+        self.withdrawal_reveal_encryptor = Some(encryptor);
         self
     }
 
@@ -722,7 +787,10 @@ where
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
         );
-        let payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval);
+        let mut payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval);
+        if let Some(encryptor) = self.withdrawal_reveal_encryptor.clone() {
+            payload_factory = payload_factory.with_withdrawal_reveal_encryptor(encryptor);
+        }
         Self::components_with_payload_factory(executor_builder, payload_factory)
     }
 
