@@ -11,11 +11,12 @@ use alloy_primitives::{Address, Bytes, TxKind};
 use alloy_sol_types::SolCall;
 use tempo_alloy::rpc::TempoTransactionRequest;
 use tempo_primitives::TempoTxEnvelope;
-use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZoneInbox};
+use tempo_zone_contracts::{CONTRACT_DEPLOYER_ALLOWLIST, ZONE_INBOX_ADDRESS, ZoneInbox};
 
 use crate::{auth::AuthContext, types::JsonRpcError};
 
 const CONTRACT_CREATION_NOT_SUPPORTED: &str = "contract creation not supported on zones";
+const CODE_AUTHORIZATION_NOT_SUPPORTED: &str = "code authorization not supported on zones";
 
 /// Enforce all private RPC authorization rules for simulation-style requests.
 ///
@@ -30,7 +31,8 @@ where
     F: Future<Output = Result<bool, JsonRpcError>>,
 {
     enforce_from(request, auth)?;
-    enforce_no_contract_creation(request)?;
+    enforce_contract_creation(request, auth.caller)?;
+    enforce_no_code_authorization(request)?;
     enforce_zone_inbox_refund_call_privacy(request, auth, is_sequencer).await
 }
 
@@ -52,19 +54,55 @@ pub fn enforce_from(
     }
 }
 
-/// Reject create-style transaction requests.
-///
-/// Zones do not support contract creation, so plain Ethereum-style create
-/// requests (`to = null`) and Tempo AA calls targeting `TxKind::Create` are
-/// rejected with `-32602 Invalid params`.
-pub fn enforce_no_contract_creation(request: &TempoTransactionRequest) -> Result<(), JsonRpcError> {
+fn requests_contract_creation(request: &TempoTransactionRequest) -> bool {
     let outer_create = request.inner.to.is_some_and(|to| to.is_create());
     let implicit_plain_create = request.calls.is_empty() && request.inner.to.is_none();
     let tempo_create = request.calls.iter().any(|call| call.to.is_create());
+    outer_create || implicit_plain_create || tempo_create
+}
 
-    if outer_create || implicit_plain_create || tempo_create {
+fn requests_code_authorization(request: &TempoTransactionRequest) -> bool {
+    request
+        .inner
+        .authorization_list
+        .as_ref()
+        .is_some_and(|authorizations| !authorizations.is_empty())
+        || !request.tempo_authorization_list.is_empty()
+}
+
+fn enforce_contract_creation_with_allowlist(
+    request: &TempoTransactionRequest,
+    caller: Address,
+    allowlist: &[Address],
+) -> Result<(), JsonRpcError> {
+    if requests_contract_creation(request) && !allowlist.contains(&caller) {
         return Err(JsonRpcError::invalid_params(
             CONTRACT_CREATION_NOT_SUPPORTED,
+        ));
+    }
+
+    Ok(())
+}
+
+/// Apply the protocol contract-deployer allowlist to create-style transaction requests.
+///
+/// Plain Ethereum-style create requests (`to = null`) and Tempo AA calls targeting
+/// `TxKind::Create` are rejected with `-32602 Invalid params` unless the authenticated caller is an
+/// explicitly designated deployer.
+pub fn enforce_contract_creation(
+    request: &TempoTransactionRequest,
+    caller: Address,
+) -> Result<(), JsonRpcError> {
+    enforce_contract_creation_with_allowlist(request, caller, CONTRACT_DEPLOYER_ALLOWLIST)
+}
+
+/// Reject Ethereum and Tempo authorization lists that can mutate account code.
+pub fn enforce_no_code_authorization(
+    request: &TempoTransactionRequest,
+) -> Result<(), JsonRpcError> {
+    if requests_code_authorization(request) {
+        return Err(JsonRpcError::invalid_params(
+            CODE_AUTHORIZATION_NOT_SUPPORTED,
         ));
     }
 
@@ -147,14 +185,20 @@ pub fn verify_raw_tx_sender(data: &[u8], auth: &AuthContext) -> Result<(), JsonR
 
 #[cfg(test)]
 mod tests {
-    use alloy_primitives::{Address, Bytes, TxKind, U256};
+    use alloy_eips::eip7702::{Authorization, SignedAuthorization};
+    use alloy_primitives::{Address, Bytes, Signature, TxKind, U256};
     use alloy_rpc_types_eth::{TransactionInput, TransactionRequest};
     use alloy_sol_types::SolCall;
     use tempo_alloy::rpc::TempoTransactionRequest;
-    use tempo_primitives::transaction::Call;
+    use tempo_primitives::transaction::{
+        Call, PrimitiveSignature, TempoSignature, TempoSignedAuthorization,
+    };
     use tempo_zone_contracts::{ZONE_INBOX_ADDRESS, ZONE_TOKEN_ADDRESS, ZoneInbox};
 
-    use super::{enforce_no_contract_creation, zone_inbox_refunds_mismatched_owner};
+    use super::{
+        enforce_contract_creation, enforce_contract_creation_with_allowlist,
+        enforce_no_code_authorization, zone_inbox_refunds_mismatched_owner,
+    };
 
     fn call_target(byte: u8) -> TxKind {
         TxKind::Call(Address::repeat_byte(byte))
@@ -190,29 +234,29 @@ mod tests {
     }
 
     #[test]
-    fn no_create_allows_standard_call_request() {
+    fn contract_creation_policy_allows_standard_call_request() {
         let request = call_request(Some(call_target(0x11)));
-        assert!(enforce_no_contract_creation(&request).is_ok());
+        assert!(enforce_contract_creation(&request, Address::repeat_byte(0x01)).is_ok());
     }
 
     #[test]
-    fn no_create_rejects_plain_create_request() {
+    fn contract_creation_policy_rejects_plain_create_request() {
         let request = call_request(None);
-        let err = enforce_no_contract_creation(&request).unwrap_err();
+        let err = enforce_contract_creation(&request, Address::repeat_byte(0x01)).unwrap_err();
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "contract creation not supported on zones");
     }
 
     #[test]
-    fn no_create_rejects_explicit_outer_create_request() {
+    fn contract_creation_policy_rejects_explicit_outer_create_request() {
         let request = call_request(Some(TxKind::Create));
-        let err = enforce_no_contract_creation(&request).unwrap_err();
+        let err = enforce_contract_creation(&request, Address::repeat_byte(0x01)).unwrap_err();
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "contract creation not supported on zones");
     }
 
     #[test]
-    fn no_create_allows_tempo_calls_without_outer_to() {
+    fn contract_creation_policy_allows_tempo_calls_without_outer_to() {
         let mut request = call_request(None);
         request.calls = vec![Call {
             to: call_target(0x22),
@@ -220,11 +264,11 @@ mod tests {
             input: Bytes::default(),
         }];
 
-        assert!(enforce_no_contract_creation(&request).is_ok());
+        assert!(enforce_contract_creation(&request, Address::repeat_byte(0x01)).is_ok());
     }
 
     #[test]
-    fn no_create_rejects_tempo_create_call() {
+    fn contract_creation_policy_rejects_tempo_create_call() {
         let mut request = call_request(None);
         request.calls = vec![Call {
             to: TxKind::Create,
@@ -232,9 +276,43 @@ mod tests {
             input: Bytes::default(),
         }];
 
-        let err = enforce_no_contract_creation(&request).unwrap_err();
+        let err = enforce_contract_creation(&request, Address::repeat_byte(0x01)).unwrap_err();
         assert_eq!(err.code, -32602);
         assert_eq!(err.message, "contract creation not supported on zones");
+    }
+
+    #[test]
+    fn contract_creation_policy_allows_designated_deployer() {
+        let caller = Address::repeat_byte(0x11);
+        let request = call_request(None);
+
+        assert!(enforce_contract_creation_with_allowlist(&request, caller, &[]).is_err());
+        assert!(enforce_contract_creation_with_allowlist(&request, caller, &[caller]).is_ok());
+    }
+
+    #[test]
+    fn no_code_authorization_rejects_ethereum_and_tempo_lists() {
+        let authorization = Authorization {
+            chain_id: U256::ONE,
+            address: Address::repeat_byte(0x44),
+            nonce: 0,
+        };
+
+        let mut ethereum_request = call_request(Some(call_target(0x11)));
+        ethereum_request.inner.authorization_list = Some(vec![SignedAuthorization::new_unchecked(
+            authorization.clone(),
+            0,
+            U256::ONE,
+            U256::ONE,
+        )]);
+        assert!(enforce_no_code_authorization(&ethereum_request).is_err());
+
+        let mut tempo_request = call_request(Some(call_target(0x11)));
+        tempo_request.tempo_authorization_list = vec![TempoSignedAuthorization::new_unchecked(
+            authorization,
+            TempoSignature::Primitive(PrimitiveSignature::Secp256k1(Signature::test_signature())),
+        )];
+        assert!(enforce_no_code_authorization(&tempo_request).is_err());
     }
 
     #[test]

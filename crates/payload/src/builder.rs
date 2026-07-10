@@ -4,7 +4,7 @@
 //! followed by pool transactions and a withdrawal batch finalization.
 
 use crate::abi::{self, ZONE_INBOX_ADDRESS, ZONE_OUTBOX_ADDRESS};
-use alloy_consensus::{Signed, Transaction, TxLegacy};
+use alloy_consensus::{Signed, TxLegacy};
 use alloy_eips::eip4895::Withdrawals;
 use alloy_evm::{
     EvmFactory,
@@ -336,16 +336,6 @@ where
             .best_transactions_with_attributes(BestTransactionsAttributes::new(base_fee, None));
 
         while let Some(pool_tx) = best_txs.next() {
-            // Contract creation (CREATE) transactions are not allowed on zones
-            if pool_tx.transaction.is_create() {
-                best_txs.mark_invalid(
-                    &pool_tx,
-                    InvalidPoolTransactionError::Consensus(
-                        reth_primitives_traits::transaction::error::InvalidTransactionError::TxTypeNotSupported,
-                    ),
-                );
-                continue;
-            }
             let gas_limit_left = block_gas_limit;
             if cumulative_gas_used + pool_tx.gas_limit() > gas_limit_left {
                 best_txs.mark_invalid(
