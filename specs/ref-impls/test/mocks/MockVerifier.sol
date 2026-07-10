@@ -14,6 +14,7 @@ contract MockVerifier is IVerifier {
     }
 
     function verify(
+        uint32, // zoneId
         uint64, // tempoBlockNumber
         uint64, // anchorBlockNumber
         bytes32, // anchorBlockHash

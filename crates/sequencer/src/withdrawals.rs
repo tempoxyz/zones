@@ -32,7 +32,7 @@ use std::{
 };
 
 use alloy_network::ReceiptResponse;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_provider::DynProvider;
 use parking_lot::Mutex;
 use tempo_alloy::TempoNetwork;
@@ -40,9 +40,10 @@ use tokio::sync::Notify;
 use tracing::{debug, error, info, instrument, warn};
 
 use crate::{
-    abi::{self, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
+    abi::{self, EMPTY_SENTINEL, MAX_WITHDRAWAL_GAS_LIMIT, ZonePortal},
     metrics::WithdrawalProcessorMetrics,
     nonce_keys::PROCESS_WITHDRAWAL_NONCE_KEY,
+    settlement::{WITHDRAWAL_QUEUE_CAPACITY, find_processed_offset},
 };
 use tempo_alloy::rpc::TempoCallBuilderExt;
 
@@ -229,12 +230,29 @@ const fn process_withdrawal_tx_gas_limit(callback_gas_limit: u64) -> u64 {
         + eip150_cushion(bounded_callback_gas)
 }
 
+/// Outcome of submitting and confirming one `processWithdrawal` transaction.
+enum SubmitOutcome {
+    /// The transaction was included on L1 and succeeded.
+    Confirmed,
+    /// The transaction was included on L1 but reverted — the provided data does
+    /// not match the portal's on-chain state.
+    Reverted,
+    /// The transaction was broadcast but no receipt was obtained in time, or it
+    /// failed to send. The next cycle re-reads the on-chain slot hash and
+    /// resumes from wherever the portal actually is.
+    Unconfirmed,
+}
+
 /// Background task that processes withdrawals from the ZonePortal queue on Tempo L1.
 ///
 /// The processor waits for a [`Notify`] signal from the batch submitter (indicating a batch
-/// has landed on L1) and then processes the head slot of the portal's withdrawal queue.
+/// has landed on L1) and then drains the portal's withdrawal queue, slot by slot.
 /// A fallback timeout ensures the processor still checks periodically if a notification
 /// is missed.
+///
+/// The processor is idempotent: before submitting a slot it reads the slot's
+/// current on-chain hash and trims withdrawals the portal has already consumed,
+/// so it can safely run at any time from any state (crash, timeout, restart).
 ///
 /// ## POC limitations
 ///
@@ -317,221 +335,300 @@ impl WithdrawalProcessor {
         }
     }
 
-    /// Process the current head slot of the portal's withdrawal queue on Tempo L1.
+    /// Drain the portal's withdrawal queue on Tempo L1, slot by slot, until the
+    /// queue is empty or a withdrawal cannot be processed.
+    ///
+    /// For each head slot the processor reads the slot's current on-chain hash
+    /// and trims withdrawals the portal has already consumed
+    /// ([`find_processed_offset`]), so a crash, timeout, or restart mid-slot
+    /// resumes exactly where the portal is.
     #[instrument(skip_all)]
     async fn process_queue(&mut self) -> eyre::Result<()> {
-        let head_call = self.portal.withdrawalQueueHead();
-        let tail_call = self.portal.withdrawalQueueTail();
-        let (head, tail): (alloy_primitives::U256, alloy_primitives::U256) =
-            tokio::try_join!(head_call.call(), tail_call.call())?;
+        // loop through all the slots
+        loop {
+            let head_call = self.portal.withdrawalQueueHead();
+            let tail_call = self.portal.withdrawalQueueTail();
+            let (head, tail): (U256, U256) = tokio::try_join!(head_call.call(), tail_call.call())?;
 
-        let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
-        let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
-        let StoreSnapshot {
-            batch_count: store_batch_count,
-            first_slot: store_first_slot,
-            last_slot: store_last_slot,
-            prev_slot: prev_store_slot,
-            next_slot: next_store_slot,
-            withdrawals,
-        } = self.capture_store_snapshot(head_val);
-        self.record_queue_metrics(head_val, tail_val, store_batch_count);
+            let head_val: u64 = head.try_into().map_err(|_| eyre::eyre!("head overflow"))?;
+            let tail_val: u64 = tail.try_into().map_err(|_| eyre::eyre!("tail overflow"))?;
+            let StoreSnapshot {
+                batch_count: store_batch_count,
+                first_slot: store_first_slot,
+                last_slot: store_last_slot,
+                prev_slot: prev_store_slot,
+                next_slot: next_store_slot,
+                withdrawals,
+            } = self.capture_store_snapshot(head_val);
+            self.record_queue_metrics(head_val, tail_val, store_batch_count);
 
-        if head_val == tail_val {
-            debug!("Withdrawal queue empty, nothing to process");
-            return Ok(());
-        }
-
-        let pending_slots = tail_val - head_val;
-        info!(
-            head = head_val,
-            tail = tail_val,
-            pending_slots,
-            "Withdrawal queue has pending slots"
-        );
-
-        let withdrawals = match withdrawals {
-            Some(w) if !w.is_empty() => w,
-            _ => {
-                self.repair_notify.notify_one();
-                warn!(
-                    slot = head_val,
-                    tail = tail_val,
-                    pending_slots,
-                    store_batches = store_batch_count,
-                    store_first_slot,
-                    store_last_slot,
-                    prev_store_slot,
-                    next_store_slot,
-                    "No withdrawal data in store for current head slot"
-                );
+            if head_val == tail_val {
+                debug!("Withdrawal queue empty, nothing to process");
                 return Ok(());
             }
-        };
 
-        info!(
-            slot = head_val,
-            count = withdrawals.len(),
-            "Processing withdrawal batch"
-        );
-        let slot_started_at = Instant::now();
-        let slot_queue_hash = abi::Withdrawal::queue_hash(&withdrawals);
-
-        for (i, withdrawal) in withdrawals.iter().enumerate() {
-            self.metrics.withdrawals_processed_total.increment(1);
-            let remaining_queue = compute_remaining_queue(&withdrawals, i + 1);
-            let is_last = i + 1 == withdrawals.len();
-
+            let pending_slots = tail_val - head_val;
             info!(
-                slot = head_val,
-                index = i,
-                total = withdrawals.len(),
-                token = %withdrawal.token,
-                to = %withdrawal.to,
-                amount = %withdrawal.amount,
-                fee = %withdrawal.fee,
-                has_callback = withdrawal.gasLimit > 0,
-                is_last,
-                "📤 Submitting withdrawal to L1"
+                head = head_val,
+                tail = tail_val,
+                pending_slots,
+                "Withdrawal queue has pending slots"
             );
 
-            let call = self
-                .portal
-                .processWithdrawal(withdrawal.clone(), remaining_queue)
-                .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY);
-
-            // When the withdrawal has a callback (`gasLimit > 0`), we must
-            // override `eth_estimateGas` because the estimate only covers the
-            // revert / bounce-back path, which is much cheaper than the happy
-            // path where the callback actually executes.
-            //
-            // The tx gas limit is composed of three parts:
-            //
-            //   txGas = min(gasLimit, MAX_WITHDRAWAL_GAS_LIMIT)
-            //         + CALLBACK_OVERHEAD
-            //         + eip150_cushion
-            //
-            // 1. `gasLimit`          — gas the user requested for their callback.
-            // 2. `CALLBACK_OVERHEAD` — fixed cost for the portal + messenger
-            //    logic that runs *around* the callback: queue dequeue & hash
-            //    verification, TIP-20 transferFrom (~500k), messenger relay
-            //    setup, fee payment, event emission, and the bounce-back path
-            //    if the callback reverts.
-            // 3. EIP-150 cushion     — the 63/64 forwarding rule means the
-            //    caller must hold back 1/64 of remaining gas. To guarantee
-            //    the inner CALL receives at least `gasLimit`, the outer frame
-            //    needs an extra `ceil(bounded_callback_gas / 63)`.
-            //
-            // `MAX_WITHDRAWAL_GAS_LIMIT` mirrors the contract-level cap. It
-            // also bounds legacy over-cap withdrawals so RPC nodes do not
-            // reject the transaction before the portal can dequeue and
-            // bounce them back.
-            let call = if withdrawal.gasLimit > 0 {
-                let tx_gas_limit = process_withdrawal_tx_gas_limit(withdrawal.gasLimit);
-                if withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT {
+            let withdrawals = match withdrawals {
+                Some(w) if !w.is_empty() => w,
+                _ => {
+                    self.repair_notify.notify_one();
                     warn!(
                         slot = head_val,
-                        index = i,
-                        requested_gas_limit = withdrawal.gasLimit,
-                        max_gas_limit = MAX_WITHDRAWAL_GAS_LIMIT,
-                        tx_gas_limit,
-                        "withdrawal callback gas exceeds protocol cap; submitting bounded tx"
-                    );
-                }
-                call.gas(tx_gas_limit)
-            } else {
-                call
-            };
-
-            let tx_result = call.send().await;
-
-            match tx_result {
-                Ok(pending) => {
-                    let tx_hash = *pending.tx_hash();
-                    match pending
-                        .with_timeout(Some(PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT))
-                        .get_receipt()
-                        .await
-                    {
-                        Ok(receipt) => {
-                            if !receipt.status() {
-                                self.metrics.withdrawals_failed_total.increment(1);
-                                self.metrics.withdrawals_reverted_total.increment(1);
-                                self.record_slot_duration(slot_started_at.elapsed());
-                                self.repair_notify.notify_one();
-
-                                error!(
-                                    slot = head_val,
-                                    index = i,
-                                    %tx_hash,
-                                    to = %withdrawal.to,
-                                    amount = %withdrawal.amount,
-                                    queue_head = head_val,
-                                    queue_tail = tail_val,
-                                    expected_slot_queue_hash = %slot_queue_hash,
-                                    expected_remaining_queue = %remaining_queue,
-                                    "processWithdrawal tx was included but reverted; keeping batch in store and requesting repair"
-                                );
-                                return Ok(());
-                            }
-
-                            self.metrics.withdrawals_confirmed_total.increment(1);
-                            info!(
-                                slot = head_val,
-                                index = i,
-                                %tx_hash,
-                                token = %withdrawal.token,
-                                to = %withdrawal.to,
-                                amount = %withdrawal.amount,
-                                "✅ Withdrawal confirmed on L1"
-                            );
-                        }
-                        Err(e) => {
-                            self.metrics.withdrawals_failed_total.increment(1);
-                            self.record_slot_duration(slot_started_at.elapsed());
-                            error!(
-                                slot = head_val,
-                                index = i,
-                                %tx_hash,
-                                expected_slot_queue_hash = %slot_queue_hash,
-                                expected_remaining_queue = %remaining_queue,
-                                to = %withdrawal.to,
-                                amount = %withdrawal.amount,
-                                error = %e,
-                                "processWithdrawal tx not confirmed, stopping batch processing"
-                            );
-                            return Ok(());
-                        }
-                    }
-                }
-                Err(e) => {
-                    self.metrics.withdrawals_failed_total.increment(1);
-                    self.record_slot_duration(slot_started_at.elapsed());
-                    error!(
-                        slot = head_val,
-                        index = i,
-                        expected_slot_queue_hash = %slot_queue_hash,
-                        expected_remaining_queue = %remaining_queue,
-                        to = %withdrawal.to,
-                        amount = %withdrawal.amount,
-                        error = %e,
-                        "processWithdrawal tx failed to send, stopping batch processing"
+                        tail = tail_val,
+                        pending_slots,
+                        store_batches = store_batch_count,
+                        store_first_slot,
+                        store_last_slot,
+                        prev_store_slot,
+                        next_store_slot,
+                        "No withdrawal data in store for current head slot"
                     );
                     return Ok(());
                 }
-            }
-        }
-        self.record_slot_duration(slot_started_at.elapsed());
+            };
 
-        // All withdrawals in this slot confirmed — safe to remove.
-        self.store.lock().remove_batch(head_val);
+            // Read the head slot's current on-chain hash and skip
+            // withdrawals the portal has already consumed.
+            let slot_hash = self
+                .portal
+                .withdrawalQueueSlot(U256::from(head_val % WITHDRAWAL_QUEUE_CAPACITY))
+                .call()
+                .await?;
+
+            if slot_hash == EMPTY_SENTINEL {
+                // The slot was fully consumed and head advanced between our reads.
+                // Re-check on the next cycle.
+                debug!(
+                    slot = head_val,
+                    "Head slot already consumed; skipping cycle"
+                );
+                return Ok(());
+            }
+
+            let Some(offset) = find_processed_offset(&withdrawals, slot_hash) else {
+                error!(
+                    slot = head_val,
+                    on_chain_slot_hash = %slot_hash,
+                    store_queue_hash = %abi::Withdrawal::queue_hash(&withdrawals),
+                    "Store data does not match the head slot's on-chain hash; requesting repair"
+                );
+                self.repair_notify.notify_one();
+                return Ok(());
+            };
+
+            if offset > 0 {
+                info!(
+                    slot = head_val,
+                    processed = offset,
+                    remaining = withdrawals.len() - offset,
+                    "Trimmed withdrawals already consumed by the portal"
+                );
+            }
+
+            let remaining = &withdrawals[offset..];
+            if remaining.is_empty() {
+                // Defensive: queue_hash never produces B256::ZERO for a pending head
+                // slot, but if it happens drop the stale batch and wait for the portal.
+                warn!(
+                    slot = head_val,
+                    "Head slot fully processed but head not advanced"
+                );
+                self.store.lock().remove_batch(head_val);
+                return Ok(());
+            }
+
+            info!(
+                slot = head_val,
+                count = remaining.len(),
+                "Processing withdrawal batch"
+            );
+            let slot_started_at = Instant::now();
+
+            for (i, withdrawal) in remaining.iter().enumerate() {
+                let remaining_queue = compute_remaining_queue(remaining, i + 1);
+                let outcome = self
+                    .submit_and_confirm(
+                        head_val,
+                        offset + i,
+                        remaining.len(),
+                        withdrawal,
+                        remaining_queue,
+                    )
+                    .await;
+
+                match outcome {
+                    SubmitOutcome::Confirmed => {}
+                    SubmitOutcome::Reverted => {
+                        self.record_slot_duration(slot_started_at.elapsed());
+                        self.repair_notify.notify_one();
+                        return Ok(());
+                    }
+                    SubmitOutcome::Unconfirmed => {
+                        // The next cycle re-reads the on-chain slot hash and resumes
+                        // from wherever the portal actually is.
+                        self.record_slot_duration(slot_started_at.elapsed());
+                        return Ok(());
+                    }
+                }
+            }
+            self.record_slot_duration(slot_started_at.elapsed());
+
+            // All withdrawals in this slot confirmed — safe to remove. Continue
+            // the loop to drain any further pending slots.
+            self.store.lock().remove_batch(head_val);
+
+            info!(
+                slot = head_val,
+                count = remaining.len(),
+                "Batch fully processed and removed from store"
+            );
+        }
+    }
+
+    /// Submit one `processWithdrawal` transaction and wait for its receipt.
+    async fn submit_and_confirm(
+        &self,
+        slot: u64,
+        index: usize,
+        total: usize,
+        withdrawal: &abi::Withdrawal,
+        remaining_queue: B256,
+    ) -> SubmitOutcome {
+        self.metrics.withdrawals_processed_total.increment(1);
 
         info!(
-            slot = head_val,
-            count = withdrawals.len(),
-            "Batch fully processed and removed from store"
+            slot,
+            index,
+            total,
+            token = %withdrawal.token,
+            to = %withdrawal.to,
+            amount = %withdrawal.amount,
+            fee = %withdrawal.fee,
+            has_callback = withdrawal.gasLimit > 0,
+            "📤 Submitting withdrawal to L1"
         );
-        Ok(())
+
+        let call = self
+            .portal
+            .processWithdrawal(withdrawal.clone(), remaining_queue)
+            .nonce_key(PROCESS_WITHDRAWAL_NONCE_KEY);
+
+        // When the withdrawal has a callback (`gasLimit > 0`), we must
+        // override `eth_estimateGas` because the estimate only covers the
+        // revert / bounce-back path, which is much cheaper than the happy
+        // path where the callback actually executes.
+        //
+        // The tx gas limit is composed of three parts:
+        //
+        //   txGas = min(gasLimit, MAX_WITHDRAWAL_GAS_LIMIT)
+        //         + CALLBACK_OVERHEAD
+        //         + eip150_cushion
+        //
+        // 1. `gasLimit`          — gas the user requested for their callback.
+        // 2. `CALLBACK_OVERHEAD` — fixed cost for the portal + messenger
+        //    logic that runs *around* the callback: queue dequeue & hash
+        //    verification, TIP-20 transferFrom (~500k), messenger relay
+        //    setup, fee payment, event emission, and the bounce-back path
+        //    if the callback reverts.
+        // 3. EIP-150 cushion     — the 63/64 forwarding rule means the
+        //    caller must hold back 1/64 of remaining gas. To guarantee
+        //    the inner CALL receives at least `gasLimit`, the outer frame
+        //    needs an extra `ceil(bounded_callback_gas / 63)`.
+        //
+        // `MAX_WITHDRAWAL_GAS_LIMIT` mirrors the contract-level cap. It
+        // also bounds legacy over-cap withdrawals so RPC nodes do not
+        // reject the transaction before the portal can dequeue and
+        // bounce them back.
+        let call = if withdrawal.gasLimit > 0 {
+            let tx_gas_limit = process_withdrawal_tx_gas_limit(withdrawal.gasLimit);
+            if withdrawal.gasLimit > MAX_WITHDRAWAL_GAS_LIMIT {
+                warn!(
+                    slot,
+                    index,
+                    requested_gas_limit = withdrawal.gasLimit,
+                    max_gas_limit = MAX_WITHDRAWAL_GAS_LIMIT,
+                    tx_gas_limit,
+                    "withdrawal callback gas exceeds protocol cap; submitting bounded tx"
+                );
+            }
+            call.gas(tx_gas_limit)
+        } else {
+            call
+        };
+
+        let pending = match call.send().await {
+            Ok(pending) => pending,
+            Err(e) => {
+                self.metrics.withdrawals_failed_total.increment(1);
+                error!(
+                    slot,
+                    index,
+                    expected_remaining_queue = %remaining_queue,
+                    to = %withdrawal.to,
+                    amount = %withdrawal.amount,
+                    error = %e,
+                    "processWithdrawal tx failed to send, stopping batch processing"
+                );
+                return SubmitOutcome::Unconfirmed;
+            }
+        };
+
+        let tx_hash = *pending.tx_hash();
+        let receipt = match pending
+            .with_timeout(Some(PROCESS_WITHDRAWAL_CONFIRM_TIMEOUT))
+            .get_receipt()
+            .await
+        {
+            Ok(receipt) => receipt,
+            Err(e) => {
+                self.metrics.withdrawals_failed_total.increment(1);
+                error!(
+                    slot,
+                    index,
+                    %tx_hash,
+                    expected_remaining_queue = %remaining_queue,
+                    to = %withdrawal.to,
+                    amount = %withdrawal.amount,
+                    error = %e,
+                    "processWithdrawal tx not confirmed, stopping batch processing"
+                );
+                return SubmitOutcome::Unconfirmed;
+            }
+        };
+
+        if !receipt.status() {
+            self.metrics.withdrawals_failed_total.increment(1);
+            self.metrics.withdrawals_reverted_total.increment(1);
+            error!(
+                slot,
+                index,
+                %tx_hash,
+                to = %withdrawal.to,
+                amount = %withdrawal.amount,
+                expected_remaining_queue = %remaining_queue,
+                "processWithdrawal tx was included but reverted; keeping batch in store and requesting repair"
+            );
+            return SubmitOutcome::Reverted;
+        }
+
+        self.metrics.withdrawals_confirmed_total.increment(1);
+        info!(
+            slot,
+            index,
+            %tx_hash,
+            token = %withdrawal.token,
+            to = %withdrawal.to,
+            amount = %withdrawal.amount,
+            "✅ Withdrawal confirmed on L1"
+        );
+        SubmitOutcome::Confirmed
     }
 
     fn record_queue_metrics(&mut self, head: u64, tail: u64, store_batch_count: usize) {
@@ -789,24 +886,39 @@ mod tests {
         assert_eq!(store.batch_count(), 2);
     }
 
+    fn abi_encode_b256(value: B256) -> Bytes {
+        Bytes::copy_from_slice(value.as_slice())
+    }
+
+    fn test_processor(
+        l1: Asserter,
+        store: SharedWithdrawalStore,
+        repair_notify: Arc<Notify>,
+    ) -> WithdrawalProcessor {
+        let config = WithdrawalProcessorConfig {
+            portal_address: address!("0x7069DeC4E64Fd07334A0933eDe836C17259c9B23"),
+            l1_rpc_url: "http://unused.test".to_string(),
+            fallback_poll_interval: Duration::from_secs(1),
+        };
+        WithdrawalProcessor::new(
+            config,
+            mock_provider(l1),
+            store,
+            Arc::new(Notify::new()),
+            repair_notify,
+        )
+    }
+
     #[tokio::test]
     async fn process_queue_requests_monitor_resync_when_head_slot_missing() {
         let l1 = Asserter::new();
         l1.push_success(&abi_encode_u64(51));
         l1.push_success(&abi_encode_u64(71));
 
-        let config = WithdrawalProcessorConfig {
-            portal_address: address!("0x7069DeC4E64Fd07334A0933eDe836C17259c9B23"),
-            l1_rpc_url: "http://unused.test".to_string(),
-            fallback_poll_interval: Duration::from_secs(1),
-        };
-        let notify = Arc::new(Notify::new());
         let repair_notify = Arc::new(Notify::new());
-        let mut processor = WithdrawalProcessor::new(
-            config,
-            mock_provider(l1.clone()),
+        let mut processor = test_processor(
+            l1.clone(),
             SharedWithdrawalStore::new(),
-            notify,
             repair_notify.clone(),
         );
 
@@ -815,6 +927,67 @@ mod tests {
         timeout(Duration::from_millis(50), repair_notify.notified())
             .await
             .expect("missing head slot should request a monitor resync");
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_queue_requests_repair_when_store_data_mismatches_slot_hash() {
+        let l1 = Asserter::new();
+        // head = 5, tail = 6, slot hash that matches no suffix of the stored batch.
+        l1.push_success(&abi_encode_u64(5));
+        l1.push_success(&abi_encode_u64(6));
+        l1.push_success(&abi_encode_b256(B256::repeat_byte(0xde)));
+
+        let store = SharedWithdrawalStore::new();
+        store.lock().add_batch(
+            5,
+            vec![test_withdrawal(
+                address!("0x0000000000000000000000000000000000000042"),
+                100,
+            )],
+        );
+
+        let repair_notify = Arc::new(Notify::new());
+        let mut processor = test_processor(l1.clone(), store, repair_notify.clone());
+
+        processor.process_queue().await.unwrap();
+
+        timeout(Duration::from_millis(50), repair_notify.notified())
+            .await
+            .expect("mismatched slot hash should request a monitor resync");
+        assert!(l1.read_q().is_empty());
+    }
+
+    #[tokio::test]
+    async fn process_queue_skips_cycle_when_head_slot_already_consumed() {
+        let l1 = Asserter::new();
+        // head = 5, tail = 6, slot already contains EMPTY_SENTINEL (head advanced
+        // between our head read and the slot read).
+        l1.push_success(&abi_encode_u64(5));
+        l1.push_success(&abi_encode_u64(6));
+        l1.push_success(&abi_encode_b256(EMPTY_SENTINEL));
+
+        let store = SharedWithdrawalStore::new();
+        store.lock().add_batch(
+            5,
+            vec![test_withdrawal(
+                address!("0x0000000000000000000000000000000000000042"),
+                100,
+            )],
+        );
+
+        let repair_notify = Arc::new(Notify::new());
+        let mut processor = test_processor(l1.clone(), store.clone(), repair_notify.clone());
+
+        processor.process_queue().await.unwrap();
+
+        // No repair requested and the batch stays in the store.
+        assert!(
+            timeout(Duration::from_millis(50), repair_notify.notified())
+                .await
+                .is_err()
+        );
+        assert!(store.lock().has_batch(5));
         assert!(l1.read_q().is_empty());
     }
 }

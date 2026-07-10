@@ -629,15 +629,15 @@ for i from (count - 1) down to 0:
 
 The function writes `withdrawalQueueHash` and `withdrawalBatchIndex` to `lastBatch` storage, where the proof reads them. The call is required at each batch boundary even if there are zero withdrawals (use `count = 0`) so the batch index advances. The `withdrawalBatchIndex` ensures batches are submitted in order, preventing the sequencer from omitting batches that contain withdrawals.
 
-Batch cadence is sequencer-chosen. It closes a batch when there are pending withdrawals or otherwise closes an empty batch when the configured `withdrawalBatchInterval` elapses; the default interval is 60 seconds. Intermediate zone blocks in the same batch do not call `finalizeWithdrawalBatch`.
+Batch cadence is deterministic. It closes a batch when there are pending withdrawals or otherwise closes an empty batch at a block-number boundary. The default cadence is every 120th zone block (~1 minute at Tempo's expected 500 ms block interval), configurable as a block count. Intermediate zone blocks in the same batch do not call `finalizeWithdrawalBatch`.
 
 ### Withdrawal Queue
 
-The portal stores withdrawals in a fixed-size ring buffer with `WITHDRAWAL_QUEUE_CAPACITY = 100`. Each batch with a non-zero `withdrawalQueueHash` gets its own slot. Empty batches advance `withdrawalBatchIndex` but do not consume a ring-buffer slot.
+The portal stores withdrawals in a fixed-size ring buffer with `WITHDRAWAL_QUEUE_CAPACITY = 100`. Each batch with a non-zero `withdrawalQueueHash` gets its own logical queue index. Empty batches advance `withdrawalBatchIndex` but do not consume a queue index.
 
-The portal tracks `head` (oldest unprocessed batch) and `tail` (where the next batch writes). Both are raw counters that never wrap. Modular arithmetic (`index % 100`) is used for slot indexing. Empty slots contain `EMPTY_SENTINEL` (`0xff...ff`) instead of `0x00` to avoid storage clearing and gas refund incentive issues.
+The portal tracks `head` (oldest unprocessed batch) and `tail` (the logical index assigned to the next non-empty batch). Both are monotonically increasing counters that never wrap. The physical ring-buffer slot for a logical queue index is `index % 100`. `withdrawalQueueSlot(physicalSlot)` reads a physical slot, so clients resolving a pending logical index from an event must call `withdrawalQueueSlot(withdrawalQueueIndex % 100)`. Empty physical slots contain `EMPTY_SENTINEL` (`0xff...ff`) instead of `0x00` to avoid storage clearing and gas refund incentive issues.
 
-When `submitBatch` includes a non-zero `withdrawalQueueHash`, it is written to `slots[tail % 100]` and `tail` advances. The queue reverts with `WithdrawalQueueFull` if `tail - head >= 100`.
+When `submitBatch` includes a non-zero `withdrawalQueueHash`, the current `tail` is assigned as its logical `withdrawalQueueIndex`, the hash is written to `slots[withdrawalQueueIndex % 100]`, and `tail` advances. `BatchSubmitted.withdrawalQueueIndex` emits that assigned logical index. For an empty batch, the event emits `NO_QUEUE_INDEX = type(uint256).max` and `tail` does not advance. The queue reverts with `WithdrawalQueueFull` if `tail - head >= 100`.
 
 ### Withdrawal Processing
 
@@ -745,7 +745,7 @@ Each zone block contains system transactions and user transactions in a fixed or
 2. User transactions, executed in order.
 3. `ZoneOutbox.finalizeWithdrawalBatch(count, blockNumber, encryptedSenders)` (required in the final block of a batch, absent in intermediate blocks). Constructs the withdrawal hash chain from pending withdrawals, populates `encryptedSender` for authenticated withdrawals, and writes the `withdrawalQueueHash` and `withdrawalBatchIndex` to state. Must be called at each batch boundary even if there are zero withdrawals so the batch index advances. The builder may execute it as a zone system transaction with `msg.sender == address(0)`.
 
-A batch covers one or more zone blocks and ends with exactly one `finalizeWithdrawalBatch` call. The sequencer controls batch frequency, and finalizes when withdrawals are present or uses the configured `withdrawalBatchInterval` as the maximum time between empty batch boundaries (60 seconds by default). Intermediate blocks within a batch contain only `advanceTempo` (optional) and user transactions.
+A batch covers one or more zone blocks and ends with exactly one `finalizeWithdrawalBatch` call. The sequencer finalizes when withdrawals are present or when the current zone block number is a configured batch-cadence multiple (every 120 blocks by default). Intermediate blocks within a batch contain only `advanceTempo` (optional) and user transactions.
 
 ### Block Header Format
 
@@ -989,7 +989,7 @@ It takes a complete witness of zone blocks and their dependencies, executes EVM 
 
 The witness contains everything needed to re-execute the batch:
 
-- **PublicInputs**: `prev_block_hash`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with.
+- **PublicInputs**: `zone_id`, `prev_block_hash`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with.
 - **BatchWitness**: the public inputs, the previous batch's block header, the zone blocks to execute, the initial zone state, Tempo state proofs, and Tempo ancestry headers (for ancestry validation).
 - **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `protocol_version`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
 - **ZoneStateWitness**: the initial zone state root, a deduplicated pool of zone-state trie nodes, and decoded account / storage reads needed to bootstrap execution. Only accounts and storage slots accessed during execution are included. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
@@ -1003,7 +1003,7 @@ flowchart TB
     subgraph BW["BatchWitness"]
         direction TB
 
-        PI["PublicInputs<br/>prev_block_hash<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
+        PI["PublicInputs<br/>zone_id<br/>prev_block_hash<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
 
         PH["ZoneHeader<br/>parent_hash<br/>beneficiary<br/>state_root<br/>transactions_root<br/>receipts_root<br/>number<br/>timestamp<br/>protocol_version"]
 
@@ -1073,6 +1073,10 @@ The prover-side inputs are defined concretely below. Types that mirror the oncha
 
 ```rust
 pub struct PublicInputs {
+    /// Zone ID. The verifier must bind this public input to the zone portal;
+    /// the program derives the EVM chain ID from it.
+    pub zone_id: u32,
+
     /// Previous batch's block hash (must equal portal.blockHash)
     pub prev_block_hash: B256,
 
@@ -1211,7 +1215,7 @@ pub struct ZoneStateWitness {
     pub state_root: B256,
 
     /// Deduplicated pool of all zone-state MPT nodes
-    pub node_pool: HashMap<B256, Vec<u8>>,
+    pub node_pool: Vec<Vec<u8>>,
 
     /// Decoded account leaves needed to bootstrap execution
     pub account_reads: Vec<ZoneAccountRead>,
@@ -1236,7 +1240,7 @@ pub struct ZoneStorageRead {
 
 pub struct BatchStateProof {
     /// Deduplicated pool of all MPT nodes
-    pub node_pool: HashMap<B256, Vec<u8>>,
+    pub node_pool: Vec<Vec<u8>>,
 
     /// Tempo state reads verified against the shared node pool
     pub reads: Vec<L1StateRead>,
@@ -1262,14 +1266,14 @@ pub struct L1StateRead {
 
 `ZoneStateWitness` and `BatchStateProof` both use the same trie-proof encoding:
 
-- `node_pool` is a deduplicated map from `keccak256(rlp(node))` to the node's raw RLP bytes. The prover validates each node once by recomputing the hash.
+- `node_pool` is a deduplicated list of raw RLP-encoded nodes. The prover computes `keccak256(rlp(node))` for each entry and builds its own hash-to-node index for proof traversal.
 - Each read descriptor (`ZoneAccountRead`, `ZoneStorageRead`, or `L1StateRead`) states which decoded account or storage value must be proven against a bound trie root.
-- Verification walks the account trie using `keccak256(account)` and, when needed, the storage trie using `keccak256(slot)`, fetching branch, extension, and leaf nodes from `node_pool`.
+- Verification walks the account trie using `keccak256(account)` and, when needed, the storage trie using `keccak256(slot)`, fetching branch, extension, and leaf nodes from the prover's hash-to-node index constructed from `node_pool`.
 - For `ZoneAccountRead`, the account leaf proves the committed `code_hash`, but not the bytecode preimage itself. If the witness supplies `code`, the prover must additionally require `keccak256(code) == code_hash` before materializing that account into the execution state.
 - Missing leaves are represented by valid non-membership proofs. An absent account is interpreted as the canonical empty account: `nonce = 0`, `balance = 0`, `code = None`, `code_hash = KECCAK_EMPTY`, and an empty storage trie. An absent storage leaf is interpreted as zero.
 - Client databases may still retain historical trie nodes that are no longer reachable from the current root, but those stale nodes are irrelevant to proof verification because only nodes reachable from the bound root contribute to the proof.
 
-`ZoneStateWitness` applies this shared trie proof format to the initial zone-state root at batch start. `account_reads` and `storage_reads` describe the decoded account and storage values needed to bootstrap execution. To initialize execution, the prover checks that `ZoneStateWitness.state_root` is consistent with `prev_block_header.state_root`, validates `node_pool`, proves each `ZoneAccountRead` and `ZoneStorageRead` against that initial root, checks `keccak256(code) == code_hash` for every supplied account-code preimage, materializes the resulting account and storage values into the execution state, and only then starts replaying blocks. Missing account or storage reads are errors; they must not silently default to zero.
+`ZoneStateWitness` applies this shared trie proof format to the initial zone-state root at batch start. `account_reads` and `storage_reads` describe the decoded account and storage values needed to bootstrap execution. To initialize execution, the prover indexes `node_pool`, proves each `ZoneAccountRead` and `ZoneStorageRead` against that initial root, checks `keccak256(code) == code_hash` for every supplied account-code preimage, materializes the resulting account and storage values into the execution state, and only then starts replaying blocks. Missing account or storage reads are errors; they must not silently default to zero.
 
 ### Batch Output
 
@@ -1290,10 +1294,10 @@ The stateless execution function must reject the witness on any failed check, mi
    Require `keccak256(rlp(prev_block_header)) == public_inputs.prev_block_hash`. Require `prev_block_header.state_root == initial_zone_state.state_root`. These checks ensure that the witness starts from the exact predecessor block already committed on Tempo.
 
 2. **Verify and materialize the initial zone state.**
-   Apply the [shared trie proof format](#shared-trie-proof-format) to `initial_zone_state`: validate every node in `initial_zone_state.node_pool`, prove each `ZoneAccountRead` and `ZoneStorageRead` against `initial_zone_state.state_root`, require `keccak256(code) == code_hash` for every supplied account-code preimage, interpret non-membership as the canonical empty account or zero storage, and load the decoded results into the prover's in-memory execution state. After this step, ordinary zone-state reads during execution come from the materialized state, not from repeated Merkle-proof checks.
+   Apply the [shared trie proof format](#shared-trie-proof-format) to `initial_zone_state`: index each node in `initial_zone_state.node_pool` by `keccak256(rlp(node))`, prove each `ZoneAccountRead` and `ZoneStorageRead` against `initial_zone_state.state_root`, require `keccak256(code) == code_hash` for every supplied account-code preimage, interpret non-membership as the canonical empty account or zero storage, and load the decoded results into the prover's in-memory execution state. After this step, ordinary zone-state reads during execution come from the materialized state, not from repeated Merkle-proof checks.
 
-3. **Verify and index the Tempo proof pool.**
-   Validate every node in `tempo_state_proofs.node_pool` once by recomputing `keccak256(rlp(node))` for each node.
+3. **Index the Tempo proof pool.**
+   Compute `keccak256(rlp(node))` for each node in `tempo_state_proofs.node_pool` and build a hash-to-node index for proof traversal.
 
 4. **For each `zone_blocks[i]`, verify the block witness before executing it.**
    Require `block.parent_hash == prev_block_hash`. Require `block.number == prev_header.number + 1`. Require `block.timestamp >= prev_header.timestamp`. Require `block.beneficiary == public_inputs.sequencer`. Require `finalize_withdrawal_batch_count` to be absent in intermediate blocks and present in the final block of the batch. If `tempo_header_rlp` is absent, require `deposits`, `decryptions`, and `enabled_tokens` to be empty. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
@@ -1326,7 +1330,7 @@ The stateless execution function must reject the witness on any failed check, mi
 
 System contracts read Tempo state during execution (deposit queue hash, sequencer address, token registry, TIP-403 policies). `BatchStateProof` applies the [shared trie proof format](#shared-trie-proof-format) to the Tempo root from the header currently bound by `TempoState` at the moment of each read. If `advanceTempo()` runs during the batch, later reads are therefore verified against the newer Tempo root, not the root from the start of the batch. The witness includes a `BatchStateProof` containing:
 
-- A deduplicated `node_pool` of MPT nodes, keyed by `keccak256(rlp(node))`. Each node is verified exactly once.
+- A deduplicated `node_pool` of raw RLP-encoded MPT nodes. The prover computes `keccak256(rlp(node))` for each entry and builds a hash-to-node index.
 - A list of `L1StateRead` entries, each specifying the zone block index, Tempo block number, account, storage slot, and expected value.
 
 Reads are indexed and verified on demand during execution. Each `L1StateRead` is additionally tagged with `zone_block_index` and `tempo_block_number` so the prover can bind that read to the correct in-batch Tempo checkpoint. The proof shape is the same as `ZoneStateWitness`; the difference is timing. `ZoneStateWitness` is verified once against the initial zone-state root at batch start, while `BatchStateProof` reads are verified against the Tempo root bound by the active Tempo checkpoint at the moment of each read.
@@ -1362,8 +1366,8 @@ On success, the portal:
 1. Updates `blockHash` to `nextBlockHash`.
 2. Updates `lastSyncedTempoBlockNumber` to `tempoBlockNumber` and `lastProcessedDepositNumber` to `depositQueueTransition.nextDepositNumber`.
 3. Advances `withdrawalBatchIndex`.
-4. Adds the withdrawal hash chain to the next slot in the withdrawal queue ring buffer (if `withdrawalQueueHash` is non-zero).
-5. Emits `BatchSubmitted`.
+4. If `withdrawalQueueHash` is non-zero, assigns the current logical withdrawal queue `tail`, writes the hash chain to physical slot `tail % WITHDRAWAL_QUEUE_CAPACITY`, and advances `tail`.
+5. Emits `BatchSubmitted` with the assigned logical `withdrawalQueueIndex`, or `NO_QUEUE_INDEX` for an empty batch.
 
 ### Verifier Interface
 
@@ -1372,6 +1376,7 @@ The portal calls the verifier to validate each batch:
 ```solidity
 interface IVerifier {
     function verify(
+        uint32 zoneId,
         uint64 tempoBlockNumber,
         uint64 anchorBlockNumber,
         bytes32 anchorBlockHash,
@@ -1386,7 +1391,7 @@ interface IVerifier {
 }
 ```
 
-The portal computes `anchorBlockNumber` and `anchorBlockHash` from the submission parameters (see [Anchor Block Validation](#anchor-block-validation)) and passes them alongside the portal's current `withdrawalBatchIndex + 1` as `expectedWithdrawalBatchIndex` and the registered `sequencer` address. The `verifierConfig` and `proof` are opaque to the portal.
+The portal passes its `zoneId`, computes `anchorBlockNumber` and `anchorBlockHash` from the submission parameters (see [Anchor Block Validation](#anchor-block-validation)), and passes them alongside the portal's current `withdrawalBatchIndex + 1` as `expectedWithdrawalBatchIndex` and the registered `sequencer` address. The `verifierConfig` and `proof` are opaque to the portal.
 
 ### Anchor Block Validation
 
@@ -1638,6 +1643,7 @@ interface IZonePortal {
     );
     event BatchSubmitted(
         uint64 indexed withdrawalBatchIndex,
+        uint256 indexed withdrawalQueueIndex,
         bytes32 nextProcessedDepositQueueHash,
         bytes32 nextBlockHash,
         bytes32 withdrawalQueueHash,
@@ -1795,7 +1801,7 @@ interface IZonePortal {
     function lastSyncedTempoBlockNumber() external view returns (uint64);
     function withdrawalQueueHead() external view returns (uint256);
     function withdrawalQueueTail() external view returns (uint256);
-    function withdrawalQueueSlot(uint256 slot) external view returns (bytes32);
+    function withdrawalQueueSlot(uint256 physicalSlot) external view returns (bytes32);
     function genesisTempoBlockNumber() external view returns (uint64);
 
 }

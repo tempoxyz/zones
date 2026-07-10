@@ -15,6 +15,7 @@ contract VerifierTest is Test {
         bool ok = verifier.verify(
             1,
             1,
+            1,
             bytes32("anchor"),
             1,
             address(0x1234),

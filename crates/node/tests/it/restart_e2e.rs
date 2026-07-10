@@ -442,7 +442,7 @@ async fn test_deferred_withdrawal_survives_sequencer_restart() -> eyre::Result<(
         l1.http_url(),
         l1.ws_url(),
         portal_address,
-        std::time::Duration::from_secs(120),
+        10_000,
     )
     .await?;
     zone.wait_for_l2_tempo_finalized(0, L1_TIMEOUT).await?;

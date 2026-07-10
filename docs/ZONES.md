@@ -586,7 +586,7 @@ Current deployment:
 | `--sequencer` | false | Enable sequencer mode for block production and withdrawal batch submission |
 | `--sequencer-key` | (optional) | Sequencer private key used when `--sequencer` is enabled |
 | `--block.interval-ms` | 250 | Block building interval |
-| `--zone.batch-interval-secs` | 60 | Max seconds to accumulate zone blocks before submitting a batch to L1 |
+| `--zone.batch-interval-blocks` | 120 | Zone blocks between empty withdrawal batch boundaries / L1 submissions (~1 minute at Tempo's 500 ms block time) |
 | `--zone.poll-interval-secs` | 1 | How often (seconds) the zone monitor polls for new L2 blocks |
 | `--withdrawal-poll-interval-secs` | 5 | How often (seconds) the withdrawal processor polls the L1 queue |
 | `--http.port` | 8546 | HTTP JSON-RPC port |

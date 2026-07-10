@@ -66,7 +66,8 @@ use zone_l1::{
     },
 };
 use zone_payload::{
-    DEFAULT_WITHDRAWAL_BATCH_INTERVAL, ZonePayloadAttributes, ZonePayloadFactory, ZonePayloadTypes,
+    DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS, ZonePayloadAttributes, ZonePayloadFactory,
+    ZonePayloadTypes,
 };
 use zone_sequencer::{BatchAnchorConfig, ZoneSequencerConfig, spawn_zone_sequencer};
 
@@ -82,8 +83,8 @@ pub struct ZoneSequencerAddOnsConfig {
     pub zone_id: u32,
     /// How often the zone monitor polls for new L2 blocks.
     pub zone_poll_interval: Duration,
-    /// Maximum time between withdrawal batch boundaries/submissions.
-    pub batch_interval: Duration,
+    /// Number of zone blocks between withdrawal batch boundaries / L1 submissions.
+    pub batch_interval_blocks: u64,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
     /// How often the withdrawal processor polls the L1 queue.
@@ -121,8 +122,8 @@ pub struct ZoneNode {
     /// Optional pre-configured list of enabled token addresses. When set, the
     /// startup L1 RPC query for `enabledTokenCount`/`enabledTokens` is skipped.
     initial_tokens: Option<Vec<Address>>,
-    /// Maximum chain-time duration between withdrawal batch finalizations.
-    withdrawal_batch_interval: Duration,
+    /// Number of zone blocks between withdrawal batch boundaries.
+    withdrawal_batch_interval_blocks: u64,
     /// Private RPC config.
     private_rpc_config: ZonePrivateRpcConfig,
     /// Optional sequencer config. When set, sequencer tasks are spawned.
@@ -167,7 +168,7 @@ impl ZoneNode {
             policy_cache,
             portal_address,
             initial_tokens: None,
-            withdrawal_batch_interval: DEFAULT_WITHDRAWAL_BATCH_INTERVAL,
+            withdrawal_batch_interval_blocks: DEFAULT_WITHDRAWAL_BATCH_INTERVAL_BLOCKS,
             private_rpc_config: ZonePrivateRpcConfig::default(),
             sequencer_config: None,
         }
@@ -193,10 +194,10 @@ impl ZoneNode {
         self
     }
 
-    /// Set the chain-time interval used by the payload builder for empty
-    /// withdrawal batch finalization.
-    pub fn with_withdrawal_batch_interval(mut self, interval: Duration) -> Self {
-        self.withdrawal_batch_interval = interval;
+    /// Set the number of zone blocks between empty withdrawal batch
+    /// finalization.
+    pub fn with_withdrawal_batch_interval_blocks(mut self, interval_blocks: u64) -> Self {
+        self.withdrawal_batch_interval_blocks = interval_blocks.max(1);
         self
     }
 
@@ -636,7 +637,7 @@ where
             tempo_state_address: TEMPO_STATE_ADDRESS,
             zone_rpc_url,
             zone_poll_interval: config.zone_poll_interval,
-            batch_interval: config.batch_interval,
+            batch_interval_blocks: config.batch_interval_blocks,
             batch_anchor_config: config.batch_anchor_config,
         };
         let seq_handle = spawn_zone_sequencer(sequencer_config, config.sequencer_signer).await;
@@ -722,7 +723,7 @@ where
             self.l1_state_cache.clone(),
             self.policy_cache.clone(),
         );
-        let payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval);
+        let payload_factory = ZonePayloadFactory::new(self.withdrawal_batch_interval_blocks);
         Self::components_with_payload_factory(executor_builder, payload_factory)
     }
 

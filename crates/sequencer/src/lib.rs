@@ -50,8 +50,8 @@ pub struct ZoneSequencerConfig {
     pub zone_rpc_url: String,
     /// How often the zone monitor polls for new L2 blocks.
     pub zone_poll_interval: Duration,
-    /// Maximum time to accumulate zone blocks before submitting a batch to L1.
-    pub batch_interval: Duration,
+    /// Number of zone blocks between empty withdrawal batch boundaries / L1 submissions.
+    pub batch_interval_blocks: u64,
     /// EIP-2935 history and safety-margin limits used by the batch submitter.
     pub batch_anchor_config: BatchAnchorConfig,
 }
@@ -104,7 +104,7 @@ pub async fn spawn_zone_sequencer(
         zone_rpc_url: config.zone_rpc_url,
         retry_connection_interval: config.retry_connection_interval,
         poll_interval: config.zone_poll_interval,
-        batch_interval: config.batch_interval,
+        batch_interval_blocks: config.batch_interval_blocks,
         portal_address: config.portal_address,
         batch_anchor_config: config.batch_anchor_config,
     };

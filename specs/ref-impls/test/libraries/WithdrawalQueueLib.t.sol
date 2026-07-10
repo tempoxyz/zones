@@ -4,6 +4,7 @@ pragma solidity ^0.8.13;
 import { Withdrawal } from "../../src/interfaces/IZone.sol";
 import {
     EMPTY_SENTINEL,
+    NO_QUEUE_INDEX,
     WITHDRAWAL_QUEUE_CAPACITY,
     WithdrawalQueue,
     WithdrawalQueueLib
@@ -18,8 +19,8 @@ contract WithdrawalQueueHarness {
 
     WithdrawalQueue internal queue;
 
-    function enqueue(bytes32 withdrawalQueueHash) external {
-        queue.enqueue(withdrawalQueueHash);
+    function enqueue(bytes32 withdrawalQueueHash) external returns (uint256 assignedIndex) {
+        return queue.enqueue(withdrawalQueueHash);
     }
 
     function dequeue(Withdrawal calldata withdrawal, bytes32 remainingQueue) external {
@@ -87,8 +88,9 @@ contract WithdrawalQueueLibTest is Test {
         Withdrawal memory w = _makeWithdrawal(alice, bob, 100e6);
         bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
 
-        harness.enqueue(wHash);
+        uint256 assignedIndex = harness.enqueue(wHash);
 
+        assertEq(assignedIndex, 0);
         assertEq(harness.head(), 0);
         assertEq(harness.tail(), 1);
         assertEq(harness.slots(0), wHash);
@@ -117,8 +119,9 @@ contract WithdrawalQueueLibTest is Test {
     }
 
     function test_enqueue_emptyTransition_noOp() public {
-        harness.enqueue(bytes32(0));
+        uint256 assignedIndex = harness.enqueue(bytes32(0));
 
+        assertEq(assignedIndex, NO_QUEUE_INDEX);
         assertEq(harness.head(), 0);
         assertEq(harness.tail(), 0);
         assertFalse(harness.hasWithdrawals());
@@ -128,14 +131,17 @@ contract WithdrawalQueueLibTest is Test {
         bytes32 h1 = keccak256("batch1");
         bytes32 h2 = keccak256("batch2");
 
-        harness.enqueue(h1);
+        uint256 firstIndex = harness.enqueue(h1);
+        assertEq(firstIndex, 0);
         assertEq(harness.tail(), 1);
 
         // Empty batch - no change
-        harness.enqueue(bytes32(0));
+        uint256 emptyIndex = harness.enqueue(bytes32(0));
+        assertEq(emptyIndex, NO_QUEUE_INDEX);
         assertEq(harness.tail(), 1);
 
-        harness.enqueue(h2);
+        uint256 secondIndex = harness.enqueue(h2);
+        assertEq(secondIndex, 1);
         assertEq(harness.tail(), 2);
 
         // Slots should be contiguous
@@ -170,7 +176,8 @@ contract WithdrawalQueueLibTest is Test {
 
         // Enqueue again — should succeed since we freed a slot
         bytes32 hNew = keccak256("new");
-        harness.enqueue(hNew);
+        uint256 assignedIndex = harness.enqueue(hNew);
+        assertEq(assignedIndex, WITHDRAWAL_QUEUE_CAPACITY);
         assertEq(harness.length(), WITHDRAWAL_QUEUE_CAPACITY);
 
         // hNew should be written to slots[tail % capacity] = slots[CAPACITY % CAPACITY] = slots[0]
