@@ -8,7 +8,9 @@ use eyre as _;
 
 #[cfg(feature = "cli")]
 pub mod cli;
+pub mod dev;
 pub mod engine;
+pub mod genesis;
 pub mod node;
 pub mod rpc;
 

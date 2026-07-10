@@ -37,6 +37,15 @@ impl ZoneCli {
         Self(Cli::parse())
     }
 
+    /// Parse CLI arguments from an iterator. The first item is the binary name.
+    pub fn parse_from<I, T>(args: I) -> Self
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        Self(Cli::parse_from(args))
+    }
+
     /// Run the Tempo Zone node.
     ///
     /// Configures the node builder, launches the zone node with all sequencer

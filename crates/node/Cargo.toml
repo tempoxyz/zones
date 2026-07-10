@@ -23,6 +23,7 @@ tempo-zone-contracts = { workspace = true, features = ["std", "serde", "rpc"] }
 zone-evm.workspace = true
 zone-l1.workspace = true
 zone-payload.workspace = true
+zone-precompiles = { workspace = true, features = ["std"] }
 zone-primitives = { workspace = true, features = ["std", "serde"] }
 zone-rpc.workspace = true
 zone-sequencer.workspace = true
@@ -52,12 +53,15 @@ reth-transaction-pool.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
+alloy-genesis.workspace = true
 alloy-network.workspace = true
 alloy-primitives.workspace = true
-alloy-provider.workspace = true
+alloy-provider = { workspace = true, features = ["ws"] }
+alloy-rlp.workspace = true
 alloy-rpc-client.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-rpc-types-eth.workspace = true
+alloy-signer.workspace = true
 alloy-signer-local.workspace = true
 alloy-sol-types.workspace = true
 
@@ -66,6 +70,7 @@ clap = { workspace = true, optional = true }
 eyre.workspace = true
 futures.workspace = true
 k256.workspace = true
+serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url = "2"
@@ -83,8 +88,6 @@ alloy = { workspace = true, features = [
 alloy-contract.workspace = true
 alloy-eips.workspace = true
 alloy-evm.workspace = true
-alloy-rlp.workspace = true
-alloy-signer.workspace = true
 base64.workspace = true
 const-hex.workspace = true
 p256.workspace = true
@@ -95,7 +98,6 @@ reth-tracing.workspace = true
 reqwest.workspace = true
 revm.workspace = true
 serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
 sha2.workspace = true
 tempo-payload-types.workspace = true
 tempo-precompiles = { workspace = true, features = ["test-utils"] }
@@ -103,7 +105,6 @@ tempo-revm.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
 tokio-tungstenite.workspace = true
-zone-precompiles = { workspace = true, features = ["std"] }
 
 [features]
 default = []

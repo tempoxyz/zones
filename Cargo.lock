@@ -13319,6 +13319,7 @@ dependencies = [
  "alloy-contract",
  "alloy-eips",
  "alloy-evm",
+ "alloy-genesis",
  "alloy-network",
  "alloy-primitives",
  "alloy-provider",
