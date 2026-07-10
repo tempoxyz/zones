@@ -82,6 +82,7 @@ impl ZoneCli {
     }
 }
 
+/// Main entry point for the `node` command.
 fn run_node(mut cli: Cli<TempoChainSpecParser, ZoneArgs>) -> eyre::Result<()> {
     prepend_log_filter(&mut cli.logs.log_stdout_filter, ZONE_LOG_FILTER_DIRECTIVES);
     prepend_log_filter(&mut cli.logs.log_file_filter, ZONE_LOG_FILTER_DIRECTIVES);
