@@ -29,8 +29,6 @@ cast rpc --rpc-url http://127.0.0.1:8545 eth_getHeaderByNumber latest \
   | jq -e '.timestampMillis != null'
 ```
 
-If `timestampMillis` is missing, update Foundry. Do not replace `eth_getHeaderByNumber` with full-block RPC calls as a workaround.
-
 Start the zone in a second terminal:
 
 ```bash
