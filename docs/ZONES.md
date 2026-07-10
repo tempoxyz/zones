@@ -582,9 +582,10 @@ export ZONE_FACTORY=0x...
 cast code "$ZONE_FACTORY" --rpc-url "$ETH_RPC_URL"
 cast call "$ZONE_FACTORY" "zoneCount()(uint32)" --rpc-url "$ETH_RPC_URL"
 cast call "$ZONE_FACTORY" "verifier()(address)" --rpc-url "$ETH_RPC_URL"
+cast call "$ZONE_FACTORY" "messenger()(address)" --rpc-url "$ETH_RPC_URL"
 ```
 
-`zoneCount()` should be `0` on a fresh deployment, and `verifier()` should return the verifier deployed by the factory constructor. Update `MODERATO_ZONE_FACTORY` in `xtask/src/zone_utils.rs`, the Key Addresses table above, and any other `rg` hits for the previous address.
+`zoneCount()` should be `0` on a fresh deployment, and `verifier()` and `messenger()` should return the contracts deployed by the factory constructor. Update `MODERATO_ZONE_FACTORY` in `xtask/src/zone_utils.rs`, the Key Addresses table above, and any other `rg` hits for the previous address.
 
 Current deployment:
 
