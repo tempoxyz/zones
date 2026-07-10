@@ -989,7 +989,7 @@ It takes a complete witness of zone blocks and their dependencies, executes EVM 
 
 The witness contains everything needed to re-execute the batch:
 
-- **PublicInputs**: `prev_block_hash`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with.
+- **PublicInputs**: `zone_id`, `prev_block_hash`, `tempo_block_number`, `anchor_block_number`, `anchor_block_hash`, `expected_withdrawal_batch_index`, `sequencer`. These are the values the portal passes to the verifier and the proof must be consistent with.
 - **BatchWitness**: the public inputs, the previous batch's block header, the zone blocks to execute, the initial zone state, Tempo state proofs, and Tempo ancestry headers (for ancestry validation).
 - **ZoneBlock**: `number`, `parent_hash`, `timestamp`, `beneficiary`, `protocol_version`, `tempo_header_rlp` (optional), `deposits`, `decryptions`, `enabled_tokens`, `finalize_withdrawal_batch_count` (optional), `finalize_withdrawal_batch_encrypted_senders`, and user `transactions`.
 - **ZoneStateWitness**: the initial zone state root, a deduplicated pool of zone-state trie nodes, and decoded account / storage reads needed to bootstrap execution. Only accounts and storage slots accessed during execution are included. Missing witness data must produce an error, not default to zero, to prevent the prover from omitting non-zero state.
@@ -1003,7 +1003,7 @@ flowchart TB
     subgraph BW["BatchWitness"]
         direction TB
 
-        PI["PublicInputs<br/>prev_block_hash<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
+        PI["PublicInputs<br/>zone_id<br/>prev_block_hash<br/>tempo_block_number<br/>anchor_block_number<br/>anchor_block_hash<br/>expected_withdrawal_batch_index<br/>sequencer"]
 
         PH["ZoneHeader<br/>parent_hash<br/>beneficiary<br/>state_root<br/>transactions_root<br/>receipts_root<br/>number<br/>timestamp<br/>protocol_version"]
 
@@ -1073,6 +1073,10 @@ The prover-side inputs are defined concretely below. Types that mirror the oncha
 
 ```rust
 pub struct PublicInputs {
+    /// Zone ID. The verifier must bind this public input to the zone portal;
+    /// the program derives the EVM chain ID from it.
+    pub zone_id: u32,
+
     /// Previous batch's block hash (must equal portal.blockHash)
     pub prev_block_hash: B256,
 
