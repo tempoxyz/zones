@@ -37,7 +37,17 @@ target/release/tempo-zone dev \
   --datadir /tmp/tempo-zone-dev-anvil
 ```
 
-`tempo_fundAddress` is absent on Anvil. This is expected when the selected dev key already has pathUSD; a zero pathUSD balance is a real provisioning error.
+`tempo_fundAddress` is absent on Anvil. The default dev key already has pathUSD. If another dev account needs funds, set its pathUSD balance before starting the zone:
+
+```bash
+cast rpc --rpc-url http://127.0.0.1:8545 \
+  anvil_dealTIP20 \
+  "$DEV_ADDRESS" \
+  0x20C0000000000000000000000000000000000000 \
+  1000000000
+```
+
+`anvil_dealTIP20` sets the account balance directly without changing total supply.
 
 `tempo-zone dev` rejects incompatible older Anvil builds with `canonical Tempo header hash`.
 
