@@ -17,9 +17,7 @@ fn main() {
         unsafe { std::env::set_var("RUST_BACKTRACE", "1") };
     }
 
-    let result = ZoneCli::parse().run();
-
-    if let Err(err) = result {
+    if let Err(err) = ZoneCli::parse().run() {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
     }

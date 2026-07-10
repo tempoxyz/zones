@@ -195,7 +195,7 @@ impl CreateZone {
             base_fee_per_gas: self.base_fee_per_gas,
             gas_limit: self.gas_limit,
             tempo_portal: portal,
-            tempo_genesis_header_rlp: header_rlp_hex,
+            tempo_genesis_header_rlp: Some(header_rlp_hex),
             admin: self.admin,
             sequencer: Some(self.sequencer),
             specs_out: self.specs_out.clone(),

@@ -8,18 +8,15 @@
 use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
 use alloy_network::{EthereumWallet, ReceiptResponse as _};
-use alloy_primitives::{Address, B256, TxKind, U256, address, keccak256};
+use alloy_primitives::{Address, B256, TxKind};
 use alloy_provider::{PendingTransactionBuilder, Provider, ProviderBuilder};
-use alloy_signer::SignerSync;
 use alloy_signer_local::PrivateKeySigner;
-use alloy_sol_types::{SolEvent, SolValue};
+use alloy_sol_types::SolEvent;
 use tempo_alloy::TempoNetwork;
-use tempo_contracts::precompiles::ITIP20;
-use tempo_zone_contracts::{ZoneFactory, ZonePortal};
+use tempo_contracts::precompiles::{ITIP20, PATH_USD_ADDRESS};
+use tempo_zone_contracts::ZoneFactory;
 use zone_primitives::constants::zone_chain_id;
-
-/// pathUSD TIP-20 token address on Tempo L1.
-pub const PATH_USD_ADDRESS: Address = address!("0x20C0000000000000000000000000000000000000");
+use zone_sequencer::register_encryption_key;
 
 /// Provisioning options for [`provision_zone`].
 #[derive(Debug)]
@@ -228,40 +225,6 @@ pub async fn deploy_zone_factory(
         .ok_or_else(|| eyre::eyre!("ZoneFactory deployment missing contract address"))
 }
 
-/// Registers `signer` as the sequencer encryption key on the portal.
-///
-/// Derives the secp256k1 public key, signs a proof-of-possession over
-/// `(portal, x, yParity)`, and calls `setSequencerEncryptionKey`.
-pub async fn register_encryption_key<P: Provider<TempoNetwork>>(
-    provider: &P,
-    portal: Address,
-    signer: &PrivateKeySigner,
-) -> eyre::Result<()> {
-    use k256::{AffinePoint, ProjectivePoint, Scalar, elliptic_curve::sec1::ToEncodedPoint};
-
-    let secret = k256::SecretKey::from_slice(signer.to_bytes().as_slice())?;
-    let scalar: Scalar = *secret.to_nonzero_scalar();
-    let public = AffinePoint::from(ProjectivePoint::GENERATOR * scalar);
-    let encoded = public.to_encoded_point(true);
-    let x = B256::from_slice(encoded.x().expect("compressed point has x").as_slice());
-    let y_parity: u8 = encoded.as_bytes()[0]; // 0x02 or 0x03
-
-    let message = keccak256((portal, x, U256::from(y_parity)).abi_encode());
-    let signature = signer.sign_hash_sync(&message)?;
-    let pop_v = signature.v() as u8 + 27;
-    let pop_r = B256::from(signature.r().to_be_bytes::<32>());
-    let pop_s = B256::from(signature.s().to_be_bytes::<32>());
-
-    let receipt = ZonePortal::new(portal, provider)
-        .setSequencerEncryptionKey(x, y_parity, pop_v, pop_r, pop_s)
-        .send()
-        .await?
-        .get_receipt()
-        .await?;
-    eyre::ensure!(receipt.status(), "setSequencerEncryptionKey reverted");
-    Ok(())
-}
-
 #[cfg(feature = "cli")]
 pub use command::DevCommand;
 
@@ -272,8 +235,9 @@ mod command {
     use alloy_primitives::Address;
     use alloy_signer_local::PrivateKeySigner;
 
-    use super::{PATH_USD_ADDRESS, ProvisionConfig, provision_zone};
+    use super::{ProvisionConfig, provision_zone};
     use crate::cli::ZoneCli;
+    use tempo_contracts::precompiles::PATH_USD_ADDRESS;
 
     /// Default dev private key (account #0 of the standard `test test ... junk` mnemonic).
     const DEFAULT_DEV_KEY: &str =

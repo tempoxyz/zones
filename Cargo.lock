@@ -11408,6 +11408,7 @@ dependencies = [
  "tokio",
  "zone-precompiles",
  "zone-primitives",
+ "zone-sequencer",
 ]
 
 [[package]]
@@ -13327,7 +13328,6 @@ dependencies = [
  "alloy-rpc-client",
  "alloy-rpc-types-engine",
  "alloy-rpc-types-eth",
- "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
  "base64 0.22.1",
@@ -13510,11 +13510,13 @@ dependencies = [
  "alloy-rlp",
  "alloy-rpc-client",
  "alloy-rpc-types-eth",
+ "alloy-signer",
  "alloy-signer-local",
  "alloy-sol-types",
  "alloy-transport",
  "eyre",
  "futures",
+ "k256",
  "metrics",
  "parking_lot",
  "reth-metrics",
