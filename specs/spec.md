@@ -1211,7 +1211,7 @@ pub struct ZoneStateWitness {
     pub state_root: B256,
 
     /// Deduplicated pool of all zone-state MPT nodes
-    pub node_pool: HashMap<B256, Vec<u8>>,
+    pub node_pool: Vec<Vec<u8>>,
 
     /// Decoded account leaves needed to bootstrap execution
     pub account_reads: Vec<ZoneAccountRead>,
@@ -1236,7 +1236,7 @@ pub struct ZoneStorageRead {
 
 pub struct BatchStateProof {
     /// Deduplicated pool of all MPT nodes
-    pub node_pool: HashMap<B256, Vec<u8>>,
+    pub node_pool: Vec<Vec<u8>>,
 
     /// Tempo state reads verified against the shared node pool
     pub reads: Vec<L1StateRead>,
@@ -1262,9 +1262,9 @@ pub struct L1StateRead {
 
 `ZoneStateWitness` and `BatchStateProof` both use the same trie-proof encoding:
 
-- `node_pool` is a deduplicated map from `keccak256(rlp(node))` to the node's raw RLP bytes. The prover validates each node once by recomputing the hash.
+- `node_pool` is a deduplicated list of raw RLP-encoded nodes. The prover validates each node once, recomputes `keccak256(rlp(node))`, and builds its own hash-to-node index for proof traversal.
 - Each read descriptor (`ZoneAccountRead`, `ZoneStorageRead`, or `L1StateRead`) states which decoded account or storage value must be proven against a bound trie root.
-- Verification walks the account trie using `keccak256(account)` and, when needed, the storage trie using `keccak256(slot)`, fetching branch, extension, and leaf nodes from `node_pool`.
+- Verification walks the account trie using `keccak256(account)` and, when needed, the storage trie using `keccak256(slot)`, fetching branch, extension, and leaf nodes from the prover's hash-to-node index.
 - For `ZoneAccountRead`, the account leaf proves the committed `code_hash`, but not the bytecode preimage itself. If the witness supplies `code`, the prover must additionally require `keccak256(code) == code_hash` before materializing that account into the execution state.
 - Missing leaves are represented by valid non-membership proofs. An absent account is interpreted as the canonical empty account: `nonce = 0`, `balance = 0`, `code = None`, `code_hash = KECCAK_EMPTY`, and an empty storage trie. An absent storage leaf is interpreted as zero.
 - Client databases may still retain historical trie nodes that are no longer reachable from the current root, but those stale nodes are irrelevant to proof verification because only nodes reachable from the bound root contribute to the proof.
@@ -1293,7 +1293,7 @@ The stateless execution function must reject the witness on any failed check, mi
    Apply the [shared trie proof format](#shared-trie-proof-format) to `initial_zone_state`: validate every node in `initial_zone_state.node_pool`, prove each `ZoneAccountRead` and `ZoneStorageRead` against `initial_zone_state.state_root`, require `keccak256(code) == code_hash` for every supplied account-code preimage, interpret non-membership as the canonical empty account or zero storage, and load the decoded results into the prover's in-memory execution state. After this step, ordinary zone-state reads during execution come from the materialized state, not from repeated Merkle-proof checks.
 
 3. **Verify and index the Tempo proof pool.**
-   Validate every node in `tempo_state_proofs.node_pool` once by recomputing `keccak256(rlp(node))` for each node.
+   Validate every node in `tempo_state_proofs.node_pool` once by recomputing `keccak256(rlp(node))` for each node, and build a hash-to-node index for proof traversal.
 
 4. **For each `zone_blocks[i]`, verify the block witness before executing it.**
    Require `block.parent_hash == prev_block_hash`. Require `block.number == prev_header.number + 1`. Require `block.timestamp >= prev_header.timestamp`. Require `block.beneficiary == public_inputs.sequencer`. Require `finalize_withdrawal_batch_count` to be absent in intermediate blocks and present in the final block of the batch. If `tempo_header_rlp` is absent, require `deposits`, `decryptions`, and `enabled_tokens` to be empty. If `finalize_withdrawal_batch_count` is absent, require `finalize_withdrawal_batch_encrypted_senders` to be empty. If it is present, require the encrypted-sender array length to equal `count`.
@@ -1326,7 +1326,7 @@ The stateless execution function must reject the witness on any failed check, mi
 
 System contracts read Tempo state during execution (deposit queue hash, sequencer address, token registry, TIP-403 policies). `BatchStateProof` applies the [shared trie proof format](#shared-trie-proof-format) to the Tempo root from the header currently bound by `TempoState` at the moment of each read. If `advanceTempo()` runs during the batch, later reads are therefore verified against the newer Tempo root, not the root from the start of the batch. The witness includes a `BatchStateProof` containing:
 
-- A deduplicated `node_pool` of MPT nodes, keyed by `keccak256(rlp(node))`. Each node is verified exactly once.
+- A deduplicated `node_pool` of raw RLP-encoded MPT nodes. The prover recomputes `keccak256(rlp(node))`, builds a hash-to-node index, and verifies each node exactly once.
 - A list of `L1StateRead` entries, each specifying the zone block index, Tempo block number, account, storage slot, and expected value.
 
 Reads are indexed and verified on demand during execution. Each `L1StateRead` is additionally tagged with `zone_block_index` and `tempo_block_number` so the prover can bind that read to the correct in-batch Tempo checkpoint. The proof shape is the same as `ZoneStateWitness`; the difference is timing. `ZoneStateWitness` is verified once against the initial zone-state root at batch start, while `BatchStateProof` reads are verified against the Tempo root bound by the active Tempo checkpoint at the moment of each read.
