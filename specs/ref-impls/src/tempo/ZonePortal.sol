@@ -898,6 +898,7 @@ contract ZonePortal is IZonePortal {
         // Verify proof (handles both direct and ancestry modes)
         bool valid = IVerifier(verifier)
             .verify(
+                zoneId,
                 tempoBlockNumber,
                 anchorBlockNumber,
                 anchorBlockHash,

@@ -1372,6 +1372,7 @@ The portal calls the verifier to validate each batch:
 ```solidity
 interface IVerifier {
     function verify(
+        uint32 zoneId,
         uint64 tempoBlockNumber,
         uint64 anchorBlockNumber,
         bytes32 anchorBlockHash,
@@ -1386,7 +1387,7 @@ interface IVerifier {
 }
 ```
 
-The portal computes `anchorBlockNumber` and `anchorBlockHash` from the submission parameters (see [Anchor Block Validation](#anchor-block-validation)) and passes them alongside the portal's current `withdrawalBatchIndex + 1` as `expectedWithdrawalBatchIndex` and the registered `sequencer` address. The `verifierConfig` and `proof` are opaque to the portal.
+The portal passes its `zoneId`, computes `anchorBlockNumber` and `anchorBlockHash` from the submission parameters (see [Anchor Block Validation](#anchor-block-validation)), and passes them alongside the portal's current `withdrawalBatchIndex + 1` as `expectedWithdrawalBatchIndex` and the registered `sequencer` address. The `verifierConfig` and `proof` are opaque to the portal.
 
 ### Anchor Block Validation
 

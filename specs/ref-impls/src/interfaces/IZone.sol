@@ -375,6 +375,7 @@ interface IVerifier {
     ///      6. ZoneOutbox.lastBatch().withdrawalQueueHash matches withdrawalQueueHash
     ///      7. Zone block beneficiary matches sequencer
     ///      8. Deposit processing is correct (validated via Tempo state read inside proof)
+    /// @param zoneId Unique identifier of the zone whose batch is being verified
     /// @param tempoBlockNumber Block zone committed to (from TempoState)
     /// @param anchorBlockNumber Block whose hash is verified (tempoBlockNumber or recent block)
     /// @param anchorBlockHash Hash of anchorBlockNumber (from EIP-2935)
@@ -386,6 +387,7 @@ interface IVerifier {
     /// @param verifierConfig Opaque payload for verifier (TEE attestation envelope, etc.)
     /// @param proof Validity proof or TEE attestation
     function verify(
+        uint32 zoneId,
         uint64 tempoBlockNumber,
         uint64 anchorBlockNumber,
         bytes32 anchorBlockHash,

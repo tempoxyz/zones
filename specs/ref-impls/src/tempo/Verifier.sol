@@ -11,6 +11,7 @@ contract Verifier is IVerifier {
 
     /// @inheritdoc IVerifier
     function verify(
+        uint32,
         uint64,
         uint64,
         bytes32,
