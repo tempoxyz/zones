@@ -39,9 +39,8 @@ Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/
 
 ### Local Development with Anvil
 
-Use an Anvil build containing
-[`foundry-rs/foundry#15685`](https://github.com/foundry-rs/foundry/pull/15685),
-then run it in Tempo mode:
+Use Foundry 1.8 or newer, or a nightly build from July 11, 2026 or later,
+then run Anvil in Tempo mode:
 
 ```bash
 anvil --network tempo --block-time 1

@@ -20,7 +20,7 @@ Use release builds and isolated datadirs and ports. Keep every started process h
 
 ## Run with Anvil
 
-Require an Anvil build containing foundry-rs/foundry#15685. Verify the RPC before starting the zone:
+Require Foundry 1.8 or newer, or a nightly build from July 11, 2026 or later. Verify the RPC before starting the zone:
 
 ```bash
 anvil --version
@@ -29,7 +29,7 @@ cast rpc --rpc-url http://127.0.0.1:8545 eth_getHeaderByNumber latest \
   | jq -e '.timestampMillis != null'
 ```
 
-If `timestampMillis` is missing, update Anvil from Foundry master. Do not replace `eth_getHeaderByNumber` with full-block RPC calls as a workaround.
+If `timestampMillis` is missing, update Foundry. Do not replace `eth_getHeaderByNumber` with full-block RPC calls as a workaround.
 
 Start the zone in a second terminal:
 
@@ -41,7 +41,7 @@ target/release/tempo-zone dev \
 
 `tempo_fundAddress` is absent on Anvil. This is expected when the selected dev key already has pathUSD; a zero pathUSD balance is a real provisioning error.
 
-Older Anvil builds mine Ethereum headers, calculate Ethereum header hashes, and only add Tempo fields to RPC responses. `tempo-zone dev` rejects them with `canonical Tempo header hash`. Update to a build containing foundry-rs/foundry#15685; do not add a synthetic parent chain in the Zone subscriber.
+`tempo-zone dev` rejects incompatible older Anvil builds with `canonical Tempo header hash`.
 
 ## Run with a native Tempo dev L1
 
@@ -100,7 +100,7 @@ cargo test -p zone-node --features cli --test it \
 - Provisioning before funding receipts settle indicates a regression in `fund_dev_account`.
 - A missing custom initial token indicates the genesis anchor skipped the `createZone` block and its `TokenEnabled` event.
 - Missing Tempo fields from `eth_getHeaderByNumber` indicate an outdated Anvil build.
-- A `canonical Tempo header hash` error means the L1 reports a different block hash from `keccak256(rlp(TempoHeader))`. Fix the L1 implementation; never rewrite header parents in the Zone subscriber.
+- A `canonical Tempo header hash` error means the L1 reports a different block hash from `keccak256(rlp(TempoHeader))`. Upgrade Foundry first; never rewrite header parents in the Zone subscriber.
 - Repeated false reorgs where each new block's `parentHash` differs from the subscriber's sealed previous hash are the same canonical-hashing failure.
 - If the node appears stalled, compare the L1 tip, the zone's Tempo block number, and the latest subscriber log before restarting.
 

@@ -53,9 +53,9 @@ just check-balance "$ADDR"
 
 See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and private RPC usage.
 
-For a fully local development stack, use an Anvil build containing
-[`foundry-rs/foundry#15685`](https://github.com/foundry-rs/foundry/pull/15685),
-run it in Tempo mode, and point the dev command at its WebSocket endpoint:
+For a fully local development stack, use Foundry 1.8 or newer, or a nightly
+build from July 11, 2026 or later. Run Anvil in Tempo mode and point the dev
+command at its WebSocket endpoint:
 
 ```bash
 # Terminal 1
