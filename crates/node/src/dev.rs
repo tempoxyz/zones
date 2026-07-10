@@ -14,7 +14,6 @@ use alloy_signer_local::PrivateKeySigner;
 use alloy_sol_types::{SolEvent, SolValue};
 use tempo_alloy::TempoNetwork;
 use tempo_contracts::precompiles::ITIP20;
-use tempo_primitives::TempoHeader;
 use tempo_zone_contracts::{ZoneFactory, ZonePortal};
 use zone_primitives::constants::zone_chain_id;
 
@@ -89,11 +88,12 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
     // Anchor before createZone so the L1 subscriber replays the creation block,
     // including the initial TokenEnabled event emitted by the portal constructor.
     let anchor_block_number = provider.get_block_number().await?;
-    let anchor_block = provider
-        .get_block_by_number(anchor_block_number.into())
+    let anchor_header = provider
+        .get_header_by_number(anchor_block_number.into())
         .await?
-        .ok_or_else(|| eyre::eyre!("anchor block {anchor_block_number} not found"))?;
-    let anchor_header: TempoHeader = anchor_block.header.as_ref().clone();
+        .ok_or_else(|| eyre::eyre!("anchor header {anchor_block_number} not found"))?
+        .inner
+        .inner;
     let anchor_block_hash = crate::genesis::tempo_header_hash(&anchor_header);
 
     let receipt = factory

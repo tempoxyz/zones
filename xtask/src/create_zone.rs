@@ -125,11 +125,12 @@ impl CreateZone {
         // Anchor before createZone so the zone replays the creation block and its
         // initial TokenEnabled event during L1 backfill.
         let anchor_block_number = provider.get_block_number().await?;
-        let anchor_block = provider
-            .get_block_by_number(anchor_block_number.into())
+        let anchor_header = provider
+            .get_header_by_number(anchor_block_number.into())
             .await?
-            .ok_or_else(|| eyre!("anchor block {anchor_block_number} not found"))?;
-        let anchor_header = anchor_block.header.as_ref().clone();
+            .ok_or_else(|| eyre!("anchor header {anchor_block_number} not found"))?
+            .inner
+            .inner;
         let mut genesis_header_rlp = Vec::new();
         anchor_header.encode(&mut genesis_header_rlp);
         let anchor_hash = keccak256(&genesis_header_rlp);

@@ -372,19 +372,18 @@ impl L1Subscriber {
                 async move {
                     let start = std::time::Instant::now();
                     let fetch_failures = &subscriber_metrics.fetch_failures;
-                    let block_resp = async {
+                    let header_resp = async {
                         provider
-                            .get_block_by_number(block_number.into())
+                            .get_header_by_number(block_number.into())
                             .await?
                             .ok_or_else(|| {
-                                eyre::eyre!("L1 block not found for block {block_number}")
+                                eyre::eyre!("L1 header not found for block {block_number}")
                             })
                     }
                     .await
                     .inspect_err(|_| {
                         fetch_failures.increment(1);
                     })?;
-                    let header_resp = block_resp.header;
                     let block_hash = header_resp.hash();
                     let block = NumHash::new(block_number, block_hash);
                     let expected_receipts_root = header_resp.receipts_root();

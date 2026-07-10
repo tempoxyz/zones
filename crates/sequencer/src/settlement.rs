@@ -398,26 +398,26 @@ impl BatchSubmitter {
         let count = (to - from) as usize;
 
         // Fetch the base block's header to seed the parent-hash chain validation.
-        let base_block = self
+        let base_header = self
             .l1_provider
-            .get_block_by_number(from.into())
+            .get_header_by_number(from.into())
             .await?
-            .ok_or_else(|| eyre::eyre!("L1 block not found for base block {from}"))?;
+            .ok_or_else(|| eyre::eyre!("L1 header not found for base block {from}"))?;
         let mut base_buf = Vec::with_capacity(600);
-        base_block.header.inner.inner.encode(&mut base_buf);
+        base_header.inner.inner.encode(&mut base_buf);
         let base_hash = alloy_primitives::keccak256(&base_buf);
 
         let mut fetched = stream::iter(range_start..=to)
             .map(|block_number| {
                 let provider = &self.l1_provider;
                 async move {
-                    let block = provider
-                        .get_block_by_number(block_number.into())
+                    let header = provider
+                        .get_header_by_number(block_number.into())
                         .await?
                         .ok_or_else(|| {
-                            eyre::eyre!("L1 block not found for block {block_number}")
+                            eyre::eyre!("L1 header not found for block {block_number}")
                         })?;
-                    Ok::<_, eyre::Report>((block_number, block.header.inner.inner))
+                    Ok::<_, eyre::Report>((block_number, header.inner.inner))
                 }
             })
             .buffered(concurrency);
