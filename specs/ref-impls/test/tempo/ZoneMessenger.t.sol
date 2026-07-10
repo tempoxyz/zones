@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.13;
 
-import { IWithdrawalReceiver, ZoneInfo } from "../../src/interfaces/IZone.sol";
+import {
+    IWithdrawalReceiver,
+    MAX_WITHDRAWAL_CALLBACK_GAS,
+    ZoneInfo
+} from "../../src/interfaces/IZone.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { BaseTest } from "../BaseTest.t.sol";
 import { MockZoneToken } from "../mocks/MockZoneToken.sol";
@@ -76,6 +80,7 @@ contract ZoneMessengerTest is BaseTest {
 
     uint32 internal constant ZONE_ID = 1;
     uint32 internal constant OTHER_ZONE_ID = 2;
+    uint64 internal constant CALLBACK_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
     MockZoneFactoryForMessenger public messengerFactory;
     ZoneMessenger public messenger;
@@ -153,7 +158,7 @@ contract ZoneMessengerTest is BaseTest {
 
         vm.prank(portal);
         messenger.relayMessage(
-            ZONE_ID, address(zoneToken), senderTag, address(receiver), 123, 1_000_000, data
+            ZONE_ID, address(zoneToken), senderTag, address(receiver), 123, CALLBACK_GAS_LIMIT, data
         );
 
         assertEq(zoneToken.balanceOf(address(receiver)), 123);
@@ -165,22 +170,21 @@ contract ZoneMessengerTest is BaseTest {
         assertEq(receiver.lastData(), data);
     }
 
-    function testFuzz_relayMessage_success(
-        uint128 amount,
-        uint64 gasLimit,
-        bytes calldata data
-    )
-        public
-    {
-        vm.assume(gasLimit >= 500_000);
+    function testFuzz_relayMessage_success(uint128 amount, bytes calldata data) public {
         amount = uint128(bound(amount, 0, 1_000_000_000e6));
         AcceptingWithdrawalReceiver receiver = new AcceptingWithdrawalReceiver();
-        bytes32 senderTag = keccak256(abi.encode(amount, gasLimit, data));
+        bytes32 senderTag = keccak256(abi.encode(amount, data));
         zoneToken.mint(address(messenger), amount);
 
         vm.prank(portal);
         messenger.relayMessage(
-            ZONE_ID, address(zoneToken), senderTag, address(receiver), amount, gasLimit, data
+            ZONE_ID,
+            address(zoneToken),
+            senderTag,
+            address(receiver),
+            amount,
+            CALLBACK_GAS_LIMIT,
+            data
         );
 
         assertEq(zoneToken.balanceOf(address(receiver)), amount);
