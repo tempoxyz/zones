@@ -20,7 +20,9 @@ Use release builds and isolated datadirs and ports. Keep every started process h
 
 ## Run with Anvil
 
-Require Foundry 1.8 or newer, or a nightly build from July 11, 2026 or later. Start Anvil in Tempo mode:
+Require Foundry 1.8 or newer, or a nightly build from July 11, 2026 or later. When testing a Foundry branch or PR, run the binary from that checkout and confirm the commit SHA from `anvil --version` matches the selected revision; do not rely on the binary on `PATH` as evidence.
+
+Start Anvil in Tempo mode:
 
 ```bash
 anvil --version
@@ -60,6 +62,10 @@ target/release/tempo-zone dev \
 ```
 
 `tempo_fundAddress` is absent on Anvil. `anvil_dealTIP20` sets the account balance directly without changing total supply.
+
+Anvil may log one RPC deserialization error when the zone probes the unsupported `tempo_fundAddress` method. This is expected when the selected dev account is already funded; repeating funding or transaction errors are not.
+
+The default batch interval is 120 zone blocks, which takes about two minutes with one-second Anvil blocks. For a faster smoke test, append `-- --zone.batch-interval-blocks 10` to the `tempo-zone dev` command.
 
 ## Run with a native Tempo dev L1
 
@@ -114,7 +120,14 @@ cargo test -p zone-node --features cli --test it \
      --rpc-url "$ZONE_RPC_URL"
    ```
 
-3. Inspect the latest zone log. Require continued L1 ingestion and no repeating errors. For a full smoke test, wait for both `Submitting batch` and `Batch submitted to L1`.
+3. Inspect the latest zone log. A one-time `enabledTokenCount` warning at the pre-creation anchor is expected because the portal is created in the next L1 block. Require that creation block to be replayed with `enabled_tokens=1`, followed by continued L1 ingestion and no repeating errors.
+
+4. For a full smoke test, wait for both `Submitting batch` and `Batch submitted to L1`. Copy the reported transaction hash and require a successful L1 receipt:
+
+   ```bash
+   cast receipt "$TX_HASH" --rpc-url "$L1_RPC_URL" --json \
+     | jq -e '.status == "0x1"'
+   ```
 
 ## Diagnose
 
