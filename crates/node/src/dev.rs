@@ -75,6 +75,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .connect(&l1_rpc_url)
         .await?;
 
+    ensure_canonical_tempo_header_hash(&provider).await?;
     fund_dev_account(&provider, dev_address).await?;
 
     let factory_address = match factory {
@@ -139,6 +140,29 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         anchor_block_number,
         genesis,
     })
+}
+
+/// Ensures the L1 reports the canonical hash of its Tempo header.
+///
+/// A client that mines Ethereum headers and only adds Tempo fields at the RPC layer
+/// produces a different hash from the header that Zones submits to `finalizeTempo`.
+async fn ensure_canonical_tempo_header_hash<P: Provider<TempoNetwork>>(
+    provider: &P,
+) -> eyre::Result<()> {
+    let block_number = provider.get_block_number().await?;
+    let response = provider
+        .get_header_by_number(block_number.into())
+        .await?
+        .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
+    let rpc_hash = response.inner.hash;
+    let canonical_hash = crate::genesis::tempo_header_hash(&response.inner.inner);
+
+    eyre::ensure!(
+        rpc_hash == canonical_hash,
+        "L1 block {block_number} reports hash {rpc_hash}, but its canonical Tempo header hash is \
+         {canonical_hash}; use an L1 that mines canonically hashed Tempo headers"
+    );
+    Ok(())
 }
 
 async fn fund_dev_account<P: Provider<TempoNetwork>>(

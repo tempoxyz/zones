@@ -157,7 +157,6 @@ fn test_subscriber(
         tracked_tokens: vec![],
         tip403_metrics: Default::default(),
         subscriber_metrics: Default::default(),
-        normalize_anvil_headers: false,
     }
 }
 

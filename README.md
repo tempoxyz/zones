@@ -39,13 +39,15 @@ Prerequisites: [Rust](https://rustup.rs/), [Foundry](https://book.getfoundry.sh/
 
 ### Local Development with Anvil
 
-Run Anvil in Tempo mode in one terminal:
+Use an Anvil build containing
+[`foundry-rs/foundry#15685`](https://github.com/foundry-rs/foundry/pull/15685),
+then run it in Tempo mode:
 
 ```bash
 anvil --network tempo --block-time 1
 ```
 
-Then provision and run a fresh zone against it:
+Provision and run a fresh zone against its WebSocket endpoint:
 
 ```bash
 cargo run --release --bin tempo-zone -- dev \
@@ -55,6 +57,10 @@ cargo run --release --bin tempo-zone -- dev \
 The default Anvil dev key is used automatically. The zone HTTP RPC listens on
 `http://127.0.0.1:9545`; generated metadata and node data are written under
 `/tmp/tempo-zone-dev`.
+
+Older Anvil builds only add Tempo fields to Ethereum headers at the RPC layer.
+The dev command rejects those builds because Zones require canonical Tempo block
+hashes and parent links.
 
 ### Deploying a Zone
 

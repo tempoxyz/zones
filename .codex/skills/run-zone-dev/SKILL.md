@@ -20,7 +20,7 @@ Use release builds and isolated datadirs and ports. Keep every started process h
 
 ## Run with Anvil
 
-Require an Anvil build containing foundry-rs/foundry#15681. Verify the RPC before starting the zone:
+Require an Anvil build containing foundry-rs/foundry#15685. Verify the RPC before starting the zone:
 
 ```bash
 anvil --version
@@ -40,6 +40,8 @@ target/release/tempo-zone dev \
 ```
 
 `tempo_fundAddress` is absent on Anvil. This is expected when the selected dev key already has pathUSD; a zero pathUSD balance is a real provisioning error.
+
+Older Anvil builds mine Ethereum headers, calculate Ethereum header hashes, and only add Tempo fields to RPC responses. `tempo-zone dev` rejects them with `canonical Tempo header hash`. Update to a build containing foundry-rs/foundry#15685; do not add a synthetic parent chain in the Zone subscriber.
 
 ## Run with a native Tempo dev L1
 
@@ -91,14 +93,15 @@ cargo test -p zone-node --features cli --test it \
    ```
 
 3. Inspect the latest zone log. Require continued L1 ingestion and no repeating errors. For a full smoke test, wait for both `Submitting batch` and `Batch submitted to L1`.
-4. On Anvil, expect the subscriber to report Anvil Tempo-header compatibility and full-block polling for live notifications. Historical and ancestry header fetches must still use `eth_getHeaderByNumber`.
+4. On Anvil, WebSocket ingestion must use the normal block subscription with no false reorg warnings. Historical and ancestry header fetches must use `eth_getHeaderByNumber`.
 
 ## Diagnose
 
 - Provisioning before funding receipts settle indicates a regression in `fund_dev_account`.
 - A missing custom initial token indicates the genesis anchor skipped the `createZone` block and its `TokenEnabled` event.
 - Missing Tempo fields from `eth_getHeaderByNumber` indicate an outdated Anvil build.
-- Anvil raw Ethereum block hashes differ from encoded Tempo header hashes; use the subscriber's synthetic Tempo parent chain for zone ingestion.
+- A `canonical Tempo header hash` error means the L1 reports a different block hash from `keccak256(rlp(TempoHeader))`. Fix the L1 implementation; never rewrite header parents in the Zone subscriber.
+- Repeated false reorgs where each new block's `parentHash` differs from the subscriber's sealed previous hash are the same canonical-hashing failure.
 - If the node appears stalled, compare the L1 tip, the zone's Tempo block number, and the latest subscriber log before restarting.
 
 ## Clean up

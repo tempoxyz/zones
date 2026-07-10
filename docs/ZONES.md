@@ -53,8 +53,9 @@ just check-balance "$ADDR"
 
 See [Interact with the Zone](#6-interact-with-the-zone) for withdrawals and private RPC usage.
 
-For a fully local development stack, run a Tempo-enabled Anvil L1 and point the
-dev command at its WebSocket endpoint:
+For a fully local development stack, use an Anvil build containing
+[`foundry-rs/foundry#15685`](https://github.com/foundry-rs/foundry/pull/15685),
+run it in Tempo mode, and point the dev command at its WebSocket endpoint:
 
 ```bash
 # Terminal 1
@@ -67,6 +68,10 @@ cargo run --release --bin tempo-zone -- dev \
 
 This provisions a new ZoneFactory and portal, writes the generated zone files to
 `/tmp/tempo-zone-dev`, and serves the zone HTTP RPC at `http://127.0.0.1:9545`.
+
+Older Anvil builds are rejected because they mine Ethereum header hashes and only
+add Tempo fields to the RPC response. Zones require canonical Tempo header hashes
+to verify L1 ancestry.
 
 To restart the zone later:
 
