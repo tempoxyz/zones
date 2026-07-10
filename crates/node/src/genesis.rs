@@ -5,9 +5,9 @@
 //! `tempoPortal` immutables are `Address::ZERO`. [`l1_anchored_genesis`] patches the
 //! template so the zone follows a real L1.
 
+use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, B256, Bytes, U256, address, keccak256};
-use alloy_rlp::Encodable;
+use alloy_primitives::{Address, B256, Bytes, U256, address};
 use tempo_primitives::TempoHeader;
 use zone_precompiles::tempo_state::slots;
 
@@ -41,13 +41,6 @@ pub fn zone_factory_bytecode() -> eyre::Result<Bytes> {
     serde_json::from_value(bytecode).map_err(Into::into)
 }
 
-/// Computes the canonical hash of a Tempo header.
-pub fn tempo_header_hash(header: &TempoHeader) -> B256 {
-    let mut rlp_buf = Vec::new();
-    header.encode(&mut rlp_buf);
-    keccak256(rlp_buf)
-}
-
 /// Builds a zone genesis anchored to a real L1 block.
 ///
 /// Applies two patches to the [template](genesis_template):
@@ -68,7 +61,7 @@ pub fn l1_anchored_genesis(
 ) -> eyre::Result<(Genesis, u64)> {
     let genesis_block_number = l1_header.inner.number;
 
-    let l1_genesis_hash = tempo_header_hash(l1_header);
+    let l1_genesis_hash = l1_header.hash_slow();
 
     let mut genesis = genesis_template()?;
 
@@ -172,7 +165,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             storage[&B256::from(slots::TEMPO_BLOCK_HASH.to_be_bytes())],
-            tempo_header_hash(&l1_header),
+            l1_header.hash_slow(),
         );
 
         let mut expected = [0u8; 32];

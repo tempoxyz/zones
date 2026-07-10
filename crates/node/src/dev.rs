@@ -5,6 +5,7 @@
 //! sequencer encryption key, and builds an L1-anchored genesis. The `tempo-zone dev`
 //! command wraps [`provision_zone`] and then runs the zone node.
 
+use alloy_consensus::Sealable;
 use alloy_genesis::Genesis;
 use alloy_network::{EthereumWallet, ReceiptResponse as _};
 use alloy_primitives::{Address, B256, TxKind, U256, address, keccak256};
@@ -95,7 +96,7 @@ pub async fn provision_zone(config: ProvisionConfig) -> eyre::Result<Provisioned
         .ok_or_else(|| eyre::eyre!("anchor header {anchor_block_number} not found"))?
         .inner
         .inner;
-    let anchor_block_hash = crate::genesis::tempo_header_hash(&anchor_header);
+    let anchor_block_hash = anchor_header.hash_slow();
 
     let receipt = factory
         .createZone(ZoneFactory::CreateZoneParams {
@@ -155,7 +156,7 @@ async fn ensure_canonical_tempo_header_hash<P: Provider<TempoNetwork>>(
         .await?
         .ok_or_else(|| eyre::eyre!("L1 header not found for block {block_number}"))?;
     let rpc_hash = response.inner.hash;
-    let canonical_hash = crate::genesis::tempo_header_hash(&response.inner.inner);
+    let canonical_hash = response.inner.inner.hash_slow();
 
     eyre::ensure!(
         rpc_hash == canonical_hash,
