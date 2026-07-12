@@ -535,7 +535,7 @@ Zones inherit the Tempo L1 EVM but replace, disable, or pass through each precom
 | Contract | Address |
 |----------|---------|
 | pathUSD (TIP-20) | `0x20C0000000000000000000000000000000000000` |
-| ZoneFactory (moderato) | `0xC63EF0DbaB04b0242C2898AaF0BeF81f8f9cA7c5` |
+| ZoneFactory (moderato) | `0x179B44a4B7eC74f3957Ed5137Dc4F1a6dEeBB19b` |
 
 The xtasks use this Moderato `ZoneFactory` as their built-in default: `create-zone` and `zone-info` point at it automatically, and `deploy-router` uses `zoneFactory` from `zone.json` before falling back to this address. Pass `--zone-factory` or set `ZONE_FACTORY` to override it.
 
@@ -549,7 +549,7 @@ export ETH_RPC_URL=https://rpc.moderato.tempo.xyz
 export PRIVATE_KEY=<deployer_private_key>
 
 forge build
-forge create --broadcast --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY" src/l1/ZoneFactory.sol:ZoneFactory
+forge create --broadcast --rpc-url "$ETH_RPC_URL" --private-key "$PRIVATE_KEY" src/tempo/ZoneFactory.sol:ZoneFactory
 ```
 
 The `--private-key "$PRIVATE_KEY"` form is useful for controlled non-interactive deployments. For manual deployments, prefer replacing it with `--interactive` and paste the key at Foundry's prompt so the key is not written into shell history or process arguments.
@@ -570,10 +570,10 @@ Current deployment:
 
 | Field | Value |
 |-------|-------|
-| Address | `0xC63EF0DbaB04b0242C2898AaF0BeF81f8f9cA7c5` |
-| Transaction | `0x3d3f0f4ec21084d8fda0c315cfe19c92568df3320c20a56679a12935547c2c4c` |
-| Block | `25403236` |
-| Deployed | `2026-07-06 20:41:32 UTC` |
+| Address | `0x179B44a4B7eC74f3957Ed5137Dc4F1a6dEeBB19b` |
+| Transaction | `0x91b6ae5d07b7a6589242bd6c4a1ae7caffcd18d918e915e66ad40f67d5348ef9` |
+| Block | `26198694` |
+| Deployed | `2026-07-12 08:36:09 UTC` |
 
 ### Zone Node CLI Options
 
