@@ -1917,6 +1917,59 @@ contract ZonePortalTest is BaseTest {
         assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
     }
 
+    function test_withdrawal_maxGasCallbackOutOfGas_bouncesBackWithinProcessorLimit() public {
+        uint64 callbackGasLimit = portal.MAX_WITHDRAWAL_GAS_LIMIT();
+        uint256 processorGasLimit = uint256(callbackGasLimit) + 2_000_000;
+
+        vm.startPrank(alice);
+        pathUSD.approve(address(portal), 1000e6);
+        portal.deposit(address(pathUSD), alice, 1000e6, bytes32(""), alice);
+        vm.stopPrank();
+
+        bytes32 depositHashBefore = portal.currentDepositQueueHash();
+        Withdrawal memory w = _withdrawal(
+            address(pathUSD),
+            alice,
+            address(gasConsumingReceiver),
+            500e6,
+            bytes32(0),
+            callbackGasLimit,
+            alice,
+            ""
+        );
+        bytes32 wHash = keccak256(abi.encode(w, EMPTY_SENTINEL));
+
+        vm.roll(block.number + 1);
+        portal.submitBatch(
+            uint64(block.number - 1),
+            0,
+            BlockTransition({ prevBlockHash: portal.blockHash(), nextBlockHash: keccak256("s1") }),
+            DepositQueueTransition({
+                prevProcessedHash: bytes32(0),
+                nextProcessedHash: depositHashBefore,
+                prevDepositNumber: 0,
+                nextDepositNumber: 0
+            }),
+            wHash,
+            "",
+            ""
+        );
+
+        vm.expectEmit(true, true, false, true);
+        emit IZonePortal.WithdrawalProcessed(
+            address(gasConsumingReceiver), w.senderTag, address(pathUSD), 500e6, false
+        );
+        (bool success,) = address(portal).call{ gas: processorGasLimit }(
+            abi.encodeCall(IZonePortal.processWithdrawal, (w, bytes32(0)))
+        );
+
+        assertTrue(success);
+        assertEq(pathUSD.balanceOf(address(gasConsumingReceiver)), 0);
+        assertTrue(portal.currentDepositQueueHash() != depositHashBefore);
+        assertEq(portal.withdrawalQueueHead(), 1);
+        assertEq(portal.withdrawalQueueSlot(0), EMPTY_SENTINEL);
+    }
+
     function test_withdrawal_zeroGasLimit_noCallback() public {
         // Fund portal
         vm.startPrank(alice);

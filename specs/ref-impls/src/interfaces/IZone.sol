@@ -266,8 +266,8 @@ interface IAesGcmDecrypt {
 }
 
 // Maximum callback gas a withdrawal may request.
-// The processor adds fixed overhead plus an EIP-150 cushion, so this value
-// keeps the outer `processWithdrawal` transaction well below a 30M gas L1 block
+// The processor adds fixed overhead, so this value keeps the outer
+// `processWithdrawal` transaction well below a 30M gas L1 block
 // limit.
 uint64 constant MAX_WITHDRAWAL_CALLBACK_GAS = 10_000_000;
 

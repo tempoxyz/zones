@@ -33,7 +33,7 @@ contract ZoneOutbox is IZoneOutbox {
     uint256 public constant MAX_CALLBACK_DATA_SIZE = 1024;
 
     /// @notice Maximum gas a withdrawal callback may request
-    /// @dev The L1 processor adds overhead and an EIP-150 cushion around this value.
+    /// @dev The L1 processor adds fixed overhead around this value.
     uint64 public constant MAX_WITHDRAWAL_GAS_LIMIT = MAX_WITHDRAWAL_CALLBACK_GAS;
 
     /// @notice Maximum gas fee rate ($1 per gas for 6-decimal stablecoins)
