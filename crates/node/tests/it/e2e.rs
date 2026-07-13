@@ -5,10 +5,11 @@
 //! subscriber retries a dummy URL in the background, but L2 execution is fully
 //! exercised via queue injection (with the L1 state cache seeded for precompile reads).
 
-use alloy::primitives::{Address, B256, Bytes, U256, address};
+use alloy::primitives::{Address, B256, Bytes, TxKind, U256, address};
 use alloy_consensus::Transaction;
 use alloy_eips::NumHash;
 use alloy_provider::{DynProvider, Provider};
+use alloy_rpc_types_eth::TransactionRequest;
 use alloy_sol_types::SolCall;
 use tempo_chainspec::spec::TEMPO_T0_BASE_FEE;
 use tempo_precompiles::PATH_USD_ADDRESS;
@@ -56,6 +57,44 @@ async fn test_deposit_via_queue_injection() -> eyre::Result<()> {
         balance,
         U256::from(deposit_amount),
         "minted amount should equal deposit amount"
+    );
+
+    Ok(())
+}
+
+/// Verify a contract-creation transaction is rejected by a running zone node.
+///
+/// This exercises the complete public transaction path: wallet signing, HTTP RPC,
+/// transaction-pool validation, and the zone contract-deployer policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_contract_creation_transaction_is_rejected() -> eyre::Result<()> {
+    reth_tracing::init_test_tracing();
+
+    let (zone, mut fixture) = start_local_zone_with_fixture(10).await?;
+    let (provider, dev_address) = local_dev_zone_account(&zone)?;
+    let deposit = fixture.make_deposit(PATH_USD_ADDRESS, dev_address, dev_address, 1_000_000);
+    fixture.inject_deposits(zone.deposit_queue(), vec![deposit]);
+    zone.wait_for_balance(
+        PATH_USD_ADDRESS,
+        dev_address,
+        U256::from(1_000_000u128),
+        DEFAULT_TIMEOUT,
+    )
+    .await?;
+
+    let mut request = TransactionRequest::default().input(Bytes::from_static(&[0x00]).into());
+    request.to = Some(TxKind::Create);
+    request.gas = Some(100_000);
+    request.gas_price = Some(TEMPO_T0_BASE_FEE as u128);
+
+    let err = provider
+        .send_transaction(request)
+        .await
+        .expect_err("an unlisted account must not submit a contract-creation transaction");
+    let error_message = format!("{err:#}");
+    assert!(
+        error_message.contains("error code -32000: contract creation is not supported"),
+        "unexpected contract-creation rejection: {error_message}"
     );
 
     Ok(())
