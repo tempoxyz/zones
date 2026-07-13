@@ -39,6 +39,7 @@ import { ZoneFactory } from "../../src/tempo/ZoneFactory.sol";
 import { ZoneMessenger } from "../../src/tempo/ZoneMessenger.sol";
 import { ZonePortal } from "../../src/tempo/ZonePortal.sol";
 import { BaseTest } from "../BaseTest.t.sol";
+import { Test } from "forge-std/Test.sol";
 import { Vm } from "forge-std/Vm.sol";
 
 /// @notice Mock withdrawal receiver that accepts funds
@@ -180,6 +181,79 @@ contract ReentrantWithdrawalReceiver is IWithdrawalReceiver {
         return IWithdrawalReceiver.onWithdrawalReceived.selector;
     }
 
+}
+
+contract ZonePortalProxyStorageTest is Test {
+    function test_proxyMetadataIsReadFromPortalStorage() public {
+        address initialToken = makeAddr("initial token");
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.name.selector), abi.encode("Initial Token")
+        );
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.symbol.selector), abi.encode("INITIAL")
+        );
+        vm.mockCall(
+            initialToken, abi.encodeWithSelector(ITIP20.currency.selector), abi.encode("USD")
+        );
+
+        ZonePortal implementation = new ZonePortal(
+            99,
+            initialToken,
+            makeAddr("implementation messenger"),
+            makeAddr("implementation admin"),
+            makeAddr("implementation sequencer"),
+            makeAddr("implementation verifier"),
+            keccak256("implementation genesis"),
+            999,
+            ""
+        );
+
+        address proxyA = makeAddr("portal proxy A");
+        address proxyB = makeAddr("portal proxy B");
+        bytes memory runtime = abi.encodePacked(
+            hex"363d3d373d3d3d363d73",
+            address(implementation),
+            hex"5af43d82803e903d91602b57fd5bf3"
+        );
+        vm.etch(proxyA, runtime);
+        vm.etch(proxyB, runtime);
+
+        address messengerA = makeAddr("messenger A");
+        address messengerB = makeAddr("messenger B");
+        address verifierA = makeAddr("verifier A");
+        address verifierB = makeAddr("verifier B");
+        _storePortalMetadata(proxyA, 1, messengerA, verifierA, 100);
+        _storePortalMetadata(proxyB, 2, messengerB, verifierB, 200);
+
+        assertEq(ZonePortal(proxyA).zoneId(), 1);
+        assertEq(ZonePortal(proxyA).messenger(), messengerA);
+        assertEq(ZonePortal(proxyA).verifier(), verifierA);
+        assertEq(ZonePortal(proxyA).genesisTempoBlockNumber(), 100);
+
+        assertEq(ZonePortal(proxyB).zoneId(), 2);
+        assertEq(ZonePortal(proxyB).messenger(), messengerB);
+        assertEq(ZonePortal(proxyB).verifier(), verifierB);
+        assertEq(ZonePortal(proxyB).genesisTempoBlockNumber(), 200);
+    }
+
+    function _storePortalMetadata(
+        address target,
+        uint32 id,
+        address portalMessenger,
+        address portalVerifier,
+        uint64 genesisBlockNumber
+    ) internal {
+        vm.store(
+            target,
+            bytes32(uint256(17)),
+            bytes32(uint256(id) | (uint256(uint160(portalMessenger)) << 32))
+        );
+        vm.store(
+            target,
+            bytes32(uint256(18)),
+            bytes32(uint256(uint160(portalVerifier)) | (uint256(genesisBlockNumber) << 160))
+        );
+    }
 }
 
 /// @notice Tests for ZonePortal - simulating L1/zone interface
@@ -2353,10 +2427,10 @@ contract ZonePortalTest is BaseTest {
     }
 
     /*//////////////////////////////////////////////////////////////
-                         IMMUTABLE GETTERS TESTS
+                          METADATA GETTER TESTS
     //////////////////////////////////////////////////////////////*/
 
-    function test_immutableGetters() public view {
+    function test_metadataGetters() public view {
         assertEq(portal.zoneId(), testZoneId);
         assertEq(portal.sequencer(), sequencer);
         assertEq(portal.verifier(), zoneFactory.verifier());
@@ -2929,7 +3003,7 @@ contract ZonePortalTest is BaseTest {
     ///      TempoState.readTempoStorageSlot() using hardcoded slot numbers. If those slot
     ///      numbers drift from the actual layout, the zone reads garbage data.
     ///
-    ///      Slot layout (non-immutable variables only):
+    ///      Slot layout:
     ///        slot 0: sequencer (address)
     ///        slot 1: admin (address)
     ///        slot 2: pendingSequencer (address)
@@ -2938,6 +3012,8 @@ contract ZonePortalTest is BaseTest {
     ///        slot 5: currentDepositQueueHash (bytes32)
     ///        slot 6: deposit counters
     ///        slot 7: _encryptionKeys.length (EncryptionKeyEntry[])
+    ///        slot 17: zoneId (uint32) + messenger (address) [packed]
+    ///        slot 18: verifier (address) + genesisTempoBlockNumber (uint64) [packed]
     function test_storageLayout_slotPositions() public {
         // --- Slot 0: sequencer ---
         bytes32 slot0 = vm.load(address(portal), bytes32(uint256(0)));
@@ -2998,6 +3074,26 @@ contract ZonePortalTest is BaseTest {
             address(uint160(uint256(slot15))),
             portal.pendingAdmin(),
             "slot 15: pendingAdmin mismatch"
+        );
+
+        // --- Slot 17: zoneId (uint32) + messenger (address) packed ---
+        bytes32 slot17 = vm.load(address(portal), bytes32(uint256(17)));
+        assertEq(uint32(uint256(slot17)), portal.zoneId(), "slot 17: zoneId mismatch");
+        assertEq(
+            address(uint160(uint256(slot17) >> 32)),
+            portal.messenger(),
+            "slot 17: messenger mismatch"
+        );
+
+        // --- Slot 18: verifier (address) + genesisTempoBlockNumber (uint64) packed ---
+        bytes32 slot18 = vm.load(address(portal), bytes32(uint256(18)));
+        assertEq(
+            address(uint160(uint256(slot18))), portal.verifier(), "slot 18: verifier mismatch"
+        );
+        assertEq(
+            uint64(uint256(slot18) >> 160),
+            portal.genesisTempoBlockNumber(),
+            "slot 18: genesisTempoBlockNumber mismatch"
         );
     }
 
